@@ -305,16 +305,6 @@ impl DecreeWorld {
         self.violation.as_deref()
     }
 
-    /// What acceptor `id` has promised and accepted.
-    #[must_use]
-    pub fn acceptor_state(&self, id: u64) -> Option<(Ballot, Option<(Ballot, Command)>)> {
-        let acceptor = self.acceptors.iter().find(|a| a.id == NodeId(id))?;
-        Some((
-            acceptor.role.promised(),
-            acceptor.role.record(DECREE).cloned(),
-        ))
-    }
-
     /// The acceptors a phase's messages currently reach.
     #[must_use]
     pub fn reach(&self, phase: Phase) -> &[NodeId] {
@@ -403,11 +393,9 @@ impl DecreeWorld {
             &BTreeMap::new(),
             &BTreeMap::new(),
         );
-        let reach = self.phase1_reach.clone();
         let asked: Vec<NodeId> = targets
-            .iter()
-            .copied()
-            .filter(|to| reach.contains(to))
+            .into_iter()
+            .filter(|to| self.phase1_reach.contains(to))
             .collect();
         self.narrate(
             NarrationKind::Election,
@@ -416,13 +404,10 @@ impl DecreeWorld {
                  1 names no value. It claims the ballot, and it asks what the acceptors have \
                  already accepted.",
                 show_ballot(ballot),
-                list_nodes(asked)
+                list_nodes(asked.iter().copied())
             ),
         );
-        for to in targets {
-            if !reach.contains(&to) {
-                continue;
-            }
+        for to in asked {
             self.send(
                 NodeId(proposer),
                 to,
@@ -926,12 +911,11 @@ impl DecreeWorld {
             reach: self.phase1_reach.clone(),
             proposed: candidate.clone(),
         });
-        let reach = self.phase2_reach.clone();
         let addressed: Vec<NodeId> = self
             .config
             .phase2_addressees(None)
             .into_iter()
-            .filter(|to| reach.contains(to))
+            .filter(|to| self.phase2_reach.contains(to))
             .collect();
         self.narrate(
             NarrationKind::Accept,
@@ -939,13 +923,10 @@ impl DecreeWorld {
                 "Phase 2 begins: Accept {} at ballot {} to {}.",
                 show_command(&candidate),
                 show_ballot(ballot),
-                list_nodes(addressed)
+                list_nodes(addressed.iter().copied())
             ),
         );
-        for to in self.config.phase2_addressees(None) {
-            if !reach.contains(&to) {
-                continue;
-            }
+        for to in addressed {
             self.send(
                 proposer,
                 to,

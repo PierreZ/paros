@@ -105,7 +105,7 @@ impl ClientHistory {
 /// watermark. Failed / timed-out operations enter no constraint — a timed-out
 /// write may still commit later, so it is deliberately unconstrained.
 ///
-/// Its bools are independent per-run coverage flags (see [`AuditState`]).
+/// Its bools are independent per-run coverage flags (see [`AuditState`](crate::audit::state::AuditState)).
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct LinHistory {

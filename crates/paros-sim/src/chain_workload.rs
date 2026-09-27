@@ -12,16 +12,18 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
     buggify_with_prob, swarm_op_enabled,
 };
-use paros::{
-    Compact, InspectReply, InspectRequest, ParosInternalClient, Propose, ProposeAck, QuorumSystem,
-    Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, WireQuorumSystem,
-    quorum_system_from_proto, quorum_system_to_proto,
-};
+use paros::{QuorumSystem, Read, RetireRequest, WireQuorumSystem, quorum_system_from_proto};
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world, check_run};
 use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
-use crate::client::{ClientSet, SimChannel};
+use crate::client::ClientSet;
+
+mod rpc;
+
 use crate::{CHAOS_DURATION_MS, DigestSink};
+use rpc::{
+    CompactResult, ProposalResult, ReconfigureMatchmakersResult, ReconfigureResult, inspect, within,
+};
 
 const PROPOSE: u8 = 0;
 const PROPOSE_TO_NON_LEADER: u8 = 1;
@@ -342,63 +344,6 @@ impl LeaderHint {
     }
 }
 
-enum ProposalResult {
-    Acked { leader: Option<u64>, slot: u64 },
-    Rejected { leader: Option<u64> },
-    Ambiguous,
-}
-
-impl ProposalResult {
-    /// Judge one `Propose` RPC's answer: a transport error is ambiguous, a
-    /// reply is committed or a redirect.
-    fn from_response(
-        response: Result<tonic::Response<ProposeAck>, tonic::Status>,
-        seq: u64,
-    ) -> Self {
-        let Ok(response) = response else {
-            return Self::Ambiguous;
-        };
-        let ack = response.into_inner();
-        assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
-        if ack.committed {
-            Self::Acked {
-                leader: ack.leader,
-                slot: ack.slot.unwrap_or_default(),
-            }
-        } else {
-            Self::Rejected { leader: ack.leader }
-        }
-    }
-}
-
-enum CompactResult {
-    Accepted { leader: Option<u64> },
-    Rejected { leader: Option<u64> },
-    Ambiguous,
-}
-
-/// The terminal outcome of one matchmaker-set reconfiguration operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ReconfigureMatchmakersResult {
-    Started { generation: u64 },
-    Refused { refusal: String },
-    Ambiguous,
-}
-
-/// The terminal outcome of one reconfiguration operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ReconfigureResult {
-    Started {
-        leader: Option<u64>,
-        round: u64,
-    },
-    Refused {
-        leader: Option<u64>,
-        refusal: String,
-    },
-    Ambiguous,
-}
-
 /// Compose the set a [`RECONFIGURE`] (or [`RECONFIGURE_MATCHMAKERS`]) step
 /// asks for, from the set in force (`members`) and the step's shape draw.
 /// `candidates` are the ids the successor may draw from — the pool minus
@@ -522,39 +467,6 @@ impl Submission {
             node,
         }
     }
-}
-
-/// Race `request` against `timeout` and the run's shutdown: `fallback` when
-/// either comes first (an ambiguous observation, never a refusal).
-async fn within<T>(
-    ctx: &SimContext,
-    timeout: Duration,
-    fallback: T,
-    request: impl Future<Output = T>,
-) -> T {
-    moonpool_sim::select! {
-        result = request => result,
-        _ = ctx.time().sleep(timeout) => fallback,
-        () = ctx.shutdown().cancelled() => fallback,
-    }
-}
-
-/// One `Inspect` probe of `client`, bounded like every other request.
-async fn inspect(
-    ctx: &SimContext,
-    client: &mut ParosInternalClient<SimChannel>,
-    timeout: Duration,
-) -> Option<InspectReply> {
-    let probe = client
-        .inspect(InspectRequest {})
-        .map(|response| response.ok().map(tonic::Response::into_inner));
-    within(ctx, timeout, None, probe).await
-}
-
-/// A read-index watermark as a signed trace/detail value: `-1` is the empty
-/// applied prefix.
-fn signed_watermark(watermark: Option<u64>) -> i64 {
-    watermark.map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX))
 }
 
 #[derive(Clone)]
@@ -883,80 +795,20 @@ impl Workload for ChainWorkload {
         // watermark never move backwards.
         let mut last_read_frontier: Option<u64> = None;
 
+        // The RPC retry layer (`rpc`), bound to this client's connections.
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
-            let mut client = public_clients[target].clone();
-            let time = time.clone();
-            async move {
-                let call = client.propose(Propose {
-                    client: client_id,
-                    seq,
-                    command: payload,
-                });
-                if abandon {
-                    moonpool_sim::select! {
-                        response = call => ProposalResult::from_response(response, seq),
-                        _ = time.sleep(Duration::from_millis(10)) => ProposalResult::Ambiguous,
-                    }
-                } else {
-                    ProposalResult::from_response(call.await, seq)
-                }
-            }
+            rpc::propose_once(
+                public_clients,
+                &time,
+                client_id,
+                target,
+                seq,
+                payload,
+                abandon,
+            )
         };
         let compact_once = |target: usize, up_to: u64| {
-            let clients = public_clients.clone();
-            let time = time.clone();
-            async move {
-                let mut client = clients[target].clone();
-                // The #101 coupling makes compaction a two-phase dance: the
-                // first ask usually seeds the `Snap` marker and answers
-                // `accepted: false`; once a quorum advertises the decided
-                // point, a retry gets the `Truncate` proposed. A few
-                // beat-spaced retries at the same leader complete the dance
-                // within one workload operation, keeping truncation pressure
-                // (and everything downstream of raised floors) at its
-                // pre-coupling cadence.
-                let mut attempt_target = target;
-                for _attempt in 0..config.compact_attempts {
-                    let outcome = moonpool_sim::select! {
-                        response = client.compact(Compact { up_to }) => match response {
-                            Ok(response) => {
-                                let ack = response.into_inner();
-                                if ack.accepted {
-                                    CompactResult::Accepted { leader: ack.leader }
-                                } else {
-                                    CompactResult::Rejected { leader: ack.leader }
-                                }
-                            }
-                            Err(_) => CompactResult::Ambiguous,
-                        },
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => CompactResult::Ambiguous,
-                    };
-                    match outcome {
-                        CompactResult::Rejected { leader: Some(next) }
-                            if usize::try_from(next).is_ok_and(|next| next == attempt_target) =>
-                        {
-                            // Same leader, not yet coupled: give the marker a
-                            // beat to decide and the custody acks to land.
-                            if time
-                                .sleep(Duration::from_millis(config.compact_beat_ms))
-                                .await
-                                .is_err()
-                            {
-                                return outcome;
-                            }
-                        }
-                        CompactResult::Rejected { leader: Some(next) } => {
-                            let Ok(next) = usize::try_from(next) else {
-                                return outcome;
-                            };
-                            attempt_target = next;
-                            client = clients[attempt_target % clients.len()].clone();
-                        }
-                        terminal => return terminal,
-                    }
-                }
-                CompactResult::Ambiguous
-            }
+            rpc::compact_once(public_clients, &time, &config, target, up_to)
         };
         // One compaction request as the trace tells it: the `Truncate` it asks
         // for, then whether the leader accepted it.
@@ -970,105 +822,17 @@ impl Workload for ChainWorkload {
             }
         };
         let reconfigure_once = |target: usize, members: Vec<u64>, quorum_system: QuorumSystem| {
-            let clients = public_clients.clone();
-            let time = time.clone();
-            async move {
-                let mut attempt_target = target % clients.len();
-                let mut client = clients[attempt_target].clone();
-                let wire = quorum_system_to_proto(quorum_system);
-                for _attempt in 0..config.reconfigure_attempts {
-                    let request = Reconfigure {
-                        members: members.clone(),
-                        quorum_system: wire.quorum_system,
-                        phase1_quorum: wire.phase1_quorum,
-                        phase2_quorum: wire.phase2_quorum,
-                        rows: wire.rows,
-                        cols: wire.cols,
-                    };
-                    let outcome = moonpool_sim::select! {
-                        response = client.reconfigure(request) => match response {
-                            Ok(response) => {
-                                let ack = response.into_inner();
-                                if ack.accepted {
-                                    ReconfigureResult::Started { leader: ack.leader, round: ack.round.unwrap_or(0) }
-                                } else {
-                                    ReconfigureResult::Refused { leader: ack.leader, refusal: ack.refusal }
-                                }
-                            }
-                            Err(_) => ReconfigureResult::Ambiguous,
-                        },
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ReconfigureResult::Ambiguous,
-                    };
-                    match &outcome {
-                        // A redirect: follow the hint. Every other refusal is
-                        // terminal for this operation — `unsettled` included,
-                        // after one beat at the same leader.
-                        ReconfigureResult::Refused {
-                            leader: Some(next),
-                            refusal,
-                        } if refusal == "not_leader" => {
-                            let Ok(next) = usize::try_from(*next) else {
-                                return outcome;
-                            };
-                            attempt_target = next % clients.len();
-                            client = clients[attempt_target].clone();
-                        }
-                        ReconfigureResult::Refused { refusal, .. } if refusal == "unsettled" => {
-                            if time
-                                .sleep(Duration::from_millis(config.reconfigure_beat_ms))
-                                .await
-                                .is_err()
-                            {
-                                return outcome;
-                            }
-                        }
-                        _ => return outcome,
-                    }
-                }
-                ReconfigureResult::Ambiguous
-            }
+            rpc::reconfigure_once(
+                public_clients,
+                &time,
+                &config,
+                target,
+                members,
+                quorum_system,
+            )
         };
         let reconfigure_matchmakers_once = |target: usize, members: Vec<u64>| {
-            let clients = public_clients.clone();
-            let time = time.clone();
-            async move {
-                let mut client = clients[target % clients.len()].clone();
-                for _attempt in 0..config.reconfigure_matchmakers_attempts {
-                    let request = ReconfigureMatchmakers {
-                        members: members.clone(),
-                    };
-                    let outcome = moonpool_sim::select! {
-                        response = client.reconfigure_matchmakers(request) => match response {
-                            Ok(response) => {
-                                let ack = response.into_inner();
-                                if ack.accepted {
-                                    ReconfigureMatchmakersResult::Started { generation: ack.generation.unwrap_or(0) }
-                                } else {
-                                    ReconfigureMatchmakersResult::Refused { refusal: ack.refusal }
-                                }
-                            }
-                            Err(_) => ReconfigureMatchmakersResult::Ambiguous,
-                        },
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ReconfigureMatchmakersResult::Ambiguous,
-                    };
-                    match &outcome {
-                        // A busy reconfigurer finishes on its own cadence:
-                        // re-ask a beat later. Every other refusal is
-                        // terminal for this operation.
-                        ReconfigureMatchmakersResult::Refused { refusal } if refusal == "busy" => {
-                            if time
-                                .sleep(Duration::from_millis(config.reconfigure_beat_ms))
-                                .await
-                                .is_err()
-                            {
-                                return outcome;
-                            }
-                        }
-                        _ => return outcome,
-                    }
-                }
-                ReconfigureMatchmakersResult::Ambiguous
-            }
+            rpc::reconfigure_matchmakers_once(public_clients, &time, &config, target, members)
         };
 
         // Start with a small concurrent batch when proposals are enabled. This
@@ -1620,7 +1384,7 @@ impl Workload for ChainWorkload {
                         tracing::info!(
                             client_id,
                             seq_id = seq,
-                            read_index = signed_watermark(watermark),
+                            read_index = crate::signed_watermark(watermark),
                             quorum,
                             "chain_read_index_acked"
                         );
@@ -1633,8 +1397,8 @@ impl Workload for ChainWorkload {
                             watermark >= last_read_frontier,
                             "chain: a client's read-index watermarks never move backwards",
                             {
-                                "previous" => signed_watermark(last_read_frontier),
-                                "observed" => signed_watermark(watermark),
+                                "previous" => crate::signed_watermark(last_read_frontier),
+                                "observed" => crate::signed_watermark(watermark),
                             }
                         );
                         last_read_frontier = last_read_frontier.max(watermark);
@@ -1647,7 +1411,7 @@ impl Workload for ChainWorkload {
                                 "chain: a read-index ack covers the client's acked writes",
                                 {
                                     "max_acked_slot" => acked,
-                                    "observed" => signed_watermark(watermark),
+                                    "observed" => crate::signed_watermark(watermark),
                                 }
                             );
                         }

@@ -560,12 +560,9 @@ impl MatchmakerAudit {
     /// declared it.
     pub(super) fn note_deployment(&mut self, matchmakers: &[MatchmakerId]) {
         let ids: Vec<u64> = matchmakers.iter().map(|m| m.0).collect();
-        let known = self
-            .bootstrap_set
-            .get_or_insert_with(|| ids.clone())
-            .clone();
+        let known = self.bootstrap_set.get_or_insert_with(|| ids.clone());
         assert_always!(
-            known == ids,
+            *known == ids,
             "matchmaker: every node derives the same matchmaker set",
             { "reported" => ids.len(), "folded" => known.len() }
         );
@@ -583,11 +580,12 @@ impl MatchmakerAudit {
     /// The matchmaker quorum of `generation`'s set (the bootstrap set until
     /// a generation is known).
     fn quorum(&self, generation: u64) -> usize {
-        let members = self.sets.get(&generation).map_or_else(
-            || self.bootstrap_set.clone().unwrap_or_default(),
-            Clone::clone,
-        );
-        members.len() / 2 + 1
+        self.sets
+            .get(&generation)
+            .or(self.bootstrap_set.as_ref())
+            .map_or(0, Vec::len)
+            / 2
+            + 1
     }
 
     /// Whether `matchmaker` is a member of `generation`'s set (unknown
@@ -1681,7 +1679,7 @@ impl MatchmakerAudit {
                 {
                     "node" => node.0,
                     "round" => watermark.round,
-                    "fence" => fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+                    "fence" => crate::signed_watermark(fence.map(|s| s.0)),
                     "uncovered" => uncovered.to_string()
                 }
             );

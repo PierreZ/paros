@@ -962,11 +962,11 @@ pub(crate) struct DepartedStragglerWorkload {
     vacuous: Option<&'static str>,
     /// Where a vacuous verdict is published, so the nextest runner can require
     /// at least one non-vacuous run across its seeds.
-    non_vacuous: Option<crate::NonVacuousSink>,
+    non_vacuous: crate::NonVacuousSink,
 }
 
 impl DepartedStragglerWorkload {
-    pub(crate) fn new(non_vacuous: Option<crate::NonVacuousSink>) -> Self {
+    pub(crate) fn new(non_vacuous: crate::NonVacuousSink) -> Self {
         Self {
             waited: false,
             recovered: false,
@@ -1244,9 +1244,10 @@ impl Workload for DepartedStragglerWorkload {
                 audit_world(ctx.state()).removed_member_promised(),
                 "corpus: the departed straggler answers Phase 1 from outside the configuration"
             );
-            if let Some(sink) = &self.non_vacuous {
-                *sink.lock().unwrap_or_else(PoisonError::into_inner) = true;
-            }
+            *self
+                .non_vacuous
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = true;
         }
         assert_sometimes!(
             self.waited,
@@ -1371,22 +1372,11 @@ impl Workload for SnapshotLifecycleWorkload {
         // are read from the audit: a survivor's refusal count rises, and node
         // 0 lands a snapshot at or past the point.
         let audit = audit_world(state);
-        let refusals_before: u64 = audit
-            .below_floor_refusals()
-            .into_iter()
-            .filter(|(node, _)| *node >= 1)
-            .map(|(_, count)| count)
-            .sum();
+        let refusals_before = audit.below_floor_refusals_from(1);
         lifecycle::restart(ctx, &servers[1]).await;
         lifecycle::restart(ctx, &servers[2]).await;
         let refusal = wait_until(ctx, time.now() + OUTCOME_BUDGET, || {
-            audit
-                .below_floor_refusals()
-                .into_iter()
-                .filter(|(node, _)| *node >= 1)
-                .map(|(_, count)| count)
-                .sum::<u64>()
-                > refusals_before
+            audit.below_floor_refusals_from(1) > refusals_before
         })
         .await;
         assert_always!(

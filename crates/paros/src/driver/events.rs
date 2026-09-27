@@ -6,11 +6,40 @@
 //! trace back (correctness lives in the audit).
 
 use paros_core::{
-    Ballot, Command, Control, Message, Party, ReconfigureRefusal, ReconfigureReply,
+    AcceptorConfig, Ballot, Command, Control, Message, Party, ReconfigureRefusal, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, Registration, Slot,
 };
 
 use crate::grpc::internal;
+
+/// A stable digest of an acceptor configuration (FNV-1a over the sorted
+/// membership and the quorum system), emitted as a trace field so a human
+/// reading the trace can compare configurations by equality without printing
+/// them. The audit callbacks carry the configuration itself.
+#[must_use]
+pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
+    // The same byte sequence, tag for tag, the digest has always folded:
+    // the membership length, each member, the quorum-system tag, its sizes.
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(&(config.members().len() as u64).to_le_bytes());
+    for member in config.members() {
+        bytes.extend_from_slice(&member.0.to_le_bytes());
+    }
+    match config.quorum_system() {
+        paros_core::QuorumSystem::Majority => bytes.push(0_u8),
+        paros_core::QuorumSystem::Flexible { q1, q2 } => {
+            bytes.push(1_u8);
+            bytes.extend_from_slice(&(q1 as u64).to_le_bytes());
+            bytes.extend_from_slice(&(q2 as u64).to_le_bytes());
+        }
+        paros_core::QuorumSystem::Grid { rows, cols } => {
+            bytes.push(2_u8);
+            bytes.extend_from_slice(&(rows as u64).to_le_bytes());
+            bytes.extend_from_slice(&(cols as u64).to_le_bytes());
+        }
+    }
+    value_hash(&bytes)
+}
 
 /// A stable `u64` digest of a value's bytes (FNV-1a), emitted on observability
 /// events so an observer can compare chosen values by equality without
@@ -241,5 +270,26 @@ pub(crate) fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str
         Some(Kind::PreRead(_)) => "pre_read",
         Some(Kind::PreReadAck(_)) => "pre_read_ack",
         None => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::{NodeId, QuorumSystem};
+
+    #[test]
+    fn config_hash_distinguishes_membership_and_is_order_independent() {
+        let a = AcceptorConfig::new(
+            vec![NodeId(0), NodeId(1), NodeId(2)],
+            QuorumSystem::Majority,
+        );
+        let b = AcceptorConfig::new(
+            vec![NodeId(2), NodeId(1), NodeId(0)],
+            QuorumSystem::Majority,
+        );
+        let c = AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority);
+        assert_eq!(config_hash(&a), config_hash(&b));
+        assert_ne!(config_hash(&a), config_hash(&c));
     }
 }

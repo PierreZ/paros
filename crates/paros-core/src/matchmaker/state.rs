@@ -173,6 +173,26 @@ pub(crate) fn resolved_phase(
     }
 }
 
+/// Raise a held effective configuration to `(ballot, config)` only when
+/// `ballot` is **strictly** higher than the one held (a tie keeps the held
+/// value). Returns whether it moved.
+///
+/// The one monotone rule every holder of an effective configuration folds
+/// through: the candidate's matchmaking phase, a matchmaker's registration,
+/// the handover's reconstruction and a generation's activation.
+pub(crate) fn raise_effective(
+    held: &mut Option<(Ballot, AcceptorConfig)>,
+    ballot: Ballot,
+    config: &AcceptorConfig,
+) -> bool {
+    if held.as_ref().is_none_or(|(newest, _)| ballot > *newest) {
+        *held = Some((ballot, config.clone()));
+        true
+    } else {
+        false
+    }
+}
+
 /// A matchmaker's static configuration: its identity and the deployment's
 /// bootstrap matchmaker set (generation 0).
 #[derive(Clone, Debug, PartialEq, Eq)]

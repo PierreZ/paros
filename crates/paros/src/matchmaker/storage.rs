@@ -24,10 +24,12 @@
 //! are lost but whose ballot survived is *recoverable* (the other matchmakers
 //! hold the same bytes), and only a record whose identity is also lost is a
 //! crash. That tri-state — report the ballot as faulty, never as "no
-//! configuration here" — is the registry's version of CTRL's central rule,
-//! and it lands as a defaulted `faulty_registrations()` on [`RegistryStorage`]
-//! beside the per-record read, exactly as [`Storage::faulty_entries`](paros_core::Storage::faulty_entries)
-//! landed for the log. A registry booted from one blob could offer none of
+//! configuration here" — is the registry's version of CTRL's central rule.
+//! Unlike the log it is not repaired in place: there is no
+//! `faulty_registrations()` on [`RegistryStorage`] and no per-record repair
+//! read. A matchmaker whose durable state is unusable is **replaced** through a
+//! matchmaker-set reconfiguration, reconstructed from the surviving quorum
+//! (see [`RegistryStorage`]). A registry booted from one blob could offer none of
 //! this: one checksum, one verdict, and a matchmaker that either boots blind or
 //! not at all. Every write returns [`Result`] for the same reason: the faults
 //! are injectable from the start, through the existing durable-record contract

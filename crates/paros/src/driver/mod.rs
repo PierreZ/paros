@@ -40,13 +40,13 @@
 //! and the per-arm steps that loop shares (`NodeLoop`).
 
 mod boot;
-pub(crate) mod config;
+mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
 mod handover;
 mod matchmaking;
 mod operator;
-pub(crate) mod ready;
+mod ready;
 pub(crate) mod reply;
 mod report;
 mod snap_repair;
@@ -56,14 +56,13 @@ pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub use events::{command_hash, message_kind, registration_history_hash};
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use moonpool_core::{Providers, RandomProvider, SimulationResult, TimeProvider};
 use paros_core::{
     ClientId, ClientSeq, ColocatedNode, Delegation, GcAck, MatchRefusal, MatchReply, MatchStep,
-    MatchmakerGeneration, MatchmakerId, Message, NodeId, NodeRole, Party, ProposeResult, ProxyId,
-    QuorumSystem, ReadIndexResult, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
-    StartRefusal, Value,
+    MatchmakerGeneration, MatchmakerId, MatchmakerSet, Message, NodeId, NodeRole, Party,
+    ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerStep, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -77,7 +76,7 @@ use crate::hooks::{DriverHooks, Reply};
 use crate::storage::NodeStorage;
 
 use boot::{check_format_marker, replay_boot_state};
-use edge::GrpcEdge;
+use edge::{GrpcEdge, edge_reporter};
 use events::message_route;
 use handover::HandoverDriver;
 use matchmaking::{
@@ -163,6 +162,28 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         );
     }
 
+    /// Report a matchmaker-set handover this node just started (or is
+    /// finishing, `finishing`) from `current` toward `target`, then put its
+    /// first requests on the matchmaker wire — in that order.
+    fn start_reconfigurer(
+        &self,
+        handover: &mut HandoverDriver,
+        current: &MatchmakerSet,
+        target: &[MatchmakerId],
+        finishing: bool,
+    ) {
+        self.audit
+            .reconfigurer_started(NodeId(self.self_id), current, target);
+        tracing::info!(
+            node = self.self_id,
+            generation = current.generation.0,
+            target = target.len() as u64,
+            finishing,
+            "reconfigurer_started"
+        );
+        self.send_reconfigure(handover.take_requests());
+    }
+
     /// The two straggler paths of a handover (#125), taken by whichever node
     /// meets them in a matchmaker's refusal: a registry frozen with no
     /// successor is finished by this node (the reconfigurer's decree adopts
@@ -191,15 +212,7 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                 if let Some(current) = node.matchmaker_set().cloned()
                     && handover.finish(&current).is_ok()
                 {
-                    audit.reconfigurer_started(NodeId(self_id), &current, current.members());
-                    tracing::info!(
-                        node = self_id,
-                        generation = current.generation.0,
-                        target = current.members().len() as u64,
-                        finishing = true,
-                        "reconfigurer_started"
-                    );
-                    self.send_reconfigure(handover.take_requests());
+                    self.start_reconfigurer(handover, &current, current.members(), true);
                 }
             }
             MatchStep::Refused(MatchRefusal::Inactive | MatchRefusal::Generation { .. }) => {
@@ -386,8 +399,9 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     }
 }
 
-/// Surface a peer message's arrival (mirror of `msg_sent`), so the demo can
-/// pair sends with receives and mark the unmatched ones as network drops.
+/// Surface a peer message's arrival (mirror of `msg_sent`), so a human reading
+/// the trace can pair sends with receives and spot the unmatched ones as
+/// network drops.
 fn trace_received(self_id: u64, msg: &Message) {
     let kind = message_kind(msg);
     match message_route(msg) {
@@ -480,8 +494,8 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 /// # Errors
 ///
 /// The exit is typed ([`RunError`]): [`RunError::SeamCrash`] when `hooks` fires
-/// at a durability seam (the caller recovers by re-running `run_node` with
-/// fresh storage); [`RunError::Storage`] when a [`NodeStorage`] call failed and
+/// at a durability seam (the caller recovers by re-running `run_node` against
+/// the surviving durable storage, which rebuilds the volatile state); [`RunError::Storage`] when a [`NodeStorage`] call failed and
 /// the driver took its fail-stop crash decision — production treats it as a
 /// process exit (crash-only), the sim node loop recovers through the same
 /// restart path as a seam crash; [`RunError::Refused`] when `boot` and the
@@ -555,10 +569,7 @@ where
     // returns nothing and the edge's answer does not depend on it). Pure
     // construction, built before the bind so the edge takes its routes whole.
     let me = Party::Node(NodeId(self_id));
-    let on_reject: crate::grpc::OnReject = {
-        let audit = audit.clone();
-        Arc::new(move |kind| audit.edge_rejected(me, kind))
-    };
+    let on_reject = edge_reporter(audit, me);
     let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
         tunables.client_inbox_capacity,
         tunables.peer_inbox_capacity,
@@ -974,29 +985,14 @@ where
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
-                let refusal = match node.matchmaker_set() {
-                    None => "no_matchmakers",
-                    Some(_) if target.is_empty() => "empty",
-                    Some(_) if !target.iter().all(|m| links.clients.contains_key(m)) => "unknown_matchmaker",
-                    Some(current) => match handover.start(current, target.clone()) {
-                        Ok(()) => "",
-                        Err(StartRefusal::Busy) => "busy",
-                        Err(StartRefusal::Empty) => "empty",
-                    },
-                };
+                let refusal = operator::reconfigure_matchmakers(&node, &mut handover, &target, |m| {
+                    links.clients.contains_key(m)
+                });
                 let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
                 if let Some(current) = node.matchmaker_set()
                     && refusal.is_empty()
                 {
-                    audit.reconfigurer_started(NodeId(self_id), current, &target);
-                    tracing::info!(
-                        node = self_id,
-                        generation,
-                        target = target.len() as u64,
-                        finishing = false,
-                        "reconfigurer_started"
-                    );
-                    loop_ctx.send_reconfigure(handover.take_requests());
+                    loop_ctx.start_reconfigurer(&mut handover, current, &target, false);
                 }
                 audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
                 tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");

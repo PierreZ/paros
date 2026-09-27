@@ -31,6 +31,7 @@ use paros_core::{
 use crate::action::Seam;
 use crate::narration::{self, NarrationKind, NodeSnapshot, many, who};
 use crate::prompt::{Prompt, PromptKind};
+use crate::world::prompts::proposer_with_promise;
 use crate::world::{Envelope, Party, World};
 
 /// How many drain rounds one action may take before the engine calls it a
@@ -254,29 +255,15 @@ impl World {
             self.recovery_plan = plan;
             return;
         }
-        let Some(Message::Promise {
-            from,
-            ballot,
-            from_slot,
-            accepted,
-            faulty,
-            next_from_slot,
-        }) = arriving
-        else {
+        let Some(message @ Message::Promise { .. }) = arriving else {
             return;
         };
         if node.role() != paros_core::NodeRole::Candidate {
             return;
         }
-        let mut clone = node.proposer().clone();
-        clone.fold_promise(
-            *from,
-            *ballot,
-            *from_slot,
-            accepted.clone(),
-            faulty.clone(),
-            *next_from_slot,
-        );
+        let Some(mut clone) = proposer_with_promise(node.proposer(), message) else {
+            return;
+        };
         if !clone.phase1_won(node.acceptor().promised()) {
             return;
         }
@@ -388,7 +375,7 @@ impl World {
     /// node is dropped and the caller stops).
     fn take_batch(&mut self, index: usize) -> Option<Batch> {
         let id = self.pool[index];
-        let pool = self.pool.clone();
+        let pool = &self.pool;
         let node = self.nodes[index].as_mut()?;
         let ready = node.ready();
         let batch = Batch {
@@ -398,7 +385,7 @@ impl World {
                 .iter()
                 .flat_map(|(audience, message)| {
                     audience
-                        .resolve(&pool, id)
+                        .resolve(pool, id)
                         .into_iter()
                         .map(move |to| (to, message.clone()))
                 })

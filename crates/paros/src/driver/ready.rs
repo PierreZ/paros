@@ -273,8 +273,8 @@ where
     // the next decided `Truncate`.
     let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
         .writes()
-        .to_vec()
-        .into_iter()
+        .iter()
+        .cloned()
         .partition(|w| matches!(w, WriteOp::Truncate { .. }));
     let must_sync = if writes.iter().any(WriteOp::needs_sync) {
         paros_core::MustSync::Sync
@@ -746,31 +746,6 @@ pub(crate) fn crash_if<H: DriverHooks, A: Audit>(
     if armed && hooks.crash_at(seam) {
         audit.crashed(node, seam);
         tracing::info!(node = node.0, seam = seam.label(), "crashed");
-        return Err(RunError::SeamCrash(seam));
-    }
-    Ok(())
-}
-
-/// The matchmaker driver's twin of [`crash_if`], reported through
-/// [`Audit::matchmaker_crashed`].
-///
-/// # Errors
-///
-/// [`RunError::SeamCrash`] when the hook fires.
-pub(crate) fn match_crash_if<H: DriverHooks, A: Audit>(
-    armed: bool,
-    hooks: &H,
-    audit: &A,
-    matchmaker: MatchmakerId,
-    seam: Seam,
-) -> Result<(), RunError> {
-    if armed && hooks.crash_at(seam) {
-        audit.matchmaker_crashed(matchmaker, seam);
-        tracing::info!(
-            matchmaker = matchmaker.0,
-            seam = seam.label(),
-            "matchmaker_crashed"
-        );
         return Err(RunError::SeamCrash(seam));
     }
     Ok(())

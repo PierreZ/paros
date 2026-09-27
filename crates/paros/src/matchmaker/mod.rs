@@ -23,15 +23,14 @@ mod storage;
 
 use moonpool_core::Providers;
 use paros_core::{
-    AcceptorConfig, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker,
-    MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
+    GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker, MatchmakerConfig,
+    MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
 use crate::driver::edge::GrpcEdge;
-use crate::driver::events::{reconfigure_kind, reconfigure_reply_kind, value_hash};
-use crate::driver::ready::match_crash_if;
+use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::match_answer;
 use crate::driver::{DriverTunables, RunError};
 use crate::grpc::{MatchmakerInbox, ParosMatchmakerServer, matchmaker_channel};
@@ -40,36 +39,6 @@ use crate::storage::StorageError;
 
 pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite};
 
-/// A stable digest of an acceptor configuration (FNV-1a over the sorted
-/// membership and the quorum system), emitted on the audit callbacks so a
-/// checker can compare configurations by equality without carrying them. The
-/// same function on both ends: the driver hashes what it persists and what it
-/// replies, an observer hashes what it sees on the wire.
-#[must_use]
-pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
-    // The same byte sequence, tag for tag, the digest has always folded:
-    // the membership length, each member, the quorum-system tag, its sizes.
-    let mut bytes: Vec<u8> = Vec::new();
-    bytes.extend_from_slice(&(config.members().len() as u64).to_le_bytes());
-    for member in config.members() {
-        bytes.extend_from_slice(&member.0.to_le_bytes());
-    }
-    match config.quorum_system() {
-        paros_core::QuorumSystem::Majority => bytes.push(0_u8),
-        paros_core::QuorumSystem::Flexible { q1, q2 } => {
-            bytes.push(1_u8);
-            bytes.extend_from_slice(&(q1 as u64).to_le_bytes());
-            bytes.extend_from_slice(&(q2 as u64).to_le_bytes());
-        }
-        paros_core::QuorumSystem::Grid { rows, cols } => {
-            bytes.push(2_u8);
-            bytes.extend_from_slice(&(rows as u64).to_le_bytes());
-            bytes.extend_from_slice(&(cols as u64).to_le_bytes());
-        }
-    }
-    value_hash(&bytes)
-}
-
 /// Map a [`StorageError`] into the driver's deliberate crash decision, typed on
 /// the audit at the instant it is made (the matchmaker twin of the node
 /// driver's storage-fault crash).
@@ -77,6 +46,31 @@ fn storage_fault_crash<A: Audit>(audit: &A, id: MatchmakerId, e: StorageError) -
     audit.matchmaker_storage_fault(id, &e, StorageFaultDecision::Crash);
     tracing::warn!(matchmaker = id.0, error = %e, decision = "crash", "matchmaker_storage_fault");
     RunError::Storage(e)
+}
+
+/// The matchmaker driver's twin of the node driver's `crash_if`, reported
+/// through [`Audit::matchmaker_crashed`].
+///
+/// # Errors
+///
+/// [`RunError::SeamCrash`] when the hook fires.
+fn match_crash_if<H: DriverHooks, A: Audit>(
+    armed: bool,
+    hooks: &H,
+    audit: &A,
+    matchmaker: MatchmakerId,
+    seam: Seam,
+) -> Result<(), RunError> {
+    if armed && hooks.crash_at(seam) {
+        audit.matchmaker_crashed(matchmaker, seam);
+        tracing::info!(
+            matchmaker = matchmaker.0,
+            seam = seam.label(),
+            "matchmaker_crashed"
+        );
+        return Err(RunError::SeamCrash(seam));
+    }
+    Ok(())
 }
 
 /// One drained batch: the replies the caller may now send.
@@ -469,26 +463,5 @@ where
             }
             () = shutdown.cancelled() => return Ok(()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use paros_core::{NodeId, QuorumSystem};
-
-    #[test]
-    fn config_hash_distinguishes_membership_and_is_order_independent() {
-        let a = AcceptorConfig::new(
-            vec![NodeId(0), NodeId(1), NodeId(2)],
-            QuorumSystem::Majority,
-        );
-        let b = AcceptorConfig::new(
-            vec![NodeId(2), NodeId(1), NodeId(0)],
-            QuorumSystem::Majority,
-        );
-        let c = AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority);
-        assert_eq!(config_hash(&a), config_hash(&b));
-        assert_ne!(config_hash(&a), config_hash(&c));
     }
 }

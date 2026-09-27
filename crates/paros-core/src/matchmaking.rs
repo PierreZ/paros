@@ -330,13 +330,7 @@ impl Matchmaking {
     /// Raise the effective configuration to `(ballot, config)` when it is
     /// newer than the one held (monotone in the ballot).
     fn raise_effective(&mut self, ballot: Ballot, config: &AcceptorConfig) {
-        if self
-            .effective
-            .as_ref()
-            .is_none_or(|(newest, _)| ballot > *newest)
-        {
-            self.effective = Some((ballot, config.clone()));
-        }
+        crate::matchmaker::raise_effective(&mut self.effective, ballot, config);
     }
 
     /// Whether a matchmaker quorum of `matchmakers` has answered completely

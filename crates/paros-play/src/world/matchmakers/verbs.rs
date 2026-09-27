@@ -13,7 +13,7 @@ use crate::narration::{NarrationKind, many, who};
 use crate::view::show_ballot;
 use crate::world::drain::Paused;
 use crate::world::matchmakers::{MatchmakerProcess, show_members, show_set, which};
-use crate::world::{World, unknown_node};
+use crate::world::{World, not_leader, unknown_node};
 
 impl World {
     /// The matchmakers this level deployed, in id order. Empty on a plain
@@ -97,7 +97,10 @@ impl World {
             .unwrap_or_default()
     }
 
-    pub(super) fn matchmaker_index(&self, id: MatchmakerId) -> Result<usize, ActionError> {
+    pub(in crate::world) fn matchmaker_index(
+        &self,
+        id: MatchmakerId,
+    ) -> Result<usize, ActionError> {
         self.matchmakers
             .iter()
             .position(|m| m.id() == id)
@@ -233,13 +236,7 @@ impl World {
         let members = show_members(config.members());
         let mark = self.narration.len();
         let requested = config.clone();
-        let result = self.observe(id, move |world| {
-            let out = world.nodes[index]
-                .as_mut()
-                .map(|node| node.reconfigure(&requested));
-            world.pump(id);
-            out
-        });
+        let result = self.drive(id, index, move |node| node.reconfigure(&requested));
         let text = match result {
             Some(ReconfigureResult::Started(ballot)) => format!(
                 "A client asks {} to run with the acceptors {members}. The leader does not edit \
@@ -252,19 +249,7 @@ impl World {
             ),
             Some(ReconfigureResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
-                return Err(ActionError::new(
-                    ActionErrorCode::NotLeader,
-                    match hint {
-                        Some(leader) => format!(
-                            "node {} is not the leader; a reconfiguration goes to node {}",
-                            id.0, leader.0
-                        ),
-                        None => format!(
-                            "node {} is not the leader, and it does not know who is",
-                            id.0
-                        ),
-                    },
-                ));
+                return Err(not_leader(id, hint, "a reconfiguration goes to"));
             }
             Some(ReconfigureResult::Refused(refusal)) => {
                 self.reconfigure_refused(id, refusal, &members);
@@ -462,12 +447,7 @@ impl World {
             ));
         };
         for member in &members {
-            if self.matchmaker(*member).is_none() {
-                return Err(ActionError::new(
-                    ActionErrorCode::UnknownParty,
-                    format!("there is no matchmaker {} in this level", member.0),
-                ));
-            }
+            self.matchmaker_index(*member)?;
         }
         let proposed = show_set(&members);
         match self.reconfigurers[index].start(&current, members) {
@@ -521,11 +501,8 @@ impl World {
                 who(id)
             ),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.resend_matchmaking();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.resend_matchmaking();
         });
         Ok(())
     }
@@ -547,11 +524,8 @@ impl World {
                 who(id)
             ),
         );
-        self.observe(id, move |world| {
-            if let Some(node) = world.nodes[index].as_mut() {
-                node.resend_gc();
-            }
-            world.pump(id);
+        self.drive(id, index, move |node| {
+            node.resend_gc();
         });
         Ok(())
     }

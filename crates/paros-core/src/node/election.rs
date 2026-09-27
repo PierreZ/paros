@@ -10,7 +10,7 @@ use super::{
     BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin, Message,
     NodeId, NodeRole, Slot,
 };
-use crate::matchmaker::{MatchRequest, RegistrationKind};
+use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
 use crate::membership::AcceptorConfig;
 use crate::proposer::{
@@ -43,6 +43,19 @@ impl ColocatedNode {
         self.campaign(RegistrationKind::Belief, self.acceptors.clone());
     }
 
+    /// The round the next campaign opens at: strictly above every round this
+    /// node promised or led, and above the `round_floor` matchmakers taught
+    /// it. `None` once the round space is exhausted — there is no strictly
+    /// higher ballot to mint. The reconfiguration pre-check asks the same.
+    pub(super) fn next_campaign_round(&self) -> Option<u64> {
+        self.acceptor
+            .promised()
+            .round
+            .max(self.ballot.round)
+            .max(self.round_floor)
+            .checked_add(1)
+    }
+
     /// Open a campaign at a fresh ballot: bump the round, promise it durably,
     /// drop every leadership state, then either register `(b, C_b)` with the
     /// matchmakers (a deployment that names them) or go straight to Phase 1
@@ -57,13 +70,7 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, reconfiguration = kind.is_reconfiguration())))]
     pub(super) fn campaign(&mut self, kind: RegistrationKind, config: AcceptorConfig) {
         let me = self.config.id;
-        let base_round = self
-            .acceptor
-            .promised()
-            .round
-            .max(self.ballot.round)
-            .max(self.round_floor);
-        let Some(round) = base_round.checked_add(1) else {
+        let Some(round) = self.next_campaign_round() else {
             // The wire/domain round space is exhausted. There is no strictly
             // higher valid ballot to campaign at, so remain a follower rather
             // than wrapping or reusing the maximum round.
@@ -92,17 +99,13 @@ impl ColocatedNode {
             self.ballot.round > self.round_floor,
             "a campaign opens above the round floor a stale refusal set"
         );
-        if let Some(matchmakers) = &self.matchmakers {
+        if self.matchmakers.is_some() {
             // The matchmaking phase: register first, prepare only once a
-            // matchmaker quorum has answered (see `super::matchmaking`).
-            let generation = matchmakers.generation;
-            let members = matchmakers.members().to_vec();
-            self.matchmaking = Some(Matchmaking::new(self.ballot, config.clone(), kind));
-            let request = MatchRequest::for_kind(kind, me, self.ballot, config, generation);
-            for matchmaker in members {
-                self.pending_match_requests
-                    .push((matchmaker, request.clone()));
-            }
+            // matchmaker quorum has answered (see `super::matchmaking`). A
+            // fresh phase has answers from nobody, so the queue addresses
+            // every member of the set from the start of its history.
+            self.matchmaking = Some(Matchmaking::new(self.ballot, config, kind));
+            self.queue_match_requests();
             // Negative space of invariant 1 (#120): nothing Phase-1-shaped
             // left this call — no `Prepare` before a matchmaker quorum.
             assert!(
@@ -185,7 +188,7 @@ impl ColocatedNode {
         // win (a won election gap-fills only *accepted* slots it can re-proposes;
         // this learns *chosen* ones outright). Harmless when we are not behind — a
         // peer with nothing past `from_slot` simply sends nothing.
-        self.broadcast(&self.catch_up_request(from_slot));
+        self.broadcast(self.catch_up_request(from_slot));
         self.try_become_leader();
     }
 
@@ -300,11 +303,7 @@ impl ColocatedNode {
             // the same one that fills an election's undescribed slot — spends
             // a `Control::Noop` on it.
             let command = decision.command.unwrap_or(Command::Control(Control::Noop));
-            if let Command::User(entry) = &command
-                && !self.replica.applied_elsewhere(entry, slot)
-            {
-                self.replica.track_inflight(entry.client, entry.seq, slot);
-            }
+            self.replica.track_command(slot, &command);
             // A repair decision is Phase-1-shaped work: never proxied.
             self.start_accept_round(slot, command, Delegation::Colocated);
         }
@@ -547,11 +546,7 @@ impl ColocatedNode {
                 self.counters.election_gap_fills =
                     self.counters.election_gap_fills.saturating_add(1);
             }
-            if let Command::User(entry) = &command
-                && !self.replica.applied_elsewhere(entry, slot)
-            {
-                self.replica.track_inflight(entry.client, entry.seq, slot);
-            }
+            self.replica.track_command(slot, &command);
             self.start_accept_round(slot, command, delegation);
             started += 1;
         }

@@ -255,9 +255,12 @@ impl Outbound {
     }
 
     /// Hand `msg` to the lossy per-peer transport and surface the protocol send.
-    /// `msg_sent` deliberately records the core's outbound decision even when
-    /// the bounded mailbox or network later drops it; safety oracles inspect the
-    /// messages a proposer attempted, independently of delivery.
+    /// The send is reported through the audit port first
+    /// (`report_sent` → [`Audit::sent`] and its siblings),
+    /// so it records the core's outbound decision even when the bounded mailbox
+    /// or network later drops it: the safety oracles fold the messages a
+    /// proposer attempted, independently of delivery. The `msg_sent` trace
+    /// event is the human-readable mirror; nothing reads it back.
     #[tracing::instrument(level = "trace", skip_all, fields(from = %self.sender, to = %to, kind = message_kind(msg)))]
     pub(crate) fn transmit<H: DriverHooks, A: Audit>(
         &self,
@@ -269,11 +272,12 @@ impl Outbound {
         self.report_sent(audit, to, msg);
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
-        // only one whose command hash the trace needs: it is what lets an oracle
-        // check the Phase-2 half of P2b — one ballot proposes at most one command
-        // per slot — a claim no other event can show, because the anomaly it
-        // guards against (#67) puts two commands for one `(ballot, slot)` on the
-        // wire without either ever being accepted or chosen.
+        // only one whose command hash the trace shows: it lets a human reading
+        // the trace see the Phase-2 half of P2b — one ballot proposes at most one
+        // command per slot — which the audit checks from the report above,
+        // because the anomaly it guards against (#67) puts two commands for one
+        // `(ballot, slot)` on the wire without either ever being accepted or
+        // chosen.
         match msg {
             Message::Accept {
                 ballot,
@@ -466,7 +470,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 // a bundle would only rename the same eight things.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
-pub(crate) async fn run_peer_delivery<P: Providers, A: Audit>(
+async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ParosInternalClient<ReconnectingChannel<P, tonic::body::Body>>,
     time: P::Time,
     shutdown: CancellationToken,
@@ -588,7 +592,7 @@ fn delivery_batch<A: Audit>(
 /// Surface a hook-decided send drop (the `msg_dropped_at_send` trace and
 /// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
 /// exactly which round the loss isolated.
-pub(crate) fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
+fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
     audit.dropped_at_send(from, to, msg);
     let kind = message_kind(msg);
     if let Message::Accept { slot, .. } = msg {

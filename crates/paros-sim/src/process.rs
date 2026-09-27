@@ -67,7 +67,8 @@ fn bootstrap_config(
             .map(NodeId)
             .collect();
     let policy = crate::shape::quorum_policy(ctx.state(), pool, perturb);
-    AcceptorConfig::new(bootstrap.clone(), policy.system(bootstrap.len()))
+    let system = policy.system(bootstrap.len());
+    AcceptorConfig::new(bootstrap, system)
 }
 
 /// One role incarnation's harness rig, armed the same way for every role:
@@ -439,10 +440,11 @@ async fn run_acceptor(
     // majority on a plain or unperturbed seed; a flexible split on the seeds
     // the swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
+    let quorum_system = policy.system(bootstrap.len());
     let config = Config {
         id: self_rank,
-        peers: bootstrap.clone(),
-        quorum_system: policy.system(bootstrap.len()),
+        peers: bootstrap,
+        quorum_system,
         nodes: pool,
         matchmakers: matchmaker_bootstrap,
         matchmaker_pool,
@@ -466,17 +468,19 @@ async fn run_acceptor(
         audit,
     } = arm_role(ctx, my_ip, perturb);
     let shape = incarnation.shape;
+    // The copy budget is sized by the run's configuration floor
+    // (`crate::shape::config_floor`): the whole pool on a plain seed, the
+    // smallest set a reconfiguration may shrink to on a matchmaker seed —
+    // and by the clean copies the run's quorum-system policy demands over
+    // every size the run may put in force, floor to pool (a majority, the
+    // split's Phase-1 quorum, or — on a grid seed — the whole floor: a grid
+    // tolerates no permanent loss). The storage world's budget and the
+    // audit's restart note below read the same two numbers.
+    let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
+    let clean_copies = policy.clean_copies(floor, config.pool().len());
     {
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-        // The copy budget is sized by the run's configuration floor
-        // (`crate::shape::config_floor`): the whole pool on a plain seed, the
-        // smallest set a reconfiguration may shrink to on a matchmaker seed —
-        // and by the clean copies the run's quorum-system policy demands
-        // over every size the run may put in force, floor to pool (a
-        // majority, the split's Phase-1 quorum, or — on a grid seed — the
-        // whole floor: a grid tolerates no permanent loss).
-        let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
-        guard.set_budget(floor, policy.clean_copies(floor, config.pool().len()));
+        guard.set_budget(floor, clean_copies);
         // The pool above that floor is the retirement budget (#123): every
         // identity a configuration may leave behind.
         guard.set_pool_size(config.pool().len());
@@ -501,13 +505,7 @@ async fn run_acceptor(
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .parked_count_excluding(my_ip);
-        let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
-        checker.note_process_restart(
-            self_rank.0,
-            parked_peers,
-            floor,
-            policy.clean_copies(floor, config.pool().len()),
-        );
+        checker.note_process_restart(self_rank.0, parked_peers, floor, clean_copies);
         // The disk's wipe coin (#124): a restart that comes back on an empty
         // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
         // which paros does not use (the fake disk is the world), so the
@@ -860,14 +858,11 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let world = storage_world(ctx.state());
-        world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_budget(1, 1);
-        world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_pool_size(1);
+        {
+            let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.set_budget(1, 1);
+            guard.set_pool_size(1);
+        }
         let faults = StorageFaults::new(
             ctx.time().clone(),
             Duration::ZERO,

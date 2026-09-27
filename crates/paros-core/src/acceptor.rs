@@ -485,7 +485,7 @@ mod tests {
     /// One ballot carries one value (P2b): a second value at the ballot a
     /// slot already recorded is a programmer error, not a tie. The proposer
     /// half of the same rule is
-    /// `proposer::tests::two_reports_at_one_ballot_are_a_programmer_error`;
+    /// `node::tests::invariants::conflicting_equal_ballot_promise_reports_trip_the_merge`;
     /// this is the half a single-decree deployment leans on, where a silent
     /// overwrite would let two successor sets be chosen for one generation.
     #[test]

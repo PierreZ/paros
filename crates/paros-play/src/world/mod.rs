@@ -364,7 +364,7 @@ impl World {
             beats_broadcast: 0,
             refused_boots: Vec::new(),
             matchmakers: Vec::new(),
-            reconfigurers: reconfigurers.into_iter().collect(),
+            reconfigurers,
             campaign_prior: vec![Vec::new(); count],
             retired: vec![false; count],
             refused_retires: Vec::new(),
@@ -497,6 +497,21 @@ impl World {
         out
     }
 
+    /// Call the node at `index` if it is live, then pump `id`, all under
+    /// [`World::observe`]. `None` when the node is down.
+    pub(crate) fn drive<R>(
+        &mut self,
+        id: NodeId,
+        index: usize,
+        f: impl FnOnce(&mut ColocatedNode) -> R,
+    ) -> Option<R> {
+        self.observe(id, move |world| {
+            let out = world.nodes[index].as_mut().map(f);
+            world.pump(id);
+            out
+        })
+    }
+
     /// The open prompt, if any.
     #[must_use]
     pub fn prompt(&self) -> Option<&Prompt> {
@@ -593,13 +608,10 @@ impl World {
         }
         self.next_event = stamp;
         for index in 0..self.pool.len() {
+            let durable = self.disks[index].hard_state().max_promised_ballot;
             let seen = self.nodes[index]
                 .as_ref()
-                .map_or_else(
-                    || self.disks[index].hard_state().max_promised_ballot,
-                    |node| node.acceptor().promised(),
-                )
-                .max(self.disks[index].hard_state().max_promised_ballot);
+                .map_or(durable, |node| node.acceptor().promised().max(durable));
             self.promise_watermarks[index] = self.promise_watermarks[index].max(seen);
         }
         for index in 0..self.pool.len() {
@@ -688,6 +700,24 @@ pub fn name(party: Party) -> String {
         Party::Node(id) => who(id),
         Party::Matchmaker(id) => matchmakers::which(id),
     }
+}
+
+/// The refusal a node that is not the leader gives, pointing the client at
+/// the leader it knows of through `redirect` ("a linearizable read goes to").
+fn not_leader(id: NodeId, hint: Option<NodeId>, redirect: &str) -> ActionError {
+    ActionError::new(
+        ActionErrorCode::NotLeader,
+        match hint {
+            Some(leader) => format!(
+                "node {} is not the leader; {redirect} node {}",
+                id.0, leader.0
+            ),
+            None => format!(
+                "node {} is not the leader, and it does not know who is",
+                id.0
+            ),
+        },
+    )
 }
 
 fn unknown_node(id: NodeId) -> ActionError {

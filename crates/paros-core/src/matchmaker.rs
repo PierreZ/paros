@@ -140,7 +140,7 @@ pub use self::state::{
     DecreeRecord, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap,
     Registration, RegistrationKind,
 };
-pub(crate) use self::state::{resolved_phase, resolved_set};
+pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
@@ -394,13 +394,8 @@ impl Matchmaker {
             // the record, so the reply that reports it never escapes a
             // non-durable scalar.
             if registration.kind.is_reconfiguration()
-                && self
-                    .hard_state
-                    .effective
-                    .as_ref()
-                    .is_none_or(|(held, _)| ballot > *held)
+                && raise_effective(&mut self.hard_state.effective, ballot, &registration.config)
             {
-                self.hard_state.effective = Some((ballot, registration.config.clone()));
                 self.stage_scalars();
             }
             self.pending_writes.push(MatchmakerWriteOp::Register {
@@ -462,10 +457,12 @@ impl Matchmaker {
     /// The generation fence for a matchmaking or GC request: `None` when
     /// this matchmaker is active for exactly `generation`.
     fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {
-        let current = self.set().clone();
+        let current = self.set();
         match self.phase() {
             MatchmakerPhase::Active if current.generation == generation => None,
-            MatchmakerPhase::Active => Some(MatchRefusal::Generation { current }),
+            MatchmakerPhase::Active => Some(MatchRefusal::Generation {
+                current: current.clone(),
+            }),
             MatchmakerPhase::Stopped if current.generation == generation => {
                 Some(MatchRefusal::Stopped {
                     successor: self.hard_state.successor.clone(),
@@ -487,9 +484,9 @@ impl Matchmaker {
                             successor: Some(successor.clone()),
                         })
                     }
-                    None if generation < current.generation => {
-                        Some(MatchRefusal::Generation { current })
-                    }
+                    None if generation < current.generation => Some(MatchRefusal::Generation {
+                        current: current.clone(),
+                    }),
                     _ => Some(MatchRefusal::Inactive),
                 }
             }
@@ -578,10 +575,7 @@ impl Matchmaker {
 
     /// Every registration this matchmaker retains — everything at or above the
     /// watermark, with no upper bound — the whole frozen registry a `StopB`
-    /// hands the reconstruction. Its own method rather than `history_below` at
-    /// a maximal ballot: "everything retained" is a different question from
-    /// "everything below `b`", and a sentinel ballot said so only by
-    /// arithmetic accident.
+    /// hands the reconstruction.
     pub(super) fn history_from_watermark(&self) -> BTreeMap<Ballot, Registration> {
         self.registry.entries().clone()
     }

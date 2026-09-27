@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::decree::{AcceptFold, Decree, DecreePromise};
 use super::{
     MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply, ReconfigureRequest,
-    Registration,
+    Registration, raise_effective,
 };
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, NodeId};
@@ -719,10 +719,8 @@ impl MatchmakerReconfigurer {
                 // record: the maximum over the frozen members carries the
                 // acceptor set in force into the successor generation even
                 // when its own registration was collected long ago.
-                if let Some((ballot, config)) = reported
-                    && effective.as_ref().is_none_or(|(held, _)| ballot > *held)
-                {
-                    *effective = Some((ballot, config));
+                if let Some((ballot, config)) = &reported {
+                    raise_effective(effective, *ballot, config);
                 }
                 // The freeze does **not** close here. A quorum is what the
                 // reconstruction *needs*, never what it should settle for:

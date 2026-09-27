@@ -7,8 +7,8 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, Control, NodeId, ProposeResult, ReconfigureRefusal,
-    ReconfigureResult, Slot,
+    AcceptorConfig, Ballot, ColocatedNode, Control, MatchmakerId, NodeId, ProposeResult,
+    ReconfigureRefusal, ReconfigureResult, Slot, StartRefusal,
 };
 
 use crate::audit::Audit;
@@ -19,6 +19,7 @@ use crate::grpc::{
 use crate::storage::NodeStorage;
 
 use super::events::reconfigure_outcome;
+use super::handover::HandoverDriver;
 use super::snap_repair::SnapRepair;
 
 /// The application permits dropping the log prefix up to `up_to`. Only the
@@ -34,6 +35,7 @@ use super::snap_repair::SnapRepair;
 /// `accepted: false`; the client's retry finds the point once the quorum's
 /// custody advertisements land. Proposal-side policy only — the acceptor
 /// paths stay fully opaque.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn compact(
     node: &mut ColocatedNode,
     snap: &mut SnapRepair,
@@ -104,6 +106,7 @@ pub(crate) fn compact(
 /// non-leader redirects, a plain deployment refuses outright, and an
 /// unsettled leadership asks the client to retry. Reported here; the loop
 /// settles the batch it opened before the ack leaves.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn reconfigure<A: Audit>(
     node: &mut ColocatedNode,
     audit: &A,
@@ -153,16 +156,14 @@ pub(crate) fn reconfigure<A: Audit>(
 /// configuration naming this node was bound to — and not the operator's
 /// belief that it read a retirable list. Only reads the core: an accepted
 /// retirement takes effect on the loop's next tick.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) fn retire<A: Audit>(
     node: &ColocatedNode,
     audit: &A,
     self_id: u64,
     req: &RetireRequest,
 ) -> RetireAck {
-    let watermark = req.gc_watermark.map(|b| Ballot {
-        round: b.round,
-        node: NodeId(b.node),
-    });
+    let watermark = req.gc_watermark.map(Ballot::from);
     let accepted = watermark.is_some_and(|w| node.may_retire(w));
     let refusal = if accepted {
         ""
@@ -183,8 +184,33 @@ pub(crate) fn retire<A: Audit>(
     }
 }
 
+/// A matchmaker-set reconfiguration request (#125): any node may drive it.
+/// Refusable like every operator request — a plain deployment, an empty
+/// target, a matchmaker this node has no link to, or a handover already in
+/// flight; otherwise the handover starts and the refusal is empty. The loop
+/// reports the start and puts its requests on the wire.
+#[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
+pub(crate) fn reconfigure_matchmakers(
+    node: &ColocatedNode,
+    handover: &mut HandoverDriver,
+    target: &[MatchmakerId],
+    is_known: impl Fn(&MatchmakerId) -> bool,
+) -> &'static str {
+    match node.matchmaker_set() {
+        None => "no_matchmakers",
+        Some(_) if target.is_empty() => "empty",
+        Some(_) if !target.iter().all(is_known) => "unknown_matchmaker",
+        Some(current) => match handover.start(current, target.to_vec()) {
+            Ok(()) => "",
+            Err(StartRefusal::Busy) => "busy",
+            Err(StartRefusal::Empty) => "empty",
+        },
+    }
+}
+
 /// A pure read of the core and the store: what an operator (or a client's
 /// composer) sees of this node.
+#[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
 pub(crate) async fn inspect<S: NodeStorage>(node: &ColocatedNode, storage: &S) -> InspectReply {
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();

@@ -726,9 +726,13 @@ impl ColocatedNode {
         // quorum read at 3 on a follower, then a read-index at 2 on the
         // leader: "chain: a client's read-index watermarks never move
         // backwards").
-        let opened = (self.config.proxy_count > 0)
-            .then(|| self.proposer.next_slot().0.checked_sub(1).map(Slot))
-            .flatten();
+        let opened = self
+            .proposer
+            .next_slot()
+            .0
+            .checked_sub(1)
+            .map(Slot)
+            .filter(|_| self.config.has_proxies());
         let index = self
             .replica
             .chosen_index()
@@ -965,7 +969,7 @@ impl ColocatedNode {
         // catch-up replay; one that truncated past them offers a snapshot.
         // Once per tick — the same cadence heartbeat-driven catch-up uses.
         if let Some(from_slot) = self.replica.app_repair() {
-            self.broadcast(&self.catch_up_request(from_slot));
+            self.broadcast(self.catch_up_request(from_slot));
         } else if let Some(first_faulty) = self
             .acceptor
             .first_faulty()
@@ -977,7 +981,7 @@ impl ColocatedNode {
             // peers so the record itself heals; a peer that has it chosen
             // serves it, and this node's own next election covers it either
             // way (the campaign range starts at the first faulty slot).
-            self.broadcast(&self.catch_up_request(first_faulty));
+            self.broadcast(self.catch_up_request(first_faulty));
         }
     }
 

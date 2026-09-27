@@ -200,7 +200,7 @@ pub(super) struct AuditState {
     /// reported — the monotonicity watermark for those reports alone (the
     /// folded [`Floor`] also absorbs installs and ground-truth flushes, which
     /// can legally outrun a reordered stale truncate; see
-    /// [`NodeAudit::truncated`]).
+    /// [`NodeAudit::truncated`](paros::Audit::truncated)).
     pub(super) truncate_watermark: BTreeMap<u64, u64>,
 
     // --- applied prefix -----------------------------------------------------
@@ -301,7 +301,7 @@ pub(super) struct AuditState {
     pub(super) crashed_before_sync: bool,
     pub(super) crashed_after_sync: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
-    /// ([`Audit::storage_fault`] with `Io`/`FsyncFailed`).
+    /// ([`Audit::storage_fault`](paros::Audit::storage_fault) with `Io`/`FsyncFailed`).
     pub(super) storage_faults_detected: u64,
     pub(super) storage_fault_crashed: bool,
     /// Typed Stage-7 corruption/metadata crash decisions folded in.
@@ -347,10 +347,10 @@ pub(super) struct AuditState {
     /// boot must not keep explaining gaps forever.
     pub(super) reported_faulty: BTreeMap<u64, BTreeSet<u64>>,
     /// Faulty reports staged since the node's last boot report: the scan
-    /// speaks *before* [`Audit::recovered`] fires, so the swap-in happens
+    /// speaks *before* [`Audit::recovered`](paros::Audit::recovered) fires, so the swap-in happens
     /// there — the boot report is the incarnation edge.
     pub(super) faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
-    /// Repair progress observed (from [`Audit::repair_progress`]): in-place
+    /// Repair progress observed (from [`Audit::repair_progress`](paros::Audit::repair_progress)): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.
     pub(super) repaired_seen: bool,
@@ -620,11 +620,14 @@ impl AuditState {
     /// their union. The union rule would count here and be wrong: it is
     /// exactly what the negative core test refuses.
     pub(super) fn observe_accept_send(&mut self, from: Party, to: u64, ballot: Ballot) {
-        let Some(config) = self.config_of(ballot).cloned() else {
+        let Some(addressed_member) = self
+            .config_of(ballot)
+            .map(|config| config.contains(paros::NodeId(to)))
+        else {
             return;
         };
         assert_always!(
-            config.contains(paros::NodeId(to)),
+            addressed_member,
             "reconfiguration: an Accept reaches only the ballot's own acceptors",
             { "from" => from.to_string(), "to" => to, "round" => ballot.round }
         );
@@ -922,14 +925,16 @@ impl AuditState {
         // The tally is counted over the ballot's *own* configuration — a
         // learner outside it (a spare, a removed member replaying a commit)
         // holds the same bytes but casts no vote (#122).
-        let config = self.config_of(ballot).cloned();
+        // Field-level borrows (the body of `config_of`), so the tallies
+        // below can be written while the configuration is borrowed.
+        let config = self
+            .configs
+            .get(&(ballot.round, ballot.node.0))
+            .or(self.bootstrap.as_ref());
         let holders = self.accept_sets.entry(key).or_default();
         holders.insert(node);
         let voters: BTreeSet<paros::NodeId> = holders.iter().map(|n| paros::NodeId(*n)).collect();
-        if config
-            .as_ref()
-            .is_some_and(|c| c.has_phase2_quorum(&voters))
-        {
+        if config.is_some_and(|c| c.has_phase2_quorum(&voters)) {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -940,7 +945,7 @@ impl AuditState {
                     // a grid column) it may be smaller than a majority of it,
                     // which is the whole point of the variant. Judged through
                     // the boundary's own majority predicate, never a count.
-                    if let Some(c) = &config
+                    if let Some(c) = config
                         && !QuorumSystem::is_majority(c.members(), &voters)
                     {
                         self.decided_below_majority = true;
@@ -951,7 +956,7 @@ impl AuditState {
                     // the boundary's own column predicates, never a count:
                     // the deciding voters lie in some full column, and not
                     // in the slot's.
-                    if let Some(c) = &config
+                    if let Some(c) = config
                         && let QuorumSystem::Grid { cols, .. } = c.quorum_system()
                     {
                         self.decided_on_column = true;
@@ -1038,7 +1043,7 @@ impl AuditState {
         // A promise-majority *of the ballot's own configuration*: only its
         // members' promises decide whether the leader can still assemble a
         // quorum at that ballot.
-        let Some(config) = self.config_of(ballot).cloned() else {
+        let Some(config) = self.config_of(ballot) else {
             return;
         };
         let above: BTreeSet<paros::NodeId> = self
@@ -1250,7 +1255,7 @@ impl AuditState {
     /// cluster can actually observe (a proposal on the wire), never against a
     /// node's own `role` flag. Two nodes exercising one ballot for overlapping
     /// slots is exactly how two different values get chosen for one slot, and
-    /// the sibling check in [`NodeAudit::sent`] ("one ballot proposes at most
+    /// the sibling check in [`NodeAudit::sent`](paros::Audit::sent) ("one ballot proposes at most
     /// one command for a slot") is the consequence this exists to prevent
     /// upstream of.
     pub(super) fn observe_authority_use(&mut self, node: u64, ballot: Ballot) {
@@ -1329,8 +1334,8 @@ impl AuditState {
             "a confirmed read index never regresses within a boot",
             {
                 "node" => node.0,
-                "confirmed" => confirmed.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX)),
-                "watermark" => watermark.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                "confirmed" => crate::signed_watermark(confirmed),
+                "watermark" => crate::signed_watermark(*watermark)
             }
         );
         *watermark = (*watermark).max(confirmed);
@@ -1383,7 +1388,7 @@ impl AuditState {
                     "client" => client,
                     "seq" => seq,
                     "acked_slot" => slot,
-                    "applied_at" => applied_at.map_or(-1_i64, |s| i64::try_from(s).unwrap_or(i64::MAX))
+                    "applied_at" => crate::signed_watermark(applied_at)
                 }
             );
         }

@@ -52,6 +52,13 @@ use crate::lifecycle::ScriptedLifecycle;
 use crate::process::{MatchmakerProcess, NodeProcess, ProxyProcess, ScriptedOptions};
 use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP};
 
+/// An optional slot or watermark as a signed trace/detail value: `None`
+/// (the empty prefix, nothing seen yet) is `-1`, and a value too large for
+/// an `i64` saturates at `i64::MAX`.
+pub(crate) fn signed_watermark(watermark: Option<u64>) -> i64 {
+    watermark.map_or(-1_i64, |wm| i64::try_from(wm).unwrap_or(i64::MAX))
+}
+
 /// Client-side gRPC channel config for the sim workloads: h2 PING keep-alive so
 /// a connection left half-open by a node restart is detected and replaced
 /// deterministically instead of swallowing requests forever.
@@ -537,9 +544,10 @@ pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
         .run()
 }
 
-/// Where the departed-straggler case publishes whether its run genuinely
-/// reached its injection (see [`departed_straggler_case`]). Shared by the
-/// workload factory's clones.
+/// Where a scripted corpus case publishes whether its run genuinely judged
+/// what it was written for — the E1 mask corpus its analytic outcome (see
+/// [`corpus_mask_case`]), the departed-straggler case its injection (see
+/// [`departed_straggler_case`]). Shared by the workload factory's clones.
 pub(crate) type NonVacuousSink = Arc<Mutex<bool>>;
 
 /// Run the departed-straggler case (see `crate::corpus`, #124): a four-node
@@ -569,9 +577,9 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
     };
     let report = scripted_builder(corpus::DEPARTED_POOL, 1, options)
         .workload_factory(move || {
-            Box::new(corpus::DepartedStragglerWorkload::new(Some(
+            Box::new(corpus::DepartedStragglerWorkload::new(
                 workload_sink.clone(),
-            )))
+            ))
         })
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
