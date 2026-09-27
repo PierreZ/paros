@@ -1602,11 +1602,28 @@ impl Workload for ChunkMaskWorkload {
                     .iter()
                     .map(|ip| corpus_disk_probe(state, ip))
                     .collect();
+                // Quiescent, not merely equal: no node retains an accepted
+                // record its application has not applied yet. A re-asked
+                // compaction can leave a Truncate *in flight* — accepted on
+                // every disk, not yet committed — at the very poll where the
+                // applied states happen to agree; settling there derives the
+                // expected full state from a tail one decision short, and the
+                // availability judgement below then waits for a state the
+                // cluster has legitimately moved past (seed
+                // 17477318529130525978, mask 646: settled at applied 8 while
+                // the re-asked Truncate at slot 8 was accepted everywhere,
+                // then every node converged to applied 9). Every decided slot
+                // is one applied command (user, Snap, Truncate or Noop), so
+                // the applied count is one past the highest applied slot.
                 let shape = probes.iter().all(|p| {
                     p.as_ref().is_some_and(|probe| {
                         probe.floor == 6
                             && probe.snap_point.is_some()
                             && probe.faulty_chunks.is_empty()
+                            && probe
+                                .clean_slots
+                                .last()
+                                .is_none_or(|slot| *slot < probe.applied_count)
                     })
                 });
                 let agreed = shape
