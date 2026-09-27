@@ -6,6 +6,10 @@ import "common.proto";
 
 // Cluster-internal consensus traffic. This surface is not part of the public
 // journal API and may evolve with the replication protocol.
+// The `service` block documents the method set; the transport is
+// moonpool-rpc, not gRPC. Each rpc is a well-known endpoint whose method id
+// and schema version live in `src/rpc/methods.rs`; only the messages are
+// generated from this file.
 service ParosInternal {
   // Hand a batch of consensus messages to a peer. The ack means every message
   // entered the peer's bounded inbox — not that its node loop processed them.

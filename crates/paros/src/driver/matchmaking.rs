@@ -1,5 +1,4 @@
-//! The driver's matchmaker wire (#120, #123, #125): the reconnecting link per
-//! matchmaker, the batch of requests a drained `Ready` hands the loop, the
+//! The driver's matchmaker wire (#120, #123, #125): the link per matchmaker, the batch of requests a drained `Ready` hands the loop, the
 //! detached RPC tasks that carry them, and the reports of what each answer did
 //! to the open campaign.
 
@@ -8,7 +7,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, TaskProvider, TimeProvider};
-use moonpool_hyper::ReconnectingChannel;
+use moonpool_rpc::RpcError;
 use paros_core::{
     Ballot, ColocatedNode, GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, MatchStep,
     MatchmakerId, NodeId, ReconfigureReply, ReconfigureRequest, Slot,
@@ -18,30 +17,26 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::driver::events::{reconfigure_kind, registration_history_hash};
-use crate::grpc::{
-    ParosMatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
+use crate::rpc::{
+    MatchmakerClient, garbage_collect_ack_from_wire, match_reply_from_wire,
     reconfigure_reply_from_wire, wire_garbage_collect, wire_match_request,
     wire_reconfigure_request,
 };
 
 use super::ready::Outbox;
 
-/// The driver's **matchmaker links** (#120): one reconnecting channel per
-/// matchmaker of the deployment, and the inbox the answers come back through.
+/// The driver's **matchmaker links** (#120): one client per matchmaker of the
+/// deployment (riding the node's RPC runtime), and the inbox the answers come back through.
 /// Empty on plain Multi-Paxos, whose driver never speaks the matchmaker
 /// contract.
 pub(crate) struct MatchmakerLinks<P: Providers> {
-    pub(crate) clients:
-        BTreeMap<MatchmakerId, ParosMatchmakerClient<ReconnectingChannel<P, tonic::body::Body>>>,
+    pub(crate) clients: BTreeMap<MatchmakerId, MatchmakerClient<P>>,
     pub(crate) replies: mpsc::Sender<MatchReply>,
     pub(crate) gc_acks: mpsc::Sender<GcAck>,
     pub(crate) reconfigure_replies: mpsc::Sender<ReconfigureReply>,
     pub(crate) timeout: Duration,
     pub(crate) shutdown: CancellationToken,
 }
-
-/// One matchmaker's reconnecting gRPC client, as this driver holds it.
-type MatchmakerClient<P> = ParosMatchmakerClient<ReconnectingChannel<P, tonic::body::Body>>;
 
 /// This driver's link to one matchmaker, or `None` with a warning: a request
 /// addressed to a matchmaker there is no channel to (a learned successor
@@ -85,7 +80,7 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
 ) where
     P: Providers,
     R: Send + 'static,
-    Fut: Future<Output = Result<Result<R, &'static str>, tonic::Status>> + Send + 'static,
+    Fut: Future<Output = Result<Result<R, &'static str>, RpcError>> + Send + 'static,
 {
     let time = providers.time().clone();
     let timeout = links.timeout;
@@ -105,8 +100,8 @@ fn spawn_matchmaker_rpc<P, R, Fut>(
                 Ok(Ok(Err(error))) => {
                     tracing::warn!(node = self_id, kind, error, "bad matchmaker reply");
                 }
-                Ok(Err(status)) => {
-                    tracing::debug!(node = self_id, kind, %status, "matchmaker RPC failed");
+                Ok(Err(error)) => {
+                    tracing::debug!(node = self_id, kind, %error, "matchmaker RPC failed");
                 }
                 Err(_) => tracing::debug!(node = self_id, kind, "matchmaker RPC timed out"),
             }
@@ -145,7 +140,7 @@ fn send_gc_requests<P: Providers, A: Audit>(
     fence: Option<Slot>,
 ) {
     for (matchmaker, request) in requests {
-        let Some(mut client) = link_to(links, self_id, matchmaker) else {
+        let Some(client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
         audit.gc_request_sent(
@@ -173,9 +168,10 @@ fn send_gc_requests<P: Providers, A: Audit>(
             links.gc_acks.clone(),
             async move {
                 client
-                    .garbage_collect(wire)
+                    .collect
+                    .try_get_reply(&wire)
                     .await
-                    .map(|response| garbage_collect_ack_from_wire(response.into_inner()))
+                    .map(garbage_collect_ack_from_wire)
             },
         );
     }
@@ -192,7 +188,7 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
     requests: Vec<(MatchmakerId, ReconfigureRequest)>,
 ) {
     for (matchmaker, request) in requests {
-        let Some(mut client) = link_to(links, self_id, matchmaker) else {
+        let Some(client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
         audit.reconfigure_request_sent(NodeId(self_id), matchmaker, &request);
@@ -212,9 +208,10 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
             links.reconfigure_replies.clone(),
             async move {
                 client
-                    .reconfigure(wire)
+                    .reconfigure
+                    .try_get_reply(&wire)
                     .await
-                    .map(|response| reconfigure_reply_from_wire(response.into_inner()))
+                    .map(reconfigure_reply_from_wire)
             },
         );
     }
@@ -260,7 +257,7 @@ fn send_match_requests<P: Providers, A: Audit>(
     requests: Vec<(MatchmakerId, MatchRequest)>,
 ) {
     for (matchmaker, request) in requests {
-        let Some(mut client) = link_to(links, self_id, matchmaker) else {
+        let Some(client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
         audit.match_request_sent(NodeId(self_id), matchmaker, request.ballot);
@@ -280,9 +277,10 @@ fn send_match_requests<P: Providers, A: Audit>(
             links.replies.clone(),
             async move {
                 client
-                    .matchmake(wire)
+                    .matchmake
+                    .try_get_reply(&wire)
                     .await
-                    .map(|response| match_reply_from_wire(response.into_inner()))
+                    .map(match_reply_from_wire)
             },
         );
     }

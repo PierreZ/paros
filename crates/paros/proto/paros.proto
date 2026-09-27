@@ -6,6 +6,10 @@ import "common.proto";
 
 // Client-facing journal API. A future proxy can expose this contract while the
 // nodes keep their consensus protocol on the separate internal service.
+// The `service` block documents the method set; the transport is
+// moonpool-rpc, not gRPC. Each rpc is a well-known endpoint whose method id
+// and schema version live in `src/rpc/methods.rs`; only the messages are
+// generated from this file.
 service Paros {
   rpc Propose(.paros.v1.Propose) returns (.paros.v1.ProposeAck);
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);

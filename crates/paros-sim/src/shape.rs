@@ -164,18 +164,18 @@ impl NodeShape {
             // newer one, and the requester re-asks every beat — a slower
             // transfer, never a starved class.
             snapshot_queue_capacity: buggify_knob!(4_usize, 1_usize..9_usize),
-            // Floor 1: the client inboxes are bounded mpsc queues whose tonic
-            // handlers `send().await` into them, so a full inbox is
-            // backpressure (the h2 request waits for the loop to drain one
-            // request), never a dropped request; a one-slot inbox serialises
-            // clients, and a client that waits past its own deadline times
-            // out ambiguously, never wrongly.
+            // Floor 1: the client inboxes are the RPC runtime's per-endpoint
+            // queues, which refuse a request beyond capacity as `Overloaded`
+            // (never admitted, so never a lost *executed* request); the loop
+            // takes each request as soon as it runs, so a one-slot queue
+            // serialises clients and a refused client retries on its own
+            // cadence — slower, ambiguous at worst, never wrong.
             client_inbox_capacity: buggify_knob!(256_usize, 1_usize..17_usize),
-            // Floor 1, same contract: the peer-delivery handler and the
-            // matchmaker reply sinks `send().await`, so a full inbox stalls
-            // the delivering peer's RPC until the loop takes one message
-            // (one message per loop iteration is throttling, not a drop);
-            // a batch that stalls past `delivery_timeout` is written off and
+            // Floor 1: the peer-delivery edge and the matchmaker reply sinks
+            // `send().await` into this inbox, so a full inbox stalls the
+            // delivering peer's RPC until the loop takes one message (one
+            // message per loop iteration is throttling, not a drop); a batch
+            // that stalls past `delivery_timeout` is written off and
             // repaired by the next re-send, the mailbox's own contract. Only
             // the duplicate-reply hook uses `try_send`, and a duplicate that
             // finds no room is simply not injected.

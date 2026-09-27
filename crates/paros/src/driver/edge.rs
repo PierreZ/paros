@@ -1,26 +1,40 @@
-//! The one gRPC edge every driver in this crate serves from: the bound
-//! listener, the h2 server, the prepared routes, and the persistent accept
-//! future. The node, matchmaker and proxy loops differ only in the task name
-//! their connection tasks carry and the `role` their connection errors name.
+//! The one RPC edge every driver in this crate serves from: a moonpool-rpc
+//! runtime listening on the process's address, the well-known endpoints the
+//! role registers on it, and the typed queues its loop selects on. The node,
+//! the proxy leader, the replica and the matchmaker differ only in which
+//! methods they register.
+//!
+//! The runtime is owned here and **polled by the loop** ([`RpcEdge::run`] is
+//! one of its `select!` arms), never spawned: when an incarnation ends —
+//! returning, or dropped mid-await by a crash — the listener, every
+//! connection and every pending call go with it on the spot, so a restart
+//! at the same address never meets its predecessor's socket.
 
-use std::fmt::Display;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use moonpool_core::{
-    Detach, NetworkProvider, Providers, SimulationError, SimulationResult, TaskProvider,
-    TcpListenerTrait,
+use moonpool_core::{Providers, SimulationError, SimulationResult};
+use moonpool_rpc::{RpcDriver, RpcHandle};
+use paros_core::{
+    GcAck, GcRequest, MatchReply, MatchRequest, Message, Party, ReconfigureReply,
+    ReconfigureRequest,
 };
-use moonpool_hyper::{H2Server, H2ServerConfig};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use paros_core::Party;
-
-use super::config::{DriverTunables, RunError, grpc_keep_alive};
+use super::config::DriverTunables;
 use crate::audit::Audit;
-use crate::grpc::OnReject;
+use crate::rpc::methods::{
+    CompactRpc, GarbageCollectRpc, InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ProposeRpc,
+    QuorumReadRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc,
+};
+use crate::rpc::{
+    Inbound, OnReject, garbage_collect_from_wire, match_request_from_wire,
+    reconfigure_request_from_wire, rpc_config, serve_deliveries, serve_well_known,
+    wire_garbage_collect_ack, wire_match_reply, wire_reconfigure_reply,
+};
 
 /// The edge's rejection callback for the driver serving as `me`: each
 /// rejection is reported to `audit` as [`Audit::edge_rejected`], stamped with
@@ -33,136 +47,172 @@ pub(crate) fn edge_reporter<A: Audit + Clone + Send + Sync + 'static>(
     Arc::new(move |kind| audit.edge_rejected(me, kind))
 }
 
-/// The listener type a provider bundle binds.
-type Listener<P> = <<P as Providers>::Network as NetworkProvider>::TcpListener;
-/// The stream type that listener accepts.
-type Stream<P> = <<P as Providers>::Network as NetworkProvider>::TcpStream;
-/// One pending `accept`, owning its share of the listener so the future and
-/// the listener can live side by side in [`GrpcEdge`].
-type AcceptFuture<P> = Pin<Box<dyn Future<Output = io::Result<(Stream<P>, String)>> + Send>>;
+/// A method whose bodies the loop consumes exactly as they arrive.
+pub(crate) type Plain<M> =
+    Inbound<M, <M as moonpool_rpc::RpcMethod>::Request, <M as moonpool_rpc::RpcMethod>::Reply>;
 
-/// A driver's inbound gRPC edge: the bound listener, the h2 server with the
-/// driver's keep-alive, the prepared routes it serves, and the **persistent
-/// accept future** below.
-///
-/// The accept future is PERSISTENT across select passes, for the same
-/// reason a driver's tick deadline is absolute: `select!` drops and
-/// re-creates its futures every pass, and a dropped accept forfeits its
-/// progress. moonpool charges the accept latency per `accept()` call and
-/// returns the reserved connection to the listener's queue when the future
-/// is dropped, so under a client storm arriving faster than that latency
-/// (a retry loop with a zero backoff pinned to one node, ~3 ms apart
-/// against a 1–10 ms accept) no peer connection is ever accepted: the node
-/// answers every client, hears no `Prepare` or `Heartbeat`, and on a
-/// flexible seed whose Phase 1 needs every acceptor the cluster never
-/// elects (seed 17898267817771645730 on 3484b13: 14,497 accepts cancelled
-/// at one listener in 60 s, none completed after the chaos window; green
-/// with this future). A kernel finishes the handshake whether or not an
-/// `accept()` is pending, so production never saw it; polling one future
-/// until it completes keeps the reservation and its delay in the sim too,
-/// and only a completed accept creates the next one ([`GrpcEdge::serve_next`]).
-pub(crate) struct GrpcEdge<P: Providers> {
-    // Declared first so it drops before the listener it holds a share of.
-    accept: AcceptFuture<P>,
-    listener: Arc<Listener<P>>,
-    server: H2Server<P>,
-    routes: tonic::service::Routes,
-    /// The incarnation's shutdown: every served connection ends with it.
-    shutdown: CancellationToken,
-    /// The name of the task each accepted connection is served on.
-    task: &'static str,
-    /// The role the listener's and its connections' errors name.
+/// A driver's inbound edge: the listening runtime and its driving future.
+pub(crate) struct RpcEdge<P: Providers> {
+    handle: RpcHandle<P>,
+    run: Pin<Box<dyn Future<Output = io::Error> + Send>>,
     role: &'static str,
 }
 
-/// The next `accept` on `listener`, owning its share of it. The provider's
-/// `accept` is an `async fn`, so nothing happens until the future is first
-/// polled — exactly when a bare `listener.accept()` would have started.
-fn accept_on<P: Providers>(listener: &Arc<Listener<P>>) -> AcceptFuture<P> {
-    let listener = Arc::clone(listener);
-    Box::pin(async move { listener.accept().await })
-}
-
-impl<P: Providers> GrpcEdge<P> {
-    /// Bind `local_addr` and prepare to serve `routes` on it with the
-    /// driver's h2 keep-alive; the first accept is armed here and polled by
-    /// the first [`GrpcEdge::serve_next`].
+impl<P: Providers> RpcEdge<P> {
+    /// Bind `local_addr` and start a runtime shaped by `tunables`. Nothing
+    /// is served until the loop polls [`RpcEdge::run`].
     ///
     /// # Errors
     ///
-    /// [`RunError::Infra`] when the bind fails.
-    pub(crate) async fn bind(
+    /// A configuration the runtime refuses or a failed bind, as
+    /// [`RunError::Infra`](super::RunError::Infra).
+    pub(crate) async fn listen(
         providers: &P,
         local_addr: &str,
-        task: &'static str,
         role: &'static str,
         tunables: &DriverTunables,
-        routes: tonic::service::Routes,
-        shutdown: CancellationToken,
-    ) -> Result<Self, RunError> {
-        let listener = providers
-            .network()
-            .bind(local_addr)
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("{role} gRPC listener: {e}")))?;
-        let listener = Arc::new(listener);
-        let server = H2Server::new(providers).with_config(H2ServerConfig {
-            keep_alive: Some(grpc_keep_alive(tunables)),
-            vectored_writes: true,
-        });
+    ) -> SimulationResult<Self> {
+        let (driver, handle) =
+            RpcDriver::listen(providers.clone(), local_addr, rpc_config(tunables))
+                .await
+                .map_err(|e| SimulationError::InvalidState(format!("{role} RPC listener: {e}")))?;
         Ok(Self {
-            accept: accept_on::<P>(&listener),
-            listener,
-            server,
-            routes,
-            shutdown,
-            task,
+            handle,
+            run: Box::pin(driver.run()),
             role,
         })
     }
 
-    /// Await the pending accept, arm the next one, and serve the accepted
-    /// connection on its own detached task until the incarnation ends. One
-    /// `select!` arm of every driver loop.
-    ///
-    /// # Errors
-    ///
-    /// The accept's own error, a genuine infrastructure failure.
-    pub(crate) async fn serve_next(&mut self, providers: &P) -> SimulationResult<()> {
-        let accepted = self.accept.as_mut().await;
-        self.accept = accept_on::<P>(&self.listener);
-        let (stream, addr) = accepted.map_err(|e| {
-            SimulationError::InvalidState(format!("{} gRPC accept: {e}", self.role))
-        })?;
-        let connection = self.server.serve_connection_with_shutdown(
-            stream,
-            self.routes.clone(),
-            self.shutdown.clone().cancelled_owned(),
-        );
-        accept_and_serve(providers, self.task, self.role, addr, connection);
-        Ok(())
+    /// The runtime every endpoint of this incarnation registers on, and
+    /// every outbound client binds to.
+    pub(crate) fn handle(&self) -> &RpcHandle<P> {
+        &self.handle
+    }
+
+    /// Drive the runtime; resolves only if it fails for good, with the
+    /// error the loop exits on. Cancel-safe: the runtime's future is kept
+    /// across `select!` passes.
+    pub(crate) async fn run(&mut self) -> SimulationError {
+        let error = (&mut self.run).await;
+        SimulationError::IoError(format!("{} RPC runtime: {error}", self.role))
     }
 }
 
-/// Serve one accepted gRPC connection on its own detached task, ending when
-/// the incarnation does.
-fn accept_and_serve<P, F, E>(
-    providers: &P,
-    task: &'static str,
-    role: &'static str,
-    addr: impl Display + Send + 'static,
-    connection: F,
-) where
-    P: Providers,
-    F: Future<Output = Result<(), E>> + Send + 'static,
-    E: Display + Send + 'static,
-{
-    providers
-        .task()
-        .spawn_task(task, async move {
-            if let Err(error) = connection.await {
-                tracing::warn!(%addr, %error, role, "gRPC connection ended");
-            }
+/// A node's inbound queues: the public journal, the operator calls, and the
+/// peer lane.
+pub(crate) struct NodeInbox {
+    pub(crate) propose: Plain<ProposeRpc>,
+    pub(crate) read: Plain<ReadRpc>,
+    pub(crate) quorum_read: Plain<QuorumReadRpc>,
+    pub(crate) compact: Plain<CompactRpc>,
+    pub(crate) reconfigure: Plain<ReconfigureRpc>,
+    pub(crate) reconfigure_matchmakers: Plain<ReconfigureMatchmakersRpc>,
+    pub(crate) inspect: Plain<InspectRpc>,
+    pub(crate) retire: Plain<RetireRpc>,
+    pub(crate) deliver: mpsc::Receiver<Message>,
+}
+
+impl NodeInbox {
+    /// Register a node's endpoints on `edge`; the peer lane holds
+    /// `peer_inbox_capacity` messages and ends with `shutdown`.
+    ///
+    /// # Errors
+    ///
+    /// A registration the runtime refuses.
+    pub(crate) fn serve<P: Providers>(
+        providers: &P,
+        edge: &RpcEdge<P>,
+        tunables: &DriverTunables,
+        on_reject: OnReject,
+        shutdown: CancellationToken,
+    ) -> SimulationResult<Self> {
+        let rpc = edge.handle();
+        Ok(Self {
+            propose: Inbound::plain(serve_well_known(rpc)?),
+            read: Inbound::plain(serve_well_known(rpc)?),
+            quorum_read: Inbound::plain(serve_well_known(rpc)?),
+            compact: Inbound::plain(serve_well_known(rpc)?),
+            reconfigure: Inbound::plain(serve_well_known(rpc)?),
+            reconfigure_matchmakers: Inbound::plain(serve_well_known(rpc)?),
+            inspect: Inbound::plain(serve_well_known(rpc)?),
+            retire: Inbound::plain(serve_well_known(rpc)?),
+            deliver: serve_deliveries(
+                providers,
+                rpc,
+                tunables.peer_inbox_capacity,
+                on_reject,
+                shutdown,
+            )?,
         })
-        .detach();
+    }
+}
+
+/// A replica's inbound queues (#144): the lane, the `Inspect` a probe reads
+/// its application through, and the public `QuorumRead` (§3.4: a client
+/// reads from a replica). Nothing else a node serves is a replica's.
+pub(crate) struct ReplicaInbox {
+    pub(crate) inspect: Plain<InspectRpc>,
+    pub(crate) quorum_read: Plain<QuorumReadRpc>,
+    pub(crate) deliver: mpsc::Receiver<Message>,
+}
+
+impl ReplicaInbox {
+    /// Register a replica's endpoints on `edge`.
+    ///
+    /// # Errors
+    ///
+    /// A registration the runtime refuses.
+    pub(crate) fn serve<P: Providers>(
+        providers: &P,
+        edge: &RpcEdge<P>,
+        tunables: &DriverTunables,
+        on_reject: OnReject,
+        shutdown: CancellationToken,
+    ) -> SimulationResult<Self> {
+        let rpc = edge.handle();
+        Ok(Self {
+            inspect: Inbound::plain(serve_well_known(rpc)?),
+            quorum_read: Inbound::plain(serve_well_known(rpc)?),
+            deliver: serve_deliveries(
+                providers,
+                rpc,
+                tunables.peer_inbox_capacity,
+                on_reject,
+                shutdown,
+            )?,
+        })
+    }
+}
+
+/// A matchmaker's inbound queues: the contract's three methods, decoded
+/// into the core's types (a malformed request never reaches the loop).
+pub(crate) struct MatchmakerInbox {
+    pub(crate) requests: Inbound<MatchmakeRpc, MatchRequest, MatchReply>,
+    pub(crate) collects: Inbound<GarbageCollectRpc, GcRequest, GcAck>,
+    pub(crate) reconfigures:
+        Inbound<MatchmakerReconfigureRpc, ReconfigureRequest, ReconfigureReply>,
+}
+
+impl MatchmakerInbox {
+    /// Register a matchmaker's endpoints on `edge`.
+    ///
+    /// # Errors
+    ///
+    /// A registration the runtime refuses.
+    pub(crate) fn serve<P: Providers>(edge: &RpcEdge<P>) -> SimulationResult<Self> {
+        let rpc = edge.handle();
+        Ok(Self {
+            requests: Inbound::new(serve_well_known(rpc)?, match_request_from_wire, |reply| {
+                wire_match_reply(&reply)
+            }),
+            collects: Inbound::new(serve_well_known(rpc)?, garbage_collect_from_wire, |ack| {
+                wire_garbage_collect_ack(&ack)
+            }),
+            reconfigures: Inbound::new(
+                serve_well_known(rpc)?,
+                reconfigure_request_from_wire,
+                |reply| wire_reconfigure_reply(&reply),
+            ),
+        })
+    }
 }

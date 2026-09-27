@@ -12,8 +12,8 @@ use paros_core::{
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
-use crate::grpc::{ProposeAck, ReadAck, ReplySender};
 use crate::hooks::{DriverHooks, Reply, Seam};
+use crate::rpc::{ProposeAck, ReadAck, ReplySender};
 use crate::storage::{NodeStorage, StorageError};
 
 use super::config::RunError;

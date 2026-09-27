@@ -1532,6 +1532,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn edge_rejected(&self, _at: Party, _kind: EdgeRejection) {
         let mut st = self.state();
         st.edge_rejections += 1;
+        // The message predates the move to moonpool-rpc; it stays verbatim
+        // because a message's hash is its assertion slot.
         reach_once!(
             st.edge_rejected,
             "the gRPC edge rejects a corrupted request"

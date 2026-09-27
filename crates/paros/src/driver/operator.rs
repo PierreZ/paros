@@ -12,7 +12,7 @@ use paros_core::{
 };
 
 use crate::audit::Audit;
-use crate::grpc::{
+use crate::rpc::{
     CompactAck, InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest,
     WireQuorumSystem, common, quorum_system_from_proto, quorum_system_to_proto,
 };

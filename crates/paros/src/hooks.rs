@@ -353,7 +353,7 @@ pub trait DriverHooks {
     /// Whether the peer-delivery task should **hold** its next drained batch
     /// for one tick before putting it on the wire. Always safe: the transport
     /// is allowed to take arbitrarily long (a reconnect, a congested link, a
-    /// stalled h2 window all do exactly this), and the mailbox is lossy by
+    /// stalled TCP window all do exactly this), and the mailbox is lossy by
     /// contract, so a delayed batch is weaker than a dropped one. What it
     /// reaches is the *concurrency window* the other mailbox hooks cannot:
     /// while the drain is parked the mailbox keeps filling, so the backlog
@@ -426,7 +426,7 @@ pub trait DriverHooks {
     /// plane's replies, which reach the node loop through a channel and are
     /// folded into `ColocatedNode` / the reconfigurer ([`Reply::Match`],
     /// [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]). The client-facing
-    /// seams take no duplicate by construction — a unary gRPC response is
+    /// seams take no duplicate by construction — a unary RPC reply is
     /// delivered exactly once, and the *client's* retry is the duplicate that
     /// path has to survive, which `drop_client_reply` already produces.
     fn duplicate_client_reply(&self, _reply: Reply) -> bool {

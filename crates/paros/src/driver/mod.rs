@@ -16,9 +16,9 @@
 //! The submodules, one concern each:
 //!
 //! - [`config`] — the per-node tunables, the constants they default to, the
-//!   shared gRPC shapes, the address parser, and [`RunError`].
-//! - [`edge`] — the inbound gRPC edge every driver serves from: the
-//!   listener, the h2 server and the persistent accept.
+//!   address parser, and [`RunError`].
+//! - [`edge`] — the inbound RPC edge every driver serves from: the
+//!   moonpool-rpc runtime the loop polls, and each role's typed inboxes.
 //! - [`events`] — the pure helpers that turn a domain value into the stable
 //!   field a trace carries.
 //! - [`transport`] — the bounded, lossy, keep-newest per-peer mailboxes, the
@@ -68,15 +68,14 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::grpc::{
-    ParosInternalClient, ParosInternalServer, ParosMatchmakerClient, ParosServer, ProposeAck,
-    ReadAck, ReconfigureMatchmakersAck, ReplySender, RpcInbox, rpc_channel,
-};
 use crate::hooks::{DriverHooks, Reply};
+use crate::rpc::{
+    MatchmakerClient, ProposeAck, ReadAck, ReconfigureMatchmakersAck, ReplySender, well_known,
+};
 use crate::storage::NodeStorage;
 
 use boot::{check_format_marker, replay_boot_state};
-use edge::{GrpcEdge, edge_reporter};
+use edge::{NodeInbox, RpcEdge, edge_reporter};
 use events::message_route;
 use handover::HandoverDriver;
 use matchmaking::{
@@ -87,7 +86,7 @@ use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, served_prefix, sto
 use reply::maybe_duplicate;
 use report::{Cadence, Deltas, draw_election_timeout, handoff_context, maintain};
 use snap_repair::{SnapRepair, route_snap_message, snap_repair_tick};
-use transport::{Channels, LaneOpener, Outbound, PeerQueues};
+use transport::{LaneOpener, Outbound, PeerQueues, peer_address};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
@@ -452,7 +451,7 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
 /// differ) and `S: NodeStorage` (the injected durable storage). The loop owns a
-/// [`ColocatedNode`], serves the Paros gRPC interface, feeds client proposals and
+/// [`ColocatedNode`], serves the Paros RPC interface, feeds client proposals and
 /// peer messages into the core, sends the core's outbound messages to the peers
 /// named in `members`, and ticks until `shutdown` fires.
 ///
@@ -570,32 +569,21 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    // Tonic handlers run as h2 request tasks and forward into these typed
-    // queues. The loop remains the sole owner of ColocatedNode. The edge's
-    // integrity rejections are reported through the audit like every other
-    // externally meaningful transition (observation only: the closure
-    // returns nothing and the edge's answer does not depend on it). Pure
-    // construction, built before the bind so the edge takes its routes whole.
+    // The RPC edge: a moonpool-rpc runtime listening on this node's address,
+    // polled by the loop below. Its handlers are the typed queues the loop
+    // selects on, so the loop remains the sole owner of ColocatedNode. The
+    // edge's integrity rejections are reported through the audit like every
+    // other externally meaningful transition (observation only: the closure
+    // returns nothing and the edge's answer does not depend on it).
     let me = Party::Node(NodeId(self_id));
-    let on_reject = edge_reporter(audit, me);
-    let (rpc_service, mut rpc): (_, RpcInbox) = rpc_channel(
-        tunables.client_inbox_capacity,
-        tunables.peer_inbox_capacity,
-        on_reject,
-    );
-    let grpc_service = tonic::service::Routes::new(ParosServer::new(rpc_service.clone()))
-        .add_service(ParosInternalServer::new(rpc_service))
-        .prepare();
-    let mut edge = GrpcEdge::bind(
+    let mut edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables).await?;
+    let mut rpc = NodeInbox::serve(
         &providers,
-        &local_addr,
-        "paros-grpc-server",
-        "node",
+        &edge,
         &tunables,
-        grpc_service,
+        edge_reporter(audit, me),
         incarnation_shutdown.clone(),
-    )
-    .await?;
+    )?;
 
     // The sans-IO core, bootstrapped from durable storage (the same
     // `initial_state` the identity above was read from).
@@ -603,11 +591,6 @@ where
 
     replay_boot_state(&mut node, &mut storage, self_id, hooks, audit).await?;
 
-    // Every reconnecting channel this incarnation opens, closed when the
-    // bundle drops; a bad origin fails the connect and the bundle closes
-    // whatever was opened before it.
-    let mut channels =
-        Channels::with_capacity(members.len() + replicas.len() + proxies.len() + matchmakers.len());
     // The replicas (#144) get a node's two lanes: a snapshot offer to a
     // replica below the floor rides the bulky lane, as to any peer.
     let learners: Vec<NodeId> = replicas.iter().map(|(id, _)| *id).collect();
@@ -622,21 +605,16 @@ where
         .into_iter()
         .chain(replicas)
         .map(|(id, addr)| {
-            let client = channels.connect(
-                &providers,
-                &tunables,
-                addr,
-                ParosInternalClient::with_origin,
-            )?;
+            let client = well_known(edge.handle(), peer_address(&addr)?);
             let to = Party::Node(id);
             let regular = lanes.open(
-                "paros-grpc-peer-delivery",
+                "paros-peer-delivery",
                 client.clone(),
                 to,
                 tunables.peer_queue_capacity,
             );
             let snapshot = lanes.open(
-                "paros-grpc-snapshot-delivery",
+                "paros-snapshot-delivery",
                 client,
                 to,
                 tunables.snapshot_queue_capacity,
@@ -657,14 +635,9 @@ where
     let proxy_queues = proxies
         .into_iter()
         .map(|(id, addr)| {
-            let client = channels.connect(
-                &providers,
-                &tunables,
-                addr,
-                ParosInternalClient::with_origin,
-            )?;
+            let client = well_known(edge.handle(), peer_address(&addr)?);
             let lane = lanes.open(
-                "paros-grpc-proxy-delivery",
+                "paros-proxy-delivery",
                 client,
                 Party::Proxy(id),
                 tunables.peer_queue_capacity,
@@ -673,7 +646,7 @@ where
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
 
-    // The matchmaker links (#120): one reconnecting channel per matchmaker,
+    // The matchmaker links (#120): one client per matchmaker,
     // and the inbox their answers come back through. Empty on plain
     // Multi-Paxos.
     let (match_reply_tx, mut match_replies) =
@@ -681,13 +654,10 @@ where
     let matchmaker_clients = matchmakers
         .into_iter()
         .map(|(id, addr)| {
-            let client = channels.connect(
-                &providers,
-                &tunables,
-                addr,
-                ParosMatchmakerClient::with_origin,
-            )?;
-            Ok((id, client))
+            Ok((
+                id,
+                MatchmakerClient::new(edge.handle(), peer_address(&addr)?),
+            ))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
     let (gc_ack_tx, mut gc_acks) = mpsc::channel::<GcAck>(tunables.peer_inbox_capacity);
@@ -709,14 +679,8 @@ where
     // after the ack had a beat to leave.
     let mut retiring = false;
 
-    // The channel bundle closes every channel when it drops. Moved into this
-    // slot of the scope so the close happens exactly here on every exit path
-    // — after the loop's state, before the incarnation guard — including
-    // simulated durability crashes that return via `?`.
-    let _channels = channels;
-
-    // One reconnecting h2 channel per peer; cloned generated clients multiplex
-    // concurrent RPCs over that shared connection.
+    // Every peer lane and link rides the edge's runtime: one selected
+    // connection per remote address, multiplexing concurrent calls.
     let out = Outbound {
         peer_queues,
         proxy_queues,
@@ -770,8 +734,8 @@ where
     let mut next_tick = time.now() + tunables.tick_interval;
     loop {
         moonpool_core::select! {
-            // The accept is persistent across passes: see `GrpcEdge`.
-            accepted = edge.serve_next(&providers) => accepted?,
+            // The runtime's future is persistent across passes: see `RpcEdge`.
+            error = edge.run() => return Err(error.into()),
             Some((req, reply)) = rpc.propose.recv() => {
                 // A client value → the leader (deduplicated by (client, seq)). The
                 // reply is held until the slot commits (ack-on-commit); a non-leader

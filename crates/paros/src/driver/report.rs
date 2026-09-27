@@ -8,8 +8,8 @@ use moonpool_core::{Providers, RandomProvider};
 use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole};
 
 use crate::audit::Audit;
-use crate::grpc::ReadAck;
 use crate::hooks::{DriverHooks, HandoffContext};
+use crate::rpc::ReadAck;
 
 use super::ready::{ClientWaiters, ReadPath};
 

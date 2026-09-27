@@ -1,6 +1,12 @@
-//! Generated gRPC contract and the bridge into the single-owner node driver.
-
-use tokio::sync::oneshot;
+//! The wire contract and the bridge between moonpool-rpc and the
+//! single-owner drivers.
+//!
+//! Every method paros speaks is a **well-known** moonpool-rpc endpoint
+//! ([`methods`]): the deployment map names processes by `ip:port`, never by
+//! a published reference, so a caller reaches whichever incarnation is
+//! serving that address — exactly what a node's peers, its clients and its
+//! matchmakers expect of a restart. The bodies are the protobuf messages
+//! generated from `proto/*.proto`.
 
 /// Types both wire contracts speak, generated from `proto/common.proto`: a
 /// ballot and an acceptor configuration mean the same thing on the consensus
@@ -8,62 +14,59 @@ use tokio::sync::oneshot;
 /// for why that changes no bytes).
 pub mod common {
     #![allow(missing_docs, clippy::pedantic)]
-    tonic::include_proto!("paros.common.v1");
+    include!(concat!(env!("OUT_DIR"), "/paros.common.v1.rs"));
 }
 
 /// Client-facing journal contract generated from `proto/paros.proto`.
 pub mod public {
     #![allow(missing_docs, clippy::pedantic)]
-    tonic::include_proto!("paros.v1");
+    include!(concat!(env!("OUT_DIR"), "/paros.v1.rs"));
 }
 
 /// Cluster-internal consensus contract generated from `proto/internal.proto`.
-pub(crate) mod internal {
+pub mod internal {
     #![allow(missing_docs, clippy::pedantic)]
-    tonic::include_proto!("paros.internal.v1");
+    include!(concat!(env!("OUT_DIR"), "/paros.internal.v1.rs"));
 }
 
 /// The matchmaker contract generated from `proto/matchmaker.proto`: a per-ballot
 /// configuration registry, spoken only by a deployment that names matchmakers.
 pub mod matchmaker {
     #![allow(missing_docs, clippy::pedantic)]
-    tonic::include_proto!("paros.matchmaker.v1");
+    include!(concat!(env!("OUT_DIR"), "/paros.matchmaker.v1.rs"));
 }
 
+mod client;
 mod codec;
 mod consensus;
+mod inbound;
 mod matchmaker_codec;
-mod matchmaker_service;
-mod service;
+pub mod methods;
 #[cfg(test)]
 mod tests;
 
-pub use internal::paros_internal_client::ParosInternalClient;
-pub(crate) use internal::paros_internal_server::ParosInternalServer;
+pub use client::NodeClient;
+pub(crate) use client::{MatchmakerClient, well_known};
+pub use inbound::EdgeRejection;
+pub(crate) use inbound::{
+    Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
+};
 pub use internal::{InspectReply, InspectRequest, RetireAck, RetireRequest};
-pub(crate) use matchmaker::paros_matchmaker_client::ParosMatchmakerClient;
-pub(crate) use matchmaker::paros_matchmaker_server::ParosMatchmakerServer;
 pub(crate) use matchmaker::{
     GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,
     MatchReply as WireMatchReply, MatchRequest as WireMatchRequest,
     ReconfigureReply as WireReconfigureReply, ReconfigureRequest as WireReconfigureRequest,
 };
-pub use public::paros_client::ParosClient;
-pub(crate) use public::paros_server::ParosServer;
 pub use public::{
     Compact, CompactAck, Propose, ProposeAck, Read, ReadAck, Reconfigure, ReconfigureAck,
     ReconfigureMatchmakers, ReconfigureMatchmakersAck,
 };
 
-pub(crate) type ReplySender<T> = oneshot::Sender<T>;
-type Call<T, U> = (T, ReplySender<U>);
-
 pub use codec::{WireQuorumSystem, quorum_system_from_proto, quorum_system_to_proto};
-pub(crate) use consensus::message_to_proto;
+pub(crate) use consensus::{message_from_proto, message_to_proto};
 pub(crate) use matchmaker_codec::{
-    garbage_collect_ack_from_wire, match_reply_from_wire, reconfigure_reply_from_wire,
-    wire_garbage_collect, wire_match_request, wire_reconfigure_request,
+    garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
+    match_request_from_wire, reconfigure_reply_from_wire, reconfigure_request_from_wire,
+    wire_garbage_collect, wire_garbage_collect_ack, wire_match_reply, wire_match_request,
+    wire_reconfigure_reply, wire_reconfigure_request,
 };
-pub(crate) use matchmaker_service::{MatchmakerInbox, matchmaker_channel};
-pub use service::EdgeRejection;
-pub(crate) use service::{LaneRole, OnReject, RpcInbox, lane_channel, rpc_channel};

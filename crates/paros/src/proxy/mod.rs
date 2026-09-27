@@ -38,12 +38,12 @@ use paros_core::{
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{Audit, DelegationOutcome};
-use crate::driver::edge::{GrpcEdge, edge_reporter};
+use crate::driver::edge::{RpcEdge, edge_reporter};
 use crate::driver::events::{command_hash, message_kind, message_route};
-use crate::driver::transport::{Channels, LaneOpener, Outbound, PeerQueues, send_messages};
+use crate::driver::transport::{LaneOpener, Outbound, PeerQueues, peer_address, send_messages};
 use crate::driver::{DriverTunables, RunError};
-use crate::grpc::{LaneRole, ParosInternalClient, ParosInternalServer, lane_channel};
 use crate::hooks::DriverHooks;
+use crate::rpc::{serve_deliveries, well_known};
 
 /// A proxy leader's deployment data: its identity in the proxy namespace and
 /// the bootstrap acceptor configuration it fans out to until a delegation
@@ -247,7 +247,7 @@ fn drain<H: DriverHooks, A: Audit>(
 /// learner resolve through the same deployment map. `replicas` is the
 /// deployment's replica tier (#144, `NodeId` → address, outside the pool;
 /// empty without one): a `Commit` reaches them beside the pool. `tunables` supplies the
-/// tick cadence, the retention budget (`proxy_round_resends`), the h2
+/// tick cadence, the retention budget (`proxy_round_resends`), the RPC
 /// keep-alive and the mailbox shape; `hooks` and
 /// `audit` are the provider-generic seams every driver in this crate takes,
 /// with the proxy's own beat location ([`DriverHooks::skip_proxy_resend`])
@@ -286,20 +286,16 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    let on_reject = edge_reporter(audit, me);
-    let (service, lane) = lane_channel(LaneRole::Proxy, tunables.peer_inbox_capacity, on_reject);
-    let mut inbox = lane.deliver;
-    let grpc_service = tonic::service::Routes::new(ParosInternalServer::new(service)).prepare();
-    let mut edge = GrpcEdge::bind(
+    // The edge serves the `Deliver` lane alone: nothing else a node serves
+    // is a proxy leader's, and a call to it is refused `EndpointNotFound`.
+    let mut edge = RpcEdge::listen(&providers, &local_addr, "proxy", &tunables).await?;
+    let mut inbox = serve_deliveries(
         &providers,
-        &local_addr,
-        "paros-proxy-grpc-server",
-        "proxy",
-        &tunables,
-        grpc_service,
+        edge.handle(),
+        tunables.peer_inbox_capacity,
+        edge_reporter(audit, me),
         incarnation_shutdown.clone(),
-    )
-    .await?;
+    )?;
 
     // The sans-IO core: empty, over the bootstrap configuration. Every boot
     // is a first boot — there is nothing to recover — and it is reported so
@@ -317,7 +313,6 @@ where
     // replica, which the `Commit`s reach too.
     let pool: Vec<NodeId> = members.iter().map(|(id, _)| *id).collect();
     let learners: Vec<NodeId> = replicas.iter().map(|(id, _)| *id).collect();
-    let mut channels = Channels::with_capacity(members.len() + replicas.len());
     let lanes = LaneOpener {
         providers: &providers,
         tunables,
@@ -329,14 +324,9 @@ where
         .into_iter()
         .chain(replicas)
         .map(|(node, addr)| {
-            let client = channels.connect(
-                &providers,
-                &tunables,
-                addr,
-                ParosInternalClient::with_origin,
-            )?;
+            let client = well_known(edge.handle(), peer_address(&addr)?);
             let regular = lanes.open(
-                "paros-grpc-proxy-fanout",
+                "paros-proxy-fanout",
                 client,
                 Party::Node(node),
                 tunables.peer_queue_capacity,
@@ -350,9 +340,6 @@ where
             ))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
-    // Closed when the bundle drops; moved here so that happens at this point
-    // of the scope on every exit path, as the guard it replaces did.
-    let _channels = channels;
     let out = Outbound {
         peer_queues,
         proxy_queues: BTreeMap::new(),
@@ -362,12 +349,12 @@ where
 
     let time = providers.time().clone();
     // An absolute tick deadline, for the reason `run_node` gives at its own
-    // loop; the persistent accept lives in the edge.
+    // loop; the runtime's persistent future lives in the edge.
     let mut next_tick = time.now() + tunables.tick_interval;
 
     loop {
         moonpool_core::select! {
-            accepted = edge.serve_next(&providers) => accepted?,
+            error = edge.run() => return Err(error.into()),
             Some(msg) = inbox.recv() => {
                 // A delegated `Accept`, an `Accepted`, a `Nack` → the core's
                 // single input router; anything else is not a proxy's to
