@@ -14,7 +14,7 @@ readme = "../../README.md"
 [dependencies]
 # `tracing` is spelled out: the library's spans are non-optional, so the core's
 # spans under them must not depend on the core's default feature set.
-paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing"] }
+paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing", "serde"] }
 
 # The driver is generic over moonpool's `Providers` abstraction, and speaks
 # moonpool-rpc over those providers, so the SAME code — transport included —
@@ -23,11 +23,20 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing"]
 # `paros` stays wasm-safe; a future `native` feature + `parosd` binary layers
 # tokio back on. Pinned to a commit on moonpool's `main` (it evolves fast; not
 # the crates.io release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "0bb9dc14b6e1e3d12e1c04f847ca1d1bd6091927", default-features = false, features = ["select"] }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c", default-features = false, features = ["select"] }
 # Typed request/reply RPC over the provider traits, protobuf bodies (prost).
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "0bb9dc14b6e1e3d12e1c04f847ca1d1bd6091927", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c", default-features = false, features = ["prost"] }
+# The durable store behind `JournalStorage` / `JournalMatchmakerStorage`: the
+# CLSTORE write-ahead journal over moonpool's `BlockFile`, generic over the
+# provider's `StorageProvider` — the same bytes on Tokio and on the simulator.
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c" }
 
 prost = "0.14"
+# The journal stores' record codec (paros-core's `serde` derives, one compact
+# binary encoding) and the decided-snapshot chunk checksums.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+crc32c = "0.6"
 # The driver emits standard observability events (node_tick, peer_message_received)
 # and wraps every loop stage in an `#[instrument]` span carrying the node id.
 tracing = "0.1"
@@ -42,6 +51,10 @@ tokio-util = "0.7"
 # `block_on`, to drive the async storage seam's contract suites against the
 # in-memory stores from plain unit tests (the sim awaits them in a workload).
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+# The journal stores' tests run on the simulator's storage (the provider the
+# harness ships), stepped by hand beside a current-thread runtime.
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c", default-features = false }
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
 
 [build-dependencies]
 prost-build = "0.14"

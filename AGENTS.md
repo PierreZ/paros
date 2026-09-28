@@ -533,11 +533,40 @@ re-deriving the decree, on the protocol precondition that only a reconfigurer ho
 Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable
 state recovers — there is deliberately no matchmaker-specific in-place repair.
 
-**Storage direction.** paros does **not** use moonpool's storage layer: it is too low-level for
-what paros needs. The storage seam stays the high-level `NodeStorage` trait (apply / snapshot /
-truncate / install_snapshot semantics), with the in-memory + sim implementations behind it. For
-production we will later search for and adopt an existing high-level storage engine rather than
-building on moonpool's primitives. **The seam is async.** Every
+**Storage direction.** The seam stays the high-level `NodeStorage` / `MatchmakerStorage`
+traits (apply / snapshot / truncate / install_snapshot semantics, the boot scan, the format
+marker); what sits behind it changed. paros's **durable, production-generic stores are built on
+`moonpool-journal`** — the CLSTORE write-ahead journal over moonpool's `BlockFile`, generic over
+the provider's `StorageProvider` — as `paros::journal` (`JournalStorage`,
+`JournalMatchmakerStorage`, `JournalStoreConfig`): the same code runs over Tokio's filesystem in
+production and over `SimStorageProvider` under test ("test the code you ship", applied to the
+disk). This reverses the earlier "paros does not use moonpool's storage layer" line, at the
+user's request: the journal is the high-level engine that line was waiting for, and the reusable
+gaps it had (a caller identity wider than one epoch, a kept ambiguous tail, batched replay,
+metadata self-repair, the whole last batch reported as ambiguous) went upstream
+(PierreZ/moonpool#284, #285) instead of being rebuilt here. The
+mapping is a **log of write operations folded at boot**, never the state itself (an acceptor
+re-accepts a slot while later slots stay; the journal's index is dense): each staged write is
+one entry whose far identifier carries its kind (as the epoch) and its identity tag
+(`(slot, ballot)` for a vote, `(point, chunk)` for a snapshot chunk, a ballot for a
+registration); the promise and the format marker live in the journal's two-copy metadata,
+flushed before the log so a record never outruns the promise covering it; periodic bracketed
+checkpoints let the journal drop whole segments. The journal's corruption report is wired to
+CTRL: a damaged vote becomes `faulty(slot, ballot)` from its tag, a damaged chunk a faulty
+chunk, a damaged chosen index / truncation / install is forgotten (each is re-derivable, and
+forgetting leaves the store as it was before it), a damaged registry record or trusted
+checkpoint header is a crash verdict; the per-kind table is on `paros::journal`. The stores
+carry **no application** (like `MemStorage`): the application seam is the next piece a
+production `parosd` needs. **The simulation harness does not run on them yet** — the campaign's
+nodes and matchmakers still use the world-backed stores (`crates/paros-sim/src/world/`), because
+those carry what a moonpool disk fault cannot: the cross-node copy budget (a clean Phase-1
+quorum copy of every record survives), the ground-truth fault ledger the audit resolves every
+injected fault against, the `ChainState` application and its audit callbacks, the provisioning
+ledger, and the corpus's per-record masks. The journal stores are proven by their own crash
+loops on the simulated disk (`crates/paros/src/journal/tests.rs`, two fault models) and by both
+contract suites, which also run inside the harness's contract workload on the simulation's own
+disk. Switching the harness means rebuilding those five surfaces over journal files, not
+dropping them. **The seam is async.** Every
 `NodeStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
 the boot scan, producing or reading snapshot bytes, restoring the application — returns a `Send`
 future (declared `-> impl Future<…> + Send`, moonpool's provider convention; implementations
@@ -757,8 +786,8 @@ keeps the identity parked *for the budget and the composer only*. Removing that 
 rebooting the wiped node fresh is the red witness (the audit's "a node's promised ballot never
 decreases", folded from the boot report). The acceptor set heals around a wiped identity by
 reconfiguration — the client's composer draws successors from the live pool and moves a dead
-member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's storage layer, which paros
-does not use); the storage world draws its own wipe coin at a chaotic restart on a matchmaker
+member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's disk, which the harness's
+world-backed stores do not live on); the storage world draws its own wipe coin at a chaotic restart on a matchmaker
 seed, under the same dead-node budget as a corruption park. A moonpool issue asks for the reboot
 kind to be exposed to a restarted process so a harness-owned disk can honor `CrashAndWipe`
 directly. The matchmaker's registry has no marker yet: the harness never wipes a matchmaker (a
@@ -894,8 +923,11 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   node RPC contract (`Propose`/`ProposeAck`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
   + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
-  transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe). No dedicated storage crate: the faulty fake is the harness's
-  world-backed store (`crates/paros-sim/src/world/storage.rs`).
+  transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and
+  `moonpool-journal` (the durable stores of `paros::journal`, `JournalStorage` /
+  `JournalMatchmakerStorage`: a log of write operations folded at boot, see *Storage
+  direction*). The faulty fake the campaign runs on is still the harness's world-backed store
+  (`crates/paros-sim/src/world/storage.rs`).
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
   deployment/role map, the fault world, the one client workload, the audit, and the scripted
   corpus. Depends on `paros` + `moonpool-sim`.

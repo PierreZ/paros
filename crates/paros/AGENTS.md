@@ -32,7 +32,7 @@ the driver, never in a sim-only path.
 - `audit.rs` `Audit` (the observation port, `NoAudit` for production): report
   once, typed, where the matching `tracing` event is; an implementation
   returns nothing, draws nothing, reads no clock.
-- `storage.rs` `NodeStorage: Storage` (async seam: every method that may
+- `storage/` `NodeStorage: Storage` (async seam: every method that may
   touch the device returns a `Send` future; the boot scan loads and verifies,
   the synchronous accessors answer from memory; the format marker
   `is_formatted` / `format`, #147, is what `run_node` judges the operator's
@@ -72,6 +72,19 @@ the driver, never in a sim-only path.
   `rpc_config` · `rpc/client.rs` `NodeClient` (the public client: one
   at-most-once attempt per call) and the driver's `MatchmakerClient`.
 - `corruption.rs` the CTRL record classification (`classify_log`).
+- `journal/` the durable stores on `moonpool-journal` (`pub mod journal`):
+  `JournalStorage` (`node.rs`, `NodeStorage`), `JournalMatchmakerStorage`
+  (`matchmaker.rs`), `JournalStoreConfig` — a log of write operations folded
+  at boot. `frame.rs` one record ↔ one entry (epoch = the record kind,
+  tag = identity: `(slot, ballot)`, `(point, chunk)`, a ballot; postcard
+  payload behind a version byte) · `plan.rs` where a boot's fold starts
+  (checkpoint brackets: cut an open one, start at the newest intact one,
+  skip damaged copies while the history is on disk, trust the oldest
+  strictly when it is not) · `node_image.rs` the node's records, the one
+  fold live writes and boot replay share, and the per-kind corruption table
+  · `tests.rs` both contract suites, targeted damage and a crash loop under
+  two fault models, all on `SimStorageProvider`. The promise and the format
+  marker live in the journal's two-copy metadata, flushed before the log.
 
 ## Rules local to this crate
 
@@ -83,12 +96,16 @@ the driver, never in a sim-only path.
 - A new durability boundary is a new `Seam` variant.
 - Spans are non-optional here (`#[tracing::instrument(skip_all, fields(..))]`
   on the loop stages, handlers and storage impls).
-- Storage implementations pass the two contract suites; the faulty fake is
-  `paros-sim`'s world-backed store, not a crate here.
-- Deps: `paros-core`, `moonpool-core` (git pin, `default-features = false`,
+- Storage implementations pass the two contract suites (whose `fresh` /
+  `reopen` are async: a disk-backed store opens and scans on the way up);
+  the faulty fake the campaign runs on is `paros-sim`'s world-backed store,
+  the durable stores are `journal/`.
+- Deps: `paros-core` (with its observation-only `serde` derives, for the
+  journal records), `moonpool-core` (git pin, `default-features = false`,
   `select`), `moonpool-rpc` (same pin, `default-features = false`, `prost`),
-  prost. The pin rev is repeated in `crates/paros-sim/Cargo.toml`; advance
-  all four lines together.
+  `moonpool-journal` (same pin), prost, postcard, crc32c. The pin rev is
+  repeated in `crates/paros-sim/Cargo.toml` and in the `moonpool-sim`
+  dev-dependency here; advance every line together.
 - Every paros call is one at-most-once attempt (`try_get_reply`): never
   `get_reply`, whose reconnect retransmission may execute a request twice
   behind the protocol's back.

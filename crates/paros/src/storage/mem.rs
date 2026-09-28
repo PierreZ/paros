@@ -278,15 +278,15 @@ mod tests {
     fn mem_storage_passes_the_contract_suite() {
         futures::executor::block_on(storage_contract_suite(
             || {
-                MemStorage::new(Config {
+                std::future::ready(MemStorage::new(Config {
                     id: NodeId(0),
                     peers: vec![NodeId(0)],
                     ..Config::default()
-                })
+                }))
             },
             // In-memory writes are immediately visible: a reboot is the same
             // handle.
-            |s| s,
+            std::future::ready,
         ));
     }
 }
