@@ -135,7 +135,7 @@ impl ColocatedNode {
         // The belief's provenance (#173): a configuration bound to a ballot
         // was heard (every binding goes through `adopt_configuration`), and
         // a membership probe is open only on the default it asks about,
-        // outside it, beside no campaign and no leadership.
+        // beside no campaign and no leadership.
         assert!(
             self.acceptors_since == Ballot::zero() || self.belief_source == BeliefSource::Heard,
             "a configuration bound to a ballot is a heard belief"
@@ -144,10 +144,6 @@ impl ColocatedNode {
             assert!(
                 self.belief_source == BeliefSource::Bootstrap,
                 "a membership probe asks only about the bootstrap default"
-            );
-            assert!(
-                !self.is_acceptor(),
-                "a membership probe is open only outside the believed configuration"
             );
             assert!(
                 self.role == NodeRole::Follower && self.matchmaking.is_none(),

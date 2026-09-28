@@ -114,10 +114,39 @@ fn deployed_node(id: u64, members: &[u64], pool: &[u64], matchmakers: u64) -> Co
     ColocatedNode::new(&storage)
 }
 
-/// Fire the election clock on `n`: its next tick opens a campaign.
-fn campaign(n: &mut ColocatedNode) {
+/// Fire the election clock on `n` once: a node on its bootstrap belief
+/// opens a membership probe (#173), any other a campaign.
+fn fire_election(n: &mut ColocatedNode) {
     n.set_election_timeout(1);
     n.tick();
+}
+
+/// Fire the election clock on `n` so a campaign opens: a probe the clock
+/// opened first is answered by every matchmaker of the believed set with
+/// no reconfiguration, which confirms the bootstrap as heard — and a node
+/// the bootstrap names campaigns from that answer.
+fn campaign(n: &mut ColocatedNode) {
+    fire_election(n);
+    let Some(tag) = n
+        .membership_probe()
+        .map(crate::matchmaking::MembershipProbe::ballot)
+    else {
+        return;
+    };
+    let set = n
+        .matchmaker_set()
+        .cloned()
+        .expect("a probe runs on a matchmaker deployment");
+    let _ = drain_match_requests(n);
+    for matchmaker in set.members() {
+        n.on_match_reply(MatchReply {
+            matchmaker: *matchmaker,
+            to: n.config().id,
+            ballot: tag,
+            generation: set.generation,
+            outcome: MatchOutcome::Probed { effective: None },
+        });
+    }
 }
 
 /// Drain a node's pending matchmaking requests and clear the batch.

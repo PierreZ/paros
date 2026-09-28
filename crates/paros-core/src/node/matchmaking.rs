@@ -110,8 +110,8 @@
 //!   durable scalar every `Registered` reply reports
 //!   ([`crate::MatchmakerHardState::effective`]).
 //! - **A membership probe** (#173) is the one matchmaker round trip that is
-//!   not a campaign: a non-member whose belief is only the bootstrap default
-//!   asks a quorum for the effective configuration and registers nothing
+//!   not a campaign: a node whose belief is only the bootstrap default asks
+//!   a quorum for the effective configuration and registers nothing
 //!   ([`crate::matchmaking::MembershipProbe`], `probe_membership`). Its
 //!   requests and answers share this wire, tagged by a round every later
 //!   campaign opens above; its refusals fold like a campaign's.
@@ -295,22 +295,22 @@ impl ColocatedNode {
     }
 
     /// Open a membership probe (#173), or re-ask an open one: the election
-    /// clock of a non-member whose belief is only the bootstrap default (see
+    /// clock of a node whose belief is only the bootstrap default (see
     /// `on_check_leader`). The probe's tag is a round this node never
     /// campaigns at: it sits at the next campaign round and raises the round
     /// floor over it, so a late answer can never be mistaken for a later
     /// campaign's. Nothing is promised and nothing registered.
     pub(super) fn probe_membership(&mut self) {
         let me = self.config.id;
-        // Preconditions: a follower on a matchmaker deployment, outside a
+        // Preconditions: a follower on a matchmaker deployment, on a
         // belief it never heard, with no campaign open.
         assert!(
             self.config.has_matchmakers(),
             "only a matchmaker deployment probes its membership"
         );
         assert!(
-            self.belief_source == BeliefSource::Bootstrap && !self.acceptors.contains(me),
-            "a node probes only when the bootstrap default leaves it outside"
+            self.belief_source == BeliefSource::Bootstrap,
+            "a node probes only on the bootstrap default it never heard confirmed"
         );
         assert!(
             self.role != NodeRole::Leader && self.matchmaking.is_none(),

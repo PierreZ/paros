@@ -31,25 +31,27 @@ impl ColocatedNode {
     /// sitting leader is the one deliberate exception, and it runs through
     /// [`ColocatedNode::reconfigure`], not here.
     ///
-    /// A non-member whose belief is only the **bootstrap default**
-    /// ([`BeliefSource::Bootstrap`]) does not skip: it probes the matchmakers
-    /// for the configuration in force instead (#173). Its "I am not a
-    /// member" is a fact about a configuration it never heard, and a reboot
-    /// erases what it did hear — so a successor whose every member rebooted
-    /// is a cluster where each member believes itself outside, the
-    /// non-members know better but do not lead, and nobody ever campaigns.
-    /// The probe registers nothing ([`crate::matchmaking::MembershipProbe`]);
-    /// a node whose probe finds it inside campaigns from there.
+    /// A node whose belief is only the **bootstrap default**
+    /// ([`BeliefSource::Bootstrap`]) neither campaigns on it nor skips on it:
+    /// it probes the matchmakers for the configuration in force first
+    /// (#173). The default is not something it heard, and acting on it went
+    /// wrong both ways — a successor whose every member rebooted was a
+    /// cluster where each member believed itself outside and nobody ever
+    /// campaigned, and a member that campaigned registered the default, a
+    /// record naming retired identities that every later `H_b` had to
+    /// cover. The probe registers nothing
+    /// ([`crate::matchmaking::MembershipProbe`]); a node whose probe finds
+    /// it inside campaigns from there.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
             return;
         }
+        if self.config.has_matchmakers() && self.belief_source == BeliefSource::Bootstrap {
+            self.probe_membership();
+            return;
+        }
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
-            if self.belief_source == BeliefSource::Bootstrap {
-                self.probe_membership();
-                return;
-            }
             self.counters.non_member_campaigns_skipped =
                 self.counters.non_member_campaigns_skipped.saturating_add(1);
             return;

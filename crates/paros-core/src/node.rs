@@ -163,8 +163,9 @@ pub struct ReadState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeliefSource {
     /// The bootstrap configuration this incarnation booted with; nothing
-    /// heard since. A node in this state that the default does not name
-    /// probes the matchmakers rather than trust the default to exclude it.
+    /// heard since. A node in this state probes the matchmakers before it
+    /// acts on the default at all: neither "I am outside" nor "I am inside,
+    /// and this is the set to register" is a fact it heard.
     Bootstrap,
     /// Heard since boot: a configuration adopted through
     /// `ColocatedNode::adopt_configuration`, or the bootstrap confirmed in
@@ -234,9 +235,8 @@ pub struct ColocatedNode {
     /// boots with, or something this incarnation **heard** — a leader's
     /// wire, its own election or handoff, an adopted effective configuration,
     /// or a membership probe's answer. Volatile, like the belief itself. A
-    /// node whose belief is only the default and does not name it probes the
-    /// matchmakers instead of skipping its campaign (#173); see
-    /// [`BeliefSource`].
+    /// node whose belief is only the default probes the matchmakers before
+    /// its first campaign or skip (#173); see [`BeliefSource`].
     belief_source: BeliefSource,
     /// The highest ballot at which a configuration this node **belonged to**
     /// was in force here: `acceptors_since` restricted to the assignments

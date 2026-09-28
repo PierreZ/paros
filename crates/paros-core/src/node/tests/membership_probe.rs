@@ -1,8 +1,9 @@
 //! The membership probe (#173), pinned at the mechanism: a node whose belief
-//! is only the bootstrap default and leaves it outside asks the matchmakers
-//! which configuration is in force instead of skipping its campaign, the
-//! probe registers nothing anywhere, and its answer either brings the node
-//! into a campaign or settles it as a non-member for this incarnation.
+//! is only the bootstrap default asks the matchmakers which configuration is
+//! in force before it campaigns or skips on that default, the probe
+//! registers nothing anywhere, and its answer either brings the node into a
+//! campaign on a belief it heard or settles it as a non-member for this
+//! incarnation.
 //!
 //! The scenario is the issue's: a rotation from `{0, 1, 2}` to `{3, 4, 5}`
 //! whose every new member rebooted. The red→green evidence is the
@@ -40,7 +41,7 @@ fn a_node_outside_its_bootstrap_belief_probes_instead_of_skipping() {
     let mut n = rebooted_member();
     assert_eq!(n.belief_source(), BeliefSource::Bootstrap);
     let promised = n.hard_state().max_promised_ballot;
-    campaign(&mut n);
+    fire_election(&mut n);
     assert_eq!(n.role(), NodeRole::Follower, "a probe is not a campaign");
     assert_eq!(n.membership_counters().0, 0, "nothing was skipped");
     let (msgs, (requests, writes)) = drain_with(&mut n, |ready| {
@@ -60,7 +61,7 @@ fn a_node_outside_its_bootstrap_belief_probes_instead_of_skipping() {
 fn a_probe_registers_nothing_at_the_matchmakers() {
     let mut mms = rotated_registries();
     let mut n = rebooted_member();
-    campaign(&mut n);
+    fire_election(&mut n);
     let requests = drain_match_requests(&mut n);
     for (id, request) in requests {
         let mm = &mut mms[usize::try_from(id.0).expect("matchmaker index")];
@@ -99,7 +100,7 @@ fn a_probe_registers_nothing_at_the_matchmakers() {
 fn a_probe_that_finds_its_node_inside_opens_a_campaign() {
     let mut mms = rotated_registries();
     let mut n = rebooted_member();
-    campaign(&mut n);
+    fire_election(&mut n);
     let replies = matchmake(&mut mms, drain_match_requests(&mut n));
     let steps: Vec<MatchStep> = replies.into_iter().map(|r| n.on_match_reply(r)).collect();
     assert!(steps.contains(&MatchStep::ProbeAnswered));
@@ -127,7 +128,7 @@ fn a_probe_that_finds_its_node_inside_opens_a_campaign() {
 fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
     let mut mms = registries(3);
     let mut n = rebooted_member();
-    campaign(&mut n);
+    fire_election(&mut n);
     let replies = matchmake(&mut mms, drain_match_requests(&mut n));
     let steps: Vec<MatchStep> = replies.into_iter().map(|r| n.on_match_reply(r)).collect();
     assert!(steps.contains(&MatchStep::ProbeClosed {
@@ -136,7 +137,7 @@ fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
     }));
     assert_eq!(n.belief_source(), BeliefSource::Heard);
     assert_eq!(n.role(), NodeRole::Follower);
-    campaign(&mut n);
+    fire_election(&mut n);
     assert_eq!(n.membership_counters().0, 1, "the settled spare skips");
     assert!(
         drain_match_requests(&mut n).is_empty(),
@@ -149,7 +150,7 @@ fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
 #[test]
 fn a_heard_belief_closes_an_open_probe() {
     let mut n = rebooted_member();
-    campaign(&mut n);
+    fire_election(&mut n);
     assert!(n.membership_probe().is_some());
     let _ = drain_match_requests(&mut n);
     n.step(Message::Heartbeat {
@@ -170,7 +171,7 @@ fn a_heard_belief_closes_an_open_probe() {
 fn a_campaign_opens_above_the_probe_tag() {
     let mut mms = rotated_registries();
     let mut n = rebooted_member();
-    campaign(&mut n);
+    fire_election(&mut n);
     let tag = n
         .membership_probe()
         .map(crate::matchmaking::MembershipProbe::ballot)
@@ -181,4 +182,45 @@ fn a_campaign_opens_above_the_probe_tag() {
     }
     assert_eq!(n.role(), NodeRole::Candidate);
     assert!(n.ballot() > tag);
+}
+
+/// A member of the bootstrap default probes too, and never registers the
+/// default it did not hear: a rebooted member of the five-node bootstrap,
+/// after the cluster moved to `{0, 2, 4}`, learns that set and campaigns on
+/// it — where campaigning on the default registered `{0..4}`, a record every
+/// later `H_b` had to cover even with node 1 retired.
+#[test]
+fn a_member_of_its_default_probes_and_registers_only_what_it_heard() {
+    let mut mms = registries(3);
+    let shrink = (0..3)
+        .map(|m| {
+            (
+                MatchmakerId(m),
+                MatchRequest::reconfigure(NodeId(3), ballot(16, 3), cfg(&[0, 2, 4]), G0),
+            )
+        })
+        .collect();
+    matchmake(&mut mms, shrink);
+    let mut n = deployed_node(0, &[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 3);
+    fire_election(&mut n);
+    assert_eq!(
+        n.role(),
+        NodeRole::Follower,
+        "a member probes first as well"
+    );
+    let requests = drain_match_requests(&mut n);
+    assert!(requests.iter().all(|(_, r)| r.purpose.is_probe()));
+    let replies = matchmake(&mut mms, requests);
+    for reply in replies {
+        n.on_match_reply(reply);
+    }
+    assert_eq!(*n.acceptors(), cfg(&[0, 2, 4]));
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let requests = drain_match_requests(&mut n);
+    assert!(
+        requests
+            .iter()
+            .all(|(_, r)| !r.purpose.is_probe() && r.config == cfg(&[0, 2, 4])),
+        "the only registration is the set the probe heard"
+    );
 }

@@ -418,12 +418,19 @@ impl Matchmaking {
 ///
 /// Who probes: a node on a matchmaker deployment whose belief about the
 /// configuration in force is only the bootstrap default — it has heard
-/// nothing since it booted — and which that default does not name. Such a
-/// node never campaigns (leadership belongs inside the acceptor set), so
-/// without a probe it could never learn that a reconfiguration moved it
-/// *in*: a rotation whose every new member rebooted is a cluster where every
-/// member believes itself outside, every non-member knows better but does
-/// not lead, and nobody ever registers anything.
+/// nothing since it booted — at its first election timeout, before it
+/// either campaigns or skips. Two wedges came from acting on the default:
+///
+/// - **Outside it**, a node never campaigns (leadership belongs inside the
+///   acceptor set), so it could never learn that a reconfiguration moved it
+///   *in*: a rotation whose every new member rebooted is a cluster where
+///   every member believes itself outside, every non-member knows better
+///   but does not lead, and nobody ever registers anything.
+/// - **Inside it**, a node campaigned and *registered* the default before
+///   `StaleConfiguration` corrected it — a record every later `H_b` then
+///   covered (below). A flexible split with `q1 = 5` over a five-node
+///   bootstrap, one member retired and the rest of the successor rebooted,
+///   asked every later campaign for a promise nobody could give.
 ///
 /// Why a quorum of effective configurations suffices: a reconfiguration is
 /// honored once its registration landed at a matchmaker quorum, which raised
@@ -438,7 +445,10 @@ impl Matchmaking {
 /// cover with a Phase-1 quorum until GC collects it. A rebooted node's
 /// belief is the bootstrap, whose members the floor may have long since
 /// released and the operator retired; registering it would ask every later
-/// leader for promises nobody can give. A probe leaves no record.
+/// leader for promises nobody can give. A probe leaves no record, so a node
+/// only ever registers a belief it heard — on a cluster that never
+/// reconfigured, the probe's empty answer is what it heard. The cost is one
+/// matchmaker round trip before an incarnation's first campaign.
 #[derive(Clone, Debug)]
 pub struct MembershipProbe {
     /// The ballot naming this probe's requests and answers. Never promised,

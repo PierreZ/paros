@@ -395,19 +395,20 @@ registered with `C_new`, stalls command issuance for one matchmaking round trip 
 resigns afterwards if the change removed it. A joining node promises the new ballot before Phase 2
 reaches it and heals as a replica; a removed node keeps answering Phase 1 for the ballots it took
 part in ("removed" is not "shut down"; acceptor guards are pool-based, never configuration-based).
-**A node campaigns only as a member of what it believes, and a belief is volatile** — every
-incarnation boots believing the bootstrap configuration. So a node whose belief is only that
-default (`BeliefSource::Bootstrap`, nothing heard since boot) and which the default leaves outside
-does not skip its campaign: it runs a **membership probe** (#173, `MembershipProbe`,
-`MatchPurpose::Probe`), asking a matchmaker quorum for the effective configuration and
-registering nothing, then campaigns at once if the answer names it. Without it a rotation whose
-every new member rebooted wedged for good (each member believed itself outside, each non-member
-knew better and did not lead); and it is a probe, not a campaign, because a registered belief is
-a configuration every later `H_b` must cover — the bootstrap's members may long since have been
-released and retired. A member whose default *does* name it still campaigns on it and is
-corrected by `StaleConfiguration`, registering its stale belief as before (a residual, not closed
-here). The chain client's reboot of every member of a configuration it just installed
-(`ScriptedLifecycle` on the main campaign) is the BUGGIFY location that makes the wedge likely.
+**A node campaigns only as a member of what it believes, a belief is volatile, and a node only
+ever registers a belief it heard.** Every incarnation boots believing the bootstrap configuration
+(`BeliefSource::Bootstrap`), so before its first campaign — or its first skip — it runs a
+**membership probe** (#173, `MembershipProbe`, `MatchPurpose::Probe`): it asks a matchmaker quorum
+for the effective configuration, registering nothing, adopts the answer (the bootstrap, confirmed,
+when there was no reconfiguration), and campaigns at once if that names it. Acting on the default
+wedged both ways: a rotation whose every new member rebooted left each member believing itself
+outside and nobody campaigning; and a member that campaigned on the default *registered* it before
+`StaleConfiguration` corrected it — a record every later `H_b` must cover, naming bootstrap members
+the floor may long since have released and the operator retired (a `q1 = 5` split over a five-node
+bootstrap with one member retired asked every later campaign for a promise nobody could give).
+The cost is one matchmaker round trip before an incarnation's first campaign. The chain client's
+reboot of every member of a configuration it just installed (`ScriptedLifecycle` on the main
+campaign) is the BUGGIFY location that makes both wedges likely.
 The harness treats membership as protocol data, with one floor under every configuration a run
 puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchmaker deployment (the
 bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the

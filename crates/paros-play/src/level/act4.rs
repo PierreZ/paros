@@ -23,7 +23,7 @@ use crate::level::common::{
     CLIENT, REPLIES_AND_BEATS, REPLIES_ONLY, TIMEOUT, all_but, applied, chosen_text, crash, fresh,
     is_phase2, open, propose, restart, start_election, text, tick,
 };
-use crate::level::script::{Script, kind, kind_at, phase, to};
+use crate::level::script::{Script, kind, kind_at, not_to, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
 use crate::narration::prefix_at;
 use crate::view::show_command;
@@ -1010,22 +1010,23 @@ together is a different claim. The card asks you which claim Phase 1 needs.",
         let mut script = Script::new("act4/reconfigure");
         script.play(start_election(0)).settle_all();
         script.play(propose(0, "alpha")).settle_all();
-        // Node 2 is away for the change, so it will come back believing the
-        // set of three — a belief this cluster has already replaced.
-        script.play(crash(2));
+        // Node 2 is cut off for the change. It keeps the set of three that it
+        // heard from node 0's Prepare — a belief this cluster replaces while
+        // nothing reaches node 2. (A node that crashed instead would come
+        // back on its bootstrap default, which it never trusts: it asks the
+        // matchmakers first and learns the change.)
         // The set grows onto the spare. Phase 1 covers the set of three.
-        script
-            .play(Action::Reconfigure {
-                node: 0,
-                members: vec![0, 1, 2, 3],
-                quorum: None,
-            })
-            .settle_all();
-        script.play(propose(0, "bravo")).settle_all();
-        // Node 2 comes back on its bootstrap belief and campaigns on it. The
-        // matchmakers report the change, so the campaign is abandoned; the
-        // next one registers the set in force and is told about both.
-        script.play(restart(2)).settle_all();
+        script.play(Action::Reconfigure {
+            node: 0,
+            members: vec![0, 1, 2, 3],
+            quorum: None,
+        });
+        script.settle(not_to(&[2])).drop_all(to(2));
+        script.play(propose(0, "bravo"));
+        script.settle(not_to(&[2])).drop_all(to(2));
+        // Node 2 campaigns on the set it heard. The matchmakers report the
+        // change, so the campaign is abandoned; the next one registers the
+        // set in force and is told about both.
         script.play(crash(0));
         script.play(start_election(2)).settle_all();
         script.play(start_election(2)).settle_all();

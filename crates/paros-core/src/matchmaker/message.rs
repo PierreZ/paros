@@ -143,8 +143,8 @@ impl MatchRequest {
 ///
 /// A registration is the matchmaking phase proper; a probe is how a node
 /// whose belief about the configuration in force is only the bootstrap
-/// default (a reboot erased what it heard) and does not name it learns what
-/// is in force without campaigning (#173). The probe is its own purpose,
+/// default (a reboot erased what it heard) learns what is in force before
+/// it campaigns or skips on it (#173). The probe is its own purpose,
 /// never a third [`RegistrationKind`]: nothing about it is ever registered,
 /// and a ledger entry that could say "probe" would be a state no matchmaker
 /// may hold.

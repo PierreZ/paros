@@ -507,6 +507,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Message::Promise { ballot, .. } = msg {
             self.state().observe_promise_send(node.0, *ballot);
         }
+        if let Message::CatchUpResponse { entries, .. } = msg
+            && !entries.is_empty()
+        {
+            self.state().observe_catch_up_serve(node.0);
+        }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
