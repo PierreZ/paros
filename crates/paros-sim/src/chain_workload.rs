@@ -458,6 +458,30 @@ fn compose_reconfiguration(
     Some((observed, RECONFIGURE_SHAPES[observed], next))
 }
 
+/// File a reconfiguration asking for `members` in the operators' ledger
+/// (#198) before it leaves; returns the id its answer is filed under.
+fn ledger_request(state: &moonpool_sim::StateHandle, members: &[u64]) -> u64 {
+    crate::world::storage_world(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .note_reconfiguration_requested(members)
+}
+
+/// File the leader's answer to ledger request `id`: the round it started
+/// at, or a refusal. An ambiguous answer is never filed — the request may
+/// have registered anywhere, and the ledger keeps it as such.
+fn ledger_answer(state: &moonpool_sim::StateHandle, id: u64, outcome: &ReconfigureResult) {
+    let started = match outcome {
+        ReconfigureResult::Started { round, .. } => Some(*round),
+        ReconfigureResult::Refused { .. } => None,
+        ReconfigureResult::Ambiguous => return,
+    };
+    crate::world::storage_world(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .note_reconfiguration_answered(id, started);
+}
+
 /// The ids (ranks into `ips`) a reconfiguration may still draw from: every
 /// identity the run has not lost for good.
 fn live_candidates(ips: &[String], dead: &std::collections::BTreeSet<String>) -> Vec<u64> {
@@ -1565,13 +1589,28 @@ impl Workload for ChainWorkload {
                     // A live quorum of *both* phases under the successor's
                     // own system: Phase 1 must complete against it (it is in
                     // `H_b` from then on) and Phase 2 must decide under it.
-                    // Asked of the membership boundary, never a count.
+                    // Asked of the membership boundary, never a count. On a
+                    // grid, Phase 2 is asked of **every** column: each slot
+                    // is decided by its own column (`column_of`), so one
+                    // live column decides only its own slots, and a column
+                    // with a member lost for good freezes the rest — the
+                    // leader's recovery never closes and no later
+                    // reconfiguration can move the dead member out (#198).
                     let keeps_live_quorum = |next: &[u64]| {
                         let live_members: BTreeSet<u64> =
                             next.iter().filter(|m| live.contains(m)).copied().collect();
                         let system = successor_system(next.len());
-                        system.is_phase1_quorum(next, &live_members)
-                            && system.is_phase2_quorum(next, &live_members)
+                        let columns: BTreeSet<usize> = (0..next.len() as u64)
+                            .filter_map(|slot| system.column_of(paros::Slot(slot)))
+                            .collect();
+                        let phase2 = if columns.is_empty() {
+                            system.is_phase2_quorum(next, &live_members)
+                        } else {
+                            columns.iter().all(|column| {
+                                system.is_phase2_quorum_in(next, &live_members, Some(*column))
+                            })
+                        };
+                        system.is_phase1_quorum(next, &live_members) && phase2
                     };
                     // Most shapes need a spare, which most seeds do not have:
                     // walk the shape ring from the draw so an impossible
@@ -1645,8 +1684,13 @@ impl Workload for ChainWorkload {
                             system = QuorumSystem::Flexible { q1: 1, q2: 1 };
                         }
                         tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
+                        // The operators' ledger (#198): filed before the
+                        // request leaves, answered below; a retirement reads
+                        // it (`StorageWorld::retire`).
+                        let ledger_id = ledger_request(ctx.state(), &next);
                         let outcome = reconfigure_once(probe_target, next.clone(), system).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
+                        ledger_answer(ctx.state(), ledger_id, &outcome);
                         match outcome {
                             ReconfigureResult::Started { leader, .. } => {
                                 // The AGENTS.md rule, client-visible: a
@@ -1901,6 +1945,32 @@ impl Workload for ChainWorkload {
                             )
                             .unwrap_or(0)],
                         );
+                        // The racing operator (#198), its own location: a
+                        // reconfiguration that puts the victim back, asked
+                        // for just before the retirement — the order two
+                        // uncoordinated clients produced (the re-add is
+                        // registered, and on its way to the victim, when the
+                        // victim accepts its retirement). The operators'
+                        // ledger must withhold the retirement; without it a
+                        // grid successor is installed with a member dead for
+                        // good.
+                        if !aim_at_member
+                            && has_matchmakers
+                            && !in_force.is_empty()
+                            && buggify_with_prob!(0.25)
+                        {
+                            let mut readd = in_force.clone();
+                            readd.push(u64::try_from(victim).unwrap_or(u64::MAX));
+                            readd.sort_unstable();
+                            readd.dedup();
+                            assert_reachable!(
+                                "gc: an operator asks to re-add a node just before retiring it"
+                            );
+                            let ledger_id = ledger_request(ctx.state(), &readd);
+                            let system = policy.system(readd.len());
+                            let outcome = reconfigure_once(probe_target, readd, system).await;
+                            ledger_answer(ctx.state(), ledger_id, &outcome);
+                        }
                         // Park the identity first, under the dead-node budget
                         // (a retirement is one more way to lose every copy a
                         // node holds); a restart of a parked identity exits
@@ -1918,6 +1988,7 @@ impl Workload for ChainWorkload {
                                 &servers[victim],
                                 u64::try_from(victim).unwrap_or(u64::MAX),
                                 &in_force,
+                                gc_watermark.map_or(0, |w| w.round),
                             )
                         };
                         if reserved {

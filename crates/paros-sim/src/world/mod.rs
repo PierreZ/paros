@@ -299,6 +299,15 @@ pub(crate) enum ParkReason {
     Retired,
 }
 
+/// One entry of the operators' reconfiguration ledger (#198).
+struct RequestedConfiguration {
+    /// The acceptor set asked for.
+    members: Vec<u64>,
+    /// The round the reconfiguration started at, `None` while the request is
+    /// in flight or its answer was ambiguous.
+    round: Option<u64>,
+}
+
 #[derive(Default)]
 pub(crate) struct StorageWorld {
     disks: BTreeMap<String, NodeDisk>,
@@ -361,6 +370,15 @@ pub(crate) struct StorageWorld {
     matchmaker_sync_failures: BTreeSet<String>,
     /// Sticky Stage-7 gate facts.
     s7: Stage7Flags,
+    /// The operators' **reconfiguration ledger** (#198): every acceptor
+    /// configuration a client asked for, by request id, with the round it
+    /// started at once the leader said so. Recorded *before* the request
+    /// leaves and dropped only on an explicit refusal, so a request in
+    /// flight or answered ambiguously stays in it with no round — it may
+    /// have registered anywhere. [`StorageWorld::retire`] reads it.
+    requested: BTreeMap<u64, RequestedConfiguration>,
+    /// The next request id the ledger hands out.
+    next_request: u64,
     /// Unbudgeted mode (the scripted corpus): a targeted injection may take
     /// every copy of a record; each slot driven to zero readable copies is
     /// recorded in `unrecoverable`, the ground truth the corpus's analytic
@@ -425,6 +443,46 @@ impl StorageWorld {
         true
     }
 
+    /// Record that an operator is about to ask for the acceptor set
+    /// `members` (#198); returns the ledger id its answer is filed under.
+    pub(crate) fn note_reconfiguration_requested(&mut self, members: &[u64]) -> u64 {
+        let id = self.next_request;
+        self.next_request += 1;
+        self.requested.insert(
+            id,
+            RequestedConfiguration {
+                members: members.to_vec(),
+                round: None,
+            },
+        );
+        id
+    }
+
+    /// File the leader's answer to request `id`: `Some(round)` it started
+    /// there, `None` it refused (nothing registered, the entry goes). An
+    /// ambiguous answer is simply never filed.
+    pub(crate) fn note_reconfiguration_answered(&mut self, id: u64, started: Option<u64>) {
+        match started {
+            Some(round) => {
+                if let Some(entry) = self.requested.get_mut(&id) {
+                    entry.round = Some(round);
+                }
+            }
+            None => {
+                self.requested.remove(&id);
+            }
+        }
+    }
+
+    /// Whether some operator asked for a configuration naming `node` that
+    /// may have registered at or above `floor_round` (#198): one that
+    /// started there, or one whose round nobody knows.
+    fn named_above(&self, node: u64, floor_round: u64) -> bool {
+        self.requested.values().any(|entry| {
+            entry.members.contains(&node) && entry.round.is_none_or(|round| round >= floor_round)
+        })
+    }
+
     /// Retire `ip` for good (#123). `in_force` is the configuration the
     /// operator read from the same `Inspect` reply the retirable list came
     /// from: a retirable node is outside it by construction, and this is the
@@ -434,8 +492,26 @@ impl StorageWorld {
     /// force costs it no quorum, and sharing one budget with the wipe coin
     /// made retirement all but unreachable on a matchmaker seed. Returns
     /// whether it fired.
+    ///
+    /// `floor_round` is the round of the GC watermark the retirement carries
+    /// as evidence, and the operators coordinate on it (#198): a node some
+    /// operator asked to put in a configuration that may have registered at
+    /// or above that floor is not retired. The node cannot check this — a
+    /// reconfiguration naming it may be registered and still on its way to
+    /// it — and the floor only says the configurations *below* it are
+    /// forgotten, never that no later one names the node. Without it two
+    /// clients raced (seed 13858746959836823457 of the #173 hunt): one
+    /// re-added a node the other retired, the successor was installed on a
+    /// 3×2 grid with a member dead for good, and its column never decided
+    /// again.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
-    pub(crate) fn retire(&mut self, key: &str, node: u64, in_force: &[u64]) -> bool {
+    pub(crate) fn retire(
+        &mut self,
+        key: &str,
+        node: u64,
+        in_force: &[u64],
+        floor_round: u64,
+    ) -> bool {
         let member = in_force.contains(&node);
         assert_always!(
             !member,
@@ -443,6 +519,12 @@ impl StorageWorld {
             { "node" => node, "members" => in_force.len() }
         );
         if member || self.parked.contains_key(key) {
+            return false;
+        }
+        if self.named_above(node, floor_round) {
+            assert_reachable!(
+                "gc: a retirement is withheld while a reconfiguration naming the node may be registered above its floor"
+            );
             return false;
         }
         if self.retired_count() + 1 > self.retire_budget() || !self.may_park_for_copies(key) {

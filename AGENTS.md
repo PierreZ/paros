@@ -480,7 +480,14 @@ bootstrap belief, otherwise passes every other leg; it now refuses as `"stale"` 
 the leader's ballot reaches it (beats reach the whole pool), and an operator holding an old
 watermark re-reads `Inspect`. The residual, documented on `may_retire`: a node whose own promise
 is above the leader's ballot does not follow its beats and stays `stale` until a later
-leadership reaches it — a retirement lost, never safety. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
+leadership reaches it — a retirement lost, never safety. The Retire contract has an **operator's
+half** the node cannot check (#198): the floor proves the configurations below it forgotten, not
+that no configuration registered above it names the node, so an operator retires only a node no
+reconfiguration it asked for above the floor names. The harness's clients are several operators
+and coordinate through the storage world's reconfiguration ledger (`StorageWorld::retire` withholds
+the retirement); two clients racing a re-add against a retirement installed a 3×2 grid with a
+member dead for good, whose column never decided again. The composer likewise asks a grid
+successor for a live Phase-2 quorum in **every** column, not one. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
 its red→green evidence are recorded in the commit that landed the GC. Module doc:
 `crates/paros-core/src/node/gc.rs`; design note:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md`.

@@ -689,6 +689,31 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 { "node" => node.0, "round" => won.round }
             );
         }
+        // A grid tolerates no member lost for good: each slot is decided by
+        // its own column, a column with a dead member never decides again,
+        // and the leader's recovery — hence every later reconfiguration —
+        // waits on it forever. The harness keeps every identity it gave up
+        // for good out of a grid in force (the copy budget parks nobody on
+        // a grid seed, the composer asks every column to stay live, the
+        // operators' ledger withholds a retirement a registered
+        // reconfiguration still names); a leadership under a grid naming a
+        // retired identity is one of those promises broken (#198).
+        if matches!(config.quorum_system(), QuorumSystem::Grid { .. }) {
+            let retired = config
+                .members()
+                .iter()
+                .find(|member| st.retired.contains(&member.0))
+                .map(|member| member.0);
+            assert_always!(
+                retired.is_none(),
+                "gc: a leader never runs a grid configuration naming a retired identity",
+                {
+                    "node" => node.0,
+                    "round" => won.round,
+                    "retired" => retired.unwrap_or(u64::MAX)
+                }
+            );
+        }
         st.bind_config(won, config);
         if st.bootstrap.as_ref().is_some_and(|b| b != config) {
             st.reconfiguration_completed = true;
