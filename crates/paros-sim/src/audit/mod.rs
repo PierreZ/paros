@@ -2021,6 +2021,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     st.retire_not_collected,
                     "gc: a retirement is refused for want of an effective floor"
                 ),
+                // The freshness leg (#165): outside the configuration it
+                // believes in force, but that belief predates the floor, so
+                // the node cannot tell whether the configuration the floor
+                // kept names it.
+                "stale" => reach_once!(
+                    st.retire_stale,
+                    "gc: a retirement is refused on a belief older than the floor"
+                ),
                 "leader" => reach_once!(
                     st.retire_leader,
                     "gc: a retirement is refused by the sitting leader"

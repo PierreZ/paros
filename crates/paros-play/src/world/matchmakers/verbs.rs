@@ -73,10 +73,10 @@ impl World {
     /// leadership made effective.
     ///
     /// This is where a retirement's evidence comes from, and the only place it
-    /// may come from. [`ColocatedNode::may_retire`] asks one question of the
+    /// may come from. [`ColocatedNode::may_retire`] asks two questions of the
     /// number it is handed — is it above every ballot that bound a
-    /// configuration naming me? — and an operator who typed a large enough
-    /// number would pass it. The core's own contract says the operator reads
+    /// configuration naming me, and is it the ballot my own belief is bound
+    /// to? — and an operator who typed that one ballot would pass them. The core's own contract says the operator reads
     /// the watermark off a leader whose garbage collection reached a
     /// matchmaker quorum, so the engine makes the operator show that: a
     /// watermark no leadership reports is not evidence of anything.

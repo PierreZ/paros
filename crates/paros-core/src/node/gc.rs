@@ -238,21 +238,49 @@ impl ColocatedNode {
     /// against the GC watermark the operator read from a leader's `Inspect`
     /// **after** that floor became effective.
     ///
-    /// Four conditions, and the fourth is the one that makes the other three
-    /// mean something:
+    /// Five conditions; the fourth is the one that makes the others mean
+    /// something, and the fifth makes the second a fact:
     ///
     /// 1. the deployment names matchmakers — without them nothing is ever
     ///    forgotten and no configuration can be retired;
     /// 2. this node is not a member of the configuration it believes in force
     ///    ("removed is not shut down" is only *begun* by a removal);
     /// 3. it is not the leader — a sitting leader is needed whatever the
-    ///    floor says; and
+    ///    floor says;
     /// 4. `watermark` is strictly above `last_member_ballot`: every
     ///    configuration this node was ever a member of is bound to a ballot
     ///    at or below that, so a floor above it means a matchmaker quorum
     ///    durably refuses every campaign that could still name one. Only then
     ///    is "no future leader can need this node's Phase-1 promise" a fact
-    ///    rather than an operator's belief.
+    ///    rather than an operator's belief; and
+    /// 5. the configuration this node believes in force is bound to exactly
+    ///    `watermark` (`acceptors_since == watermark`): the belief condition 2
+    ///    reads is `C_w`, the configuration the floor was computed over.
+    ///
+    /// Condition 5 closes the retirement window (#165). Conditions 2 and 4
+    /// are both read off what this node *heard*, and a node can be a member
+    /// of `C_w` without having heard it: a spare pulled in by a
+    /// reconfiguration whose `Prepare` and beats never reached it, or a
+    /// member that rebooted to its bootstrap belief (`acceptors` and
+    /// `last_member_ballot` are volatile). Its belief then does not name it
+    /// and its fence sits below the watermark, so without condition 5 it
+    /// honored a `Retire` aimed at a current member — the coverage-guided
+    /// sweep's recipe `11365151955225522550 [(4114, 1006316943509197070)]`
+    /// on `ee9d078` shut down node 5 of `C_9` with its promise at round 3
+    /// ("gc: a node retires only after an effective floor named it
+    /// retirable"). A durable fence would close only the reboot half: a node
+    /// cannot make durable what it never heard. Freshness closes both.
+    ///
+    /// The leg is an equality, not `>=`. A belief bound *above* `w` means the
+    /// node heard a later configuration, which may drop it, while `C_w`,
+    /// which the floor did not collect, still names it. Such a node would
+    /// pass every other leg for an old watermark. An operator holding an old
+    /// watermark re-reads `Inspect`. The refusal is `"stale"`, and it ends
+    /// when the node hears a beat at the leader's ballot (beats reach the
+    /// whole pool, removed members included). One residual: a node whose own
+    /// promise is above the leader's ballot does not follow that leader's
+    /// beats, so it stays `stale` until a later leadership reaches it. That
+    /// costs the operator a retirement, never safety.
     ///
     /// Condition 2 alone is a *belief* — `acceptors` is volatile and a
     /// rebooted node regresses to its bootstrap configuration — so a node
@@ -268,6 +296,7 @@ impl ColocatedNode {
             && !self.is_acceptor()
             && self.role != NodeRole::Leader
             && watermark > self.last_member_ballot
+            && self.acceptors_since == watermark
     }
 
     /// The floor this leadership made effective at a matchmaker quorum, and

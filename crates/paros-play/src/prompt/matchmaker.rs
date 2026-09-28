@@ -259,6 +259,7 @@ impl Prompt {
         node: NodeId,
         watermark: Ballot,
         effective: Option<Ballot>,
+        belief: Ballot,
         member: bool,
         leader: bool,
         may: bool,
@@ -290,8 +291,10 @@ impl Prompt {
                      Phase-1 quorum of the old configuration, and it must find the promise of \
                      this node. A retirement needs a watermark strictly above every ballot that \
                      bound a configuration naming this node. Only then does a matchmaker quorum \
-                     durably refuse every campaign that could ask. Refuse the request, and answer \
-                     \"not collected\"."
+                     durably refuse every campaign that could ask. The node must also know the \
+                     set that the floor kept: the set that it has must be bound to that \
+                     watermark. If not, it cannot tell if that set names it. Refuse the request, \
+                     and answer \"not collected\"."
                 )
             } else {
                 format!(
@@ -310,7 +313,9 @@ impl Prompt {
             format!(
                 "This answer costs the operator a machine that no node uses again. The \
                  watermark {shown} is above every ballot that bound a configuration naming this \
-                 node, {standing}, and this node does not lead. A matchmaker quorum wrote that \
+                 node, {standing}, and this node does not lead. The set that it has is bound to \
+                 the watermark, so it knows the set that the floor kept. A matchmaker quorum \
+                 wrote that \
                  floor to disk. No future campaign can register below it, and no future leader \
                  can ask this node for a promise."
             ),
@@ -323,6 +328,10 @@ impl Prompt {
             state_summary: vec![
                 format!("the state of this node: {standing}"),
                 format!("the watermark that the operator shows: {shown}"),
+                format!(
+                    "the set that this node has is bound to: {}",
+                    show_ballot(belief)
+                ),
                 format!("the leader reports: {held}"),
                 format!(
                     "a leader reports this watermark as its own floor: {}",

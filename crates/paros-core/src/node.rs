@@ -1255,6 +1255,14 @@ impl ColocatedNode {
         self.acceptors_since
     }
 
+    /// The membership fence [`ColocatedNode::may_retire`] reads: the highest
+    /// ballot a configuration naming this node was bound to, as far as this
+    /// incarnation heard (volatile; `Ballot::zero()` at boot).
+    #[must_use]
+    pub fn last_member_ballot(&self) -> Ballot {
+        self.last_member_ballot
+    }
+
     /// Whether this node is a member of its active configuration
     /// ([`ColocatedNode::acceptors`]) — a real acceptor whose own vote counts.
     #[must_use]

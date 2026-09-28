@@ -83,8 +83,9 @@ Two corollaries that bite in review:
     `MatchmakerReconfigurer` per node — it is a *driver* object, as in
     `paros::driver::handover`.
   - **A retirement needs evidence, and the number is not the evidence.**
-    `ColocatedNode::may_retire` asks one question of the watermark it is handed, so an
-    operator who typed a large enough number would pass it. `World::retire` therefore
+    `ColocatedNode::may_retire` asks two questions of the watermark it is handed (above the
+    node's membership fence, equal to the ballot its belief is bound to), so an
+    operator who typed that one ballot would pass them. `World::retire` therefore
     refuses any watermark that no live node reports as a floor of its own
     (`World::reports_gc_floor`), which is the contract the core documents: the operator
     reads that number off a leader whose garbage collection reached a matchmaker

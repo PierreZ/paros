@@ -1781,6 +1781,45 @@ impl Workload for ChainWorkload {
                         "gc: a deployment without matchmakers never names a retirable node"
                     );
                     let parked = crate::world::parked_nodes(ctx.state());
+                    let live = |id: &u64| {
+                        usize::try_from(*id)
+                            .ok()
+                            .filter(|i| *i < server_count && !parked.contains(&servers[*i]))
+                    };
+                    // The stale member (#165), its own location: a member of
+                    // the configuration the floor kept whose *own* belief
+                    // does not name it — it never heard that configuration,
+                    // or rebooted to its bootstrap belief and has not heard a
+                    // beat since. The window is narrow, so a blind aim almost
+                    // never lands in it; this operator asks every member at
+                    // once what it believes (one request timeout for all) and
+                    // aims at the first that does not know it is one. The
+                    // node must still refuse (`stale`). None found: the
+                    // ordinary draw below, so the retirement mix is kept.
+                    let mut stale_member = None;
+                    if gc_watermark.is_some() && buggify_with_prob!(0.25) {
+                        assert_reachable!(
+                            "gc: an operator probes the members' beliefs before a retirement"
+                        );
+                        let candidates: Vec<usize> = in_force.iter().filter_map(live).collect();
+                        let beliefs = join_all(
+                            candidates
+                                .iter()
+                                .map(|i| inspect(ctx, &clients[*i], request_timeout)),
+                        )
+                        .await;
+                        stale_member = candidates.iter().zip(beliefs).find_map(|(i, reply)| {
+                            let own = u64::try_from(*i).unwrap_or(u64::MAX);
+                            reply
+                                .is_some_and(|reply| !reply.members.contains(&own))
+                                .then_some(*i)
+                        });
+                        if stale_member.is_some() {
+                            assert_reachable!(
+                                "gc: a retirement is aimed at a member whose belief does not name it"
+                            );
+                        }
+                    }
                     // The adversarial aim (R5): send the retirement to a node
                     // the *same* reply names as a current member instead of a
                     // retirable one. A well-behaved operator would not; the
@@ -1788,21 +1827,19 @@ impl Workload for ChainWorkload {
                     // the sitting one), so the world reservation is skipped
                     // for this draw — nothing is parked, and a refusal has
                     // nothing to release.
-                    let aim_at_member = buggify_with_prob!(0.10);
+                    let aim_at_member = stale_member.is_some() || buggify_with_prob!(0.10);
                     let pool: &[u64] = if aim_at_member { &in_force } else { &retirable };
-                    let victims: Vec<usize> = pool
-                        .iter()
-                        .filter_map(|id| usize::try_from(*id).ok())
-                        .filter(|i| *i < server_count && !parked.contains(&servers[*i]))
-                        .collect();
+                    let victims: Vec<usize> = pool.iter().filter_map(live).collect();
                     if aim_at_member && !victims.is_empty() {
                         assert_reachable!("gc: a retirement is aimed at a current member");
                     }
                     if !victims.is_empty() {
-                        let victim = victims[usize::try_from(
-                            raw_payload % u64::try_from(victims.len()).unwrap_or(1),
-                        )
-                        .unwrap_or(0)];
+                        let victim = stale_member.unwrap_or(
+                            victims[usize::try_from(
+                                raw_payload % u64::try_from(victims.len()).unwrap_or(1),
+                            )
+                            .unwrap_or(0)],
+                        );
                         // Park the identity first, under the dead-node budget
                         // (a retirement is one more way to lose every copy a
                         // node holds); a restart of a parked identity exits
