@@ -9,7 +9,7 @@
 
 use paros_core::{
     ColocatedNode, MatchOutcome, MatchReply, MatchRequest, MatchStep, MatchmakerId, MatchmakerSet,
-    NodeId, ReconfigureReply, ReconfigureRequest, ReconfigurerStep, RegistrationKind,
+    NodeId, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
 };
 
 use crate::narration::{NarrationKind, many, who};
@@ -204,7 +204,7 @@ impl World {
         };
         let ballot = request.ballot;
         let members = show_members(request.config.members());
-        let reconfiguration = request.kind == RegistrationKind::Reconfiguration;
+        let reconfiguration = request.purpose.is_reconfiguration();
         let Some(reply) = self.matchmakers[index].deliver_match(request) else {
             return;
         };
@@ -222,6 +222,18 @@ impl World {
                     ""
                 },
                 many(history.len(), "configuration")
+            ),
+            MatchOutcome::Probed { effective } => format!(
+                "{} writes nothing. It only tells the node which configuration is in force: {}.",
+                which(to),
+                effective.as_ref().map_or_else(
+                    || "no operator changed it, so the first one is".to_string(),
+                    |(at, config)| format!(
+                        "{}, from the change at ballot {}",
+                        show_members(config.members()),
+                        show_ballot(*at)
+                    )
+                )
             ),
             MatchOutcome::Refused(refusal) => format!(
                 "{} refuses ballot {}: {}.",
@@ -363,6 +375,23 @@ impl World {
                 who(id),
                 set.generation.0,
                 show_set(set.members())
+            ),
+            MatchStep::ProbeAnswered => format!(
+                "{} counts one answer to its question. It waits for a matchmaker quorum.",
+                who(id)
+            ),
+            MatchStep::ProbeClosed { effective, member } => format!(
+                "{} knows which configuration is in force now{}. {}",
+                who(id),
+                effective.map_or_else(String::new, |at| format!(
+                    ": the change at ballot {}",
+                    show_ballot(at)
+                )),
+                if *member {
+                    "It is a member, so it starts a campaign."
+                } else {
+                    "It is not a member, so it does not campaign."
+                }
             ),
             MatchStep::StaleConfiguration { newest } => format!(
                 "{} abandons its campaign and adopts the configuration registered at {}. Its own \

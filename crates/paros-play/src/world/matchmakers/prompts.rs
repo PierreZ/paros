@@ -33,7 +33,7 @@ impl World {
         let outcome = ready.replies().first().map(|reply| reply.outcome.clone());
         ready.advance();
         let refused = match outcome? {
-            MatchOutcome::Registered { .. } => None,
+            MatchOutcome::Registered { .. } | MatchOutcome::Probed { .. } => None,
             MatchOutcome::Refused(refusal) => Some(refusal),
         };
         let id = self.take_prompt_id();
@@ -82,7 +82,7 @@ impl World {
         let mut clone = role.clone();
         let (matchmaker, answer) =
             paros_core::matchmaking::RegisteredPage::from_reply(reply.clone());
-        let Ok(page) = answer else {
+        let Some(Ok(page)) = answer else {
             return None;
         };
         if clone.fold(matchmaker, page) != paros_core::matchmaking::MatchFold::Registered {

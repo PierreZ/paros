@@ -36,6 +36,18 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
                     show_ballot(answer.ballot),
                     many(history.len(), "configuration")
                 ),
+                MatchOutcome::Probed { effective } => format!(
+                    "Probed {}: {}",
+                    show_ballot(answer.ballot),
+                    effective.as_ref().map_or_else(
+                        || "the first configuration is in force".to_string(),
+                        |(at, config)| format!(
+                            "{} is in force since {}",
+                            show_members(config.members()),
+                            show_ballot(*at)
+                        )
+                    )
+                ),
                 MatchOutcome::Refused(refusal) => {
                     format!("Refused {}: {}", show_ballot(answer.ballot), why(refusal))
                 }

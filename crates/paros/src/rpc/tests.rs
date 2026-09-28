@@ -299,6 +299,7 @@ fn matchmaker_contract_round_trips() {
     for request in [
         MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
         MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
+        MatchRequest::probe(NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
     ] {
         let wire = super::matchmaker_codec::wire_match_request(&request);
         let bytes = wire.encode_to_vec();
@@ -345,6 +346,14 @@ fn matchmaker_contract_round_trips() {
                 next_from_ballot: None,
             },
         ),
+        reply(
+            3,
+            ballot(8, 5),
+            MatchOutcome::Probed {
+                effective: Some((ballot(5, 3), config(&[3, 4, 5]))),
+            },
+        ),
+        reply(3, ballot(8, 5), MatchOutcome::Probed { effective: None }),
         reply(
             0,
             ballot(7, 4),

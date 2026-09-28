@@ -7,8 +7,8 @@
 //! fence, and opens the GC campaign on a matchmaker deployment.
 
 use super::{
-    BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin, Message,
-    NodeId, NodeRole, Slot,
+    BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
+    Message, NodeId, NodeRole, Slot,
 };
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
@@ -30,12 +30,26 @@ impl ColocatedNode {
     /// configuration nobody asked for). A reconfiguration that removes the
     /// sitting leader is the one deliberate exception, and it runs through
     /// [`ColocatedNode::reconfigure`], not here.
+    ///
+    /// A non-member whose belief is only the **bootstrap default**
+    /// ([`BeliefSource::Bootstrap`]) does not skip: it probes the matchmakers
+    /// for the configuration in force instead (#173). Its "I am not a
+    /// member" is a fact about a configuration it never heard, and a reboot
+    /// erases what it did hear — so a successor whose every member rebooted
+    /// is a cluster where each member believes itself outside, the
+    /// non-members know better but do not lead, and nobody ever campaigns.
+    /// The probe registers nothing ([`crate::matchmaking::MembershipProbe`]);
+    /// a node whose probe finds it inside campaigns from there.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
             return;
         }
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
+            if self.belief_source == BeliefSource::Bootstrap {
+                self.probe_membership();
+                return;
+            }
             self.counters.non_member_campaigns_skipped =
                 self.counters.non_member_campaigns_skipped.saturating_add(1);
             return;
@@ -81,6 +95,9 @@ impl ColocatedNode {
         // in-flight rounds exactly as a deposed one does (the accepted stall
         // window of #122: the successor ballot's Phase 1 recovers them).
         self.clear_leadership_state();
+        // A campaign and a membership probe never coexist (#173): the
+        // campaign registers what this node now believes.
+        self.probe = None;
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };

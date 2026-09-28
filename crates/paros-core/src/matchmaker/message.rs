@@ -25,11 +25,14 @@ pub struct MatchRequest {
     /// The ballot to register under. One ballot has exactly one proposer, so
     /// `ballot.node` is the identity that keeps matchmakers from disagreeing.
     pub ballot: Ballot,
-    /// The acceptor configuration the proposer intends to run `ballot` with.
+    /// The acceptor configuration the proposer intends to run `ballot` with
+    /// (for a probe: the configuration it believes in force, which the
+    /// matchmaker never records).
     pub config: AcceptorConfig,
-    /// Whether this registers a belief or an operator's reconfiguration
-    /// (see [`Registration`]).
-    pub kind: RegistrationKind,
+    /// What the request asks for: a registration of a belief or of an
+    /// operator's reconfiguration (see [`Registration`]), or a membership
+    /// probe that registers nothing.
+    pub purpose: MatchPurpose,
     /// The matchmaker generation the proposer addresses. A matchmaker not
     /// active for exactly this generation refuses with what it knows.
     pub generation: MatchmakerGeneration,
@@ -58,7 +61,7 @@ impl MatchRequest {
             from,
             ballot,
             config,
-            kind: RegistrationKind::Belief,
+            purpose: MatchPurpose::Register(RegistrationKind::Belief),
             generation,
             from_ballot: None,
         }
@@ -77,7 +80,7 @@ impl MatchRequest {
             from,
             ballot,
             config,
-            kind: RegistrationKind::Reconfiguration,
+            purpose: MatchPurpose::Register(RegistrationKind::Reconfiguration),
             generation,
             from_ballot: None,
         }
@@ -104,12 +107,69 @@ impl MatchRequest {
         }
     }
 
+    /// A **membership probe** from `from` (#173): "which configuration is in
+    /// force?", answered with the matchmaker's effective configuration and
+    /// nothing else ([`MatchOutcome::Probed`]). It registers nothing, so it
+    /// leaves no record a later campaign's `H_b` must cover; `ballot` only
+    /// names the probe so its answers can be told apart, and `believed` is
+    /// the configuration the prober holds, carried for observability.
+    #[must_use]
+    pub fn probe(
+        from: NodeId,
+        ballot: Ballot,
+        believed: AcceptorConfig,
+        generation: MatchmakerGeneration,
+    ) -> Self {
+        Self {
+            from,
+            ballot,
+            config: believed,
+            purpose: MatchPurpose::Probe,
+            generation,
+            from_ballot: None,
+        }
+    }
+
     /// The same request, asking for the page that starts at `from`: what a
     /// candidate re-asks with while a matchmaker's answer is still paged.
     #[must_use]
     pub fn from_page(mut self, from: Ballot) -> Self {
         self.from_ballot = Some(from);
         self
+    }
+}
+
+/// What a [`MatchRequest`] asks a matchmaker for.
+///
+/// A registration is the matchmaking phase proper; a probe is how a node
+/// whose belief about the configuration in force is only the bootstrap
+/// default (a reboot erased what it heard) and does not name it learns what
+/// is in force without campaigning (#173). The probe is its own purpose,
+/// never a third [`RegistrationKind`]: nothing about it is ever registered,
+/// and a ledger entry that could say "probe" would be a state no matchmaker
+/// may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum MatchPurpose {
+    /// Register the configuration as the kind says, and answer with the
+    /// history below the ballot ([`MatchOutcome::Registered`]).
+    Register(RegistrationKind),
+    /// Register nothing; answer with the effective configuration
+    /// ([`MatchOutcome::Probed`]).
+    Probe,
+}
+
+impl MatchPurpose {
+    /// Whether this registers an operator's explicit change.
+    #[must_use]
+    pub fn is_reconfiguration(self) -> bool {
+        matches!(self, Self::Register(kind) if kind.is_reconfiguration())
+    }
+
+    /// Whether this is a membership probe.
+    #[must_use]
+    pub fn is_probe(self) -> bool {
+        matches!(self, Self::Probe)
     }
 }
 
@@ -185,6 +245,17 @@ pub enum MatchOutcome {
         /// its record is still in `history`: GC drops the record, never the
         /// scalar, so this is what tells a candidate which acceptor set is
         /// in force after a floor rose over the last reconfiguration.
+        effective: Option<(Ballot, AcceptorConfig)>,
+    },
+    /// The answer to a membership probe ([`MatchPurpose::Probe`]): the
+    /// effective configuration this matchmaker durably holds, and nothing
+    /// registered. A probe is served only by the active generation, like a
+    /// registration, since a stopped generation's scalar may lag a
+    /// reconfiguration its successor registered.
+    Probed {
+        /// The effective configuration (see
+        /// [`super::MatchmakerHardState::effective`]), `None` when no
+        /// reconfiguration was ever registered here.
         effective: Option<(Ballot, AcceptorConfig)>,
     },
     /// The request was refused; nothing was registered.

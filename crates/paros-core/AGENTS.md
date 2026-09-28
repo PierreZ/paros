@@ -33,7 +33,9 @@ doctrine; this file is the map.
   `has_phase1_quorum_in` — the one place a read row is) · `quorum_read.rs` `QuorumRead` /
   `QuorumReads` (the leaderless read tally, #143: a row's vote watermarks, the maximum, the
   replica's `covers`; wired on any node by `node/quorum_reads.rs`) · `matchmaking.rs`
-  `Matchmaking` (the candidate's phase) · `retained.rs` `RetainedWindow`.
+  `Matchmaking` (the candidate's phase) and `MembershipProbe` (#173: a non-member whose belief is
+  only the bootstrap default asks a matchmaker quorum for the effective configuration, registering
+  nothing; wired in `node/matchmaking.rs`) · `retained.rs` `RetainedWindow`.
 - `matchmaker.rs` `Matchmaker` + `matchmaker/{reconfigurer,decree,generation,
   handover_model,storage,message,state,write}.rs`: the registry, the handover
   and the single decree over the shared roles at slot zero; `MemRegistry` is

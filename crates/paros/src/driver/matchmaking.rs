@@ -218,9 +218,10 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
     }
 }
 
-/// Surface a matchmaking phase the batch just opened (#120): once per
-/// campaign, keyed on its ballot, and *before* the batch's requests leave —
-/// the audit folds the campaign's opening ahead of its first request.
+/// Surface a matchmaking phase or a membership probe the batch just opened
+/// (#120, #173): once per campaign or probe, keyed on its ballot, and
+/// *before* the batch's requests leave — the audit folds the opening ahead
+/// of its first request.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn surface_matchmaking<A: Audit>(
     node: &ColocatedNode,
@@ -228,6 +229,20 @@ pub(crate) fn surface_matchmaking<A: Audit>(
     audit: &A,
     self_id: u64,
 ) {
+    if let Some(probe) = node.membership_probe()
+        && *last_matchmaking != Some(probe.ballot())
+    {
+        let ballot = probe.ballot();
+        *last_matchmaking = Some(ballot);
+        let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
+        audit.membership_probe_opened(NodeId(self_id), ballot, probe.believed(), generation);
+        tracing::info!(
+            node = self_id,
+            round = ballot.round,
+            members = probe.believed().members().len() as u64,
+            "membership_probe_opened"
+        );
+    }
     if let Some(m) = node.matchmaking_role()
         && *last_matchmaking != Some(m.ballot())
     {
@@ -261,13 +276,23 @@ fn send_match_requests<P: Providers, A: Audit>(
         let Some(client) = link_to(links, self_id, matchmaker) else {
             continue;
         };
-        audit.match_request_sent(NodeId(self_id), matchmaker, request.ballot);
-        tracing::info!(
-            node = self_id,
-            matchmaker = matchmaker.0,
-            round = request.ballot.round,
-            "match_request_sent"
-        );
+        if request.purpose.is_probe() {
+            audit.membership_probe_sent(NodeId(self_id), matchmaker, request.ballot);
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = request.ballot.round,
+                "membership_probe_sent"
+            );
+        } else {
+            audit.match_request_sent(NodeId(self_id), matchmaker, request.ballot);
+            tracing::info!(
+                node = self_id,
+                matchmaker = matchmaker.0,
+                round = request.ballot.round,
+                "match_request_sent"
+            );
+        }
         let wire = wire_match_request(&request);
         spawn_matchmaker_rpc(
             providers,
@@ -298,8 +323,53 @@ pub(crate) fn folded_answer(reply: &MatchReply) -> Option<(Ballot, u64)> {
             gc_watermark,
             ..
         } => Some((*gc_watermark, registration_history_hash(history))),
-        MatchOutcome::Refused(_) => None,
+        MatchOutcome::Probed { .. } | MatchOutcome::Refused(_) => None,
     }
+}
+
+/// Report a matchmaking phase that closed with a quorum and opened Phase 1.
+fn report_completed<A: Audit>(
+    node: &ColocatedNode,
+    audit: &A,
+    self_id: u64,
+    ballot: Ballot,
+    prior: &[paros_core::AcceptorConfig],
+    watermark: Ballot,
+    registered_by: usize,
+) {
+    audit.matchmaking_completed(
+        NodeId(self_id),
+        ballot,
+        prior,
+        watermark,
+        registered_by,
+        node.matchmaking_disagreements(),
+    );
+    tracing::info!(
+        node = self_id,
+        round = ballot.round,
+        prior = prior.len() as u64,
+        watermark_round = watermark.round,
+        registered_by = registered_by as u64,
+        "matchmaking_completed"
+    );
+}
+
+/// Report a membership probe that closed (#173). A probe's partial answer
+/// (`MatchStep::ProbeAnswered`) moves nothing a checker judges: only its
+/// closing is a transition.
+fn report_probe_closed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: &MatchStep) {
+    let MatchStep::ProbeClosed { effective, member } = *step else {
+        return;
+    };
+    audit.membership_probe_closed(NodeId(self_id), ballot, effective, member);
+    tracing::info!(
+        node = self_id,
+        round = ballot.round,
+        effective_round = effective.map_or(0, |b| b.round),
+        member,
+        "membership_probe_closed"
+    );
 }
 
 /// Report what one matchmaker reply did to the open campaign. `folded` is
@@ -316,7 +386,7 @@ pub(crate) fn report_match_step<A: Audit>(
 ) {
     let (folded_watermark, folded_hash) = folded.unwrap_or_default();
     match step {
-        MatchStep::Ignored => {}
+        MatchStep::Ignored | MatchStep::ProbeAnswered => {}
         MatchStep::Registered { remaining } => {
             audit.match_registered_by(
                 NodeId(self_id),
@@ -368,21 +438,14 @@ pub(crate) fn report_match_step<A: Audit>(
                 folded_watermark,
                 folded_hash,
             );
-            audit.matchmaking_completed(
-                NodeId(self_id),
+            report_completed(
+                node,
+                audit,
+                self_id,
                 ballot,
                 prior,
                 *watermark,
                 *registered_by,
-                node.matchmaking_disagreements(),
-            );
-            tracing::info!(
-                node = self_id,
-                round = ballot.round,
-                prior = prior.len() as u64,
-                watermark_round = watermark.round,
-                registered_by = *registered_by as u64,
-                "matchmaking_completed"
             );
         }
         MatchStep::StaleConfiguration { newest } => {
@@ -405,6 +468,7 @@ pub(crate) fn report_match_step<A: Audit>(
                 "matchmakers_learned"
             );
         }
+        MatchStep::ProbeClosed { .. } => report_probe_closed(audit, self_id, ballot, step),
         MatchStep::Refused(refusal) => {
             audit.matchmaking_refused(NodeId(self_id), matchmaker, ballot, refusal.clone());
             tracing::info!(

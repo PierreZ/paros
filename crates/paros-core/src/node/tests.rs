@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LEADER_RECOVERY_BATCH,
-    LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult, READ_TTL_TICKS,
-    ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
+    BeliefSource, ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
+    LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
+    READ_TTL_TICKS, ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
@@ -344,6 +344,7 @@ mod election;
 mod handoff;
 mod invariants;
 mod matchmaking;
+mod membership_probe;
 mod phase2;
 mod quorum_reads;
 mod reads;

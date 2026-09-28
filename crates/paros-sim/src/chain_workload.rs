@@ -155,6 +155,14 @@ struct ChainConfig {
     /// Matchmaker-set reconfiguration re-asks per operation (a `busy`
     /// reconfigurer a beat later). Floor 1.
     reconfigure_matchmakers_attempts: u8,
+    /// How long after a started reconfiguration the client waits before it
+    /// reboots every member of the configuration it asked for (#173: a
+    /// member's belief in force is volatile, so a whole successor rebooted
+    /// forgets it at once). Floor 50 ms: the members may not have heard the
+    /// new configuration yet, which is a valid, shorter version of the same
+    /// state. Ceiling 2 s: long enough for a member of the successor to
+    /// lead it, far inside the recovery budget.
+    reboot_successor_delay_ms: u64,
     /// The client runtime's connect timeout. Floor 250 ms: one round trip
     /// over the default cross-datacenter link; a shorter one never connects.
     connect_timeout_ms: u64,
@@ -204,6 +212,7 @@ impl ChainConfig {
             reconfigure_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             reconfigure_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
             reconfigure_matchmakers_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
+            reboot_successor_delay_ms: buggify_knob!(600_u64, 50_u64..2001_u64),
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
@@ -356,6 +365,11 @@ impl LeaderHint {
 /// spare to grow onto, nothing above the floor to shrink); the step is then
 /// a no-op.
 ///
+/// `whole` asks a `rotate` for a **whole-set rotation**: the successor drawn
+/// from the spares alone, sharing no member with the set in force, whenever
+/// the candidates hold enough of them (a BUGGIFY choice at the call site:
+/// an ordinary rotation's random start on the ring rarely lands there).
+///
 /// The index and name returned are the shape **observed in the composed set**,
 /// not the one asked for: a `rotate` through a candidate ring no larger than
 /// the set in force drops members instead of replacing them, which is a
@@ -368,6 +382,7 @@ fn compose_reconfiguration(
     floor: usize,
     leader: Option<u64>,
     draw: u64,
+    whole: bool,
 ) -> Option<(usize, &'static str, Vec<u64>)> {
     let mut current: Vec<u64> = members.to_vec();
     current.sort_unstable();
@@ -414,12 +429,20 @@ fn compose_reconfiguration(
         _ => {
             // "rotate": the same number of members, read off the candidate
             // ring from a shifted start — a mostly or wholly disjoint
-            // successor when spares allow it.
-            let ring = candidates.len();
-            let start = 1 + pick(ring.max(2) - 1);
-            next = (0..current.len().min(ring))
-                .map(|k| candidates[(start + k) % ring])
-                .collect();
+            // successor when spares allow it; wholly, off the spares alone,
+            // when `whole` asks and there are enough of them.
+            if whole && spares.len() >= current.len() {
+                let start = pick(spares.len());
+                next = (0..current.len())
+                    .map(|k| spares[(start + k) % spares.len()])
+                    .collect();
+            } else {
+                let ring = candidates.len();
+                let start = 1 + pick(ring.max(2) - 1);
+                next = (0..current.len().min(ring))
+                    .map(|k| candidates[(start + k) % ring])
+                    .collect();
+            }
         }
     }
     next.sort_unstable();
@@ -1510,6 +1533,11 @@ impl Workload for ChainWorkload {
                     let all_ranks: Vec<u64> =
                         (0..u64::try_from(server_count).unwrap_or(0)).collect();
                     let adversarial_members = buggify_with_prob!(0.10);
+                    // A whole-set rotation (#173): the successor off the
+                    // spares alone. The ring's random start lands there only
+                    // by luck, and it is the shape that leaves every
+                    // rebooted member outside the bootstrap belief.
+                    let whole_rotation = buggify_with_prob!(0.5);
                     // The successor's quorum system (#140, #141): the seed's
                     // policy at the successor's own size — or, on a flexible
                     // or a grid seed, a coin that composes a *majority*
@@ -1560,6 +1588,7 @@ impl Workload for ChainWorkload {
                                     config_floor,
                                     leader_id,
                                     raw_payload,
+                                    whole_rotation,
                                 )
                                 .filter(|(_, _, next)| keeps_live_quorum(next))
                                 .map(|(observed, name, next)| (shape, observed, name, next))
@@ -1590,10 +1619,10 @@ impl Workload for ChainWorkload {
                                 "reconfiguration: the drawn shape is impossible and the step falls through"
                             );
                         }
-                        if members
+                        let disjoint = members
                             .as_deref()
-                            .is_some_and(|in_force| in_force.iter().all(|m| !next.contains(m)))
-                        {
+                            .is_some_and(|in_force| in_force.iter().all(|m| !next.contains(m)));
+                        if disjoint {
                             assert_reachable!(
                                 "reconfiguration: a successor acceptor set shares no member with its predecessor"
                             );
@@ -1616,7 +1645,7 @@ impl Workload for ChainWorkload {
                             system = QuorumSystem::Flexible { q1: 1, q2: 1 };
                         }
                         tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
-                        let outcome = reconfigure_once(probe_target, next, system).await;
+                        let outcome = reconfigure_once(probe_target, next.clone(), system).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
                         match outcome {
                             ReconfigureResult::Started { leader, .. } => {
@@ -1635,6 +1664,37 @@ impl Workload for ChainWorkload {
                                 );
                                 self.adversarial.reconfigure_started[observed] = true;
                                 hint.observe(leader, server_count);
+                                // A rare-but-valid operator act (#173):
+                                // reboot every member of the configuration
+                                // just installed. Each loses its belief in
+                                // force and boots to the bootstrap one, so a
+                                // successor disjoint from the bootstrap is a
+                                // cluster whose members all believe they are
+                                // outside the configuration in force, and
+                                // whose non-members know better but do not
+                                // lead. A clean reboot keeps every disk. A
+                                // successor sharing no member with its
+                                // predecessor is the shape that leaves no
+                                // rebooted member inside the default, so it
+                                // is the one the location leans on.
+                                if buggify_with_prob!(if disjoint { 0.9 } else { 0.25 }) {
+                                    let _ = time
+                                        .sleep(Duration::from_millis(
+                                            config.reboot_successor_delay_ms,
+                                        ))
+                                        .await;
+                                    assert_reachable!(
+                                        "reconfiguration: the client reboots every member of the configuration it installed"
+                                    );
+                                    for member in &next {
+                                        if let Some(ip) = usize::try_from(*member)
+                                            .ok()
+                                            .and_then(|rank| servers.get(rank))
+                                        {
+                                            crate::lifecycle::restart(ctx, ip).await;
+                                        }
+                                    }
+                                }
                             }
                             ReconfigureResult::Refused { leader, refusal } => {
                                 if refusal == "no_matchmakers" {
@@ -1691,6 +1751,7 @@ impl Workload for ChainWorkload {
                                     matchmaker_floor,
                                     None,
                                     raw_payload,
+                                    false,
                                 )
                                 .map(|(observed, name, next)| {
                                     // The observed shape's own slot: a
@@ -2289,61 +2350,76 @@ mod tests {
     fn reconfiguration_shapes_respect_the_floor_and_the_pool() {
         let members = [1_u64, 2, 3];
         let pool5 = [0_u64, 1, 2, 3, 4];
-        let grow = compose_reconfiguration(0, &members, &pool5, 3, Some(1), 7).unwrap();
+        let grow = compose_reconfiguration(0, &members, &pool5, 3, Some(1), 7, false).unwrap();
         assert_eq!(grow.1, "grow");
         assert_eq!(grow.2.len(), 4);
         assert!(grow.2.iter().all(|n| *n < 5));
         assert!(
-            compose_reconfiguration(0, &[0, 1, 2], &[0, 1, 2], 3, None, 0).is_none(),
+            compose_reconfiguration(0, &[0, 1, 2], &[0, 1, 2], 3, None, 0, false).is_none(),
             "no spare"
         );
         assert!(
-            compose_reconfiguration(1, &members, &pool5, 3, None, 0).is_none(),
+            compose_reconfiguration(1, &members, &pool5, 3, None, 0, false).is_none(),
             "at the floor"
         );
-        let shrink = compose_reconfiguration(1, &[0, 1, 2, 3], &pool5, 3, None, 2).unwrap();
+        let shrink = compose_reconfiguration(1, &[0, 1, 2, 3], &pool5, 3, None, 2, false).unwrap();
         assert_eq!((shrink.1, shrink.2.len()), ("shrink", 3));
-        let replace = compose_reconfiguration(2, &members, &pool5, 3, None, 1).unwrap();
+        let replace = compose_reconfiguration(2, &members, &pool5, 3, None, 1, false).unwrap();
         assert_eq!(replace.1, "replace");
         assert_eq!(replace.2.len(), 3);
         assert_ne!(replace.2, members.to_vec());
         assert!(
-            compose_reconfiguration(3, &members, &pool5, 3, Some(1), 0).is_none(),
+            compose_reconfiguration(3, &members, &pool5, 3, Some(1), 0, false).is_none(),
             "removing the leader at the floor is refused"
         );
-        let removed = compose_reconfiguration(3, &[0, 1, 2, 3], &pool5, 3, Some(2), 0).unwrap();
+        let removed =
+            compose_reconfiguration(3, &[0, 1, 2, 3], &pool5, 3, Some(2), 0, false).unwrap();
         assert_eq!(
             (removed.1, removed.2.clone()),
             ("remove-leader", vec![0, 1, 3])
         );
         assert!(
-            compose_reconfiguration(3, &[0, 1, 2, 3], &pool5, 3, None, 0).is_none(),
+            compose_reconfiguration(3, &[0, 1, 2, 3], &pool5, 3, None, 0, false).is_none(),
             "no leader known"
         );
         let rotate =
-            compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2, 3, 4, 5], 3, None, 2).unwrap();
+            compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2, 3, 4, 5], 3, None, 2, false).unwrap();
         assert_eq!((rotate.1, rotate.2.clone()), ("rotate", vec![3, 4, 5]));
+        // A whole-set rotation draws the successor off the spares alone,
+        // whatever the draw; with too few spares it is an ordinary one.
+        for draw in 0..6 {
+            let whole =
+                compose_reconfiguration(4, &[1, 2, 3], &[0, 1, 2, 3, 4, 5, 6], 3, None, draw, true)
+                    .unwrap();
+            assert_eq!(whole.1, "rotate");
+            assert!(whole.2.iter().all(|n| ![1, 2, 3].contains(n)));
+        }
+        let few_spares =
+            compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2, 3, 4], 3, None, 2, true).unwrap();
+        assert_eq!(few_spares.2.len(), 3);
         // A rotation through a ring no larger than the set in force drops a
         // member instead of replacing it: observed as the shrink it is.
-        let short_ring = compose_reconfiguration(4, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 1).unwrap();
+        let short_ring =
+            compose_reconfiguration(4, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 1, false).unwrap();
         assert_eq!(
             (short_ring.1, short_ring.2.clone()),
             ("shrink", vec![0, 2, 3])
         );
         // A dead member (outside the candidates) is the first one moved out.
-        let heal = compose_reconfiguration(2, &[0, 1, 2], &[0, 2, 3], 3, None, 0).unwrap();
+        let heal = compose_reconfiguration(2, &[0, 1, 2], &[0, 2, 3], 3, None, 0, false).unwrap();
         assert_eq!((heal.1, heal.2.clone()), ("replace", vec![0, 2, 3]));
-        let drop_dead = compose_reconfiguration(1, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 5).unwrap();
+        let drop_dead =
+            compose_reconfiguration(1, &[0, 1, 2, 3], &[0, 2, 3], 3, None, 5, false).unwrap();
         assert_eq!(
             (drop_dead.1, drop_dead.2.clone()),
             ("shrink", vec![0, 2, 3])
         );
         assert!(
-            compose_reconfiguration(0, &members, &[], 3, None, 0).is_none(),
+            compose_reconfiguration(0, &members, &[], 3, None, 0, false).is_none(),
             "no live candidate at all"
         );
         assert!(
-            compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2], 3, None, 0).is_none(),
+            compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2], 3, None, 0, false).is_none(),
             "a rotation through a pool with no spare is the same set"
         );
     }

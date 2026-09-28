@@ -283,6 +283,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
             Box::new(ChainWorkload::new(digest.clone()))
         })
         .enable_chaos(chaos_surfaces())
+        .fault_factory(|| Box::new(ScriptedLifecycle))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }

@@ -2045,6 +2045,30 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.retired.insert(node.0);
     }
 
+    fn membership_probe_opened(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        _believed: &AcceptorConfig,
+        generation: u64,
+    ) {
+        self.state()
+            .matchmaker
+            .probe_opened(node, ballot, generation);
+    }
+
+    fn membership_probe_closed(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        effective: Option<Ballot>,
+        member: bool,
+    ) {
+        self.state()
+            .matchmaker
+            .probe_closed(node, ballot, effective, member);
+    }
+
     fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {
         self.state()
             .matchmaker

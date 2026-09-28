@@ -31,7 +31,7 @@ use crate::acceptor::Acceptor;
 use crate::collector::Collector;
 pub use crate::collector::GcStep;
 use crate::matchmaker::{GcRequest, MatchRequest};
-use crate::matchmaking::Matchmaking;
+use crate::matchmaking::{Matchmaking, MembershipProbe};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
 use crate::message::{Audience, Message, Party};
 use crate::proposer::{Proposer, Round};
@@ -152,6 +152,26 @@ pub struct ReadState {
     pub index: Option<Slot>,
 }
 
+/// Where a node's belief about the acceptor configuration in force came
+/// from (#173).
+///
+/// A belief is volatile: every incarnation boots believing the bootstrap
+/// configuration, whatever it believed before. That default is right on a
+/// cluster that never reconfigured and wrong after any reconfiguration, and
+/// a node cannot tell which from the default alone. It can tell whether it
+/// has *heard* anything since it booted, and that is the whole distinction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BeliefSource {
+    /// The bootstrap configuration this incarnation booted with; nothing
+    /// heard since. A node in this state that the default does not name
+    /// probes the matchmakers rather than trust the default to exclude it.
+    Bootstrap,
+    /// Heard since boot: a configuration adopted through
+    /// `ColocatedNode::adopt_configuration`, or the bootstrap confirmed in
+    /// force by a probe that found no reconfiguration.
+    Heard,
+}
+
 /// **The deployment that colocates all three Paxos roles on one node**, and
 /// the wiring between them.
 ///
@@ -210,6 +230,14 @@ pub struct ColocatedNode {
     /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
     /// bootstrap configuration).
     acceptors_since: Ballot,
+    /// Where `acceptors` came from: the bootstrap default every incarnation
+    /// boots with, or something this incarnation **heard** — a leader's
+    /// wire, its own election or handoff, an adopted effective configuration,
+    /// or a membership probe's answer. Volatile, like the belief itself. A
+    /// node whose belief is only the default and does not name it probes the
+    /// matchmakers instead of skipping its campaign (#173); see
+    /// [`BeliefSource`].
+    belief_source: BeliefSource,
     /// The highest ballot at which a configuration this node **belonged to**
     /// was in force here: `acceptors_since` restricted to the assignments
     /// that left this node inside `acceptors` (boot, `learn_config`,
@@ -301,6 +329,12 @@ pub struct ColocatedNode {
     /// precedes `election`, and never coexists with it. `None` on a plain
     /// deployment, always.
     matchmaking: Option<Matchmaking>,
+    /// The open **membership probe** (#173, [`MembershipProbe`]): a
+    /// non-member whose belief is only the bootstrap default asking the
+    /// matchmakers which configuration is in force. Never coexists with a
+    /// campaign; `None` on a plain deployment, always. Boxed: it is rare and
+    /// the node is held inside the driver's future.
+    probe: Option<Box<MembershipProbe>>,
     /// Matchmaking requests to send this batch, drained via
     /// [`Ready::match_requests`]. A separate wire from `pending_messages`:
     /// the matchmaker contract is its own RPC service, spoken only by a
@@ -1253,6 +1287,20 @@ impl ColocatedNode {
     #[must_use]
     pub fn acceptors_since(&self) -> Ballot {
         self.acceptors_since
+    }
+
+    /// Where [`ColocatedNode::acceptors`] came from: the bootstrap default,
+    /// or something this incarnation heard (#173, [`BeliefSource`]).
+    #[must_use]
+    pub fn belief_source(&self) -> BeliefSource {
+        self.belief_source
+    }
+
+    /// The open membership probe, if any (#173) — read-only, like
+    /// [`ColocatedNode::matchmaking_role`].
+    #[must_use]
+    pub fn membership_probe(&self) -> Option<&MembershipProbe> {
+        self.probe.as_deref()
     }
 
     /// The membership fence [`ColocatedNode::may_retire`] reads: the highest

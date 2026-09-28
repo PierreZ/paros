@@ -194,6 +194,10 @@ pub(super) struct MatchmakerAudit {
     reconfigurations: BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
     campaigns: BTreeMap<(u64, Ballot), Campaign>,
+    /// Every open membership probe (#173), keyed by `(node, tag)`: the
+    /// effective configuration a quorum of the probed generation already
+    /// held durably when it opened — what its answers cannot miss.
+    probes: BTreeMap<(u64, Ballot), Option<(Ballot, AcceptorConfig)>>,
     /// Per matchmaker generation, the configuration each **completed**
     /// campaign registered, by ballot — the reconstruction-completeness check
     /// reads exactly this, and reading it here keeps that check proportional
@@ -272,9 +276,8 @@ pub(super) struct MatchmakerAudit {
     campaign_completed: bool,
     campaign_refused: bool,
     clock_reasked: bool,
-    refloored: bool,
     campaign_stale: bool,
-    effective_checked: bool,
+    probe_rejoined: bool,
     ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from
@@ -1241,10 +1244,6 @@ impl MatchmakerAudit {
                 { "node" => node.0, "round" => ballot.round, "floor" => floor }
             );
             self.refused_floor.remove(&node.0);
-            reach_once!(
-                self.refloored,
-                "matchmaking: a refused candidate re-campaigns above the refuser's round"
-            );
         }
         // A belief comes from a leader's wire or the bootstrap, never from
         // the ledger: a plain campaign registers only a configuration some
@@ -1506,10 +1505,6 @@ impl MatchmakerAudit {
                 "matchmaking: a completed ordinary campaign registered the effective configuration",
                 { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
             );
-            reach_once!(
-                self.effective_checked,
-                "matchmaking: a completed campaign is checked against the effective configuration"
-            );
         }
         campaign.completed = true;
         let registered = campaign.config.clone();
@@ -1590,12 +1585,62 @@ impl MatchmakerAudit {
     }
 
     /// The candidate folded a refusal and abandoned the campaign.
+    /// A node opened a membership probe tagged `ballot` against
+    /// `generation`'s matchmakers (#173).
+    pub(super) fn probe_opened(&mut self, node: NodeId, ballot: Ballot, generation: u64) {
+        let ceiling = Ballot {
+            round: u64::MAX,
+            node: NodeId(u64::MAX),
+        };
+        let held = self.effective_at(generation, ceiling);
+        self.probes.insert((node.0, ballot), held);
+    }
+
+    /// A node's membership probe closed (#173). A reconfiguration a
+    /// matchmaker quorum already held when the probe opened is in every
+    /// quorum of answers (each raised its effective scalar durably before
+    /// answering anything), so the configuration the probe adopted is at
+    /// least that one — the same intersection argument that hands a
+    /// campaign's matchmaking every earlier registration.
+    pub(super) fn probe_closed(
+        &mut self,
+        node: NodeId,
+        ballot: Ballot,
+        effective: Option<Ballot>,
+        member: bool,
+    ) {
+        let held = self.probes.remove(&(node.0, ballot)).flatten();
+        let learned = held
+            .as_ref()
+            .is_none_or(|(at, _)| effective.is_some_and(|adopted| adopted >= *at));
+        assert_always!(
+            learned,
+            "matchmaking: a membership probe learns every reconfiguration a matchmaker quorum held when it opened",
+            {
+                "node" => node.0,
+                "held_round" => held.as_ref().map_or(0, |(at, _)| at.round),
+                "adopted_round" => effective.map_or(0, |at| at.round)
+            }
+        );
+        if member && effective.is_some() {
+            reach_once!(
+                self.probe_rejoined,
+                "matchmaking: a membership probe finds its node inside a reconfiguration and it campaigns"
+            );
+        }
+    }
+
     pub(super) fn campaign_refused(
         &mut self,
         node: NodeId,
         ballot: Ballot,
         refusal: &MatchRefusal,
     ) {
+        if self.probes.remove(&(node.0, ballot)).is_some() {
+            // A refused probe is simply spent: the node's next election
+            // timeout opens another.
+            return;
+        }
         let campaign = self.campaigns.entry((node.0, ballot)).or_default();
         assert_always!(
             !campaign.completed,

@@ -46,6 +46,9 @@ message MatchRequest {
   // The history cursor: absent asks for the first page (which starts at the
   // matchmaker's watermark), present continues a paged answer.
   optional .paros.common.v1.Ballot from_ballot = 6;
+  // A membership probe (#173): register nothing, answer with the effective
+  // configuration alone. `reconfiguration` is false on a probe.
+  bool probe = 7;
 }
 
 message Registration {
@@ -99,6 +102,12 @@ message Refused {
   }
 }
 
+// The answer to a membership probe: the effective configuration the
+// matchmaker durably holds, and nothing registered.
+message Probed {
+  optional EffectiveConfiguration effective = 1;
+}
+
 message MatchReply {
   uint64 matchmaker = 1;
   uint64 to = 2;
@@ -106,6 +115,7 @@ message MatchReply {
   oneof outcome {
     Registered registered = 4;
     Refused refused = 5;
+    Probed probed = 7;
   }
   // The request's generation, echoed.
   uint64 generation = 6;

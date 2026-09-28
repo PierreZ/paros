@@ -129,8 +129,8 @@ use std::collections::BTreeMap;
 
 pub use self::decree::Decree;
 pub use self::message::{
-    GcAck, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest, ReconfigureReply,
-    ReconfigureRequest,
+    GcAck, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest,
+    ReconfigureReply, ReconfigureRequest,
 };
 pub use self::reconfigurer::{
     MatchmakerReconfigurer, ReconfigurerPhase, ReconfigurerReady, ReconfigurerStep, Reconstruction,
@@ -145,7 +145,7 @@ pub use self::storage::{MemRegistry, RegistryStorage};
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
-use crate::types::Ballot;
+use crate::types::{Ballot, NodeId};
 
 /// The most registrations one `MatchB` page carries
 /// ([`MatchOutcome::Registered`]). A registry retains one record per ballot
@@ -356,10 +356,17 @@ impl Matchmaker {
             from,
             ballot,
             config,
-            kind,
+            purpose,
             generation,
             from_ballot,
         } = request;
+        let kind = match purpose {
+            MatchPurpose::Register(kind) => kind,
+            MatchPurpose::Probe => {
+                self.answer_probe(from, ballot, generation);
+                return;
+            }
+        };
         let registration = Registration { config, kind };
         let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
@@ -444,6 +451,40 @@ impl Matchmaker {
                 "only an active matchmaker of the addressed generation registers"
             );
         }
+        self.pending_replies.push(MatchReply {
+            matchmaker: self.config.id,
+            to: from,
+            ballot,
+            generation,
+            outcome,
+        });
+        self.assert_invariants();
+    }
+
+    /// Answer a membership probe (#173): the effective configuration this
+    /// matchmaker durably holds, fenced by generation exactly as a
+    /// registration is, and **nothing registered** — no record, no raised
+    /// highest ballot, no write. A probe below the watermark or at a stale
+    /// ballot is answered all the same: it asks for a fact, not a slot in
+    /// the ledger.
+    fn answer_probe(&mut self, from: NodeId, ballot: Ballot, generation: MatchmakerGeneration) {
+        let writes = self.pending_writes.len();
+        let registered = self.registry.contains_key(ballot);
+        let outcome = match self.generation_refusal(generation) {
+            Some(refusal) => MatchOutcome::Refused(refusal),
+            None => MatchOutcome::Probed {
+                effective: self.hard_state.effective.clone(),
+            },
+        };
+        // A probe leaves the matchmaker exactly as it found it.
+        assert!(
+            self.pending_writes.len() == writes,
+            "a membership probe stages no write"
+        );
+        assert!(
+            self.registry.contains_key(ballot) == registered,
+            "a membership probe registers nothing"
+        );
         self.pending_replies.push(MatchReply {
             matchmaker: self.config.id,
             to: from,
@@ -820,6 +861,7 @@ mod tests {
                 ..
             } => (history, *gc_watermark),
             MatchOutcome::Refused(r) => panic!("expected a registration, got {r:?}"),
+            MatchOutcome::Probed { .. } => panic!("expected a registration, got a probe answer"),
         }
     }
 

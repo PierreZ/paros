@@ -9,8 +9,8 @@
 //! read back rather than persisted beside it.
 
 use super::{
-    Acceptor, BTreeMap, Ballot, ColocatedNode, Command, Config, Counters, HandoffCounters,
-    LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
+    Acceptor, BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Config, Counters,
+    HandoffCounters, LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerSet};
 use crate::quorum_read::QuorumReads;
@@ -89,6 +89,7 @@ impl ColocatedNode {
             config,
             acceptors,
             acceptors_since: Ballot::zero(),
+            belief_source: BeliefSource::Bootstrap,
             // The bootstrap configuration is bound to `Ballot::zero()`, so a
             // node that boots inside it was a member at exactly that ballot —
             // and a node that boots as a spare has not been a member of
@@ -119,6 +120,7 @@ impl ColocatedNode {
                 proposer
             },
             matchmaking: None,
+            probe: None,
             pending_match_requests: Vec::new(),
             pending_gc_requests: Vec::new(),
             matchmakers,

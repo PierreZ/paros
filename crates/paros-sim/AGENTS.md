@@ -31,7 +31,9 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   registered with `StorageWorld::note_replica` so the copy budget never counts it — a
   replica's record is never a copy an acceptor quorum needs), `IdleProcess`,
   `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
-  `FaultInjector`) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
+  `FaultInjector`, registered on the main campaign too for the chain client's one lifecycle
+  act — rebooting every member of a configuration it installed, #173; it drains for the whole
+  run) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
   one `buggify_with_prob!` location each, the module-doc table of *enabled /
   consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
   corpus's one targeted seam crash, fired once per run, no draw.
