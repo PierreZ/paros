@@ -441,13 +441,20 @@ acked, and only then does the leader name the **retirable** acceptors,
 Retirement itself is an operator act, and the request **carries the evidence**.
 The operator reads the effective watermark from a leader's `Inspect`, beside the
 retirable list, and sends it in the retire request. The node honors the request
-under four conditions. It has matchmakers. It is not a member of the configuration
-it believes in force, and it is not the leader. And the watermark sits strictly
-above the highest ballot that any configuration naming it was bound to.
+under five conditions. It has matchmakers. It is not a member of the configuration
+it believes in force, and it is not the leader. The watermark sits strictly
+above the highest ballot that any configuration naming it was bound to. And the
+configuration it believes in force is bound to exactly that watermark.
 
 The first three conditions are beliefs, and the third is volatile across a reboot.
 Without the fourth condition, "the cluster is done with me" would be the
-operator's assumption rather than a protocol fact.
+operator's assumption rather than a protocol fact. The fifth makes the belief
+fresh. A node learns its membership only from the messages it receives, so a
+member that never heard the configuration naming it, or that rebooted to the one
+it was deployed with, would pass the other four. Its belief must be the
+configuration the floor was computed over, neither older nor newer, before "I am
+not a member" means anything. Otherwise it refuses as `stale`, until a beat from
+the leader reaches it.
 
 **In the code.** `GcStep::Effective` (`collector.rs`, `node/gc.rs`);
 `ColocatedNode::may_retire` (`node/gc.rs`); `GcRequest`, `GcAck`,

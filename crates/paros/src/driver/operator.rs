@@ -173,6 +173,10 @@ pub(crate) fn retire<A: Audit>(
         "leader"
     } else if node.is_acceptor() {
         "member"
+    } else if watermark
+        .is_some_and(|w| node.acceptors_since() != w && w > node.last_member_ballot())
+    {
+        "stale"
     } else {
         "not_collected"
     };

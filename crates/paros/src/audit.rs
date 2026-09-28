@@ -793,9 +793,11 @@ pub trait Audit {
     /// This node answered an operator `Retire` request: accepted (the node
     /// shuts down for good at its next tick) or refused, with `refusal`
     /// naming the leg that refused it — `"plain"`, `"leader"`, `"member"`,
-    /// or `"not_collected"` (the request carried no GC watermark above this
-    /// node's membership fence, so nothing proves the cluster is done with
-    /// it). Empty when accepted.
+    /// `"stale"` (the configuration this node believes in force is bound
+    /// below the watermark, so it cannot tell whether the configuration the
+    /// floor kept names it, #165), or `"not_collected"` (the request carried
+    /// no GC watermark above this node's membership fence, so nothing proves
+    /// the cluster is done with it). Empty when accepted.
     fn retire_acked(&self, node: NodeId, accepted: bool, refusal: &str) {}
 
     /// This node is shutting down for good, retired by its operator after a

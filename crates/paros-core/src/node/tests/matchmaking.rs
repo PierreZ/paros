@@ -802,6 +802,71 @@ fn an_honored_reconfiguration_may_bind_an_older_ballot_than_the_fence() {
     assert!(!n.may_retire(ballot(10, 1)));
 }
 
+/// A node's belief about its own membership comes only from what it heard,
+/// so a member of `C_w` that never heard `C_w` — a spare pulled in by a
+/// reconfiguration whose `Prepare` and beats never reached it, or a member
+/// that rebooted to its bootstrap belief — is outside the configuration it
+/// believes in force and its membership fence sits below the watermark. It
+/// must still refuse a retirement at `w` (#165: the sweep shut down node 5
+/// of `C_9` with its promise at round 3), until it hears the configuration
+/// the floor kept and can tell whether that names it — exactly `C_w`,
+/// neither an older belief nor a newer one.
+#[test]
+fn a_belief_older_than_the_floor_refuses_to_retire() {
+    // Node 3, a spare of the bootstrap `{0, 1, 2}`. `C_9 = {1, 2, 3}` names
+    // it, but nothing at 9 ever reached it.
+    let mut n = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    let w = ballot(9, 1);
+    assert!(!n.is_acceptor());
+    assert_eq!(n.acceptors_since(), Ballot::zero());
+    assert!(!n.may_retire(w), "a belief bound below the floor is stale");
+
+    // The leader's beat at 9 carries `C_9`: now it knows it is a member.
+    n.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: w,
+        commit: None,
+        seq: 1,
+        config: Some(cfg(&[1, 2, 3])),
+    });
+    n.ready().advance();
+    assert!(n.is_acceptor());
+    assert!(!n.may_retire(w));
+
+    // A spare that hears the configuration the floor kept, and is not in
+    // it, may retire: its belief is now a fact about `C_w`.
+    let mut spare = deployed_node(4, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    assert!(!spare.may_retire(w));
+    spare.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: w,
+        commit: None,
+        seq: 1,
+        config: Some(cfg(&[1, 2, 3])),
+    });
+    spare.ready().advance();
+    assert!(!spare.is_acceptor());
+    assert!(spare.may_retire(w));
+    // A floor above what it heard is again beyond its knowledge.
+    assert!(!spare.may_retire(ballot(10, 1)));
+
+    // A belief bound *above* the floor is stale too: node 3, a member of
+    // `C_9` that heard nothing at 9, hears a later configuration at 11 that
+    // drops it. `C_9` still names it and the floor at 9 did not collect
+    // `C_9`, so the old watermark proves nothing.
+    let mut late = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    late.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: ballot(11, 1),
+        commit: None,
+        seq: 1,
+        config: Some(cfg(&[0, 1, 2])),
+    });
+    late.ready().advance();
+    assert!(!late.is_acceptor());
+    assert!(!late.may_retire(w));
+}
+
 /// The reported scalar and the histories are folded together, maximum wins:
 /// a matchmaker whose floor collected the newest record still reports it,
 /// and a matchmaker still holding an older record does not outrank it.

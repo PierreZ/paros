@@ -456,7 +456,17 @@ of the configuration it believes in force nor the leader, *and* that watermark s
 `last_member_ballot` — the highest ballot a configuration naming this node was bound to. The first
 three are beliefs and the third one is volatile (a reboot regresses `acceptors` to the bootstrap
 configuration), so without the fourth "the cluster is done with me" would be the operator's
-assumption rather than a protocol fact; the refusal leg is `"not_collected"`. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
+assumption rather than a protocol fact; the refusal leg is `"not_collected"`. The fence is
+itself read off what the node *heard*, so a fifth leg makes the belief fresh (#165): the
+configuration the node believes in force must be bound to exactly the watermark
+(`acceptors_since == w`), so "not a member" is a fact about `C_w` itself. An older belief may
+not know that `C_w` names the node; a newer one may drop a node that `C_w`, which the floor did
+not collect, still names. A member of `C_w` that never heard it, or that rebooted to its
+bootstrap belief, otherwise passes every other leg; it now refuses as `"stale"` until a beat at
+the leader's ballot reaches it (beats reach the whole pool), and an operator holding an old
+watermark re-reads `Inspect`. The residual, documented on `may_retire`: a node whose own promise
+is above the leader's ballot does not follow its beats and stays `stale` until a later
+leadership reaches it — a retirement lost, never safety. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
 its red→green evidence are recorded in the commit that landed the GC. Module doc:
 `crates/paros-core/src/node/gc.rs`; design note:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md`.

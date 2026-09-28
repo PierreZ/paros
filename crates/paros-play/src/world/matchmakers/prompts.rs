@@ -126,10 +126,11 @@ impl World {
         let node = self.nodes[index].as_ref()?;
         let member = node.is_acceptor();
         let leader = node.is_leader();
+        let belief = node.acceptors_since();
         let may = evidenced && node.may_retire(watermark);
         let id = self.take_prompt_id();
         Some(Prompt::may_retire(
-            id, target, watermark, effective, member, leader, may, evidenced,
+            id, target, watermark, effective, belief, member, leader, may, evidenced,
         ))
     }
 }

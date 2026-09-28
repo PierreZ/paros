@@ -27,7 +27,7 @@ generation, a chosen successor is a majority's durable vote, an activated regist
 the complete reconstruction). Claims 4–9 are this note's, and the table at the end maps each
 to the mutation that proves it load-bearing.
 
-## 1. Retirement after a reboot
+## 1. Retirement on a stale belief
 
 **The concern.** `Retire` carries the effective GC watermark as evidence and the node honors
 it only above `last_member_ballot`, the highest ballot a configuration naming it was bound
@@ -58,18 +58,49 @@ became effective.
 
 **Verification.** By reading and by the harness's oracle, not by a model claim: the model
 has no node reboot of `ColocatedNode` state. The harness aims one retirement in ten at a
-*member* rather than at a retirable acceptor (`chain_workload.rs:2103`, the
-`aim_at_member` coin, with the watermark it just read), and the audit's "gc: a node retires
-only after an effective floor named it retirable" (`crates/paros-sim/src/audit/matchmaker.rs:1862`)
-is an always-assertion on the retired node against the set the effective floor released.
-Every sweep and hunt since #134 has been green under that coin, including this branch's.
+*member* rather than at a retirable acceptor (`chain_workload.rs`, the `aim_at_member`
+coin, with the watermark it just read), and the audit's "gc: a node retires only after an
+effective floor named it retirable" (`crates/paros-sim/src/audit/matchmaker.rs`) is an
+always-assertion on the retired node against the set the effective floor released.
 
-**Verdict.** Unproven as a bug, and the doctrine says what that means: no speculative
-defensive code. The fix, if the window is ever reached, has one honest shape — make
-`last_member_ballot` a durable `HardState` scalar with its write op, storage record and
-boot read-back — and that is a protocol change with a storage surface, not a patch. What is
-recorded here is the exact window and what closes it, so a red witness has a diagnosis
-waiting. Nothing changed.
+**The red witness (#165).** CI's coverage-guided sweep on #160 produced the recipe
+`11365151955225522550 [(4114, 1006316943509197070)]`, red on `main` at `ee9d078`: node 5 of
+`C_9` accepted a retirement aimed at it as a member, with its durable promise at round 3
+while the cluster was at round 9. A promise stuck six rounds behind says node 5 heard
+nothing at rounds 4–9 — no `Prepare`, no beat — so the witness is the **never-learned**
+shape rather than only the reboot window above: the node's belief did not name it because
+the configuration that did never reached it. The two readings share one cause — every
+membership fact the node holds was read off a message it received — and a durable
+`last_member_ballot` closes only the reboot half (a node cannot make durable what it never
+heard). The recipe is a draw schedule of that build; it did not replay on later heads.
+
+**Verdict.** Fixed by a freshness leg, not a durable scalar. `may_retire` now also requires
+`acceptors_since == w`: the configuration the node believes in force is bound to exactly the
+watermark, so it is `C_w`, the configuration the floor was computed over, and "not an
+acceptor" is a fact about it. Both readings then refuse: the rebooted node's belief is bound
+at `Ballot::zero()`, the deaf node's below `w`. The leg is an equality because a belief bound
+*above* `w` fails the other way: a node of `C_w` that missed `w` and then heard a later
+configuration dropping it would pass every other leg for the old watermark, while `C_w`,
+which the floor did not collect, still names it (a review finding on the first draft, which
+used `>=`). The refusal leg is `"stale"` (`paros::driver::operator::retire`, reported only
+when the fence leg passed, so `not_collected` keeps its meaning; the audit's reachable "gc: a
+retirement is refused on a belief older than the floor"). It ends when a beat at the
+leader's ballot reaches the node — beats go to the whole pool, removed members included —
+and an operator holding an older watermark re-reads `Inspect`. **Residual:** a node whose
+own promise is above the leader's ballot (it campaigned after a reboot, then adopted an
+effective configuration that does not name it) does not follow that leader's beats, so it
+stays `stale` until a later leadership reaches it; before this leg such a node could retire
+legitimately. That costs the operator a retirement, never safety, and is recorded on
+`may_retire`. The mechanism test is
+`a_belief_older_than_the_floor_refuses_to_retire` (`node/tests/matchmaking.rs`, red without
+the leg). The harness gained reach toward the state: an operator that probes every member's
+own `Inspect` at once and aims at one whose belief does not name it (its own BUGGIFY
+location in the chain workload's `RETIRE`, with the reachables "gc: an operator probes the
+members' beliefs before a retirement" and "gc: a retirement is aimed at a member whose
+belief does not name it"; none found, it falls back to the ordinary draw). The state is
+short-lived: on this branch neither a 2,000-seed hunt nor a saturated sancov sweep of the
+*unfixed* code reached it, so the red evidence is the CI recipe and the mechanism test, and
+the explorer is still the runner most likely to land in the state again.
 
 ## 2. Registry paging as protocol
 
@@ -300,7 +331,7 @@ reverted; none is kept, per the doctrine that a witness is evidence, not an arti
 | 8 seams | 9 | `on_stop` answers `Stopped` without `freeze()` (`generation.rs:92`) | `:1020` |
 
 Concerns 1 and 4 are verified by reading and by the harness, not by a model claim; §1
-records the one open window and the shape of its fix.
+records the window the sweep reached (#165) and the freshness leg that closed it.
 
 ## What this note does not claim
 
