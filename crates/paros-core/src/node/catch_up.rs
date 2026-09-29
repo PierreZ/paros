@@ -143,7 +143,10 @@ impl ColocatedNode {
             self.acceptor.first_slot() == point,
             "a trim-point jump raises the floor to the point"
         );
-        assert!(point > old_floor, "a trim-point jump never lowers the floor");
+        assert!(
+            point > old_floor,
+            "a trim-point jump never lowers the floor"
+        );
         assert!(
             self.first_unchosen() >= point,
             "a trim-point jump chooses everything below the point"

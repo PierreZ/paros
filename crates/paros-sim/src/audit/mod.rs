@@ -510,7 +510,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn replica_booted(&self, replica: NodeId, _chosen_index: Option<Slot>, _floor: Slot) {
+    fn replica_booted(&self, replica: NodeId, chosen_index: Option<Slot>, _floor: Slot) {
         let mut st = self.state();
         // A replica's id is outside the pool by construction; a collision
         // would fold a replica's reports into an acceptor's state.
@@ -522,6 +522,19 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.replicas.insert(replica.0);
         // A replica's read frontier is per boot, as a node's.
         st.read_watermark.remove(&replica.0);
+        // The recovered prefix is walked, exactly as a node's boot report
+        // says in `recovered`: with no application to replay (#186) the
+        // walk resumes one past the durable chosen index, so a crash that
+        // made the index durable before the walk over it was reported
+        // (the `AfterSyncBeforeSend` seam) lands the next incarnation past
+        // slots the audit never saw walked. Admitted as a landing — before
+        // this, a replica's boot was not, and its first walked slot tripped
+        // the no-gaps check (seeds 6838332052396296126,
+        // 13879836091973256863, 3245387034260967674).
+        if let Some(ci) = chosen_index {
+            st.landings.entry(replica.0).or_default().insert(ci.0);
+            st.observe_applied_index(replica.0, ci.0);
+        }
     }
 
     fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {

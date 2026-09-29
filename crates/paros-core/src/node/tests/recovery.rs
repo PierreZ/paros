@@ -292,6 +292,71 @@ fn faulty_chosen_slot_heals_via_catchup() {
     }
 }
 
+/// A faulty record inside the chosen prefix is also a hole in the #94
+/// at-most-once ledger: the identity it decided is unknown here until it
+/// heals. The walk holds meanwhile — walking a later duplicate of that
+/// identity would run it as its first application (a user entry here, a
+/// `Noop` everywhere else) — and resumes, suppressing the duplicate, once
+/// the record heals.
+#[test]
+fn a_faulty_chosen_record_holds_the_walk_until_the_ledger_heals() {
+    let nodes = cluster_with_three_chosen();
+    let mut storage = TestStorage::from_node(&nodes[1]);
+    storage.rot(Slot(1));
+    let mut n = ColocatedNode::new(&storage);
+    let _ = drain(&mut n);
+    let record = |s: u64| {
+        nodes[0]
+            .acceptor()
+            .records()
+            .get(&Slot(s))
+            .cloned()
+            .expect("chosen")
+    };
+    let (ballot, original) = record(1);
+    assert!(
+        matches!(&original, Command::User(e) if e.client == ClientId(1) && e.seq == ClientSeq(2)),
+        "slot 1 decided (client 1, seq 2)"
+    );
+
+    // Slot 3 is chosen with a #94 duplicate of slot 1's identity.
+    n.step(Message::CatchUpResponse {
+        from: NodeId(0),
+        entries: BTreeMap::from([(Slot(3), (ballot, original.clone()))]),
+    });
+    assert!(n.replica().is_chosen(Slot(3)));
+    assert_eq!(
+        n.replica().chosen_index(),
+        Some(Slot(2)),
+        "the walk holds while the ledger has a hole"
+    );
+    let (_, committed) = drain_with(&mut n, |r| r.committed().to_vec());
+    assert!(committed.is_empty(), "nothing walked past the hole");
+
+    // The record heals: the walk resumes and suppresses the duplicate.
+    n.step(Message::CatchUpResponse {
+        from: NodeId(0),
+        entries: BTreeMap::from([(Slot(1), record(1))]),
+    });
+    assert!(n.acceptor().faulty().is_empty(), "the record healed");
+    assert_eq!(n.replica().chosen_index(), Some(Slot(3)));
+    assert!(
+        n.replica().duplicate_slots().contains(&Slot(3)),
+        "slot 3 runs as the duplicate it is"
+    );
+    assert_eq!(
+        n.replica().applied_at(ClientId(1), ClientSeq(2)),
+        Some(Slot(1)),
+        "the identity applied at its first slot"
+    );
+    let (_, committed) = drain_with(&mut n, |r| r.committed().to_vec());
+    assert_eq!(
+        committed,
+        vec![(Slot(3), Command::Control(Control::Noop))],
+        "the walk hands the duplicate on as a no-op"
+    );
+}
+
 /// Per-slot attribution on the serving side: a peer never serves catch-up past
 /// its own faulty slot — silence, not a silently gapped replay.
 #[test]

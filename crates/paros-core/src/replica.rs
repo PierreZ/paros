@@ -559,6 +559,20 @@ impl Replica {
         truncate_up_to
     }
 
+    /// **Hold** the walk instead of running it: the caller knows the
+    /// at-most-once ledger is incomplete — a chosen record inside the prefix
+    /// is faulty (a boot read it back damaged, CTRL Stage 8), so the identity
+    /// it decided is missing from the ledger until the record heals
+    /// ([`Replica::learn`]'s below-prefix fold) or a trim-point jump seals
+    /// it ([`Replica::trim_to`]). Walking past the hole would decide a later
+    /// #94 duplicate of that identity as its first application — a user
+    /// entry here, a `Noop` on every node whose ledger is whole. Only the
+    /// deferred-continuation flag is kept in step, so the first walk after
+    /// the heal resumes from the same slot.
+    pub fn hold(&mut self) {
+        self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+    }
+
     // ---- log prefix drops -----------------------------------------------------
 
     /// Drop everything below `first` after a decided truncation: the walked

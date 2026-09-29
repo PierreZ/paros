@@ -523,6 +523,13 @@ impl ReplicaNode {
     /// Walk the contiguous prefix and execute a decided truncation *after*
     /// the walk.
     fn advance(&mut self) {
+        // Every faulty record here sits inside the chosen prefix (the boot
+        // keeps only those): a hole in the at-most-once ledger, so the walk
+        // holds until it heals, exactly as a node's does.
+        if !self.faulty.is_empty() {
+            self.replica.hold();
+            return;
+        }
         // The coupling a node asserts per applied slot — "the authoritative
         // record carries the applied command" — holds here by construction:
         // the record is `WriteOp::Learned` from the very command `learn`

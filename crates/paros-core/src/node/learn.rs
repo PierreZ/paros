@@ -122,6 +122,23 @@ impl ColocatedNode {
     /// fresh-leader fence).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
+        // A faulty record inside the chosen prefix is a hole in the
+        // at-most-once ledger: hold the walk until it heals (catch-up pulled
+        // by `tick_repair`, a trim-point jump, or this node's own election).
+        // Walking past it decided a #94 duplicate of the missing identity as
+        // its first application and acked the client at the duplicate's slot
+        // — a boot read slot 2 back faulty under a durable chosen index of 2,
+        // and the walk applied the same `(client, seq)` again at slot 5 while
+        // every other node ran it as a `Noop` (seed 16921589310752617664).
+        if self
+            .acceptor
+            .first_faulty()
+            .is_some_and(|slot| slot < self.replica.first_unchosen())
+        {
+            self.replica.hold();
+            self.serve_reads();
+            return;
+        }
         let acceptor = &self.acceptor;
         let truncate_up_to = self.replica.advance(
             |slot, command| acceptor.record(slot).map(|(_, c)| c) == Some(command),
