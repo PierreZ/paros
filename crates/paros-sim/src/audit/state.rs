@@ -398,6 +398,8 @@ pub(super) struct AuditState {
     pub(super) compact_ack_refused: bool,
     pub(super) mailbox_dropped: bool,
     pub(super) shortest_timeout: bool,
+    /// The election backoff doubled a timeout base (reach-once).
+    pub(super) election_backoff: bool,
     pub(super) dropped_accept: bool,
     pub(super) dropped_election: bool,
     pub(super) dropped_commit: bool,

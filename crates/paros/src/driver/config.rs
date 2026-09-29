@@ -97,6 +97,18 @@ pub struct DriverTunables {
     /// the node; a long quarantine is a node that is slow to heal one
     /// journal, never a wrong one.
     pub quarantine_ticks: u64,
+    /// How many times a node's election timeout base may double across
+    /// consecutive failed campaigns (no leader known between two expiries):
+    /// the `k`-th consecutive expiry draws from `[T·2^j, 2·T·2^j)` with
+    /// `j = min(k - 1, election_backoff_doublings)`, and knowing a leader
+    /// (or being one) resets it. A fixed timeout below a Phase-1 round trip
+    /// livelocks for good: a sole candidate whose slowest promise always
+    /// lands one round late abandons every round it opens (witness
+    /// 2881076808784637484: `q1 = n` over a degraded link, 180 rounds in
+    /// 63 s and never a leader). Floor 2: `T × 4` outruns any round trip the
+    /// base's own floor is sized against; a larger ceiling is a slower
+    /// recovery after a leader dies behind a partition, never a wrong one.
+    pub election_backoff_doublings: u32,
     /// Capacity of each client-facing endpoint queue (propose, read, compact,
     /// inspect, …) between the RPC runtime and the node loop
     /// (`RpcConfig::endpoint_queue_capacity`). Floor 1: overload is visible as
@@ -198,6 +210,7 @@ impl Default for DriverTunables {
             read_retry_ticks: READ_RETRY_TICKS,
             read_poll_ticks: READ_POLL_TICKS,
             quarantine_ticks: QUARANTINE_TICKS,
+            election_backoff_doublings: ELECTION_BACKOFF_DOUBLINGS,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
             peer_queue_capacity: PEER_QUEUE_CAPACITY,
@@ -235,6 +248,10 @@ const QUARANTINE_TICKS: u64 = 8 * ELECTION_TIMEOUT_BASE;
 /// dominates the core's heartbeat interval, so a live leader always beats before
 /// a follower's election clock fires.
 const ELECTION_TIMEOUT_BASE: u64 = 5;
+
+/// Default [`DriverTunables::election_backoff_doublings`]: up to `8 × T`
+/// (two to four seconds at the default tick) after three failed campaigns.
+const ELECTION_BACKOFF_DOUBLINGS: u32 = 3;
 
 /// Default take-back budget for a delegated round (#142), in re-delegations
 /// — one per beat, so two election-timeout bases of ticks: long enough for a

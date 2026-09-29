@@ -236,7 +236,17 @@ impl NodeShape {
             // ceiling holds one journal down on one node for a few seconds,
             // which the recovery tail outlasts.
             quarantine_ticks: buggify_knob!(40_u64, 1_u64..161_u64),
+            // The election backoff's ceiling (doublings of the base across
+            // consecutive failed campaigns). Floor 2: below it a sole
+            // candidate over a degraded link can still abandon every round
+            // before its slowest promise returns; the ceiling only slows a
+            // leaderless cluster's re-election.
+            election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
         };
+        if tunables.election_backoff_doublings != 3 {
+            // BUGGIFY pairing: the election backoff extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme election backoff ceiling");
+        }
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme GC re-send cadence");

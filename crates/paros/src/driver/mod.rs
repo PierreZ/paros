@@ -137,7 +137,10 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             last,
             waiters,
             self.self_id,
-            self.tunables.election_timeout_base,
+            (
+                self.tunables.election_timeout_base,
+                self.tunables.election_backoff_doublings,
+            ),
             self.hooks,
             self.audit,
         );

@@ -1563,6 +1563,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
+    fn election_backoff(&self, _node: NodeId, _doublings: u32) {
+        // A cause, not an outcome: failed campaigns are the swarm's business;
+        // what the backoff buys is the convergence claim.
+        let mut st = self.state();
+        reach_once!(
+            st.election_backoff,
+            "the driver backs off its election timeout after a failed campaign"
+        );
+    }
+
     fn waiter_superseded(&self, _node: NodeId, _slot: Slot) {
         let mut st = self.state();
         reach_once!(

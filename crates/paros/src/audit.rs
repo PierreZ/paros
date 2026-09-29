@@ -383,6 +383,11 @@ pub trait Audit {
     /// This node selected the shortest valid election timeout.
     fn election_timeout_extreme(&self, node: NodeId, ticks: u64) {}
 
+    /// This node's election timeout base was doubled `doublings` times: its
+    /// previous campaigns expired with no leader known (the election
+    /// backoff, [`crate::DriverTunables::election_backoff_doublings`]).
+    fn election_backoff(&self, node: NodeId, doublings: u32) {}
+
     /// This node now runs with an election timeout of `ticks` (the driver's
     /// randomized draw, re-drawn at every demotion). The `CheckQuorum`
     /// window a leader re-proves its ack quorum in is exactly this long, so
