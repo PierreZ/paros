@@ -296,9 +296,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // A trim point is a floor some peer holds, and a floor only ever
         // moves inside a walked chosen prefix — so the landing sits inside
         // the cluster's applied frontier, or it names slots nobody chose.
+        // The message keeps its pre-#186 wording — the same claim the
+        // snapshot install made, and an assertion's slot is its hash.
         assert_always!(
             st.cluster_applied_max.is_some_and(|max| landing <= max),
-            "a trim-point jump lands within the cluster's applied frontier",
+            "an installed snapshot lands within the cluster's applied frontier",
             {
                 "node" => node.0,
                 "landing" => landing,

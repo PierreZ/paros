@@ -62,7 +62,7 @@ snapshot machinery's, and nothing new is added to make GC possible. The rule liv
 `ColocatedNode::gc_covered`; the derivation is the module doc of `node/gc.rs`.
 
 Two more preconditions keep the "Region 2 is decided" half honest: GC waits while any
-Phase-1-shaped work is open (`leader_recovery`, the CTRL `repair_probe`, `app_repair`), the
+Phase-1-shaped work is open (`leader_recovery`, the CTRL `repair_probe`; the `app_repair` gate went with the application in #186), the
 same gates that refuse a handoff.
 
 ### The protocol

@@ -140,13 +140,17 @@ impl ColocatedNode {
         // regresses, the chosen index covers everything below it and never
         // rewinds, and the promise did not move.
         assert!(
-            self.acceptor.first_slot() == point && point > old_floor,
+            self.acceptor.first_slot() == point,
             "a trim-point jump raises the floor to the point"
         );
+        assert!(point > old_floor, "a trim-point jump never lowers the floor");
         assert!(
-            self.first_unchosen() >= point
-                && Some(Slot(point.0 - 1)) <= self.replica.chosen_index(),
+            self.first_unchosen() >= point,
             "a trim-point jump chooses everything below the point"
+        );
+        assert!(
+            Some(Slot(point.0 - 1)) <= self.replica.chosen_index(),
+            "a trim-point jump's chosen index covers the point"
         );
         assert!(
             self.replica.chosen_index() >= old_chosen_index,

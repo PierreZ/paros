@@ -45,6 +45,7 @@
 //! | `skip_proxy_resend` | audit `proxy_resend_skipped` | "proxy: a leader takes a delegated round back" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
+//! | `withhold_gc_requests` | scripted, never drawn (`ScriptedOptions::withhold_gc`) | the departed-straggler case's non-vacuous floor |
 //!
 //! Message kinds keep their own gates where they walk different Paxos paths:
 //! a lost `Accept` is the stranded-slot terrain, a lost `Accepted` is the

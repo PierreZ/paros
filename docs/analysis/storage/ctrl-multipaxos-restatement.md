@@ -111,6 +111,11 @@ demo). Mechanically: repair *fills or replaces-with-proven-identical* —
 
 ## Where each repair actually flows (Boxes B/C/D, fused into existing paths)
 
+> **Since #186** paros runs no application and keeps no snapshot: the snap-chunk plane,
+> `InstallSnapshot` and the application rows below are gone. A node below the floor jumps
+> to a peer's trim point (`Message::TrimmedTo`) and heals the rest by catch-up; the other
+> rows stand. The table is kept as the #101 design record.
+
 paros grows **one dedicated repair plane and nothing else**: the #101 snap-chunk
 messages (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse`), handled driver-terminally —
 they never enter `ColocatedNode`, so the core protocol still grows no recovery RPC and the M5
