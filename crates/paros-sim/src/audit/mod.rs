@@ -150,7 +150,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             );
         }
         let in_chaos = self.time.now() < crate::CHAOS_DURATION;
-        board.applied(node.0, *journal, in_chaos);
+        board.applied(*journal, in_chaos);
     }
 
     fn now_ms(&self) -> u64 {
@@ -432,11 +432,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {
         if let Some((journal, board)) = &self.journal {
+            let mut board = journals::lock(board);
             assert_always!(
-                !journals::lock(board).is_quarantined(node.0, *journal),
+                !board.is_quarantined(node.0, *journal),
                 "journal: a quarantined journal sends nothing",
                 { "node" => node.0, "journal" => journal.0 }
             );
+            board.sent(node.0, *journal);
         }
         self.count_sent(msg);
         if let Message::Prepare { ballot, config, .. } = msg {

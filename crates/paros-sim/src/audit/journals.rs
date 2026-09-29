@@ -13,8 +13,10 @@
 //!   journal's identity), and a journal a storage fault quarantined on a node
 //!   sends nothing from that node until it re-opens;
 //! - **liveness** — a journal keeps committing while a sibling on the same
-//!   nodes is held for the chaos window (`DriverHooks::hold_journal`), and a
-//!   node keeps serving its other journals while one is quarantined.
+//!   nodes is held for the chaos window (`DriverHooks::hold_journal`) or
+//!   still recovering from the hold, and a node keeps running its other
+//!   journals' protocol (it sends their beats, votes and acks) while one is
+//!   quarantined.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -36,8 +38,10 @@ pub(crate) struct JournalBoard {
     held: Option<JournalId>,
     /// `(node, journal)` pairs quarantined right now.
     quarantined: BTreeSet<(u64, u64)>,
-    /// A journal committed while a sibling was held.
+    /// A journal committed while a sibling was held or not yet caught up.
     committed_while_held: bool,
+    /// The held journal applied a slot after its hold ended: it caught up.
+    held_caught_up: bool,
     /// A node applied a slot of one journal while another of its journals
     /// was quarantined.
     served_while_quarantined: bool,
@@ -79,14 +83,28 @@ impl JournalBoard {
     }
 
     /// `node` applied a slot of `journal`; `in_chaos` says the chaos window
-    /// (the hold) is still open.
-    pub(crate) fn applied(&mut self, node: u64, journal: JournalId, in_chaos: bool) {
-        if in_chaos && self.held.is_some_and(|held| held != journal) {
+    /// (the hold) is still open. The held journal stays stalled past the
+    /// window until it re-elects and commits again, so a sibling's commit
+    /// counts until then: commits inside the 4 s window alone are rare
+    /// (a run's first leaders are still being elected).
+    pub(crate) fn applied(&mut self, journal: JournalId, in_chaos: bool) {
+        let Some(held) = self.held else {
+            return;
+        };
+        if held == journal {
+            self.held_caught_up |= !in_chaos;
+        } else if in_chaos || !self.held_caught_up {
             if !self.committed_while_held {
                 assert_reachable!("journal: a journal commits while a sibling is held");
             }
             self.committed_while_held = true;
         }
+    }
+
+    /// `node` sent a message of `journal`: it is running that journal's
+    /// protocol, which counts as serving it while a sibling is quarantined
+    /// on the same node.
+    pub(crate) fn sent(&mut self, node: u64, journal: JournalId) {
         if self
             .quarantined
             .iter()
