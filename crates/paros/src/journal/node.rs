@@ -64,6 +64,23 @@ pub struct JournalStorage<P: StorageProvider> {
     pub(super) image: NodeImage,
     /// Records applied to the image and not yet appended.
     staged: Vec<NodeRecord>,
+    /// What the last boot scan found (observation only).
+    boot_facts: JournalBootFacts,
+}
+
+/// What a [`JournalStorage`]'s last boot scan found — observation for a
+/// harness's reach gates, never a decision: the store boots the same way
+/// whatever these say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JournalBootFacts {
+    /// The journal's live prefix started past its genesis: a checkpoint had
+    /// truncated the segments before it.
+    pub checkpoint_truncated: bool,
+    /// Entries of an ambiguous last batch (a crash before its sync resolved)
+    /// the journal kept, marked damaged, instead of cutting.
+    pub ambiguous_kept: usize,
+    /// A torn tail (never acknowledged) was discarded.
+    pub torn_tail: bool,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
@@ -96,7 +113,14 @@ impl<P: StorageProvider> JournalStorage<P> {
             meta_dirty: false,
             image: NodeImage::default(),
             staged: Vec::new(),
+            boot_facts: JournalBootFacts::default(),
         }
+    }
+
+    /// What the last boot scan found ([`JournalBootFacts`]).
+    #[must_use]
+    pub fn boot_facts(&self) -> JournalBootFacts {
+        self.boot_facts
     }
 
     /// The directory the journal lives in.
@@ -129,6 +153,11 @@ impl<P: StorageProvider> JournalStorage<P> {
                 .await
                 .map_err(|e| open_error(&e))?;
         report(self.config.id.0, &recovery);
+        self.boot_facts = JournalBootFacts {
+            checkpoint_truncated: journal.start_index() != GENESIS,
+            ambiguous_kept: recovery.ambiguous_batch.len(),
+            torn_tail: recovery.torn_tail,
+        };
         self.meta = match journal.meta() {
             None => NodeMeta::default(),
             Some(bytes) => NodeMeta::decode(bytes).ok_or(StorageError::Corruption {

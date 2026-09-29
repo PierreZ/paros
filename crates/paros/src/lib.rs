@@ -63,7 +63,7 @@ pub mod wire {
     pub use crate::rpc::{common, internal, matchmaker, public};
 }
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
-pub use journal::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
+pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
 };

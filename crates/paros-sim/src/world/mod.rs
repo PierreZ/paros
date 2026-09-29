@@ -8,6 +8,7 @@
 //! handle; the boot-rot sites live in [`rot`].
 
 pub(crate) mod matchmaker;
+pub(crate) mod node_store;
 pub(crate) mod rot;
 pub(crate) mod storage;
 
@@ -351,6 +352,17 @@ pub(crate) struct StorageWorld {
     /// exactly when the marker lands durably, so a first boot whose format
     /// sync was lost is a first boot again.
     provisioned: BTreeSet<String>,
+    /// Identities whose provisioning began on a store whose marker lands
+    /// only with a later sync (#187: the journal store): between the format
+    /// and that sync a process kill leaves the operator honestly unsure, and
+    /// the next boot resolves it by looking at the disk
+    /// ([`StorageWorld::provisioning_ambiguous`]).
+    provisioning: BTreeSet<String>,
+    /// I/O faults a journal store surfaced from moonpool's simulated disk
+    /// (#187: a sync the disk failed, an operation the shutdown cut): the
+    /// world injected none of them, so they are counted at the store
+    /// boundary and join `injected` in the one-crash-per-fault correlation.
+    disk_faults: usize,
     /// The replica tier's disks (#144), by IP: learners that are not
     /// acceptors. Their records are never a *copy* the budget defends — a
     /// replica answers no Phase 1 — so the copy count never looks at them,
@@ -413,6 +425,35 @@ impl StorageWorld {
     /// harness hands the driver as `BootKind`.
     pub(crate) fn provisioned(&self, ip: &str) -> bool {
         self.provisioned.contains(ip)
+    }
+
+    /// The operator began provisioning `ip` (#187): a journal store's format
+    /// was staged; it is durable only once the next sync returns.
+    pub(crate) fn note_provisioning(&mut self, ip: &str) {
+        self.provisioning.insert(ip.to_string());
+    }
+
+    /// A journal store surfaced an I/O fault from the simulated disk (#187).
+    pub(crate) fn note_disk_fault(&mut self) {
+        self.disk_faults += 1;
+    }
+
+    /// `ip`'s provisioning landed: its format marker is durable (#187).
+    pub(crate) fn note_provisioned(&mut self, ip: &str) {
+        self.provisioning.remove(ip);
+        self.provisioned.insert(ip.to_string());
+    }
+
+    /// `ip`'s provisioning was interrupted and never confirmed: the marker
+    /// may or may not be on its disk (#187).
+    pub(crate) fn provisioning_ambiguous(&self, ip: &str) -> bool {
+        self.provisioning.contains(ip) && !self.provisioned.contains(ip)
+    }
+
+    /// The disk said the interrupted provisioning of `ip` never landed: the
+    /// identity is unprovisioned, and its next boot is a first boot.
+    pub(crate) fn abandon_provisioning(&mut self, ip: &str) {
+        self.provisioning.remove(ip);
     }
 
     /// Whether `ip`'s registry was lost for good.
@@ -1056,7 +1097,7 @@ pub(crate) fn storage_fault_stats(
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let mut stats = StorageFaultStats {
-        injected: guard.injected.len(),
+        injected: guard.injected.len() + guard.disk_faults,
         eio_landed: false,
         eio_lost: false,
         fsync_durable: false,

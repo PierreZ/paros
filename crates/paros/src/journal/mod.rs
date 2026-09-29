@@ -81,7 +81,7 @@ use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::storage::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 
 pub use matchmaker::JournalMatchmakerStorage;
-pub use node::JournalStorage;
+pub use node::{JournalBootFacts, JournalStorage};
 
 /// The index the first entry of every journal gets: a store whose log still
 /// starts here has never dropped a prefix, so its whole history is on disk.

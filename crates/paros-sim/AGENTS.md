@@ -50,7 +50,11 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   cursor).
 - `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,
   parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`LogStorage` +
-  write-path fault sites) · `world/rot.rs` boot-rot BUGGIFY sites, one per
+  write-path fault sites) · `world/node_store.rs` `NodeStore` (#187: an acceptor's
+  store, the world's or the library's `JournalStorage` over `SimStorageProvider` on the
+  seeds `shape::journal_store` draws; `LedgeredJournal` keeps the provisioning ledger in
+  two steps and counts the disk's I/O faults for the one-crash-per-fault correlation) ·
+  `world/rot.rs` boot-rot BUGGIFY sites, one per
   fault family · `world/matchmaker.rs` `DurableMatchmakerStorage`.
 - `audit/mod.rs` `AuditWorld` (one per journal, `audit_world_for`; `world/`'s
   `storage_world_for` likewise, keyed by `state::journal_key`), `check_run`,

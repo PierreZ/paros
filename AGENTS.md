@@ -640,15 +640,23 @@ CTRL: a damaged vote becomes `faulty(slot, ballot)` from its tag, a damaged chos
 truncation / trim jump is forgotten (each is re-derivable, and
 forgetting leaves the store as it was before it), a damaged registry record or trusted
 checkpoint header is a crash verdict; the per-kind table is on `paros::journal`. The stores
-carry **no application** and neither does paros (#186): a journal's client folds what it reads. **The simulation harness does not run on them yet** — the campaign's
-nodes and matchmakers still use the world-backed stores (`crates/paros-sim/src/world/`), because
-those carry what a moonpool disk fault cannot: the cross-node copy budget (a clean Phase-1
-quorum copy of every record survives), the ground-truth fault ledger the audit resolves every
-injected fault against, the provisioning ledger, and the corpus's per-record masks. The journal stores are proven by their own crash
-loops on the simulated disk (`crates/paros/src/journal/tests.rs`, two fault models) and by both
-contract suites, which also run inside the harness's contract workload on the simulation's own
-disk. Switching the harness means rebuilding those four surfaces over journal files, not
-dropping them. **The seam is async.** Every
+carry **no application** and neither does paros (#186): a journal's client folds what it reads.
+**The simulation harness runs them on half the plain seeds (#187)**: `paros_sim::shape::journal_store`
+draws a seeded coin on a perturbed seed without matchmakers, and a heads seed runs every
+acceptor on `JournalStorage` over `SimStorageProvider` (`world/node_store.rs`, `NodeStore`)
+under every network fault, attrition and moonpool's own disk model (unsynced writes resolved at
+a crash, the `BuggifyKnobs` disk extremes) — but no world-injected corruption. The other seeds,
+every matchmaker seed and the corpus stay on the world-backed stores (`crates/paros-sim/src/world/`),
+because those carry what a moonpool disk fault cannot: the cross-node copy budget (a clean
+Phase-1 quorum copy of every record survives), the ground-truth fault ledger the audit resolves
+every injected fault against, and the corpus's per-record masks. What a journal seed keeps of
+the world is the **provisioning ledger** (#147), in two steps (`LedgeredJournal`: begun at the
+format, landed with the sync that makes the marker durable; a kill between the two is resolved
+at the next boot by reading the disk), and a fault ledger of its own: every error the journal
+store surfaced is counted at the store boundary, so "every fault surfaces as exactly one typed
+crash decision" still binds. The journal stores are also proven by their own crash loops on the
+simulated disk (`crates/paros/src/journal/tests.rs`, two fault models) and by both contract
+suites. Moving matchmaker seeds and injected corruption onto the journal is #176. **The seam is async.** Every
 `LogStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
 the boot scan — returns a `Send`
 future (declared `-> impl Future<…> + Send`, moonpool's provider convention; implementations
