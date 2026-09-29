@@ -139,7 +139,7 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
         NodeId(self_id),
         Seam::AfterSyncBeforeSend,
     )?;
-    send_messages(out, hooks, audit, messages);
+    send_messages(out, hooks, audit, replica.config().journal, messages);
     for (slot, command) in &committed {
         report_applied(audit, self_id, *slot, command);
     }
@@ -448,7 +448,11 @@ where
     loop {
         moonpool_core::select! {
             error = edge.run() => return Err(error.into()),
-            Some(msg) = inbox.recv() => {
+            Some((to, msg)) = inbox.recv() => {
+                if to != journal {
+                    tracing::info!(node = self_id, journal = to.0, "foreign_journal_dropped");
+                    continue;
+                }
                 trace_received(self_id, &msg);
                 replica.step(msg);
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;

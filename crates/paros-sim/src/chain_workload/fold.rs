@@ -36,13 +36,19 @@ struct Fence {
     cursors: BTreeMap<u64, u64>,
 }
 
-fn fence(state: &StateHandle) -> Arc<Mutex<Fence>> {
-    crate::state::published(state, FENCE_KEY, Fence::default)
+/// `journal`'s fence (#188: each journal's trims wait only for the clients
+/// folding that journal).
+fn fence(state: &StateHandle, journal: JournalId) -> Arc<Mutex<Fence>> {
+    crate::state::published(
+        state,
+        &crate::state::journal_key(FENCE_KEY, journal),
+        Fence::default,
+    )
 }
 
 /// Register `client` in the fence at the log's start.
-pub(super) fn register(state: &StateHandle, client: u64) {
-    fence(state)
+pub(super) fn register(state: &StateHandle, journal: JournalId, client: u64) {
+    fence(state, journal)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .cursors
@@ -50,8 +56,8 @@ pub(super) fn register(state: &StateHandle, client: u64) {
 }
 
 /// Take `client` out of the fence: trims no longer wait for it.
-pub(super) fn release(state: &StateHandle, client: u64) {
-    fence(state)
+pub(super) fn release(state: &StateHandle, journal: JournalId, client: u64) {
+    fence(state, journal)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .cursors
@@ -61,8 +67,8 @@ pub(super) fn release(state: &StateHandle, client: u64) {
 /// The highest `Truncate { up_to }` the fence allows at most `up_to`:
 /// every slot at or below it folded by every registered client. `None`
 /// while some registered client has folded nothing.
-pub(super) fn clamp(state: &StateHandle, up_to: u64) -> Option<u64> {
-    let guard = fence(state);
+pub(super) fn clamp(state: &StateHandle, journal: JournalId, up_to: u64) -> Option<u64> {
+    let guard = fence(state, journal);
     let guard = guard.lock().unwrap_or_else(PoisonError::into_inner);
     match guard.cursors.values().min() {
         None => Some(up_to),
@@ -72,6 +78,8 @@ pub(super) fn clamp(state: &StateHandle, up_to: u64) -> Option<u64> {
 
 /// One client's fold: the state after every user entry below `cursor`.
 pub(super) struct Fold {
+    /// The journal this client folds.
+    journal: JournalId,
     state: ChainState,
     cursor: u64,
     /// Whether the client is still in the fence. Once it left, a trim may
@@ -81,8 +89,9 @@ pub(super) struct Fold {
 }
 
 impl Fold {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(journal: JournalId) -> Self {
         Self {
+            journal,
             state: ChainState::default(),
             cursor: 0,
             fenced: true,
@@ -104,7 +113,7 @@ impl Fold {
     /// Leave the fence (see [`release`]).
     pub(super) fn leave(&mut self, state: &StateHandle, client: u64) {
         self.fenced = false;
-        release(state, client);
+        release(state, self.journal, client);
     }
 
     /// Fold one page read from `from` (already judged). A page from anywhere
@@ -147,7 +156,7 @@ impl Fold {
             }
         }
         self.cursor = self.cursor.max(next);
-        if let Some(cursor) = fence(state)
+        if let Some(cursor) = fence(state, self.journal)
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .cursors
@@ -175,7 +184,7 @@ impl Fold {
             }
             let from = self.cursor;
             let request = Read {
-                journal: JournalId::default().0,
+                journal: self.journal.0,
                 from_lsn: from,
                 max_bytes,
             };

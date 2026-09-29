@@ -36,15 +36,16 @@ macro_rules! reach_once {
 }
 
 mod client;
+pub(crate) mod journals;
 mod matchmaker;
 mod state;
 mod world;
 
 pub(crate) use client::ClientHistory;
-pub(crate) use world::{AuditWorld, audit_world, check_run};
+pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
@@ -70,6 +71,9 @@ use self::state::AuditState;
 pub(crate) struct NodeAudit<T> {
     time: T,
     world: Arc<AuditWorld>,
+    /// The journal this port reports for and the run's cross-journal board
+    /// (#188); `None` for a port outside the journal plane (a matchmaker).
+    journal: Option<(JournalId, Arc<Mutex<journals::JournalBoard>>)>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -108,7 +112,45 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
     }
     pub(crate) fn new(time: T, world: Arc<AuditWorld>) -> Self {
-        Self { time, world }
+        Self {
+            time,
+            world,
+            journal: None,
+        }
+    }
+
+    /// This port reports for `journal` (#188): the non-interference oracles
+    /// on `board` see its applies, its sends and its quarantines.
+    pub(crate) fn in_journal(
+        mut self,
+        journal: JournalId,
+        board: Arc<Mutex<journals::JournalBoard>>,
+    ) -> Self {
+        self.journal = Some((journal, board));
+        self
+    }
+
+    /// The non-interference half of an apply (#188): on a multi-journal run
+    /// a user command's identity must be one appended to this journal, and
+    /// the board learns which journal committed while a sibling was held or
+    /// quarantined.
+    fn journal_applied(&self, node: NodeId, identity: Option<(u64, u64)>) {
+        let Some((journal, board)) = &self.journal else {
+            return;
+        };
+        let mut board = journals::lock(board);
+        if !board.is_multi() {
+            return;
+        }
+        if let Some((client, seq)) = identity {
+            assert_always!(
+                self.state().appended.contains(&(client, seq)),
+                "journal: a slot holds only a command appended to its own journal",
+                { "node" => node.0, "journal" => journal.0, "client" => client, "seq" => seq }
+            );
+        }
+        let in_chaos = self.time.now() < crate::CHAOS_DURATION;
+        board.applied(node.0, *journal, in_chaos);
     }
 
     fn now_ms(&self) -> u64 {
@@ -375,9 +417,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
+        drop(st);
+        self.journal_applied(node, identity);
+    }
+
+    fn journal_quarantined(&self, node: NodeId) {
+        if let Some((journal, board)) = &self.journal {
+            journals::lock(board).quarantine(node.0, *journal);
+            // A cause: the storage fault that took one journal down on a
+            // node; the outcome is the board's "serves its other journals".
+            assert_reachable!("journal: a storage fault quarantines one journal of a node");
+        }
     }
 
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {
+        if let Some((journal, board)) = &self.journal {
+            assert_always!(
+                !journals::lock(board).is_quarantined(node.0, *journal),
+                "journal: a quarantined journal sends nothing",
+                { "node" => node.0, "journal" => journal.0 }
+            );
+        }
         self.count_sent(msg);
         if let Message::Prepare { ballot, config, .. } = msg {
             self.check_prepare_licence(node, to, *ballot, config.as_ref());
@@ -1043,6 +1103,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         accepted: &[(Slot, Ballot, u64)],
     ) {
         let now = self.now_ms();
+        if let Some((journal, board)) = &self.journal {
+            journals::lock(board).reopened(node.0, *journal);
+        }
         let mut st = self.state();
         st.booted.insert(node.0);
         // One shared deployment per run: every node's durable configuration

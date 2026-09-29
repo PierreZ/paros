@@ -14,7 +14,10 @@ use super::{common, internal};
 
 #[test]
 fn protobuf_rejects_a_missing_message_kind() {
-    let result = message_from_proto(internal::ConsensusMessage { kind: None });
+    let result = message_from_proto(internal::ConsensusMessage {
+        kind: None,
+        journal: 0,
+    });
     assert!(matches!(result, Err("missing Paxos message kind")));
 }
 
@@ -36,6 +39,7 @@ fn protobuf_rejects_duplicate_slots_in_a_suffix() {
                 entries: vec![entry.clone(), entry],
             },
         )),
+        journal: 0,
     };
 
     assert!(matches!(

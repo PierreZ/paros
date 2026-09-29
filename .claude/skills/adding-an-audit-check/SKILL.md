@@ -32,6 +32,7 @@ is emitted**, with the same coordinates (`node`, `from`, `round`, `slot`).
 | client-visible history: linearizability, sequential-client consistency | `audit/client.rs` (`ClientHistory`), fed by the workload, which alone knows its program order |
 | the application's fold (#186: paros runs no application, the client is it): one command and one state per LSN across clients, each client's fold in increasing LSN order, proposal validity | `ChainState` (`chain.rs`), folded by each client from what it `Read`s (`chain_workload/fold.rs`) and reported through `AuditWorld::fold_applied` (`audit/world.rs`); keep its message strings — they are the old application check's |
 | end-of-run claims (convergence of the recovery tail, `node.replica().chosen_gap()` at quiescence) | `audit/world.rs` (`check_run`, `AuditWorld::check_final_convergence`) |
+| a relation *between* journals (#188: a slot applies only its own journal's identities, a quarantined journal sends nothing, a journal commits while a sibling is held or quarantined) | the journal board, `audit/journals.rs` — every per-journal fact stays on the journal's own `AuditWorld` (`audit_world_for`, one per journal), which is how every other oracle is keyed by journal without knowing it |
 
 Keep the fold O(1) per callback; the audit runs on every transition of every
 node of every seed.

@@ -8,6 +8,20 @@
 use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
+use paros::JournalId;
+
+/// The key of `journal`'s copy of a per-journal singleton (#188): `base`
+/// itself for the default journal — so a one-journal run keeps every key it
+/// always had — and `base` suffixed by the id for any other. Every journal
+/// gets its own audit world and its own storage world, which is how every
+/// oracle is keyed by journal without an oracle knowing.
+pub(crate) fn journal_key(base: &str, journal: JournalId) -> String {
+    if journal == JournalId::default() {
+        base.to_string()
+    } else {
+        format!("{base}-{}", journal.0)
+    }
+}
 
 /// Get-or-publish the `Arc<T>` under `key`, creating it with `init` on the
 /// first ask. Get-then-publish is race-free: the sim executor is
@@ -15,7 +29,7 @@ use moonpool_sim::StateHandle;
 /// and the publish).
 pub(crate) fn published_arc<T: Send + Sync + 'static>(
     state: &StateHandle,
-    key: &'static str,
+    key: &str,
     init: impl FnOnce() -> T,
 ) -> Arc<T> {
     if let Some(value) = state.get::<Arc<T>>(key) {
@@ -30,7 +44,7 @@ pub(crate) fn published_arc<T: Send + Sync + 'static>(
 /// under `key`.
 pub(crate) fn published<T: Send + Sync + 'static>(
     state: &StateHandle,
-    key: &'static str,
+    key: &str,
     init: impl FnOnce() -> T,
 ) -> Arc<Mutex<T>> {
     published_arc(state, key, || Mutex::new(init()))

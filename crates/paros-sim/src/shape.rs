@@ -36,7 +36,7 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
-use paros::{DriverTunables, QuorumSystem};
+use paros::{DriverTunables, JournalId, QuorumSystem};
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -230,6 +230,12 @@ impl NodeShape {
             // round for a compacted slot is re-fanned-out; the tail
             // outlasts it.
             proxy_round_resends: buggify_knob!(20_u64, 1_u64..81_u64),
+            // A quarantined journal's re-open delay (#188), in ticks. Floor
+            // 1: a journal re-opened the next beat is a restart loop that
+            // still leaves the node's other journals their beats; the
+            // ceiling holds one journal down on one node for a few seconds,
+            // which the recovery tail outlasts.
+            quarantine_ticks: buggify_knob!(40_u64, 1_u64..161_u64),
         };
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
@@ -434,7 +440,85 @@ struct Registry {
     /// Run-level: the bootstrap matchmaker ranks (see
     /// [`matchmaker_bootstrap_ranks`]), fixed by the first caller.
     matchmaker_bootstrap: Option<Vec<u64>>,
+    /// Run-level: the journals every node serves and the one held for the
+    /// chaos window (see [`journals`]), fixed by the first caller.
+    journals: Option<JournalPlan>,
     nodes: BTreeMap<String, Entry>,
+}
+
+/// The run's journals (#188): the static list every node serves, in id
+/// order, and the journal held on every node for the chaos window (the
+/// non-interference stall), if the seed drew one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JournalPlan {
+    pub(crate) ids: Vec<JournalId>,
+    pub(crate) held: Option<JournalId>,
+}
+
+impl JournalPlan {
+    /// The journal client `client` appends to: clients are spread over the
+    /// journals round-robin.
+    pub(crate) fn for_client(&self, client: usize) -> JournalId {
+        self.ids
+            .get(client % self.ids.len().max(1))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Whether the run serves more than one journal.
+    pub(crate) fn is_multi(&self) -> bool {
+        self.ids.len() > 1
+    }
+}
+
+/// The run's journals (#188), drawn once per seed by whoever asks first — a
+/// node or a client. The count is a `buggify_knob!` (default 1, extreme
+/// 2..=3; floor 1, the one-journal campaign); a corpus run (`perturb ==
+/// false`) serves the default journal alone, and so does a seed with
+/// matchmakers (`matchmakers`): a matchmaker campaign is two round trips
+/// (matchmaking, then Phase 1), and tripling a degraded link's traffic
+/// livelocked its candidates past every election timeout (witness
+/// 7568743934611962292 on the first multi-journal hunt: the matchmaker
+/// journal dueled from round 2 to 201 for 80 s while its plain siblings on
+/// the same nodes elected) — the matchmaker plane serving many journals is
+/// its own milestone. The **default** journal is the seed's deployment — its
+/// proxies, replicas and bootstrap; every other journal is a plain
+/// Multi-Paxos journal over the whole pool (`crate::process`: the proxy
+/// leaders and the replica tier serve one journal each). On a multi-journal seed a second
+/// location draws whether one journal is **held** on every node for the
+/// chaos window (`DriverHooks::hold_journal`): its siblings must keep
+/// committing.
+#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
+pub(crate) fn journals(state: &StateHandle, matchmakers: bool, perturb: bool) -> JournalPlan {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .journals
+        .get_or_insert_with(|| {
+            let count = if perturb && !matchmakers {
+                buggify_knob!(1_u64, 2_u64..4_u64)
+            } else {
+                1
+            };
+            let ids: Vec<JournalId> = (0..count)
+                .map(|k| JournalId(JournalId::FIRST_USER.0 + k))
+                .collect();
+            if ids.len() < 2 {
+                return JournalPlan { ids, held: None };
+            }
+            // BUGGIFY pairing: a seed genuinely runs several journals (a
+            // cause; the outcomes are the non-interference gates).
+            assert_reachable!("journal: a seed runs more than one journal");
+            let held = moonpool_sim::buggify_with_prob!(0.5).then(|| {
+                // BUGGIFY pairing: the hold genuinely fires on some seed.
+                assert_reachable!(
+                    "journal: one journal is held on every node for the chaos window"
+                );
+                ids[usize::try_from(count - 1).unwrap_or(0)]
+            });
+            JournalPlan { ids, held }
+        })
+        .clone()
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {

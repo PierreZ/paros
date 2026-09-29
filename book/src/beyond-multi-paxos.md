@@ -572,3 +572,44 @@ the acceptor set, which draws its successors from the live nodes.
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`
 (`crates/paros/src/driver/config.rs`); `Audit::boot_refused`. Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
+
+## Many journals on one process
+
+A journal service runs many logs on the same machines. The tempting design shares
+one Paxos instance and partitions its log by key. paros goes the other way: it
+shares **processes, disks and connections, and never protocol state**. Each
+journal is its own namespace, with its own `ColocatedNode`, its own ballots, its
+own log and its own store. Every proof in this book then holds per journal
+unchanged, and exactly one new property has to be shown: **non-interference**.
+
+The journal id travels on the `Deliver` envelope, one per message, and the driver
+routes each message to its journal's node before the core sees a byte. Folding the
+id into the command fingerprint would not be enough. That protects the value an
+`Accepted` names, but a `Prepare`, a `Promise`, a `Commit` or a heartbeat carries
+no command at all, and it would cross journals silently. One `Deliver` per peer
+carries every journal. Inside the peer mailbox each journal has its own
+keep-newest lane, and the drain takes them round-robin, so a busy journal can only
+evict its own messages.
+
+A storage fault **quarantines its journal**, not the process. The damage is
+scoped to one store. The journal's node is dropped and sends nothing, while the
+process keeps serving its other journals. After a short delay the driver re-opens
+the journal from its store, as if that one journal had restarted. A process whose
+every journal is quarantined at once has nothing left and crashes, which with one
+journal is exactly the old fail-stop rule. The copy budget is therefore per
+journal.
+
+The simulation gives every journal its own audit and its own storage world, so
+every oracle in the campaign is keyed by journal without knowing it. A shared
+board carries what no single journal can see:
+
+- every slot of a journal applies only a command appended to that journal;
+- a quarantined journal sends nothing;
+- a journal keeps committing while a sibling is held on every node for the chaos
+  window;
+- a node keeps serving its other journals while one is quarantined.
+
+**In the code.** `run_journals`, `JournalStores` (`crates/paros/src/driver/`,
+`journals.rs`); `PeerMailbox` (`crates/paros/src/driver/transport.rs`);
+`DriverHooks::hold_journal`, `Audit::journal_quarantined`;
+`crates/paros-sim/src/audit/journals.rs`; `paros_sim::shape::journals`.

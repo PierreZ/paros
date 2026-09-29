@@ -141,13 +141,25 @@ impl<P: Providers> NodeClient<P> {
         self.reconfigure_matchmakers.try_get_reply(request).await
     }
 
-    /// Inspect the node's chosen prefix, configuration and application.
+    /// Inspect the node's first journal: its chosen prefix and
+    /// configuration.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
     pub async fn inspect(&self) -> Result<InspectReply, RpcError> {
-        self.inspect.try_get_reply(&InspectRequest {}).await
+        self.inspect_journal(0).await
+    }
+
+    /// Inspect `journal` on the node (#188; `0` names its first journal).
+    ///
+    /// # Errors
+    ///
+    /// The attempt's [`RpcError`].
+    pub async fn inspect_journal(&self, journal: u64) -> Result<InspectReply, RpcError> {
+        self.inspect
+            .try_get_reply(&InspectRequest { journal })
+            .await
     }
 
     /// Decommission the node (#123).

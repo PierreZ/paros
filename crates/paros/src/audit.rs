@@ -345,6 +345,14 @@ pub trait Audit {
     /// injected-vs-detected accounting into O(1) state without string parsing.
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {}
 
+    /// A storage fault ended this journal's incarnation on `node` (#188):
+    /// the journal is quarantined — it sends nothing and answers nothing —
+    /// while the node serves its other journals, until the driver re-opens
+    /// it from its store (the next [`Audit::recovered`] boot report) or the
+    /// store refuses to open for good. Reported to the quarantined
+    /// journal's own audit port.
+    fn journal_quarantined(&self, node: NodeId) {}
+
     /// `from` (a node, or a proxy leader) dropped one outbound message at
     /// the send seam (hook-decided per-message loss, indistinguishable from
     /// network loss to the peers).

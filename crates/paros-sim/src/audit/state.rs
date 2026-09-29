@@ -223,6 +223,9 @@ pub(super) struct AuditState {
     // --- application state (the Chain-of-Blocks register) --------------------
     /// User command hashes the workload registered before proposing.
     pub(super) submitted: BTreeSet<u64>,
+    /// Every `(client, seq)` a client appended to this world's journal
+    /// (#188, `AuditWorld::note_appended`).
+    pub(super) appended: BTreeSet<(u64, u64)>,
     /// This run has no client (see `AuditWorld::client_free`).
     pub(super) client_free: bool,
     /// The client fold (#186): per client, the last LSN it folded (its

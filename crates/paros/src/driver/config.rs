@@ -90,6 +90,13 @@ pub struct DriverTunables {
     /// never a wrong one. A client whose deadline is shorter than the wait
     /// times out (ambiguous, never wrong).
     pub read_poll_ticks: u64,
+    /// Ticks a journal quarantined by a storage fault (#188) stays down on
+    /// this node before the driver re-opens it from its store — the
+    /// per-journal twin of a crashed process's restart delay. Floor 1: a
+    /// re-open the same tick is a restart loop with no room for the rest of
+    /// the node; a long quarantine is a node that is slow to heal one
+    /// journal, never a wrong one.
+    pub quarantine_ticks: u64,
     /// Capacity of each client-facing endpoint queue (propose, read, compact,
     /// inspect, …) between the RPC runtime and the node loop
     /// (`RpcConfig::endpoint_queue_capacity`). Floor 1: overload is visible as
@@ -190,6 +197,7 @@ impl Default for DriverTunables {
             delivery_timeout: DELIVERY_TIMEOUT,
             read_retry_ticks: READ_RETRY_TICKS,
             read_poll_ticks: READ_POLL_TICKS,
+            quarantine_ticks: QUARANTINE_TICKS,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
             peer_queue_capacity: PEER_QUEUE_CAPACITY,
@@ -215,6 +223,11 @@ const READ_RETRY_TICKS: u64 = 10;
 /// (#185): 400 ms at the default tick, inside the sim client's 1000 ms
 /// deadline.
 const READ_POLL_TICKS: u64 = 8;
+/// Default [`DriverTunables::quarantine_ticks`]: eight election timeouts —
+/// long enough that a journal's re-open is not a restart loop against a
+/// still-faulty device, short enough that the node rejoins the journal well
+/// inside a recovery tail.
+const QUARANTINE_TICKS: u64 = 8 * ELECTION_TIMEOUT_BASE;
 
 /// Base election timeout, in ticks. Each node's actual timeout is drawn
 /// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,

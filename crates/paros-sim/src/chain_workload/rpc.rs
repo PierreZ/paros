@@ -95,20 +95,21 @@ pub(super) async fn within<T>(
 pub(super) async fn inspect(
     ctx: &SimContext,
     client: &SimClient,
+    journal: JournalId,
     timeout: Duration,
 ) -> Option<InspectReply> {
-    let probe = async { client.inspect().await.ok() };
+    let probe = async { client.inspect_journal(journal.0).await.ok() };
     within(ctx, timeout, None, probe).await
 }
 
-/// One `Append` of `payload` (a single record) as `(client_id, seq)` to
-/// `target`. With
+/// One `Append` of `payload` (a single record) to `journal` as
+/// `(client_id, seq)` to `target`. With
 /// `abandon` the client stops listening after 10 ms and records the
 /// observation as ambiguous.
 pub(super) fn propose_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
-    client_id: u64,
+    (journal, client_id): (JournalId, u64),
     target: usize,
     seq: u64,
     payload: Vec<u8>,
@@ -118,7 +119,7 @@ pub(super) fn propose_once(
     let time = time.clone();
     async move {
         let request = Append {
-            journal: JournalId::default().0,
+            journal: journal.0,
             client: client_id,
             seq,
             records: vec![payload],
@@ -140,6 +141,7 @@ pub(super) fn propose_once(
 pub(super) fn compact_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
+    journal: JournalId,
     config: &ChainConfig,
     target: usize,
     up_to: u64,
@@ -149,18 +151,13 @@ pub(super) fn compact_once(
     let config = *config;
     async move {
         let mut client = clients[target].clone();
-        // The #101 coupling makes compaction a two-phase dance: the
-        // first ask usually seeds the `Snap` marker and answers
-        // `accepted: false`; once a quorum advertises the decided
-        // point, a retry gets the `Truncate` proposed. A few
-        // beat-spaced retries at the same leader complete the dance
-        // within one workload operation, keeping truncation pressure
-        // (and everything downstream of raised floors) at its
-        // pre-coupling cadence.
+        // A few beat-spaced asks, following the leader hint: a trim is
+        // proposed by the leader alone (#186), so a redirect or a lost
+        // answer is all a retry can meet.
         let mut attempt_target = target;
         for _attempt in 0..config.compact_attempts {
             let request = Trim {
-                journal: JournalId::default().0,
+                journal: journal.0,
                 up_to,
             };
             let outcome = moonpool_sim::select! {

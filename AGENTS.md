@@ -39,8 +39,9 @@ oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
 **The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
-three-to-six process pool of `NodeProcess::chaotic()` plus zero to five `MatchmakerProcess`es
-plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
+three-to-six process pool of `NodeProcess::chaotic()`, each serving one to three journals
+(#188, on a seed without matchmakers: the default journal is the seed's deployment, every other
+a plain journal over the whole pool), plus zero to five `MatchmakerProcess`es plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
 IP order — the count is every node's `Config::proxy_count`, zero the plain deployment)
 plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that walk the chosen prefix and never vote,
 `ReplicaId(rank)` in IP order and `NodeId(1000 + rank)` on the wire — the count is every node's
@@ -359,6 +360,10 @@ today's guarantees. The rules, which every later session reads before touching `
   never quietly honored.
 - Removing every matchmaker feature must leave the plain program's behaviour unchanged — the same
   test the turbulence doctrine below applies to BUGGIFY.
+- Since M6 every peer and client message is framed by a `JournalId` (`>= 1`). A plain deployment
+  is one user journal (plus the system journals once they exist). Inside that frame it exchanges
+  today's messages and persists today's scalars; no matchmaker message, no `HardState` field and
+  no extra round trip enters it. Byte identity with pre-M6 builds is not kept.
 
 The general rule this instantiates: **flexible quorums, matchmaker reconfiguration, and
 compartmentalized Paxos are opt-in features** of paros. The default is plain Multi-Paxos; each
@@ -572,6 +577,46 @@ acceptor decision**: a matchmaker records or activates the successor it is told 
 re-deriving the decree, on the protocol precondition that only a reconfigurer holding the
 Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable
 state recovers — there is deliberately no matchmaker-specific in-place repair.
+
+**Journals doctrine (M6, #185–#188).** paros is a journal service: one process serves a
+**static list of journals** (`paros::run_journals` over a `JournalStores`; `run_node` is the
+one-journal case), and the rule is **share processes, disks and connections, never protocol
+state**. Each journal is its own namespace — its own `ColocatedNode` (`Config::journal`, read
+for assertions and tracing only), its own ballots, its own log and its own store — so every
+existing proof holds per journal and the one new property is **non-interference**. Ids: `0` is
+unset and refused at the edge, `1..=127` are reserved for system journals, user journals start
+at `JournalId::FIRST_USER` (128, the default). The id rides **the `Deliver` envelope, per
+message** (`ConsensusMessage.journal`) — never folded into a command fingerprint, which would
+protect only `Accepted`'s vhash while `Prepare`, `Promise`, `Commit`, `Heartbeat` and catch-up
+crossed journals — and the driver demuxes on it before the core sees a byte; a message for a
+journal the node does not run now is dropped (the sender's re-send repairs it). Every client
+call names its journal: an unknown id is answered `unknown_journal`, a journal the node serves
+but has quarantined is left unanswered. One `Deliver` per peer carries every journal, and the
+peer mailbox gives **each journal its own keep-newest lane, drained round-robin**, so a busy
+journal only ever evicts its own messages. The **matchmaker plane, the proxy leaders and the
+replica tier serve one journal each — the node's first** (asserted at boot): every other
+journal is plain Multi-Paxos over the whole pool (journal-tagged proxies are #193), a
+retirement retires the first journal and the node keeps serving the rest.
+**A storage fault quarantines its journal, not the process** (#188's decision): the damage is
+scoped to one store, so the journal's runtime is dropped — it sends and answers nothing — while
+the node serves its other journals, and after `DriverTunables::quarantine_ticks` (born
+buggified) the driver re-opens it from its store as a restart of that journal alone; a store
+that will not open (parked, retired) keeps it down for good. A node whose every journal is
+quarantined at once has nothing left and exits with the fault — for one journal exactly the
+pre-M6 fail-stop crash, so the one-journal campaign is unchanged. A seam crash is the process
+dying, for every journal. The copy budget is therefore **per journal**. In simulation the plan
+is drawn once per seed (`paros_sim::shape::journals`, a `buggify_knob!` for the count, floor 1;
+one journal on a seed with matchmakers, whose two-round-trip campaigns livelocked under a
+tripled load — witness in the doc comment) and every journal gets **its own `AuditWorld` and `StorageWorld`** (`audit_world_for`,
+`storage_world_for`, keyed by `state::journal_key`): safety, the clients' folds, convergence,
+the storage gates and the budget are keyed by journal without any oracle knowing, and no
+message gains an interpolated id. Clients are spread over the journals round-robin; the
+matchmaker-plane operations stay on the default journal. What no single world sees lives on
+the shared **journal board** (`paros_sim::audit::journals`): every slot of journal `j` applies
+only an identity appended to `j`, a quarantined journal sends nothing, a journal keeps
+committing while a sibling is **held** on every node for the chaos window
+(`DriverHooks::hold_journal`, a per-seed BUGGIFY location), and a node keeps serving its other
+journals while one is quarantined.
 
 **Storage direction.** The seam stays the high-level `LogStorage` / `MatchmakerStorage`
 traits (the durable writes, truncate / trimmed-to semantics, the boot scan, the format

@@ -204,6 +204,11 @@ where
     A: Audit,
 {
     let self_id = out.self_node().0;
+    // The journal every message of this batch is framed by (#188).
+    let journal = node.config().journal;
+    // The replica tier serves one journal (#188): a journal with no replica
+    // in its configuration never addresses one.
+    let with_learners = node.config().replica_count > 0;
     // The deployment map an `Audience` is resolved against, read before the
     // batch takes the node's borrow.
     let pool: Vec<NodeId> = node.config().pool().to_vec();
@@ -232,7 +237,11 @@ where
         .iter()
         .flat_map(|(audience, msg)| {
             let proxy = audience.proxy().map(Party::Proxy);
-            let nodes = out.resolve(audience, &pool).into_iter().map(Party::Node);
+            let nodes = out
+                .resolve(audience, &pool)
+                .into_iter()
+                .filter(|node| with_learners || !out.learners.contains(node))
+                .map(Party::Node);
             proxy
                 .into_iter()
                 .chain(nodes)
@@ -282,7 +291,7 @@ where
     }
 
     // 2. Send messages — only after (1) is durable.
-    send_messages(out, hooks, audit, messages);
+    send_messages(out, hooks, audit, journal, messages);
 
     // 3. Learn the entries the chosen prefix walked over (already durable, in
     //    contiguous order) — surface them to the oracles and ack any clients

@@ -19,6 +19,14 @@ main-campaign workload and no per-scenario process type; a new behaviour is a
 new operation in this alphabet, judged by the same `ClientHistory` and the
 same `AuditWorld`.
 
+Since #188 a client belongs to one journal (`JournalPlan::for_client`, round-robin
+over the seed's one to three journals): every RPC names `self.journal`, every world
+it reads is that journal's (`audit_world_for`, `storage_world_for`, the per-journal
+trim fence), the matchmaker-plane operations (`RECONFIGURE`,
+`RECONFIGURE_MATCHMAKERS`, `RETIRE`) run only on the default journal (a client of
+another journal pauses instead), and the run ends only once every journal a client
+appends to has converged (`Tail::converged`).
+
 ## The alphabet is a wire format
 
 ```

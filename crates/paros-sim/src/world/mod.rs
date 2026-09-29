@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
-use crate::audit::audit_world;
 use paros::{
     Ballot, ClientId, ClientSeq, Command, HardState, IntegrityFault, MetadataFault, Slot,
     StorageRecord, WitnessStatus,
@@ -29,7 +28,21 @@ const STORAGE_WORLD_KEY: &str = "paros-storage-world";
 /// Get-or-create the singleton [`StorageWorld`] for this iteration
 /// (`crate::state::published`).
 pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
-    crate::state::published(state, STORAGE_WORLD_KEY, StorageWorld::default)
+    storage_world_for(state, paros::JournalId::default())
+}
+
+/// `journal`'s own [`StorageWorld`] (#188): its disks, its copy budget, its
+/// fault ledger and its parked identities — one per journal, so the budget
+/// is per journal and a journal's faults never excuse another's.
+pub(crate) fn storage_world_for(
+    state: &StateHandle,
+    journal: paros::JournalId,
+) -> Arc<Mutex<StorageWorld>> {
+    crate::state::published(
+        state,
+        &crate::state::journal_key(STORAGE_WORLD_KEY, journal),
+        StorageWorld::default,
+    )
 }
 
 /// Semantic health of one durable record — the world stores **records, not
@@ -1036,8 +1049,11 @@ pub(crate) struct StorageFaultStats {
 }
 
 /// Fold the storage world's ground truth (empty world = no faults).
-pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
-    let world = storage_world(handle);
+pub(crate) fn storage_fault_stats(
+    handle: &StateHandle,
+    journal: paros::JournalId,
+) -> StorageFaultStats {
+    let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let mut stats = StorageFaultStats {
         injected: guard.injected.len(),
@@ -1104,8 +1120,8 @@ pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
 /// retired by the operator. The workload's convergence probe skips exactly
 /// these — the availability cost the dead-node budget bounds so the cluster
 /// keeps serving — and its reconfigurations never name one of them.
-pub(crate) fn parked_nodes(handle: &StateHandle) -> BTreeSet<String> {
-    let world = storage_world(handle);
+pub(crate) fn parked_nodes(handle: &StateHandle, journal: paros::JournalId) -> BTreeSet<String> {
+    let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.parked.keys().cloned().collect()
 }
@@ -1148,7 +1164,16 @@ pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: 
 }
 
 pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
-    let world = storage_world(handle);
+    disk_probe_for(handle, paros::JournalId::default(), ip)
+}
+
+/// [`corpus_disk_probe`] of `journal`'s disk on `ip` (#188).
+pub(crate) fn disk_probe_for(
+    handle: &StateHandle,
+    journal: paros::JournalId,
+    ip: &str,
+) -> Option<CorpusDiskProbe> {
+    let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.disks.get(ip).map(|disk| CorpusDiskProbe {
         clean_slots: disk
@@ -1212,8 +1237,8 @@ pub(crate) struct CorruptionStats {
     flags: Stage7Flags,
 }
 
-pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
-    let world = storage_world(handle);
+pub(crate) fn corruption_stats(handle: &StateHandle, journal: paros::JournalId) -> CorruptionStats {
+    let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let mut crashed = 0_u64;
     let mut accounted = true;
@@ -1255,10 +1280,10 @@ pub(crate) fn corruption_stats(handle: &StateHandle) -> CorruptionStats {
 /// evaluated once per run from the workload's `check()` (the shared-gate
 /// doctrine in [`crate::audit`]).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn check_storage_gates(handle: &StateHandle) {
-    let stats = storage_fault_stats(handle);
-    let corruption = corruption_stats(handle);
-    let detected = audit_world(handle).storage_faults_detected();
+pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalId) {
+    let stats = storage_fault_stats(handle, journal);
+    let corruption = corruption_stats(handle, journal);
+    let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
     // Injected fault ↔ surfaced error ↔ crash decision correlate 1:1, typed,
     // with no string parsing: a spontaneous (non-injected) storage fault or a
     // swallowed injection both break this count.
@@ -1274,7 +1299,7 @@ pub(crate) fn check_storage_gates(handle: &StateHandle) {
         stats.clean_quorum_everywhere,
         "storage: injected faults never cost a record its clean quorum of live copies"
     );
-    check_corruption_gates(handle, &corruption);
+    check_corruption_gates(handle, journal, &corruption);
     // The #71 compound gate: corruption x partition x a lagging follower
     // reached in one run (the network swarm IS the partition; lag is the
     // audit's observed fact). It used to ride the safety-only axis, which was
@@ -1282,7 +1307,7 @@ pub(crate) fn check_storage_gates(handle: &StateHandle) {
     // turbulence into the main campaign, the main campaign is where the
     // compound is reachable and where it must saturate.
     assert_sometimes!(
-        corruption.injected > 0 && audit_world(handle).lag_observed(),
+        corruption.injected > 0 && crate::audit::audit_world_for(handle, journal).lag_observed(),
         "storage: corruption compounds with a partition and a lagging follower"
     );
     assert_sometimes!(
@@ -1306,13 +1331,18 @@ pub(crate) fn check_storage_gates(handle: &StateHandle) {
 /// The Stage-7 half of the storage oracle (issue #20 F): the exercised ⇔
 /// detected correlation, the dead-node budget, and the per-family /
 /// per-verdict coverage gates.
-fn check_corruption_gates(handle: &StateHandle, corruption: &CorruptionStats) {
+fn check_corruption_gates(
+    handle: &StateHandle,
+    journal: paros::JournalId,
+    corruption: &CorruptionStats,
+) {
     // Every exercised corruption is detected as exactly one typed crash
     // decision — a spontaneous corruption detection (nothing injected) or a
     // swallowed injection both break the count — and every injection is
     // accounted for (crashed, co-detected, repaired, discarded, or genuinely
     // never read).
-    let corruption_crashes = audit_world(handle).corruption_faults_detected();
+    let corruption_crashes =
+        crate::audit::audit_world_for(handle, journal).corruption_faults_detected();
     assert_always!(
         corruption_crashes == corruption.crashed,
         "storage: every exercised corruption is exactly one typed crash decision",

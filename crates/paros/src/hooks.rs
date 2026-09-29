@@ -18,7 +18,7 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
+use paros_core::{JournalId, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,6 +197,17 @@ pub trait DriverHooks {
     /// corpus case that must keep a prior configuration answerable answers
     /// `true` (the departed straggler, #124).
     fn withhold_gc_requests(&self) -> bool {
+        false
+    }
+
+    /// Whether `journal` sits out this beat on this node (#188): its tick is
+    /// skipped and the peer messages that arrive for it are dropped. Consulted
+    /// on the node loop only when the node runs more than one journal — once
+    /// per journal per beat and once per inbound message — so a held journal
+    /// is a slow, partitioned journal, and its siblings on the same node must
+    /// not notice (the non-interference claim). Always safe: a slow node and
+    /// a lossy network are both within the model.
+    fn hold_journal(&self, _journal: JournalId) -> bool {
         false
     }
 

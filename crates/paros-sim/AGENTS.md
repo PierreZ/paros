@@ -20,10 +20,13 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   the run's `QuorumPolicy`
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
   grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
-  per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
+  per node per seed and reused across restarts; the run's `JournalPlan` (`journals`,
+  #188: one to three journals, the held one) and the quarantine re-open knob; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
 - `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
-  fixed bootstrap subset, the GC requests withheld), `MatchmakerProcess`, `ProxyProcess` (runs
+  fixed bootstrap subset, the GC requests withheld; an acceptor runs
+  `paros::run_journals` over `SimStores`, one `Seat` per journal — its config, its
+  storage world, its audit world and port), `MatchmakerProcess`, `ProxyProcess` (runs
   `paros::run_proxy`; nothing durable, a kill reboots it empty), `ReplicaProcess` (runs
   `paros::run_replica` in a seam-crash recovery loop over its own **fault-free** disk,
   registered with `StorageWorld::note_replica` so the copy budget never counts it — a
@@ -49,7 +52,10 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`LogStorage` +
   write-path fault sites) · `world/rot.rs` boot-rot BUGGIFY sites, one per
   fault family · `world/matchmaker.rs` `DurableMatchmakerStorage`.
-- `audit/mod.rs` `AuditWorld`, `check_run`, `reach_once!` · `audit/state.rs`
+- `audit/mod.rs` `AuditWorld` (one per journal, `audit_world_for`; `world/`'s
+  `storage_world_for` likewise, keyed by `state::journal_key`), `check_run`,
+  `reach_once!` · `audit/journals.rs` the journal board and the non-interference
+  oracles (#188) · `audit/state.rs`
   `AuditState` (per-transition protocol safety) · `audit/client.rs`
   `ClientHistory` (linearizability, sequential-client consistency) ·
   `audit/matchmaker.rs` `MatchmakerAudit`.

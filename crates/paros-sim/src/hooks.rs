@@ -58,7 +58,8 @@ use std::time::Duration;
 use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{
-    DriverHooks, HandoffContext, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Seam, Slot,
+    DriverHooks, HandoffContext, JournalId, Message, NodeId, Party, ProxyId, ReconfigurerPhase,
+    Seam, Slot,
 };
 
 /// The shape every inline-gated hook shares: one `buggify_with_prob!` draw
@@ -95,6 +96,9 @@ pub(crate) struct BuggifyHooks<T> {
     /// request (`ScriptedOptions::withhold_gc`); `false` on the main
     /// campaign, where it draws nothing.
     withhold_gc: bool,
+    /// The journal held on every node for the chaos window (#188), drawn
+    /// once per seed (`crate::shape::journals`); `None` on most seeds.
+    held_journal: Option<JournalId>,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
@@ -105,7 +109,15 @@ impl<T: TimeProvider> BuggifyHooks<T> {
             enabled,
             seam_crash_bias,
             withhold_gc: false,
+            held_journal: None,
         }
+    }
+
+    /// Hold `held` on this node for the chaos window
+    /// (`DriverHooks::hold_journal`, #188).
+    pub(crate) fn holding_journal(mut self, held: Option<JournalId>) -> Self {
+        self.held_journal = held;
+        self
     }
 
     /// Withhold every GC request these hooks' node would send (a scripted
@@ -171,6 +183,14 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn withhold_gc_requests(&self) -> bool {
         // Scripted, never drawn: a corpus choice, not a swarm site.
         self.withhold_gc
+    }
+
+    fn hold_journal(&self, journal: JournalId) -> bool {
+        // Drawn once per seed (the plan's own BUGGIFY location and its
+        // reachable), never per call: a deterministic answer is safe to ask
+        // per inbound message. Only inside the chaos window, so the held
+        // journal recovers in the tail like any partition.
+        self.active() && self.held_journal == Some(journal)
     }
 
     fn skip_reconfigurer_resend(&self) -> bool {

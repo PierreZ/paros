@@ -266,7 +266,10 @@ pub(crate) fn message_to_proto(
         }),
         _ => return Err("unsupported Paxos message variant"),
     };
-    Ok(internal::ConsensusMessage { kind: Some(kind) })
+    Ok(internal::ConsensusMessage {
+        kind: Some(kind),
+        journal: 0,
+    })
 }
 
 /// Validate and convert one typed protobuf message into the core domain type.

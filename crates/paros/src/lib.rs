@@ -46,8 +46,8 @@ pub use corruption::{
     CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
 };
 pub use driver::{
-    BootKind, BootRefusal, DriverTunables, RunError, command_hash, message_kind, parse_addr,
-    registration_history_hash, run_node,
+    BootKind, BootRefusal, DriverTunables, JournalStores, RunError, command_hash, message_kind,
+    parse_addr, registration_history_hash, run_journals, run_node,
 };
 pub use rpc::{
     Append, AppendAck, CheckTail, CheckTailAck, EdgeRejection, InspectReply, InspectRequest,

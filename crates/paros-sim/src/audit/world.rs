@@ -17,7 +17,18 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 /// Get-or-create the singleton [`AuditWorld`] for this iteration
 /// (`crate::state::published_arc`).
 pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
-    crate::state::published_arc(state, AUDIT_WORLD_KEY, AuditWorld::default)
+    audit_world_for(state, paros::JournalId::default())
+}
+
+/// `journal`'s own [`AuditWorld`] (#188): every oracle folds one journal's
+/// transitions, so safety, the clients' folds, convergence and the storage
+/// gates are all keyed by journal without any of them knowing.
+pub(crate) fn audit_world_for(state: &StateHandle, journal: paros::JournalId) -> Arc<AuditWorld> {
+    crate::state::published_arc(
+        state,
+        &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
+        AuditWorld::default,
+    )
 }
 
 /// The per-iteration shared checker.
@@ -46,6 +57,13 @@ impl AuditWorld {
     /// registered is one the cluster invented.
     pub(crate) fn note_submitted(&self, cmd_hash: u64) {
         self.lock().submitted.insert(cmd_hash);
+    }
+
+    /// A client appended `(client, seq)` to this world's journal (#188) —
+    /// the identity the non-interference oracle requires of every user
+    /// command a slot of the journal applies.
+    pub(crate) fn note_appended(&self, client: u64, seq: u64) {
+        self.lock().appended.insert((client, seq));
     }
 
     /// The value the audit knows was decided at `slot` (a durable accept
@@ -506,13 +524,19 @@ impl AuditWorld {
 /// applied map. **Audit side** — the coverage gates recorded once per run, the
 /// storage world's injected⇔detected correlation, and the one liveness claim:
 /// every live node ends on the cluster's applied prefix, which covers every
-/// acked slot. Returns the run's digest for the determinism proof.
+/// acked slot. All of it over `journal`'s own worlds (#188). Returns the
+/// run's digest for the determinism proof.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
-    let audit = audit_world(state);
+pub(crate) fn check_run(
+    state: &StateHandle,
+    journal: paros::JournalId,
+    history: &ClientHistory,
+) -> u64 {
+    let audit = audit_world_for(state, journal);
     audit.check_client_history(history);
     audit.check_gates();
-    crate::world::check_storage_gates(state);
+    crate::world::check_storage_gates(state, journal);
+    super::journals::lock(&super::journals::journal_board(state)).check_gates();
     let acked_max = audit.lock().lin.acked_max();
     audit.check_final_convergence(acked_max);
     audit.digest()

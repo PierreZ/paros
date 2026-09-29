@@ -8,13 +8,21 @@ the driver, never in a sim-only path.
 
 ## Map
 
-- `driver/mod.rs` `run_node<P, S, H, A>` (the etcd-raft `Node` layer) ·
+- `driver/mod.rs` `run_node<P, S, H, A>` (the etcd-raft `Node` layer: one journal) and
+  `run_journals<P, J: JournalStores, H>` (#188: a static list of journals, one
+  `ColocatedNode` + store + audit port each, sharing the edge, the peer lanes and the
+  tick; the loop routes every call and every `Deliver` message by its journal) ·
+  `driver/journals.rs` `JournalStores` (the list and a per-journal opener),
+  `SingleStore`, the per-journal runtime, and the quarantine (a storage fault drops the
+  journal's runtime and re-opens it after `quarantine_ticks`; a node with no live journal
+  exits with the fault) ·
   `driver/{boot,ready,report,transport,matchmaking,handover,operator,events}.rs`
   by stage: the format-marker check and the boot report (nothing is
   replayed: there is no application, #186), the `Ready` handshake's I/O side in
   persist-before-send order, post-batch upkeep, the bounded keep-newest
-  `PeerMailbox` (with `LaneOpener` and `peer_address`, the lane wiring
-  every driver opens its peers through), the matchmaker wire, the
+  `PeerMailbox` (one keep-newest lane per journal, drained round-robin, #188;
+  with `LaneOpener` and `peer_address`, the lane wiring every driver opens its
+  peers through), the matchmaker wire, the
   matchmaker-set handover, the operator RPCs (trim, reconfigure, retire,
   inspect) ·
   `driver/edge.rs` `RpcEdge` (the inbound edge all four drivers serve
