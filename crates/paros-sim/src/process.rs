@@ -516,6 +516,7 @@ async fn run_acceptor(
             Application::Colocated
         };
     let config = Config {
+        journal: paros::JournalId::default(),
         id: self_rank,
         peers: bootstrap,
         quorum_system,
@@ -658,7 +659,9 @@ async fn run_acceptor(
             faults.clone(),
             checker.clone(),
         );
-        match run_node(
+        // Boxed: the node loop's future is large (every arm's state lives
+        // in it), and this incarnation loop awaits it on its own frame.
+        match Box::pin(run_node(
             ctx.providers().clone(),
             storage,
             parse_addr(my_ip)?,
@@ -671,7 +674,7 @@ async fn run_acceptor(
             ctx.shutdown().clone(),
             &hooks,
             &audit,
-        )
+        ))
         .await
         {
             // Simulated crash at a durability seam: fall through to recover

@@ -48,6 +48,14 @@ impl AuditWorld {
         self.lock().submitted.insert(cmd_hash);
     }
 
+    /// The value the audit knows was decided at `slot` (a durable accept
+    /// quorum at one ballot), as `paros::command_hash` — what a journal
+    /// read's entry there must hash to (#185). `None` when the audit has not
+    /// seen that slot decided.
+    pub(crate) fn decided_vhash(&self, slot: u64) -> Option<u64> {
+        self.lock().decided_vhash(slot)
+    }
+
     /// The application applied one command at `index` (its 1-based applied
     /// count), reaching `state`. Reported by the storage layer as the
     /// transition is made durable. Contiguous per node, one command and one

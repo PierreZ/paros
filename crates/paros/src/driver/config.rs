@@ -86,6 +86,13 @@ pub struct DriverTunables {
     /// exceed it or no read ever confirms. A client whose deadline is shorter
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
+    /// Ticks a journal `Read` at or past the serving node's end may wait
+    /// (the long-poll, #185) for something to be chosen before the driver
+    /// answers an empty page. Floor 0: a zero wait answers every such read
+    /// at once, empty, and the client simply re-asks — a busier client,
+    /// never a wrong one. A client whose deadline is shorter than the wait
+    /// times out (ambiguous, never wrong).
+    pub read_poll_ticks: u64,
     /// Capacity of the snapshot offers' independent delivery lane. Floor 1.
     pub snapshot_queue_capacity: usize,
     /// Capacity of each client-facing endpoint queue (propose, read, compact,
@@ -187,6 +194,7 @@ impl Default for DriverTunables {
             connection_timeout: DELIVERY_TIMEOUT,
             delivery_timeout: DELIVERY_TIMEOUT,
             read_retry_ticks: READ_RETRY_TICKS,
+            read_poll_ticks: READ_POLL_TICKS,
             snapshot_queue_capacity: SNAPSHOT_QUEUE_CAPACITY,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
@@ -208,6 +216,11 @@ impl Default for DriverTunables {
 /// 1000 ms deadline, and inside the core's own round TTL, so a late core
 /// confirmation just finds the ctx gone and is ignored).
 const READ_RETRY_TICKS: u64 = 10;
+
+/// Ticks a journal `Read` above the end long-polls before an empty answer
+/// (#185): 400 ms at the default tick, inside the sim client's 1000 ms
+/// deadline.
+const READ_POLL_TICKS: u64 = 8;
 
 /// Base election timeout, in ticks. Each node's actual timeout is drawn
 /// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,

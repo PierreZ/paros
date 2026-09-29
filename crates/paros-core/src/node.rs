@@ -1363,6 +1363,15 @@ impl ColocatedNode {
         &self.replica
     }
 
+    /// A **journal read** (#185) from this node's chosen prefix, against
+    /// its compaction floor: [`Replica::read`] with the floor this node
+    /// retains. A pure read — nothing in the node moves.
+    #[must_use]
+    pub fn read_log(&self, from: Slot, max_bytes: usize) -> crate::LogRead {
+        self.replica
+            .read(from, self.acceptor.first_slot(), max_bytes)
+    }
+
     /// The node's **proposer** role: the open Phase 1, the CTRL repair
     /// probe, the in-flight Phase-2 rounds, the allocator frontier and the
     /// leadership's standing authority. A read view, like

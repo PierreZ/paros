@@ -13,7 +13,7 @@ use paros_core::{
 
 use crate::audit::{Audit, StorageFaultDecision};
 use crate::hooks::{DriverHooks, Reply, Seam};
-use crate::rpc::{ProposeAck, ReadAck, ReplySender};
+use crate::rpc::{AppendAck, CheckTailAck, ReplySender};
 use crate::storage::{NodeStorage, StorageError};
 
 use super::config::RunError;
@@ -28,8 +28,10 @@ use super::transport::{Outbound, send_messages};
 #[derive(Default)]
 pub(crate) struct ClientWaiters {
     /// `(client id, client seq, the held reply)` per slot.
-    pub(crate) pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<ProposeAck>)>>,
+    pub(crate) pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<AppendAck>)>>,
     pub(crate) pending_reads: BTreeMap<u64, ParkedRead>,
+    /// Journal reads long-polling at the end (#185).
+    pub(crate) log_reads: super::log_reads::LogReads,
 }
 
 /// Which of the two read tallies a parked read waits on.
@@ -58,7 +60,7 @@ pub(crate) struct ParkedRead {
     /// The tally it waits on.
     pub(crate) path: ReadPath,
     /// The held reply.
-    pub(crate) reply: ReplySender<ReadAck>,
+    pub(crate) reply: ReplySender<CheckTailAck>,
 }
 
 /// Materialize and send this batch's snapshot offers. An offered snapshot must
@@ -237,11 +239,12 @@ fn ack_committed_waiters<H, A>(
                 // the honest `(client, seq)` dedup path.
                 audit.waiter_superseded(NodeId(self_id), *slot);
                 tracing::info!(node = self_id, slot = slot.0, "propose_waiter_superseded");
-                let _ = waiter.send(ProposeAck {
+                let _ = waiter.send(AppendAck {
                     seq,
                     leader: Some(self_id),
                     committed: false,
-                    slot: None,
+                    first_lsn: None,
+                    unknown_journal: false,
                 });
                 continue;
             }
@@ -252,11 +255,12 @@ fn ack_committed_waiters<H, A>(
                 NodeId(self_id),
                 Reply::Propose,
                 waiter,
-                ProposeAck {
+                AppendAck {
                     seq,
                     leader: Some(self_id),
                     committed: true,
-                    slot: Some(slot.0),
+                    first_lsn: Some(slot.0),
+                    unknown_journal: false,
                 },
             );
         }
@@ -547,11 +551,12 @@ where
                 NodeId(self_id),
                 Reply::Read,
                 parked.reply,
-                ReadAck {
+                CheckTailAck {
                     seq: parked.seq,
                     leader,
                     committed: true,
-                    read_index: read_index.map(|s| s.0),
+                    committed_end: Some(committed_end(read_index)),
+                    unknown_journal: false,
                 },
             );
         }
@@ -568,6 +573,12 @@ where
         gc_requests,
         gc_fence,
     })
+}
+
+/// The exclusive end of a chosen prefix whose last slot is `index` — what
+/// a `CheckTail` answers (#185): every LSN below it is chosen.
+pub(crate) fn committed_end(index: Option<Slot>) -> u64 {
+    index.map_or(0, |slot| slot.0 + 1)
 }
 
 /// Report one slot applied — by the live batch walk or by the boot replay,

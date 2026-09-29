@@ -732,6 +732,14 @@ impl ReplicaNode {
         self.floor
     }
 
+    /// A **journal read** (#185) from this replica's chosen prefix, against
+    /// its own floor — read replicas serve `Read` so read load leaves the
+    /// acceptors. A pure read.
+    #[must_use]
+    pub fn read_log(&self, from: Slot, max_bytes: usize) -> crate::LogRead {
+        self.replica.read(from, self.floor, max_bytes)
+    }
+
     /// The node whose beat this replica heard last, if any.
     #[must_use]
     pub fn leader(&self) -> Option<NodeId> {

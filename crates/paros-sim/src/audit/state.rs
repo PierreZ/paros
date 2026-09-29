@@ -539,6 +539,13 @@ pub(super) struct AuditState {
     pub(super) acked_by_other: BTreeMap<u64, u64>,
     /// A quorum read was served by a replica (§3.4, #144).
     pub(super) quorum_read_on_replica: bool,
+    /// Journal-read outcomes (#185): a page stepped over a hole, a
+    /// long-poll was woken by a newly chosen entry, a read was served by a
+    /// replica, a read below the trim point was refused.
+    pub(super) journal_read_skipped_hole: bool,
+    pub(super) journal_read_woke: bool,
+    pub(super) journal_read_on_replica: bool,
+    pub(super) journal_read_trimmed: bool,
     pub(super) replica_installed_snapshot: bool,
 }
 
@@ -896,6 +903,30 @@ impl AuditState {
         assert_sometimes!(
             self.quorum_read_on_replica,
             "replica: a quorum read is served by a replica"
+        );
+        self.check_journal_read_gates();
+    }
+
+    /// The journal-read outcomes (#185): the four shapes a `Read` answer
+    /// takes that a correct client must handle — a hole it never sees, a
+    /// long-poll that returns the moment an append is chosen, a read replica
+    /// serving it, and the trim point refusing it.
+    fn check_journal_read_gates(&self) {
+        assert_sometimes!(
+            self.journal_read_skipped_hole,
+            "journal read: a read skips a hole"
+        );
+        assert_sometimes!(
+            self.journal_read_woke,
+            "journal read: a long-poll wakes on a new append"
+        );
+        assert_sometimes!(
+            self.journal_read_on_replica,
+            "journal read: a read is served by a replica"
+        );
+        assert_sometimes!(
+            self.journal_read_trimmed,
+            "journal read: a read below the trim point is refused"
         );
     }
 

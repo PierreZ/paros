@@ -577,6 +577,9 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             paros::Reply::Propose => buggify_with_prob!(0.10),
             paros::Reply::ProposeDedup => buggify_with_prob!(0.10),
             paros::Reply::Read => buggify_with_prob!(0.10),
+            // A lost journal read (#185): the client re-asks, and a read
+            // parked at the end costs it its deadline first.
+            paros::Reply::LogRead => buggify_with_prob!(0.10),
             // A lost redirect costs the client its whole request deadline
             // before it retries blind, so the retarget policies meet a stale
             // hint under time pressure instead of a fresh one.

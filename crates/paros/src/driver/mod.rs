@@ -44,6 +44,7 @@ mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
 mod handover;
+pub(crate) mod log_reads;
 mod matchmaking;
 mod operator;
 pub(crate) mod ready;
@@ -70,7 +71,8 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
 use crate::rpc::{
-    MatchmakerClient, ProposeAck, ReadAck, ReconfigureMatchmakersAck, ReplySender, well_known,
+    AppendAck, CheckTailAck, MatchmakerClient, ReconfigureMatchmakersAck, ReplySender, TailPath,
+    TrimAck, encode_records, well_known,
 };
 use crate::storage::NodeStorage;
 
@@ -131,6 +133,14 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             waiters,
             self.self_id,
             self.tunables.election_timeout_base,
+            self.hooks,
+            self.audit,
+        );
+        // The chosen prefix only grows inside a batch: a journal read
+        // long-polling at the end is re-served here (#185).
+        waiters.log_reads.wake(
+            |from, max| node.read_log(from, max),
+            NodeId(self.self_id),
             self.hooks,
             self.audit,
         );
@@ -386,11 +396,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                 self.answer(
                     Reply::ReadRedirect,
                     parked.reply,
-                    ReadAck {
+                    CheckTailAck {
                         seq: parked.seq,
                         leader: Some(self.self_id),
                         committed: false,
-                        read_index: None,
+                        committed_end: None,
+                        unknown_journal: false,
                     },
                 );
             }
@@ -737,10 +748,20 @@ where
         moonpool_core::select! {
             // The runtime's future is persistent across passes: see `RpcEdge`.
             error = edge.run() => return Err(error.into()),
-            Some((req, reply)) = rpc.propose.recv() => {
-                // A client value → the leader (deduplicated by (client, seq)). The
-                // reply is held until the slot commits (ack-on-commit); a non-leader
-                // redirects immediately.
+            Some((req, reply)) = rpc.append.recv() => {
+                // A journal append (#185) → the leader, deduplicated by
+                // (client, seq). The records are framed into the slot's one
+                // opaque value (all of them land in one slot, whose number is
+                // the LSN). The reply is held until the slot commits
+                // (ack-on-commit); a non-leader redirects immediately.
+                if log_reads::refuse_journal(node.config().journal, req.journal, "append", NodeId(self_id), audit) {
+                    loop_ctx.answer(
+                        Reply::ProposeRedirect,
+                        reply,
+                        AppendAck { seq: req.seq, unknown_journal: true, ..AppendAck::default() },
+                    );
+                    continue;
+                }
                 let seq = req.seq;
                 let client = req.client;
                 // The column override (#141): consulted only where it can
@@ -763,14 +784,14 @@ where
                 // hand it to; `Delegation::Auto` — the core's `slot %
                 // proxy_count` — stands under `NoHooks`.
                 let delegation = delegation_choice(&node, hooks);
-                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(req.command), column, delegation) {
+                match node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(encode_records(&req.records)), column, delegation) {
                     ProposeResult::NotLeader(hint) => {
                         // A lost redirect is a legal outcome: the client's
                         // deadline turns it into a retry elsewhere.
                         loop_ctx.answer(
                             Reply::ProposeRedirect,
                             reply,
-                            ProposeAck { seq, leader: hint.map(|n| n.0), committed: false, slot: None },
+                            AppendAck { seq, leader: hint.map(|n| n.0), committed: false, first_lsn: None, unknown_journal: false },
                         );
                     }
                     ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
@@ -788,62 +809,86 @@ where
                         loop_ctx.answer(
                             Reply::ProposeDedup,
                             reply,
-                            ProposeAck { seq, leader: Some(self_id), committed: true, slot: Some(slot.0) },
+                            AppendAck { seq, leader: Some(self_id), committed: true, first_lsn: Some(slot.0), unknown_journal: false },
                         );
                     }
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
-            Some((req, reply)) = rpc.read.recv() => {
-                // A client read via read-index: the leader captures its applied
-                // watermark, confirms it is still leader with a heartbeat-ack
-                // quorum round (no log write), and the reply is parked until the
-                // confirmed `ReadState` surfaces after apply — a deposed or
-                // freshly elected leader can no longer serve a stale watermark.
-                // A non-leader redirects immediately.
+            Some((req, reply)) = rpc.check_tail.recv() => {
+                if log_reads::refuse_journal(node.config().journal, req.journal, "check_tail", NodeId(self_id), audit) {
+                    loop_ctx.answer(
+                        Reply::ReadRedirect,
+                        reply,
+                        CheckTailAck { seq: req.seq, unknown_journal: true, ..CheckTailAck::default() },
+                    );
+                    continue;
+                }
                 let seq = req.seq;
-                match node.read_index(next_read_ctx) {
-                    ReadIndexResult::NotLeader(hint) => {
-                        loop_ctx.answer(
-                            Reply::ReadRedirect,
-                            reply,
-                            ReadAck { seq, leader: hint.map(|n| n.0), committed: false, read_index: None },
-                        );
+                if req.path() == TailPath::Leader {
+                    // A linearizable tail via read-index: the leader captures
+                    // its chosen watermark, confirms it is still leader with a
+                    // heartbeat-ack quorum round (no log write), and the reply
+                    // is parked until the confirmed `ReadState` surfaces — a
+                    // deposed or freshly elected leader can no longer serve a
+                    // stale watermark. A non-leader redirects immediately.
+                    match node.read_index(next_read_ctx) {
+                        ReadIndexResult::NotLeader(hint) => {
+                            loop_ctx.answer(
+                                Reply::ReadRedirect,
+                                reply,
+                                CheckTailAck { seq, leader: hint.map(|n| n.0), ..CheckTailAck::default() },
+                            );
+                        }
+                        ReadIndexResult::Pending => {
+                            let parked = ParkedRead { seq, parked_at: ticks, path: ReadPath::Index, reply };
+                            waiters.pending_reads.insert(next_read_ctx, parked);
+                            next_read_ctx += 1;
+                        }
                     }
-                    ReadIndexResult::Pending => {
-                        let parked = ParkedRead { seq, parked_at: ticks, path: ReadPath::Index, reply };
-                        waiters.pending_reads.insert(next_read_ctx, parked);
-                        next_read_ctx += 1;
-                    }
+                } else {
+                    // A leaderless tail (#143, Paxos Quorum Reads), on any
+                    // node: the core asks a Phase-1 quorum — a row of a grid,
+                    // the whole configuration otherwise — for their vote
+                    // watermarks, and the confirmed `ReadState` surfaces once
+                    // this node's chosen prefix covers the maximum; the reply
+                    // is parked exactly like a read-index one, on the same ctx
+                    // counter, and times out the same way. Never a redirect:
+                    // no role is asked for.
+                    //
+                    // The row override (the Phase-1 twin of `phase2_column`)
+                    // is asked only where it can have an effect: under a grid.
+                    // The core's `ctx % rows` stands under `NoHooks`.
+                    let row = match node.acceptors().quorum_system() {
+                        QuorumSystem::Grid { rows, .. } => hooks.read_row(next_read_ctx, rows).filter(|r| *r < rows),
+                        _ => None,
+                    };
+                    let opened = node.hard_state().chosen_index;
+                    // The row the core will ask, resolved exactly as it
+                    // resolves it, for the audit's report of what served it.
+                    let row = node.acceptors().read_row(next_read_ctx, row);
+                    node.quorum_read_in(next_read_ctx, row);
+                    let path = ReadPath::Quorum { row, opened };
+                    let parked = ParkedRead { seq, parked_at: ticks, path, reply };
+                    waiters.pending_reads.insert(next_read_ctx, parked);
+                    next_read_ctx += 1;
                 }
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
-            Some((req, reply)) = rpc.quorum_read.recv() => {
-                // A leaderless read (#143, Paxos Quorum Reads), on any node:
-                // the core asks a Phase-1 quorum — a row of a grid, the whole
-                // configuration otherwise — for their vote watermarks, and the
-                // confirmed `ReadState` surfaces once this node's chosen
-                // prefix covers the maximum; the reply is parked exactly like
-                // a read-index one, on the same ctx counter, and times out the
-                // same way. Never a redirect: no role is asked for.
-                //
-                // The row override (the Phase-1 twin of `phase2_column`) is
-                // asked only where it can have an effect: under a grid. The
-                // core's `ctx % rows` stands under `NoHooks`.
-                let row = match node.acceptors().quorum_system() {
-                    QuorumSystem::Grid { rows, .. } => hooks.read_row(next_read_ctx, rows).filter(|r| *r < rows),
-                    _ => None,
-                };
-                let opened = node.hard_state().chosen_index;
-                // The row the core will ask, resolved exactly as it resolves
-                // it, for the audit's report of what served the read.
-                let row = node.acceptors().read_row(next_read_ctx, row);
-                node.quorum_read_in(next_read_ctx, row);
-                let path = ReadPath::Quorum { row, opened };
-                let parked = ParkedRead { seq: req.seq, parked_at: ticks, path, reply };
-                waiters.pending_reads.insert(next_read_ctx, parked);
-                next_read_ctx += 1;
-                loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
+            Some((req, reply)) = rpc.log_read.recv() => {
+                // A journal read (#185): a pure read of the chosen prefix,
+                // answered now or parked at the end until a slot is chosen
+                // there (the long-poll). No batch: nothing in the core moved.
+                waiters.log_reads.serve(
+                    |from, max| node.read_log(from, max),
+                    node.config().journal,
+                    &req,
+                    reply,
+                    ticks,
+                    NodeId(self_id),
+                    hooks,
+                    audit,
+                );
             }
             Some(msg) = rpc.deliver.recv() => {
                 // A peer Paxos message → the core's single input router. The same
@@ -1000,12 +1045,16 @@ where
                 // as `not_leader` while it runs, then `unchanged` once done).
                 loop_ctx.answer(Reply::Reconfigure, reply, ack);
             }
-            Some((req, reply)) = rpc.compact.recv() => {
-                let ack = operator::compact(&mut node, &mut snap, req.up_to, self_id);
+            Some((req, reply)) = rpc.trim.recv() => {
+                if log_reads::refuse_journal(node.config().journal, req.journal, "trim", NodeId(self_id), audit) {
+                    loop_ctx.answer(Reply::Compact, reply, TrimAck { unknown_journal: true, ..TrimAck::default() });
+                    continue;
+                }
+                let ack = operator::trim(&mut node, &mut snap, req.up_to, self_id);
                 audit.compact_acked(NodeId(self_id), ack.accepted);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
-                // A lost compaction ack is ambiguous to the client, which
-                // re-asks; the marker/Truncate it may have seeded stands.
+                // A lost trim ack is ambiguous to the client, which re-asks;
+                // the marker/Truncate it may have seeded stands.
                 loop_ctx.answer(Reply::Compact, reply, ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
@@ -1079,6 +1128,14 @@ where
                 snap_repair_tick(&node, &storage, &out, hooks, audit, &mut snap);
                 ticks += 1;
                 loop_ctx.expire_parked_reads(&mut waiters, ticks);
+                waiters.log_reads.expire(
+                    |from, max| node.read_log(from, max),
+                    ticks,
+                    tunables.read_poll_ticks,
+                    NodeId(self_id),
+                    hooks,
+                    audit,
+                );
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // Surface a chosen slot stranded above the applied prefix. The
                 // `Ready` handshake only ever hands out the *contiguous* prefix, so

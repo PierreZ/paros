@@ -13,8 +13,8 @@ use paros_core::{
 
 use crate::audit::Audit;
 use crate::rpc::{
-    CompactAck, InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest,
-    WireQuorumSystem, common, quorum_system_from_proto, quorum_system_to_proto,
+    InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest, TrimAck, WireQuorumSystem,
+    common, quorum_system_from_proto, quorum_system_to_proto,
 };
 use crate::storage::NodeStorage;
 
@@ -22,7 +22,8 @@ use super::events::reconfigure_outcome;
 use super::handover::HandoverDriver;
 use super::snap_repair::SnapRepair;
 
-/// The application permits dropping the log prefix up to `up_to`. Only the
+/// A journal `Trim` (#185, formerly `Compact`): the client permits dropping
+/// the log prefix up to `up_to`. Only the
 /// leader admits it: it proposes a `Truncate` control command into the next
 /// slot, decided by ordinary Paxos and forwarded to every node, each of which
 /// truncates lazily when it applies that slot. A non-leader redirects (like
@@ -36,17 +37,18 @@ use super::snap_repair::SnapRepair;
 /// custody advertisements land. Proposal-side policy only — the acceptor
 /// paths stay fully opaque.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
-pub(crate) fn compact(
+pub(crate) fn trim(
     node: &mut ColocatedNode,
     snap: &mut SnapRepair,
     up_to: u64,
     self_id: u64,
-) -> CompactAck {
+) -> TrimAck {
     if !node.is_leader() {
-        return CompactAck {
+        return TrimAck {
             leader: node.leader().map(|n| n.0),
             accepted: false,
-            first_slot: node.acceptor().first_slot().0,
+            trim_point: node.acceptor().first_slot().0,
+            unknown_journal: false,
         };
     }
     // The quorum question goes through the configuration in force, never a
@@ -94,10 +96,11 @@ pub(crate) fn compact(
         propose_marker(node, snap);
         false
     };
-    CompactAck {
+    TrimAck {
         leader: Some(self_id),
         accepted,
-        first_slot: node.acceptor().first_slot().0,
+        trim_point: node.acceptor().first_slot().0,
+        unknown_journal: false,
     }
 }
 

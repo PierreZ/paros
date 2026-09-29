@@ -49,12 +49,12 @@ use std::sync::{Arc, MutexGuard};
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
     AcceptorConfig, Application, Audit, Ballot, BootRefusal, Command, Control, Deployment,
-    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
-    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
-    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
-    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
-    message_kind,
+    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, JournalId,
+    LEADER_RECOVERY_BATCH, LogReadAnswer, LogReadReport, MatchRefusal, MatchmakerHardState,
+    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, PROMISE_BATCH, Party,
+    PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, SNAP_CHUNK_BYTES, Seam,
+    Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash, message_kind,
 };
 
 use self::state::AuditState;
@@ -1026,6 +1026,51 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         {
             st.read_confirmed_on_column = true;
         }
+    }
+
+    fn log_read_served(&self, node: NodeId, report: &LogReadReport) {
+        let mut st = self.state();
+        // A page is served from the serving process's contiguous chosen
+        // prefix and never above it: an empty long-poll answer names its own
+        // start, everything else ends inside the prefix.
+        assert_always!(
+            report.next <= report.committed_end
+                || (report.entries == 0 && report.next == report.from),
+            "journal read: a page never passes the serving prefix",
+            {
+                "node" => node.0,
+                "from" => report.from.0,
+                "next" => report.next.0,
+                "committed_end" => report.committed_end.0
+            }
+        );
+        if let Some(trim) = report.trimmed_to {
+            // Trimmed only below the trim point, and a trim point only ever
+            // inside what the cluster decided (a floor moves inside the
+            // chosen prefix).
+            assert_always!(
+                report.from < trim,
+                "journal read: a trim point refuses only reads below it",
+                { "node" => node.0, "from" => report.from.0, "trim" => trim.0 }
+            );
+            assert_always!(
+                st.decided_max.is_some_and(|d| trim.0 <= d + 1),
+                "journal read: a trim point never passes the decided prefix",
+                {
+                    "node" => node.0,
+                    "trim" => trim.0,
+                    "decided_max" => crate::signed_watermark(st.decided_max)
+                }
+            );
+            st.journal_read_trimmed = true;
+        }
+        st.journal_read_skipped_hole |= report.skipped > 0;
+        st.journal_read_woke |= report.answer == LogReadAnswer::Woke && report.entries > 0;
+        st.journal_read_on_replica |= st.replicas.contains(&node.0);
+    }
+
+    fn journal_refused(&self, _node: NodeId, _journal: JournalId, _call: &'static str) {
+        assert_reachable!("journal: a call naming an unserved journal is refused");
     }
 
     fn quorum_read_served(

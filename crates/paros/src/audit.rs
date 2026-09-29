@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
+    AcceptorConfig, Ballot, GcAck, GcStep, Handoff, JournalId, MatchRefusal, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, Party, PendingBootstrap,
     ProxyId, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep,
     Registration, RegistrationKind, Slot,
@@ -80,6 +80,39 @@ pub struct Deployment {
     pub application: paros_core::Application,
 }
 
+/// How a journal `Read` (#185) was answered, as reported by
+/// [`Audit::log_read_served`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogReadAnswer {
+    /// Served on arrival.
+    Immediate,
+    /// Parked at the end (the long-poll) and woken by a newly chosen slot
+    /// (or by a trim that overtook it).
+    Woke,
+    /// Parked at the end and answered empty when its wait ran out.
+    Expired,
+}
+
+/// One journal `Read` answer (#185), as it leaves a node or a replica.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogReadReport {
+    /// Where the read started.
+    pub from: Slot,
+    /// Set when the read started below the trim point: the first readable
+    /// slot. Nothing else was answered.
+    pub trimmed_to: Option<Slot>,
+    /// Where the next read starts.
+    pub next: Slot,
+    /// One past the serving node's contiguous chosen prefix.
+    pub committed_end: Slot,
+    /// How many entries the page carried.
+    pub entries: u64,
+    /// How many holes it stepped over.
+    pub skipped: u64,
+    /// How it was answered.
+    pub answer: LogReadAnswer,
+}
+
 /// One `MatchB` page as it leaves a matchmaker: where it starts, the
 /// registrations it carries, where the next one starts (`None` when the
 /// answer is complete) and the durable watermark it was computed under.
@@ -129,6 +162,15 @@ pub trait Audit {
     /// This node installed an opaque application snapshot from a peer, jumping
     /// its chosen prefix to `chosen_index` and adopting `ballot`.
     fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, ballot: Ballot) {}
+
+    /// This node (or replica) answered a journal `Read` (#185) — reported
+    /// once, as the answer is handed to the reply seam (a reply the seam
+    /// then drops was still served).
+    fn log_read_served(&self, node: NodeId, report: &LogReadReport) {}
+
+    /// This node refused a client call naming a journal it does not serve
+    /// (`0`, or any other id than its own, #185). `call` names the RPC.
+    fn journal_refused(&self, node: NodeId, journal: JournalId, call: &'static str) {}
 
     /// This node applied the chosen command at `slot` (hashed to `vhash`),
     /// advancing its contiguous applied prefix.

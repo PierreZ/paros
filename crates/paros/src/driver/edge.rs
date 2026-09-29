@@ -40,8 +40,8 @@ use tokio_util::sync::CancellationToken;
 use super::config::DriverTunables;
 use crate::audit::Audit;
 use crate::rpc::methods::{
-    CompactRpc, GarbageCollectRpc, InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ProposeRpc,
-    QuorumReadRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc,
+    AppendRpc, CheckTailRpc, GarbageCollectRpc, InspectRpc, LogReadRpc, MatchmakeRpc,
+    MatchmakerReconfigureRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, TrimRpc,
 };
 use crate::rpc::{
     Inbound, OnReject, garbage_collect_from_wire, match_request_from_wire,
@@ -115,10 +115,10 @@ impl<P: Providers> RpcEdge<P> {
 /// A node's inbound queues: the public journal, the operator calls, and the
 /// peer lane.
 pub(crate) struct NodeInbox {
-    pub(crate) propose: Plain<ProposeRpc>,
-    pub(crate) read: Plain<ReadRpc>,
-    pub(crate) quorum_read: Plain<QuorumReadRpc>,
-    pub(crate) compact: Plain<CompactRpc>,
+    pub(crate) append: Plain<AppendRpc>,
+    pub(crate) log_read: Plain<LogReadRpc>,
+    pub(crate) check_tail: Plain<CheckTailRpc>,
+    pub(crate) trim: Plain<TrimRpc>,
     pub(crate) reconfigure: Plain<ReconfigureRpc>,
     pub(crate) reconfigure_matchmakers: Plain<ReconfigureMatchmakersRpc>,
     pub(crate) inspect: Plain<InspectRpc>,
@@ -144,10 +144,10 @@ impl NodeInbox {
     ) -> SimulationResult<Self> {
         let rpc = edge.handle();
         Ok(Self {
-            propose: Inbound::plain(serve_well_known(rpc)?),
-            read: Inbound::plain(serve_well_known(rpc)?),
-            quorum_read: Inbound::plain(serve_well_known(rpc)?),
-            compact: Inbound::plain(serve_well_known(rpc)?),
+            append: Inbound::plain(serve_well_known(rpc)?),
+            log_read: Inbound::plain(serve_well_known(rpc)?),
+            check_tail: Inbound::plain(serve_well_known(rpc)?),
+            trim: Inbound::plain(serve_well_known(rpc)?),
             reconfigure: Inbound::plain(serve_well_known(rpc)?),
             reconfigure_matchmakers: Inbound::plain(serve_well_known(rpc)?),
             inspect: Inbound::plain(serve_well_known(rpc)?),
@@ -165,11 +165,13 @@ impl NodeInbox {
 }
 
 /// A replica's inbound queues (#144): the lane, the `Inspect` a probe reads
-/// its application through, and the public `QuorumRead` (§3.4: a client
-/// reads from a replica). Nothing else a node serves is a replica's.
+/// it through, and the public reads — the journal `Read` (#185: read
+/// replicas take read load off the acceptors) and `CheckTail` (§3.4: a
+/// client reads from a replica). Nothing else a node serves is a replica's.
 pub(crate) struct ReplicaInbox {
     pub(crate) inspect: Plain<InspectRpc>,
-    pub(crate) quorum_read: Plain<QuorumReadRpc>,
+    pub(crate) log_read: Plain<LogReadRpc>,
+    pub(crate) check_tail: Plain<CheckTailRpc>,
     pub(crate) deliver: mpsc::Receiver<Message>,
 }
 
@@ -191,7 +193,8 @@ impl ReplicaInbox {
         let rpc = edge.handle();
         Ok(Self {
             inspect: Inbound::plain(serve_well_known(rpc)?),
-            quorum_read: Inbound::plain(serve_well_known(rpc)?),
+            log_read: Inbound::plain(serve_well_known(rpc)?),
+            check_tail: Inbound::plain(serve_well_known(rpc)?),
             deliver: serve_deliveries(
                 providers,
                 rpc,

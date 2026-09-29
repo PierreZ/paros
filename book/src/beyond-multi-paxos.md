@@ -131,14 +131,14 @@ The argument is single-configuration, so a read is bound to the configuration it
 opened against. A `PreReadAck` carries the answerer's configuration ballot, and a
 node abandons its open reads when it learns a newer configuration.
 
-A client reaches this path through its own RPC, `QuorumRead`. It may ask any
+A client reaches this path through `CheckTail` on its quorum path. It may ask any
 node, and the node never redirects it: the leader, a follower and a spare all
 serve the read the same way. The simulation's client draws the node at random,
 and the same history check that judges read-index reads judges these reads.
 
 **In the code.** `QuorumRead`, `QuorumReads` (`quorum_read.rs`);
 `ColocatedNode::quorum_read(ctx)` and `quorum_read_in(ctx, row)`
-(`node/quorum_reads.rs`); the `QuorumRead` RPC (`paros.proto`), which the driver
+(`node/quorum_reads.rs`); the `CheckTail` RPC's quorum path (`paros.proto`), which the driver
 parks like a read-index read;
 `Acceptor::vote_watermark` (`acceptor.rs`); `Message::PreRead`,
 `Message::PreReadAck` (`message.rs`); `Replica::covers`, `Ready::read_states`.

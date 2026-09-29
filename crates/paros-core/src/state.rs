@@ -1,7 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
-use crate::types::{Ballot, NodeId, Slot};
+use crate::types::{Ballot, JournalId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.
@@ -112,6 +112,13 @@ pub struct Config {
     /// the application nothing. Deployment data, never a feature: one code
     /// path runs the learner logic for both.
     pub application: Application,
+    /// The journal this node serves (#184): carried for assertions and
+    /// tracing, never read by a protocol decision — the driver routes a
+    /// message to its journal before the core sees it, and a client call
+    /// naming any other journal is refused at the wire. Defaults to the one
+    /// user journal of a single-journal deployment
+    /// ([`JournalId::FIRST_USER`]).
+    pub journal: JournalId,
 }
 
 /// Whether a [`crate::ColocatedNode`] runs the **application** or sheds it

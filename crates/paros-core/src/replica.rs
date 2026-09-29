@@ -41,6 +41,35 @@ pub const APPLY_BATCH: usize = 64;
 /// this role enforces in [`Replica::pump_app_repair`].
 pub const APP_REPAIR_BATCH: usize = 64;
 
+/// The answer to a journal read ([`Replica::read`], #185).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogRead {
+    /// The read started below the retention floor: those entries are gone
+    /// here, and `trim_point` is the first slot a read may start at.
+    Trimmed {
+        /// The retention floor (the first retained slot).
+        trim_point: Slot,
+    },
+    /// A page of chosen entries.
+    Page(LogPage),
+}
+
+/// One page of chosen client entries ([`Replica::read`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogPage {
+    /// The client entries, by slot (the LSN), holes skipped.
+    pub entries: Vec<(Slot, Entry)>,
+    /// Where the next read starts: one past the last slot this page
+    /// covered, entries and holes alike.
+    pub next: Slot,
+    /// One past the contiguous chosen prefix: every slot below it is
+    /// chosen here.
+    pub committed_end: Slot,
+    /// How many holes (control commands, #94 duplicates) the page stepped
+    /// over.
+    pub skipped: u64,
+}
+
 /// The replica: chosen log, applied prefix, dedup ledger. See the module doc.
 #[derive(Clone, Debug)]
 pub struct Replica {
@@ -332,6 +361,91 @@ impl Replica {
             .collect()
     }
 
+    /// One page of a **journal read** (#185, `Read(journal, from_lsn,
+    /// max_bytes)`): the chosen client entries from `from` up, served from
+    /// this replica's contiguous chosen prefix and never above it.
+    ///
+    /// The log sequence number *is* the slot. A slot holding a control
+    /// command (a `Noop` gap fill, a `Truncate`, a snapshot marker) or a #94
+    /// duplicate is a **hole**: skipped, counted in [`LogPage::skipped`],
+    /// and invisible to the client except that [`LogPage::next`] steps past
+    /// it — a reader never has to know why a slot was skipped.
+    ///
+    /// `floor` is the retention floor the caller holds (the acceptor's
+    /// compaction floor on a node, the replica's own on a replica): a read
+    /// that starts below it is [`LogRead::Trimmed`], and nothing else, since
+    /// the entries there are gone. `max_bytes` bounds the page by the sum of
+    /// the entries' payload bytes, except that a page that could hold an
+    /// entry always holds at least one — a single entry larger than the
+    /// budget must still be readable.
+    ///
+    /// A `from` at or past the prefix's end returns an empty page whose
+    /// `next` is `from`: the caller (the driver) decides whether to wait for
+    /// the prefix to grow — the long-poll is not the core's.
+    ///
+    /// A slot inside the prefix whose value this node does not hold (a
+    /// corrupted record under repair) ends the page early, never skipped:
+    /// skipping it would tell the reader the slot is a hole.
+    ///
+    /// # Panics
+    ///
+    /// If the page it built breaks its own shape (entries outside
+    /// `[from, next)` or out of order): a programmer error.
+    #[must_use]
+    pub fn read(&self, from: Slot, floor: Slot, max_bytes: usize) -> LogRead {
+        if from < floor {
+            return LogRead::Trimmed { trim_point: floor };
+        }
+        let end = self.first_unchosen();
+        let mut page = LogPage {
+            entries: Vec::new(),
+            next: from.max(floor),
+            committed_end: end,
+            skipped: 0,
+        };
+        let mut bytes = 0_usize;
+        while page.next < end {
+            let slot = page.next;
+            // A slot of the prefix whose value this node lost (a CTRL
+            // `faulty` record whose repair is still open) ends the page:
+            // the reader's next read starts there and is served once the
+            // value is healed, or by another node.
+            let Some(command) = self.chosen.get(&slot) else {
+                break;
+            };
+            let entry = command
+                .user()
+                .filter(|_| !self.duplicate_slots.contains(&slot));
+            match entry {
+                Some(entry) => {
+                    let size = entry.value.0.len();
+                    if !page.entries.is_empty() && bytes.saturating_add(size) > max_bytes {
+                        break;
+                    }
+                    bytes = bytes.saturating_add(size);
+                    page.entries.push((slot, entry.clone()));
+                }
+                None => page.skipped += 1,
+            }
+            page.next = Slot(slot.0 + 1);
+        }
+        // Postconditions: the page never passes the prefix, and every entry
+        // lies in `[from, next)` in strictly increasing order.
+        assert!(
+            page.next <= end || page.next == from,
+            "a read page ends inside the chosen prefix"
+        );
+        assert!(
+            page.entries.windows(2).all(|w| w[0].0 < w[1].0)
+                && page
+                    .entries
+                    .iter()
+                    .all(|(s, _)| *s >= from && *s < page.next),
+            "a read page's entries lie in [from, next) in slot order"
+        );
+        LogRead::Page(page)
+    }
+
     // ---- learning -------------------------------------------------------------
 
     /// Point the in-flight table at `slot` for `(client, seq)` — a fresh
@@ -566,5 +680,87 @@ impl Replica {
                 .entry(*seq)
                 .or_insert(*slot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{LogRead, Replica};
+    use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
+
+    fn user(client: u64, seq: u64, bytes: &[u8]) -> Command {
+        Command::User(Entry {
+            client: ClientId(client),
+            seq: ClientSeq(seq),
+            value: Value(bytes.to_vec()),
+        })
+    }
+
+    /// A replica whose chosen prefix is `commands` from slot 0.
+    fn replica(commands: &[Command]) -> Replica {
+        let ballot = Ballot {
+            round: 1,
+            node: NodeId(1),
+        };
+        let records: BTreeMap<Slot, (Ballot, Command)> = commands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (Slot(i as u64), (ballot, c.clone())))
+            .collect();
+        let ci = commands.len().checked_sub(1).map(|i| Slot(i as u64));
+        Replica::from_boot(ci, [], &records)
+    }
+
+    fn page(read: LogRead) -> super::LogPage {
+        match read {
+            LogRead::Page(page) => page,
+            LogRead::Trimmed { .. } => panic!("expected a page"),
+        }
+    }
+
+    #[test]
+    fn a_read_skips_holes_and_names_where_the_next_one_starts() {
+        let r = replica(&[
+            user(1, 1, b"a"),
+            Command::Control(Control::Noop),
+            user(1, 1, b"a"), // a #94 duplicate of slot 0
+            Command::Control(Control::Truncate { up_to: Slot(0) }),
+            user(2, 1, b"b"),
+        ]);
+        let p = page(r.read(Slot(0), Slot(0), 1024));
+        let slots: Vec<u64> = p.entries.iter().map(|(s, _)| s.0).collect();
+        assert_eq!(slots, vec![0, 4]);
+        assert_eq!(p.skipped, 3);
+        assert_eq!(p.next, Slot(5));
+        assert_eq!(p.committed_end, Slot(5));
+    }
+
+    #[test]
+    fn a_read_is_bounded_by_bytes_but_always_carries_one_entry() {
+        let r = replica(&[user(1, 1, b"xxxx"), user(1, 2, b"yyyy"), user(1, 3, b"z")]);
+        let p = page(r.read(Slot(0), Slot(0), 1));
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.next, Slot(1));
+        let p = page(r.read(Slot(0), Slot(0), 8));
+        assert_eq!(p.entries.len(), 2);
+        assert_eq!(p.next, Slot(2));
+    }
+
+    #[test]
+    fn a_read_at_the_end_is_empty_and_a_read_below_the_floor_is_trimmed() {
+        let r = replica(&[user(1, 1, b"a")]);
+        let p = page(r.read(Slot(1), Slot(0), 64));
+        assert!(p.entries.is_empty());
+        assert_eq!(p.next, Slot(1));
+        let p = page(r.read(Slot(7), Slot(0), 64));
+        assert_eq!(p.next, Slot(7));
+        assert_eq!(
+            r.read(Slot(0), Slot(1), 64),
+            LogRead::Trimmed {
+                trim_point: Slot(1)
+            }
+        );
     }
 }

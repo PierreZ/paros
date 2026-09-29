@@ -11,7 +11,10 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
     buggify_with_prob, swarm_op_enabled,
 };
-use paros::{QuorumSystem, Read, RetireRequest, WireQuorumSystem, quorum_system_from_proto};
+use paros::{
+    CheckTail, ClientId, ClientSeq, Command, Entry, JournalId, QuorumSystem, Read, RetireRequest,
+    TailPath, Value, WireQuorumSystem, command_hash, encode_records, quorum_system_from_proto,
+};
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world, check_run};
 use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
@@ -70,7 +73,20 @@ const RETIRE: u8 = 13;
 /// by exactly the checks [`READ_INDEX`] is: the per-client frontier, read
 /// your writes, and the merged history's linearizability.
 const QUORUM_READ: u8 = 14;
-const OP_COUNT: u8 = 15;
+/// The PUBLIC **journal read** (#185): `Read(from_lsn, max_bytes)` asked of
+/// a node or a replica drawn at random, from this client's tailing cursor,
+/// from its own last acked slot, from the start of the log, or far past the
+/// end. Judged here as it arrives: every entry is the value the audit knows
+/// was decided at its slot, the page lies in `[from, next)` in order, this
+/// client's own acked appends inside the page are in it, the cursor never
+/// moves backwards, and a trim answer refuses only reads below it.
+const READ: u8 = 15;
+/// The PUBLIC **linearizable tail** (#185, `CheckTail`) on a path this step
+/// draws — read-index at the leader or a quorum read anywhere — judged by
+/// exactly the checks [`READ_INDEX`] and [`QUORUM_READ`] are, which pin the
+/// path.
+const CHECK_TAIL: u8 = 16;
+const OP_COUNT: u8 = 17;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -172,6 +188,10 @@ struct ChainConfig {
     /// How long a connection may stay silent after a ping. Floor 250 ms: a
     /// timeout under the round trip fails a healthy connection on every ping.
     keep_alive_timeout_ms: u64,
+    /// The byte budget a journal `READ` asks a page for. Floor 0: a page
+    /// that can hold an entry always holds one, so the floor is a reader
+    /// that walks the log one entry per call — slower, never stuck.
+    read_max_bytes: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -216,9 +236,10 @@ impl ChainConfig {
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
+            read_max_bytes: buggify_knob!(4096_u64, 0_u64..257_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
             // MATCHMAKE (retired), MATCH_GC (retired), RECONFIGURE,
-            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ
+            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ, READ, CHECK_TAIL
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -248,6 +269,11 @@ impl ChainConfig {
                 // server's prefix; the ceiling is a read-heavy client, the
                 // floor one that never takes the leaderless path.
                 buggify_knob!(10_u64, 0_u64..41_u64),
+                // A journal read is a pure read of one process's prefix (or
+                // a long-poll at its end); the ceiling is a tailing reader.
+                buggify_knob!(14_u64, 0_u64..41_u64),
+                // A tail on a drawn path costs what its path costs.
+                buggify_knob!(8_u64, 0_u64..41_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -523,6 +549,65 @@ struct AckedCommand {
     node: usize,
 }
 
+/// Judge one journal `Read` answer (#185) against the audit and this
+/// client's own acked appends: every entry is the value decided at its slot,
+/// the page lies in `[from, next)` in slot order, this client's acked appends
+/// inside `[from, next)` are in it (a page never hides a real entry as a
+/// hole), and a trim answer carries nothing.
+fn judge_read(
+    audit: &AuditWorld,
+    client_id: u64,
+    from: u64,
+    ack: &paros::ReadAck,
+    acked: &[AckedCommand],
+) {
+    if let Some(trim) = ack.trimmed_to {
+        assert_always!(
+            ack.entries.is_empty() && from < trim,
+            "chain: a trimmed read carries nothing and names a point above its start",
+            { "from" => from, "trim" => trim }
+        );
+        return;
+    }
+    let mut previous: Option<u64> = None;
+    for entry in &ack.entries {
+        assert_always!(
+            entry.lsn >= from
+                && entry.lsn < ack.next_lsn
+                && previous.is_none_or(|p| p < entry.lsn),
+            "chain: a read page lies in [from, next) in slot order",
+            { "from" => from, "lsn" => entry.lsn, "next" => ack.next_lsn }
+        );
+        previous = Some(entry.lsn);
+        // The slot's decided value, rebuilt from the page: the identity and
+        // the framed records are exactly what the slot holds.
+        let command = Command::User(Entry {
+            client: ClientId(entry.client),
+            seq: ClientSeq(entry.seq),
+            value: Value(encode_records(&entry.records)),
+        });
+        if let Some(decided) = audit.decided_vhash(entry.lsn) {
+            assert_always!(
+                decided == command_hash(&command),
+                "chain: a read entry is the value decided at its slot",
+                { "lsn" => entry.lsn, "client" => entry.client, "seq" => entry.seq }
+            );
+        }
+    }
+    for own in acked
+        .iter()
+        .filter(|own| own.slot >= from && own.slot < ack.next_lsn)
+    {
+        assert_always!(
+            ack.entries
+                .iter()
+                .any(|e| e.lsn == own.slot && e.client == client_id && e.seq == own.seq),
+            "chain: a read covering an acked append returns it",
+            { "slot" => own.slot, "seq" => own.seq, "from" => from, "next" => ack.next_lsn }
+        );
+    }
+}
+
 const TAIL_KEY: &str = "paros-chain-tail";
 
 /// How long the cluster must stay converged and unchanged before the run is
@@ -595,6 +680,10 @@ struct AdversarialCoverage {
     read_index_committed: bool,
     /// A `QUORUM_READ` step ran (the draw fired).
     quorum_read_executed: bool,
+    /// A `CHECK_TAIL` step ran.
+    check_tail_executed: bool,
+    /// A `READ` step ran.
+    read_executed: bool,
     /// One flag per [`RECONFIGURE_SHAPES`] entry: the shape was requested and
     /// the leader started it.
     reconfigure_started: [bool; 5],
@@ -688,7 +777,9 @@ impl ChainWorkload {
             config.large_command_bytes,
             seed,
         );
-        let cmd_hash = user_command_hash(&payload);
+        // The slot decides the append's framed records (#185), not the raw
+        // payload: the application folds what the slot holds.
+        let cmd_hash = user_command_hash(&paros::encode_records(std::slice::from_ref(&payload)));
         audit.note_submitted(cmd_hash);
         self.history.record_write_issued(seq, now_ms);
         tracing::info!(
@@ -851,6 +942,10 @@ impl Workload for ChainWorkload {
         // starts after an earlier one completed: linearizability demands its
         // watermark never move backwards.
         let mut last_read_frontier: Option<u64> = None;
+        // This client's journal-read cursor (#185): where its tailing reads
+        // start. Only ever moved forward by a page's `next_lsn` (or a trim
+        // point), so a reader that never went backwards never re-reads.
+        let mut read_cursor: u64 = 0;
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
@@ -1334,17 +1429,29 @@ impl Workload for ChainWorkload {
                         }
                     }
                 }
-                READ_INDEX | QUORUM_READ => {
-                    // The two public linearizable reads, judged alike. The
-                    // read-index read: the driver captures the leader's
-                    // applied watermark, confirms leadership with a
-                    // heartbeat-ack quorum round, and only then answers. The
-                    // quorum read (#143): any node asks a row for its vote
-                    // watermarks and answers once its prefix covers the
-                    // maximum — so it goes to a node drawn at random, never
-                    // to the hint. A timeout is Ambiguous — nothing is
-                    // recorded or assumed.
-                    let quorum = op == QUORUM_READ;
+                READ_INDEX | QUORUM_READ | CHECK_TAIL => {
+                    // The public linearizable tail (`CheckTail`, #185) on
+                    // its two paths, judged alike. The read-index path: the
+                    // driver captures the leader's chosen watermark, confirms
+                    // leadership with a heartbeat-ack quorum round, and only
+                    // then answers. The quorum path (#143): any node asks a
+                    // row for its vote watermarks and answers once its prefix
+                    // covers the maximum — so it goes to a node drawn at
+                    // random, never to the hint. `READ_INDEX` and
+                    // `QUORUM_READ` pin the path; `CHECK_TAIL` draws it, as a
+                    // journal client that does not care would. A timeout is
+                    // Ambiguous — nothing is recorded or assumed.
+                    let quorum = match op {
+                        QUORUM_READ => true,
+                        CHECK_TAIL => {
+                            if !self.adversarial.check_tail_executed {
+                                assert_reachable!("chain: check-tail operation executes");
+                                self.adversarial.check_tail_executed = true;
+                            }
+                            raw_target & (1 << 20) != 0
+                        }
+                        _ => false,
+                    };
                     let seq = next_seq;
                     next_seq = next_seq.saturating_add(1);
                     if quorum {
@@ -1384,18 +1491,18 @@ impl Workload for ChainWorkload {
                             Some(replica) => replica_clients[replica].clone(),
                             None => clients[attempt_target].clone(),
                         };
-                        let request = Read {
+                        let request = CheckTail {
+                            journal: JournalId::default().0,
                             client: client_id,
                             seq,
-                        };
-                        let call = async move {
-                            let response = if quorum {
-                                client.quorum_read(&request).await
+                            path: if quorum {
+                                TailPath::Quorum
                             } else {
-                                client.read(&request).await
-                            };
-                            response.ok()
+                                TailPath::Leader
+                            }
+                            .into(),
                         };
+                        let call = async move { client.check_tail(&request).await.ok() };
                         let attempt = within(ctx, remaining, None, call).await;
                         match attempt {
                             Some(ack) => {
@@ -1403,8 +1510,16 @@ impl Workload for ChainWorkload {
                                     ack.seq == seq,
                                     "chain: read-index ack echoes request"
                                 );
+                                assert_always!(
+                                    !ack.unknown_journal,
+                                    "chain: a node serves the journal the client names"
+                                );
                                 if ack.committed {
-                                    break Some(ack.read_index);
+                                    // The tail is exclusive; the history
+                                    // judges the last chosen slot.
+                                    break Some(
+                                        ack.committed_end.and_then(|end| end.checked_sub(1)),
+                                    );
                                 }
                                 // Redirect, by this step's policy, inside
                                 // the same deadline. An overdue quorum read
@@ -1474,6 +1589,87 @@ impl Workload for ChainWorkload {
                             quorum,
                             "chain_read_index_ambiguous"
                         );
+                    }
+                }
+                READ => {
+                    if !self.adversarial.read_executed {
+                        assert_reachable!("chain: journal-read operation executes");
+                        self.adversarial.read_executed = true;
+                    }
+                    // Where the read starts, from the class draw: the
+                    // tailing cursor (most often — the reader that long-polls
+                    // at the end and meets the trim point as the log moves),
+                    // this client's own last acked slot, the log's start, or
+                    // far past any end (a long-poll answered empty).
+                    let tailing = raw_class % 4 < 2;
+                    let from = match raw_class % 4 {
+                        0 | 1 => read_cursor,
+                        2 => max_acked_slot.unwrap_or(0),
+                        _ => {
+                            if raw_class & (1 << 8) != 0 {
+                                0
+                            } else {
+                                read_cursor.saturating_add(1 << 20)
+                            }
+                        }
+                    };
+                    // Any node or replica serves a journal read.
+                    let replica_count = replica_clients.len();
+                    let span = u64::try_from(server_count + replica_count)
+                        .unwrap_or(1)
+                        .max(1);
+                    let drawn = usize::try_from((raw_target >> 32) % span).unwrap_or(0);
+                    let client = match drawn.checked_sub(server_count) {
+                        Some(replica) => replica_clients[replica].clone(),
+                        None => clients[drawn].clone(),
+                    };
+                    // A client naming a journal this deployment does not
+                    // serve (`0`, the unset id, or another user journal) must
+                    // be refused, never answered from the wrong log.
+                    let stray = buggify_with_prob!(0.05);
+                    let journal = if stray {
+                        assert_reachable!("chain: a client asks for a journal nobody serves");
+                        if raw_policy & 1 == 0 {
+                            0
+                        } else {
+                            JournalId::default().0 + 1
+                        }
+                    } else {
+                        JournalId::default().0
+                    };
+                    let request = Read {
+                        journal,
+                        from_lsn: from,
+                        max_bytes: config.read_max_bytes,
+                    };
+                    let call = async move { client.read(&request).await.ok() };
+                    if let Some(ack) = within(ctx, request_timeout, None, call).await {
+                        if stray {
+                            assert_always!(
+                                ack.unknown_journal && ack.entries.is_empty(),
+                                "chain: a read naming another journal is refused",
+                                { "journal" => journal }
+                            );
+                        } else {
+                            assert_always!(
+                                !ack.unknown_journal,
+                                "chain: a node serves the journal the client names"
+                            );
+                            judge_read(&audit, client_id, from, &ack, &acked_commands);
+                            if tailing {
+                                // The cursor only moves forward: a page's
+                                // `next_lsn` is at or past its start, and a
+                                // trim point is where a trimmed reader
+                                // resumes.
+                                let next = ack.trimmed_to.unwrap_or(ack.next_lsn);
+                                assert_always!(
+                                    next >= read_cursor,
+                                    "chain: a client's journal-read cursor never moves backwards",
+                                    { "cursor" => read_cursor, "next" => next }
+                                );
+                                read_cursor = read_cursor.max(next);
+                            }
+                        }
                     }
                 }
                 READ_STATE => {

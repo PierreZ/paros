@@ -158,6 +158,11 @@ impl NodeShape {
             connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(floor_ticks),
+            // Floor 0: a zero wait answers every journal read at the end at
+            // once, empty, and the client re-asks; the ceiling crosses the
+            // client's deadline, where a long-poll the client stops waiting
+            // for is an ambiguous read, never a wrong one (#185).
+            read_poll_ticks: buggify_knob!(8_u64, 0_u64..41_u64),
             // Floor 1: the snapshot lane is a keep-newest `PeerMailbox` that
             // carries one class (`InstallSnapshot`), so a one-slot lane only
             // ever evicts an older offer to the same peer in favour of the

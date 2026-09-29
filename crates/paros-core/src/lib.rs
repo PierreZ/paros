@@ -107,12 +107,13 @@ pub use node::{
 pub use proxy_leader::{ProxyLeader, ProxyReady};
 pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
 pub use ready::Ready;
+pub use replica::{LogPage, LogRead};
 pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};
 pub use retained::RetainedWindow;
 pub use state::{Application, Config, HardState};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId, SessionEntry, Slot,
-    Value, command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, JournalId, NodeId,
+    SessionEntry, Slot, Value, command_fingerprint,
 };
 pub use write::{AcceptorWrite, MustSync, WriteOp};

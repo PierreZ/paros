@@ -49,7 +49,7 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes,
 };
 use paros::{
-    Command, Compact, Control, Entry, InspectReply, Propose, Reconfigure, Slot, Value,
+    Append, Command, Control, Entry, InspectReply, JournalId, Reconfigure, Slot, Trim, Value,
     snap_chunk_count,
 };
 
@@ -292,31 +292,32 @@ impl CorpusClients {
         }
     }
 
-    /// Propose `(seq, bytes)` until some node commits it, rotating targets and
-    /// following leader hints. Returns the committed slot, or `None` at the
-    /// deadline.
+    /// Append `(seq, record)` until some node commits it, rotating targets
+    /// and following leader hints. Returns the committed slot, or `None` at
+    /// the deadline.
     #[tracing::instrument(level = "debug", skip_all)]
     async fn propose_until_acked(
         &self,
         ctx: &SimContext,
         client_id: u64,
         seq: u64,
-        bytes: &[u8],
+        record: &[u8],
         exclude: Option<usize>,
         deadline: Duration,
     ) -> Option<u64> {
         let first = usize::try_from(seq).unwrap_or(0);
         self.until_accepted(ctx, first, exclude, deadline, |client| async move {
             let ack = client
-                .propose(&Propose {
+                .append(&Append {
+                    journal: JournalId::default().0,
                     client: client_id,
                     seq,
-                    command: bytes.to_vec(),
+                    records: vec![record.to_vec()],
                 })
                 .await
                 .ok()?;
             Some(if ack.committed {
-                Verdict::Accepted(ack.slot)
+                Verdict::Accepted(ack.first_lsn)
             } else {
                 Verdict::Refused { leader: ack.leader }
             })
@@ -336,7 +337,13 @@ impl CorpusClients {
     ) -> bool {
         trace_truncate(up_to);
         self.until_accepted(ctx, 0, exclude, deadline, |client| async move {
-            let ack = client.compact(&Compact { up_to }).await.ok()?;
+            let ack = client
+                .trim(&Trim {
+                    journal: JournalId::default().0,
+                    up_to,
+                })
+                .await
+                .ok()?;
             Some(if ack.accepted {
                 Verdict::Accepted(())
             } else {
@@ -543,7 +550,9 @@ async fn prime_prefix(
     let mut commands = Vec::new();
     for offset in 0..count {
         let seq = seq_base + offset;
-        let bytes = payload(seq);
+        let record = payload(seq);
+        // The slot decides the append's framed records (#185).
+        let bytes = paros::encode_records(std::slice::from_ref(&record));
         // Registered before the RPC leaves: an applied user command the audit
         // never saw submitted is one the cluster invented.
         audit_world(ctx.state()).note_submitted(user_command_hash(&bytes));
@@ -554,7 +563,7 @@ async fn prime_prefix(
             "chain_command_submitted"
         );
         let Some(slot) = clients
-            .propose_until_acked(ctx, client_id, seq, &bytes, exclude, deadline)
+            .propose_until_acked(ctx, client_id, seq, &record, exclude, deadline)
             .await
         else {
             assert_always!(

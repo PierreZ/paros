@@ -111,9 +111,17 @@ identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the matchmaker set a nod
 authoritative, compose a successor — grow, shrink, replace, rotate through the matchmaker pool —
 and ask any node to drive the generation handover; refused on a plain seed), `RETIRE=13`
 (ask the leader which acceptors its effective GC floor released, park one in the storage world
-for good, and tell it to shut down) and `QUORUM_READ=14` (#143: the public leaderless read,
+for good, and tell it to shut down), `QUORUM_READ=14` (#143: the public leaderless read,
 asked of a node drawn at random and never redirected; judged by the same per-client frontier,
-read-your-writes and history linearizability checks as `READ_INDEX`).
+read-your-writes and history linearizability checks as `READ_INDEX`), `READ=15` (#185: the
+journal `Read` of a log range, asked of a node or a replica drawn at random, from the client's
+tailing cursor, its own last acked slot, the log's start or far past the end; judged as it
+arrives — every entry the audit's decided value at its slot, the page in `[from, next)` in
+order, the client's own acked appends inside the page present, the cursor monotone, a trim
+answer only below its point) and `CHECK_TAIL=16` (#185: the journal `CheckTail` on a drawn
+path — read-index or quorum — judged exactly as `READ_INDEX` and `QUORUM_READ`, which pin
+the path). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
+`COMPACT` a `Trim`, `READ_INDEX` and `QUORUM_READ` a `CheckTail`.
 Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
 chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
 that opaque state. The audit's application check (over the `ChainState` the storage layer reports
@@ -263,7 +271,8 @@ own**. The roles:
   successor abandons the read; the residual — a grid row wholly unaware of a completed
   successor — is what the client-history linearizability oracle judges (the chain campaign's
   `QUORUM_READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
-  The driver half: a `QuorumRead` RPC on any node, parked on the read-index path's `ctx`
+  The driver half: `CheckTail` on its quorum path (#185; the `QuorumRead` RPC before it)
+  on any node, parked on the read-index path's `ctx`
   counter and deadline but bound to no role (a leader stepping down redirects its read-index
   reads, never its quorum reads); `DriverHooks::read_row` (a BUGGIFY location, consulted on a
   grid node) names the row through `ColocatedNode::quorum_read_in`; `Audit::quorum_read_served`
@@ -951,7 +960,8 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   simulation-only conditional compilation. Sancov crate-under-test.
 - `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, the
-  node RPC contract (`Propose`/`ProposeAck`), and the matchmaker's driver + storage seam
+  node RPC contract (the journal API of #185: `Append`, `Read`, `CheckTail`, `Trim`, every
+  call naming a `JournalId`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
   + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
   transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and

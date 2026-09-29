@@ -9,7 +9,7 @@ use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeI
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, HandoffContext};
-use crate::rpc::ReadAck;
+use crate::rpc::CheckTailAck;
 
 use super::ready::{ClientWaiters, ReadPath};
 
@@ -377,11 +377,10 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
                 .partition(|(_, parked)| parked.path == ReadPath::Index);
         waiters.pending_reads = quorum;
         for parked in index.into_values() {
-            let _ = parked.reply.send(ReadAck {
+            let _ = parked.reply.send(CheckTailAck {
                 seq: parked.seq,
                 leader: node.leader().map(|n| n.0),
-                committed: false,
-                read_index: None,
+                ..CheckTailAck::default()
             });
         }
     }

@@ -155,6 +155,9 @@ pub enum Reply {
     /// A `RetireAck`. Dropping it after the node accepted its retirement
     /// leaves the operator to re-ask a node that is already gone.
     Retire,
+    /// A journal `ReadAck` (#185): a page, a trim point, or an empty
+    /// long-poll answer. Dropping it is a lost read the client re-asks.
+    LogRead,
 }
 
 impl Reply {
@@ -163,6 +166,7 @@ impl Reply {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Reply::LogRead => "log_read",
             Reply::Propose => "propose",
             Reply::ProposeDedup => "propose_dedup",
             Reply::Read => "read",

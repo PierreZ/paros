@@ -22,7 +22,10 @@ the driver, never in a sim-only path.
   arm, never spawned, so a crash drops its listener on the spot) and each
   role's typed inboxes (`NodeInbox`, `ReplicaInbox`, `MatchmakerInbox`) · `driver/reply.rs`
   the one client-reply seam (`answer`, `match_answer`, `maybe_duplicate`) ·
-  `driver/config.rs` `DriverTunables` and its production defaults.
+  `driver/config.rs` `DriverTunables` and its production defaults ·
+  `driver/log_reads.rs` the journal `Read` answer and its long-poll (#185:
+  parked at the end, re-served after every batch, answered empty after
+  `read_poll_ticks`), shared by the node and the replica driver.
 - `hooks.rs` `DriverHooks` (the BUGGIFY prong-1 surface, every method
   defaulting to inert, `NoHooks` for production), `Seam` (eight durability
   seams), `HandoffContext`, `Reply`. The `H: DriverHooks` bound on `run_node`
@@ -50,7 +53,7 @@ the driver, never in a sim-only path.
   the deployment map's proxies beside its peers · `replica_tier/mod.rs`
   `run_replica` (#144: the fourth driver — the node contract's learner subset
   over a `NodeStorage`, the node's boot scan, format marker and durability seams,
-  sends catch-up requests and pre-reads, serves clients the public `QuorumRead` from its
+  sends catch-up requests and pre-reads, serves clients the public `Read` and `CheckTail` (quorum path) from its
   own applied state and nothing else, holds no snapshot custody and runs no chunk plane, by
   decision — the module doc says why). `run_node` and `run_proxy` take the deployment's replicas and
   `Outbound::resolve` adds them to every `Audience::Learners` send; `Outbound::learners`
@@ -60,10 +63,12 @@ the driver, never in a sim-only path.
   wire is deterministic in simulation and `paros` stays wasm-checkable):
   `rpc/methods.rs` one `RpcMethod` marker per call, each a **well-known
   endpoint** (`WellKnownMethod`, method id = well-known id, never reused) —
-  the public journal (Propose/Read/QuorumRead/Compact/Reconfigure/
-  ReconfigureMatchmakers), the internal contract (Deliver/Inspect/Retire; a
+  the public journal (#185: Append/Read/CheckTail/Trim, each naming a
+  `JournalId` a node refuses unless it serves it; Reconfigure/
+  ReconfigureMatchmakers; ids `0x5041_0001..=0x5041_0004`, the old
+  Propose/Read/QuorumRead/Compact, are retired), the internal contract (Deliver/Inspect/Retire; a
   proxy leader and a replica register their `Deliver` — a replica its
-  `Inspect` and the public `QuorumRead` too — and a method a role does not
+  `Inspect` and the public `Read` and `CheckTail` too — and a method a role does not
   register is refused `EndpointNotFound`), the matchmaker contract
   (Matchmake/GarbageCollect/Reconfigure) · `rpc/inbound.rs` `Inbound` (a
   request stream decoded into what the loop steps), `ReplySender` (the

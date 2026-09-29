@@ -43,7 +43,7 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   get-or-publish of every per-iteration singleton on the `StateHandle`).
 - `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
   `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a
-  `buggify_knob!`; the operation-id table `PROPOSE=0 … QUORUM_READ=14`,
+  `buggify_knob!`; the operation-id table `PROPOSE=0 … CHECK_TAIL=16`,
   `OP_COUNT`, the weight table, the reconfiguration shape rings).
 - `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,
   parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`NodeStorage` +

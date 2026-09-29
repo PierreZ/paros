@@ -22,11 +22,15 @@
 //! healed from the acceptors, never from another replica, so it offers no
 //! snapshot and answers no catch-up.
 //!
-//! **It serves clients one thing: the leaderless read** (§3.4). The public
-//! `QuorumRead` RPC opens a quorum read in the core (the grid row is the
-//! node's `read_row` hook), parks the reply exactly as the node driver does,
-//! answers it after the apply that covers the confirmed index, and expires
-//! it on `read_retry_ticks`. Every other public call is refused as
+//! **It serves clients reads, and only reads.** The journal `Read` (#185)
+//! is served from its own chosen prefix — read replicas take read load off
+//! the acceptors — and long-polls at its end exactly as a node's does. A
+//! `CheckTail` on the quorum path is the leaderless read (§3.4): it opens a
+//! quorum read in the core (the grid row is the node's `read_row` hook),
+//! parks the reply exactly as the node driver does, answers it after the
+//! apply that covers the confirmed index, and expires it on
+//! `read_retry_ticks`; on the leader path it redirects, since a replica
+//! confirms no leadership. Every other public call is refused as
 //! unimplemented.
 //!
 //! **No snapshot custody, by decision.** A replica records the decided
@@ -59,6 +63,8 @@ use crate::audit::Audit;
 use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
+use crate::driver::log_reads::{LogReads, refuse_journal};
+use crate::driver::ready::committed_end;
 use crate::driver::ready::{
     ParkedRead, ReadPath, crash_if, persist_writes, report_applied, report_snap_recorded,
     storage_fault_crash,
@@ -67,7 +73,10 @@ use crate::driver::reply::answer;
 use crate::driver::transport::{LaneOpener, Outbound, PeerQueues, peer_address, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::hooks::{DriverHooks, Reply, Seam};
-use crate::rpc::{InspectReply, ReadAck, ReplySender, quorum_system_to_proto, well_known};
+use crate::rpc::{
+    CheckTail, CheckTailAck, InspectReply, ReplySender, TailPath, quorum_system_to_proto,
+    well_known,
+};
 use crate::storage::NodeStorage;
 
 /// Walk the retained chosen prefix back through the application on a
@@ -274,10 +283,12 @@ async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
     Ok(read_states)
 }
 
-/// The replica's held client reads, keyed by the core's `ctx` token.
+/// The replica's held client reads: the tails, keyed by the core's `ctx`
+/// token, and the journal reads long-polling at its end (#185).
 struct ParkedReads {
     reads: BTreeMap<u64, ParkedRead>,
     next_ctx: u64,
+    journal: LogReads,
 }
 
 impl ParkedReads {
@@ -290,7 +301,7 @@ impl ParkedReads {
         &mut self,
         replica: &mut ReplicaNode,
         seq: u64,
-        reply: ReplySender<ReadAck>,
+        reply: ReplySender<CheckTailAck>,
         ticks: u64,
         hooks: &H,
     ) {
@@ -355,28 +366,47 @@ impl ParkedReads {
                 NodeId(self_id),
                 Reply::Read,
                 parked.reply,
-                ReadAck {
+                CheckTailAck {
                     seq: parked.seq,
                     leader: replica.leader().map(|n| n.0),
                     committed: true,
-                    read_index: read_index.map(|s| s.0),
+                    committed_end: Some(committed_end(read_index)),
+                    unknown_journal: false,
                 },
             );
         }
+        // The chosen prefix only grows inside a batch: a journal read at the
+        // end is re-served after each one.
+        self.journal.wake(
+            |from, max| replica.read_log(from, max),
+            NodeId(self_id),
+            hooks,
+            audit,
+        );
     }
 
     /// Answer a retry redirect to every read whose confirmation is overdue
     /// (a row that never answered whole, a watermark this replica has not
-    /// reached): the client records it ambiguous and asks again.
+    /// reached): the client records it ambiguous and asks again. A journal
+    /// read whose long-poll ran out is answered empty.
     fn expire<H: DriverHooks, A: Audit>(
         &mut self,
         ticks: u64,
-        retry_ticks: u64,
+        tunables: &DriverTunables,
         replica: &ReplicaNode,
         self_id: u64,
         hooks: &H,
         audit: &A,
     ) {
+        let retry_ticks = tunables.read_retry_ticks;
+        self.journal.expire(
+            |from, max| replica.read_log(from, max),
+            ticks,
+            tunables.read_poll_ticks,
+            NodeId(self_id),
+            hooks,
+            audit,
+        );
         let overdue: Vec<u64> = self
             .reads
             .iter()
@@ -392,16 +422,40 @@ impl ParkedReads {
                     NodeId(self_id),
                     Reply::ReadRedirect,
                     parked.reply,
-                    ReadAck {
+                    CheckTailAck {
                         seq: parked.seq,
                         leader: replica.leader().map(|n| n.0),
-                        committed: false,
-                        read_index: None,
+                        ..CheckTailAck::default()
                     },
                 );
             }
         }
     }
+}
+
+/// The refusal a replica answers a `CheckTail` with before opening
+/// anything: a journal it does not serve, or the leader path — a replica
+/// holds no leadership to confirm, so it redirects to the leader it heard
+/// last. `None` when it serves the read (a quorum read, §3.4).
+fn refused_tail<A: Audit>(
+    req: &CheckTail,
+    journal: paros_core::JournalId,
+    replica: &ReplicaNode,
+    me: NodeId,
+    audit: &A,
+) -> Option<CheckTailAck> {
+    if refuse_journal(journal, req.journal, "check_tail", me, audit) {
+        return Some(CheckTailAck {
+            seq: req.seq,
+            unknown_journal: true,
+            ..CheckTailAck::default()
+        });
+    }
+    (req.path() == TailPath::Leader).then(|| CheckTailAck {
+        seq: req.seq,
+        leader: replica.leader().map(|n| n.0),
+        ..CheckTailAck::default()
+    })
 }
 
 /// Surface an inbound message's arrival for a human reading the trace, the
@@ -484,11 +538,13 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    let me = Party::Node(NodeId(self_id));
+    let me_id = NodeId(self_id);
+    let me = Party::Node(me_id);
     let mut edge = RpcEdge::listen(&providers, &local_addr, "replica", &tunables).await?;
     let ReplicaInbox {
         inspect: mut inspects,
-        quorum_read: mut quorum_reads,
+        log_read: mut log_reads,
+        check_tail: mut tails,
         deliver: mut inbox,
     } = ReplicaInbox::serve(
         &providers,
@@ -519,7 +575,9 @@ where
     let mut parked = ParkedReads {
         reads: BTreeMap::new(),
         next_ctx: 0,
+        journal: LogReads::default(),
     };
+    let journal = replica.config().journal;
     let mut ticks: u64 = 0;
     let time = providers.time().clone();
     let mut next_tick = time.now() + tunables.tick_interval;
@@ -532,10 +590,29 @@ where
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 parked.answer_served(&served, &replica, self_id, hooks, audit);
             }
-            Some((req, reply)) = quorum_reads.recv() => {
+            Some((req, reply)) = tails.recv() => {
+                if let Some(refused) = refused_tail(&req, journal, &replica, me_id, audit) {
+                    answer(hooks, audit, me_id, Reply::ReadRedirect, reply, refused);
+                    continue;
+                }
                 parked.open(&mut replica, req.seq, reply, ticks, hooks);
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 parked.answer_served(&served, &replica, self_id, hooks, audit);
+            }
+            Some((req, reply)) = log_reads.recv() => {
+                // A journal read (#185), served from this replica's own
+                // chosen prefix — read replicas take read load off the
+                // acceptors — or parked at its end.
+                parked.journal.serve(
+                    |from, max| replica.read_log(from, max),
+                    journal,
+                    &req,
+                    reply,
+                    ticks,
+                    me_id,
+                    hooks,
+                    audit,
+                );
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
@@ -543,7 +620,7 @@ where
                 replica.tick();
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 parked.answer_served(&served, &replica, self_id, hooks, audit);
-                parked.expire(ticks, tunables.read_retry_ticks, &replica, self_id, hooks, audit);
+                parked.expire(ticks, &tunables, &replica, self_id, hooks, audit);
                 if let Some((hole, above)) = replica.replica().chosen_gap() {
                     audit.chosen_gap(NodeId(self_id), hole, above);
                     tracing::info!(replica = self_id, hole = hole.0, above = above.0, "chosen_gap");
