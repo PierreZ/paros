@@ -23,9 +23,6 @@ const DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 /// network I/O, and current heartbeats/resends repair anything dropped here.
 /// Overflow evicts the *oldest* undelivered message (see [`PeerMailbox`]).
 const PEER_QUEUE_CAPACITY: usize = 4096;
-/// Snapshot offers use an independent delivery lane so their opaque bytes
-/// cannot sit in front of heartbeats and normal replication.
-const SNAPSHOT_QUEUE_CAPACITY: usize = 4;
 /// Leave headroom below the RPC runtime's 4 MiB frame limit
 /// (`rpc::inbound`'s `MAX_FRAME_BYTES`) for the protobuf and RPC envelopes.
 /// An earlier transport capped a complete payload at 1 MiB; this preserves
@@ -93,8 +90,6 @@ pub struct DriverTunables {
     /// never a wrong one. A client whose deadline is shorter than the wait
     /// times out (ambiguous, never wrong).
     pub read_poll_ticks: u64,
-    /// Capacity of the snapshot offers' independent delivery lane. Floor 1.
-    pub snapshot_queue_capacity: usize,
     /// Capacity of each client-facing endpoint queue (propose, read, compact,
     /// inspect, …) between the RPC runtime and the node loop
     /// (`RpcConfig::endpoint_queue_capacity`). Floor 1: overload is visible as
@@ -195,7 +190,6 @@ impl Default for DriverTunables {
             delivery_timeout: DELIVERY_TIMEOUT,
             read_retry_ticks: READ_RETRY_TICKS,
             read_poll_ticks: READ_POLL_TICKS,
-            snapshot_queue_capacity: SNAPSHOT_QUEUE_CAPACITY,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
             peer_queue_capacity: PEER_QUEUE_CAPACITY,
@@ -276,7 +270,7 @@ pub fn parse_addr(ip: &str) -> SimulationResult<String> {
 /// (#147): configuration data, never inferred from the store's contents.
 ///
 /// The claim is judged against the store's **format marker**
-/// ([`crate::NodeStorage::is_formatted`]): a store that has ever belonged to
+/// ([`crate::LogStorage::is_formatted`]): a store that has ever belonged to
 /// a member carries one, written by the driver on the identity's first boot
 /// and never removed. An existing member whose store carries no marker has
 /// lost its disk — *amnesia*, not a clean crash — and its durable promise
@@ -324,7 +318,7 @@ pub enum RunError {
     /// recovers by re-running the driver loop, which rebuilds volatile state
     /// from durable storage.
     SeamCrash(Seam),
-    /// A [`crate::NodeStorage`] (or [`crate::MatchmakerStorage`]) call failed
+    /// A [`crate::LogStorage`] (or [`crate::MatchmakerStorage`]) call failed
     /// and the driver took its fail-stop crash
     /// decision — never an incidental error propagation. In **production**
     /// this is a crash-only process exit; recovery is the next boot. In

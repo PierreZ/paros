@@ -18,7 +18,7 @@
 //! handover and the unbounded Multi-Paxos log are the same role over
 //! different `V`. Its two durable ops are named by [`AcceptorWrite`]; the
 //! caller's batch type only has to say where they sit (`W: From<_>`). The
-//! two *retention* ops, [`crate::WriteOp::Truncate`] and [`crate::WriteOp::InstallSnapshot`],
+//! two *retention* ops, [`crate::WriteOp::Truncate`] and [`crate::WriteOp::TrimmedTo`],
 //! live in their own module (`acceptor/retention.rs`) and still speak the
 //! node batch's own language: a log that compacts is the multi-slot
 //! deployment's concern, and they stay methods of this role because the
@@ -547,16 +547,20 @@ mod tests {
             matches!(writes.last(), Some(WriteOp::Truncate { first, .. }) if *first == Slot(1)),
             "the truncation is durable"
         );
-        let first = acceptor.install(Slot(4), ballot(2), Value(vec![9]), Vec::new(), &mut writes);
-        assert_eq!(first, Slot(5));
+        acceptor.trim_to(Slot(5), Vec::new(), &mut writes);
         assert_eq!(acceptor.first_slot(), Slot(5));
-        assert!(acceptor.records().is_empty(), "the folded prefix is gone");
+        assert!(acceptor.records().is_empty(), "the dropped prefix is gone");
+        assert_eq!(
+            acceptor.promised(),
+            ballot(1),
+            "a trim-point jump never moves the promise"
+        );
         assert!(
             matches!(
                 writes.last(),
-                Some(WriteOp::InstallSnapshot { chosen_index, .. }) if *chosen_index == Slot(4)
+                Some(WriteOp::TrimmedTo { point, .. }) if *point == Slot(5)
             ),
-            "the install is durable"
+            "the jump is durable"
         );
         assert!(
             writes.iter().all(WriteOp::needs_sync),

@@ -755,16 +755,11 @@ fn a_prompt_blocks_every_other_move() {
     assert_eq!(err.code, paros_play::ActionErrorCode::PromptOpen);
 }
 
-// ---- truncation and snapshots (Act III) --------------------------------------
+// ---- truncation and the trim point (Act III) --------------------------------
 
-/// Drive `world` to a state where a `Truncate` has been decided: seed a
-/// snapshot point (the leader refuses the first request and proposes a `Snap`
-/// marker), then ask again.
+/// Drive `world` to a state where a `Truncate` has been decided and applied
+/// everywhere it can be.
 fn truncate_through(world: &mut World, leader: u64, up_to: u64) {
-    world
-        .compact(NodeId(leader), up_to)
-        .expect("the leader answers a compaction request");
-    deliver_all(world);
     world
         .compact(NodeId(leader), up_to)
         .expect("the leader answers a compaction request");
@@ -772,7 +767,7 @@ fn truncate_through(world: &mut World, leader: u64, up_to: u64) {
 }
 
 #[test]
-fn a_truncate_is_refused_until_a_quorum_holds_a_snapshot_point() {
+fn a_truncate_is_proposed_like_any_value() {
     let mut world = cluster(3);
     elect(&mut world, 0);
     world
@@ -782,34 +777,19 @@ fn a_truncate_is_refused_until_a_quorum_holds_a_snapshot_point() {
         .propose(NodeId(0), CLIENT, "bravo", None)
         .expect("admitted");
     deliver_all(&mut world);
-    // Nothing has been snapshotted, so the coupling rule refuses: past the
-    // floor the entries are gone everywhere, and a snapshot nobody holds
-    // rescues nobody.
     world.compact(NodeId(0), 8).expect("the leader answers");
     let first = *world.compacts().first().expect("one request answered");
-    assert!(!first.accepted, "the first request is refused");
-    assert_eq!(first.covered, None, "no quorum holds a point yet");
-    assert!(first.seeded_marker, "and the refusal seeds one");
+    assert!(first.accepted, "the leader proposes the Truncate");
     assert_eq!(
         world.disk(NodeId(0)).expect("a disk").floor(),
         Slot(0),
-        "nothing was truncated"
+        "nothing is truncated before the Truncate is decided and applied"
     );
     deliver_all(&mut world);
-    // Now a quorum holds a decided snapshot point, and the retry goes through.
     assert!(
-        world
-            .snapshot_points()
-            .iter()
-            .filter(|(_, point)| point.is_some())
-            .count()
-            >= 2,
-        "a quorum recorded the decided snapshot point"
+        world.floors().iter().all(|(_, first)| *first > Slot(0)),
+        "every node applied the decided Truncate"
     );
-    world.compact(NodeId(0), 8).expect("the leader answers");
-    let second = *world.compacts().last().expect("two requests answered");
-    assert!(second.accepted, "the retry is admitted");
-    assert!(second.covered.is_some(), "and it names the covered point");
 }
 
 #[test]
@@ -819,8 +799,6 @@ fn a_truncate_is_applied_lazily_by_every_node() {
     world
         .propose(NodeId(0), CLIENT, "alpha", None)
         .expect("admitted");
-    deliver_all(&mut world);
-    world.compact(NodeId(0), 8).expect("answers");
     deliver_all(&mut world);
     world.compact(NodeId(0), 8).expect("answers");
     // The decision exists but nobody outside the leader has applied it yet, so
@@ -848,7 +826,7 @@ fn a_truncate_is_applied_lazily_by_every_node() {
 }
 
 #[test]
-fn a_below_floor_catch_up_is_answered_with_a_snapshot() {
+fn a_below_floor_catch_up_is_answered_with_the_trim_point() {
     let mut world = cluster(3);
     world.crash(NodeId(2)).expect("a live node may crash");
     elect(&mut world, 0);
@@ -887,22 +865,31 @@ fn a_below_floor_catch_up_is_answered_with_a_snapshot() {
         "no peer replays a range it has truncated: those entries are gone"
     );
     assert!(
-        world
-            .wire()
-            .iter()
-            .any(|entry| matches!(entry.message(), Some(Message::InstallSnapshot { .. }))),
-        "the peer offers the application's state instead"
+        world.wire().iter().any(|entry| matches!(
+            entry.message(),
+            Some(Message::TrimmedTo { point, .. }) if *point == floor
+        )),
+        "the peer answers with where its log starts instead"
     );
     deliver_all(&mut world);
+    assert!(
+        world.stranded().is_empty(),
+        "node 2 jumped to the trim point"
+    );
+    let disk = world.disk(NodeId(2)).expect("a disk");
     assert_eq!(
-        applied_text(&world, 2),
-        applied_text(&world, 0),
-        "node 2 was restored from bytes paros never read"
+        disk.floor(),
+        floor,
+        "node 2's floor is the peer's trim point"
+    );
+    assert!(
+        disk.hard_state().chosen_index >= Some(Slot(floor.0 - 1)),
+        "and everything below it counts as chosen"
     );
 }
 
 #[test]
-fn a_snapshot_install_never_lowers_the_promise() {
+fn a_trim_point_jump_never_moves_the_promise() {
     let mut world = cluster(3);
     world.crash(NodeId(2)).expect("crashes");
     elect(&mut world, 0);
@@ -911,10 +898,10 @@ fn a_snapshot_install_never_lowers_the_promise() {
         .expect("admitted");
     deliver_all(&mut world);
     truncate_through(&mut world, 0, 8);
+    let floor = world.disk(NodeId(0)).expect("a disk").floor();
     world.restart(NodeId(2)).expect("restarts");
-    // Node 2 campaigns before it is healed, so its own promise ends up *above*
-    // the ballot the snapshot's prefix was decided under. That is the case the
-    // rule exists for.
+    // Node 2 campaigns before it is healed, so it holds a promise of its own
+    // that no peer knows about. That is the case the rule exists for.
     for _ in 0..10 {
         world.tick(NodeId(2)).expect("ticks");
     }
@@ -926,53 +913,44 @@ fn a_snapshot_install_never_lowers_the_promise() {
         .expect("running")
         .acceptor()
         .promised();
-    let offered = {
-        deliver_where(&mut world, |message| {
-            matches!(message, Message::CatchUpRequest { .. })
-        });
-        world
-            .wire()
-            .iter()
-            .find_map(|entry| match entry.message() {
-                Some(Message::InstallSnapshot { ballot, .. }) => Some(*ballot),
-                _ => None,
-            })
-            .expect("a snapshot is offered")
-    };
-    assert!(
-        offered < promise_before,
-        "the snapshot's ballot ({offered:?}) is below node 2's own promise ({promise_before:?})"
-    );
-    world.set_policy(policy(&[PromptKind::SnapshotPromise]));
+    deliver_where(&mut world, |message| {
+        matches!(message, Message::CatchUpRequest { .. })
+    });
+    world.set_policy(policy(&[PromptKind::TrimPoint]));
     let id = world
         .wire()
         .iter()
-        .find(|entry| matches!(entry.message(), Some(Message::InstallSnapshot { .. })))
+        .find(|entry| matches!(entry.message(), Some(Message::TrimmedTo { .. })))
         .map(|entry| entry.id)
         .expect("in flight");
     world.deliver(id).expect("delivered");
-    let prompt = world.prompt().expect("the installing node is asked");
-    assert_eq!(prompt.kind, PromptKind::SnapshotPromise);
+    let prompt = world.prompt().expect("the stranded node is asked");
+    assert_eq!(prompt.kind, PromptKind::TrimPoint);
     let (prompt_id, expected) = (prompt.id, prompt.expected().to_string());
-    assert_eq!(expected, "higher", "it keeps the higher of the two");
-    let wrong = prompt
-        .choices
-        .iter()
-        .map(|choice| choice.id.clone())
-        .find(|choice| *choice != expected)
-        .expect("the other ballot is offered too");
-    assert_eq!(world.answer(prompt_id, &wrong), Ok(Verdict::Wrong));
+    assert_eq!(expected, "jump", "it jumps to the trim point");
+    assert_eq!(
+        world.disk(NodeId(2)).expect("a disk").floor(),
+        Slot(0),
+        "a wrong answer is never a state: nothing moved while the prompt is open"
+    );
+    assert_eq!(world.answer(prompt_id, "wait"), Ok(Verdict::Wrong));
+    assert_eq!(world.answer(prompt_id, "reset"), Ok(Verdict::Wrong));
     assert_eq!(world.answer(prompt_id, &expected), Ok(Verdict::Right));
-    deliver_all(&mut world);
-    assert!(
+    assert_eq!(
+        world.disk(NodeId(2)).expect("a disk").floor(),
+        floor,
+        "the right answer lets the core jump"
+    );
+    assert_eq!(
         world
             .node(NodeId(2))
             .expect("running")
             .acceptor()
-            .promised()
-            >= promise_before,
-        "a snapshot restores the log, never a promise"
+            .promised(),
+        promise_before,
+        "a trim point never moves the promise"
     );
+    deliver_all(&mut world);
     assert_eq!(world.promise_regressed(), None);
 }
 
@@ -983,8 +961,6 @@ fn the_after_sync_seam_loses_the_truncate_with_the_batch() {
     world
         .propose(NodeId(0), CLIENT, "alpha", None)
         .expect("admitted");
-    deliver_all(&mut world);
-    world.compact(NodeId(0), 8).expect("answers");
     deliver_all(&mut world);
     world.compact(NodeId(0), 8).expect("answers");
     // Let the Truncate decide at the leader, then hand the decision to node 1

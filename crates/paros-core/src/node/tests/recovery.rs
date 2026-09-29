@@ -233,26 +233,26 @@ fn recovery_timeout_steps_the_leader_down() {
     assert!(!nodes[0].is_leader(), "the blocked leader resigned");
 }
 
-/// A faulty record inside the *chosen* prefix stalls the application exactly
-/// like an unchosen gap (routed through `chosen_gap`) and heals through
-/// ordinary commit-replay catch-up, re-emitting the decided commands in order.
+/// A faulty record inside the *chosen* prefix is a hole in the servable
+/// log — a journal read stops at it rather than skip it (#185) — and heals
+/// through ordinary commit-replay catch-up, pulled from the first faulty slot
+/// on the tick.
 #[test]
-fn faulty_chosen_slot_heals_via_catchup_and_the_repair_pump() {
+fn faulty_chosen_slot_heals_via_catchup() {
+    use crate::LogRead;
+
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage);
-    // The driver's boot replay stops at the unreadable slot 1 and opens the
-    // repair there.
-    n.open_app_repair(Slot(1));
-    assert_eq!(n.replica().app_repair(), Some(Slot(1)));
-    assert_eq!(
-        n.replica().chosen_gap(),
-        Some((Slot(1), Slot(2))),
-        "the stall is visible through the chosen-gap seam"
-    );
+    // A read over the rotted slot ends at it: the slot is chosen, its value
+    // is not here, and skipping it would tell the reader it is a hole.
+    match n.read_log(Slot(0), usize::MAX) {
+        LogRead::Page(page) => assert_eq!(page.next, Slot(1), "the page ends at the rotted slot"),
+        LogRead::Trimmed { .. } => panic!("nothing is trimmed"),
+    }
 
-    // The tick pull asks peers for the decided range from the cursor.
+    // The tick pull asks peers for the decided range from the faulty slot.
     n.set_election_timeout(NO_CHECK_QUORUM);
     n.tick();
     let msgs = drain(&mut n);
@@ -264,11 +264,10 @@ fn faulty_chosen_slot_heals_via_catchup_and_the_repair_pump() {
                 ..
             }
         )),
-        "the repair pulls from its cursor"
+        "the repair pulls from the first faulty slot"
     );
 
-    // A peer replays the decided range; the pump re-emits slots 1..=2 in
-    // order and closes the repair.
+    // A peer replays the decided range; the record heals.
     let mut entries = BTreeMap::new();
     for s in 1..=2u64 {
         let (b, c) = nodes[0]
@@ -283,19 +282,14 @@ fn faulty_chosen_slot_heals_via_catchup_and_the_repair_pump() {
         from: NodeId(0),
         entries,
     });
-    assert_eq!(n.replica().app_repair(), None, "the repair closed");
     assert!(
         n.acceptor().faulty().is_empty(),
         "the faulty record was healed"
     );
-    let ready = n.ready();
-    let committed: Vec<Slot> = ready.committed().iter().map(|(s, _)| *s).collect();
-    ready.advance();
-    assert_eq!(
-        committed,
-        vec![Slot(1), Slot(2)],
-        "the pump re-emitted the healed range in slot order"
-    );
+    match n.read_log(Slot(0), usize::MAX) {
+        LogRead::Page(page) => assert_eq!(page.next, Slot(3), "the read runs to the end"),
+        LogRead::Trimmed { .. } => panic!("nothing is trimmed"),
+    }
 }
 
 /// Per-slot attribution on the serving side: a peer never serves catch-up past
@@ -323,35 +317,33 @@ fn serve_catchup_stops_at_the_servers_own_faulty_hole() {
     assert_eq!(served, vec![Slot(0)], "the replay stops at the faulty hole");
 }
 
-/// The below-floor application repair: a node whose snapshot state was lost
-/// under a truncated log installs a peer snapshot at an *equal* chosen index —
-/// the one legal equality install — and closes the repair.
+/// A faulty record below a peer's trim point is healed by the jump: the
+/// slot is chosen and trimmed cluster-wide, so the node drops its copy with
+/// the prefix, and its chosen index — already past the point — stays.
 #[test]
-fn install_snapshot_at_equal_index_closes_a_below_floor_repair() {
+fn a_trim_point_jump_drops_a_faulty_record_below_it() {
     let nodes = cluster_with_three_chosen();
-    // Simulate: node 1 truncated through slot 1 and then lost its snapshot.
     let mut storage = TestStorage::from_node(&nodes[1]);
-    storage.first_slot = Slot(2);
-    storage.accepted.retain(|s, _| *s >= Slot(2));
+    storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage);
-    n.open_app_repair(Slot(0));
-    assert_eq!(n.replica().app_repair(), Some(Slot(0)));
+    assert!(!n.acceptor().faulty().is_empty());
+    let chosen = n.hard_state().chosen_index;
 
-    // A snapshot at chosen_index == our own chosen index is normally a no-op;
-    // with the repair open it is the heal.
-    n.step(Message::InstallSnapshot {
+    n.step(Message::TrimmedTo {
         from: NodeId(0),
-        ballot: nodes[0].ballot(),
-        chosen_index: Slot(2),
-        snapshot: val(9),
+        point: Slot(2),
         sessions: Vec::new(),
     });
-    assert_eq!(
-        n.replica().app_repair(),
-        None,
-        "the install closed the repair"
+    assert!(
+        n.acceptor().faulty().is_empty(),
+        "the rotted copy went with the prefix"
     );
-    assert_eq!(n.acceptor().first_slot(), Slot(3));
+    assert_eq!(n.acceptor().first_slot(), Slot(2));
+    assert_eq!(
+        n.hard_state().chosen_index,
+        chosen,
+        "the chosen index stays"
+    );
 }
 
 /// The CTRL §5.1.1 mixed-epoch state, restated for Multi-Paxos: three

@@ -139,7 +139,7 @@ Multi-Paxos, the leader's heartbeat resend of un-acked `Accept`s.
 | vote rule | `ballot >= promised` in `Acceptor::admit` |
 | value-selection rule (P2c) | the highest `(ballot, value)` over the promise quorum, merged by `Election::close_phase1` (`proposer/election.rs`) |
 | "inform a rejected proposer" | the explicit `Message::Nack` (`message.rs`) |
-| chosen by a majority | a Phase-2 quorum in `try_decide` (`node/decide_apply.rs`), judged by `AcceptorConfig::has_phase2_quorum` (`membership.rs`) |
+| chosen by a majority | a Phase-2 quorum in `try_decide` (`node/phase2.rs`), judged by `AcceptorConfig::has_phase2_quorum` (`membership.rs`) |
 | any two quorums intersect | `QuorumSystem::cross_intersects` — `q1 + q2 > n` (`membership.rs`) |
 
 paros never proves this property by hand. The deterministic simulation asserts it on

@@ -1,6 +1,6 @@
 ---
 name: update-the-book
-description: Keep the paros mdbook (seven chapters under book/src, mermaid-only diagrams, the light-theme colour rules in book/CLAUDE.md) in step with paros-core - map a protocol or harness change to the chapter that explains it, keep every named symbol real, and verify with mdbook build. Use after changing a protocol rule, a message, a recovery or read path, truncation or snapshot behaviour, or when asked to explain part of paros for readers.
+description: Keep the paros mdbook (the chapters under book/src, mermaid-only diagrams, the light-theme colour rules in book/CLAUDE.md) in step with paros-core - map a protocol or harness change to the chapter that explains it, keep every named symbol real, and verify with mdbook build. Use after changing a protocol rule, a message, a recovery or read path, truncation or trim-point behaviour, or when asked to explain part of paros for readers.
 ---
 
 # Update the book
@@ -16,8 +16,8 @@ under `book/`) holds the diagram rules; this skill is the map.
 | single-decree kernel, Prepare/Promise/Accept, the P2c rule | `choose-one-value.md`, `safety.md` |
 | slots, the log, `next_slot`, catch-up | `replicated-log.md` |
 | leader election, heartbeats, election gap fill, handoff | `stable-leader.md` |
-| `HardState`, persist-before-send, boot replay, seams, promise monotonicity | `restart-safety.md` |
-| `Truncate`/`Snap` control commands, floors, `InstallSnapshot`, chunk repair | `truncation-and-snapshots.md` |
+| `HardState`, persist-before-send, the boot report, seams, promise monotonicity | `restart-safety.md` |
+| the `Truncate` control command and the `Trim` RPC, floors, the trim-point jump (`TrimmedTo`), reads below the trim point | `truncation-and-snapshots.md` (titled *Truncation and the trim point*) |
 | `READ_INDEX`, the read fence, parked reads | `linearizable-reads.md` |
 | a new area (matchmaking, GC, generations) | a new chapter: add to `SUMMARY.md` and `index.md` |
 

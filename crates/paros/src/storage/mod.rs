@@ -1,6 +1,10 @@
-//! Node storage — the read-only [`Storage`] recovery port (from `paros-core`)
-//! plus the [`NodeStorage`] write extension the driver persists through, and the
+//! Log storage — the read-only [`Storage`] recovery port (from `paros-core`)
+//! plus the [`LogStorage`] write extension the driver persists through, and the
 //! default in-memory [`MemStorage`] implementing both.
+//!
+//! A store keeps an ordered, trimmable log and the acceptor's scalars, and
+//! nothing else: since #186 paros runs no application and holds no
+//! snapshot — a journal's client folds what it reads.
 
 use std::fmt;
 use std::future::Future;
@@ -8,23 +12,6 @@ use std::future::Future;
 use paros_core::{Ballot, Command, MustSync, SessionEntry, Slot, Storage};
 
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
-
-/// Fixed chunk size for decided-snapshot-point storage and repair (#101).
-///
-/// A compile-time constant, deliberately not a tunable: chunk identities
-/// `(snap index, chunk#)` are only meaningful because every node slices the
-/// byte-identical decided snapshot the same way, so the size must be
-/// cluster-consistent. CTRL uses 4 KiB chunks; this stays small so the
-/// simulation's application snapshots genuinely span several chunks and the
-/// repair-cost metric (a chunk repair ships ~one chunk, never the blob) is
-/// observable at sim scale.
-pub const SNAP_CHUNK_BYTES: usize = 64;
-
-/// How many [`SNAP_CHUNK_BYTES`] chunks a snapshot blob of `len` bytes spans.
-#[must_use]
-pub fn snap_chunk_count(len: usize) -> u32 {
-    u32::try_from(len.div_ceil(SNAP_CHUNK_BYTES)).unwrap_or(u32::MAX)
-}
 
 /// The durable record a storage operation (and therefore a storage fault) hit.
 ///
@@ -40,15 +27,9 @@ pub enum StorageRecord {
     Accepted(Slot),
     /// The chosen-index (commit index) scalar.
     ChosenIndex,
-    /// The truncation record (the durable compaction floor + sealed sessions).
+    /// The truncation record (the durable compaction floor + sealed sessions)
+    /// — a decided `Truncate` or a jump below a peer's trim point.
     Truncation,
-    /// The installed opaque application snapshot.
-    Snapshot,
-    /// One chunk of the retained decided snapshot point (#101):
-    /// `(marker slot, chunk index)`.
-    SnapChunk(Slot, u32),
-    /// The staged application transition at this slot (the apply seam).
-    Application(Slot),
     /// The whole staged batch: an fsync flushes every record staged since the
     /// last flush, so a failed fsync has no single-record identity.
     Batch,
@@ -70,11 +51,6 @@ impl fmt::Display for StorageRecord {
             StorageRecord::Accepted(slot) => write!(f, "accepted[{}]", slot.0),
             StorageRecord::ChosenIndex => write!(f, "chosen-index"),
             StorageRecord::Truncation => write!(f, "truncation"),
-            StorageRecord::Snapshot => write!(f, "snapshot"),
-            StorageRecord::SnapChunk(at, chunk) => {
-                write!(f, "snap-chunk[{}#{chunk}]", at.0)
-            }
-            StorageRecord::Application(slot) => write!(f, "application[{}]", slot.0),
             StorageRecord::Batch => write!(f, "batch"),
             StorageRecord::Registration(ballot) => {
                 write!(f, "registration[{}.{}]", ballot.round, ballot.node.0)
@@ -97,7 +73,7 @@ pub enum MetadataFault {
     /// The record store is missing or unopenable.
     Missing,
     /// The store has the wrong size (checkable: the log is fixed-size
-    /// preallocated and the snapshot's size is stored separately).
+    /// preallocated).
     WrongSize,
     /// The store mounted read-only: no write can ever succeed.
     ReadOnly,
@@ -143,7 +119,7 @@ impl fmt::Display for WriteOutcome {
 /// *record identity* and (for writes) the *durability outcome* are data.
 ///
 /// The read-side [`paros_core::Storage`] recovery port stays infallible, but
-/// every *write* — and the Stage-7 [`boot_scan`](NodeStorage::boot_scan) — is
+/// every *write* — and the Stage-7 [`boot_scan`](LogStorage::boot_scan) — is
 /// fallible so the storage-fault stages can inject `EIO` / fsync / corruption
 /// faults through these signatures. `Display` stays human-readable; the
 /// Stage-7 [`Corruption`](StorageError::Corruption) verdict is typed data
@@ -234,15 +210,14 @@ impl std::error::Error for StorageError {}
 /// [`paros_core::Storage`] is the read-only recovery port — the core only ever
 /// *reads back* durable state (at construction). The driver, which owns all
 /// writes, applies each [`paros_core::WriteOp`] a [`paros_core::Ready`] surfaces
-/// through the matching method here, then [`sync`](NodeStorage::sync)s the batch
+/// through the matching method here, then [`sync`](LogStorage::sync)s the batch
 /// **before** sending its messages (the persist-before-send rule). Every write
 /// returns [`Result`] so faults are injectable from the start.
 ///
 /// # Async seam
 ///
 /// Every method that may touch the device is **async**: the writes, the
-/// flush, the boot scan, producing or reading snapshot bytes, restoring the
-/// application. The driver awaits each one in the order the persist-before-send
+/// flush, the boot scan. The driver awaits each one in the order the persist-before-send
 /// pipeline dictates, so a disk-backed implementation blocks nothing but its
 /// own node loop while the device works — the same provider-generic loop
 /// runs over a simulated disk and a real one. The futures are `Send`
@@ -250,18 +225,15 @@ impl std::error::Error for StorageError {}
 /// the loop that awaits them can be spawned on any executor; an
 /// implementation writes plain `async fn`s.
 ///
-/// The few accessors that report what the store already **knows about
-/// itself** — [`applied_slot`](NodeStorage::applied_slot),
-/// [`latest_snap_point`](NodeStorage::latest_snap_point),
-/// [`snap_chunk_count`](NodeStorage::snap_chunk_count),
-/// [`faulty_snap_chunks`](NodeStorage::faulty_snap_chunks) — stay
-/// synchronous, exactly like the core's [`Storage`] recovery port they sit
-/// beside: they are answered from the index the boot scan built, never by a
+/// The one accessor that reports what the store already **knows about
+/// itself** — [`is_formatted`](LogStorage::is_formatted) — stays
+/// synchronous, exactly like the core's [`Storage`] recovery port it sits
+/// beside: it is answered from the index the boot scan built, never by a
 /// device read. That is the contract a disk-backed store meets in
-/// [`boot_scan`](NodeStorage::boot_scan): it is the one place a store
+/// [`boot_scan`](LogStorage::boot_scan): it is the one place a store
 /// loads and verifies its records, and everything the synchronous ports
 /// answer afterwards is served from memory.
-pub trait NodeStorage: Storage {
+pub trait LogStorage: Storage {
     /// Boot-time integrity scan (Stage 7): verify every durable record and
     /// classify every mismatch **before** any byte reaches
     /// [`paros_core::ColocatedNode`]. The driver calls this once per incarnation,
@@ -275,7 +247,7 @@ pub trait NodeStorage: Storage {
     /// design; see `docs/analysis/storage/clstore-record-contract.md`):
     ///
     /// - **Every persisted record is checksummed**: each accepted entry, the
-    ///   snapshot, the `HardState` scalars (promise + chosen index +
+    ///   `HardState` scalars (promise + chosen index +
     ///   truncation floor), and the sealed-sessions ledger.
     /// - **Each log entry has an identifier physically separate from the
     ///   entry** — `⟨slot, accepted_ballot, offset, cksum⟩`, atomically
@@ -320,7 +292,7 @@ pub trait NodeStorage: Storage {
 
     /// Whether this store carries the **format marker** (#147): the durable
     /// proof that the identity this store belongs to has been provisioned —
-    /// written once by [`format`](NodeStorage::format) on the identity's
+    /// written once by [`format`](LogStorage::format) on the identity's
     /// first boot, before any protocol state, and never removed. The driver
     /// judges the operator's [`BootKind`](crate::BootKind) claim against it:
     /// an existing member whose store has no marker has lost its disk, and
@@ -330,7 +302,7 @@ pub trait NodeStorage: Storage {
     fn is_formatted(&self) -> bool;
 
     /// Write the format marker (#147). Staged like every other write and
-    /// durable at the next [`sync`](NodeStorage::sync); the driver syncs it
+    /// durable at the next [`sync`](LogStorage::sync); the driver syncs it
     /// alone, on a first boot, before the core reads the store, so the
     /// marker is on disk no later than the first promise. Nothing but this
     /// method writes it, and nothing removes it.
@@ -383,8 +355,8 @@ pub trait NodeStorage: Storage {
 
     /// Truncate the log below `first`, discarding the compacted prefix, and
     /// record `first` as the durable compaction floor (returned by
-    /// [`Storage::first_slot`] after a restart). The application drives this via
-    /// [`paros_core::ColocatedNode::compact`], which only ever names slots within the
+    /// [`Storage::first_slot`] after a restart). A decided `Truncate` drives
+    /// this via [`paros_core::ColocatedNode::compact`], which only ever names slots within the
     /// chosen prefix, so nothing undecided is dropped. `sealed` carries the
     /// at-most-once ledger records whose slots this truncation drops; persist
     /// them durably (upsert by `(client, seq)`) so [`Storage::sealed_sessions`]
@@ -399,143 +371,20 @@ pub trait NodeStorage: Storage {
         sealed: &[SessionEntry],
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
-    /// The opaque application snapshot at this node's chosen prefix, for serving a
-    /// below-floor peer. The **application** owns its meaning; paros only transfers
-    /// the bytes. The core never calls this — only the driver, when it fills a
-    /// [`paros_core::Ready::snapshot_offers`] offer with bytes before sending an
-    /// [`paros_core::Message::InstallSnapshot`].
-    ///
-    /// **Determinism contract (#101):** the returned bytes must be a
-    /// deterministic function of the applied prefix — two nodes whose
-    /// applications have applied the same command sequence must produce
-    /// byte-identical snapshots. Decided snapshot points
-    /// ([`Control::Snap`](paros_core::Control::Snap)) rely on exactly this:
-    /// identical bytes are what make chunk-level repair from any peer sound.
-    fn snapshot(&self) -> impl Future<Output = Vec<u8>> + Send;
-
-    // ---- decided snapshot points (#101, CTRL §3.5) --------------------------
-
-    /// Record the current application state as the **decided snapshot point**
-    /// at `at` (the applied [`Control::Snap`](paros_core::Control::Snap)
-    /// marker's slot). Called by the driver at the instant the marker applies,
-    /// when the application state *is* the boundary state, and staged/flushed
-    /// like every other durable write. Only the latest point is retained.
-    ///
-    /// The default is a no-op for storages without decided-point support.
+    /// Jump below a peer's trim point (#186, [`paros_core::WriteOp::TrimmedTo`]):
+    /// record `point` as the durable compaction floor, raise the durable
+    /// chosen index to at least `point - 1` (everything below a trim point is
+    /// chosen), drop every record below `point`, and persist `sessions` as
+    /// sealed records (upsert), exactly like [`LogStorage::truncate`]'s
+    /// `sealed`. The promise does not move.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn record_snapshot(
+    fn trimmed_to(
         &mut self,
-        at: Slot,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send {
-        let _ = at;
-        async { Ok(()) }
-    }
-
-    /// The latest decided snapshot point this store retains, if any.
-    fn latest_snap_point(&self) -> Option<Slot> {
-        None
-    }
-
-    /// How many [`SNAP_CHUNK_BYTES`] chunks the retained point at `at` spans
-    /// (`None` when `at` is not the retained point).
-    fn snap_chunk_count(&self, at: Slot) -> Option<u32> {
-        let _ = at;
-        None
-    }
-
-    /// Read one clean chunk of the retained point at `at`. `None` means this
-    /// store cannot serve it — wrong point, out of range, or the chunk is
-    /// rotted — and per CTRL Box B the caller stays silent about it.
-    fn read_snap_chunk(
-        &self,
-        at: Slot,
-        chunk: u32,
-    ) -> impl Future<Output = Option<Vec<u8>>> + Send {
-        let _ = (at, chunk);
-        async { None }
-    }
-
-    /// Install one repaired chunk of the retained point at `at`, verifying and
-    /// persisting it. Returns whether the point is now fully clean. A write
-    /// for a point this store no longer retains is a no-op `Ok(false)`.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the durable write fails.
-    fn write_snap_chunk(
-        &mut self,
-        at: Slot,
-        chunk: u32,
-        bytes: &[u8],
-    ) -> impl Future<Output = Result<bool, StorageError>> + Send {
-        let _ = (at, chunk, bytes);
-        async { Ok(false) }
-    }
-
-    /// The retained point's chunks the boot scan classified rotted — value
-    /// lost, identity `(point, chunk#)` known: the recoverable class the
-    /// driver repairs from peers chunk by chunk.
-    fn faulty_snap_chunks(&self) -> Vec<(Slot, u32)> {
-        Vec::new()
-    }
-
-    /// If the live application state is lost or behind while the retained
-    /// point is fully clean and covers the compaction floor (`point ==
-    /// floor - 1`), restore the application from the point and return the
-    /// point's slot. `Ok(None)` when not applicable — the application is
-    /// already at or past the point, the point is incomplete, or it does not
-    /// cover the floor.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the durable write fails.
-    fn restore_from_snap_point(
-        &mut self,
-    ) -> impl Future<Output = Result<Option<Slot>, StorageError>> + Send {
-        async { Ok(None) }
-    }
-
-    /// Install an opaque application snapshot at `chosen_index`: set the durable
-    /// commit index, raise the promise to at least `ballot`, record
-    /// `chosen_index + 1` as the compaction floor, and persist `snapshot` (so a
-    /// restart boots from it and the node can serve it onward). `sessions` is
-    /// the serving peer's at-most-once ledger for the folded prefix; persist it
-    /// as sealed records (upsert), exactly like [`NodeStorage::truncate`]'s
-    /// `sealed`. Mirrors [`paros_core::WriteOp::InstallSnapshot`].
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the durable write fails.
-    fn install_snapshot(
-        &mut self,
-        chosen_index: Slot,
-        ballot: Ballot,
-        snapshot: Vec<u8>,
+        point: Slot,
         sessions: &[SessionEntry],
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
-
-    /// Stage one newly chosen command for durable application. Implementations
-    /// must be idempotent by `slot`: a reboot may replay retained chosen records
-    /// after the consensus chosen index reached disk but application effects did
-    /// not. The driver flushes the staged application batch before acknowledging
-    /// clients.
-    ///
-    /// `chosen_index` is the core's contiguous chosen prefix for the batch and is
-    /// supplied so an application adapter can assert it never applies ahead of
-    /// consensus.
-    ///
-    /// # Errors
-    /// Returns [`StorageError`] if the application transition cannot be staged.
-    fn apply(
-        &mut self,
-        chosen_index: Slot,
-        slot: Slot,
-        command: &Command,
-    ) -> impl Future<Output = Result<(), StorageError>> + Send;
-
-    /// Highest slot durably reflected in the application snapshot, if the
-    /// application tracks one. Used only to make reboot replay idempotent.
-    /// Synchronous: answered from what the store knows, never a device read.
-    fn applied_slot(&self) -> Option<Slot>;
 }
 
 mod contract;

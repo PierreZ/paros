@@ -86,7 +86,7 @@ Four conventions the generated types do not spell out: every number is a
 `number` (never a `bigint`), a ballot is always the string `"round.node"`, and
 a command's text is plain — the engine strips Rust's quoting before it sends
 it. A slot that holds one of paros's own control commands says so in
-`SlotView.control` (`noop`, `truncate`, `snap`), and the stage prints that name
+`SlotView.control` (`noop`, `truncate`), and the stage prints that name
 in the box in place of the text. Node ids and matchmaker ids are **two identity
 spaces**: matchmaker 0 and node 0 are two processes, and a matchmaker is written
 `m0` everywhere the player reads one.

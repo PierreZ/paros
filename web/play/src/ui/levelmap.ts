@@ -7,7 +7,7 @@ import { h } from '../render/dom';
 const ACT_TITLES: Record<number, string> = {
   1: 'Act I — a single decree',
   2: 'Act II — a replicated log',
-  3: 'Act III — truncation, snapshots and reads',
+  3: 'Act III — truncation, the trim point and reads',
   4: 'Act IV — everything the book never wrote',
 };
 

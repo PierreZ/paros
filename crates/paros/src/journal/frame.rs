@@ -5,7 +5,7 @@
 //!
 //! The identity lives in the identifier because that is what survives when
 //! the entry's bytes do not: a damaged accepted record still names its slot
-//! and ballot, a damaged snapshot chunk its point and index. The payload
+//! and ballot, a damaged registration its ballot. The payload
 //! repeats the identity, and decoding checks the two agree — a record that
 //! checks out but names something other than its identifier is a
 //! misdirected write, and is treated exactly like a damaged one.
@@ -31,14 +31,15 @@ pub(crate) enum Kind {
     ChosenIndex = 3,
     /// A truncation: the floor and the sealed ledger it drops.
     Truncate = 4,
-    /// A snapshot install: the boundary and the peer's sealed ledger.
-    InstallSnapshot = 5,
-    /// A decided snapshot point's header: length and per-chunk checksums.
-    SnapPoint = 6,
-    /// One chunk of a decided snapshot point.
-    SnapChunk = 7,
+    // 5, 6 and 7 were the snapshot install, the decided snapshot point and
+    // its chunks, deleted with the application (#186). Retired, never
+    // reused: a store that still holds one reads it as a kind it never
+    // wrote.
     /// Part of a checkpoint's sealed ledger.
     Sealed = 8,
+    /// A jump below a peer's trim point (#186): the point and the peer's
+    /// sealed ledger.
+    TrimmedTo = 9,
     /// A matchmaker registration.
     Register = 16,
     /// The matchmaker's durable scalars, whole.
@@ -60,10 +61,8 @@ impl Kind {
             2 => Kind::Faulty,
             3 => Kind::ChosenIndex,
             4 => Kind::Truncate,
-            5 => Kind::InstallSnapshot,
-            6 => Kind::SnapPoint,
-            7 => Kind::SnapChunk,
             8 => Kind::Sealed,
+            9 => Kind::TrimmedTo,
             16 => Kind::Register,
             17 => Kind::Scalars,
             128 => Kind::Begin,
@@ -186,7 +185,7 @@ mod tests {
 
     #[test]
     fn epochs_carry_the_kind() {
-        assert_eq!(kind_of(epoch(Kind::SnapChunk)), Some(Kind::SnapChunk));
+        assert_eq!(kind_of(epoch(Kind::TrimmedTo)), Some(Kind::TrimmedTo));
         assert_eq!(kind_of(1 << 56), None, "a foreign epoch is no kind");
         assert_eq!(kind_of(0), None, "an all-zero epoch is no kind");
     }

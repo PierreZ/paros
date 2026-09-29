@@ -1,6 +1,6 @@
 ---
 name: writing-a-corpus-case
-description: Add a scripted case to paros's CTRL corpus - a three-node (or the one four-node) cluster from scripted_builder, every fault a targeted injection through ScriptedLifecycle (moonpool fault_factory) or a corruption mask, an analytically known outcome per mask, a non-vacuous floor in the nextest test, and its entry point in paros_sim plus the hunt binary. Use when a storage-fault or recovery scenario has a closed-form expected outcome, when adding an E1 or chunk mask family, or when extending corpus.rs.
+description: Add a scripted case to paros's CTRL corpus - a three-node (or the one four-node) cluster from scripted_builder, every fault a targeted injection through ScriptedLifecycle (moonpool fault_factory) or a corruption mask, an analytically known outcome per mask, a non-vacuous floor in the nextest test, and its entry point in paros_sim plus the hunt binary. Use when a storage-fault or recovery scenario has a closed-form expected outcome, when adding an E1-style mask family, or when extending corpus.rs.
 ---
 
 # Writing a corpus case
@@ -8,14 +8,16 @@ description: Add a scripted case to paros's CTRL corpus - a three-node (or the o
 The corpus is the second axis of the harness: where the main campaign is
 chaos under swarm, a corpus case is a **scripted** cluster with every fault a
 targeted injection and an outcome you can derive by hand per mask (a slot
-recovers, a slot waits for its lost custodian, a below-floor node heals
-through a snapshot). It exists to make CTRL's per-slot corruption terrain
+recovers, a slot waits for its lost custodian, a straggler's clean copy is
+recovered through the prior configuration). It exists to make CTRL's per-slot corruption terrain
 exhaustive where the swarm can only sample it.
 
 ## Shape
 
-- `scripted_builder(nodes, bootstrap, matchmakers)` in
-  `crates/paros-sim/src/lib.rs`: `NodeProcess::scripted()`, no swarm chaos, a
+- `scripted_builder(nodes, matchmakers, ScriptedOptions)` in
+  `crates/paros-sim/src/lib.rs`: `NodeProcess::scripted_with(options)`
+  (`ScriptedOptions::bootstrap` fixes a bootstrap subset that leaves spares;
+  the default bootstraps on the whole pool), no swarm chaos, a
   long chaos window, and `fault_factory(ScriptedLifecycle)`
   (`lifecycle.rs`) whose crash/restart commands the workload issues through
   the shared `StateHandle`.
@@ -23,7 +25,9 @@ exhaustive where the swarm can only sample it.
   corruption mask over `CORPUS_SLOTS = 3`, mask space 512),
   `BareQuorumWorkload`, `DepartedStragglerWorkload` (the one four-node,
   one-matchmaker case: a spare and a prior configuration across a
-  reconfiguration), `SnapshotLifecycleWorkload`, `ChunkMaskWorkload`.
+  reconfiguration). The snapshot cases (`SnapshotLifecycleWorkload`,
+  `ChunkMaskWorkload`) went with snapshots in #186: the log is the only
+  custody paros keeps.
   A new family is a new workload here, not a new process type.
 - The seed **is** the input when the mask is drawn from it
   (`MaskSource::Seeded`), which is the one place a hard-coded seed is not a
@@ -55,15 +59,15 @@ exhaustive where the swarm can only sample it.
 
 - Every fault is targeted: no `Chaos::Network`/`Storage` swarm on a corpus
   builder; moonpool's `crash`/`restart` through `FaultContext` are the
-  lifecycle primitives. A durability seam only a choreographed case can
-  reach is crashed the same way — `scripted_builder_with(.., Some(seam))`
-  gives every node `NodeProcess::scripted_with_seam_crash`, whose hooks
-  answer `crash_at(seam)` once per run and draw nothing (`ScriptedCrash`,
-  #146; `ChunkLiveCase::LostThenRestoreCrash` is the one case) — and the
-  case asserts its own non-vacuity (`hooks::scripted_crash_fired`).
+  lifecycle primitives. A scripted node's hooks and swarm sites stay dark,
+  so a case replays as choreographed. (The scripted durability-seam crash of
+  #146, `ScriptedCrash`, went with the chunk-repair seams it existed to
+  reach in #186; a case that needs one again adds it back as a
+  `ScriptedOptions` field.)
 - The corpus registers no matchmaker group and draws no bootstrap except in
   the departed-straggler case; keep it that way unless the outcome table
   needs a reconfiguration.
 - The same `AuditWorld` judges corpus runs; do not add a check that only a
-  corpus case can see unless it is an application or storage fact reported
-  through the storage layer's audit callbacks.
+  corpus case can see unless it is a storage fact reported through the
+  storage layer's audit callbacks (the application's fold is the client's
+  since #186, `AuditWorld::fold_applied`).

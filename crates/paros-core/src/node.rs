@@ -4,7 +4,7 @@
 mod acceptor;
 mod authority;
 mod boot;
-mod catch_up_snapshot;
+mod catch_up;
 mod election;
 mod gc;
 mod handoff;
@@ -204,8 +204,8 @@ pub enum BeliefSource {
 /// first one exists: the compartmentalized **proxy leader**
 /// ([`crate::proxy_leader::ProxyLeader`], #142) is the proposer's Phase-2
 /// tally ([`crate::proposer::Rounds`]) plus routing, on a process that is
-/// neither an acceptor nor a replica; a bare acceptor and a read-only
-/// replica would be the next two.
+/// neither an acceptor nor a replica; the replica tier
+/// ([`crate::replica_node::ReplicaNode`], #144) is the next.
 ///
 /// Pure, synchronous and single-threaded: no I/O, no clock, no randomness.
 /// Inputs arrive via [`ColocatedNode::step`] (peer messages and
@@ -254,8 +254,8 @@ pub struct ColocatedNode {
     /// [`WriteOp`]s it emits into this node's batch.
     acceptor: Acceptor<Command>,
     /// The **replica** component ([`crate::replica::Replica`]): the chosen
-    /// log, the durable chosen index, the contiguous apply walk, the
-    /// at-most-once ledger and the application repair cursor.
+    /// log, the durable chosen index, the contiguous apply walk and the
+    /// at-most-once ledger.
     replica: Replica,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
@@ -263,12 +263,6 @@ pub struct ColocatedNode {
     /// Semantic durable write deltas produced this batch, in apply order.
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(Audience, Message)>,
-    /// Snapshot offers to serve this batch:
-    /// `(to, chosen_index, ballot)`. The core decides *who* needs a
-    /// snapshot and *up to where* (a below-floor catch-up request), but holds no
-    /// application state, so the driver attaches the opaque snapshot bytes (from
-    /// storage) and sends the [`Message::InstallSnapshot`].
-    pending_snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
     /// Read-index rounds and quorum reads confirmed this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
@@ -465,13 +459,9 @@ impl ColocatedNode {
             } => self.on_commit(ballot, slot, &command),
             Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
             Message::CatchUpResponse { entries, .. } => self.on_catchup_response(entries),
-            Message::InstallSnapshot {
-                ballot,
-                chosen_index,
-                snapshot,
-                sessions,
-                ..
-            } => self.on_install_snapshot(ballot, chosen_index, snapshot, sessions),
+            Message::TrimmedTo {
+                point, sessions, ..
+            } => self.on_trimmed_to(point, sessions),
             Message::Relinquish {
                 from,
                 to,
@@ -511,14 +501,6 @@ impl ColocatedNode {
                 watermark,
                 config_since,
             } => self.on_pre_read_ack(from, ctx, watermark, config_since),
-            // Driver-terminal snapshot-repair traffic (CTRL §3.5): the
-            // driver's repair layer owns these end to end and normally
-            // intercepts them before `step`. Consensus state never depends on
-            // snapshot custody, so a message that does reach the core is
-            // deliberately ignored rather than an error.
-            Message::SnapAck { .. }
-            | Message::SnapChunkRequest { .. }
-            | Message::SnapChunkResponse { .. } => {}
         }
         self.assert_invariants();
     }
@@ -588,13 +570,8 @@ impl ColocatedNode {
         // applied, the honest answer is `Chosen` at its first slot, even while a
         // #94 duplicate of it sits chosen-but-unapplied at a later slot (that
         // slot will suppress to a no-op at apply, so a reply parked on it would
-        // hang to the client's deadline). While an application repair is open,
-        // the ledger's slots are chosen but not yet re-applied here, so the
-        // immediate `Chosen` ack would name a slot outside the applied prefix —
-        // fall through to the honest slower paths instead.
-        if self.replica.app_repair().is_none()
-            && let Some(at) = self.replica.applied_at(client, seq)
-        {
+        // hang to the client's deadline).
+        if let Some(at) = self.replica.applied_at(client, seq) {
             // What an immediate ack claims, restated at the reply: the slot is
             // inside this node's applied prefix (the ledger is written only by
             // the contiguous walk, the boot rebuild, and sealed records below
@@ -703,26 +680,6 @@ impl ColocatedNode {
         self.open_proposal(None, delegation, |_, _| Command::Control(control))
     }
 
-    /// Leader entry point for a **decided snapshot point** (#101, CTRL §3.5):
-    /// propose a [`Control::Snap`] marker into the next slot, with `at_index`
-    /// bound to exactly that slot **by construction** — Paxos never moves an
-    /// accepted command between slots, so a decided marker always describes
-    /// its own position. A non-leader returns [`ProposeResult::NotLeader`].
-    ///
-    /// # Panics
-    ///
-    /// If an internal invariant is broken (a programmer error, never an
-    /// operating condition).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
-    pub fn propose_snap_marker(&mut self) -> ProposeResult {
-        if self.role != NodeRole::Leader {
-            return ProposeResult::NotLeader(self.leader);
-        }
-        self.open_proposal(None, Delegation::Auto, |_, slot| {
-            Command::Control(Control::Snap { at_index: slot })
-        })
-    }
-
     /// Leader entry point for a **linearizable read**: capture the current
     /// applied watermark as the read index and start a heartbeat-ack quorum
     /// round to confirm this node is still leader — no log write. The confirmed
@@ -787,11 +744,11 @@ impl ColocatedNode {
         ReadIndexResult::Pending
     }
 
-    /// Application-driven log compaction: drop every retained slot at or below
+    /// Decided log compaction (a journal `Trim`, #185): drop every retained slot at or below
     /// `up_to`, raising the truncation floor. Returns the new floor (the first
     /// slot still retained).
     ///
-    /// `up_to` is the last slot the application permits dropping (inclusive); the
+    /// `up_to` is the last slot the client permits dropping (inclusive); the
     /// floor stored in the log is the first slot *retained*. The request is
     /// clamped to the contiguous chosen prefix (`up_to.min(chosen_index)`): a slot
     /// that is not yet chosen is never dropped, so nothing undecided is lost.
@@ -820,18 +777,7 @@ impl ColocatedNode {
         let Some(ci) = self.replica.chosen_index() else {
             return self.acceptor.first_slot();
         };
-        let mut highest_drop = up_to.min(ci);
-        // An open application repair pins the floor: truncating at or past the
-        // repair cursor would drop the very records the catch-up heal is about
-        // to re-emit, converting a one-slot repair into a snapshot transfer (or
-        // an unrecoverable wait). The floor resumes rising once the repair
-        // closes; a decided `Truncate` is idempotent over-asking by design.
-        if let Some(pending) = self.replica.app_repair() {
-            let Some(cap) = pending.0.checked_sub(1) else {
-                return self.acceptor.first_slot();
-            };
-            highest_drop = highest_drop.min(Slot(cap));
-        }
+        let highest_drop = up_to.min(ci);
         let old_floor = self.acceptor.first_slot();
         let first = Slot(highest_drop.0 + 1).max(old_floor);
         if first <= old_floor {
@@ -839,11 +785,12 @@ impl ColocatedNode {
         }
         // Seal from the *ledger*, not from the dropped `chosen` range (see
         // `Replica::seal`). Only the delta is sealed — records below the old
-        // floor were sealed by the truncation (or install) that dropped them.
+        // floor were sealed by the truncation (or trim-point jump) that dropped
+        // them.
         let sealed: Vec<SessionEntry> = self.replica.seal(old_floor, first);
-        // A faulty entry below the floor is superseded by the compacted state
-        // (only chosen slots are dropped, and truncation is decided over the
-        // applied prefix): custodianship moved into the application snapshot.
+        // A faulty entry below the floor is dropped with the prefix: only
+        // chosen slots are dropped, and a trim is decided, so no peer will
+        // ever need this node's copy of a slot below it.
         self.acceptor
             .truncate(first, sealed, &mut self.pending_writes);
         self.replica.truncate(first);
@@ -857,15 +804,6 @@ impl ColocatedNode {
         assert!(
             self.acceptor.first_slot() <= self.first_unchosen(),
             "compaction never drops an undecided slot"
-        );
-        // The cap above, restated as what it protects: an open application
-        // repair still needs every decided record from its cursor up, so the
-        // floor stops below the cursor (the truncate-before-heal bug class).
-        assert!(
-            self.replica
-                .app_repair()
-                .is_none_or(|cursor| self.acceptor.first_slot() <= cursor),
-            "compaction never drops a slot an open application repair still needs"
         );
         self.assert_invariants();
         self.acceptor.first_slot()
@@ -961,7 +899,7 @@ impl ColocatedNode {
 
     /// Per-tick repair upkeep (Stage 8): drive the leader's open repair probe
     /// (straggler re-query + the CTRL §4.2 recovery-timeout resignation) and
-    /// pull the application repair range from peers.
+    /// pull a faulty chosen record's range from peers.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     fn tick_repair(&mut self) {
         // The leader's blocked-slot probe: re-send `Prepare` at our ballot to
@@ -996,23 +934,19 @@ impl ColocatedNode {
                 self.send_prepare(unanswered, ballot, from_slot, config);
             }
         }
-        // The application repair pull: ask every peer for the decided range
-        // from the cursor. A peer that still holds the slots serves a
-        // catch-up replay; one that truncated past them offers a snapshot.
-        // Once per tick — the same cadence heartbeat-driven catch-up uses.
-        if let Some(from_slot) = self.replica.app_repair() {
-            self.broadcast(self.catch_up_request(from_slot));
-        } else if let Some(first_faulty) = self
+        if let Some(first_faulty) = self
             .acceptor
             .first_faulty()
             .filter(|slot| *slot < self.first_unchosen())
         {
-            // A faulty **chosen** record whose effect the application already
-            // holds still leaves a hole in the servable log (catch-up replay
-            // stops at it — per-slot attribution). Pull the decided range from
-            // peers so the record itself heals; a peer that has it chosen
-            // serves it, and this node's own next election covers it either
-            // way (the campaign range starts at the first faulty slot).
+            // A faulty **chosen** record leaves a hole in the servable log
+            // (catch-up replay and a journal read both stop at it — per-slot
+            // attribution). Pull the decided range from peers so the record
+            // itself heals; a peer that has it chosen serves it, one that
+            // trimmed past it answers `TrimmedTo`, and this node's own next
+            // election covers it either way (the campaign range starts at the
+            // first faulty slot). Once per tick — the same cadence
+            // heartbeat-driven catch-up uses.
             self.broadcast(self.catch_up_request(first_faulty));
         }
     }
@@ -1191,45 +1125,6 @@ impl ColocatedNode {
         self.assert_invariants();
     }
 
-    /// Open an **application repair** (Stage 8): the driver's boot replay could
-    /// not walk the whole chosen prefix — a faulty chosen record blocked it, or
-    /// the application snapshot was lost below the compaction floor — and the
-    /// application's durable prefix stops just below `from`. The core re-emits
-    /// every decided command from `from` onward, in slot order, through the
-    /// ordinary [`Ready::committed`](crate::Ready::committed) seam as the
-    /// missing values arrive (commit-replay catch-up, or a snapshot install
-    /// when `from` sits below the floor), and pulls them from peers each tick.
-    ///
-    /// A no-op when nothing is chosen or `from` already covers the prefix.
-    ///
-    /// # Panics
-    ///
-    /// If `from` lies past the contiguous chosen prefix — the driver may only
-    /// name a slot the durable chosen index already covers — or if this node
-    /// is a bare acceptor ([`Application::Shed`](crate::Application::Shed)),
-    /// which runs no application to repair.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, from = from.0)))]
-    pub fn open_app_repair(&mut self, from: Slot) {
-        assert!(
-            self.config.runs_application(),
-            "only a node that runs the application opens an application repair"
-        );
-        self.replica.open_app_repair(from);
-        self.pump_app_repair();
-        self.assert_invariants();
-    }
-
-    /// Re-emit the next run of decided commands the open application repair can
-    /// serve: from the cursor, while each slot's value is present (readable in
-    /// `chosen`), bounded per batch. Stops at the floor (only a snapshot can
-    /// heal below it) or at the first still-missing value (catch-up will bring
-    /// it). Closes the repair when the cursor reaches the contiguous prefix
-    /// walk's frontier.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
-    pub(crate) fn pump_app_repair(&mut self) {
-        self.replica.pump_app_repair(self.acceptor.first_slot());
-    }
-
     /// The driver supplies a randomized election timeout (in ticks, jitter drawn
     /// from its `RandomProvider`). Clears the [`ColocatedNode::needs_election_timeout`]
     /// flag.
@@ -1356,7 +1251,7 @@ impl ColocatedNode {
     }
 
     /// The node's **replica** role: the chosen log, the contiguous apply
-    /// walk, the at-most-once ledger and the application repair cursor. A
+    /// walk and the at-most-once ledger. A
     /// read view, like [`ColocatedNode::acceptor`].
     #[must_use]
     pub fn replica(&self) -> &Replica {
@@ -1430,10 +1325,10 @@ impl ColocatedNode {
     }
 
     /// The full at-most-once session ledger: every `(client, seq) -> slot`
-    /// record in this node's applied prefix, flattened. The driver attaches it
-    /// to each [`Message::InstallSnapshot`] it serves (paros-owned metadata
-    /// beside the opaque application bytes), so a snapshot-recovered peer makes
-    /// the same #94 duplicate-suppression decisions as everyone else.
+    /// record in this node's applied prefix, flattened. Its prefix below the
+    /// trim point travels in each [`Message::TrimmedTo`] this node serves, so
+    /// a peer that jumped makes the same #94 duplicate-suppression decisions
+    /// as everyone else.
     #[must_use]
     pub fn session_ledger(&self) -> Vec<SessionEntry> {
         self.replica
@@ -1506,10 +1401,6 @@ impl ColocatedNode {
         self.replica.committed()
     }
 
-    pub(crate) fn pending_snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
-        &self.pending_snapshot_offers
-    }
-
     pub(crate) fn pending_read_states(&self) -> &[ReadState] {
         &self.pending_read_states
     }
@@ -1530,7 +1421,6 @@ impl ColocatedNode {
         self.pending_writes.clear();
         self.pending_messages.clear();
         self.replica.clear_committed();
-        self.pending_snapshot_offers.clear();
         self.pending_read_states.clear();
         self.pending_match_requests.clear();
         self.pending_gc_requests.clear();

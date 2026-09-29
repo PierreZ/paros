@@ -24,14 +24,11 @@ use crate::rpc::{internal, message_to_proto};
 use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
-/// One peer's outbound mailboxes: `regular` for ordinary protocol traffic
-/// and `snapshot` for the bulky `InstallSnapshot` class. Separate bounded
-/// queues, so a snapshot push can never evict the beats and `Accept`s queued
-/// beside it (and vice versa). A proxy leader opens no snapshot lane: it
-/// never serves one.
+/// One peer's outbound mailbox. Since #186 nothing bulky travels between
+/// peers (a laggard below the trim point gets a `TrimmedTo`, never bytes),
+/// so the snapshot lane is gone and one lane carries every class.
 pub(crate) struct PeerQueues {
     pub(crate) regular: PeerMailbox,
-    pub(crate) snapshot: Option<PeerMailbox>,
 }
 
 /// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd
@@ -201,13 +198,12 @@ impl PeerMailbox {
 /// Bundled so `drain_ready` takes one handle.
 pub(crate) struct Outbound {
     pub(crate) peer_queues: BTreeMap<NodeId, PeerQueues>,
-    /// The proxy leaders' regular mailboxes: a node delegates through them,
-    /// and nothing bulky ever goes to a proxy (a proxy holds no snapshot).
+    /// The proxy leaders' mailboxes: a node delegates through them.
     pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
     /// The deployment's replicas (#144): learners that are not in the node
     /// pool, reached by every [`Audience::Learners`] message beside the pool
-    /// and addressed by their own `NodeId` (a catch-up answer, a snapshot
-    /// offer). Their lanes are in `peer_queues`. Empty on a deployment
+    /// and addressed by their own `NodeId` (a catch-up answer, a trim
+    /// point). Their lanes are in `peer_queues`. Empty on a deployment
     /// without a replica tier, and on a replica itself — a replica sends to
     /// no learner.
     pub(crate) learners: Vec<NodeId>,
@@ -233,8 +229,7 @@ impl Outbound {
     }
 
     /// The node this handle sends as. The node driver's own paths (the
-    /// `Ready` drain, the snapshot repair plane) are the only callers, and
-    /// they never run on a proxy.
+    /// `Ready` drain) are the only callers, and they never run on a proxy.
     ///
     /// # Panics
     ///
@@ -264,15 +259,9 @@ impl Outbound {
 
     /// The mailbox `to`'s copy of `msg` goes into, if the deployment map
     /// names `to` at all.
-    fn mailbox_for(&self, to: Party, msg: &Message) -> Option<&PeerMailbox> {
+    fn mailbox_for(&self, to: Party) -> Option<&PeerMailbox> {
         match to {
-            Party::Node(node) => self.peer_queues.get(&node).map(|queues| {
-                if matches!(msg, Message::InstallSnapshot { .. }) {
-                    queues.snapshot.as_ref().unwrap_or(&queues.regular)
-                } else {
-                    &queues.regular
-                }
-            }),
+            Party::Node(node) => self.peer_queues.get(&node).map(|queues| &queues.regular),
             Party::Proxy(proxy) => self.proxy_queues.get(&proxy),
         }
     }
@@ -341,7 +330,7 @@ impl Outbound {
                 None => tracing::info!(from = %self.sender, to = %to, kind, "msg_sent"),
             },
         }
-        if let Some(queue) = self.mailbox_for(to, msg) {
+        if let Some(queue) = self.mailbox_for(to) {
             let Ok(message) = message_to_proto(msg) else {
                 tracing::warn!(
                     from = %self.sender,

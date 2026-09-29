@@ -17,7 +17,7 @@ ballot: string | null,
  */
 value: string, 
 /**
- * Which control command it is (`noop`, `truncate`, `snap`), or `None` for
+ * Which control command it is (`noop`, `truncate`), or `None` for
  * an opaque client entry.
  */
 control: string | null, 

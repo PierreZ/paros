@@ -214,7 +214,7 @@ impl<Id, V> Rounds<Id, V> {
         self.by_slot.remove(&slot);
     }
 
-    /// Drop every round below `first` (a compaction or a snapshot install
+    /// Drop every round below `first` (a compaction or a trim-point jump
     /// folded those slots: they are chosen).
     pub fn retain_from(&mut self, first: Slot) {
         self.by_slot.retain(|slot, _| *slot >= first);
@@ -523,7 +523,7 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Raise the frontier to `slot` if it sits below — the monotone form an
-    /// installed snapshot uses, whose boundary may sit above everything this
+    /// trim-point jump uses, whose boundary may sit above everything this
     /// node had.
     pub fn raise_next_slot(&mut self, slot: Slot) {
         self.next_slot = self.next_slot.max(slot);

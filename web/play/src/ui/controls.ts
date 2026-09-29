@@ -529,7 +529,7 @@ function compactRow(view: GameView, state: ControlState, dispatch: Dispatch): HT
     input,
     action(
       'Compact',
-      'The client asks the leader to drop the log prefix. The leader must hold a snapshot point first.',
+      'The client asks the leader to drop the log prefix. The leader proposes a Truncate like any value.',
       submit,
     ),
   );

@@ -32,7 +32,7 @@ use moonpool_sim::{
 };
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
-use crate::hooks::{BuggifyHooks, ScriptedCrash};
+use crate::hooks::BuggifyHooks;
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
@@ -40,9 +40,9 @@ use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, storage_world};
 use paros::{
-    AcceptorConfig, Application, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId,
-    NodeId, ProxyConfig, ProxyId, ReplicaId, RunError, Seam, parse_addr, run_matchmaker, run_node,
-    run_proxy, run_replica,
+    AcceptorConfig, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId, NodeId,
+    ProxyConfig, ProxyId, ReplicaId, RunError, parse_addr, run_matchmaker, run_node, run_proxy,
+    run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -171,7 +171,7 @@ fn stay_down(checker: &AuditWorld, down: Down) {
 /// stretches the durability-seam crash window process-level attrition
 /// cannot reach — a node held down while the cluster keeps committing and
 /// truncating returns below the compaction floor and independently
-/// exercises snapshot recovery. Drawn per *crash*, deliberately not per node
+/// exercises the trim-point jump. Drawn per *crash*, deliberately not per node
 /// (it is not part of the node's shape): the delay describes one event, and
 /// two crashes of the same node should be free to look different. The floor
 /// is structural: a held-down node is a recovery the tail must absorb, never
@@ -210,9 +210,10 @@ pub(crate) struct ScriptedOptions {
     /// acceptors, the rest spares — a case that needs a spare); `None`
     /// bootstraps on the whole pool.
     pub(crate) bootstrap: Option<usize>,
-    /// One targeted seam crash (`crate::hooks::ScriptedCrash`, #146): the
-    /// first node to reach the seam crashes there, once per run.
-    pub(crate) seam_crash: Option<Seam>,
+    /// Withhold every GC request (`DriverHooks::withhold_gc_requests`): a
+    /// case whose prior configuration must stay answerable (#124) cannot
+    /// race the new leader's GC floor.
+    pub(crate) withhold_gc: bool,
 }
 
 /// How a process is perturbed.
@@ -507,14 +508,6 @@ async fn run_acceptor(
     // the swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let quorum_system = policy.system(bootstrap.len());
-    // A bare acceptor (#144) is deployment data too, drawn once per seed and
-    // only where a replica tier runs the application.
-    let application =
-        if crate::shape::bare_acceptors(ctx.state(), deployment.replica_count(), perturb) {
-            Application::Shed
-        } else {
-            Application::Colocated
-        };
     let config = Config {
         journal: paros::JournalId::default(),
         id: self_rank,
@@ -525,7 +518,6 @@ async fn run_acceptor(
         matchmaker_pool,
         proxy_count: proxies.len(),
         replica_count: deployment.replica_count(),
-        application,
     };
 
     // The per-iteration durable-storage world, shared by every node and
@@ -540,10 +532,15 @@ async fn run_acceptor(
     // seed's draw schedule keeps its order.
     let RoleRig {
         incarnation,
-        mut hooks,
+        hooks,
         checker,
         audit,
     } = arm_role(ctx, my_ip, perturb);
+    let hooks = if options.withhold_gc {
+        hooks.withholding_gc()
+    } else {
+        hooks
+    };
     let shape = incarnation.shape;
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
@@ -564,10 +561,6 @@ async fn run_acceptor(
         if !perturb {
             guard.set_unbudgeted();
         }
-        guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
-    }
-    if let Some(seam) = options.seam_crash {
-        hooks = hooks.with_scripted_crash(ScriptedCrash::arm(ctx.state(), seam));
     }
     let faults = storage_faults(ctx, perturb, shape.write_rates);
     let tunables = shape.tunables;
@@ -960,10 +953,6 @@ async fn run_replica_role(
     {
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
         guard.note_replica(my_ip);
-        // The application's digest-lane count is one per-run value every
-        // applier must slice by; a replica may boot before any acceptor
-        // published it, so it publishes the seed's own draw too.
-        guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
     }
     let faults = StorageFaults::new(
         ctx.time().clone(),
@@ -1048,8 +1037,7 @@ use moonpool_sim::SimStorageProvider;
 #[tracing::instrument(level = "debug", skip_all)]
 async fn journal_contract_suites(provider: SimStorageProvider) {
     use paros::{
-        JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, MatchmakerStorage,
-        NodeStorage,
+        JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, LogStorage, MatchmakerStorage,
     };
     let config = Config {
         id: NodeId(0),

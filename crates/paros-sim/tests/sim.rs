@@ -29,14 +29,14 @@ fn chain_single_seed_converges() {
 
 /// The world-backed sim storage passes the same behavioral contract suite
 /// `MemStorage` passes as a `paros` unit test, so the fake can never drift from
-/// the `NodeStorage` trait contract.
+/// the `LogStorage` trait contract.
 #[test]
 fn sim_storage_passes_the_contract_suite() {
     let report = paros_sim::run_storage_contract_suite();
     assert_eq!(report.failed_runs, 0, "the contract suite completed");
     assert!(
         report.assertion_violations.is_empty(),
-        "the sim storage honors the NodeStorage contract: {:?}",
+        "the sim storage honors the LogStorage contract: {:?}",
         report.assertion_violations
     );
 }

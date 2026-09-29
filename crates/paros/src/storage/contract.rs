@@ -1,13 +1,13 @@
-//! The behavioral contract suite every [`NodeStorage`] implementation must
+//! The behavioral contract suite every [`LogStorage`] implementation must
 //! pass, shared by the in-memory store and the simulation's world-backed one.
 
 use std::future::Future;
 
 use paros_core::{Ballot, Command, MustSync, Slot};
 
-use super::{NodeStorage, snap_chunk_count};
+use super::LogStorage;
 
-/// The behavioral **contract suite** every [`NodeStorage`] implementation must
+/// The behavioral **contract suite** every [`LogStorage`] implementation must
 /// pass (issue #21 item F): one suite, run against both [`MemStorage`] (in this crate)
 /// and the simulation's world-backed storage (in `paros-sim`), so a fake can
 /// never drift from the trait contract. The Stage-6/7 fault-budget logic stays
@@ -34,7 +34,7 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     mut fresh: impl FnMut() -> Fresh,
     mut reopen: impl FnMut(S) -> Reopened,
 ) where
-    S: NodeStorage,
+    S: LogStorage,
     Fresh: Future<Output = S>,
     Reopened: Future<Output = S>,
 {
@@ -139,116 +139,46 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     let s = reopen(s).await;
     assert_eq!(s.first_slot(), Slot(1), "the floor is monotone");
 
-    // A snapshot install: chosen index jumps, promise takes the max (never
-    // regresses), floor lands one past the boundary, sessions seal. The blob
-    // comes from a *source* storage whose applied prefix genuinely covers the
-    // boundary, so an application-typed implementation's boundary checks hold.
-    let mut source = fresh().await;
-    for s in 0..=4u64 {
-        source
-            .append_accepted(Slot(s), ballot(1), user(10 + s, 0x40))
-            .await
-            .expect("source append");
-    }
-    source
-        .set_chosen_index(Slot(4))
-        .await
-        .expect("source index");
-    for s in 0..=4u64 {
-        source
-            .apply(Slot(4), Slot(s), &user(10 + s, 0x40))
-            .await
-            .expect("source apply");
-    }
-    source.sync(MustSync::Sync).await.expect("source sync");
-    let blob = source.snapshot().await;
-
+    // A trim-point jump (#186): the chosen index rises to one below the
+    // point, the promise does not move, the floor lands on the point, the
+    // records below it go, and the peer's ledger seals.
     let mut s = fresh().await;
     s.persist_ballot(ballot(9)).await.expect("high promise");
+    s.append_accepted(Slot(0), ballot(1), user(10, 0x40))
+        .await
+        .expect("append below the point");
+    s.append_accepted(Slot(6), ballot(1), user(16, 0x40))
+        .await
+        .expect("append above the point");
     s.sync(MustSync::Sync).await.expect("sync promise");
-    s.install_snapshot(
-        Slot(4),
-        ballot(2),
-        blob,
-        &[(ClientId(7), ClientSeq(2), Slot(3))],
-    )
-    .await
-    .expect("install");
-    s.sync(MustSync::Sync).await.expect("sync install");
+    s.trimmed_to(Slot(5), &[(ClientId(7), ClientSeq(2), Slot(3))])
+        .await
+        .expect("jump");
+    s.sync(MustSync::Sync).await.expect("sync jump");
     let s = reopen(s).await;
     let (hs, _config) = s.initial_state();
-    assert_eq!(hs.chosen_index, Some(Slot(4)), "the install set the index");
+    assert_eq!(
+        hs.chosen_index,
+        Some(Slot(4)),
+        "the jump chose everything below the point"
+    );
     assert_eq!(
         hs.max_promised_ballot,
         ballot(9),
-        "an install never lowers the promise"
+        "a trim-point jump never moves the promise"
     );
-    assert_eq!(
-        s.first_slot(),
-        Slot(5),
-        "the floor is one past the boundary"
+    assert_eq!(s.first_slot(), Slot(5), "the floor is the point");
+    assert!(
+        s.accepted(Slot(0)).is_none(),
+        "the records below the point are gone"
+    );
+    assert!(
+        s.accepted(Slot(6)).is_some(),
+        "the records above the point stay"
     );
     assert_eq!(
         s.sealed_sessions(),
         vec![(ClientId(7), ClientSeq(2), Slot(3))],
-        "the install sealed the peer's ledger"
-    );
-
-    // A decided snapshot point (#101): recorded at its marker slot, retained
-    // across a reopen, chunked at the fixed size, and chunk reads reassemble
-    // exactly the blob the point captured.
-    let mut s = fresh().await;
-    for slot in 0..=2u64 {
-        s.append_accepted(Slot(slot), ballot(1), user(20 + slot, 0x50))
-            .await
-            .expect("point append");
-    }
-    s.set_chosen_index(Slot(2)).await.expect("point index");
-    for slot in 0..=2u64 {
-        s.apply(Slot(2), Slot(slot), &user(20 + slot, 0x50))
-            .await
-            .expect("point apply");
-    }
-    let blob = s.snapshot().await;
-    s.record_snapshot(Slot(2)).await.expect("record point");
-    s.sync(MustSync::Sync).await.expect("sync point");
-    let mut s = reopen(s).await;
-    assert_eq!(
-        s.latest_snap_point(),
-        Some(Slot(2)),
-        "the decided point survives a reopen"
-    );
-    let chunks = s
-        .snap_chunk_count(Slot(2))
-        .expect("the retained point reports its chunk count");
-    assert_eq!(
-        chunks,
-        snap_chunk_count(blob.len()),
-        "the chunk count matches the fixed chunk size"
-    );
-    let mut reassembled = Vec::new();
-    for chunk in 0..chunks {
-        reassembled.extend(
-            s.read_snap_chunk(Slot(2), chunk)
-                .await
-                .expect("a clean chunk reads back"),
-        );
-    }
-    assert_eq!(reassembled, blob, "chunks reassemble the exact blob");
-    assert!(
-        s.read_snap_chunk(Slot(3), 0).await.is_none(),
-        "a point this store does not retain answers nothing"
-    );
-    // A chunk write round-trips (repair installs the identical bytes).
-    let first = s.read_snap_chunk(Slot(2), 0).await.expect("first chunk");
-    s.write_snap_chunk(Slot(2), 0, &first)
-        .await
-        .expect("chunk write succeeds");
-    s.sync(MustSync::Sync).await.expect("sync chunk write");
-    let s = reopen(s).await;
-    assert_eq!(
-        s.read_snap_chunk(Slot(2), 0).await,
-        Some(first),
-        "a written chunk reads back identically"
+        "the jump sealed the peer's ledger"
     );
 }

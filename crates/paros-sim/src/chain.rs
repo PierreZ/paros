@@ -1,173 +1,83 @@
-//! Deterministic Chain-of-Blocks application state and wire encoding.
+//! The Chain-of-Blocks application — a **client** of the journal (#186).
+//!
+//! paros runs no application: a journal's client reads the log through
+//! `Read` (#185) and folds what it reads. [`ChainState`] is that fold for the
+//! simulation's client: every user entry, in LSN order, chained into one
+//! running digest. Holes (a `Noop`, a control command, a #94 duplicate)
+//! never reach it — a reader never sees them — so two clients that read the
+//! same journal from the start agree on the state after every entry, and the
+//! audit checks exactly that (`AuditWorld::fold_applied`).
 
 use paros::{Command, Control, Slot};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Version 3: the state carries per-lane block digests beside the running
-/// chain hash, so a snapshot blob genuinely spans several
-/// [`paros::SNAP_CHUNK_BYTES`] chunks and chunk-level repair is observable —
-/// and the lane count travels in the blob, so a seed can draw it.
-const SNAPSHOT_VERSION: u8 = 3;
-/// Upper bound on the digest-lane count (the array is fixed; only
-/// `lane_count` lanes are live and encoded).
-pub(crate) const MAX_LANES: usize = 128;
-/// The lane count the corpus and the default state use: five chunks of
-/// [`paros::SNAP_CHUNK_BYTES`], the grid the chunk corpus enumerates.
-pub(crate) const DEFAULT_LANES: u8 = 32;
-const HEADER_LEN: usize = 1 + 1 + 8 + 8;
 
-/// The complete application value checked across replicas. Command `i` folds
-/// into lane `i % lane_count`, so the whole array is a deterministic function
-/// of the applied prefix (and of the lane count, which every node of a run
-/// shares).
+/// A client's fold of the journal: how many user entries it folded and the
+/// running digest over them, each chained with its LSN (so the same bytes at
+/// another position fold to another state).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChainState {
     pub(crate) applied_count: u64,
     pub(crate) chain_hash: u64,
-    /// Live digest lanes: the snapshot body that makes the blob multi-chunk.
-    /// A per-seed draw on the main campaign (1..=128 lanes, so the blob spans
-    /// 1 to 17 chunks), fixed at [`DEFAULT_LANES`] on the corpus.
-    pub(crate) lane_count: u8,
-    /// Per-lane digests; lanes past `lane_count` stay at the offset.
-    pub(crate) lanes: [u64; MAX_LANES],
 }
 
-/// Compact: the count, the digest, and the live lane count — never the lane
-/// array, which would drown every red-path dump in a kilobyte per node.
+/// Compact: the count and the digest.
 impl std::fmt::Debug for ChainState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ChainState({}, {}, {} lanes)",
+            "ChainState({}, {})",
             self.applied_count,
-            hash_text(self.chain_hash),
-            self.lane_count
+            hash_text(self.chain_hash)
         )
     }
 }
 
 impl Default for ChainState {
     fn default() -> Self {
-        Self::empty(DEFAULT_LANES)
+        Self {
+            applied_count: 0,
+            chain_hash: FNV_OFFSET,
+        }
     }
 }
 
 impl ChainState {
-    /// The empty state with `lane_count` live lanes (at least one).
-    pub(crate) fn empty(lane_count: u8) -> Self {
-        Self {
-            applied_count: 0,
-            chain_hash: FNV_OFFSET,
-            lane_count: lane_count.clamp(1, u8::try_from(MAX_LANES).unwrap_or(u8::MAX)),
-            lanes: [FNV_OFFSET; MAX_LANES],
-        }
-    }
-
-    pub(crate) fn applied_slot(self) -> Option<Slot> {
-        self.applied_count.checked_sub(1).map(Slot)
-    }
-
-    pub(crate) fn apply(self, command: &Command) -> AppliedTransition {
-        let encoded = encode_command(command);
-        let cmd_hash = fnv1a(&encoded);
+    /// Fold the user entry at `lsn` whose slot value is `value` (the framed
+    /// records, exactly as the slot decided them).
+    pub(crate) fn fold(self, lsn: u64, value: &[u8]) -> Self {
         let mut chained = self.chain_hash.to_le_bytes().to_vec();
-        chained.extend_from_slice(&encoded);
-        let lane = usize::try_from(self.applied_count).unwrap_or(0) % usize::from(self.lane_count);
-        let mut lanes = self.lanes;
-        let mut lane_bytes = lanes[lane].to_le_bytes().to_vec();
-        lane_bytes.extend_from_slice(&encoded);
-        lanes[lane] = fnv1a(&lane_bytes);
-        let next = Self {
+        chained.extend_from_slice(&lsn.to_le_bytes());
+        chained.push(0);
+        chained.extend_from_slice(value);
+        Self {
             applied_count: self.applied_count.saturating_add(1),
             chain_hash: fnv1a(&chained),
-            lane_count: self.lane_count,
-            lanes,
-        };
-        AppliedTransition {
-            next,
-            cmd_hash,
-            kind: command_kind(command),
         }
     }
 
-    fn encoded_len(lane_count: u8) -> usize {
-        HEADER_LEN + 8 * usize::from(lane_count)
-    }
-
-    pub(crate) fn encode(self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(Self::encoded_len(self.lane_count));
-        bytes.push(SNAPSHOT_VERSION);
-        bytes.push(self.lane_count);
-        bytes.extend_from_slice(&self.applied_count.to_le_bytes());
-        bytes.extend_from_slice(&self.chain_hash.to_le_bytes());
-        for lane in &self.lanes[..usize::from(self.lane_count)] {
-            bytes.extend_from_slice(&lane.to_le_bytes());
+    /// The analytic fold of a decided command sequence starting at slot 0:
+    /// `states[i]` is the state after the first `i` slots, holes (control
+    /// commands) folding nothing — what a reader of that log computes.
+    pub(crate) fn expected(commands: &[Command]) -> Vec<Self> {
+        let mut states = vec![Self::default()];
+        for (slot, command) in commands.iter().enumerate() {
+            let previous = *states.last().expect("seeded with the initial state");
+            let next = match command {
+                Command::User(entry) => {
+                    previous.fold(u64::try_from(slot).unwrap_or(u64::MAX), &entry.value.0)
+                }
+                Command::Control(_) => previous,
+            };
+            states.push(next);
         }
-        bytes
-    }
-
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < HEADER_LEN {
-            return Err(format!(
-                "chain snapshot has {} bytes, too short",
-                bytes.len()
-            ));
-        }
-        if bytes[0] != SNAPSHOT_VERSION {
-            return Err(format!("unsupported chain snapshot version {}", bytes[0]));
-        }
-        let lane_count = bytes[1];
-        if lane_count == 0 || usize::from(lane_count) > MAX_LANES {
-            return Err(format!("invalid lane count {lane_count}"));
-        }
-        if bytes.len() != Self::encoded_len(lane_count) {
-            return Err(format!(
-                "chain snapshot has {} bytes, expected {}",
-                bytes.len(),
-                Self::encoded_len(lane_count)
-            ));
-        }
-        let applied_count = u64::from_le_bytes(
-            bytes[2..10]
-                .try_into()
-                .map_err(|_| "invalid applied-count encoding")?,
-        );
-        let chain_hash = u64::from_le_bytes(
-            bytes[10..18]
-                .try_into()
-                .map_err(|_| "invalid chain-hash encoding")?,
-        );
-        let mut lanes = [FNV_OFFSET; MAX_LANES];
-        for (i, lane) in lanes.iter_mut().enumerate().take(usize::from(lane_count)) {
-            let start = HEADER_LEN + 8 * i;
-            *lane = u64::from_le_bytes(
-                bytes[start..start + 8]
-                    .try_into()
-                    .map_err(|_| "invalid lane encoding")?,
-            );
-        }
-        Ok(Self {
-            applied_count,
-            chain_hash,
-            lane_count,
-            lanes,
-        })
+        states
     }
 }
 
-pub(crate) struct AppliedTransition {
-    pub(crate) next: ChainState,
-    pub(crate) cmd_hash: u64,
-    pub(crate) kind: &'static str,
-}
-
-/// The chain application's hash of a command, over its own encoding
-/// (`encode_command`) — not the audit's `paros::command_hash`.
-fn app_command_hash(command: &Command) -> u64 {
-    fnv1a(&encode_command(command))
-}
-
+/// The hash a user command's slot value is registered under
+/// (`AuditWorld::note_submitted`) and checked against when a client folds it.
 pub(crate) fn user_command_hash(bytes: &[u8]) -> u64 {
     let mut encoded = Vec::with_capacity(1 + bytes.len());
     encoded.push(0);
@@ -179,49 +89,14 @@ pub(crate) fn hash_text(hash: u64) -> String {
     format!("{hash:016x}")
 }
 
-/// Log the `Truncate { up_to }` control command a compaction request asks
-/// for, and return its hash.
-pub(crate) fn trace_truncate(up_to: u64) -> u64 {
-    let cmd_hash = app_command_hash(&Command::Control(Control::Truncate { up_to: Slot(up_to) }));
+/// Log the `Truncate { up_to }` control command a trim request asks for.
+pub(crate) fn trace_truncate(up_to: u64) {
+    let command = Command::Control(Control::Truncate { up_to: Slot(up_to) });
     tracing::info!(
-        cmd = %hash_text(cmd_hash),
+        cmd = %hash_text(paros::command_hash(&command)),
         up_to,
         "chain_control_submitted"
     );
-    cmd_hash
-}
-
-fn command_kind(command: &Command) -> &'static str {
-    match command {
-        Command::User(_) => "user",
-        Command::Control(Control::Truncate { .. }) => "truncate",
-        Command::Control(Control::Noop) => "noop",
-        Command::Control(Control::Snap { .. }) => "snap",
-    }
-}
-
-fn encode_command(command: &Command) -> Vec<u8> {
-    match command {
-        Command::User(entry) => {
-            let mut bytes = Vec::with_capacity(1 + entry.value.0.len());
-            bytes.push(0);
-            bytes.extend_from_slice(&entry.value.0);
-            bytes
-        }
-        Command::Control(Control::Truncate { up_to }) => {
-            let mut bytes = Vec::with_capacity(9);
-            bytes.push(1);
-            bytes.extend_from_slice(&up_to.0.to_le_bytes());
-            bytes
-        }
-        Command::Control(Control::Noop) => vec![2],
-        Command::Control(Control::Snap { at_index }) => {
-            let mut bytes = Vec::with_capacity(9);
-            bytes.push(3);
-            bytes.extend_from_slice(&at_index.0.to_le_bytes());
-            bytes
-        }
-    }
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {

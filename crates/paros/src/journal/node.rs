@@ -1,4 +1,4 @@
-//! [`JournalStorage`]: the node's [`NodeStorage`] on `moonpool-journal`.
+//! [`JournalStorage`]: the node's [`LogStorage`] on `moonpool-journal`.
 
 use moonpool_core::StorageProvider;
 use moonpool_journal::{Journal, Record, Recovery};
@@ -6,11 +6,11 @@ use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slo
 use serde::{Deserialize, Serialize};
 
 use super::frame::{Framed, Scanned, encode, epoch};
-use super::node_image::{NodeImage, NodeRecord, SnapPoint};
+use super::node_image::{NodeImage, NodeRecord};
 use super::plan::plan;
 use super::{GENESIS, JournalStoreConfig, append_error, meta_error, open_error};
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
-use crate::storage::{NodeStorage, StorageError, StorageRecord};
+use crate::storage::{LogStorage, StorageError, StorageRecord};
 
 /// The scalars the journal's two-copy metadata holds: the ones whose loss
 /// no peer can repair.
@@ -45,15 +45,14 @@ impl NodeMeta {
 /// disk under test. See the [module docs](super) for the mapping of every
 /// durable fact onto the journal and the corruption table.
 ///
-/// The store opens its journal in [`boot_scan`](NodeStorage::boot_scan),
+/// The store opens its journal in [`boot_scan`](LogStorage::boot_scan),
 /// which is also where it loads: until then every accessor answers for an
 /// empty store (the driver reads only the configuration first). A write
 /// before the boot scan runs it.
 ///
-/// Like [`MemStorage`](crate::MemStorage) it carries **no application**: its
-/// [`apply`](NodeStorage::apply) is a no-op and its
-/// [`snapshot`](NodeStorage::snapshot) is the chosen prefix's marker. An
-/// application persists its own state; this store persists paros's.
+/// Like [`MemStorage`](crate::MemStorage) it keeps a log and the acceptor's
+/// scalars and nothing else (#186): a journal's client folds what it reads
+/// and persists its own state.
 pub struct JournalStorage<P: StorageProvider> {
     provider: P,
     dir: String,
@@ -122,7 +121,7 @@ impl<P: StorageProvider> JournalStorage<P> {
     }
 
     /// Open the journal, replay it into the image, and settle what the
-    /// replay found. The body of [`NodeStorage::boot_scan`].
+    /// replay found. The body of [`LogStorage::boot_scan`].
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
     async fn load(&mut self) -> Result<(), StorageError> {
         let (mut journal, recovery) =
@@ -313,10 +312,10 @@ impl<P: StorageProvider> Storage for JournalStorage<P> {
     }
 }
 
-impl<P: StorageProvider> NodeStorage for JournalStorage<P> {
+impl<P: StorageProvider> LogStorage for JournalStorage<P> {
     /// Open the journal and fold it into the image (see the [module
     /// docs](super) for the per-kind corruption table). A clean store, a
-    /// store with faulty entries or chunks (reported through the read
+    /// store with faulty entries (reported through the read
     /// ports), and a store whose tail a crash tore all boot; a store the
     /// journal cannot open, a trusted checkpoint that lost its header or
     /// ledger are crash verdicts.
@@ -407,116 +406,17 @@ impl<P: StorageProvider> NodeStorage for JournalStorage<P> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0))]
-    async fn snapshot(&self) -> Vec<u8> {
-        self.image
-            .chosen_index
-            .map_or_else(Vec::new, |chosen| chosen.0.to_le_bytes().to_vec())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, at = at.0))]
-    async fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
-        self.opened().await?;
-        let point = SnapPoint::of(at, &self.snapshot().await);
-        self.stage(NodeRecord::SnapPoint {
-            at,
-            len: point.len,
-            crcs: point.crcs.clone(),
-        });
-        for (index, bytes) in point.chunks.iter().enumerate() {
-            let chunk = u32::try_from(index).expect("chunk counts fit 32 bits");
-            let bytes = bytes.clone().expect("a fresh point holds every chunk");
-            self.stage(NodeRecord::SnapChunk { at, chunk, bytes });
-        }
-        Ok(())
-    }
-
-    fn latest_snap_point(&self) -> Option<Slot> {
-        self.image.point.as_ref().map(|point| point.at)
-    }
-
-    fn snap_chunk_count(&self, at: Slot) -> Option<u32> {
-        self.image
-            .point
-            .as_ref()
-            .filter(|point| point.at == at)
-            .map(|point| u32::try_from(point.chunks.len()).unwrap_or(u32::MAX))
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, at = at.0, chunk))]
-    async fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
-        let point = self.image.point.as_ref().filter(|point| point.at == at)?;
-        point.chunks.get(usize::try_from(chunk).ok()?)?.clone()
-    }
-
-    /// A repaired chunk is verified against the checksum the point's header
-    /// recorded before it is staged: a chunk that does not match is refused
-    /// (`Ok(false)`), never persisted.
-    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, at = at.0, chunk))]
-    async fn write_snap_chunk(
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, point = point.0))]
+    async fn trimmed_to(
         &mut self,
-        at: Slot,
-        chunk: u32,
-        bytes: &[u8],
-    ) -> Result<bool, StorageError> {
-        self.opened().await?;
-        let Some(point) = self.image.point.as_ref().filter(|point| point.at == at) else {
-            return Ok(false);
-        };
-        if !point.verifies(chunk, bytes) {
-            return Ok(false);
-        }
-        self.stage(NodeRecord::SnapChunk {
-            at,
-            chunk,
-            bytes: bytes.to_vec(),
-        });
-        Ok(self
-            .image
-            .point
-            .as_ref()
-            .is_some_and(|point| point.lost().next().is_none()))
-    }
-
-    fn faulty_snap_chunks(&self) -> Vec<(Slot, u32)> {
-        self.image
-            .point
-            .as_ref()
-            .map(|point| point.lost().map(|chunk| (point.at, chunk)).collect())
-            .unwrap_or_default()
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, chosen = chosen_index.0))]
-    async fn install_snapshot(
-        &mut self,
-        chosen_index: Slot,
-        ballot: Ballot,
-        _snapshot: Vec<u8>,
+        point: Slot,
         sessions: &[SessionEntry],
     ) -> Result<(), StorageError> {
         self.opened().await?;
-        if ballot > self.meta.promise {
-            self.meta.promise = ballot;
-            self.meta_dirty = true;
-        }
-        self.stage(NodeRecord::InstallSnapshot {
-            chosen_index,
+        self.stage(NodeRecord::TrimmedTo {
+            point,
             sessions: sessions.to_vec(),
         });
         Ok(())
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0))]
-    async fn apply(
-        &mut self,
-        _chosen_index: Slot,
-        _slot: Slot,
-        _command: &Command,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    fn applied_slot(&self) -> Option<Slot> {
-        self.image.chosen_index
     }
 }

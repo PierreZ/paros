@@ -35,7 +35,6 @@ mod shape;
 mod state;
 mod world;
 
-pub use corpus::ChunkLiveCase;
 pub use moonpool_sim::{AssertKind, SimulationReport};
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -163,8 +162,6 @@ pub const SMOKE_ITERATIONS: usize = 50;
 pub const COVERAGE_ITERATIONS: usize = 1024;
 /// Seeded-mask volume for the E1 evaluation corpus in the CI campaign.
 pub const CORPUS_CI_ITERATIONS: usize = 64;
-/// Seeded-mask volume for the per-chunk corpus in the CI campaign.
-pub const CHUNK_CORPUS_CI_ITERATIONS: usize = 32;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 
@@ -399,7 +396,7 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
         .run_configured()
 }
 
-/// Run the shared `NodeStorage` behavioral contract suite against the
+/// Run the shared `LogStorage` behavioral contract suite against the
 /// simulation's world-backed storage, inside one quiet iteration. `MemStorage`
 /// runs the identical suite as a `paros` unit test; together they keep the fake
 /// and the trait contract from drifting apart. The same iteration runs both
@@ -419,9 +416,8 @@ pub fn run_storage_contract_suite() -> SimulationReport {
 
 /// The scripted corpus cluster, the one shape every corpus case is built
 /// from: `nodes` scripted-lifecycle nodes choreographed by `options` (a
-/// fixed bootstrap subset that leaves spares, one scripted durability-seam
-/// crash, #146 — the default is the plain case: bootstrapped on all, every
-/// site dark), `matchmakers` scripted matchmakers (zero on every case but
+/// fixed bootstrap subset that leaves spares, the GC requests withheld —
+/// the default is the plain case: bootstrapped on all, every site dark), `matchmakers` scripted matchmakers (zero on every case but
 /// the departed straggler, which needs a prior configuration), and no swarm
 /// chaos at all — every fault is a targeted injection from the workload.
 /// The caller adds its `workload_factory`, iterations and seeds. See
@@ -577,7 +573,7 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
     let workload_sink = sink.clone();
     let options = ScriptedOptions {
         bootstrap: Some(corpus::DEPARTED_BOOTSTRAP),
-        ..ScriptedOptions::default()
+        withhold_gc: true,
     };
     let report = scripted_builder(corpus::DEPARTED_POOL, 1, options)
         .workload_factory(move || {
@@ -590,87 +586,4 @@ pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
         .run_configured();
     let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
     (report, non_vacuous)
-}
-
-/// Run the §5.1.2 snapshot-lifecycle compound (see `crate::corpus`): log-only,
-/// snapshotted, and snapshotted-and-truncated nodes in one scripted run,
-/// reaching all four snapshot-recovery paths.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_snapshot_lifecycle_case(seed: u64) -> SimulationReport {
-    scripted_builder(corpus::CORPUS_NODES, 0, ScriptedOptions::default())
-        .workload_factory(|| Box::new(corpus::SnapshotLifecycleWorkload::new()))
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run_configured()
-}
-
-/// The per-chunk mask corpus builder (see `crate::corpus`). The restore-crash
-/// live case is the one corpus shape whose process hooks are not dark: it
-/// scripts `Seam::AfterChunkRestoreBeforeSync` (#146).
-fn chunk_corpus_builder(source: corpus::ChunkMaskSource, live: ChunkLiveCase) -> SimulationBuilder {
-    let seam_crash = match live {
-        ChunkLiveCase::Intact | ChunkLiveCase::Lost => None,
-        ChunkLiveCase::LostThenRestoreCrash => Some(paros::Seam::AfterChunkRestoreBeforeSync),
-    };
-    let options = ScriptedOptions {
-        seam_crash,
-        ..ScriptedOptions::default()
-    };
-    scripted_builder(corpus::CORPUS_NODES, 0, options)
-        .workload_factory(move || Box::new(corpus::ChunkMaskWorkload::new(source, live)))
-}
-
-/// The canonical chunk-mask cases (bit index `node * 5 + chunk` over the
-/// five-chunk decided-point blob): the no-rot sanity case, single-copy and
-/// two-copy losses (repair from the survivors), a per-node cross pattern, a
-/// whole node's point lost, a chunk lost everywhere (must stay faulty, never
-/// fabricated), and everything lost.
-#[must_use]
-pub fn chunk_corpus_canonical_masks() -> Vec<u32> {
-    vec![
-        0,
-        1 << 0,
-        (1 << 0) | (1 << 5),
-        (1 << 0) | (1 << 5) | (1 << 10),
-        0b11111,
-        (1 << 0) | (1 << 6) | (1 << 12),
-        (1 << 2) | (1 << 7) | (1 << 12) | (1 << 3) | (1 << 9),
-        0x7FFF,
-    ]
-}
-
-/// Run one explicit chunk-mask case deterministically (seeded by the mask).
-/// `live` says what happens to node 0's live snapshot beside the mask: lost,
-/// it drives the point-restore / whole-blob race on top of the chunk repair;
-/// lost then crashed after the restore, it visits the one durability seam
-/// the swarm never reaches (#146) — the mask must then give node 0 at least
-/// one assemblable rotted chunk, or the case is vacuous and says so.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_chunk_mask(mask: u32, live: ChunkLiveCase) -> SimulationReport {
-    chunk_corpus_builder(corpus::ChunkMaskSource::Fixed(mask), live)
-        .set_iterations(1)
-        .set_debug_seeds(vec![u64::from(mask)])
-        .run_configured()
-}
-
-/// Raw-volume chunk-mask sampling: each seed draws its mask from the seeded
-/// RNG. Replay with [`run_chunk_corpus_seed`].
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn chunk_corpus_hunt(iterations: usize) -> SimulationReport {
-    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, ChunkLiveCase::Intact)
-        .set_iterations(iterations)
-        .run_configured()
-}
-
-/// Replay one seeded chunk-mask corpus case deterministically.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_chunk_corpus_seed(seed: u64) -> SimulationReport {
-    chunk_corpus_builder(corpus::ChunkMaskSource::Seeded, ChunkLiveCase::Intact)
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run_configured()
 }

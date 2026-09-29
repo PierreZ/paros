@@ -20,7 +20,7 @@ Two corollaries that bite in review:
 
 - **A judge that restates a rule is a bug.** `expected` comes from a clone — `prepare`,
   `admit`, `close_phase1`, `recovery_next`, `confirm_reads`, `Replica::advance`,
-  `Acceptor::install`, the two dedup ledgers. The one deliberate exception is a prompt
+  `Acceptor::trim_to` / `Replica::trim_to`, the two dedup ledgers. The one deliberate exception is a prompt
   whose answer is a *constant* because the core has no other state to be in
   (`PersistOrder`, `CommitOverwrite`); each says so in its doc comment and says why.
 - **The engine validates before it calls the core.** The core asserts, and an assert in
@@ -63,9 +63,9 @@ Two corollaries that bite in review:
     reports at the next boot.
   - `world/reads.rs` — the read-index round and the leaderless `World::quorum_read`,
     both served through the same `ReadState`.
-  - `world/disk.rs` — the `Storage` impl plus the application: the applied log, and the
-    opaque snapshot that log serialises to. The game *is* the application here, so the
-    apply side is the one party entitled to read those bytes back.
+  - `world/disk.rs` — the `Storage` impl plus the applied log, and the
+    `WriteOp::TrimmedTo` jump a node below the floor makes to a peer's trim point (no
+    bytes, no ballot: the promise does not move).
   - `world/drain.rs` — **the drain contract**, and the only place a `Ready` is held.
   - `world/prompts.rs` — which delivery raises which question, and the clone it is
     judged on.
@@ -124,11 +124,8 @@ After **any** call into a node, exactly once, in this order (it is
    durable floor must never outrun the durable application state covering the slots it
    drops; the `AfterSyncBeforeSend` seam makes the same split for the same reason, and
    drops the truncates with the half of the batch that was lost.
-5. Serve the batch's `snapshot_offers` — after the apply, so the bytes really do cover
-   the boundary the message advertises (the driver's own guard:
-   `applied_slot() == Some(offered_index)`).
-6. Answer the `read_states`.
-7. `advance_recovery()`, and drain again until the node is quiet.
+5. Answer the `read_states`.
+6. `advance_recovery()`, and drain again until the node is quiet.
 
 Two prompts can hold a whole batch back (`PersistOrder`, `LeaderRecovery`). Their
 narration is **deferred** until the answer, so the caption never prints above the

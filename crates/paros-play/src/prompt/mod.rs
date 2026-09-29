@@ -59,8 +59,9 @@ pub enum PromptKind {
     CommitOverwrite,
     /// A read's index is captured and the acks are in. Serve, or wait?
     ReadServe,
-    /// A peer's snapshot arrived. What is this node's promise afterwards?
-    SnapshotPromise,
+    /// A peer answered a catch-up with its trim point. Where does this node's
+    /// log start afterwards, and what does it promise?
+    TrimPoint,
     /// A client retried a write. Acked as applied, held in flight, or fresh?
     AckWrite,
     /// A grid leader is about to propose. Which column takes this slot?
@@ -98,7 +99,7 @@ impl PromptKind {
             PromptKind::ReplicaApply => AutomationFlag::ReplicaApply,
             PromptKind::PersistOrder => AutomationFlag::PersistOrder,
             PromptKind::ReadServe => AutomationFlag::ReadServe,
-            PromptKind::SnapshotPromise => AutomationFlag::SnapshotPromise,
+            PromptKind::TrimPoint => AutomationFlag::TrimPoint,
             PromptKind::AckWrite => AutomationFlag::AckWrite,
             PromptKind::GridColumn => AutomationFlag::GridColumn,
             PromptKind::QuorumReadServe => AutomationFlag::QuorumReadServe,
@@ -124,7 +125,7 @@ pub const ALL_PROMPTS: &[PromptKind] = &[
     PromptKind::PersistOrder,
     PromptKind::CommitOverwrite,
     PromptKind::ReadServe,
-    PromptKind::SnapshotPromise,
+    PromptKind::TrimPoint,
     PromptKind::AckWrite,
     PromptKind::GridColumn,
     PromptKind::QuorumReadServe,
@@ -168,8 +169,9 @@ pub fn confirmation(kind: PromptKind) -> &'static str {
         PromptKind::ReadServe => {
             "a node answers a read only with a proof of leadership newer than the read."
         }
-        PromptKind::SnapshotPromise => {
-            "a snapshot restores the log and not a promise, so the promise only goes up."
+        PromptKind::TrimPoint => {
+            "everything below a trim point is chosen and gone, so the node jumps there and \
+             keeps its own promise."
         }
         PromptKind::AckWrite => {
             "an ack names a slot that this node executed, and it names nothing else."

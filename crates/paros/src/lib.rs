@@ -23,7 +23,7 @@
 //!
 //! [`run_replica`] is the fourth (#144, Compartmentalized Paxos §3.3): a
 //! [`ReplicaNode`] — the chosen log and the application, no vote — over the
-//! same [`NodeStorage`] a node runs on. Opt-in again: a deployment whose
+//! same [`LogStorage`] a node runs on. Opt-in again: a deployment whose
 //! `Config::replica_count` is zero runs none, and the node driver's learner
 //! traffic reaches the pool alone.
 
@@ -70,8 +70,8 @@ pub use matchmaker::{
 pub use proxy::{ProxyConfig, run_proxy};
 pub use replica_tier::run_replica;
 pub use storage::{
-    MemStorage, MetadataFault, NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord,
-    WriteOutcome, snap_chunk_count, storage_contract_suite,
+    LogStorage, MemStorage, MetadataFault, StorageError, StorageRecord, WriteOutcome,
+    storage_contract_suite,
 };
 
 // The whole sans-IO core, re-exported: the roles (`acceptor`, `proposer`,

@@ -39,9 +39,9 @@ pub enum AutomationFlag {
     PersistOrder,
     /// A leader serves a confirmed read on its own.
     ReadServe,
-    /// A node installing a peer's snapshot keeps the higher of its own promise
-    /// and the snapshot's ballot, on its own.
-    SnapshotPromise,
+    /// A node that asked for slots a peer already trimmed jumps to that
+    /// peer's trim point, keeping its own promise, on its own.
+    TrimPoint,
     /// A leader answers a client's retry from its two dedup tables, on its own.
     AckWrite,
     /// A grid leader addresses each slot to its own column, on its own.
@@ -81,7 +81,7 @@ pub const ALL_FLAGS: &[AutomationFlag] = &[
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
     AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
+    AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
     AutomationFlag::GridColumn,
     AutomationFlag::QuorumReadServe,
@@ -109,7 +109,7 @@ impl AutomationFlag {
             AutomationFlag::LeaderRecovery => "recover and fill the gaps",
             AutomationFlag::PersistOrder => "persist the batch before the send",
             AutomationFlag::ReadServe => "serve a confirmed read",
-            AutomationFlag::SnapshotPromise => "keep the higher promise",
+            AutomationFlag::TrimPoint => "jump to the trim point",
             AutomationFlag::AckWrite => "answer a client retry",
             AutomationFlag::GridColumn => "address a slot to its column",
             AutomationFlag::QuorumReadServe => "serve a quorum read",

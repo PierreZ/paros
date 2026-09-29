@@ -890,7 +890,7 @@ impl ProxyId {
 /// quorum. The id names **who owns a slot's reply**, nothing else — on the
 /// wire a replica speaks as the [`NodeId`] its deployment
 /// map gave it, because the learner messages it sends and receives
-/// (`CatchUpRequest`, `CatchUpResponse`, `InstallSnapshot`) address nodes.
+/// (`CatchUpRequest`, `CatchUpResponse`, `TrimmedTo`) address nodes.
 ///
 /// The core holds only the count (`Config::replica_count`) and derives a
 /// slot's owner as `ReplicaId(slot % replica_count)` ([`ReplicaId::of`]):

@@ -124,7 +124,7 @@ never rejoins**; the acceptor set heals around it by reconfiguration.
   chaotic restart on a matchmaker seed, within the same dead-node budget as a corruption
   park (a wipe is one more way to lose every copy a node holds).
 - **The library keeps it down (#147), not the harness.** Every store carries a durable
-  format marker (`NodeStorage::is_formatted` / `format`), written by `run_node` on the
+  format marker (`LogStorage::is_formatted` / `format`), written by `run_node` on the
   identity's first boot before the core reads a byte. `run_node` takes the operator's claim
   as data (`BootKind::{FirstBoot, ExistingMember}`) and refuses an existing member whose
   store has no marker (`RunError::Refused(BootRefusal::Amnesia)`, reported through

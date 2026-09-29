@@ -199,40 +199,18 @@ fn the_merge_keeps_the_highest_ballot_report() {
     assert_eq!(*round.command(), ucmd(1, 1, 40));
 }
 
-// ---- truncation and snapshot boundaries --------------------------------------
+// ---- truncation and trim-point boundaries ------------------------------------
 
-/// An open application repair pins the floor below its cursor: the records it
-/// still needs are never truncated underneath it.
+/// A trim point at or below the floor is an operating condition (a stale
+/// answer): ignored whole, with no frontier moving backwards.
 #[test]
-fn compaction_stops_below_an_open_application_repair() {
-    let nodes = cluster_with_three_chosen();
-    let mut storage = TestStorage::from_node(&nodes[1]);
-    storage.rot(Slot(1));
-    let mut n = ColocatedNode::new(&storage);
-    n.open_app_repair(Slot(1));
-    assert_eq!(
-        n.replica().app_repair(),
-        Some(Slot(1)),
-        "the rotted slot keeps the repair open"
-    );
-    let floor = n.compact(Slot(2));
-    assert_eq!(floor, Slot(1), "the floor stops at the repair cursor");
-    assert_eq!(n.acceptor().first_slot(), Slot(1));
-    assert_eq!(n.replica().app_repair(), Some(Slot(1)));
-}
-
-/// A snapshot behind the prefix is an operating condition (a stale offer):
-/// ignored whole, with no frontier moving backwards.
-#[test]
-fn a_stale_snapshot_never_rewinds_a_frontier() {
+fn a_stale_trim_point_never_rewinds_a_frontier() {
     let mut nodes = cluster_with_three_chosen();
     let before = nodes[1].hard_state();
     let floor = nodes[1].acceptor().first_slot();
-    nodes[1].step(Message::InstallSnapshot {
+    nodes[1].step(Message::TrimmedTo {
         from: NodeId(0),
-        ballot: ballot(1, 0),
-        chosen_index: Slot(0),
-        snapshot: Value(vec![]),
+        point: floor,
         sessions: Vec::new(),
     });
     assert_eq!(nodes[1].hard_state(), before);

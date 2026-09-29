@@ -3,7 +3,7 @@
 Stage 7 (issue #20) design note. This is the **contract** the corruption-detection layer
 assumes about every durable record, the spec the future production storage engine must
 implement, and the semantics the simulation's `StorageWorld` models — as first-class *read
-outcomes* at the `NodeStorage` seam, never as serialized bytes.
+outcomes* at the `LogStorage` seam, never as serialized bytes.
 
 Sources: CTRL §3.3/§4.1 (the CLStore design from *Protocol-Aware Recovery for
 Consensus-Based Storage*, FAST '18), TigerBeetle's journal recovery + checksum machinery,
@@ -112,7 +112,7 @@ crash semantics (`StorageError::Io` / `FsyncFailed` with the `WriteOutcome` ambi
 
 ## Boot-time scan
 
-On recovery, `NodeStorage::boot_scan` — called by the driver **before**
+On recovery, `LogStorage::boot_scan` — called by the driver **before**
 `ColocatedNode::new` reads anything — scans the durable records and produces the
 `faulty_entries` / `faulty_snapshot` / `faulty_metainfo` sets. In Stage 7 any non-empty
 set ⇒ the classified `StorageError` ⇒ the driver's typed crash decision. The scan itself
@@ -137,7 +137,7 @@ unavailable = pass, unsafe = fail.
 ## What the simulation models
 
 The `StorageWorld` stores **semantic records, not bytes** (#20 fixed decision): every
-corruption-family member is a first-class read outcome at the `NodeStorage` seam —
+corruption-family member is a first-class read outcome at the `LogStorage` seam —
 
 | Injected fault                                        | Surfaces as |
 |-------------------------------------------------------|-------------|

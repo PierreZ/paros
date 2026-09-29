@@ -34,7 +34,9 @@ capability; do not downgrade to a unit test.
 - a driver-observable transition → `paros_sim::audit` (add the `Audit`
   callback in `crates/paros/src/audit.rs` if the driver does not report it);
 - a client-observable one → the workload's own history and `check()`;
-- an application or storage fact → the storage layer's audit callbacks.
+- a storage fact → the storage layer's audit callbacks; an application fact
+  → the client's fold (`chain_workload/fold.rs`, `AuditWorld::fold_applied`),
+  since paros runs no application (#186).
 
 Never a scan over the trace (`/adding-an-audit-check`). Preserve existing
 message strings; a reworded message is a new slot.

@@ -19,13 +19,13 @@ because the perturbation is a caller that stops calling.
 | durable promise, accepted log, compaction floor, CTRL faulty set | `acceptor.rs` (`Acceptor`) |
 | Phase-1 election and P2c merge, CTRL probe, Phase-2 rounds (the standalone `Rounds` tally the proposer embeds; a round's `Custody` is colocated or delegated to a `ProxyId`; a proxy leader embeds the same tally, never a second kernel), the standing authority (`Authority`: read fence, read-index rounds, `CheckQuorum` window — embedded the same way), bounded recovery; policies are explicit types (`RecoveryPolicy::{Phase1Backed, Inherited}`), never flags | `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs` |
 | the proxy leader (#142): a `Rounds` plus routing on its own process — fans a delegated `Accept` out to the column, folds, emits `Commit { from: Party::Proxy }`, relays a `Nack`, re-fans-out on its beat (`resend_pending`), works for the highest ballot it was handed; ephemeral, no `WriteOp`; proven by `proxy_model.rs` | `proxy_leader.rs` (`ProxyLeader`, `ProxyReady`) |
-| chosen prefix, contiguous apply walk, at-most-once ledger, repair cursor; `chosen_gap()` lives here (`node.replica().chosen_gap()`) | `replica.rs` (`Replica`) |
-| the replica tier (#144): a `Replica` over a durable chosen log on a process with no `Acceptor` — steps `Commit` / `CatchUpResponse` / `InstallSnapshot` / `Heartbeat` / `PreReadAck`, sends `CatchUpRequest` and `PreRead` (its quorum reads, §3.4), writes `WriteOp::Learned` (never an acceptor op), never in the pool; the coupling analysis behind the bare acceptor (`Config::application = Application::Shed`) is its module doc; `Config::reply_owner` names a slot's reply owner | `replica_node.rs` (`ReplicaNode`, `ReplicaReady`) |
+| chosen prefix, contiguous walk, at-most-once ledger (sealed on a trim), the journal read (`Replica::read`, `LogRead`), the trim-point jump (`Replica::trim_to`); `chosen_gap()` lives here (`node.replica().chosen_gap()`). No application: paros runs none (#186) | `replica.rs` (`Replica`) |
+| the replica tier (#144): a `Replica` over a durable chosen log on a process with no `Acceptor` — steps `Commit` / `CatchUpResponse` / `TrimmedTo` / `Heartbeat` / `PreReadAck`, sends `CatchUpRequest` and `PreRead` (its quorum reads, §3.4), serves journal reads (`read_log`), writes `WriteOp::Learned` / `SetChosenIndex` / `Truncate` / `TrimmedTo` (never an acceptor op), never in the pool; the coupling analysis (why every acceptor stays a learner) is its module doc; `Config::reply_owner` names a slot's reply owner | `replica_node.rs` (`ReplicaNode`, `ReplicaReady`) |
 | `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` — **every** quorum question crosses here; no tally compares a count to a threshold on its own; Phase-1 vs Phase-2 predicates are split on purpose; a grid's column is chosen here (`column_of`) and nowhere else | `membership.rs` |
 | the leaderless read tally (#143): a row's vote watermarks, the maximum, bound to one configuration, TTL-bounded; the acceptor answers `vote_watermark`, the replica answers `covers` | `quorum_read.rs` (`QuorumRead`, `QuorumReads`) |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |
 | the registry and generations, the handover, the single decree over the shared roles at slot zero, the model checker | `matchmaker.rs`, `matchmaker/{reconfigurer,decree,generation,handover_model,storage,message,state,write}.rs` |
-| wiring only: role transitions, timers, message construction, the persist-before-send batch, **no protocol tally**; `phase2` opens, fans out or delegates, folds, decides and takes back; `learn` is the learner half | `node.rs`, `node/{election,replication,authority,phase2,learn,handoff,gc,matchmaking,reconfigure,reads,quorum_reads,catch_up_snapshot,boot,acceptor,helpers,invariants}.rs` |
+| wiring only: role transitions, timers, message construction, the persist-before-send batch, **no protocol tally**; `phase2` opens, fans out or delegates, folds, decides and takes back; `learn` is the learner half | `node.rs`, `node/{election,replication,authority,phase2,learn,handoff,gc,matchmaking,reconfigure,reads,quorum_reads,catch_up,boot,acceptor,helpers,invariants}.rs`; `catch_up` serves commit replay and answers a below-floor request with `TrimmedTo` (`serve_catchup`, `on_trimmed_to`) |
 
 A component must not learn something merely because the deployment colocates
 it: the proposer builds no message and knows no role, the acceptor never reads
@@ -50,8 +50,8 @@ the `None` arm of the same state machine. Read this before touching
 ## Assertions
 
 Hard `assert!`, always on, in release too; crash beats corruption. Operating
-errors from external input (a non-leader proposal, a stale snapshot, a
-below-floor prepare) are result values or guarded returns, asserted only once
+errors from external input (a non-leader proposal, a trim point at or below
+the floor, a below-floor prepare) are result values or guarded returns, asserted only once
 past the validation boundary. Style: precondition stack at entry,
 postconditions at exit, split compound conditions, assert positive and
 negative space, pair each property across two paths (write-side ordering vs

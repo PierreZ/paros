@@ -345,8 +345,8 @@
         "pinned_off": false
       },
       {
-        "flag": "snapshot_promise",
-        "label": "keep the higher promise",
+        "flag": "trim_point",
+        "label": "jump to the trim point",
         "on": false,
         "unlocked": false,
         "pinned_off": false

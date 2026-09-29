@@ -14,18 +14,16 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   replica speaks as `replica_node_id(rank)` = `NodeId(1000 + rank)`, outside every pool),
   `Deployment`, `Role`.
 - `shape.rs` `NodeShape::draw`: the per-logical-node knobs
-  (`DriverTunables`, seam crash bias, wipe/loss percentages, lane count,
+  (`DriverTunables`, seam crash bias, wipe/loss percentages,
   `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the proxy take-back budget
   `proxy_take_back_resends` and the proxy's retention budget `proxy_round_resends`,
   the run's `QuorumPolicy`
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
-  grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), and
-  `bare_acceptors` (#144: the whole pool `Application::Shed`, only on a seed with
-  replicas; the workload probes replicas and waits for the bare chosen prefix), drawn once
+  grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
   per node per seed and reused across restarts; `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
 - `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
-  fixed bootstrap subset, one scripted seam crash), `MatchmakerProcess`, `ProxyProcess` (runs
+  fixed bootstrap subset, the GC requests withheld), `MatchmakerProcess`, `ProxyProcess` (runs
   `paros::run_proxy`; nothing durable, a kill reboots it empty), `ReplicaProcess` (runs
   `paros::run_replica` in a seam-crash recovery loop over its own **fault-free** disk,
   registered with `StorageWorld::note_replica` so the copy budget never counts it — a
@@ -35,18 +33,20 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   act — rebooting every member of a configuration it installed, #173; it drains for the whole
   run) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
   one `buggify_with_prob!` location each, the module-doc table of *enabled /
-  consulted / fired / recovered* per hook, and `ScriptedCrash` (#146): the
-  corpus's one targeted seam crash, fired once per run, no draw.
+  consulted / fired / recovered* per hook.
 - `client.rs` `ClientRuntime` (a workload's client-only moonpool-rpc
   runtime, driven on its own task and stopped when the handle drops; one
   `paros::NodeClient` per server; the corpus builds on it) · `state.rs` `published` (the
   get-or-publish of every per-iteration singleton on the `StateHandle`).
-- `chain.rs` `ChainState` (the Chain-of-Blocks application) ·
-  `chain_workload.rs` `ChainWorkload` + `ChainConfig` (every field a
-  `buggify_knob!`; the operation-id table `PROPOSE=0 … CHECK_TAIL=16`,
-  `OP_COUNT`, the weight table, the reconfiguration shape rings).
+- `chain.rs` `ChainState` (the Chain-of-Blocks fold a journal client
+  computes, #186) · `chain_workload.rs` `ChainWorkload` + `ChainConfig`
+  (every field a `buggify_knob!`; the operation-id table `PROPOSE=0 …
+  CHECK_TAIL=16`, `OP_COUNT`, the weight table, the reconfiguration shape
+  rings) · `chain_workload/fold.rs` the client's `Fold` of the journal and
+  the run's trim fence (every trim clamped below every folding client's
+  cursor).
 - `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,
-  parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`NodeStorage` +
+  parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`LogStorage` +
   write-path fault sites) · `world/rot.rs` boot-rot BUGGIFY sites, one per
   fault family · `world/matchmaker.rs` `DurableMatchmakerStorage`.
 - `audit/mod.rs` `AuditWorld`, `check_run`, `reach_once!` · `audit/state.rs`
@@ -54,7 +54,7 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   `ClientHistory` (linearizability, sequential-client consistency) ·
   `audit/matchmaker.rs` `MatchmakerAudit`.
 - `corpus.rs` the scripted workloads: `E1MaskWorkload`, `BareQuorumWorkload`,
-  `DepartedStragglerWorkload`, `SnapshotLifecycleWorkload`, `ChunkMaskWorkload`.
+  `DepartedStragglerWorkload`.
 
 ## Campaign constants (`lib.rs`)
 
@@ -62,7 +62,7 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 plain Multi-Paxos deployment), `PROXY_POOL_RANGE = 0..=3` (zero means every
 Phase 2 colocated), `CLIENT_COUNT_RANGE = 1..4`, `PLATEAU_SEEDS = 8`,
 `CHAOS_DURATION_MS = 4_000`, `SMOKE_ITERATIONS = 50`, `COVERAGE_ITERATIONS = 1024`,
-`CORPUS_CI_ITERATIONS = 64`, `CHUNK_CORPUS_CI_ITERATIONS = 32`,
+`CORPUS_CI_ITERATIONS = 64`,
 `EXPLORATION_TIMELINES_PER_SEED = 8`. `chaos_surfaces()` is `Network(Swarm)`,
 attrition scoped per group with `AttritionVictims::group`, and `BuggifyKnobs`;
 `BitFlip` is masked off. Exploration runs in-process (`workers: 0`). Oracle
@@ -72,8 +72,7 @@ Entry points: `explore`, `run_chain_seed`, `chain_seed_digest`,
 `chain_seed_canary`, `chain_canary_hunt`, `chain_smoke`, `explore_chain_seed`,
 `run_storage_contract_suite`, and the corpus family (`corpus_canonical_masks`,
 `run_corpus_mask`, `corpus_hunt`, `run_bare_quorum_case`,
-`run_departed_straggler_case`, `run_snapshot_lifecycle_case`,
-`chunk_corpus_canonical_masks`, `run_chunk_mask`, `chunk_corpus_hunt`, ...).
+`run_departed_straggler_case`, ...).
 
 ## Rules local to this crate
 

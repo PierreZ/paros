@@ -17,10 +17,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
 use crate::audit::audit_world;
-use crate::chain::ChainState;
 use paros::{
     Ballot, ClientId, ClientSeq, Command, HardState, IntegrityFault, MetadataFault, Slot,
-    StorageRecord, WitnessStatus, snap_chunk_count,
+    StorageRecord, WitnessStatus,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -93,8 +92,6 @@ pub(super) struct NodeDisk {
     accepted: BTreeMap<Slot, (Ballot, Command)>,
     /// The first slot still retained. Everything below it has been truncated.
     first_slot: Slot,
-    /// Application-produced snapshot state, durable across clean reboot.
-    chain: ChainState,
     /// Sealed at-most-once ledger records for truncated slots (#94): read back
     /// on boot so a restart suppresses re-chosen identities like every peer.
     sealed: BTreeMap<(ClientId, ClientSeq), Slot>,
@@ -106,19 +103,11 @@ pub(super) struct NodeDisk {
     promise_health: [RecordHealth; 2],
     chosen_health: RecordHealth,
     truncation_health: RecordHealth,
-    snapshot_health: RecordHealth,
     /// A file-granularity FS-metadata fault on the whole store.
     meta_fault: Option<MetadataFault>,
     /// One pending transient read-`EIO` target, cleared when it surfaces (the
     /// retry — the next boot — reads clean).
     read_eio: Option<StorageRecord>,
-    /// The latest **decided snapshot point** (#101): the `Snap` marker's slot
-    /// and the byte-identical boundary state every node captured there. Only
-    /// the latest point is retained.
-    snap_point: Option<(u64, ChainState)>,
-    /// Per-chunk health of the retained point's blob (fixed
-    /// [`SNAP_CHUNK_BYTES`](paros::SNAP_CHUNK_BYTES) chunking of the encoded state).
-    snap_chunk_health: Vec<RecordHealth>,
     /// The format marker (#147): written by the driver on the identity's
     /// first boot, never cleared — gone only with the whole disk (a wipe).
     formatted: bool,
@@ -201,7 +190,7 @@ pub(crate) enum CorruptionOutcome {
     Reported,
     /// Stage 8: the faulty record was genuinely re-written by a clean flush
     /// (an in-place repair — a re-sent `Accept`, a learned chosen value, a
-    /// decided no-op) or superseded by truncation/snapshot custodianship.
+    /// decided no-op) or superseded by truncation or a trim-point jump.
     Recovered,
 }
 
@@ -242,7 +231,6 @@ pub(super) struct Stage7Flags {
     misdirected_detected: bool,
     read_eio_detected: bool,
     torn_tail_discarded: bool,
-    snapshot_detected: bool,
     promise_repaired: bool,
     metadata_crashed: bool,
     corruption_below_tail: bool,
@@ -325,10 +313,6 @@ pub(crate) struct StorageWorld {
     /// deployment names, members and spares alike. The retirement budget is
     /// the difference between it and [`StorageWorld::cluster_size`].
     pool_size: usize,
-    /// The application's digest-lane count for this run (see
-    /// [`ChainState::lane_count`]): every node's blob must slice identically,
-    /// so it is one per-run value, published by the first node to boot.
-    lane_count: Option<u8>,
     /// Ground truth of every permitted injection, in order.
     injected: Vec<InjectedFault>,
     /// Lost-leg fault marks per node: accepted-log records whose most recent
@@ -385,8 +369,8 @@ pub(crate) struct StorageWorld {
     /// derivation is cross-checked against.
     unbudgeted: bool,
     /// Slots with no readable copy anywhere — no clean log record on any node
-    /// and no post-truncation snapshot covering them (only ever populated in
-    /// unbudgeted runs).
+    /// and no live node trimmed past them (only ever populated in unbudgeted
+    /// runs).
     unrecoverable: BTreeSet<u64>,
 }
 
@@ -602,30 +586,9 @@ impl StorageWorld {
             .count()
     }
 
-    /// Fix this run's digest-lane count (first caller wins; the corpus pins
-    /// the default, the main campaign draws a knob).
-    pub(crate) fn set_lane_count(&mut self, lane_count: u8) {
-        if self.lane_count.is_none() {
-            self.lane_count = Some(lane_count);
-        }
-    }
-
-    /// The run's digest-lane count.
-    pub(crate) fn lane_count(&self) -> u8 {
-        self.lane_count.unwrap_or(crate::chain::DEFAULT_LANES)
-    }
-
-    /// The disk under `key`, created on first touch with an empty application
-    /// state at the run's lane count — every node's blob must slice
-    /// identically, so a disk is never born with the default count.
+    /// The disk under `key`, created empty on first touch.
     pub(super) fn disk_mut(&mut self, key: &str) -> &mut NodeDisk {
-        let lanes = self.lane_count();
-        self.disks
-            .entry(key.to_string())
-            .or_insert_with(|| NodeDisk {
-                chain: ChainState::empty(lanes),
-                ..NodeDisk::default()
-            })
+        self.disks.entry(key.to_string()).or_default()
     }
 
     /// Declare the unbudgeted (corpus) mode: masks may exceed the per-record
@@ -795,8 +758,7 @@ impl StorageWorld {
         // The accepted-map walk above misses slots this node no longer holds
         // (truncated past) or never flushed — but the availability
         // re-derivation counts *every* parked node unclean for *every* marked
-        // slot (a dead node serves neither the record nor its superseding
-        // snapshot). Close the composition hole: for each slot marked faulty
+        // slot (a dead node serves neither the record nor its trim point). Close the composition hole: for each slot marked faulty
         // anywhere in the cluster, parking this node must still leave that
         // slot its clean quorum under the re-derivation's own formula.
         for slot in self.marks.values().flatten() {
@@ -852,56 +814,19 @@ impl StorageWorld {
     }
 
     /// Whether `slot` has **no readable copy anywhere**: every disk that holds
-    /// its accepted record holds it unhealthy or sits on a parked node, no
-    /// disk truncated past it with a healthy snapshot (the snapshot covers the
-    /// folded prefix), no disk retains a fully clean decided snapshot point
-    /// covering it (#101), and no disk holds it clean. Ground truth for the
-    /// corpus.
+    /// its accepted record holds it unhealthy or sits on a parked node, and no
+    /// live disk trimmed past it (a trimmed slot is chosen and needed by no
+    /// one: a laggard jumps over it with `TrimmedTo`, #186). Ground truth for
+    /// the corpus.
     fn slot_unrecoverable(&self, slot: u64) -> bool {
         for (key, disk) in &self.disks {
             if self.parked.contains_key(key) {
                 continue;
             }
-            if disk.first_slot.0 > slot && disk.snapshot_health == RecordHealth::Clean {
+            if disk.first_slot.0 > slot {
                 return false;
             }
             if disk.accepted.contains_key(&Slot(slot)) && disk.slot_health(Slot(slot)).clean() {
-                return false;
-            }
-        }
-        // #101: a decided snapshot point at or past the slot is custody too —
-        // and because the point is byte-identical cluster-wide, chunk repair
-        // reassembles it from *any* clean copy of each chunk, so the clause is
-        // cluster-assembled, never per-disk: the point is readable unless some
-        // chunk has no clean copy on any live holder.
-        let points: BTreeSet<u64> = self
-            .disks
-            .iter()
-            .filter(|(key, _)| !self.parked.contains_key(*key))
-            .filter_map(|(_, disk)| disk.snap_point.map(|(at, _)| at))
-            .filter(|at| *at >= slot)
-            .collect();
-        for at in points {
-            let chunk_count = self
-                .disks
-                .values()
-                .find_map(|disk| {
-                    disk.snap_point
-                        .filter(|(point, _)| *point == at)
-                        .map(|(_, state)| snap_chunk_count(state.encode().len()))
-                })
-                .unwrap_or(0);
-            let assemblable = (0..chunk_count).all(|chunk| {
-                self.disks.iter().any(|(key, disk)| {
-                    !self.parked.contains_key(key)
-                        && disk.snap_point.is_some_and(|(point, _)| point == at)
-                        && disk
-                            .snap_chunk_health
-                            .get(usize::try_from(chunk).unwrap_or(usize::MAX))
-                            .is_none_or(|health| *health == RecordHealth::Clean)
-                })
-            });
-            if assemblable {
                 return false;
             }
         }
@@ -1139,8 +1064,8 @@ pub(crate) fn storage_fault_stats(handle: &StateHandle) -> StorageFaultStats {
     for slot in marked {
         // The availability re-derivation deliberately differs from the
         // injection-time budget formula: here a peer that truncated past the
-        // slot counts as *clean* — its truncation was decided over the applied
-        // prefix, so it can serve the superseding snapshot — while only a
+        // slot counts as *clean* — its truncation was decided, so it answers a
+        // laggard with its trim point — while only a
         // live lost-write/corruption mark or a terminally parked node makes a
         // copy unclean. The budget stays conservative (truncated peers don't
         // count there); this independent count is what an unavailable run is
@@ -1195,21 +1120,15 @@ pub(crate) fn parked_matchmakers(handle: &StateHandle) -> BTreeSet<String> {
 // --- corpus support: world probes + targeted mask injection -------------------
 
 /// One node's durable evidence, for the corpus workloads' deterministic waits
-/// (world-truth probes: replication, floors, and the durable application
-/// state — the corpus still verifies final outcomes over live RPC reads).
+/// (world-truth probes: replication and floors — the corpus still verifies
+/// final outcomes over live RPC reads).
 pub(crate) struct CorpusDiskProbe {
     /// Retained accepted slots whose record reads back clean and witnessed.
     pub(crate) clean_slots: BTreeSet<u64>,
     /// The durable compaction floor.
     pub(crate) floor: u64,
-    /// The durable application state's applied count.
-    pub(crate) applied_count: u64,
-    /// The durable application state's chain digest.
-    pub(crate) chain_hash: u64,
-    /// The retained decided snapshot point, if any (#101).
-    pub(crate) snap_point: Option<u64>,
-    /// The retained point's rotted chunk indexes.
-    pub(crate) faulty_chunks: BTreeSet<u32>,
+    /// The durable chosen index.
+    pub(crate) chosen_index: Option<u64>,
 }
 
 /// Whether `ip`'s durable registry still holds a registration naming `node` —
@@ -1239,62 +1158,8 @@ pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<Corpus
             .map(|slot| slot.0)
             .collect(),
         floor: disk.first_slot.0,
-        applied_count: disk.chain.applied_count,
-        chain_hash: disk.chain.chain_hash,
-        snap_point: disk.snap_point.map(|(at, _)| at),
-        faulty_chunks: disk
-            .snap_chunk_health
-            .iter()
-            .enumerate()
-            .filter(|(_, health)| **health != RecordHealth::Clean)
-            .map(|(index, _)| u32::try_from(index).unwrap_or(u32::MAX))
-            .collect(),
+        chosen_index: disk.hard_state.chosen_index.map(|slot| slot.0),
     })
-}
-
-/// Targeted chunk corruption of the retained decided snapshot point (#101):
-/// one chunk's value lost, the point's identity — and every other chunk —
-/// intact. Unbudgeted like every corpus injection; below-floor slots are
-/// re-evaluated against the world's unrecoverable ground truth (the point is
-/// custody, so losing its last clean copy can strand a folded prefix).
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn corpus_corrupt_snap_chunk(
-    handle: &StateHandle,
-    ip: &str,
-    node: u64,
-    chunk: u32,
-) -> bool {
-    let world = storage_world(handle);
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    let (at, floor) = {
-        let Some(disk) = guard.disks.get_mut(ip) else {
-            return false;
-        };
-        let Some((at, state)) = disk.snap_point else {
-            return false;
-        };
-        let chunks = usize::try_from(snap_chunk_count(state.encode().len())).unwrap_or(0);
-        let Some(index) = usize::try_from(chunk).ok().filter(|index| *index < chunks) else {
-            return false;
-        };
-        if disk.snap_chunk_health.len() < chunks {
-            disk.snap_chunk_health.resize(chunks, RecordHealth::Clean);
-        }
-        if disk.snap_chunk_health[index] != RecordHealth::Clean {
-            return false;
-        }
-        disk.snap_chunk_health[index] = RecordHealth::Faulty;
-        (at, disk.first_slot.0)
-    };
-    guard.note_corruption(CorruptionInjection::dormant(
-        node,
-        StorageRecord::SnapChunk(Slot(at), chunk),
-        CorruptionKind::BitFlip,
-    ));
-    for slot in 0..floor {
-        guard.note_if_unrecoverable(slot);
-    }
-    true
 }
 
 /// Targeted E1 mask corruption of one accepted record — value lost, identity
@@ -1326,29 +1191,6 @@ pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, sl
         CorruptionKind::BitFlip,
     ));
     guard.note_if_unrecoverable(slot);
-    true
-}
-
-/// Targeted corruption of one node's durable application snapshot. Slots the
-/// node had truncated past lose their only local custody, so each is
-/// re-evaluated against the world's unrecoverable ground truth.
-#[tracing::instrument(level = "debug", skip(handle), fields(ip = %ip, node))]
-pub(crate) fn corpus_corrupt_snapshot(handle: &StateHandle, ip: &str, node: u64) -> bool {
-    let world = storage_world(handle);
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(disk) = guard.disks.get_mut(ip) else {
-        return false;
-    };
-    disk.snapshot_health = RecordHealth::Faulty;
-    let floor = disk.first_slot.0;
-    guard.note_corruption(CorruptionInjection::dormant(
-        node,
-        StorageRecord::Snapshot,
-        CorruptionKind::BitFlip,
-    ));
-    for slot in 0..floor {
-        guard.note_if_unrecoverable(slot);
-    }
     true
 }
 
@@ -1512,10 +1354,6 @@ fn check_corruption_gates(handle: &StateHandle, corruption: &CorruptionStats) {
     assert_sometimes!(
         s7.torn_tail_discarded,
         "storage: a crash-truncatable tail is discarded on boot"
-    );
-    assert_sometimes!(
-        s7.snapshot_detected,
-        "storage: snapshot corruption is detected as its own record"
     );
     assert_sometimes!(
         s7.promise_repaired,

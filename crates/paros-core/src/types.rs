@@ -76,8 +76,8 @@ pub struct Value(pub Vec<u8>);
 /// One at-most-once session-ledger record: the client request `(client, seq)`
 /// was applied at `slot` (the *first* — lowest — slot it entered the applied
 /// prefix at). The ledger is paros-owned metadata: it is **sealed** durably when
-/// truncation drops the log records it was derived from, and it travels beside
-/// the opaque bytes in [`crate::Message::InstallSnapshot`], so every node — and
+/// truncation drops the log records it was derived from, and it travels in
+/// [`crate::Message::TrimmedTo`], so every node — and
 /// every restart — reproduces the identical duplicate-suppression decision at
 /// the apply seam (see `ColocatedNode::advance_chosen_index`'s doc).
 pub type SessionEntry = (ClientId, ClientSeq, Slot);
@@ -110,34 +110,14 @@ pub struct Entry {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Control {
     /// Truncate the log: every node drops its retained prefix up to `up_to`
-    /// (clamped to its own chosen index) when it applies this slot. The
+    /// (clamped to its own chosen index) when its contiguous walk reaches this
+    /// slot. The
     /// leader-decided, cluster-wide analogue of a local
     /// [`crate::ColocatedNode::compact`] call, forwarded by normal replication +
     /// catch-up.
     Truncate {
-        /// The last slot the application permits dropping (inclusive).
+        /// The last slot the journal's client permits dropping (inclusive).
         up_to: Slot,
-    },
-    /// A **decided snapshot point** (CTRL §3.5's `snap` marker): when this
-    /// slot enters a node's contiguous chosen prefix, the node snapshots its
-    /// application state *at this slot's boundary* — independent execution,
-    /// identical results, because the marker is applied at the same index
-    /// everywhere. That identity is what makes chunk-level snapshot repair
-    /// sound: byte-wise identical snapshots can be repaired chunk by chunk
-    /// from any peer, where self-chosen snapshot points could only ever ship
-    /// whole blobs.
-    ///
-    /// `at_index` is the slot the proposing leader allocated for the marker.
-    /// Paxos never moves an accepted command between slots, so a *decided*
-    /// marker always sits at `at_index` (the apply seam may assert it); the
-    /// field makes the decided snapshot point self-describing wherever the
-    /// command travels. Its partner rule — `Truncate{up_to}` is only proposed
-    /// once a quorum has reported snapshotting at `up_to` — is proposal-side
-    /// driver policy, never an acceptor-side check: the consensus paths treat
-    /// this command as opaquely as any other.
-    Snap {
-        /// The log index the marker snapshots at (its own decided slot).
-        at_index: Slot,
     },
     /// A **no-op**: decides the slot without doing anything at apply time.
     ///
@@ -215,10 +195,6 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             fnv1a(hash, &up_to.0.to_le_bytes())
         }
         Command::Control(Control::Noop) => fnv1a(FNV_OFFSET, &[2]),
-        Command::Control(Control::Snap { at_index }) => {
-            let hash = fnv1a(FNV_OFFSET, &[3]);
-            fnv1a(hash, &at_index.0.to_le_bytes())
-        }
     }
 }
 

@@ -5,7 +5,7 @@ use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
 use crate::message::{Audience, Message};
 use crate::node::{ColocatedNode, ReadState};
-use crate::types::{Ballot, Command, NodeId, Slot};
+use crate::types::{Command, Slot};
 use crate::write::WriteOp;
 
 /// A single batch of work the caller must process, and a **compile-time gate**
@@ -25,9 +25,11 @@ use crate::write::WriteOp;
 /// 2. **Send** [`Ready::messages`] to peers — *only after* step 1 is durable. A
 ///    `Promise`/`Accepted` published before its durable write is on disk is a
 ///    safety violation (a crash could un-promise / un-accept).
-/// 3. **Apply** [`Ready::committed`] to the application state machine — these are
-///    already chosen *and* durable.
-/// 4. **Answer** [`Ready::read_states`] — *after* step 3, so the applied state a
+/// 3. **Learn** [`Ready::committed`] — the slots the contiguous chosen prefix
+///    just walked over, already chosen *and* durable: ack the clients waiting
+///    on them. paros runs no application (#186); a journal client folds what
+///    it reads.
+/// 4. **Answer** [`Ready::read_states`] — *after* step 3, so the prefix a
 ///    read serves covers the confirmed read index this same batch carried.
 /// 5. Call [`Ready::advance`] to release the gate and unlock the next batch.
 ///
@@ -71,31 +73,14 @@ impl<'a> Ready<'a> {
         self.node.pending_messages()
     }
 
-    /// Newly chosen `(slot, command)` pairs to apply **after** they are durable
-    /// (step 3), surfaced in contiguous slot order (no gaps). Each is a
-    /// [`Command::User`] client entry to hand the application, or a
-    /// [`Command::Control`] the driver acts on (a `Truncate` records the durable
-    /// floor).
+    /// The `(slot, command)` pairs the contiguous chosen prefix just walked
+    /// over, **after** they are durable (step 3), in slot order (no gaps). A
+    /// #94 duplicate surfaces as the `Noop` the walk executed it as. The
+    /// driver acks the clients waiting on these slots and reports them; there
+    /// is no application to hand them to (#186).
     #[must_use]
     pub fn committed(&self) -> &[(Slot, Command)] {
         self.node.pending_committed()
-    }
-
-    /// Snapshot offers to serve this batch: `(to, chosen_index, ballot)`.
-    /// The core
-    /// decided a peer needs a snapshot (it asked for a prefix below this node's
-    /// compaction floor) but holds no application state, so the **driver** must
-    /// read the opaque snapshot bytes from storage, build a
-    /// [`Message::InstallSnapshot`] at `chosen_index`/`ballot`, and send it to
-    /// `to`. Serve these only **after** applying [`Ready::committed`] (step 3)
-    /// and making that application state durable (the application fsync, plus
-    /// any truncate flush ordered behind it): the snapshot bytes are read from
-    /// storage at serve time, so an offer served alongside step 2's messages
-    /// could carry bytes that do not yet cover the advertised `chosen_index`
-    /// boundary.
-    #[must_use]
-    pub fn snapshot_offers(&self) -> &[(NodeId, Slot, Ballot)] {
-        self.node.pending_snapshot_offers()
     }
 
     /// Read-index rounds confirmed this batch: each [`ReadState`] certifies that

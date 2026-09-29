@@ -20,8 +20,8 @@ use crate::driver::DriverTunables;
 
 /// Largest frame a paros runtime accepts or produces: a full delivery batch
 /// (the driver's 3 MiB batch cap) plus envelope headroom. A client runtime
-/// takes the same limit, or an `Inspect` reply carrying a large application
-/// snapshot would fail `ReplyTooLarge` on its side.
+/// takes the same limit, or a large `Read` page would fail `ReplyTooLarge`
+/// on its side.
 pub const MAX_FRAME_BYTES: u32 = 4 << 20;
 
 /// The runtime configuration every paros role serves and calls with, shaped

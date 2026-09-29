@@ -39,7 +39,7 @@ puts it in one sentence:
 
 A **slot** is a numbered log position, `Slot(u64)`, and the value chosen for it is a
 `Command`: either a `User(Entry)` carrying opaque client bytes, or a `Control`
-command the log itself needs (`Truncate`, `Noop`, `Snap`).
+command the log itself needs (`Truncate`, `Noop`).
 
 ```rust
 pub struct Entry {
@@ -95,7 +95,10 @@ and a hole stops the walk until it is filled. A hole that *never* fills is a per
 cluster-wide wedge — see [The stable leader](stable-leader.md). The audit pins the walk
 from both ends: **"a node's applied prefix advances one slot at a time (a forward jump
 only at the compaction floor or a snapshot install)"** and **"chain: applies are
-contiguous per node"** (`crates/paros-sim/src/audit/`).
+contiguous per node"** (`crates/paros-sim/src/audit/`). The first message keeps its
+old wording because an assertion's identity is the hash of its message; the only
+forward jump left today is the
+[trim-point jump](truncation-and-snapshots.md#the-node-below-the-floor-and-the-trim-point-jump).
 
 ## Five roles, collapsed into one node
 

@@ -74,12 +74,6 @@ pub fn command_hash(command: &Command) -> u64 {
         // are nine bytes and start `0xff`), and every node hashes the same no-op to
         // the same digest, so per-slot prefix agreement stays checkable.
         Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
-        // Nine bytes starting 0xfd: disjoint from both encodings above.
-        Command::Control(Control::Snap { at_index }) => {
-            let mut bytes = vec![0xfd_u8];
-            bytes.extend_from_slice(&at_index.0.to_le_bytes());
-            value_hash(&bytes)
-        }
     }
 }
 
@@ -172,12 +166,9 @@ pub fn message_kind(m: &Message) -> &'static str {
         Message::Commit { .. } => "commit",
         Message::CatchUpRequest { .. } => "catchup_request",
         Message::CatchUpResponse { .. } => "catchup_response",
-        Message::InstallSnapshot { .. } => "install_snapshot",
+        Message::TrimmedTo { .. } => "trimmed_to",
         Message::Heartbeat { .. } => "heartbeat",
         Message::HeartbeatAck { .. } => "heartbeat_ack",
-        Message::SnapAck { .. } => "snap_ack",
-        Message::SnapChunkRequest { .. } => "snap_chunk_request",
-        Message::SnapChunkResponse { .. } => "snap_chunk_response",
         Message::Relinquish { .. } => "relinquish",
         Message::PreRead { .. } => "pre_read",
         Message::PreReadAck { .. } => "pre_read_ack",
@@ -228,12 +219,6 @@ pub(crate) fn message_route(m: &Message) -> Option<(Party, Ballot, Option<Slot>)
             commit,
             ..
         } => Some((Party::Node(*from), *ballot, *commit)),
-        Message::InstallSnapshot {
-            from,
-            ballot,
-            chosen_index,
-            ..
-        } => Some((Party::Node(*from), *ballot, Some(*chosen_index))),
         // A handoff's "slot" is the allocator frontier it transfers — the
         // field that carries its meaning on a timeline.
         Message::Relinquish {
@@ -260,13 +245,10 @@ pub(crate) fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str
         Some(Kind::Commit(_)) => "commit",
         Some(Kind::CatchUpRequest(_)) => "catchup_request",
         Some(Kind::CatchUpResponse(_)) => "catchup_response",
-        Some(Kind::InstallSnapshot(_)) => "install_snapshot",
+        Some(Kind::TrimmedTo(_)) => "trimmed_to",
         Some(Kind::Heartbeat(_)) => "heartbeat",
         Some(Kind::HeartbeatAck(_)) => "heartbeat_ack",
-        Some(Kind::SnapAck(_)) => "snap_ack",
         Some(Kind::Relinquish(_)) => "relinquish",
-        Some(Kind::SnapChunkRequest(_)) => "snap_chunk_request",
-        Some(Kind::SnapChunkResponse(_)) => "snap_chunk_response",
         Some(Kind::PreRead(_)) => "pre_read",
         Some(Kind::PreReadAck(_)) => "pre_read_ack",
         None => "unknown",

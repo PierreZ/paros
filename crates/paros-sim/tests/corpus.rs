@@ -1,12 +1,11 @@
 //! The #113 CTRL evaluation corpus: enumerated per-slot × per-node corruption
 //! masks with analytically derived expected outcomes, the bare-quorum
-//! lost-slot case, and the §5.1.2 snapshot-lifecycle compound. Deterministic
+//! lost-slot case, and the departed straggler. Deterministic
 //! and bounded — this is enumerated evidence *beside* the coverage-guided
 //! sweep, never a replacement for it.
 
 use paros_sim::{
-    ChunkLiveCase, chunk_corpus_canonical_masks, corpus_canonical_masks, corpus_mask_case,
-    departed_straggler_case, run_bare_quorum_case, run_chunk_mask, run_snapshot_lifecycle_case,
+    corpus_canonical_masks, corpus_mask_case, departed_straggler_case, run_bare_quorum_case,
 };
 
 /// Run one E1 mask, require it green, and report whether it was non-vacuous
@@ -74,8 +73,8 @@ fn e1_canonical_masks_quarter_3() {
     canonical_quarter(3, 8);
 }
 
-/// The bare-quorum lost slot: decided by two of three, then both copies (and
-/// both holders' snapshots) rotted. The Phase-1 tally is `faulty, faulty,
+/// The bare-quorum lost slot: decided by two of three, then both copies
+/// rotted. The Phase-1 tally is `faulty, faulty,
 /// none` — the cluster must WAIT at the lost slot, never no-op fill it (CTRL
 /// §5.1.1 mutation (b)'s target: weakening the full-Q1 threshold to a sub-Q1
 /// `none` count fabricates history and turns exactly this case red).
@@ -119,72 +118,5 @@ fn departed_straggler_waits_then_recovers() {
     assert!(
         non_vacuous > 0,
         "at least one departed-straggler seed reached its injection"
-    );
-}
-
-/// The §5.1.2 snapshot-lifecycle compound: one scripted run reaching local
-/// snapshot re-replay at floor 0, whole-blob `InstallSnapshot` under a
-/// truncated log, the below-floor `Prepare` refusal, and the
-/// truncated-past-everyone WAIT.
-#[test]
-fn snapshot_lifecycle_compound_reaches_all_paths() {
-    let report = run_snapshot_lifecycle_case(0);
-    assert_eq!(report.failed_runs, 0, "lifecycle compound completed");
-    assert!(
-        report.assertion_violations.is_empty(),
-        "lifecycle compound asserted all four recovery paths: {:?}",
-        report.assertion_violations
-    );
-}
-
-/// The #101 per-chunk mask corpus: every canonical mask over the decided
-/// snapshot point's chunks asserts its analytic outcome — an assemblable
-/// chunk (≥ 1 clean copy anywhere) is repaired from a peer on every holder
-/// (chunk repair is the only heal in these cases: the live states stay
-/// healthy, so the repair-cost metric is ~chunk, never the blob), and an
-/// unassemblable chunk stays faulty everywhere, never fabricated, while the
-/// cluster stays fully available.
-#[test]
-fn chunk_canonical_masks_assert_their_analytic_outcomes() {
-    for mask in chunk_corpus_canonical_masks() {
-        let report = run_chunk_mask(mask, ChunkLiveCase::Intact);
-        assert_eq!(report.failed_runs, 0, "chunk mask {mask:#017b} completed");
-        assert!(
-            report.assertion_violations.is_empty(),
-            "chunk mask {mask:#017b} asserted its analytic outcome: {:?}",
-            report.assertion_violations
-        );
-    }
-}
-
-/// One chunk mask compounded with a lost live snapshot on node 0: the node's
-/// below-floor recovery races the point restore against the whole-blob
-/// install, and either way converges without fabricating.
-#[test]
-fn chunk_mask_with_lost_live_snapshot_converges() {
-    let report = run_chunk_mask(0b10, ChunkLiveCase::Lost);
-    assert_eq!(report.failed_runs, 0, "chunk+live case completed");
-    assert!(
-        report.assertion_violations.is_empty(),
-        "chunk+live case converged: {:?}",
-        report.assertion_violations
-    );
-}
-
-/// The same compound with the one durability seam the swarm never reaches
-/// scripted in (#146): node 0 repairs its chunk, restores the point into its
-/// lost application, and crashes before the restore's sync. The staged
-/// restore dies, the durable chunks stay clean, and the reboot — below the
-/// floor with nothing left to repair — heals through a peer's
-/// `InstallSnapshot`. The workload asserts non-vacuity itself (the scripted
-/// crash fired), so a green run here is a visited seam, never a skipped one.
-#[test]
-fn chunk_mask_with_crash_after_point_restore_recovers() {
-    let report = run_chunk_mask(0b10, ChunkLiveCase::LostThenRestoreCrash);
-    assert_eq!(report.failed_runs, 0, "chunk+restore-crash case completed");
-    assert!(
-        report.assertion_violations.is_empty(),
-        "chunk+restore-crash case visited the seam and converged: {:?}",
-        report.assertion_violations
     );
 }

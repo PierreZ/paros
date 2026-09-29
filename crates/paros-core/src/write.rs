@@ -9,7 +9,7 @@
 //! whole, the log persists per record — and is what lets later stages truncate,
 //! checksum, and recover per entry without a blob rewrite.
 
-use crate::types::{Ballot, Command, SessionEntry, Slot, Value};
+use crate::types::{Ballot, Command, SessionEntry, Slot};
 
 /// The two durable writes an [`Acceptor`](crate::acceptor::Acceptor) makes,
 /// over whatever value that deployment's log carries.
@@ -51,7 +51,7 @@ pub enum AcceptorWrite<V> {
 /// The classification is role-shaped, and stays that way: **every op that
 /// [`needs_sync`](WriteOp::needs_sync) is emitted by
 /// [`Acceptor`](crate::acceptor::Acceptor)** — the promise, the accepted
-/// record, the truncation and the snapshot install are all mutations of the
+/// record, the truncation and the trim-point jump are all mutations of the
 /// acceptor's own durable state, and each is emitted by the method that makes
 /// it, never pushed beside the call by the wiring.
 /// [`Replica`](crate::replica::Replica) emits exactly one op, the relaxed
@@ -65,7 +65,7 @@ pub enum AcceptorWrite<V> {
 /// [`ReplicaNode`](crate::ReplicaNode) (#144), emits
 /// [`Learned`](WriteOp::Learned) in place of the accepted record, and the
 /// floor-moving ops its prefix needs ([`Truncate`](WriteOp::Truncate),
-/// [`InstallSnapshot`](WriteOp::InstallSnapshot)) — never an
+/// [`TrimmedTo`](WriteOp::TrimmedTo)) — never an
 /// [`Acceptor`](WriteOp::Acceptor) op. Nothing it sends is predicated on
 /// its writes (it sends only catch-up requests), so its fsync buys only
 /// that the boot read-back finds every record below the chosen index.
@@ -96,7 +96,8 @@ pub enum WriteOp {
     /// Advance the durable chosen index (commit index) to `slot`.
     SetChosenIndex(Slot),
     /// Truncate the log below `first`, discarding the compacted prefix, and
-    /// record `first` as the durable compaction floor. Application-driven (see
+    /// record `first` as the durable compaction floor. Decided by the log (a
+    /// `Control::Truncate` the walk reached, see
     /// [`crate::ColocatedNode::compact`]); `first` always sits within the chosen
     /// prefix, so nothing undecided is dropped.
     Truncate {
@@ -111,22 +112,17 @@ pub enum WriteOp {
         /// divergence, strictly worse than the double-apply (#94).
         sealed: Vec<SessionEntry>,
     },
-    /// Install an opaque application snapshot: record `chosen_index` as the
-    /// durable commit index, `chosen_index + 1` as the durable compaction floor,
-    /// `ballot` as (at least) the durable promise, and persist the opaque
-    /// `snapshot` bytes (so a restart boots from them and the node can serve them
-    /// onward). Produced only by [`crate::Message::InstallSnapshot`]; the bytes are
-    /// never interpreted by the core.
-    InstallSnapshot {
-        /// The commit index the snapshot brings the node up to.
-        chosen_index: Slot,
-        /// The ballot adopted with the snapshot (the promise takes its max).
-        ballot: Ballot,
-        /// Opaque application snapshot bytes at `chosen_index`.
-        snapshot: Value,
-        /// The serving peer's at-most-once session ledger, persisted as sealed
-        /// records beside the opaque bytes: the folded prefix's log records will
-        /// never be walked here, so this is the only carrier of its
+    /// Jump below the trim point (#186, [`crate::Message::TrimmedTo`]):
+    /// record `point` as the durable compaction floor and at least
+    /// `point - 1` as the durable chosen index, drop every record below
+    /// `point`, and seal `sessions`. No bytes and no ballot: the promise does
+    /// not move.
+    TrimmedTo {
+        /// The trim point: the first slot still retained.
+        point: Slot,
+        /// The serving peer's at-most-once session ledger for the slots below
+        /// `point`, persisted as sealed records: their log records will never
+        /// be walked here, so this is the only carrier of their
         /// `(client, seq) -> slot` facts (see [`WriteOp::Truncate::sealed`]).
         sessions: Vec<SessionEntry>,
     },
@@ -161,7 +157,7 @@ pub enum MustSync {
 
 impl WriteOp {
     /// Whether this op requires an fsync (a promise-raise, an accepted or
-    /// learned record, a truncate, or a snapshot install).
+    /// learned record, a truncate, or a trim-point jump).
     #[must_use]
     pub fn needs_sync(&self) -> bool {
         matches!(
@@ -169,7 +165,7 @@ impl WriteOp {
             WriteOp::Acceptor(_)
                 | WriteOp::Learned { .. }
                 | WriteOp::Truncate { .. }
-                | WriteOp::InstallSnapshot { .. }
+                | WriteOp::TrimmedTo { .. }
         )
     }
 }

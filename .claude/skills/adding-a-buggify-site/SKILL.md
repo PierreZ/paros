@@ -62,16 +62,18 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
 ## Seams
 
 Process-level attrition cannot crash between a write and its sync. The
-`Seam` enum in `crates/paros/src/hooks.rs` names the eight points the driver
-asks `crash_at(seam)` at (`BeforeSync`, `AfterSyncBeforeSend`,
-`AfterApplyBeforeSync`, `AfterBootReplayBeforeSync`, `BeforeChunkSync`,
-`AfterChunkRestoreBeforeSync`, `MatchBeforeSync`, `MatchAfterSyncBeforeReply`).
-A new durability boundary gets a new variant and its own location in
-`BuggifyHooks`; sharing one location stops the sweep from selecting the
-failure modes independently. If the swarm cannot build the seam's
-precondition (it took #146 to visit `AfterChunkRestoreBeforeSync`), the
-corpus scripts it: `ScriptedCrash` answers `crash_at` for one named seam
-once per run, and the corpus case asserts the crash fired.
+`Seam` enum in `crates/paros/src/hooks.rs` names the four points the drivers
+ask `crash_at(seam)` at: the node driver's `BeforeSync` and
+`AfterSyncBeforeSend`, and the matchmaker driver's `MatchBeforeSync` and
+`MatchAfterSyncBeforeReply`. (The apply, boot-replay and chunk-repair seams
+went with the application and snapshots in #186.) A new durability boundary
+gets a new variant and its own location in `BuggifyHooks`; sharing one
+location stops the sweep from selecting the failure modes independently. If
+the swarm cannot build the seam's precondition, the corpus scripts it: a
+scripted node whose hooks answer `crash_at` for one named seam once per run
+and draw nothing, with the corpus case asserting the crash fired (#146 built
+this as `ScriptedCrash` for a chunk seam; it went with that seam, so a new
+one is a `ScriptedOptions` field in `crates/paros-sim/src/process.rs`).
 
 ## The four questions every site must answer
 

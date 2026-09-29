@@ -35,7 +35,7 @@ enum AcceptorWrite<V> {
     AppendAccepted { slot: Slot, ballot: Ballot, value: V },  // one accept (upsert)
 }
 // A `Ready` batch carries those, plus `SetChosenIndex`, `Truncate` and
-// `InstallSnapshot`, as `WriteOp`s.
+// `TrimmedTo`, as `WriteOp`s.
 ```
 
 The rule is **persist before send**: a raised promise reaches disk before the
@@ -58,7 +58,7 @@ states the same hazard from the other side:
 
 paros enforces the ordering with a type rather than a convention: `ready()` borrows the
 node uniquely, so the driver must run the batch's four steps in sequence — persist and
-fsync, send, apply the committed entries, `advance()` — and a second `ready()` before
+fsync, send, learn the committed entries, `advance()` — and a second `ready()` before
 that `advance()` is a **compile** error, not a bug to find in review.
 
 ## The bug: a restart that resurrects a dead value
@@ -144,7 +144,11 @@ applied-slot reports lost those reports, and the boot did not replay them, so th
 looked like it skipped, failing **"a node's applied prefix advances one slot at a time
 (a forward jump only at the compaction floor or a snapshot install)"**
 (`crates/paros-sim/src/audit/`). The durable prefix was gap-free the whole time; the
-*apply* had simply not been re-driven. The fix mirrors what a real state machine must
-do — on boot, re-drive the apply of the durable committed prefix, idempotent because
-the commit index *is* the applied index — and the sweep now saturates with seam crashes
-on, a stronger guard than replaying the one seed that surfaced it.
+*report* had simply not been re-driven. The fix was to re-drive it on boot, idempotent
+because the commit index *is* the applied index, and the sweep saturated with seam
+crashes on, a stronger guard than replaying the one seed that surfaced it. Since paros
+stopped running an application (#186) there is nothing left to replay at all: the
+recovered chosen index is the node's whole walked prefix, and the boot report
+(`report_boot_state`, `crates/paros/src/driver/boot.rs`) hands it to the audit as one
+transition. The application is a client that reads the log, and it keeps its own
+place in it.

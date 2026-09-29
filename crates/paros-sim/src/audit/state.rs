@@ -206,10 +206,10 @@ pub(super) struct AuditState {
     // --- applied prefix -----------------------------------------------------
     /// Per node: the next slot expected to be newly applied.
     pub(super) frontier: BTreeMap<u64, u64>,
-    /// Per node: every index it jumped to through a snapshot install.
-    pub(super) snap_landings: BTreeMap<u64, BTreeSet<u64>>,
-    /// Per acceptor: below-floor `Prepare`s it refused (a corpus probe).
-    pub(super) below_floor_refusals: BTreeMap<u64, u64>,
+    /// Per node: every index its walked prefix jumped to without walking the
+    /// slots below it — a trim-point jump's landing (#186), or the chosen
+    /// index a boot recovered.
+    pub(super) landings: BTreeMap<u64, BTreeSet<u64>>,
     /// Per node: its applied high-water mark (absent = applied nothing).
     pub(super) applied_max: BTreeMap<u64, u64>,
     pub(super) cluster_applied_max: Option<u64>,
@@ -225,13 +225,15 @@ pub(super) struct AuditState {
     pub(super) submitted: BTreeSet<u64>,
     /// This run has no client (see `AuditWorld::client_free`).
     pub(super) client_free: bool,
-    /// Per node: its application's applied count (contiguity frontier).
-    pub(super) app_index: BTreeMap<u64, u64>,
-    /// Per applied index: the command hash every node must apply there.
-    pub(super) app_command: BTreeMap<u64, u64>,
-    /// Per applied index: the state hash every node must reach there.
-    pub(super) app_state: BTreeMap<u64, u64>,
-    pub(super) noop_applied: bool,
+    /// The client fold (#186): per client, the last LSN it folded (its
+    /// contiguity frontier).
+    pub(super) fold_lsn: BTreeMap<u64, u64>,
+    /// Per LSN: the command hash every client's fold must meet there.
+    pub(super) fold_command: BTreeMap<u64, u64>,
+    /// Per LSN: the state every client's fold must reach after it.
+    pub(super) fold_state: BTreeMap<u64, u64>,
+    /// Two clients' folds were checked against each other at one LSN.
+    pub(super) fold_agreed: bool,
 
     // --- cooperative leader handoff -----------------------------------------
     /// `(ballot round, ballot node)` → who is exercising that logical authority
@@ -274,9 +276,8 @@ pub(super) struct AuditState {
     pub(super) compacted: bool,
     pub(super) prepare_below_floor: bool,
     pub(super) gap_filled: bool,
-    pub(super) snapshot_installed: bool,
-    pub(super) snapshot_offered: bool,
-    pub(super) snapshot_mid_election: bool,
+    /// A node below the floor jumped to a peer's trim point (#186).
+    pub(super) trim_jumped: bool,
     pub(super) caught_up: bool,
     /// At-most-once ledger for the oracle: each applied user command's
     /// `(client, seq)` and the single log index it applied at. A second apply
@@ -357,24 +358,8 @@ pub(super) struct AuditState {
     pub(super) case1_seen: bool,
     pub(super) case2_seen: bool,
     pub(super) repair_stepdown_seen: bool,
-    pub(super) app_repair_seen: bool,
-    pub(super) app_repair_below_floor_seen: bool,
-    /// #101: decided snapshot points each node has durably recorded — the
-    /// per-node custody facts the truncation-coupling check reads.
-    pub(super) snap_points: BTreeMap<u64, BTreeSet<u64>>,
-    pub(super) snap_recorded_seen: bool,
-    pub(super) snap_chunks_reported_seen: bool,
-    pub(super) snap_chunk_repaired_seen: bool,
-    pub(super) snap_fallback_seen: bool,
-    pub(super) snap_restore_seen: bool,
     pub(super) resend_skipped: bool,
     pub(super) resigned: bool,
-    /// The `withhold_snap_chunk` hook family: it fired somewhere, the
-    /// requesters it was silent toward, and whether one of them still
-    /// completed its chunk repair — the recovery path the silence tests.
-    pub(super) chunk_withheld: bool,
-    pub(super) withheld_from: BTreeSet<u64>,
-    pub(super) repaired_after_withhold: bool,
     /// Parked reads redirected: by the deadline, and by the early-expiry hook.
     pub(super) read_expired_overdue: bool,
     pub(super) read_expired_early: bool,
@@ -409,7 +394,6 @@ pub(super) struct AuditState {
     pub(super) compact_ack_accepted: bool,
     pub(super) compact_ack_refused: bool,
     pub(super) mailbox_dropped: bool,
-    pub(super) offer_skipped: bool,
     pub(super) shortest_timeout: bool,
     pub(super) dropped_accept: bool,
     pub(super) dropped_election: bool,
@@ -418,10 +402,6 @@ pub(super) struct AuditState {
     pub(super) dropped_heartbeat: bool,
     pub(super) dropped_repair: bool,
     pub(super) dropped_catchup_request: bool,
-    pub(super) crashed_after_apply: bool,
-    pub(super) crashed_before_chunk_sync: bool,
-    pub(super) crashed_after_chunk_restore: bool,
-    pub(super) crashed_after_boot_replay: bool,
     /// Transport tallies for the failure print: sends per message kind,
     /// failed delivery RPCs, edge rejections.
     pub(super) sent_kinds: BTreeMap<&'static str, u64>,
@@ -430,12 +410,6 @@ pub(super) struct AuditState {
     pub(super) delivery_failed: bool,
     pub(super) waiters_cleared: bool,
     pub(super) edge_rejected: bool,
-    /// Chunk repairs the store refused after every write returned `Ok`, and
-    /// the last point one was refused at — the dynamic context the reachable
-    /// gate itself cannot carry (`assert_reachable!` takes only a message).
-    pub(super) snap_chunks_rejected: u64,
-    pub(super) snap_chunk_rejected_at: Option<u64>,
-    pub(super) snap_chunk_rejected: bool,
     /// A matchmaker-plane reply the node loop folded twice, per kind
     /// (`Match`, `GcAck`, `MatchmakerReconfigure`).
     pub(super) reply_duplicated: [bool; 3],
@@ -520,18 +494,10 @@ pub(super) struct AuditState {
     /// Every replica that booted: learners outside the pool that hold no
     /// promise, registered by `replica_booted` before anything they report.
     pub(super) replicas: BTreeSet<u64>,
-    /// The two outcomes the campaign must reach: a slot applied on a replica
+    /// The two outcomes the campaign must reach: a slot learned on a replica
     /// that never voted for it, and a replica below every acceptor's floor
-    /// healed by a snapshot install.
+    /// jumping to their trim point.
     pub(super) applied_on_replica: bool,
-    /// Bare acceptors (#144, `Application::Shed`), from their boot reports:
-    /// they apply nothing, so their convergence is their chosen prefix.
-    pub(super) bare: BTreeSet<u64>,
-    /// A bare acceptor acked a client on a slot it never applied.
-    pub(super) bare_acked: bool,
-    /// Acks a bare acceptor gave before any process applied the identity:
-    /// `(client, seq) -> acked slot`, judged when the identity applies.
-    pub(super) bare_acks_pending: BTreeMap<(u64, u64), u64>,
     /// The deployment's replica count (`Deployment::replica_count`).
     pub(super) replica_count: usize,
     /// Per reply-owner replica, the lowest slot it owns that another process
@@ -546,7 +512,7 @@ pub(super) struct AuditState {
     pub(super) journal_read_woke: bool,
     pub(super) journal_read_on_replica: bool,
     pub(super) journal_read_trimmed: bool,
-    pub(super) replica_installed_snapshot: bool,
+    pub(super) replica_jumped: bool,
 }
 
 impl AuditState {
@@ -731,8 +697,8 @@ impl AuditState {
         );
     }
 
-    /// The protocol-level `sometimes` gates: progress, truncation, snapshot and
-    /// the multi-slot log. Their `reachable` counterparts already fired at their
+    /// The protocol-level `sometimes` gates: progress, truncation, the
+    /// trim-point jump and the multi-slot log. Their `reachable` counterparts already fired at their
     /// transition instants.
     pub(super) fn check_protocol_gates(&self) {
         let max_applied = self.cluster_applied_max.unwrap_or(0);
@@ -802,25 +768,13 @@ impl AuditState {
         );
         // Compaction actually happens (the workload drives it every run).
         assert_sometimes!(self.compacted, "the log is compacted (truncation happens)");
-        // The #101 coupling's other half: compaction implies a decided
-        // snapshot point was recorded first, so this saturates wherever the
-        // compaction gate does.
+        // A node left below the trim point while it was down heals by
+        // jumping to a peer's trim point (#186) — the outcome that replaced
+        // the snapshot transfer.
         assert_sometimes!(
-            self.snap_recorded_seen,
-            "storage: a decided snapshot point is recorded"
+            self.trim_jumped,
+            "a below-floor node recovers by jumping to a peer's trim point"
         );
-        assert_sometimes!(
-            self.snapshot_installed,
-            "a below-floor node recovers via snapshot transfer"
-        );
-        // The #88 mid-election install window is anchored by the `reach_once!`
-        // in [`AuditWorld::snapshot_mid_election`], not demanded per sweep:
-        // #101 made whole-blob installs structurally rare (a below-floor node
-        // with a clean covering point restores locally, and rotted chunks
-        // repair chunk-wise), so the install x live-election coincidence is a
-        // leg the swarm is no longer *certain* to visit. Per the assertion
-        // doctrine such a leg anchors exploration when hit and never fails
-        // coverage (same shape as the block-fault family gate).
         // CheckQuorum (#95) is actually exercised: some seed isolates a leader
         // from its ack quorum long enough that it demotes itself (the n=2
         // regime plus attrition is the reliable generator).
@@ -871,7 +825,7 @@ impl AuditState {
             self.delegation_taken_back,
             "proxy: a leader takes a delegated round back"
         );
-        // The replica outcomes (#144): a seed with a replica tier applies
+        // The replica outcomes (#144): a seed with a replica tier learns
         // on a process that never voted, and a replica killed by its own
         // attrition regime comes back below the floor the acceptors kept
         // raising without it.
@@ -880,14 +834,8 @@ impl AuditState {
             "replica: a slot is applied on a replica that never voted"
         );
         assert_sometimes!(
-            self.replica_installed_snapshot,
-            "replica: a replica below the floor is healed by a snapshot"
-        );
-        // The bare acceptor (#144): a slot decided and acked by an acceptor
-        // that never applied it — the application lives on the replicas.
-        assert_sometimes!(
-            self.bare_acked,
-            "bare acceptor: a client is acked on a slot the acceptor never applied"
+            self.replica_jumped,
+            "replica: a replica below the floor jumps to the trim point"
         );
         // Decision 1 of #144: a slot the node asked acked is owned by a
         // replica that applied it too — the owner the future client library
@@ -936,10 +884,6 @@ impl AuditState {
     /// that observes them, in [`super::NodeAudit`]; only the *outcomes* that
     /// need the whole run to judge live here.
     pub(super) fn check_driver_hook_gates(&self) {
-        assert_sometimes!(
-            self.snapshot_offered,
-            "a snapshot offer enters the driver's common outbound path"
-        );
         assert_sometimes!(
             self.dedup_after_dropped_reply,
             "a committed proposal ack is lost and the retry takes the dedup path"
@@ -991,8 +935,8 @@ impl AuditState {
     /// That is CTRL's takedown of Google's `MarkNonVoting`: a node that lost
     /// its promise can accept from an old leader while the new leader still
     /// counts that promise, and a chosen value is overwritten. It is why
-    /// `prob_wipe` stays 0 on every campaign — a snapshot restores the log, not
-    /// the promise, and restoring redundancy is node replacement (#22's
+    /// `prob_wipe` stays 0 on every campaign — a trim jump restores the floor,
+    /// not the promise, and restoring redundancy is node replacement (#22's
     /// reconfiguration), never a rejoin.
     pub(super) fn observe_promise(&mut self, node: u64, ballot: Ballot) {
         if let Some(prev) = self.promised.insert(node, ballot) {
@@ -1437,8 +1381,8 @@ impl AuditState {
     /// A node's applied (contiguous chosen) prefix advances one slot at a time.
     /// A *replay* of an already-applied slot after a restart is idempotent and
     /// allowed; only a forward skip past the frontier is a real gap, and that is
-    /// legal only at the node's compaction floor (a truncated log's boot replay
-    /// resumes there) or at a snapshot install.
+    /// legal only at the node's compaction floor or at an admitted landing (a
+    /// trim-point jump, or the chosen index a boot recovered).
     /// Fold one client read a node answered at `index` (its serve-time
     /// chosen index, from either read path) into its per-boot frontier. The
     /// serve-time chosen index is monotone within an incarnation — so
@@ -1464,14 +1408,17 @@ impl AuditState {
 
     pub(super) fn check_no_gaps(&mut self, node: u64, idx: u64) {
         let at_floor = idx == self.floor.get(&node).map_or(0, |f| f.now);
-        let at_snapshot = self
-            .snap_landings
+        let at_landing = self
+            .landings
             .get(&node)
             .is_some_and(|landings| landings.contains(&idx));
         let next_now = self.frontier.get(&node).copied().unwrap_or(0);
-        // Stage 8: a boot replay may step over a rotted record whose effect is
-        // already durable in the application state — legal only when every
+        // Stage 8: a walk may step over a rotted record whose slot is
+        // already inside the durable chosen prefix — legal only when every
         // skipped slot was reported faulty by this node (the explained jump).
+        // A landing is a trim-point jump or a boot's recovered chosen index
+        // (#186); the message keeps its pre-#186 wording (its slot is its
+        // hash).
         let over_reported = idx > next_now
             && self
                 .reported_faulty
@@ -1483,7 +1430,7 @@ impl AuditState {
         } else if idx > *next {
             *next = idx + 1;
             assert_always!(
-                at_floor || at_snapshot || over_reported,
+                at_floor || at_landing || over_reported,
                 "a node's applied prefix advances one slot at a time (a forward jump only at the compaction floor or a snapshot install)",
                 { "node" => node, "index" => idx }
             );

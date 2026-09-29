@@ -163,12 +163,6 @@ impl NodeShape {
             // client's deadline, where a long-poll the client stops waiting
             // for is an ambiguous read, never a wrong one (#185).
             read_poll_ticks: buggify_knob!(8_u64, 0_u64..41_u64),
-            // Floor 1: the snapshot lane is a keep-newest `PeerMailbox` that
-            // carries one class (`InstallSnapshot`), so a one-slot lane only
-            // ever evicts an older offer to the same peer in favour of the
-            // newer one, and the requester re-asks every beat — a slower
-            // transfer, never a starved class.
-            snapshot_queue_capacity: buggify_knob!(4_usize, 1_usize..9_usize),
             // Floor 1: the client inboxes are the RPC runtime's per-endpoint
             // queues, which refuse a request beyond capacity as `Overloaded`
             // (never admitted, so never a lost *executed* request); the loop
@@ -431,9 +425,6 @@ impl QuorumPolicy {
 
 #[derive(Default)]
 struct Registry {
-    /// Run-level: the application's digest-lane count, fixed by the first
-    /// node to boot.
-    lanes: Option<u8>,
     /// Run-level: the quorum-system policy (see [`quorum_policy`]), fixed by
     /// the first caller — a node or a client.
     quorum: Option<QuorumPolicy>,
@@ -443,9 +434,6 @@ struct Registry {
     /// Run-level: the bootstrap matchmaker ranks (see
     /// [`matchmaker_bootstrap_ranks`]), fixed by the first caller.
     matchmaker_bootstrap: Option<Vec<u64>>,
-    /// Run-level: whether the acceptor pool is bare (see
-    /// [`bare_acceptors`]), fixed by the first caller.
-    bare: Option<bool>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -480,23 +468,6 @@ pub(crate) fn boot(state: &StateHandle, ip: &str, perturb: bool) -> Incarnation 
         assert_reachable!("a restarted node boots under its first incarnation's shape");
     }
     incarnation
-}
-
-/// The run's digest-lane count, drawn once by the first caller (a perturbing
-/// node draws a knob; the corpus pins the default). 1 to 128 lanes is a blob
-/// of 1 to 17 chunks, so the chunk-repair plane sees the single-chunk and the
-/// many-chunk shapes instead of always five. Floor 1: one lane is a complete,
-/// valid application.
-pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.lanes.get_or_insert_with(|| {
-        if perturb {
-            buggify_knob!(crate::chain::DEFAULT_LANES, 1_u8..129_u8)
-        } else {
-            crate::chain::DEFAULT_LANES
-        }
-    })
 }
 
 /// The run's **quorum-system policy** (#140, #141), drawn once per seed by
@@ -548,37 +519,6 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize, perturb: bool) -> 
         // a row — are the audit's gates).
         assert_reachable!("a run draws an acceptor grid");
         QuorumPolicy::Grid { rows, cols }
-    })
-}
-
-/// Whether the run's acceptors are **bare** (#144, `Application::Shed`):
-/// drawn once per seed by whichever process or workload asks first, on a
-/// seed that deploys a replica tier only — a bare acceptor applies nothing,
-/// so a deployment without replicas would run no application at all. One
-/// `buggify_knob!` location, default colocated; the extreme is the
-/// log-and-storage split (the whole pool votes and keeps the chosen log, the
-/// replicas alone apply). Whole-pool, not per node: a bare acceptor records
-/// no snapshot point, so on a bare seed no quorum ever holds custody, the
-/// leader refuses every `Truncate`, and no floor ever forms — the snapshot
-/// plane a mixed pool would need a bare leader to serve (it holds no
-/// application bytes) is never asked for. Floor: a replica tier of at least
-/// one; a corpus run never draws.
-#[tracing::instrument(level = "debug", skip(state), fields(replicas, perturb))]
-pub(crate) fn bare_acceptors(state: &StateHandle, replicas: usize, perturb: bool) -> bool {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.bare.get_or_insert_with(|| {
-        if !perturb || replicas == 0 {
-            return false;
-        }
-        let bare = buggify_knob!(0_u8, 1_u8..2_u8) == 1;
-        if bare {
-            // BUGGIFY pairing: a seed genuinely runs bare acceptors (a
-            // cause; the outcome — a slot decided and acked on an acceptor
-            // that never applied it — is the audit's gate).
-            assert_reachable!("a run draws bare acceptors");
-        }
-        bare
     })
 }
 
@@ -772,15 +712,6 @@ mod tests {
         let entry = &guard.nodes["10.0.1.1"];
         assert_eq!(entry.incarnations, 2);
         assert_eq!(guard.nodes["10.0.1.2"].incarnations, 1);
-    }
-
-    /// The lane count is a run-level shape: the first caller fixes it.
-    #[test]
-    fn the_lane_count_is_fixed_by_the_first_caller() {
-        let state = StateHandle::new();
-        let first = lane_count(&state, true);
-        assert_eq!(lane_count(&state, true), first);
-        assert_eq!(lane_count(&state, false), first);
     }
 
     /// A scripted node takes the production shape and never draws.

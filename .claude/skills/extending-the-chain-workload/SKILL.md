@@ -6,8 +6,15 @@ description: Add or change an operation in paros's ChainWorkload (the one main-c
 # Extending the chain workload
 
 `ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`) is the only
-main-campaign workload: one to three factory-created clients driving the
-Chain-of-Blocks application against a chaotic pool. There is no second
+main-campaign workload: one to three factory-created clients driving a
+chaotic pool through the journal API (`PROPOSE` is an `Append`, `COMPACT` a
+`Trim`, `READ_INDEX`/`QUORUM_READ` a `CheckTail`). paros runs no application
+(#186): each client *is* the Chain-of-Blocks application, reading the journal
+and folding every user entry into its own `ChainState`
+(`chain_workload/fold.rs`), which the audit compares across clients
+(`AuditWorld::fold_applied`). A fold needs every entry from the start, so every
+trim a client asks for is clamped below the shared trim fence (the lowest
+cursor of the clients still folding). There is no second
 main-campaign workload and no per-scenario process type; a new behaviour is a
 new operation in this alphabet, judged by the same `ClientHistory` and the
 same `AuditWorld`.
@@ -58,7 +65,7 @@ its number as a no-op (that is why 9 and 10 exist), and a new operation takes
 ## What the workload never does
 
 It never reads the trace, never inspects node internals except through the
-`Inspect` RPC (`READ_STATE`), never pins a seed, and never decides safety on
+`Inspect` RPC, never pins a seed, never trims past the fence, and never decides safety on
 its own: linearizability and sequential-client consistency are checked in
 `ClientHistory` at `check()`, protocol safety in the audit. Keep the
 assertion messages stable; they are slots.

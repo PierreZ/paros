@@ -139,7 +139,6 @@ export function phaseClass(phase: string): string {
     'commit',
     'heartbeat',
     'catchup',
-    'snapshot',
     'read',
     'handoff',
     'match',
@@ -152,8 +151,8 @@ export function phaseClass(phase: string): string {
 /**
  * The name of a control command, as a slot box prints it.
  *
- * The engine sends the discriminant in lower case (`noop`, `truncate`,
- * `snap`); the label is the command's own name. A slot with no control command
+ * The engine sends the discriminant in lower case (`noop`, `truncate`); the
+ * label is the command's own name. A slot with no control command
  * holds an opaque client value and has no name to print.
  */
 export function controlLabel(control: string | null | undefined): string | null {
@@ -161,7 +160,6 @@ export function controlLabel(control: string | null | undefined): string | null 
   const known: Record<string, string> = {
     noop: 'Noop',
     truncate: 'Truncate',
-    snap: 'Snap',
   };
   return known[control.toLowerCase()] ?? control;
 }
@@ -250,7 +248,7 @@ function logColumn(node: NodeView, at: Point, centre: Point): SVGGElement {
   let row = 0;
 
   // The floor sits above the slots the node still keeps: everything before it
-  // is deleted here, and only a snapshot can put it back.
+  // is deleted here, and a node below it jumps to a peer's trim point.
   if (floor !== null) {
     const y = top + SLOT_HEIGHT - 4;
     rows.push(

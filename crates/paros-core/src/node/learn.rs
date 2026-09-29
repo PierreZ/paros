@@ -59,7 +59,7 @@ impl ColocatedNode {
                 "a slot already chosen here is relearned with the same value"
             );
             // Known value, nothing to relearn — but still re-drive the walk: a
-            // snapshot install (or a boot) can leave `chosen_index` *below* a
+            // trim-point jump (or a boot) can leave `chosen_index` *below* a
             // slot already present in `chosen`, and a catch-up replay of that
             // slot is then the only message this node keeps receiving. Skipping
             // the walk here wedged that node in a forever catch-up loop.
@@ -118,8 +118,7 @@ impl ColocatedNode {
     /// decided: the truncation a `Truncate` control command ordered (lazily,
     /// *after* the walk so the mutation cannot disturb the iteration, its
     /// [`WriteOp::Truncate`](crate::WriteOp::Truncate) ordered after the
-    /// `SetChosenIndex` writes), the application repair that may now
-    /// advance, and the read rounds waiting on the apply condition (the
+    /// `SetChosenIndex` writes) and the read rounds waiting on the apply condition (the
     /// fresh-leader fence).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
@@ -128,17 +127,9 @@ impl ColocatedNode {
             |slot, command| acceptor.record(slot).map(|(_, c)| c) == Some(command),
             &mut self.pending_writes,
         );
-        // The bare acceptor (#144) sheds the walk's application output and
-        // keeps everything else it did: the durable chosen index, the ledger,
-        // the decided truncation below. What the walk would have handed an
-        // application is exactly what this node does not run.
-        if !self.config.runs_application() {
-            self.replica.clear_committed();
-        }
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        self.pump_app_repair();
         self.serve_reads();
     }
 }

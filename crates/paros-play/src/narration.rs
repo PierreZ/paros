@@ -61,8 +61,8 @@ pub enum NarrationKind {
     Read,
     /// A log prefix was dropped: a `Truncate` decided, or a floor that rose.
     Truncate,
-    /// A snapshot point was recorded, offered, or installed.
-    Snapshot,
+    /// A node below the floor jumped to a peer's trim point.
+    TrimPoint,
     /// A client asked for something.
     Client,
     /// A candidate registered a configuration with the matchmakers, or learned
@@ -212,6 +212,8 @@ pub(crate) struct NodeSnapshot {
     chosen: BTreeMap<Slot, Command>,
     chosen_index: Option<Slot>,
     first_unchosen: Slot,
+    /// The compaction floor: the first slot still retained.
+    floor: Slot,
     role: Option<NodeRole>,
     ballot: Ballot,
     /// Per open Phase-2 round: how many acceptors have voted so far. The
@@ -243,6 +245,7 @@ impl NodeSnapshot {
             chosen: node.replica().chosen().clone(),
             chosen_index: node.replica().chosen_index(),
             first_unchosen: node.replica().first_unchosen(),
+            floor: node.acceptor().first_slot(),
             role: Some(node.role()),
             ballot: node.ballot(),
             votes: node
@@ -406,17 +409,10 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             entries.len(),
             at(before.chosen_index)
         ),
-        Message::InstallSnapshot {
-            from,
-            chosen_index,
-            ballot,
-            ..
-        } => format!(
-            "{node} receives a snapshot from node {} covering everything up to slot {}, taken \
-             under ballot {}.",
-            from.0,
-            chosen_index.0,
-            show_ballot(*ballot)
+        Message::TrimmedTo { from, point, .. } => format!(
+            "{node} receives node {}'s trim point: its log starts at slot {}, and everything \
+             below it is chosen and gone. {node}'s own floor is slot {}.",
+            from.0, point.0, before.floor.0
         ),
         Message::Relinquish {
             from,

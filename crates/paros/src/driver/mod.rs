@@ -8,7 +8,7 @@
 //!
 //! The loop `select`s over {client request, peer message, tick timer, shutdown},
 //! feeds the core via `step`/`tick`, and drains every [`paros_core::Ready`] in
-//! persist → send → apply → advance order (durable-before-send). It also draws
+//! persist → send → learn → advance order (durable-before-send). It also draws
 //! the randomized election timeout from the provider RNG (the core stays
 //! dependency-free) and holds each client reply until its slot commits
 //! (ack-on-commit), redirecting non-leader proposals.
@@ -23,7 +23,7 @@
 //!   field a trace carries.
 //! - [`transport`] — the bounded, lossy, keep-newest per-peer mailboxes, the
 //!   `Outbound` send handle, and the detached peer-delivery task.
-//! - [`snap_repair`] — the snapshot-point custody tally and chunk-repair pull.
+//! - [`log_reads`] — the journal `Read` answer and its long-poll (#185).
 //! - [`ready`] — the `Ready` handshake's durability pipeline and the held
 //!   client replies it answers.
 //! - [`reply`] — the one client-reply seam (the drop and duplicate hooks,
@@ -33,7 +33,7 @@
 //! - [`handover`] — the driver-side policy around the matchmaker-set handover.
 //! - [`operator`] — the operator RPCs answered from the core: compaction,
 //!   acceptor-set reconfiguration, retirement and inspection.
-//! - [`boot`] — the (re)boot replay of durable state.
+//! - [`boot`] — the format-marker check and the (re)boot report.
 //! - [`report`] — the post-batch upkeep and its cross-batch delta trackers.
 //!
 //! `mod.rs` itself holds only [`run_node`], the select loop that wires them,
@@ -50,7 +50,6 @@ mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
-mod snap_repair;
 pub(crate) mod transport;
 
 pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
@@ -74,9 +73,9 @@ use crate::rpc::{
     AppendAck, CheckTailAck, MatchmakerClient, ReconfigureMatchmakersAck, ReplySender, TailPath,
     TrimAck, encode_records, well_known,
 };
-use crate::storage::NodeStorage;
+use crate::storage::LogStorage;
 
-use boot::{check_format_marker, replay_boot_state};
+use boot::{check_format_marker, report_boot_state};
 use edge::{NodeInbox, RpcEdge, edge_reporter};
 use events::message_route;
 use handover::HandoverDriver;
@@ -87,7 +86,6 @@ use matchmaking::{
 use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, served_prefix, storage_fault_crash};
 use reply::maybe_duplicate;
 use report::{Cadence, Deltas, draw_election_timeout, handoff_context, maintain};
-use snap_repair::{SnapRepair, route_snap_message, snap_repair_tick};
 use transport::{LaneOpener, Outbound, PeerQueues, peer_address};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
@@ -116,14 +114,19 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     ///
     /// Propagates the drain's typed exit ([`RunError`]): a durability-seam
     /// crash or a storage fault the driver decided to crash on.
-    async fn settle<S: NodeStorage>(
+    async fn settle<S: LogStorage>(
         &self,
         node: &mut ColocatedNode,
         storage: &mut S,
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
     ) -> Result<(), RunError> {
-        let outbox = drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
+        let mut outbox =
+            drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
+        if !outbox.gc_requests.is_empty() && self.hooks.withhold_gc_requests() {
+            tracing::info!(node = self.self_id, "gc_requests_withheld");
+            outbox.gc_requests.clear();
+        }
         surface_matchmaking(node, &mut last.matchmaking, self.audit, self.self_id);
         send_outbox(self.providers, self.links, self.audit, self.self_id, outbox);
         maintain(
@@ -461,7 +464,7 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 /// Drive a paros node to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation — only the providers
-/// differ) and `S: NodeStorage` (the injected durable storage). The loop owns a
+/// differ) and `S: LogStorage` (the injected durable storage). The loop owns a
 /// [`ColocatedNode`], serves the Paros RPC interface, feeds client proposals and
 /// peer messages into the core, sends the core's outbound messages to the peers
 /// named in `members`, and ticks until `shutdown` fires.
@@ -488,7 +491,7 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 /// address, empty without one): learners outside the pool that are not
 /// acceptors. Every message the core addresses to the learners — a
 /// `Commit`, a beat — reaches them beside the pool, and a catch-up answer or
-/// a snapshot offer addressed to one reaches its lane. Its length is the
+/// a trim point addressed to one reaches its lane. Its length is the
 /// `Config`'s `replica_count`.
 ///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #147): a
@@ -512,7 +515,7 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
 ///
 /// The exit is typed ([`RunError`]): [`RunError::SeamCrash`] when `hooks` fires
 /// at a durability seam (the caller recovers by re-running `run_node` against
-/// the surviving durable storage, which rebuilds the volatile state); [`RunError::Storage`] when a [`NodeStorage`] call failed and
+/// the surviving durable storage, which rebuilds the volatile state); [`RunError::Storage`] when a [`LogStorage`] call failed and
 /// the driver took its fail-stop crash decision — production treats it as a
 /// process exit (crash-only), the sim node loop recovers through the same
 /// restart path as a seam crash; [`RunError::Refused`] when `boot` and the
@@ -543,7 +546,7 @@ pub async fn run_node<P, S, H, A>(
 ) -> Result<(), RunError>
 where
     P: Providers,
-    S: NodeStorage,
+    S: LogStorage,
     // Deliberately *not* `Send + 'static`, unlike the audit below. Every hook
     // is consulted from the node loop, never from a spawned task, and keeping
     // the bound this narrow is what *enforces* that: `hooks` arrives as a
@@ -564,7 +567,7 @@ where
     // deliberate crash decision as any other storage fault: typed on the
     // audit, then `RunError::Storage` unwinds the incarnation. The scan itself
     // may only discard a crash-truncatable tail or repair a `HardState` copy
-    // from its twin (see [`NodeStorage::boot_scan`]); it never truncates on a
+    // from its twin (see [`LogStorage::boot_scan`]); it never truncates on a
     // corruption verdict.
     let self_id = storage.initial_state().1.id.0;
     storage
@@ -601,10 +604,9 @@ where
     // `initial_state` the identity above was read from).
     let mut node = ColocatedNode::new(&storage);
 
-    replay_boot_state(&mut node, &mut storage, self_id, hooks, audit).await?;
+    report_boot_state(&node, self_id, audit);
 
-    // The replicas (#144) get a node's two lanes: a snapshot offer to a
-    // replica below the floor rides the bulky lane, as to any peer.
+    // The replicas (#144) get a node's lane, as any peer.
     let learners: Vec<NodeId> = replicas.iter().map(|(id, _)| *id).collect();
     let lanes = LaneOpener {
         providers: &providers,
@@ -621,23 +623,11 @@ where
             let to = Party::Node(id);
             let regular = lanes.open(
                 "paros-peer-delivery",
-                client.clone(),
+                client,
                 to,
                 tunables.peer_queue_capacity,
             );
-            let snapshot = lanes.open(
-                "paros-snapshot-delivery",
-                client,
-                to,
-                tunables.snapshot_queue_capacity,
-            );
-            Ok((
-                id,
-                PeerQueues {
-                    regular,
-                    snapshot: Some(snapshot),
-                },
-            ))
+            Ok((id, PeerQueues { regular }))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
     // The proxy leaders (#142): one lane each, on the same lossy keep-newest
@@ -713,8 +703,6 @@ where
     // keyed by their read-index ctx.
     let mut waiters = ClientWaiters::default();
     let mut next_read_ctx: u64 = 0;
-    // The snapshot-point repair layer (#101).
-    let mut snap = SnapRepair::from_boot_scan(&storage, audit, self_id);
     // Seed the first randomized election timeout (jitter from the driver's RNG).
     let first_timeout = draw_election_timeout(
         &providers,
@@ -804,7 +792,7 @@ where
                         // ack that named nothing was unfalsifiable: the client was
                         // told "applied" with no way for an oracle to check the
                         // claim against the applied prefix.
-                        audit.client_acked(NodeId(self_id), client, seq, slot, served_prefix(&node, &storage), true);
+                        audit.client_acked(NodeId(self_id), client, seq, slot, served_prefix(&node), true);
                         tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
                         loop_ctx.answer(
                             Reply::ProposeDedup,
@@ -917,9 +905,7 @@ where
                         "prepare_below_floor"
                     );
                 }
-                if !route_snap_message(&mut node, &mut storage, &mut snap, &out, hooks, audit, &msg).await? {
-                    node.step(msg);
-                }
+                node.step(msg);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
             }
             Some(reply) = match_replies.recv() => {
@@ -1050,17 +1036,17 @@ where
                     loop_ctx.answer(Reply::Compact, reply, TrimAck { unknown_journal: true, ..TrimAck::default() });
                     continue;
                 }
-                let ack = operator::trim(&mut node, &mut snap, req.up_to, self_id);
+                let ack = operator::trim(&mut node, req.up_to, self_id);
                 audit.compact_acked(NodeId(self_id), ack.accepted);
                 loop_ctx.settle(&mut node, &mut storage, &mut waiters, &mut last).await?;
                 // A lost trim ack is ambiguous to the client, which re-asks;
-                // the marker/Truncate it may have seeded stands.
+                // the `Truncate` it may have proposed stands.
                 loop_ctx.answer(Reply::Compact, reply, ack);
             }
             Some((_req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core and the
                 // store, so it produces no `Ready` batch.
-                let _ = reply.send(operator::inspect(&node, &storage).await);
+                let _ = reply.send(operator::inspect(&node));
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is
@@ -1114,7 +1100,9 @@ where
                 // The open GC request's re-send (#123): its own cadence
                 // (`gc_resend_ticks`) and its own BUGGIFY location.
                 if gc_resend.tick_if(node.gc_pending(), tunables.gc_resend_ticks) {
-                    if hooks.skip_gc_resend() {
+                    if hooks.withhold_gc_requests() {
+                        tracing::info!(node = self_id, "gc_requests_withheld");
+                    } else if hooks.skip_gc_resend() {
                         audit.gc_resend_skipped(NodeId(self_id));
                         tracing::info!(node = self_id, "gc_resend_skipped");
                     } else {
@@ -1123,9 +1111,6 @@ where
                 }
                 loop_ctx.pace_handover(&node, &mut handover);
                 loop_ctx.offer_handoff(&mut node);
-                // Snapshot-point repair upkeep (#101): custody advertisement,
-                // the leader's coupling tally, and the chunk-repair pull.
-                snap_repair_tick(&node, &storage, &out, hooks, audit, &mut snap);
                 ticks += 1;
                 loop_ctx.expire_parked_reads(&mut waiters, ticks);
                 waiters.log_reads.expire(

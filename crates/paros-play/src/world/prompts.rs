@@ -35,7 +35,7 @@ impl World {
             .or_else(|| self.quorum_read_prompt(to, index, message))
             .or_else(|| self.phase1_prompt(to, index, message))
             .or_else(|| self.repair_prompt(to, index, message))
-            .or_else(|| self.snapshot_prompt(to, index, message))
+            .or_else(|| self.trim_point_prompt(to, index, message))
     }
 
     /// The question a `Promise` raises at a candidate whose matchmaking phase
@@ -267,57 +267,38 @@ impl World {
             .find_map(|disk| disk.faulty().get(&slot).copied())
     }
 
-    /// The question a peer's snapshot raises at a node stranded below the
-    /// cluster's floor: what is its durable promise afterwards?
+    /// The question a peer's trim point raises at a node stranded below the
+    /// cluster's floor: where does its log start, and what does it promise?
     ///
-    /// Judged on a clone of the acceptor, driven exactly as
-    /// `ColocatedNode::on_install_snapshot` drives the real one.
-    fn snapshot_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
-        if !self.policy.manual.contains(&PromptKind::SnapshotPromise) {
+    /// Judged on clones of the acceptor and the replica, driven through the
+    /// same two `trim_to` calls `ColocatedNode`'s `TrimmedTo` handler makes.
+    fn trim_point_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
+        if !self.policy.manual.contains(&PromptKind::TrimPoint) {
             return None;
         }
-        let Message::InstallSnapshot {
-            ballot,
-            chosen_index,
-            snapshot,
+        let Message::TrimmedTo {
+            from,
+            point,
             sessions,
-            ..
         } = message
         else {
             return None;
         };
         let node = self.nodes[index].as_ref()?;
-        // A snapshot the core would ignore teaches nothing: it neither
-        // installs nor moves the promise, so there is no decision to play.
-        if node
-            .replica()
-            .chosen_index()
-            .is_some_and(|ci| *chosen_index <= ci)
-        {
+        let old_floor = node.acceptor().first_slot();
+        // A trim point at or below the floor the node already holds is
+        // ignored by the core: nothing moves, so there is no decision to play.
+        if *point <= old_floor {
             return None;
         }
-        let held = node.acceptor().promised();
-        let mut clone = node.acceptor().clone();
+        let mut acceptor = node.acceptor().clone();
+        let mut replica = node.replica().clone();
         let mut writes: Vec<WriteOp> = Vec::new();
-        if *ballot > clone.promised() {
-            clone.set_promise(*ballot, &mut writes);
-        }
-        clone.install(
-            *chosen_index,
-            *ballot,
-            snapshot.clone(),
-            sessions.clone(),
-            &mut writes,
-        );
-        let promised = clone.promised();
+        replica.trim_to(*point, sessions);
+        acceptor.trim_to(*point, sessions.clone(), &mut writes);
         let id = self.take_prompt_id();
-        Some(Prompt::snapshot_promise(
-            id,
-            to,
-            *chosen_index,
-            *ballot,
-            held,
-            promised,
+        Some(Prompt::trim_point(
+            id, to, *from, *point, old_floor, &acceptor, &replica,
         ))
     }
 

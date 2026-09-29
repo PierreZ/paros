@@ -10,7 +10,7 @@ use crate::types::Ballot;
 /// [`crate::Storage`], mirrored method for method. The **application**
 /// implements it and owns *all* writes; the core only ever *reads back*, once
 /// at construction, what the driver has already persisted through its write
-/// extension (`paros::MatchmakerStorage`, the `NodeStorage` twin).
+/// extension (`paros::MatchmakerStorage`, the `LogStorage` twin).
 ///
 /// # Why a per-record port and not a state blob
 ///

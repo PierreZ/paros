@@ -332,13 +332,7 @@ where
                 Party::Node(node),
                 tunables.peer_queue_capacity,
             );
-            Ok((
-                node,
-                PeerQueues {
-                    regular,
-                    snapshot: None,
-                },
-            ))
+            Ok((node, PeerQueues { regular }))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
     let out = Outbound {

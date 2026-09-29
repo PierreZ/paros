@@ -10,13 +10,13 @@
 //! generous never fails a random run, but fails an enumerated case whose
 //! ground truth says "this mask is recoverable" (or "this mask must wait").
 //!
-//! Three case families, all on a fixed three-node cluster with a scripted
+//! Three case families, the first two on a fixed three-node cluster with a scripted
 //! lifecycle (moonpool's `fault_factory` driven through `crate::lifecycle`; no
 //! swarm chaos — every fault is a targeted injection):
 //!
-//! - [`E1MaskWorkload`]: a short fully-replicated decided prefix, every
-//!   application snapshot rotted (so the log is the only custody), then a
-//!   per-slot × per-node corruption mask over the decided records. A slot with
+//! - [`E1MaskWorkload`]: a short fully-replicated decided prefix (the log is
+//!   the only custody: paros keeps no snapshot, #186), then a per-slot ×
+//!   per-node corruption mask over the decided records. A slot with
 //!   ≥ 1 clean copy must converge intact; a slot with 0 clean copies must be
 //!   waited on, never fabricated. The derivation cross-checks the world's
 //!   `unrecoverable_slots` ground truth.
@@ -25,11 +25,6 @@
 //!   whose Phase-1 tally is `faulty, faulty, none`: exactly CTRL §5.1.1's
 //!   mutation-(b) target (a sub-Q1 count of `none` must never no-op fill a
 //!   chosen slot).
-//! - [`SnapshotLifecycleWorkload`]: the §5.1.2 compound — log-only,
-//!   snapshotted, and snapshotted-and-truncated nodes in one scripted run,
-//!   reaching all four snapshot-recovery paths: local re-replay at floor 0,
-//!   whole-blob `InstallSnapshot` under a truncated log, the below-floor
-//!   `Prepare` refusal, and the truncated-past-everyone WAIT.
 //! - [`DepartedStragglerWorkload`] (#124): the one case that needs a fourth
 //!   node and a matchmaker — a pool bootstrapped on three, reconfigured onto
 //!   the spare, then the only clean copy of a slot left on the node the
@@ -48,18 +43,14 @@ use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
     assert_always, assert_reachable, assert_sometimes,
 };
-use paros::{
-    Append, Command, Control, Entry, InspectReply, JournalId, Reconfigure, Slot, Trim, Value,
-    snap_chunk_count,
-};
+use paros::{Append, Command, Entry, InspectReply, JournalId, Read, Reconfigure, Value};
 
 use crate::audit::audit_world;
-use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
+use crate::chain::{ChainState, hash_text, user_command_hash};
 use crate::client::{ClientRuntime, SimClient, default_client_rpc_config};
 use crate::lifecycle;
 use crate::world::{
-    corpus_corrupt_entry, corpus_corrupt_snap_chunk, corpus_corrupt_snapshot, corpus_disk_probe,
-    corpus_matchmaker_remembers, unrecoverable_slots,
+    corpus_corrupt_entry, corpus_disk_probe, corpus_matchmaker_remembers, unrecoverable_slots,
 };
 
 /// Fixed corpus cluster size. The mask grid and the analytic derivation both
@@ -89,9 +80,9 @@ const OUTCOME_BUDGET: Duration = Duration::from_secs(90);
 /// before the run believes nothing will be fabricated late.
 const WAIT_SETTLE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// How long an accepted compact may take to raise the floor cluster-wide
-/// before the chunk corpus re-asks (the proposal can die with its leader).
-const FLOOR_GRACE: Duration = Duration::from_secs(3);
+/// The pages one corpus read folds at most (a corpus log is a handful of
+/// slots; the bound only stops a node that keeps answering).
+const FOLD_PAGES: usize = 64;
 
 /// Where an E1 run's mask comes from.
 #[derive(Clone, Copy, Debug)]
@@ -142,74 +133,12 @@ fn payload(seq: u64) -> Vec<u8> {
     bytes
 }
 
-/// Fold the expected chain states for a command sequence: `expected[i]` is the
-/// application state after the first `i` commands. This is the corpus's own
-/// analytic model of the register — computed from what it proposed, never read
+/// The expected chain states for a command sequence: `expected[i]` is the
+/// state a reader folds from the first `i` slots. This is the corpus's own
+/// analytic model of the log — computed from what it proposed, never read
 /// back from the cluster.
 fn expected_states(commands: &[Command]) -> Vec<ChainState> {
-    let mut states = vec![ChainState::default()];
-    for command in commands {
-        let previous = *states.last().expect("seeded with the initial state");
-        states.push(previous.apply(command).next);
-    }
-    states
-}
-
-/// Identify the decided control tail behind an observed settled configuration
-/// (#101 chunk corpus). The coupling seeds one `Snap` and one `Truncate`, but
-/// chaos can legitimately decide more: a leadership blip re-seeds a marker, an
-/// ambiguous compact retry re-decides `Truncate{5}`, an election gap-fills a
-/// `Noop`, and a #94 duplicate applies as a `Noop`. The settled state stays
-/// fully analytic — it must equal the fold of the primed prefix plus SOME tail
-/// over `{Snap, Truncate{5}, Noop}` whose last `Snap` sits at the retained
-/// point. Returns `(point state, full state)` for the matching tail, `None`
-/// when no legitimate tail explains the observation (a real state corruption).
-fn identify_control_tail(
-    prefix: &[Command],
-    applied: u64,
-    hash: u64,
-    point: u64,
-) -> Option<(ChainState, ChainState)> {
-    let base = u64::try_from(prefix.len()).unwrap_or(u64::MAX);
-    let len = usize::try_from(applied.checked_sub(base)?).ok()?;
-    if len == 0 || len > 8 {
-        return None;
-    }
-    let patterns = 3_u32.checked_pow(u32::try_from(len).ok()?)?;
-    for pattern in 0..patterns {
-        let mut commands = prefix.to_vec();
-        let mut digits = pattern;
-        let mut last_snap: Option<u64> = None;
-        let mut truncates = 0_u32;
-        for offset in 0..len {
-            let slot = base + u64::try_from(offset).unwrap_or(0);
-            let command = match digits % 3 {
-                0 => {
-                    last_snap = Some(slot);
-                    Command::Control(Control::Snap {
-                        at_index: Slot(slot),
-                    })
-                }
-                1 => {
-                    truncates += 1;
-                    Command::Control(Control::Truncate { up_to: Slot(5) })
-                }
-                _ => Command::Control(Control::Noop),
-            };
-            digits /= 3;
-            commands.push(command);
-        }
-        if truncates == 0 || last_snap != Some(point) {
-            continue;
-        }
-        let states = expected_states(&commands);
-        let full = states[commands.len()];
-        if full.applied_count == applied && full.chain_hash == hash {
-            let point_state = states[usize::try_from(point).ok()? + 1];
-            return Some((point_state, full));
-        }
-    }
-    None
+    ChainState::expected(commands)
 }
 
 fn user_command(client: u64, seq: u64, bytes: Vec<u8>) -> Command {
@@ -326,34 +255,6 @@ impl CorpusClients {
         .flatten()
     }
 
-    /// Ask for a decided `Truncate{up_to}` until a leader accepts it.
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn compact_until_accepted(
-        &self,
-        ctx: &SimContext,
-        up_to: u64,
-        exclude: Option<usize>,
-        deadline: Duration,
-    ) -> bool {
-        trace_truncate(up_to);
-        self.until_accepted(ctx, 0, exclude, deadline, |client| async move {
-            let ack = client
-                .trim(&Trim {
-                    journal: JournalId::default().0,
-                    up_to,
-                })
-                .await
-                .ok()?;
-            Some(if ack.accepted {
-                Verdict::Accepted(())
-            } else {
-                Verdict::Refused { leader: ack.leader }
-            })
-        })
-        .await
-        .is_some()
-    }
-
     /// Ask the leader for the acceptor configuration `members` until one
     /// accepts the reconfiguration (following `not_leader` hints; an
     /// `unsettled` leader is re-asked a poll later).
@@ -393,12 +294,40 @@ impl CorpusClients {
         }
     }
 
-    /// One live application-state read from node `i` (`None` on timeout).
+    /// What a journal client reading node `i` from the log's start folds:
+    /// the state after every entry of the node's contiguous chosen prefix it
+    /// can serve (#186 — there is no application on the node to ask). `None`
+    /// on a timeout or a trimmed log (no corpus case trims).
     #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
     async fn inspect(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
-        self.inspect_reply(ctx, i)
-            .await
-            .and_then(|reply| ChainState::decode(&reply.snapshot).ok())
+        let time = ctx.time();
+        let client = &self.clients[i];
+        let mut state = ChainState::default();
+        let mut from = 0;
+        for _ in 0..FOLD_PAGES {
+            let request = Read {
+                journal: JournalId::default().0,
+                from_lsn: from,
+                max_bytes: 0,
+            };
+            let ack = moonpool_sim::select! {
+                response = client.read(&request) => response.ok(),
+                _ = time.sleep(RPC_TIMEOUT) => None,
+            }?;
+            if ack.trimmed_to.is_some() || ack.unknown_journal {
+                return None;
+            }
+            for entry in &ack.entries {
+                state = state.fold(entry.lsn, &paros::encode_records(&entry.records));
+            }
+            // The end of the served prefix, or a slot the node cannot serve
+            // yet (a page that moved nothing).
+            if ack.next_lsn >= ack.committed_end || ack.next_lsn == from {
+                return Some(state);
+            }
+            from = ack.next_lsn;
+        }
+        Some(state)
     }
 
     /// Wait until every live node's inspected state equals `want` (`true`), or
@@ -450,11 +379,11 @@ impl CorpusClients {
             let live = self.inspect(ctx, n).await;
             let probe = corpus_disk_probe(ctx.state(), ip);
             eprintln!(
-                "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} applied={:?}",
+                "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} chosen={:?}",
                 live.map(|s| (s.applied_count, s.chain_hash)),
                 probe.as_ref().map(|p| p.clean_slots.clone()),
                 probe.as_ref().map(|p| p.floor),
-                probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
+                probe.as_ref().map(|p| p.chosen_index),
             );
         }
     }
@@ -488,15 +417,17 @@ impl CorpusClients {
 }
 
 /// Wait until every node's durable world record shows the fully replicated,
-/// fully applied prefix (`slots` clean everywhere, application at `want`).
+/// fully chosen prefix (`slots` clean everywhere, the chosen index at the
+/// last of the `through` slots).
 #[tracing::instrument(level = "debug", skip_all)]
 async fn wait_replicated(
     ctx: &SimContext,
     servers: &[String],
     slots: &BTreeSet<u64>,
-    want: &ChainState,
+    through: usize,
     deadline: Duration,
 ) -> bool {
+    let chosen = u64::try_from(through).ok().and_then(|n| n.checked_sub(1));
     let time = ctx.time();
     loop {
         if ctx.shutdown().is_cancelled() {
@@ -504,30 +435,13 @@ async fn wait_replicated(
         }
         let all = servers.iter().all(|ip| {
             corpus_disk_probe(ctx.state(), ip).is_some_and(|probe| {
-                slots.is_subset(&probe.clean_slots)
-                    && probe.applied_count == want.applied_count
-                    && probe.chain_hash == want.chain_hash
+                slots.is_subset(&probe.clean_slots) && probe.chosen_index == chosen
             })
         });
         if all {
             return true;
         }
         if time.now() >= deadline {
-            return false;
-        }
-        time.sleep(POLL_INTERVAL).await.ok();
-    }
-}
-
-/// Poll `ready` on the simulated clock until it holds (`true`) or the deadline
-/// passes (`false`).
-async fn wait_until(ctx: &SimContext, deadline: Duration, ready: impl Fn() -> bool) -> bool {
-    let time = ctx.time();
-    loop {
-        if ready() {
-            return true;
-        }
-        if time.now() >= deadline || ctx.shutdown().is_cancelled() {
             return false;
         }
         time.sleep(POLL_INTERVAL).await.ok();
@@ -609,10 +523,9 @@ async fn primed_cluster(ctx: &SimContext, count: u64, case: &str) -> SimulationR
     let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
     let commands = prime_prefix(ctx, &clients, client_id, count, None, 0, 0).await?;
     let states = expected_states(&commands);
-    let full = states[commands.len()];
     let slots: BTreeSet<u64> = (0..count).collect();
     let deadline = ctx.time().now() + PRIME_BUDGET;
-    let replicated = wait_replicated(ctx, &servers, &slots, &full, deadline).await;
+    let replicated = wait_replicated(ctx, &servers, &slots, commands.len(), deadline).await;
     assert_always!(
         replicated,
         "corpus: priming replicates and applies the full prefix everywhere"
@@ -688,11 +601,8 @@ impl Workload for E1MaskWorkload {
         };
         tracing::info!(mask, "corpus_mask_selected");
         let mut derived_unrecoverable: BTreeSet<u64> = BTreeSet::new();
-        // Every snapshot is rotted first: the decided log is the only custody
-        // left, so the mask alone decides recoverability.
-        for (n, ip) in servers.iter().enumerate() {
-            corpus_corrupt_snapshot(ctx.state(), ip, u64::try_from(n).unwrap_or(u64::MAX));
-        }
+        // The decided log is the only custody (#186: there is no snapshot),
+        // so the mask alone decides recoverability.
         for slot in 0..CORPUS_SLOTS {
             let mut corrupted = 0_usize;
             for (n, ip) in servers.iter().enumerate() {
@@ -844,7 +754,7 @@ impl Workload for E1MaskWorkload {
 // --- the bare-quorum lost-slot case -------------------------------------------
 
 /// One slot decided by a bare quorum while the third node is down, then both
-/// holders' copies (and their application snapshots) rotted: the CTRL
+/// holders' copies rotted: the CTRL
 /// `faulty, faulty, none` tally. The cluster must WAIT at the lost slot — the
 /// deterministic target of §5.1.1's mutation (b), where a sub-Q1 `none` count
 /// no-op fills the chosen slot and fabricates history.
@@ -884,12 +794,11 @@ impl Workload for BareQuorumWorkload {
         lifecycle::crash(ctx, &servers[absent]).await;
         let survivors: Vec<String> = servers[..absent].to_vec();
         commands.extend(prime_prefix(ctx, &clients, client_id, 1, Some(absent), 2, 2).await?);
-        let expected3 = expected_states(&commands)[3];
         let survivors_hold = wait_replicated(
             ctx,
             &survivors,
             &(0..3).collect(),
-            &expected3,
+            commands.len(),
             time.now() + PRIME_BUDGET,
         )
         .await;
@@ -899,12 +808,11 @@ impl Workload for BareQuorumWorkload {
             { "slot" => 2_u64 }
         );
 
-        // Phase 3 (atomic with the restarts): rot both holders' slot-2 copies
-        // and their snapshots. The value now exists nowhere readable — the
+        // Phase 3 (atomic with the restarts): rot both holders' slot-2
+        // copies. The value now exists nowhere readable — the
         // third node honestly reports `none` (it never accepted the slot).
         for (n, ip) in survivors.iter().enumerate() {
             let node = u64::try_from(n).unwrap_or(u64::MAX);
-            corpus_corrupt_snapshot(ctx.state(), ip, node);
             let landed = corpus_corrupt_entry(ctx.state(), ip, node, 2);
             assert_always!(
                 landed,
@@ -1026,8 +934,14 @@ impl Workload for DepartedStragglerWorkload {
         let full = expected[commands.len()];
         let slots: BTreeSet<u64> = (0..CORPUS_SLOTS).collect();
         let bootstrap: Vec<String> = servers[..DEPARTED_BOOTSTRAP].to_vec();
-        let replicated =
-            wait_replicated(ctx, &bootstrap, &slots, &full, time.now() + PRIME_BUDGET).await;
+        let replicated = wait_replicated(
+            ctx,
+            &bootstrap,
+            &slots,
+            commands.len(),
+            time.now() + PRIME_BUDGET,
+        )
+        .await;
         assert_always!(
             replicated,
             "corpus: priming replicates and applies the full prefix everywhere"
@@ -1075,7 +989,14 @@ impl Workload for DepartedStragglerWorkload {
             in_force,
             "corpus: the successor configuration is in force at every member"
         );
-        let joined = wait_replicated(ctx, &servers, &slots, &full, time.now() + PRIME_BUDGET).await;
+        let joined = wait_replicated(
+            ctx,
+            &servers,
+            &slots,
+            commands.len(),
+            time.now() + PRIME_BUDGET,
+        )
+        .await;
         assert_always!(
             joined,
             "corpus: the joining spare replicates the prefix through catch-up"
@@ -1086,15 +1007,15 @@ impl Workload for DepartedStragglerWorkload {
         }
 
         // The prior configuration must still be in the matchmaker's ledger
-        // when the cluster dies: hold the matchmaker down from here so the
-        // new leader's GC floor (#123) can never become effective. A ledger
-        // that no longer names the straggler makes the run vacuous — GC
-        // legitimately forgot the straggler's configuration, which is the
-        // *other* corpus outcome (a correctly unavailable slot), not this
-        // case's. The raw watermark is the wrong test for that: an ordinary
-        // leader raises it as soon as its leadership settles, so it was
-        // non-zero on every seed and the case never once reached its
-        // injection.
+        // when the cluster dies. The scripted nodes withhold their GC
+        // requests (`ScriptedOptions::withhold_gc`): since #186 nothing holds
+        // a fresh leadership unsettled (there is no application repair), so
+        // the new leader's floor became effective before the case could
+        // crash the matchmaker, on every seed. The matchmaker is held down
+        // from here all the same, and a ledger that no longer names the
+        // straggler still makes the run vacuous — GC legitimately forgot the
+        // straggler's configuration, which is the *other* corpus outcome (a
+        // correctly unavailable slot), not this case's.
         lifecycle::crash(ctx, &matchmakers[0]).await;
         time.sleep(POLL_INTERVAL).await.ok();
         let forgotten = !corpus_matchmaker_remembers(
@@ -1110,14 +1031,11 @@ impl Workload for DepartedStragglerWorkload {
             return Ok(());
         }
 
-        // Phase 3 (atomic with the deaths): rot every snapshot and the lost
-        // slot's copy on every member of the configuration in force. The
+        // Phase 3 (atomic with the deaths): rot the lost slot's copy on
+        // every member of the configuration in force. The
         // only clean copy is the straggler's — a node no configuration in
         // force names, reachable only through the prior configuration the
         // matchmaker still remembers.
-        for (n, ip) in servers.iter().enumerate() {
-            corpus_corrupt_snapshot(ctx.state(), ip, u64::try_from(n).unwrap_or(u64::MAX));
-        }
         for (n, ip) in servers.iter().enumerate().skip(1) {
             let landed = corpus_corrupt_entry(
                 ctx.state(),
@@ -1182,7 +1100,11 @@ impl Workload for DepartedStragglerWorkload {
                 let Some(reply) = clients.inspect_reply(ctx, i).await else {
                     continue;
                 };
-                if ChainState::decode(&reply.snapshot).ok() != Some(held_state) {
+                if clients
+                    .inspect(ctx, i)
+                    .await
+                    .is_some_and(|state| state != held_state)
+                {
                     held = false;
                     break;
                 }
@@ -1277,585 +1199,6 @@ impl Workload for DepartedStragglerWorkload {
             self.recovered,
             "corpus: a departed straggler's slot recovers when it returns"
         );
-        Ok(())
-    }
-}
-
-// --- the §5.1.2 snapshot-lifecycle compound -----------------------------------
-
-/// The §5.1.2 compound run (see the module doc): all four snapshot-recovery
-/// paths in one scripted scenario.
-pub(crate) struct SnapshotLifecycleWorkload {
-    completed: bool,
-}
-
-impl SnapshotLifecycleWorkload {
-    pub(crate) fn new() -> Self {
-        Self { completed: false }
-    }
-}
-
-#[async_trait]
-impl Workload for SnapshotLifecycleWorkload {
-    fn name(&self) -> &'static str {
-        "corpus-snapshot-lifecycle"
-    }
-
-    #[allow(clippy::too_many_lines)] // one linear scripted compound scenario
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Phase A: five decided, fully replicated slots.
-        let Primed {
-            servers,
-            clients,
-            client_id,
-            mut commands,
-            states,
-        } = primed_cluster(ctx, 5, "lifecycle").await?;
-        let time = ctx.time().clone();
-        let state = ctx.state();
-        let state5 = states[5];
-
-        // Phase B — path 1, local re-replay at floor 0: rot one node's
-        // snapshot (making it log-only) and restart it; the boot scan resets
-        // the application and the local log rebuilds the exact state.
-        corpus_corrupt_snapshot(state, &servers[2], 2);
-        lifecycle::restart(ctx, &servers[2]).await;
-        let replayed = wait_replicated(
-            ctx,
-            &servers[2..],
-            &(0..5).collect(),
-            &state5,
-            time.now() + PRIME_BUDGET,
-        )
-        .await;
-        assert_always!(
-            replayed,
-            "corpus: a log-only node replays its exact state from its local log"
-        );
-
-        // Phase C: crash node 0 and hold it down; the survivors decide three
-        // more slots and a Truncate past all of them, raising both floors.
-        lifecycle::crash(ctx, &servers[0]).await;
-        commands.extend(prime_prefix(ctx, &clients, client_id, 3, Some(0), 5, 5).await?);
-        let compacted = clients
-            .compact_until_accepted(ctx, 7, Some(0), time.now() + PRIME_BUDGET)
-            .await;
-        assert_always!(
-            compacted,
-            "corpus: a survivor accepts compaction past the held-down node"
-        );
-        // Under the #101 coupling, compaction decides two commands: the Snap
-        // marker at slot 8 (the decided snapshot point that must cover the
-        // truncation), then the Truncate at slot 9.
-        commands.push(Command::Control(Control::Snap { at_index: Slot(8) }));
-        commands.push(Command::Control(Control::Truncate { up_to: Slot(7) }));
-        let full_state = expected_states(&commands)[10];
-        let floors_raised = {
-            let deadline = time.now() + PRIME_BUDGET;
-            loop {
-                let both = servers[1..]
-                    .iter()
-                    .all(|ip| corpus_disk_probe(state, ip).is_some_and(|probe| probe.floor == 8));
-                if both {
-                    break true;
-                }
-                if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                    break false;
-                }
-                time.sleep(POLL_INTERVAL).await.ok();
-            }
-        };
-        assert_always!(
-            floors_raised,
-            "corpus: both survivors truncate past the held-down node"
-        );
-        if !floors_raised {
-            drop(clients);
-            return Err(invalid("survivors did not truncate"));
-        }
-
-        // Phase D: crash both survivors and hold them down; rot the held
-        // node's snapshot and restart it alone. It re-replays its retained log
-        // locally (floor 0) and campaigns unanswered, its ballot and promise
-        // climbing.
-        lifecycle::crash(ctx, &servers[1]).await;
-        lifecycle::crash(ctx, &servers[2]).await;
-        corpus_corrupt_snapshot(state, &servers[0], 0);
-        lifecycle::restart(ctx, &servers[0]).await;
-        time.sleep(Duration::from_secs(4)).await.ok();
-
-        // Phase E — paths 2 and 3: restart the survivors. The lone node's
-        // next campaign prepares from slot 5, below both floors — refused by
-        // the floor guard (path 3) — while its campaign catch-up probe draws
-        // the whole-blob InstallSnapshot that heals it (path 2). Both facts
-        // are read from the audit: a survivor's refusal count rises, and node
-        // 0 lands a snapshot at or past the point.
-        let audit = audit_world(state);
-        let refusals_before = audit.below_floor_refusals_from(1);
-        lifecycle::restart(ctx, &servers[1]).await;
-        lifecycle::restart(ctx, &servers[2]).await;
-        let refusal = wait_until(ctx, time.now() + OUTCOME_BUDGET, || {
-            audit.below_floor_refusals_from(1) > refusals_before
-        })
-        .await;
-        assert_always!(
-            refusal,
-            "corpus: a below-floor campaign is refused by a truncated acceptor"
-        );
-        let installed = wait_until(ctx, time.now() + OUTCOME_BUDGET, || {
-            audit.snapshot_landed_at_least(0, 8)
-        })
-        .await;
-        assert_always!(
-            installed,
-            "corpus: a below-floor node recovers by whole-blob snapshot install"
-        );
-        let healed = clients
-            .wait_all_at(ctx, &full_state, time.now() + OUTCOME_BUDGET)
-            .await;
-        assert_always!(
-            healed,
-            "corpus: the lifecycle cluster converges after the snapshot heal"
-        );
-        if !healed {
-            drop(clients);
-            return Err(invalid("cluster did not converge after the install"));
-        }
-
-        // Phase F — path 4, truncated past everyone: every node now sits above
-        // a raised floor; rot every live snapshot AND every chunk of every
-        // retained decided point (the survivors hold the point at slot 8 —
-        // without rotting it too, #101's local point restore would rescue
-        // them), then restart everyone atomically. The folded prefix has no
-        // custody left anywhere — the whole cluster must wait at applied
-        // count 0, fabricating nothing.
-        for (n, ip) in servers.iter().enumerate() {
-            let node = u64::try_from(n).unwrap_or(u64::MAX);
-            corpus_corrupt_snapshot(state, ip, node);
-            if let Some(probe) = corpus_disk_probe(state, ip)
-                && probe.snap_point.is_some()
-            {
-                let mut chunk = 0_u32;
-                while corpus_corrupt_snap_chunk(state, ip, node, chunk) {
-                    chunk += 1;
-                }
-            }
-        }
-        let ground_truth = unrecoverable_slots(state);
-        let folded: BTreeSet<u64> = (0..8).collect();
-        assert_always!(
-            folded.is_subset(&ground_truth),
-            "corpus: the truncated-past-everyone fold is unrecoverable ground truth",
-            { "world" => ground_truth.len() }
-        );
-        for ip in &servers {
-            lifecycle::restart(ctx, ip).await;
-        }
-        let waiting = clients
-            .wait_all_at(ctx, &ChainState::default(), time.now() + OUTCOME_BUDGET)
-            .await;
-        assert_always!(
-            waiting,
-            "corpus: a truncated cluster with rotted snapshots resets and waits"
-        );
-        let held = clients
-            .hold_all_at(ctx, &ChainState::default(), WAIT_SETTLE)
-            .await;
-        assert_always!(
-            held,
-            "corpus: the truncated-past-everyone wait never fabricates state"
-        );
-        self.completed = waiting && held;
-        drop(clients);
-        Ok(())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        assert_sometimes!(
-            self.completed,
-            "corpus: the snapshot-lifecycle compound reaches all four recovery paths"
-        );
-        Ok(())
-    }
-}
-
-// --- the #101 per-chunk mask corpus -------------------------------------------
-
-/// Where a chunk-mask run's mask comes from (bit index
-/// `node * chunk_count + chunk` over the decided point's blob).
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ChunkMaskSource {
-    /// An explicit mask (the canonical nextest cases).
-    Fixed(u32),
-    /// Drawn from the run's seeded RNG (the hunt axis's dense sampling).
-    Seeded,
-}
-
-/// What a chunk-mask case does to node 0's **live** application beside the
-/// chunk mask.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChunkLiveCase {
-    /// The live states stay healthy: chunk repair is the only heal.
-    Intact,
-    /// Node 0's live snapshot is rotted too, driving the point-restore /
-    /// whole-blob race on top of the chunk repair.
-    Lost,
-    /// As [`ChunkLiveCase::Lost`], and the node **crashes after the point
-    /// restore, before its sync** (`Seam::AfterChunkRestoreBeforeSync`,
-    /// #146): the one durability seam the swarm never reaches, scripted. The
-    /// analytic outcome: the staged restore dies with the storage handle,
-    /// the repaired chunks — flushed before the restore — stay clean and
-    /// durable, the reboot lands below the floor again with nothing pending
-    /// to repair (so the point is never restored a second time), and the
-    /// node heals through a peer's `InstallSnapshot` instead. The cluster
-    /// converges, every assemblable chunk clean. The race between the
-    /// point restore and the whole-blob install is scripted, not left to
-    /// timing: while the crash is still owed no node offers a whole-blob
-    /// snapshot (`crate::hooks`), so the restore is the only heal that can
-    /// run first and the seam is visited on every mask that gives node 0
-    /// an assemblable rotted chunk.
-    LostThenRestoreCrash,
-}
-
-/// Per-chunk corruption masks over the retained decided snapshot point (#101):
-/// a fully replicated prefix is compacted through the Snap/Truncate coupling,
-/// every node retains the byte-identical point, and the mask rots chunks per
-/// node. A chunk with ≥ 1 clean copy anywhere must be repaired back to clean
-/// on every holder (chunk repair is the only heal — the live application
-/// states stay healthy, so no whole-blob path runs); a chunk with 0 clean
-/// copies must stay faulty on every holder, never fabricated, while the
-/// cluster itself stays fully available (the live states are custody). The
-/// [`ChunkLiveCase`] says what happens to node 0's live snapshot beside the
-/// mask.
-pub(crate) struct ChunkMaskWorkload {
-    source: ChunkMaskSource,
-    live: ChunkLiveCase,
-    repaired_clean: bool,
-    unassemblable_held: bool,
-    restore_crash_recovered: bool,
-}
-
-impl ChunkMaskWorkload {
-    pub(crate) fn new(source: ChunkMaskSource, live: ChunkLiveCase) -> Self {
-        Self {
-            source,
-            live,
-            repaired_clean: false,
-            unassemblable_held: false,
-            restore_crash_recovered: false,
-        }
-    }
-}
-
-#[async_trait]
-impl Workload for ChunkMaskWorkload {
-    fn name(&self) -> &'static str {
-        "corpus-chunk-mask"
-    }
-
-    #[allow(clippy::too_many_lines)] // one linear scripted case
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Phase 1: six decided slots, then compaction through the coupling —
-        // the Snap marker at slot 6, the Truncate at slot 7, floor 6, and the
-        // byte-identical decided point retained on every node. Full
-        // replication before compaction: every node must hold and apply the
-        // whole prefix, so no node is below the floor when the coupling's
-        // Snap + Truncate decide — all three then record the identical point
-        // themselves (the mask assumes three holders).
-        let Primed {
-            servers,
-            clients,
-            commands,
-            ..
-        } = primed_cluster(ctx, 6, "chunk corpus").await?;
-        let time = ctx.time().clone();
-        let state = ctx.state();
-        let compacted = {
-            // An `accepted: true` compact is a *proposal*, not a decision: the
-            // proposing leader can die before the Truncate's accepts leave it,
-            // and nothing re-proposes a lost control command. Re-ask until the
-            // floor genuinely rises (the tail identifier below absorbs any
-            // extra Truncate decisions a re-ask produces).
-            let deadline = time.now() + PRIME_BUDGET;
-            loop {
-                if !clients.compact_until_accepted(ctx, 5, None, deadline).await {
-                    break false;
-                }
-                let grace = deadline.min(time.now() + FLOOR_GRACE);
-                let mut risen = false;
-                while time.now() < grace && !ctx.shutdown().is_cancelled() {
-                    if servers.iter().all(|ip| {
-                        corpus_disk_probe(state, ip).is_some_and(|probe| probe.floor == 6)
-                    }) {
-                        risen = true;
-                        break;
-                    }
-                    time.sleep(POLL_INTERVAL).await.ok();
-                }
-                if risen {
-                    break true;
-                }
-                if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                    break false;
-                }
-            }
-        };
-        assert_always!(
-            compacted,
-            "corpus: compaction is accepted once the point is quorum-held"
-        );
-        // Settle: wait for the cluster to agree on ONE post-compaction
-        // configuration (floor 6, a shared retained point, clean chunks, equal
-        // applied state everywhere), then identify the decided control tail
-        // behind it. The canonical tail is `Snap@6 + Truncate{5}`, but chaos
-        // can legitimately decide extra markers, truncate re-decisions, and
-        // gap-fill Noops — `identify_control_tail` derives the point and full
-        // states analytically for whichever legitimate tail actually decided,
-        // and refuses anything no tail explains.
-        let observed = {
-            let deadline = time.now() + PRIME_BUDGET;
-            loop {
-                let probes: Vec<_> = servers
-                    .iter()
-                    .map(|ip| corpus_disk_probe(state, ip))
-                    .collect();
-                // Quiescent, not merely equal: no node retains an accepted
-                // record its application has not applied yet. A re-asked
-                // compaction can leave a Truncate *in flight* — accepted on
-                // every disk, not yet committed — at the very poll where the
-                // applied states happen to agree; settling there derives the
-                // expected full state from a tail one decision short, and the
-                // availability judgement below then waits for a state the
-                // cluster has legitimately moved past (seed
-                // 17477318529130525978, mask 646: settled at applied 8 while
-                // the re-asked Truncate at slot 8 was accepted everywhere,
-                // then every node converged to applied 9). Every decided slot
-                // is one applied command (user, Snap, Truncate or Noop), so
-                // the applied count is one past the highest applied slot.
-                let shape = probes.iter().all(|p| {
-                    p.as_ref().is_some_and(|probe| {
-                        probe.floor == 6
-                            && probe.snap_point.is_some()
-                            && probe.faulty_chunks.is_empty()
-                            && probe
-                                .clean_slots
-                                .last()
-                                .is_none_or(|slot| *slot < probe.applied_count)
-                    })
-                });
-                let agreed = shape
-                    && probes
-                        .iter()
-                        .all(|p| match (probes[0].as_ref(), p.as_ref()) {
-                            (Some(a), Some(b)) => {
-                                a.applied_count == b.applied_count
-                                    && a.chain_hash == b.chain_hash
-                                    && a.snap_point == b.snap_point
-                            }
-                            _ => false,
-                        });
-                if agreed {
-                    break probes[0]
-                        .as_ref()
-                        .map(|p| (p.applied_count, p.chain_hash, p.snap_point.unwrap_or(0)));
-                }
-                if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                    break None;
-                }
-                time.sleep(POLL_INTERVAL).await.ok();
-            }
-        };
-        let matched = observed.and_then(|(applied, hash, point)| {
-            identify_control_tail(&commands, applied, hash, point)
-        });
-        if matched.is_none() {
-            // Failure diagnostic (fires only on the red path).
-            for (n, ip) in servers.iter().enumerate() {
-                let probe = corpus_disk_probe(state, ip);
-                eprintln!(
-                    "CORPUS-DIAG chunk settle node {n}: floor={:?} point={:?} applied={:?} observed={observed:?}",
-                    probe.as_ref().map(|p| p.floor),
-                    probe.as_ref().map(|p| p.snap_point),
-                    probe.as_ref().map(|p| (p.applied_count, p.chain_hash)),
-                );
-            }
-            eprintln!("CORPUS-DIAG audit: {}", audit_world(state).diagnostics());
-        }
-        assert_always!(
-            matched.is_some(),
-            "corpus: every node retains the decided point before the chunk mask"
-        );
-        let Some((point_state, full)) = matched else {
-            drop(clients);
-            return Err(invalid("chunk corpus did not settle before injection"));
-        };
-        let chunk_count = snap_chunk_count(point_state.encode().len());
-        assert_always!(
-            chunk_count == 5,
-            "corpus: the chunk grid matches the decided point's blob",
-            { "chunks" => chunk_count }
-        );
-
-        // Phase 2: derive and inject the chunk mask, atomically with the
-        // restarts whose boot scans classify it.
-        let space: u32 = 1 << (u32::try_from(servers.len()).unwrap_or(3) * chunk_count);
-        let mask = match self.source {
-            ChunkMaskSource::Fixed(mask) => mask % space,
-            ChunkMaskSource::Seeded => {
-                u32::try_from(ctx.random().random::<u64>() % u64::from(space)).unwrap_or(0)
-            }
-        };
-        tracing::info!(mask, "corpus_chunk_mask_selected");
-        let mut unassemblable: BTreeSet<u32> = BTreeSet::new();
-        for chunk in 0..chunk_count {
-            let mut rotted = 0_usize;
-            for (n, ip) in servers.iter().enumerate() {
-                let bit = u32::try_from(n).unwrap_or(0) * chunk_count + chunk;
-                if mask & (1_u32 << bit) != 0 {
-                    let landed = corpus_corrupt_snap_chunk(
-                        state,
-                        ip,
-                        u64::try_from(n).unwrap_or(u64::MAX),
-                        chunk,
-                    );
-                    assert_always!(
-                        landed,
-                        "corpus: a chunk mask injection lands on a clean chunk",
-                        { "node" => n, "chunk" => chunk }
-                    );
-                    rotted += 1;
-                }
-            }
-            if rotted == servers.len() {
-                unassemblable.insert(chunk);
-            }
-        }
-        if self.live != ChunkLiveCase::Intact {
-            corpus_corrupt_snapshot(state, &servers[0], 0);
-        }
-        // Cross-check: chunk rot alone never strands a slot — the live
-        // application states (and, with one live rot, the two healthy peers)
-        // remain custody, so the world's ground truth must stay empty.
-        let ground_truth = unrecoverable_slots(state);
-        assert_always!(
-            ground_truth.is_empty(),
-            "corpus: chunk rot alone leaves every slot recoverable",
-            { "world" => ground_truth.len() }
-        );
-        for ip in &servers {
-            lifecycle::restart(ctx, ip).await;
-        }
-
-        // Phase 3: judge. Assemblable chunks must heal back to clean on every
-        // holder (chunk repair is the only path — live states stay healthy);
-        // unassemblable chunks must stay faulty everywhere, never fabricated;
-        // and the cluster converges to the full state either way.
-        let deadline = time.now() + OUTCOME_BUDGET;
-        let converged = clients.wait_all_at(ctx, &full, deadline).await;
-        assert_always!(
-            converged,
-            "corpus: the cluster stays available under chunk rot",
-            { "mask" => mask }
-        );
-        let repaired = {
-            loop {
-                let healed = servers.iter().all(|ip| {
-                    corpus_disk_probe(state, ip).is_some_and(|probe| {
-                        probe
-                            .faulty_chunks
-                            .iter()
-                            .all(|chunk| unassemblable.contains(chunk))
-                    })
-                });
-                if healed {
-                    break true;
-                }
-                if time.now() >= deadline || ctx.shutdown().is_cancelled() {
-                    break false;
-                }
-                time.sleep(POLL_INTERVAL).await.ok();
-            }
-        };
-        assert_always!(
-            repaired,
-            "corpus: every assemblable chunk is repaired from a peer",
-            { "mask" => mask }
-        );
-        // The settle hold: nothing may resolve an unassemblable chunk — a
-        // late "repair" of a chunk with zero clean copies would be fabricated
-        // bytes (the write-side identity assert is the second line of
-        // defense).
-        let held = {
-            let until = time.now() + WAIT_SETTLE;
-            let mut ok = true;
-            while time.now() < until && !ctx.shutdown().is_cancelled() {
-                for (n, ip) in servers.iter().enumerate() {
-                    let bits_for_node = |chunk: u32| {
-                        let bit = u32::try_from(n).unwrap_or(0) * chunk_count + chunk;
-                        mask & (1_u32 << bit) != 0
-                    };
-                    let still_faulty = corpus_disk_probe(state, ip).is_some_and(|probe| {
-                        unassemblable
-                            .iter()
-                            .filter(|chunk| bits_for_node(**chunk))
-                            .all(|chunk| probe.faulty_chunks.contains(chunk))
-                    });
-                    if !still_faulty {
-                        ok = false;
-                    }
-                }
-                if !ok {
-                    break;
-                }
-                time.sleep(POLL_INTERVAL).await.ok();
-            }
-            ok
-        };
-        assert_always!(
-            held,
-            "corpus: a chunk with no clean copy is never fabricated",
-            { "mask" => mask }
-        );
-        self.repaired_clean =
-            converged && repaired && (mask != 0 || self.live != ChunkLiveCase::Intact);
-        self.unassemblable_held = held && !unassemblable.is_empty();
-        if self.live == ChunkLiveCase::LostThenRestoreCrash {
-            // Non-vacuity: the case exists to visit the seam, so a run in
-            // which the scripted crash never fired — node 0 never reached
-            // the restore — observed nothing and must not pass silently.
-            // The mask must give node 0 at least one assemblable rotted
-            // chunk, or no repair completes and no restore runs.
-            let fired = crate::hooks::scripted_crash_fired(state);
-            assert_always!(
-                fired,
-                "corpus: the scripted crash after the point restore fired",
-                { "mask" => mask }
-            );
-            self.restore_crash_recovered = fired && converged && repaired;
-        }
-        drop(clients);
-        Ok(())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        assert_sometimes!(
-            self.repaired_clean,
-            "corpus: a chunk mask heals through per-chunk repair"
-        );
-        assert_sometimes!(
-            self.unassemblable_held,
-            "corpus: an unassemblable chunk is correctly left faulty"
-        );
-        if self.live == ChunkLiveCase::LostThenRestoreCrash {
-            assert_sometimes!(
-                self.restore_crash_recovered,
-                "corpus: a node crashed after its point restore recovers and the cluster converges"
-            );
-        }
         Ok(())
     }
 }

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Message, NodeId, Party, SessionEntry, Slot, Value,
+    Ballot, ClientId, ClientSeq, Command, Message, NodeId, Party, SessionEntry, Slot,
 };
 
 use super::codec::{
@@ -87,27 +87,15 @@ fn pending_commands_from_proto(
     )
 }
 
-fn snapshot_to_proto(
-    from: NodeId,
-    ballot: Ballot,
-    chosen_index: Slot,
-    snapshot: &Value,
-    sessions: &[SessionEntry],
-) -> internal::consensus_message::Kind {
-    internal::consensus_message::Kind::InstallSnapshot(internal::InstallSnapshot {
-        from: from.0,
-        ballot: Some(ballot_to_proto(ballot)),
-        chosen_index: chosen_index.0,
-        snapshot: snapshot.0.clone(),
-        sessions: sessions
-            .iter()
-            .map(|&(client, seq, slot)| internal::SessionRecord {
-                client: client.0,
-                seq: seq.0,
-                slot: slot.0,
-            })
-            .collect(),
-    })
+fn sessions_to_proto(sessions: &[SessionEntry]) -> Vec<internal::SessionRecord> {
+    sessions
+        .iter()
+        .map(|&(client, seq, slot)| internal::SessionRecord {
+            client: client.0,
+            seq: seq.0,
+            slot: slot.0,
+        })
+        .collect()
 }
 
 /// Convert one domain message into its typed protobuf representation.
@@ -209,13 +197,15 @@ pub(crate) fn message_to_proto(
                 entries: slot_commands_to_proto(entries),
             })
         }
-        Message::InstallSnapshot {
+        Message::TrimmedTo {
             from,
-            ballot,
-            chosen_index,
-            snapshot,
+            point,
             sessions,
-        } => snapshot_to_proto(*from, *ballot, *chosen_index, snapshot, sessions),
+        } => Kind::TrimmedTo(internal::TrimmedTo {
+            from: from.0,
+            point: point.0,
+            sessions: sessions_to_proto(sessions),
+        }),
         Message::Heartbeat {
             from,
             ballot,
@@ -239,34 +229,6 @@ pub(crate) fn message_to_proto(
             ballot: Some(ballot_to_proto(*ballot)),
             seq: *seq,
             chosen: chosen.map(|s| s.0),
-        }),
-        Message::SnapAck { from, at_index } => Kind::SnapAck(internal::SnapAck {
-            from: from.0,
-            at_index: at_index.0,
-        }),
-        Message::SnapChunkRequest {
-            from,
-            at_index,
-            chunks,
-        } => Kind::SnapChunkRequest(internal::SnapChunkRequest {
-            from: from.0,
-            at_index: at_index.0,
-            chunks: chunks.clone(),
-        }),
-        Message::SnapChunkResponse {
-            from,
-            at_index,
-            chunks,
-        } => Kind::SnapChunkResponse(internal::SnapChunkResponse {
-            from: from.0,
-            at_index: at_index.0,
-            chunks: chunks
-                .iter()
-                .map(|(index, bytes)| internal::SnapChunk {
-                    index: *index,
-                    bytes: bytes.0.clone(),
-                })
-                .collect(),
         }),
         Message::Relinquish {
             from,
@@ -366,11 +328,9 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             entries: slot_commands_from_proto(message.entries)?,
         }),
-        Kind::InstallSnapshot(message) => Ok(Message::InstallSnapshot {
+        Kind::TrimmedTo(message) => Ok(Message::TrimmedTo {
             from: NodeId(message.from),
-            ballot: ballot_from_proto(message.ballot)?,
-            chosen_index: Slot(message.chosen_index),
-            snapshot: Value(message.snapshot),
+            point: Slot(message.point),
             sessions: message
                 .sessions
                 .into_iter()
@@ -395,24 +355,6 @@ pub(crate) fn message_from_proto(
             ballot: ballot_from_proto(message.ballot)?,
             seq: message.seq,
             chosen: message.chosen.map(Slot),
-        }),
-        Kind::SnapAck(message) => Ok(Message::SnapAck {
-            from: NodeId(message.from),
-            at_index: Slot(message.at_index),
-        }),
-        Kind::SnapChunkRequest(message) => Ok(Message::SnapChunkRequest {
-            from: NodeId(message.from),
-            at_index: Slot(message.at_index),
-            chunks: message.chunks,
-        }),
-        Kind::SnapChunkResponse(message) => Ok(Message::SnapChunkResponse {
-            from: NodeId(message.from),
-            at_index: Slot(message.at_index),
-            chunks: message
-                .chunks
-                .into_iter()
-                .map(|chunk| (chunk.index, Value(chunk.bytes)))
-                .collect(),
         }),
         Kind::Relinquish(message) => Ok(Message::Relinquish {
             from: NodeId(message.from),

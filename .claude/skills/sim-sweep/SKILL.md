@@ -1,6 +1,6 @@
 ---
 name: sim-sweep
-description: Run and interpret paros's simulation campaigns - the coverage-guided sancov sweep (cargo xtask sim run paros-chain, the CI gate that must saturate), the raw hunt binary sim-paros-hunt with its axes (main, canary, corpus, corpus-chunks), its replay/explore commands, and the evidence budgets (2,000-3,000 seeds normal, 10,000 only for a substantial change). Use when asked to run the sim, hunt for a bug, prove a fix saturates, check determinism after touching randomness or the process lifecycle, or when deciding which of the two runners a task needs.
+description: Run and interpret paros's simulation campaigns - the coverage-guided sancov sweep (cargo xtask sim run paros-chain, the CI gate that must saturate), the raw hunt binary sim-paros-hunt with its axes (main, canary, corpus), its replay/explore commands, and the evidence budgets (2,000-3,000 seeds normal, 10,000 only for a substantial change). Use when asked to run the sim, hunt for a bug, prove a fix saturates, check determinism after touching randomness or the process lifecycle, or when deciding which of the two runners a task needs.
 argument-hint: [axis or seed]
 ---
 
@@ -11,7 +11,7 @@ saturation, and the sweep is the wrong tool for volume.
 
 | Need | Command | What it proves |
 |---|---|---|
-| **saturation** (every `sometimes`/`reachable` fired, sancov coverage plateaued) | `cargo xtask sim run paros-chain` (CI runs `run-all`; today they are the same single binary) | the CI gate: exits 1 on any violation, failed run, unfired gate or convergence timeout, then runs both corpus axes |
+| **saturation** (every `sometimes`/`reachable` fired, sancov coverage plateaued) | `cargo xtask sim run paros-chain` (CI runs `run-all`; today they are the same single binary) | the CI gate: exits 1 on any violation, failed run, unfired gate or convergence timeout, then runs the corpus axis (the E1 masks) |
 | **volume** through the safety oracles, no saturation claim | `cargo run -p paros-sim-runner --bin sim-paros-hunt [axis] [iterations]` | a failing seed, or "N seeds green" as evidence |
 | **replay one seed** | `sim-paros-hunt replay-main <seed>` | GREEN/RED for that draw schedule on this build |
 | **fork-explore around one seed** | `sim-paros-hunt explore-main <seed>` | timelines near the seed (`EXPLORATION_TIMELINES_PER_SEED = 8`) |
@@ -25,11 +25,11 @@ for volume.
 ## Hunt axes and replay commands (`crates/paros-sim-runner/src/hunt.rs`)
 
 Axes: `main` (default; the combined swarm campaign), `canary`, `corpus` (CTRL
-E1 masks, one per seed), `corpus-chunks` (snapshot-chunk masks). Iterations
-default to **2000**. Replays: `replay-main`, `replay-canary`, `explore-main`,
-`replay-corpus <seed>`, `replay-corpus-mask <mask>`, `replay-bare-quorum`,
-`replay-lifecycle`, `replay-departed`, `replay-chunk-mask <mask>`,
-`replay-chunk-seed`. Neither binary reads environment variables;
+E1 masks, one per seed). Iterations default to **2000**. Replays:
+`replay-main`, `replay-canary`, `explore-main`, `replay-corpus <seed>`,
+`replay-corpus-mask <mask>`, `replay-bare-quorum`, `replay-departed`. (The
+snapshot axes — `corpus-chunks`, `replay-lifecycle`, `replay-chunk-*` — went
+with snapshots in #186.) Neither binary reads environment variables;
 `SMOKE_ITERATIONS`, `COVERAGE_ITERATIONS`, `CORPUS_CI_ITERATIONS` are `pub
 const`s in `crates/paros-sim/src/lib.rs`, and the flake exports `RUST_LOG=debug`
 while moonpool's sim subscriber stays floored at INFO.

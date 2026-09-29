@@ -64,8 +64,8 @@ on the wire.
 
 Act I is single-decree Paxos: three acceptors, one or two proposers, one slot, no
 clock and no storage. Act II is the replicated log: three `ColocatedNode`s, a
-client, and disks that survive a crash. Act III adds truncation, snapshots and a
-second client. Act IV adds the quorum systems, the matchmaker plane, disk faults
+client, and disks that survive a crash. Act III adds truncation, the trim-point
+jump and a second client. Act IV adds the quorum systems, the matchmaker plane, disk faults
 and a wipe.
 
 | Level | What you do by hand | What it teaches | Field guide |
@@ -83,8 +83,8 @@ and a wipe.
 | [`act2/the-permanent-gap`](play/#act2/the-permanent-gap) | Drop exactly slot 1's Accepts, let slot 2 be chosen, crash the leader, then fill the hole | A slot no Promise reports wedges the whole cluster forever unless the new leader fills it | [The stable leader](stable-leader.md) |
 | [`act2/what-survives-a-crash`](play/#act2/what-survives-a-crash) | Crash and restart at each step of a decision, and say what the durable record keeps | A chosen value must overwrite a stale lower-ballot accept, or a restart resurrects it | [Crash and restart safety](restart-safety.md) |
 | [`act2/the-read-that-lies`](play/#act2/the-read-that-lies) | Decide whether a leader that has already been deposed may answer a read | Leadership is a belief; a read has to confirm it against a quorum | [Why reads are not free](linearizable-reads.md) |
-| [`act3/truncate-by-consensus`](play/#act3/truncate-by-consensus) | Ask the leader to compact, take its refusal, retry, and watch each node move its own floor | The floor is a decided control command, so one decision gives one cluster-wide floor | [Truncation and snapshot restore](truncation-and-snapshots.md) |
-| [`act3/the-stranded-node`](play/#act3/the-stranded-node) | Strand a node below the floor, pull the snapshot, and state its promise after the install | A snapshot restores the log and never a promise: the node keeps `max(promise, ballot)` | [Truncation and snapshot restore](truncation-and-snapshots.md) |
+| [`act3/truncate-by-consensus`](play/#act3/truncate-by-consensus) | Ask the leader to compact and watch each node move its own floor when its walk reaches the slot | The floor is a decided control command, so one decision gives one cluster-wide floor | [Truncation and the trim point](truncation-and-snapshots.md) |
+| [`act3/the-stranded-node`](play/#act3/the-stranded-node) | Strand a node below the floor, let a peer answer its catch-up with the trim point, and state its promise after the jump | A trim-point jump moves the floor and never a promise: the node keeps the promise it had | [Truncation and the trim point](truncation-and-snapshots.md) |
 | [`act3/read-index`](play/#act3/read-index) | Capture the index, confirm with a beat, and judge one ack that answers an older beat | Capture, confirm, serve — and an ack to an older beat proves nothing | [Why reads are not free](linearizable-reads.md) |
 | [`act3/the-fresh-leader-trap`](play/#act3/the-fresh-leader-trap) | Refuse a read at a new leader that holds a valid quorum and a lagging chosen index | The read floor: a fresh quorum does not make a short applied prefix current | [Why reads are not free](linearizable-reads.md) |
 | [`act3/linearizable-or-not`](play/#act3/linearizable-or-not) | Produce a history with a read across a leader change, then try to break it | Linearizability as three conditions over the client's own program order | [Why reads are not free](linearizable-reads.md) |

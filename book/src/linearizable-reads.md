@@ -116,8 +116,9 @@ and the fresh leader both break.
 
 Condition 1 leans on the word *acknowledged*, so the ack must mean what it says. A
 slot is **chosen** when a quorum has voted for it, and pipelining makes that true
-at slot 6 while slot 5 is still open. A slot is **applied** when this node hands it
-to its state machine, strictly in order. A node that acks a chosen-but-unapplied
+at slot 6 while slot 5 is still open. A slot is **applied** when this node's
+contiguous walk reaches it, strictly in order: from then on a client that reads the
+log through this node can see it and fold it into its own state. A node that acks a chosen-but-unapplied
 command promises the client something that no node can read back yet. paros had
 that bug: `mark_chosen` recorded a command as applied the moment the slot was
 learned chosen. The fix is a definition rather than a special case, because

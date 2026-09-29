@@ -32,7 +32,6 @@
   --phase-commit: #c97a2b;
   --phase-heartbeat: #8a7a5c;
   --phase-catchup: #6b4f8a;
-  --phase-snapshot: #2f7d7a;
   --phase-read: #a05a9c;
   --phase-handoff: #8a6b2f;
   --phase-match: #4a6b8a;
@@ -78,7 +77,6 @@
     --phase-commit: #e2a463;
     --phase-heartbeat: #bda986;
     --phase-catchup: #a98ad0;
-    --phase-snapshot: #63bdb9;
     --phase-read: #d68fce;
     --phase-handoff: #cfae6a;
     --phase-match: #8fb2d6;
@@ -362,7 +360,6 @@ code,
 .phase-commit .dot { fill: var(--phase-commit); stroke: var(--phase-commit); }
 .phase-heartbeat .dot { fill: var(--phase-heartbeat); stroke: var(--phase-heartbeat); }
 .phase-catchup .dot { fill: var(--phase-catchup); stroke: var(--phase-catchup); }
-.phase-snapshot .dot { fill: var(--phase-snapshot); stroke: var(--phase-snapshot); }
 .phase-read .dot { fill: var(--phase-read); stroke: var(--phase-read); }
 .phase-handoff .dot { fill: var(--phase-handoff); stroke: var(--phase-handoff); }
 .phase-match .dot { fill: var(--phase-match); stroke: var(--phase-match); }
@@ -550,7 +547,6 @@ code,
 .wire-swatch.phase-commit { background: var(--phase-commit); }
 .wire-swatch.phase-heartbeat { background: var(--phase-heartbeat); }
 .wire-swatch.phase-catchup { background: var(--phase-catchup); }
-.wire-swatch.phase-snapshot { background: var(--phase-snapshot); }
 .wire-swatch.phase-read { background: var(--phase-read); }
 .wire-swatch.phase-handoff { background: var(--phase-handoff); }
 .wire-swatch.phase-match { background: var(--phase-match); }
@@ -828,7 +824,7 @@ code,
   letter-spacing: 0.04em;
 }
 
-/* A control command is paros's own: a Noop, a Truncate, a Snap. The dashed
+/* A control command is paros's own: a Noop or a Truncate. The dashed
  * edge and the orange say that the slot holds a decision about the log, and
  * not a value that a client wrote. */
 .slot.control rect {
@@ -847,12 +843,6 @@ code,
 
 .slot.control .slot-label {
   font-style: italic;
-}
-
-/* A snapshot is the only message that carries application state, so its dot
- * gets a heavier edge as well as its own colour. */
-.wire-dot.phase-snapshot .dot {
-  stroke-width: 3;
 }
 
 /* ---- the client history ---- */
@@ -956,7 +946,6 @@ code,
 .wire-swatch.reply.phase-commit { color: var(--phase-commit); }
 .wire-swatch.reply.phase-heartbeat { color: var(--phase-heartbeat); }
 .wire-swatch.reply.phase-catchup { color: var(--phase-catchup); }
-.wire-swatch.reply.phase-snapshot { color: var(--phase-snapshot); }
 .wire-swatch.reply.phase-read { color: var(--phase-read); }
 .wire-swatch.reply.phase-handoff { color: var(--phase-handoff); }
 .wire-swatch.reply.phase-match { color: var(--phase-match); }

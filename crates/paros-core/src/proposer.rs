@@ -335,7 +335,7 @@ pub struct Proposer<Id, V> {
     recovery: Option<Recovery<V>>,
     /// Next slot a fresh proposal is allocated at. The **one** piece of this
     /// component that outlives a leadership: it is derived from the durable
-    /// accepted log (at boot, at a snapshot install, at a won Phase 1), not
+    /// accepted log (at boot, at a trim-point jump, at a won Phase 1), not
     /// from a Phase-1 tally, and a node that holds no leadership still
     /// refuses to let a replayed handoff rewind it.
     next_slot: Slot,
