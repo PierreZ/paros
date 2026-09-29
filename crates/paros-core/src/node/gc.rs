@@ -290,6 +290,16 @@ impl ColocatedNode {
     /// a leader whose GC actually reached a matchmaker quorum
     /// (`InspectReply::gc_watermark`, populated by
     /// [`ColocatedNode::gc_effective`]).
+    ///
+    /// What the evidence cannot say is the **operator's half** of the
+    /// contract (#198): the watermark proves every configuration *below* it
+    /// forgotten, never that no configuration registered *above* it names
+    /// the node — a reconfiguration re-adding it may already be registered
+    /// and still on its way here, and nothing this node holds can see it.
+    /// The operator retires only a node no reconfiguration it asked for
+    /// above the watermark names. A node retired past that is a member lost
+    /// for good in the configuration that re-added it: a majority or a
+    /// flexible split may absorb it, a grid's column never decides again.
     #[must_use]
     pub fn may_retire(&self, watermark: Ballot) -> bool {
         self.config.has_matchmakers()

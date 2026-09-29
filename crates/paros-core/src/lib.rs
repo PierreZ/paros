@@ -86,8 +86,8 @@ mod types;
 mod write;
 
 pub use matchmaker::{
-    Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchRefusal, MatchReply,
-    MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
+    Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal,
+    MatchReply, MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
     MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap,
     REGISTRY_PAGE, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady,
     ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryStorage,
@@ -99,9 +99,9 @@ pub use membership::{
 };
 pub use message::{Audience, Message, Party};
 pub use node::{
-    ColocatedNode, Delegation, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, HEARTBEAT_TICKS,
-    Handoff, HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole,
-    PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS, ReadIndexResult, ReadState,
+    BeliefSource, ColocatedNode, Delegation, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
+    HEARTBEAT_TICKS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep,
+    NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS, ReadIndexResult, ReadState,
     ReconfigureRefusal, ReconfigureResult,
 };
 pub use proxy_leader::{ProxyLeader, ProxyReady};

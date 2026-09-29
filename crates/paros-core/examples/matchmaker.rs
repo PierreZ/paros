@@ -226,10 +226,11 @@ use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Entry, Fingerprint,
-    MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
-    MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerSet,
-    MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
-    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Slot, Value,
+    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
+    MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Slot,
+    Value,
 };
 
 const N1: NodeId = NodeId(1);
@@ -518,7 +519,10 @@ fn matchmake(
     set: &MatchmakerSet,
     request: &MatchRequest,
 ) -> Result<Matchmaking, MatchRefusal> {
-    let kind = match request.kind {
+    let MatchPurpose::Register(registration) = request.purpose else {
+        unreachable!("this example registers, it never probes");
+    };
+    let kind = match registration {
         RegistrationKind::Belief => "belief",
         RegistrationKind::Reconfiguration => "RECONFIGURATION",
     };
@@ -530,7 +534,7 @@ fn matchmake(
         set.generation.0,
         show_set(set.members())
     );
-    let mut phase = Matchmaking::new(request.ballot, request.config.clone(), request.kind);
+    let mut phase = Matchmaking::new(request.ballot, request.config.clone(), registration);
     for id in set.members() {
         let (reply, writes) = matchmaker(pool, *id).deliver_match(request.clone());
         // The wiring's guards come first: the reply answers this request,
@@ -542,7 +546,7 @@ fn matchmake(
             "a reply echoes its request's ballot"
         );
         let (from, answer) = RegisteredPage::from_reply(reply);
-        match answer {
+        match answer.expect("a registration is answered with a page or a refusal") {
             Ok(page) => {
                 assert!(
                     page.next_from_ballot.is_none(),

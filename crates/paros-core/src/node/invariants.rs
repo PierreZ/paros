@@ -9,7 +9,7 @@
 //! deployment), the per-role state machine, and the volatile leadership state
 //! that may exist only on a leader.
 
-use super::{Ballot, ColocatedNode, LeadershipOrigin, NodeRole};
+use super::{Ballot, BeliefSource, ColocatedNode, LeadershipOrigin, NodeRole};
 use crate::proposer::Round;
 
 impl ColocatedNode {
@@ -90,6 +90,10 @@ impl ColocatedNode {
                 "a plain deployment never opens a matchmaking phase"
             );
             assert!(
+                self.probe.is_none(),
+                "a plain deployment never probes its membership"
+            );
+            assert!(
                 self.acceptors.members() == self.config.peers,
                 "a plain deployment keeps its bootstrap configuration"
             );
@@ -128,6 +132,30 @@ impl ColocatedNode {
             !self.is_acceptor() || self.last_member_ballot >= self.acceptors_since,
             "a member's fence is at least the ballot its configuration is bound to"
         );
+        // The belief's provenance (#173): a configuration bound to a ballot
+        // was heard (every binding goes through `adopt_configuration`), and
+        // a membership probe is open only on the default it asks about,
+        // beside no campaign and no leadership.
+        assert!(
+            self.acceptors_since == Ballot::zero() || self.belief_source == BeliefSource::Heard,
+            "a configuration bound to a ballot is a heard belief"
+        );
+        if self.probe.is_some() {
+            assert!(
+                self.belief_source == BeliefSource::Bootstrap,
+                "a membership probe asks only about the bootstrap default"
+            );
+            assert!(
+                self.role == NodeRole::Follower && self.matchmaking.is_none(),
+                "a membership probe never overlaps a campaign or a leadership"
+            );
+            assert!(
+                self.probe
+                    .as_ref()
+                    .is_some_and(|p| p.ballot().round <= self.round_floor),
+                "every later campaign opens above an open probe's tag"
+            );
+        }
     }
 
     /// The per-role state machine: what a leader, a candidate and a follower

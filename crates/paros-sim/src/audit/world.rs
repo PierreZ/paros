@@ -172,6 +172,14 @@ impl AuditWorld {
         self.lock().removed_member_promised
     }
 
+    /// Whether a node outside the configuration in force served a catch-up
+    /// with entries: the second way a removed member's copy reaches the
+    /// cluster, read by the departed-straggler case beside
+    /// [`AuditWorld::removed_member_promised`].
+    pub(crate) fn removed_member_served(&self) -> bool {
+        self.lock().removed_member_served
+    }
+
     /// A one-line picture of the run for the red path: per-node applied
     /// prefixes, the leader rounds, and the last chosen gap each node reported.
     pub(crate) fn diagnostics(&self) -> String {

@@ -109,15 +109,21 @@
 //!   included — the effective configuration outlives its record as the
 //!   durable scalar every `Registered` reply reports
 //!   ([`crate::MatchmakerHardState::effective`]).
+//! - **A membership probe** (#173) is the one matchmaker round trip that is
+//!   not a campaign: a node whose belief is only the bootstrap default asks
+//!   a quorum for the effective configuration and registers nothing
+//!   ([`crate::matchmaking::MembershipProbe`], `probe_membership`). Its
+//!   requests and answers share this wire, tagged by a round every later
+//!   campaign opens above; its refusals fold like a campaign's.
 //! - **Lost replies** are the driver's business: [`super::ColocatedNode::resend_matchmaking`]
 //!   re-queues the request for every matchmaker that has not answered, and
 //!   skipping the call is always safe — the matchmaker answers a repeated
 //!   request idempotently from its retained history, and a campaign that never
 //!   completes is simply abandoned at the next election timeout.
 
-use super::{Ballot, ColocatedNode, NodeId, NodeRole};
-use crate::matchmaker::{MatchRefusal, MatchReply, MatchRequest};
-use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
+use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
+use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
+use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 
 /// What one matchmaker reply did to an open campaign, returned by
@@ -170,21 +176,43 @@ pub enum MatchStep {
         /// The ballot the effective configuration was registered under.
         newest: Ballot,
     },
+    /// One more matchmaker answered the open membership probe (#173), and
+    /// the probe still waits for a quorum.
+    ProbeAnswered,
+    /// A matchmaker quorum answered the membership probe and it closed: the
+    /// node's belief is now heard — the effective configuration they named,
+    /// or the bootstrap confirmed when they named none — and a node the
+    /// belief names opened a campaign in the same call.
+    ProbeClosed {
+        /// The ballot of the effective configuration adopted, `None` when
+        /// the quorum named no reconfiguration.
+        effective: Option<Ballot>,
+        /// Whether the belief now names this node (and a campaign opened).
+        member: bool,
+    },
 }
 
-/// Decode one reply into the answer the campaign folds.
-fn split_reply(
-    reply: MatchReply,
-) -> (
-    MatchmakerId,
-    NodeId,
-    Ballot,
-    Result<RegisteredPage, MatchRefusal>,
-) {
+/// What one reply answers: a registration's page, a probe's effective
+/// configuration, or a refusal of either.
+enum Answer {
+    Page(RegisteredPage),
+    Probed(Option<(Ballot, AcceptorConfig)>),
+    Refused(MatchRefusal),
+}
+
+/// Decode one reply into the answer the campaign or the probe folds.
+fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, Answer) {
     let to = reply.to;
     let ballot = reply.ballot;
-    let (matchmaker, answer) = RegisteredPage::from_reply(reply);
-    (matchmaker, to, ballot, answer)
+    let answer = match reply.outcome {
+        MatchOutcome::Probed { effective } => Answer::Probed(effective),
+        outcome => match RegisteredPage::from_outcome(outcome) {
+            Some(Ok(page)) => Answer::Page(page),
+            Some(Err(refusal)) => Answer::Refused(refusal),
+            None => unreachable!("only a probe's answer decodes to no page"),
+        },
+    };
+    (reply.matchmaker, to, ballot, answer)
 }
 
 /// The open phase's `MatchRequest` from `me`: its kind, ballot and
@@ -218,6 +246,7 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_matchmaking(&mut self) {
         self.queue_match_requests();
+        self.queue_probe_requests();
         self.assert_invariants();
     }
 
@@ -246,12 +275,70 @@ impl ColocatedNode {
         }
     }
 
-    /// Whether a matchmaking phase is open — the driver's cue to pace
-    /// [`ColocatedNode::resend_matchmaking`], consulted only where a re-send can
-    /// have an effect.
+    /// Queue the open membership probe's request toward every matchmaker
+    /// that has not answered it. A no-op with no probe open.
+    fn queue_probe_requests(&mut self) {
+        let Some(probe) = self.probe.as_ref() else {
+            return;
+        };
+        let matchmakers = self.deployment_matchmakers();
+        let request = MatchRequest::probe(
+            self.config.id,
+            probe.ballot(),
+            probe.believed().clone(),
+            matchmakers.generation,
+        );
+        for matchmaker in probe.unanswered(matchmakers) {
+            self.pending_match_requests
+                .push((matchmaker, request.clone()));
+        }
+    }
+
+    /// Open a membership probe (#173), or re-ask an open one: the election
+    /// clock of a node whose belief is only the bootstrap default (see
+    /// `on_check_leader`). The probe's tag is a round this node never
+    /// campaigns at: it sits at the next campaign round and raises the round
+    /// floor over it, so a late answer can never be mistaken for a later
+    /// campaign's. Nothing is promised and nothing registered.
+    pub(super) fn probe_membership(&mut self) {
+        let me = self.config.id;
+        // Preconditions: a follower on a matchmaker deployment, on a
+        // belief it never heard, with no campaign open.
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment probes its membership"
+        );
+        assert!(
+            self.belief_source == BeliefSource::Bootstrap,
+            "a node probes only on the bootstrap default it never heard confirmed"
+        );
+        assert!(
+            self.role != NodeRole::Leader && self.matchmaking.is_none(),
+            "a probe never overlaps a campaign or a leadership"
+        );
+        if self.probe.is_some() {
+            // The clock is the probe's retry cadence, as it is a
+            // matchmaking's: re-ask whoever has not answered.
+            self.queue_probe_requests();
+            return;
+        }
+        let Some(round) = self.next_campaign_round() else {
+            return;
+        };
+        self.round_floor = self.round_floor.max(round);
+        self.probe = Some(Box::new(MembershipProbe::new(
+            Ballot { round, node: me },
+            self.acceptors.clone(),
+        )));
+        self.queue_probe_requests();
+    }
+
+    /// Whether a matchmaking phase or a membership probe is open — the
+    /// driver's cue to pace [`ColocatedNode::resend_matchmaking`], consulted
+    /// only where a re-send can have an effect.
     #[must_use]
     pub fn matchmaking_pending(&self) -> bool {
-        self.matchmaking.is_some()
+        self.matchmaking.is_some() || self.probe.is_some()
     }
 
     /// The open matchmaking phase, if any — the node's own [`Matchmaking`]
@@ -306,17 +393,35 @@ impl ColocatedNode {
         if to != self.config.id || !matchmakers.contains(matchmaker) {
             return MatchStep::Ignored;
         }
-        if generation != matchmakers.generation
-            || self
-                .matchmaking
-                .as_ref()
-                .is_none_or(|m| m.ballot() != ballot)
+        if generation != matchmakers.generation {
+            return MatchStep::Ignored;
+        }
+        if self.probe.as_ref().is_some_and(|p| p.ballot() == ballot) {
+            let step = match answer {
+                Answer::Probed(effective) => self.fold_probe_answer(matchmaker, effective),
+                Answer::Refused(refusal) => {
+                    self.probe = None;
+                    self.fold_refusal(refusal)
+                }
+                // A registration's page at a probe's tag: not an answer to
+                // anything this node asked.
+                Answer::Page(_) => MatchStep::Ignored,
+            };
+            self.assert_invariants();
+            return step;
+        }
+        if self
+            .matchmaking
+            .as_ref()
+            .is_none_or(|m| m.ballot() != ballot)
         {
             return MatchStep::Ignored;
         }
         let step = match answer {
-            Ok(page) => self.fold_registration(matchmaker, page),
-            Err(refusal) => self.fold_refusal(refusal),
+            Answer::Page(page) => self.fold_registration(matchmaker, page),
+            Answer::Refused(refusal) => self.fold_refusal(refusal),
+            // A probe's answer at a campaign's ballot: never asked for.
+            Answer::Probed(_) => MatchStep::Ignored,
         };
         // Post-step restatements of invariants 1 and 4: a refused campaign
         // left nothing Phase-1-shaped behind, and a completed one
@@ -340,7 +445,11 @@ impl ColocatedNode {
                     "a completed matchmaking phase is closed"
                 );
             }
-            MatchStep::Registered { .. } | MatchStep::Paged { .. } | MatchStep::Ignored => {}
+            MatchStep::Registered { .. }
+            | MatchStep::Paged { .. }
+            | MatchStep::Ignored
+            | MatchStep::ProbeAnswered
+            | MatchStep::ProbeClosed { .. } => {}
         }
         self.assert_invariants();
         step
@@ -439,6 +548,65 @@ impl ColocatedNode {
                 watermark,
                 registered_by: registered,
             }
+        }
+    }
+
+    /// The probe half of [`ColocatedNode::on_match_reply`] (#173): fold one
+    /// matchmaker's effective configuration, and once a quorum answered,
+    /// close the probe — adopt what they named (or keep the bootstrap, now
+    /// confirmed) as a belief this node **heard**, and campaign at once if
+    /// that belief names it.
+    ///
+    /// # Panics
+    ///
+    /// If the probe closes on a belief this node heard since it opened (a
+    /// heard belief closes the probe itself).
+    fn fold_probe_answer(
+        &mut self,
+        matchmaker: MatchmakerId,
+        effective: Option<(Ballot, AcceptorConfig)>,
+    ) -> MatchStep {
+        let me = self.config.id;
+        let matchmakers = self.deployment_matchmakers().clone();
+        let Some(probe) = self.probe.as_mut() else {
+            return MatchStep::Ignored;
+        };
+        if !probe.fold(matchmaker, effective) {
+            return MatchStep::Ignored;
+        }
+        if !probe.quorum_held(&matchmakers) {
+            return MatchStep::ProbeAnswered;
+        }
+        let effective = probe.effective().cloned();
+        self.probe = None;
+        // A belief heard since the probe opened would have closed it
+        // (`adopt_configuration`): what closes here is still the default.
+        assert!(
+            self.belief_source == BeliefSource::Bootstrap && self.acceptors_since == Ballot::zero(),
+            "a probe closes on the bootstrap default it opened on"
+        );
+        let adopted = effective.map(|(ballot, config)| {
+            self.adopt_configuration(config, ballot);
+            ballot
+        });
+        // No reconfiguration at a quorum: the bootstrap is the configuration
+        // in force as far as any campaign could learn, and this node heard
+        // so.
+        self.belief_source = BeliefSource::Heard;
+        let member = self.acceptors.contains(me);
+        if member {
+            self.campaign(RegistrationKind::Belief, self.acceptors.clone());
+        }
+        // Postconditions: the probe is spent, the belief is heard, and a
+        // campaign opened exactly when the belief names this node.
+        assert!(self.probe.is_none(), "a closed probe leaves nothing open");
+        assert!(
+            member == (self.role == NodeRole::Candidate) || self.next_campaign_round().is_none(),
+            "a probe that finds its node inside campaigns, and only then"
+        );
+        MatchStep::ProbeClosed {
+            effective: adopted,
+            member,
         }
     }
 
@@ -545,6 +713,9 @@ impl ColocatedNode {
             return false;
         }
         self.matchmakers = Some(set.clone());
+        // A membership probe tallies one generation's answers: the next
+        // election timeout asks the new set afresh.
+        self.probe = None;
         if self.matchmaking.is_some() {
             // The registrations collected so far were for a replaced
             // generation; a stopped quorum will never complete them.

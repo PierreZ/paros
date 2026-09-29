@@ -2008,16 +2008,15 @@ fn a_campaign_on_a_stale_belief_abandons_and_adopts_the_set_in_force() {
     world.set_policy(policy(&[PromptKind::StaleConfiguration]));
     world.start_election(NodeId(0)).expect("node 0 campaigns");
     answer_through(&mut world);
-    // Node 2 is away while the set changes, so it comes back on its bootstrap
-    // belief: `acceptors` is volatile, and a reboot regresses it.
-    world.crash(NodeId(2)).expect("running");
+    // Node 2 is cut off while the set changes: it keeps the set of three it
+    // heard from node 0's `Prepare`. (A node that crashed instead comes back
+    // on its bootstrap default, which it never trusts: it probes the
+    // matchmakers first and learns the change, #173.)
     let config = world
         .compose(&[0, 1, 2, 3], QuorumSystem::Majority)
         .expect("a well-formed set");
     world.reconfigure(NodeId(0), &config).expect("started");
-    answer_through(&mut world);
-    world.restart(NodeId(2)).expect("crashed");
-    answer_through(&mut world);
+    isolate(&mut world, NodeId(2));
     assert_eq!(
         world
             .node(NodeId(2))

@@ -395,6 +395,20 @@ registered with `C_new`, stalls command issuance for one matchmaking round trip 
 resigns afterwards if the change removed it. A joining node promises the new ballot before Phase 2
 reaches it and heals as a replica; a removed node keeps answering Phase 1 for the ballots it took
 part in ("removed" is not "shut down"; acceptor guards are pool-based, never configuration-based).
+**A node campaigns only as a member of what it believes, a belief is volatile, and a node only
+ever registers a belief it heard.** Every incarnation boots believing the bootstrap configuration
+(`BeliefSource::Bootstrap`), so before its first campaign — or its first skip — it runs a
+**membership probe** (#173, `MembershipProbe`, `MatchPurpose::Probe`): it asks a matchmaker quorum
+for the effective configuration, registering nothing, adopts the answer (the bootstrap, confirmed,
+when there was no reconfiguration), and campaigns at once if that names it. Acting on the default
+wedged both ways: a rotation whose every new member rebooted left each member believing itself
+outside and nobody campaigning; and a member that campaigned on the default *registered* it before
+`StaleConfiguration` corrected it — a record every later `H_b` must cover, naming bootstrap members
+the floor may long since have released and the operator retired (a `q1 = 5` split over a five-node
+bootstrap with one member retired asked every later campaign for a promise nobody could give).
+The cost is one matchmaker round trip before an incarnation's first campaign. The chain client's
+reboot of every member of a configuration it just installed (`ScriptedLifecycle` on the main
+campaign) is the BUGGIFY location that makes both wedges likely.
 The harness treats membership as protocol data, with one floor under every configuration a run
 puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchmaker deployment (the
 bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the
@@ -466,7 +480,14 @@ bootstrap belief, otherwise passes every other leg; it now refuses as `"stale"` 
 the leader's ballot reaches it (beats reach the whole pool), and an operator holding an old
 watermark re-reads `Inspect`. The residual, documented on `may_retire`: a node whose own promise
 is above the leader's ballot does not follow its beats and stays `stale` until a later
-leadership reaches it — a retirement lost, never safety. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
+leadership reaches it — a retirement lost, never safety. The Retire contract has an **operator's
+half** the node cannot check (#198): the floor proves the configurations below it forgotten, not
+that no configuration registered above it names the node, so an operator retires only a node no
+reconfiguration it asked for above the floor names. The harness's clients are several operators
+and coordinate through the storage world's reconfiguration ledger (`StorageWorld::retire` withholds
+the retirement); two clients racing a re-add against a retirement installed a 3×2 grid with a
+member dead for good, whose column never decided again. The composer likewise asks a grid
+successor for a live Phase-2 quorum in **every** column, not one. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
 its red→green evidence are recorded in the commit that landed the GC. Module doc:
 `crates/paros-core/src/node/gc.rs`; design note:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md`.

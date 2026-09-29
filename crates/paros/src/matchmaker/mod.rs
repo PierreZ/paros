@@ -270,6 +270,24 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
                 "match_replied"
             );
         }
+        MatchOutcome::Probed { effective } => {
+            audit.match_probed(
+                id,
+                reply.to,
+                reply.ballot,
+                reply.generation.0,
+                effective.as_ref(),
+            );
+            tracing::info!(
+                matchmaker = id.0,
+                to = reply.to.0,
+                round = reply.ballot.round,
+                bnode = reply.ballot.node.0,
+                generation = reply.generation.0,
+                effective_round = effective.as_ref().map_or(0, |(b, _)| b.round),
+                "match_probed"
+            );
+        }
         MatchOutcome::Refused(refusal) => {
             audit.match_refused(id, reply.to, reply.ballot, refusal.clone());
             tracing::info!(

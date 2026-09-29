@@ -94,9 +94,10 @@ pub(crate) fn wire_match_request(request: &MatchRequest) -> WireMatchRequest {
         from: request.from.0,
         ballot: Some(ballot_to_proto(request.ballot)),
         config: Some(config_to_proto(&request.config)),
-        reconfiguration: request.kind.is_reconfiguration(),
+        reconfiguration: request.purpose.is_reconfiguration(),
         generation: request.generation.0,
         from_ballot: request.from_ballot.map(ballot_to_proto),
+        probe: request.purpose.is_probe(),
     }
 }
 
@@ -111,10 +112,11 @@ pub(crate) fn match_request_from_wire(
     let ballot = ballot_from_proto(request.ballot)?;
     let config = acceptor_config_from_proto(request.config)?;
     let generation = MatchmakerGeneration(request.generation);
-    let base = if request.reconfiguration {
-        MatchRequest::reconfigure(from, ballot, config, generation)
-    } else {
-        MatchRequest::new(from, ballot, config, generation)
+    let base = match (request.probe, request.reconfiguration) {
+        (true, true) => return Err("a probe registers no reconfiguration"),
+        (true, false) => MatchRequest::probe(from, ballot, config, generation),
+        (false, true) => MatchRequest::reconfigure(from, ballot, config, generation),
+        (false, false) => MatchRequest::new(from, ballot, config, generation),
     };
     Ok(match request.from_ballot {
         Some(cursor) => base.from_page(cursor.into()),
@@ -139,6 +141,11 @@ pub(crate) fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
             from_ballot: Some(ballot_to_proto(*from_ballot)),
             next_from_ballot: next_from_ballot.map(ballot_to_proto),
         }),
+        MatchOutcome::Probed { effective } => {
+            matchmaker::match_reply::Outcome::Probed(matchmaker::Probed {
+                effective: effective_to_proto(effective.as_ref()),
+            })
+        }
         MatchOutcome::Refused(refusal) => {
             let reason = match refusal {
                 MatchRefusal::Stale { highest } => {
@@ -185,6 +192,9 @@ pub(crate) fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply,
             next_from_ballot: registered.next_from_ballot.map(Ballot::from),
             gc_watermark: ballot_from_proto(registered.gc_watermark)?,
             effective: effective_from_proto(registered.effective)?,
+        },
+        matchmaker::match_reply::Outcome::Probed(probed) => MatchOutcome::Probed {
+            effective: effective_from_proto(probed.effective)?,
         },
         matchmaker::match_reply::Outcome::Refused(refused) => {
             MatchOutcome::Refused(match refused.reason.ok_or("missing refusal reason")? {

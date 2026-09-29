@@ -1236,13 +1236,24 @@ impl Workload for DepartedStragglerWorkload {
             }
         );
         if self.vacuous.is_none() {
-            // The mechanism the case is named for: the straggler is outside
-            // every configuration in force, so its clean copy is reachable
-            // only because a removed member still answers Phase 1 for the
-            // ballots it took part in.
+            // The mechanism the case is named for — "removed is not shut
+            // down": the straggler is outside every configuration in force,
+            // and its clean copy still reaches the cluster from there. Two
+            // paths carry it and the network decides which comes first: the
+            // blocked leader's repair re-query, which the straggler answers
+            // as a removed member still answering Phase 1 for the ballots it
+            // took part in; or the straggler's catch-up, which serves the
+            // slot from the chosen prefix it decided it in. The gate used to
+            // name the first alone, and held only while that leader's
+            // `Prepare` happened to outrun the catch-up (#173: the probe
+            // moved the timing and catch-up won).
+            let world = audit_world(ctx.state());
+            let promised = world.removed_member_promised();
+            let served = world.removed_member_served();
             assert_always!(
-                audit_world(ctx.state()).removed_member_promised(),
-                "corpus: the departed straggler answers Phase 1 from outside the configuration"
+                promised || served,
+                "corpus: the departed straggler supplies the lost slot from outside the configuration",
+                { "promised" => promised, "served" => served }
             );
             *self
                 .non_vacuous

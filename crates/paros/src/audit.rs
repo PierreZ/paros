@@ -604,6 +604,39 @@ pub trait Audit {
     /// transport, addressed to `matchmaker` (the first send or a re-send).
     fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {}
 
+    /// This node opened a membership probe tagged `ballot` (#173): its
+    /// belief is only the bootstrap default `believed`, which does not name
+    /// it, so its election clock asks the matchmakers which configuration is
+    /// in force instead of skipping the campaign. Reported at the instant the
+    /// probe opens, before any request is sent. Never fires on plain
+    /// Multi-Paxos. `generation` is the matchmaker set the probe asks.
+    fn membership_probe_opened(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        believed: &AcceptorConfig,
+        generation: u64,
+    ) {
+    }
+
+    /// This node handed its membership probe's request for `ballot` to the
+    /// transport, addressed to `matchmaker` (the first send or a re-send).
+    fn membership_probe_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {}
+
+    /// A matchmaker quorum answered this node's membership probe for
+    /// `ballot` and it closed: `effective` is the ballot of the effective
+    /// configuration the node adopted (`None`: the quorum named none and the
+    /// bootstrap stands, now heard), and `member` whether the belief names
+    /// the node — in which case a campaign opened in the same step.
+    fn membership_probe_closed(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        effective: Option<Ballot>,
+        member: bool,
+    ) {
+    }
+
     /// This candidate deliberately skipped re-sending its open matchmaking
     /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).
     fn matchmaking_resend_skipped(&self, node: NodeId) {}
@@ -908,6 +941,19 @@ pub trait Audit {
         ballot: Ballot,
         generation: u64,
         page: &HistoryPage<'_>,
+    ) {
+    }
+
+    /// This matchmaker is answering `to`'s membership probe for `ballot`
+    /// (#173) with the effective configuration it durably holds; nothing was
+    /// registered or written. Reported at the instant the answer leaves.
+    fn match_probed(
+        &self,
+        matchmaker: MatchmakerId,
+        to: NodeId,
+        ballot: Ballot,
+        generation: u64,
+        effective: Option<&(Ballot, AcceptorConfig)>,
     ) {
     }
 

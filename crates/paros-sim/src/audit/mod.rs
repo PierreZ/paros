@@ -507,6 +507,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Message::Promise { ballot, .. } = msg {
             self.state().observe_promise_send(node.0, *ballot);
         }
+        if let Message::CatchUpResponse { entries, .. } = msg
+            && !entries.is_empty()
+        {
+            self.state().observe_catch_up_serve(node.0);
+        }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
@@ -682,6 +687,31 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 st.bootstrap.as_ref() == Some(config),
                 "plain: a leader on a deployment without matchmakers keeps the bootstrap configuration",
                 { "node" => node.0, "round" => won.round }
+            );
+        }
+        // A grid tolerates no member lost for good: each slot is decided by
+        // its own column, a column with a dead member never decides again,
+        // and the leader's recovery — hence every later reconfiguration —
+        // waits on it forever. The harness keeps every identity it gave up
+        // for good out of a grid in force (the copy budget parks nobody on
+        // a grid seed, the composer asks every column to stay live, the
+        // operators' ledger withholds a retirement a registered
+        // reconfiguration still names); a leadership under a grid naming a
+        // retired identity is one of those promises broken (#198).
+        if matches!(config.quorum_system(), QuorumSystem::Grid { .. }) {
+            let retired = config
+                .members()
+                .iter()
+                .find(|member| st.retired.contains(&member.0))
+                .map(|member| member.0);
+            assert_always!(
+                retired.is_none(),
+                "gc: a leader never runs a grid configuration naming a retired identity",
+                {
+                    "node" => node.0,
+                    "round" => won.round,
+                    "retired" => retired.unwrap_or(u64::MAX)
+                }
             );
         }
         st.bind_config(won, config);
@@ -2043,6 +2073,30 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         st.matchmaker.retired(node);
         st.retired.insert(node.0);
+    }
+
+    fn membership_probe_opened(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        _believed: &AcceptorConfig,
+        generation: u64,
+    ) {
+        self.state()
+            .matchmaker
+            .probe_opened(node, ballot, generation);
+    }
+
+    fn membership_probe_closed(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        effective: Option<Ballot>,
+        member: bool,
+    ) {
+        self.state()
+            .matchmaker
+            .probe_closed(node, ballot, effective, member);
     }
 
     fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {

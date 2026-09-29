@@ -1,6 +1,6 @@
 use super::{
-    Audience, Ballot, ColocatedNode, Command, LeadershipOrigin, Message, NodeId, NodeRole, Party,
-    Slot,
+    Audience, Ballot, BeliefSource, ColocatedNode, Command, LeadershipOrigin, Message, NodeId,
+    NodeRole, Party, Slot,
 };
 use crate::membership::AcceptorConfig;
 
@@ -98,9 +98,16 @@ impl ColocatedNode {
     /// a handoff install, the adoption of an effective configuration — comes
     /// through here, so none can forget the membership record that
     /// [`ColocatedNode::may_retire`] and the quorum reads depend on.
+    ///
+    /// Whatever moved it, the belief is now one this incarnation **heard**
+    /// ([`BeliefSource::Heard`]), and a membership probe still open is
+    /// answered by it: a probe only ever asks about the bootstrap default
+    /// (#173).
     pub(super) fn adopt_configuration(&mut self, config: AcceptorConfig, since: Ballot) {
         self.acceptors = config;
         self.acceptors_since = since;
+        self.belief_source = BeliefSource::Heard;
+        self.probe = None;
         self.record_membership();
     }
 

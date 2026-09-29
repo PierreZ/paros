@@ -52,6 +52,14 @@
 //! configuration as a durable scalar beside its history
 //! ([`crate::MatchmakerHardState::effective`]) and the fold takes the
 //! maximum of the two.
+//!
+//! # The membership probe
+//!
+//! [`MembershipProbe`] is the phase's registration-free sibling (#173): the
+//! tally of a node that is *not* campaigning — a non-member whose belief is
+//! only the bootstrap default — and asks a matchmaker quorum for nothing but
+//! the effective configuration. It shares the phase's intersection argument
+//! and none of its registrations.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -78,13 +86,11 @@ pub struct RegisteredPage {
 }
 
 impl RegisteredPage {
-    /// Decode one matchmaker's answer: the page it registered, or its
-    /// refusal.
-    ///
-    /// # Errors
-    ///
-    /// The refusal, when the matchmaker refused.
-    pub fn from_outcome(outcome: MatchOutcome) -> Result<Self, MatchRefusal> {
+    /// Decode one matchmaker's answer to a registration: the page it
+    /// registered, or its refusal. `None` for a probe's answer
+    /// ([`MatchOutcome::Probed`]), which no registration folds.
+    #[must_use]
+    pub fn from_outcome(outcome: MatchOutcome) -> Option<Result<Self, MatchRefusal>> {
         match outcome {
             MatchOutcome::Registered {
                 from_ballot,
@@ -92,25 +98,24 @@ impl RegisteredPage {
                 next_from_ballot,
                 gc_watermark,
                 effective,
-            } => Ok(Self {
+            } => Some(Ok(Self {
                 from_ballot,
                 history,
                 next_from_ballot,
                 gc_watermark,
                 effective,
-            }),
-            MatchOutcome::Refused(refusal) => Err(refusal),
+            })),
+            MatchOutcome::Refused(refusal) => Some(Err(refusal)),
+            MatchOutcome::Probed { .. } => None,
         }
     }
 
     /// Decode a whole reply: the answering matchmaker, and its page or
-    /// refusal. The caller checks the reply's addressee, ballot and
-    /// generation first — those are its guards, not the phase's.
-    ///
-    /// # Errors
-    ///
-    /// The refusal, when the matchmaker refused.
-    pub fn from_reply(reply: MatchReply) -> (MatchmakerId, Result<Self, MatchRefusal>) {
+    /// refusal (`None` for a probe's answer). The caller checks the reply's
+    /// addressee, ballot and generation first — those are its guards, not
+    /// the phase's.
+    #[must_use]
+    pub fn from_reply(reply: MatchReply) -> (MatchmakerId, Option<Result<Self, MatchRefusal>>) {
         (reply.matchmaker, Self::from_outcome(reply.outcome))
     }
 }
@@ -404,5 +409,122 @@ impl Matchmaking {
             return None;
         }
         Some((*newest, config.clone()))
+    }
+}
+
+/// A **membership probe** (#173): the tally of a node that asks the
+/// matchmakers which acceptor configuration is in force, without
+/// campaigning and without registering anything.
+///
+/// Who probes: a node on a matchmaker deployment whose belief about the
+/// configuration in force is only the bootstrap default — it has heard
+/// nothing since it booted — at its first election timeout, before it
+/// either campaigns or skips. Two wedges came from acting on the default:
+///
+/// - **Outside it**, a node never campaigns (leadership belongs inside the
+///   acceptor set), so it could never learn that a reconfiguration moved it
+///   *in*: a rotation whose every new member rebooted is a cluster where
+///   every member believes itself outside, every non-member knows better
+///   but does not lead, and nobody ever registers anything.
+/// - **Inside it**, a node campaigned and *registered* the default before
+///   `StaleConfiguration` corrected it — a record every later `H_b` then
+///   covered (below). A flexible split with `q1 = 5` over a five-node
+///   bootstrap, one member retired and the rest of the successor rebooted,
+///   asked every later campaign for a promise nobody could give.
+///
+/// Why a quorum of effective configurations suffices: a reconfiguration is
+/// honored once its registration landed at a matchmaker quorum, which raised
+/// the durable effective scalar at every matchmaker of that quorum; any
+/// quorum of answers intersects it, so the maximum effective configuration
+/// they report is at least that one. A reconfiguration registered at a
+/// minority may be missed, exactly as a campaign may miss it — a later
+/// wire message or campaign corrects the belief then.
+///
+/// Why a probe and not a campaign: a campaign registers its belief, and a
+/// registered belief is a configuration every later campaign's `H_b` must
+/// cover with a Phase-1 quorum until GC collects it. A rebooted node's
+/// belief is the bootstrap, whose members the floor may have long since
+/// released and the operator retired; registering it would ask every later
+/// leader for promises nobody can give. A probe leaves no record, so a node
+/// only ever registers a belief it heard — on a cluster that never
+/// reconfigured, the probe's empty answer is what it heard. The cost is one
+/// matchmaker round trip before an incarnation's first campaign.
+#[derive(Clone, Debug)]
+pub struct MembershipProbe {
+    /// The ballot naming this probe's requests and answers. Never promised,
+    /// never registered: only a tag the wiring keeps campaigns above.
+    ballot: Ballot,
+    /// The configuration the prober believed when it opened.
+    believed: AcceptorConfig,
+    /// Matchmakers whose answer has been folded.
+    answered: BTreeSet<MatchmakerId>,
+    /// The highest-ballot effective configuration any answer reported.
+    effective: Option<(Ballot, AcceptorConfig)>,
+}
+
+impl MembershipProbe {
+    /// Open a probe tagged `ballot`, from a node that believes `believed`.
+    #[must_use]
+    pub fn new(ballot: Ballot, believed: AcceptorConfig) -> Self {
+        Self {
+            ballot,
+            believed,
+            answered: BTreeSet::new(),
+            effective: None,
+        }
+    }
+
+    /// The tag of this probe's requests.
+    #[must_use]
+    pub fn ballot(&self) -> Ballot {
+        self.ballot
+    }
+
+    /// The configuration the prober believed when it opened.
+    #[must_use]
+    pub fn believed(&self) -> &AcceptorConfig {
+        &self.believed
+    }
+
+    /// Fold one matchmaker's answer. Returns whether it counted: a second
+    /// answer from the same matchmaker is ignored whole (wire input).
+    pub fn fold(
+        &mut self,
+        matchmaker: MatchmakerId,
+        effective: Option<(Ballot, AcceptorConfig)>,
+    ) -> bool {
+        if !self.answered.insert(matchmaker) {
+            return false;
+        }
+        if let Some((ballot, config)) = effective {
+            crate::matchmaker::raise_effective(&mut self.effective, ballot, &config);
+        }
+        true
+    }
+
+    /// Whether a matchmaker quorum has answered — asked at the membership
+    /// boundary, never as a count.
+    #[must_use]
+    pub fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
+        matchmakers.has_quorum(&self.answered)
+    }
+
+    /// The matchmakers that have not answered — whom a re-send addresses.
+    #[must_use]
+    pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<MatchmakerId> {
+        matchmakers
+            .members()
+            .iter()
+            .copied()
+            .filter(|mm| !self.answered.contains(mm))
+            .collect()
+    }
+
+    /// The highest-ballot effective configuration the answers named, `None`
+    /// when none named one (the bootstrap is then the only configuration
+    /// ever in force, as far as a quorum knows).
+    #[must_use]
+    pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        self.effective.as_ref()
     }
 }

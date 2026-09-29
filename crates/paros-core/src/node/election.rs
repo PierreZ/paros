@@ -7,8 +7,8 @@
 //! fence, and opens the GC campaign on a matchmaker deployment.
 
 use super::{
-    BTreeMap, Ballot, ColocatedNode, Command, Control, Delegation, LeadershipOrigin, Message,
-    NodeId, NodeRole, Slot,
+    BTreeMap, Ballot, BeliefSource, ColocatedNode, Command, Control, Delegation, LeadershipOrigin,
+    Message, NodeId, NodeRole, Slot,
 };
 use crate::matchmaker::RegistrationKind;
 use crate::matchmaking::Matchmaking;
@@ -30,9 +30,25 @@ impl ColocatedNode {
     /// configuration nobody asked for). A reconfiguration that removes the
     /// sitting leader is the one deliberate exception, and it runs through
     /// [`ColocatedNode::reconfigure`], not here.
+    ///
+    /// A node whose belief is only the **bootstrap default**
+    /// ([`BeliefSource::Bootstrap`]) neither campaigns on it nor skips on it:
+    /// it probes the matchmakers for the configuration in force first
+    /// (#173). The default is not something it heard, and acting on it went
+    /// wrong both ways — a successor whose every member rebooted was a
+    /// cluster where each member believed itself outside and nobody ever
+    /// campaigned, and a member that campaigned registered the default, a
+    /// record naming retired identities that every later `H_b` had to
+    /// cover. The probe registers nothing
+    /// ([`crate::matchmaking::MembershipProbe`]); a node whose probe finds
+    /// it inside campaigns from there.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
+            return;
+        }
+        if self.config.has_matchmakers() && self.belief_source == BeliefSource::Bootstrap {
+            self.probe_membership();
             return;
         }
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
@@ -81,6 +97,9 @@ impl ColocatedNode {
         // in-flight rounds exactly as a deposed one does (the accepted stall
         // window of #122: the successor ballot's Phase 1 recovers them).
         self.clear_leadership_state();
+        // A campaign and a membership probe never coexist (#173): the
+        // campaign registers what this node now believes.
+        self.probe = None;
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };

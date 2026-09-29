@@ -68,6 +68,7 @@ use super::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
     MatchmakerGeneration, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     MatchmakerWriteOp, MemRegistry, ReconfigureReply, ReconfigureRequest, Registration,
+    RegistrationKind,
 };
 use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use crate::membership::{AcceptorConfig, QuorumSystem};
@@ -1202,7 +1203,9 @@ impl World {
     fn fold_campaign(&mut self, to: NodeId, reply: &MatchReply) {
         let matchmaker = reply.matchmaker;
         let believed = self.node(to).believed.clone();
-        let page = match RegisteredPage::from_outcome(reply.outcome.clone()) {
+        let page = match RegisteredPage::from_outcome(reply.outcome.clone())
+            .expect("the model never probes, so every answer is a page or a refusal")
+        {
             Ok(page) => page,
             Err(refusal) => {
                 // `ColocatedNode::fold_refusal`: the next campaign opens
@@ -1431,13 +1434,14 @@ impl World {
         // Some registrations are an operator's *reconfiguration*, which is
         // what raises the matchmakers' effective-configuration scalar — the
         // fact a handover must carry across the generation boundary.
-        let request = if self.rng.chance(1, 3) {
-            MatchRequest::reconfigure(node, ballot, config, believed.generation)
+        let kind = if self.rng.chance(1, 3) {
+            RegistrationKind::Reconfiguration
         } else {
-            MatchRequest::new(node, ballot, config, believed.generation)
+            RegistrationKind::Belief
         };
+        let request = MatchRequest::for_kind(kind, node, ballot, config, believed.generation);
         self.node(node).campaign = Some(Campaign {
-            tally: Matchmaking::new(ballot, request.config.clone(), request.kind),
+            tally: Matchmaking::new(ballot, request.config.clone(), kind),
             generation: believed.generation,
             request: request.clone(),
         });
