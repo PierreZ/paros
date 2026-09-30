@@ -10,7 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use moonpool_rpc::RpcError;
-use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always};
+use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always, assert_reachable};
 use paros::{
     Entry, InspectReply, JournalId, JournalState, QuorumSystem, Read, ReadAck, Reconfigure,
     ReconfigureMatchmakers, SetLeader, Truncate, Write, WriteAck, journal_state_from_proto,
@@ -56,11 +56,17 @@ pub(super) fn state_of(state: Option<paros::wire::common::JournalState>) -> Jour
 
 impl WriteResult {
     /// Judge one `Write` RPC's answer: a transport error is ambiguous, a
-    /// reply is a verdict or a redirect.
-    fn from_response(response: Result<WriteAck, RpcError>) -> Self {
+    /// reply is a verdict or a redirect. On a journal `created` at runtime
+    /// an unknown answer is no verdict: a member that has not folded the
+    /// create yet does not serve it.
+    fn from_response(response: Result<WriteAck, RpcError>, created: bool) -> Self {
         let Some(ack) = response.ok() else {
             return Self::Ambiguous;
         };
+        if created && ack.unknown_journal {
+            assert_reachable!("system: a member that has not folded a create refuses its journal");
+            return Self::Redirect { leader: None };
+        }
         assert_always!(
             !ack.unknown_journal,
             "chain: a node serves the journal the client names"
@@ -152,7 +158,8 @@ pub(super) async fn inspect(
 
 /// One `Write` of `entry` to `journal` at `target`. With `abandon` the
 /// client stops listening after 10 ms and records the observation as
-/// ambiguous.
+/// ambiguous. `created` says the journal was created at runtime (#189),
+/// so a member may not serve it yet.
 pub(super) fn write_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
@@ -160,6 +167,7 @@ pub(super) fn write_once(
     target: usize,
     entry: &Entry,
     abandon: bool,
+    created: bool,
 ) -> impl Future<Output = WriteResult> + use<> {
     let client = clients[target].clone();
     let time = time.clone();
@@ -174,22 +182,24 @@ pub(super) fn write_once(
         let call = client.write(&request);
         if abandon {
             moonpool_sim::select! {
-                response = call => WriteResult::from_response(response),
+                response = call => WriteResult::from_response(response, created),
                 _ = time.sleep(Duration::from_millis(10)) => WriteResult::Ambiguous,
             }
         } else {
-            WriteResult::from_response(call.await)
+            WriteResult::from_response(call.await, created)
         }
     }
 }
 
-/// One `SetLeader(expected, owner)` asked of `target`.
+/// One `SetLeader(expected, owner)` asked of `target`; `created` as for
+/// [`write_once`].
 pub(super) fn set_leader_once(
     clients: &[SimClient],
     journal: JournalId,
     target: usize,
     expected: u64,
     owner: u64,
+    created: bool,
 ) -> impl Future<Output = SetLeaderResult> + use<> {
     let client = clients[target].clone();
     let request = SetLeader {
@@ -201,6 +211,10 @@ pub(super) fn set_leader_once(
         let Ok(ack) = client.set_leader(&request).await else {
             return SetLeaderResult::Ambiguous;
         };
+        if created && ack.unknown_journal {
+            assert_reachable!("system: a member that has not folded a create refuses its journal");
+            return SetLeaderResult::Redirect { leader: None };
+        }
         assert_always!(
             !ack.unknown_journal,
             "chain: a node serves the journal the client names"

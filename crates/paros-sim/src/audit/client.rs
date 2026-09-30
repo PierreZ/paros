@@ -136,6 +136,10 @@ impl ClientHistory {
 pub(super) struct LinHistory {
     /// Acked writes with a known slot (program order within one client).
     pub(super) write_slot: BTreeMap<(u64, u64), u64>,
+    /// The acked writes whose first ack was a `Duplicate` (#204): they took
+    /// no new position, so the checks that place a write above an earlier
+    /// read (L3, C3) leave them out.
+    pub(super) write_dup: BTreeSet<(u64, u64)>,
     /// Committed reads and their observed watermark.
     pub(super) read_wm: BTreeMap<(u64, u64), Option<u64>>,
     /// Committed writes as real-time spans with their slot (`None` for a
@@ -169,6 +173,9 @@ impl LinHistory {
         for (&seq, &(resp, slot)) in &h.write_resp {
             if let Some(s) = slot {
                 self.write_slot.insert((c, seq), s);
+                if h.write_dup.contains(&seq) {
+                    self.write_dup.insert((c, seq));
+                }
             }
             if let Some(&inv) = h.write_inv.get(&seq) {
                 self.writes
@@ -334,7 +341,8 @@ pub(super) fn check_sequential_client(client: u64, h: &LinHistory) {
     // C3 — a write issued after a committed read must land above that read's
     // watermark (a slot at or below it would place the write inside the prefix
     // the read already observed). Guards against an inflated / speculative
-    // watermark.
+    // watermark. A `Duplicate` (#204) lands where the log already held it, so
+    // it is left out, as in L3.
     let mut max_read_wm: Option<u64> = None;
     let mut reads = h.read_wm.range(span.clone()).peekable();
     for (&(_, wj), &slot) in h.write_slot.range(span) {
@@ -345,7 +353,9 @@ pub(super) fn check_sequential_client(client: u64, h: &LinHistory) {
             max_read_wm = max_read_wm.max(wm);
             reads.next();
         }
-        if let Some(i) = max_read_wm {
+        if let Some(i) = max_read_wm
+            && !h.write_dup.contains(&(client, wj))
+        {
             assert_always!(
                 slot > i,
                 "a write issued after a committed read lands above its watermark"

@@ -1005,7 +1005,7 @@ async fn claim(
         }
     }
     let tail = state_of(served?.state);
-    let ask = set_leader_once(clients, journal, target, tail.generation.0, me);
+    let ask = set_leader_once(clients, journal, target, tail.generation.0, me, false);
     Some(within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await)
 }
 
@@ -1163,7 +1163,7 @@ impl Workload for ChainWorkload {
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let write_once = |target: usize, entry: &Entry, abandon: bool| {
-            rpc::write_once(&clients, &time, journal, target, entry, abandon)
+            rpc::write_once(&clients, &time, journal, target, entry, abandon, false)
         };
         let truncate_once = |target: usize, up_to: u64| {
             rpc::truncate_once(&clients, &time, journal, &config, target, up_to)

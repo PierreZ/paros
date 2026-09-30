@@ -137,7 +137,9 @@ impl SystemOps {
     /// `targets` names from the one `draw` picks: read the tail's state,
     /// `SetLeader` against its generation, then `Write` at the position the
     /// claim answered. A lost claim, a fenced write and a redirect are
-    /// retried within [`APPEND_ATTEMPTS`] asks.
+    /// retried within [`APPEND_ATTEMPTS`] asks. On a journal `created` at
+    /// runtime (every journal here but a system one) a member that has not
+    /// folded the create answers unknown, and the ask moves on.
     async fn claim_and_write(
         &mut self,
         ctx: &SimContext,
@@ -147,6 +149,7 @@ impl SystemOps {
         record: Vec<u8>,
         draw: u64,
     ) -> Appended {
+        let created = !paros::system::is_system(journal);
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
@@ -161,6 +164,10 @@ impl SystemOps {
                     target += 1;
                     continue;
                 };
+                if ack.unknown_journal && created {
+                    target += 1;
+                    continue;
+                }
                 if ack.unknown_journal {
                     assert_always!(
                         !self.active || !paros::system::is_system(journal),
@@ -179,8 +186,14 @@ impl SystemOps {
                     continue;
                 }
                 let tail = state_of(ack.state);
-                let ask =
-                    set_leader_once(clients, journal, node, tail.generation.0, self.client_id);
+                let ask = set_leader_once(
+                    clients,
+                    journal,
+                    node,
+                    tail.generation.0,
+                    self.client_id,
+                    created,
+                );
                 match within(ctx, self.timeout, SetLeaderResult::Ambiguous, ask).await {
                     SetLeaderResult::Won { state } => {
                         claim = Some((state.generation.0, state.next_seq.0));
@@ -201,7 +214,7 @@ impl SystemOps {
                 records: vec![Value(record.clone())],
             };
             audit.note_appended(paros::command_hash(&Command::Write(entry.clone())));
-            let write = write_once(clients, ctx.time(), journal, node, &entry, false);
+            let write = write_once(clients, ctx.time(), journal, node, &entry, false, created);
             match within(ctx, self.timeout, WriteResult::Ambiguous, write).await {
                 WriteResult::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
