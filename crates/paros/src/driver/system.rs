@@ -68,6 +68,14 @@ pub struct SystemPlan {
     /// The journals the deployment was booted with: ids the directory never
     /// allocates.
     pub genesis_journals: Vec<JournalId>,
+    /// The journals a node outside the genesis pool joins **as a spare** once
+    /// the registry admits it: each a configuration template (its journal,
+    /// bootstrap membership, quorum system, matchmakers) whose identity and
+    /// pool the driver fills in — the node's own id, and the pool the
+    /// registry has admitted. A reconfiguration may then name the node.
+    /// Empty where no journal can reconfigure (a deployment without
+    /// matchmakers never names a new member).
+    pub spares: Vec<paros_core::Config>,
 }
 
 /// One remote follow read's answer, back on the loop.
@@ -91,6 +99,7 @@ pub(crate) struct SystemFollower<P: Providers> {
     outstanding: BTreeSet<JournalId>,
     next_seed: usize,
     tombstones: BTreeSet<JournalId>,
+    spares: Vec<paros_core::Config>,
     replies: mpsc::Sender<Followed>,
     timeout: Duration,
     shutdown: CancellationToken,
@@ -140,6 +149,7 @@ impl<P: Providers> SystemFollower<P> {
                 outstanding: BTreeSet::new(),
                 next_seed: 0,
                 tombstones: BTreeSet::new(),
+                spares: plan.spares.clone(),
                 replies,
                 timeout,
                 shutdown,
@@ -161,6 +171,17 @@ impl<P: Providers> SystemFollower<P> {
             Party::Proxy(_) => true,
             Party::Node(node) => self.fixed.contains(&node) || self.registry.contains(node),
         }
+    }
+
+    /// The pool the registry fold has admitted: the genesis pool and every
+    /// registered node not retired.
+    pub(crate) fn pool(&self) -> Vec<NodeId> {
+        self.registry.pool()
+    }
+
+    /// The journals this node joins as a spare once registered.
+    pub(crate) fn spares(&self) -> &[paros_core::Config] {
+        &self.spares
     }
 
     /// Whether `journal` was tombstoned in the directory fold.

@@ -1438,8 +1438,14 @@ where
                 ticks += 1;
                 // A quarantined journal whose time is up re-opens from its
                 // store — a restart of that journal alone.
-                for journal in journals.due(ticks, tunables.quarantine_ticks) {
+                let due = journals.due(ticks, tunables.quarantine_ticks);
+                for &journal in &due {
                     open_journal(&providers, &mut stores, &mut journals, journal, ticks, &tunables, hooks).await;
+                }
+                // A re-opened journal booted from `Config::pool`: it admits
+                // the registry's pool again (#189).
+                if let Some(f) = follower.as_ref().filter(|_| !due.is_empty()) {
+                    admit_pool(&mut journals, f);
                 }
                 // Every live journal's beat, in id order.
                 let live: Vec<JournalId> = journals.live.keys().copied().collect();
@@ -1499,6 +1505,10 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         events: Vec<(u64, SystemEvent)>,
     ) {
         let me = follower.self_id();
+        // Whether the pool moved or a journal opened: every live journal
+        // then admits the registry's pool (`ColocatedNode::extend_pool`,
+        // refused on a journal that cannot reconfigure).
+        let mut admit = false;
         for (lsn, event) in events {
             self.audit.system_folded(me, journal, lsn, &event);
             tracing::info!(node = me.0, journal = journal.0, lsn, event = ?event, "system_folded");
@@ -1533,6 +1543,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     if self.journals.live.contains_key(&id) {
                         self.audit.journal_started(me, id);
                         tracing::info!(node = me.0, journal = id.0, "journal_started");
+                        admit = true;
                     }
                 }
                 SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
@@ -1543,10 +1554,11 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     }
                     self.stores.delete(id);
                 }
+                SystemEvent::Registry(RegistryEvent::Registered { id, .. }) if id == me => {
+                    self.join_spares(follower).await;
+                    admit = true;
+                }
                 SystemEvent::Registry(RegistryEvent::Registered { id, addr }) => {
-                    if id == me {
-                        continue;
-                    }
                     if !self.out.has_peer(id) {
                         match peer_address(&addr) {
                             Ok(addr) => {
@@ -1566,6 +1578,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     }
                     self.audit.pool_admitted(me, id);
                     tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
+                    admit = true;
                 }
                 SystemEvent::Registry(RegistryEvent::Retired { id }) if id == me => {
                     let served: Vec<JournalId> = self
@@ -1584,6 +1597,61 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                 _ => {}
             }
         }
+        if admit {
+            admit_pool(self.journals, follower);
+        }
+    }
+}
+
+impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+    /// This node is in the pool now (#189): it joins every journal a
+    /// reconfiguration may pull it into, as a spare — its own identity, the
+    /// pool the registry has admitted.
+    async fn join_spares(&mut self, follower: &SystemFollower<P>) {
+        let me = follower.self_id();
+        for template in follower.spares() {
+            let journal = template.journal;
+            if self.journals.serves(journal) {
+                continue;
+            }
+            let mut nodes = follower.pool();
+            nodes.push(me);
+            nodes.sort_unstable();
+            nodes.dedup();
+            let config = paros_core::Config {
+                id: me,
+                nodes,
+                ..template.clone()
+            };
+            if !self.stores.create(journal, config) {
+                continue;
+            }
+            open_journal(
+                self.lanes.providers,
+                self.stores,
+                self.journals,
+                journal,
+                self.now,
+                self.tunables,
+                self.hooks,
+            )
+            .await;
+            if self.journals.live.contains_key(&journal) {
+                self.audit.journal_started(me, journal);
+                tracing::info!(node = me.0, journal = journal.0, "spare_joined");
+            }
+        }
+    }
+}
+
+/// Every live journal admits the registry's pool (#189): a registered node
+/// becomes one it follows, counts and answers. Refused by the core on a
+/// journal that cannot reconfigure; retired nodes stay in (the pool is
+/// grow-only) and are kept out at the edge instead.
+fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &SystemFollower<P>) {
+    let pool = follower.pool();
+    for rt in journals.live.values_mut() {
+        rt.node.extend_pool(&pool);
     }
 }
 

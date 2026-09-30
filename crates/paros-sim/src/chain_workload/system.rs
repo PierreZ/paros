@@ -64,6 +64,10 @@ pub(super) struct SystemOps {
     joiners: Vec<(NodeId, String)>,
     /// The genesis journals: ids the directory never allocates.
     genesis: Vec<JournalId>,
+    /// A registered joiner joins the default journal as a spare (a seed with
+    /// matchmakers and neither proxies nor replicas, `process::spare_template`),
+    /// so a reconfiguration may name one.
+    spares: bool,
     client_id: u64,
     next_seq: u64,
     /// Journals this client created and has not asked to delete.
@@ -77,6 +81,7 @@ impl SystemOps {
         pool: usize,
         joiners: Vec<(NodeId, String)>,
         genesis: Vec<JournalId>,
+        spares: bool,
         client_id: u64,
         timeout: Duration,
     ) -> Self {
@@ -86,6 +91,7 @@ impl SystemOps {
             pool,
             joiners,
             genesis,
+            spares,
             client_id,
             next_seq: SYSTEM_SEQ_BASE,
             created: Vec::new(),
@@ -348,6 +354,37 @@ impl SystemOps {
         }
     }
 
+    /// The joiners a reconfiguration may name now (#189): registered (not
+    /// draining, not retired) in the registry a seed serves, and not
+    /// reserved for retirement. Empty on a run without system journals.
+    pub(super) async fn joinable(
+        &self,
+        ctx: &SimContext,
+        clients: &[SimClient],
+        draw: u64,
+    ) -> Vec<u64> {
+        // Only where a registered joiner joins the default journal: a
+        // configuration naming one anywhere else names a member that runs
+        // nothing.
+        if !self.active || !self.spares || self.joiners.is_empty() {
+            return Vec::new();
+        }
+        let Some((_, _, registry)) = self.read_back(ctx, clients, REGISTRY, draw).await else {
+            return Vec::new();
+        };
+        let world = crate::world::storage_world(ctx.state());
+        let world = world
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry
+            .nodes()
+            .filter(|(id, node)| {
+                node.standing == NodeStanding::Registered && !world.is_retiring_joiner(id.0)
+            })
+            .map(|(id, _)| id.0)
+            .collect()
+    }
+
     /// `REGISTER_NODE` / `DRAIN_NODE` / `RETIRE_NODE`: one registry entry for
     /// a joiner the draw names; a drain or a retirement only for a joiner the
     /// registry has in the standing it needs (one read back first).
@@ -394,9 +431,24 @@ impl SystemOps {
                     .get(usize::try_from(draw % eligible.len().max(1) as u64).unwrap_or(0))
                     .copied()
                     .unwrap_or(self.joiners[0].0);
-                match standing {
-                    NodeStanding::Registered => SystemCommand::DrainNode { id },
-                    _ => SystemCommand::RetireNode { id },
+                if standing == NodeStanding::Registered {
+                    SystemCommand::DrainNode { id }
+                } else {
+                    // The operators coordinate (#189, the joiner's #198): a
+                    // joiner some reconfiguration named is never retired,
+                    // and once reserved no composer names it.
+                    if self.active
+                        && !crate::world::storage_world(ctx.state())
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .reserve_joiner_retirement(id.0)
+                    {
+                        assert_reachable!(
+                            "system: a retirement of a joiner a reconfiguration named is withheld"
+                        );
+                        return;
+                    }
+                    SystemCommand::RetireNode { id }
                 }
             }
         };

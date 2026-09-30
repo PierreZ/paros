@@ -38,6 +38,9 @@ pub(crate) struct SystemBoard {
     armed: bool,
     /// The run deploys joiners.
     joiners: bool,
+    /// A joiner joins the default journal as a spare a reconfiguration may
+    /// pull in (a seed with matchmakers, no proxies, no replicas).
+    spares: bool,
     /// The genesis journals: ids the directory never allocates.
     genesis: BTreeSet<JournalId>,
     /// The genesis pool: a node outside it is a joiner.
@@ -62,6 +65,9 @@ pub(crate) struct SystemBoard {
     refused_then_admitted: bool,
     /// A joiner started a journal the directory created naming it.
     joiner_started: bool,
+    /// A leadership ran under a configuration naming a joiner: a node the
+    /// registry admitted at runtime joined a journal through `Reconfigure`.
+    joined_through_reconfigure: bool,
 }
 
 /// The run's [`SystemBoard`] (`crate::state::published`).
@@ -89,9 +95,11 @@ impl SystemBoard {
         genesis: impl IntoIterator<Item = JournalId>,
         pool: impl IntoIterator<Item = u64>,
         joiners: bool,
+        spares: bool,
     ) {
         self.armed = true;
         self.joiners = joiners;
+        self.spares = spares;
         self.genesis = genesis.into_iter().collect();
         self.genesis_pool = pool.into_iter().collect();
     }
@@ -169,6 +177,15 @@ impl SystemBoard {
         }
     }
 
+    /// A leader was elected under `members`: a joiner among them joined its
+    /// journal's configuration through `Reconfigure` (a genesis pool is all
+    /// a bootstrap names).
+    pub(crate) fn elected_under(&mut self, members: &[u64]) {
+        if members.iter().any(|m| !self.genesis_pool.contains(m)) {
+            self.joined_through_reconfigure = true;
+        }
+    }
+
     /// `node` refused a message from `from`, not in its pool yet.
     pub(crate) fn refused(&mut self, node: NodeId, from: NodeId) {
         if self.refused.insert((node.0, from.0)) && self.refused.len() == 1 {
@@ -205,5 +222,11 @@ impl SystemBoard {
             self.refused_then_admitted,
             "system: a message from a not-yet-folded node is refused and later accepted"
         );
+        if self.spares {
+            assert_sometimes!(
+                self.joined_through_reconfigure,
+                "system: a node registered at runtime joins a journal's configuration through Reconfigure"
+            );
+        }
     }
 }

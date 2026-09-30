@@ -535,7 +535,11 @@ pub(crate) fn journal_store(
 pub(crate) const SEED_COUNT: usize = 3;
 
 /// The seeds of a pool of `pool` nodes (#189): its [`SEED_COUNT`] lowest
-/// ranks.
+/// ranks. Never fewer than three where the pool allows (it always does,
+/// `PROCESS_POOL_RANGE` starts at three): a one-member system journal is
+/// the only journal whose chosen slot a single crash can leave unreported
+/// by every learner, and the system journals' plain beats among three
+/// nodes are the lightest load a journal adds.
 pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
     (0..pool.min(SEED_COUNT) as u64).collect()
 }
@@ -543,18 +547,16 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// Whether the run runs the **system journals** (#189) — the directory and
 /// the node registry on the seeds, every node following them, and the
 /// joiners joining the pool through the registry — drawn once per seed: a
-/// seeded coin on a perturbed seed without matchmakers. Deployment shape,
-/// like [`journal_store`]: half the plain seeds keep #188's static
-/// deployment, whose shape and draw schedule a system seed must not move.
-/// Matchmaker seeds stay static: the matchmaker plane serving many journals
-/// is #190, and tripled traffic already livelocked a matchmaker campaign
-/// once (see [`journals`]).
-#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
-pub(crate) fn system_journals(state: &StateHandle, matchmakers: bool, perturb: bool) -> bool {
+/// seeded coin on a perturbed seed. Deployment shape, like
+/// [`journal_store`]: half the seeds keep #188's static deployment. On a
+/// seed with matchmakers a joiner the registry admits joins the default
+/// journal as a spare a reconfiguration may pull in.
+#[tracing::instrument(level = "debug", skip(state), fields(perturb))]
+pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.system.get_or_insert_with(|| {
-        if !perturb || matchmakers || !moonpool_sim::sim_random_bool(0.5) {
+        if !perturb || !moonpool_sim::sim_random_bool(0.5) {
             return false;
         }
         // BUGGIFY pairing: a seed genuinely runs the system journals (a

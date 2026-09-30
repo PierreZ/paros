@@ -355,12 +355,15 @@ async fn run_joiner(
     perturb: bool,
 ) -> SimulationResult<()> {
     let has_matchmakers = !deployment.matchmakers().is_empty();
-    if !crate::shape::system_journals(ctx.state(), has_matchmakers, perturb) {
+    if !crate::shape::system_journals(ctx.state(), perturb) {
         // No system journals on this seed: nothing to join.
         ctx.shutdown().cancelled().await;
         return Ok(());
     }
     let members = ranked(deployment.acceptors(), NodeId)?;
+    // A joiner that joins the default journal as a spare campaigns through
+    // the matchmakers like any member of it.
+    let matchmakers = ranked(deployment.matchmakers(), MatchmakerId)?;
     let plan = crate::shape::journals(ctx.state(), has_matchmakers, perturb);
     let board = crate::audit::system::system_board(ctx.state());
     let (system_plan, _) = system_plan(ctx, deployment, &members, &plan, id);
@@ -385,7 +388,7 @@ async fn run_joiner(
             stores,
             parse_addr(my_ip)?,
             members.clone(),
-            Vec::new(),
+            matchmakers.clone(),
             Vec::new(),
             Vec::new(),
             Some(system_plan.clone()),
@@ -737,7 +740,7 @@ async fn run_acceptor(
     // follows the directory and the registry, and the seeds — the lowest
     // ranks — host them, a static configuration of plain Multi-Paxos on a
     // fault-free disk.
-    let system = crate::shape::system_journals(ctx.state(), !matchmakers.is_empty(), perturb)
+    let system = crate::shape::system_journals(ctx.state(), perturb)
         .then(|| system_rig(ctx, deployment, &members, &plan, &mut seats, self_rank));
     let faults = storage_faults(ctx, perturb, shape.write_rates);
     let tunables = shape.tunables;
@@ -952,10 +955,16 @@ impl Seat {
         system: &Arc<Mutex<crate::audit::system::SystemBoard>>,
     ) -> Self {
         let world = storage_world_for(ctx.state(), journal);
-        world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_unbudgeted();
+        // A journal of its own (a system or a created one) is outside every
+        // budget; a joiner's seat on a genesis journal (#189, a spare) shares
+        // that journal's world and leaves its budget as the genesis nodes
+        // sized it — a fault-free copy only ever adds to what it defends.
+        if journal != paros::JournalId::default() {
+            world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .set_unbudgeted();
+        }
         let checker = audit_world_for(ctx.state(), journal);
         let audit = NodeAudit::new(ctx.time().clone(), checker.clone())
             .in_journal(journal, journal_board(ctx.state()))
@@ -1221,10 +1230,12 @@ fn system_plan(
         .map(NodeId)
         .collect();
     let board = crate::audit::system::system_board(ctx.state());
+    let spares = spare_template(ctx, deployment);
     crate::audit::system::lock(&board).arm(
         plan.ids.iter().copied(),
         members.iter().map(|(id, _)| id.0),
         !deployment.joiners().is_empty(),
+        spares.is_some() && !deployment.joiners().is_empty(),
     );
     (
         SystemPlan {
@@ -1236,9 +1247,50 @@ fn system_plan(
                 .collect(),
             genesis_pool: members.iter().map(|(id, _)| *id).collect(),
             genesis_journals: plan.ids.clone(),
+            spares: spares.into_iter().collect(),
         },
         seeds,
     )
+}
+
+/// The default journal's configuration a joiner joins as a spare once the
+/// registry admits it (#189) — the same run-level draws every genesis node
+/// built its own from (the bootstrap ranks, the matchmaker set, the quorum
+/// policy; each fixed by its first caller). Only where a reconfiguration can
+/// pull a joiner in and every process of the deployment can reach it: a
+/// seed with matchmakers, and neither proxy leaders nor replicas (their
+/// address books and pools are static; a joiner leading would reach
+/// neither).
+fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
+    if deployment.matchmakers().is_empty()
+        || !deployment.proxies().is_empty()
+        || !deployment.replicas().is_empty()
+    {
+        return None;
+    }
+    let pool_len = deployment.acceptors().len();
+    let bootstrap: Vec<NodeId> = crate::shape::bootstrap_ranks(ctx.state(), pool_len, true, true)
+        .into_iter()
+        .map(NodeId)
+        .collect();
+    let matchmaker_len = deployment.matchmakers().len();
+    let matchmakers: Vec<MatchmakerId> =
+        crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_len, true)
+            .into_iter()
+            .map(MatchmakerId)
+            .collect();
+    let policy = crate::shape::quorum_policy(ctx.state(), pool_len, true);
+    Some(Config {
+        journal: paros::JournalId::default(),
+        id: NodeId(0),
+        quorum_system: policy.system(bootstrap.len()),
+        peers: bootstrap,
+        nodes: (0..pool_len as u64).map(NodeId).collect(),
+        matchmakers,
+        matchmaker_pool: (0..matchmaker_len as u64).map(MatchmakerId).collect(),
+        proxy_count: 0,
+        replica_count: 0,
+    })
 }
 
 /// A matchmaker: the provider-generic registry driver inside the same

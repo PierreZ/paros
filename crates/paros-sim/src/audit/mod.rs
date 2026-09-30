@@ -673,6 +673,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _gap_fills: u64,
         config: &AcceptorConfig,
     ) {
+        if let Some(mut board) = self.system_board() {
+            let members: Vec<u64> = config.members().iter().map(|m| m.0).collect();
+            board.elected_under(&members);
+        }
         let now = self.now_ms();
         let mut st = self.state();
         // Matchmaking invariants 4 and 5 (#120): a leadership on a matchmaker
@@ -1099,10 +1103,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn journal_stopped(&self, _node: NodeId, _journal: JournalId) {
+    fn journal_stopped(&self, node: NodeId, journal: JournalId) {
         assert_reachable!(
             "system: a node stops a journal the directory tombstoned or its retirement ended"
         );
+        // A joiner the registry retired leaves the default journal for good
+        // (#189): convergence excuses it, exactly like an operator
+        // retirement (#123).
+        if journal == JournalId::default() {
+            self.world.note_left_pool(node.0);
+        }
     }
 
     fn unpooled_message(&self, node: NodeId, _journal: JournalId, from: NodeId) {
@@ -1180,8 +1190,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
         let known = st.pool.get_or_insert_with(|| pool.clone());
+        // A genesis node boots with the genesis pool; a joiner (#189) — a node
+        // outside it, admitted by the registry at runtime — boots with the
+        // genesis pool plus itself and whoever the registry had admitted.
+        let same = if known.contains(&node.0) {
+            *known == pool
+        } else {
+            known.is_subset(&pool) && pool.contains(&node.0)
+        };
         assert_always!(
-            *known == pool,
+            same,
             "every node derives the same node pool",
             { "node" => node.0, "pool" => pool.len() }
         );

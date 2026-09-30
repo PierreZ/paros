@@ -983,7 +983,7 @@ impl Workload for ChainWorkload {
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
         let mut system_ops = system::SystemOps::new(
-            crate::shape::system_journals(ctx.state(), has_matchmakers, true),
+            crate::shape::system_journals(ctx.state(), true),
             server_count,
             deployment
                 .joiners()
@@ -999,6 +999,7 @@ impl Workload for ChainWorkload {
                 .as_ref()
                 .map(|plan| plan.ids.clone())
                 .unwrap_or_default(),
+            has_matchmakers && deployment.proxies().is_empty() && deployment.replicas().is_empty(),
             client_id,
             request_timeout,
         );
@@ -1118,6 +1119,12 @@ impl Workload for ChainWorkload {
             let op = if journal != JournalId::default()
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
+                PAUSE
+            } else if has_matchmakers && op == CREATE_JOURNAL {
+                // A created journal is one more journal's beats on every
+                // link of its members: a matchmaker seed runs none (its
+                // two-round-trip campaigns livelocked once under extra load,
+                // `crate::shape::journals`).
                 PAUSE
             } else {
                 op
@@ -1827,10 +1834,17 @@ impl Workload for ChainWorkload {
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
-                    let live = live_candidates(
+                    let mut live = live_candidates(
                         &servers,
                         &crate::world::parked_nodes(ctx.state(), journal),
                     );
+                    // The joiners the node registry admitted (#189): a
+                    // successor may pull one in. Read here, before the
+                    // composition and its ledger entry, which take no await
+                    // between them — a retirement reserved in the meantime
+                    // is re-checked at the ledger.
+                    let joinable = system_ops.joinable(ctx, &clients, raw_payload).await;
+                    live.extend(joinable.iter().copied());
                     // The adversarial draw (R5): compose from *every* rank
                     // instead, so the request may name an identity the run
                     // lost for good. A well-behaved operator would not, and
@@ -2483,8 +2497,11 @@ impl Workload for ChainWorkload {
                         break;
                     }
                     ProposalResult::Rejected { leader } => {
+                        // A leader outside the genesis pool (#189: a joiner
+                        // a reconfiguration pulled in) has no client here.
                         target = leader
                             .and_then(|id| usize::try_from(id).ok())
+                            .filter(|node| *node < server_count)
                             .unwrap_or((target + 1) % server_count);
                     }
                     ProposalResult::Ambiguous => target = (target + 1) % server_count,

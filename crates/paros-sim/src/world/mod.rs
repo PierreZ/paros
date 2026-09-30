@@ -388,6 +388,9 @@ pub(crate) struct StorageWorld {
     requested: BTreeMap<u64, RequestedConfiguration>,
     /// The next request id the ledger hands out.
     next_request: u64,
+    /// Joiners an operator reserved for retirement through the node registry
+    /// (#189): no later reconfiguration names one.
+    retiring_joiners: BTreeSet<u64>,
     /// Unbudgeted mode (the scripted corpus): a targeted injection may take
     /// every copy of a record; each slot driven to zero readable copies is
     /// recorded in `unrecoverable`, the ground truth the corpus's analytic
@@ -479,6 +482,33 @@ impl StorageWorld {
         self.park_as(key, node, ParkReason::Wiped);
         tracing::info!(node, "storage_wiped");
         true
+    }
+
+    /// Reserve joiner `node` for retirement through the node registry
+    /// (#189): refused when any reconfiguration an operator ever asked for
+    /// names it — it may be, or become, a member the protocol still needs —
+    /// the joiner's twin of [`StorageWorld::retire`]'s ledger check. Once
+    /// reserved, no composer names it again
+    /// ([`StorageWorld::is_retiring_joiner`]), so a retired joiner is never
+    /// asked to vote. Returns whether it is reserved.
+    pub(crate) fn reserve_joiner_retirement(&mut self, node: u64) -> bool {
+        if self.retiring_joiners.contains(&node) {
+            return true;
+        }
+        if self
+            .requested
+            .values()
+            .any(|entry| entry.members.contains(&node))
+        {
+            return false;
+        }
+        self.retiring_joiners.insert(node);
+        true
+    }
+
+    /// Whether joiner `node` is reserved for retirement (#189).
+    pub(crate) fn is_retiring_joiner(&self, node: u64) -> bool {
+        self.retiring_joiners.contains(&node)
     }
 
     /// Record that an operator is about to ask for the acceptor set

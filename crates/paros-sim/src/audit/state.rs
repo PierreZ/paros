@@ -324,6 +324,9 @@ pub(super) struct AuditState {
     /// refusal to boot the amnesiac store (`Audit::boot_refused`, #147) —
     /// a library decision the harness only cross-checks against its coin.
     pub(super) wiped: BTreeSet<u64>,
+    /// Joiners the node registry retired (#189): out of the pool for good,
+    /// excused from convergence.
+    pub(super) left_pool: BTreeSet<u64>,
     /// Nodes that shut down on an operator's retirement (#123): reported by
     /// the driver at the instant they exit, or by a boot that found the
     /// identity retired.

@@ -646,19 +646,32 @@ refused as unknown, a registered node gets a peer lane at its address (`Outbound
 at runtime), a peer message from a node the registry fold does not have in the pool is refused
 before the core sees it (a liveness cost until the fold catches up, never safety), and the
 node's own retirement stops its user journals. System journals are never trimmed and serve no
-plane (the matchmaker, proxy and replica planes serve the first *user* journal). **Not yet:**
-the core's own pool is still boot data — a runtime-registered node serves the journals the
-directory creates naming it, but joining an existing reconfigurable journal's configuration
-through `Reconfigure` needs `ColocatedNode` to learn a pool at runtime and is the open half of
-#189. In simulation the system journals run on half the plain seeds
-(`paros_sim::shape::system_journals`), seeds are the lowest `SEED_COUNT = 3` ranks, and system
-and created journals sit on fault-free world-backed seats outside the copy budget. Their
+plane (the matchmaker, proxy and replica planes serve the first *user* journal). **The core's
+pool is runtime state** (`ColocatedNode::pool`, `extend_pool`): `Config::pool` at boot, grown —
+never shrunk — as the driver admits the registry's nodes, and refused on a deployment without
+matchmakers (plain Multi-Paxos never reconfigures, so its pool stays its membership and its
+learner traffic exactly today's). A retired node leaves no core pool; the driver keeps it out at
+the edge. A candidate whose matchmakers name a configuration with a node its pool has not
+admitted abandons the campaign or the probe (`MatchStep::UnknownMember`) instead of acting on it,
+and completes once its pool catches up — the one path where registry lag reached a hard
+`assert!`. A registered node joins every journal of `SystemPlan::spares` (the deployment's
+reconfigurable journal) **as a spare**, so a `Reconfigure` may name it and it takes part like
+any spare of the pool. In simulation the system journals run on half the seeds (`paros_sim::shape::system_journals`),
+seeds are the lowest `SEED_COUNT = 3` ranks (never one: a one-member journal is the only one whose
+chosen slot a single crash leaves unreported by every learner), and system and created journals
+sit on fault-free world-backed seats outside the copy budget. A joiner joins the default journal
+as a spare only on a seed with matchmakers and neither proxies nor replicas (their pools and
+address books are static), the chain client's composer then draws successors from the genesis pool
+plus the joiners the registry has registered, and the operators coordinate a joiner's retirement
+through the storage world's ledger (`StorageWorld::reserve_joiner_retirement`: never a joiner any
+reconfiguration named, and a reserved one is never named); matchmaker seeds create no journals. Their
 meaning is judged on the **system board** (`paros_sim::audit::system`): every node folds each
 system journal to the same event at every LSN, a created journal's id is `128 + its LSN` and
 never reused, and no node acknowledges an append to a journal after folding its tombstone; its
 gates are a name race decided by slot order, a joiner that learned the system journals before
 any pool had it, and a joiner's message refused by a node that had not folded its registration
-and accepted once it had.
+and accepted once it had, and — where joiners can join — a node registered at runtime joining a
+journal's configuration through `Reconfigure`.
 
 **Storage direction.** The seam stays the high-level `LogStorage` / `MatchmakerStorage`
 traits (the durable writes, truncate / trimmed-to semantics, the boot scan, the format
