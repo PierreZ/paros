@@ -958,10 +958,16 @@ impl ChainWorkload {
     }
 }
 
-/// Claim `journal` (#204): read where it stands through `clients[target]`,
-/// then `SetLeader` against the generation read. Returns what the claim
-/// came back with, and the state the read saw (`None` when the read did
-/// not answer — then nothing is asked).
+/// Claim `journal` (#204): read where it stands, then `SetLeader` against the
+/// generation read, asked of `clients[target]`. Returns what the claim came
+/// back with (`None` when no server answered the read — then nothing is
+/// asked).
+///
+/// The read is a quorum read any node serves, so it starts at `target` and
+/// moves on to the next node while one goes unserved: a leader whose own
+/// reads cannot confirm (a slow link to its row, say) must not also fence
+/// every claim sent its way — witness seed 13376948288886643991, where two
+/// owners' claims read at such a leader for the whole recovery tail.
 async fn claim(
     ctx: &SimContext,
     clients: &[SimClient],
@@ -970,9 +976,24 @@ async fn claim(
     me: u64,
     timeout: Duration,
 ) -> Option<SetLeaderResult> {
-    let read = read_once(&clients[target], journal.0, 0, 1, 0);
-    let ack = within(ctx, timeout, None, read).await?;
-    if !ack.served || ack.unknown_journal {
+    let mut served = None;
+    for offset in 0..clients.len() {
+        let read = read_once(
+            &clients[(target + offset) % clients.len()],
+            journal.0,
+            0,
+            1,
+            0,
+        );
+        if let Some(ack) = within(ctx, timeout, None, read).await
+            && (ack.served || ack.unknown_journal)
+        {
+            served = Some(ack);
+            break;
+        }
+    }
+    let ack = served?;
+    if ack.unknown_journal {
         return None;
     }
     let tail = state_of(ack.state);
@@ -2799,7 +2820,12 @@ impl Workload for ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        if !converged && !ended_by_sibling {
+        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling) {
+            // Which leg failed: the cluster, or this owner's recovery writes.
+            eprintln!(
+                "chain run RED: client {client_id} converged={converged} recovery_acked={recovery_acked} reader={reader} owned={:?} next_seq={}",
+                writer.owned, writer.next_seq
+            );
             // Failure diagnostic (fires only on the red path): which node is
             // stuck, and where, by real node id (the parked nodes are absent,
             // not renumbered). `None` = the node did not answer the inspect
