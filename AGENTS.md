@@ -47,6 +47,9 @@ plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that walk t
 `ReplicaId(rank)` in IP order and `NodeId(1000 + rank)` on the wire — the count is every node's
 `Config::replica_count`, zero the plain deployment; each on a fault-free disk outside the copy
 budget, and each judged by the same final convergence claim as a node)
+plus zero to two `JoinerProcess`es (#189; `paros-joiner`, nodes outside the genesis pool,
+`NodeId(100 + rank)`, that follow the system journals from the seeds and join the pool through
+the node registry; they idle on a seed without system journals and are no attrition victim)
 under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
 three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
 three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
@@ -120,7 +123,12 @@ arrives — every entry the audit's decided value at its slot, the page in `[fro
 order, the client's own acked appends inside the page present, the cursor monotone, a trim
 answer only below its point) and `CHECK_TAIL=16` (#185: the journal `CheckTail` on a drawn
 path — read-index or quorum — judged exactly as `READ_INDEX` and `QUORUM_READ`, which pin
-the path). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
+the path), and the system-journal operations of #189 — `CREATE_JOURNAL=17` (a name from a
+four-name alphabet over three members of the pool, read back as `Created` or refused for a
+taken name, then one record appended to the new journal), `DELETE_JOURNAL=18`,
+`REGISTER_NODE=19`, `DRAIN_NODE=20` and `RETIRE_NODE=21`, each one `Append` to journal 1 or 2
+at a seed, sent on every seed and refused as `unknown_journal` on one without system journals
+(`chain_workload/system.rs`). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
 `COMPACT` a `Trim`, `READ_INDEX` and `QUORUM_READ` a `CheckTail`.
 paros runs no application (#186): the client *is* the application. Every client reads the
 journal from its cursor and folds each user entry, in LSN order, into `ChainState { applied_count,
@@ -617,6 +625,40 @@ only an identity appended to `j`, a quarantined journal sends nothing, a journal
 committing while a sibling is **held** on every node for the chaos window
 (`DriverHooks::hold_journal`, a per-seed BUGGIFY location), and a node keeps serving its other
 journals while one is quarantined.
+
+**System journals (#189).** A service creates and deletes journals, and adds and retires
+nodes, while it runs; both lists are journals of their own. Journal **1** is the directory
+(`CreateJournal { name, config }`, `DeleteJournal { id }`) and journal **2** the node registry
+(`RegisterNode { id, addr, failure_domain }`, `DrainNode`, `RetireNode`), one entry per slot
+(`proto/system.proto`), read by one pure fold (`paros::system::{Directory, Registry}`) that every
+node and every client reading back runs in LSN order. A created journal's id is `128 + the
+LSN of its CreateJournal`: the log order is the allocator, an id is never reused (a delete is a
+tombstone), a name race is decided by the lower slot, and a slot whose id lands on a genesis
+journal folds to `Reserved`. The pool is the genesis pool plus every registered node not yet
+retired. It is opt-in configuration data: `run_journals` takes a `SystemPlan` (the **seeds**
+that host journals 1 and 2 — a static configuration of plain Multi-Paxos — and the genesis pool
+and journals), and `None` is #188's static deployment. A seed folds its own chosen prefix each
+tick; every other node keeps one long-polling `Read` per system journal open against a seed —
+the public `Read` is how a seed serves a node outside the pool, so no peer message from outside
+the pool is ever needed. The driver applies the folds: a created journal naming the node starts
+(`JournalStores::create`, then the ordinary open), a tombstoned one stops for good and is
+refused as unknown, a registered node gets a peer lane at its address (`Outbound`'s lanes grow
+at runtime), a peer message from a node the registry fold does not have in the pool is refused
+before the core sees it (a liveness cost until the fold catches up, never safety), and the
+node's own retirement stops its user journals. System journals are never trimmed and serve no
+plane (the matchmaker, proxy and replica planes serve the first *user* journal). **Not yet:**
+the core's own pool is still boot data — a runtime-registered node serves the journals the
+directory creates naming it, but joining an existing reconfigurable journal's configuration
+through `Reconfigure` needs `ColocatedNode` to learn a pool at runtime and is the open half of
+#189. In simulation the system journals run on half the plain seeds
+(`paros_sim::shape::system_journals`), seeds are the lowest `SEED_COUNT = 3` ranks, and system
+and created journals sit on fault-free world-backed seats outside the copy budget. Their
+meaning is judged on the **system board** (`paros_sim::audit::system`): every node folds each
+system journal to the same event at every LSN, a created journal's id is `128 + its LSN` and
+never reused, and no node acknowledges an append to a journal after folding its tombstone; its
+gates are a name race decided by slot order, a joiner that learned the system journals before
+any pool had it, and a joiner's message refused by a node that had not folded its registration
+and accepted once it had.
 
 **Storage direction.** The seam stays the high-level `LogStorage` / `MatchmakerStorage`
 traits (the durable writes, truncate / trimmed-to semantics, the boot scan, the format

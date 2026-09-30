@@ -45,6 +45,19 @@ pub(crate) const MATCHMAKER_GROUP: &str = "paros-matchmaker";
 pub(crate) const PROXY_GROUP: &str = "paros-proxy";
 /// The process group of the replicas (`ReplicaProcess::name`, #144).
 pub(crate) const REPLICA_GROUP: &str = "paros-replica";
+/// The process group of the joiners (`JoinerProcess::name`, #189): nodes
+/// outside the genesis pool that join it at runtime through the registry.
+pub(crate) const JOINER_GROUP: &str = "paros-joiner";
+
+/// Where the joiners' `NodeId`s start: above any genesis pool the campaign
+/// draws and below the replicas', so a joiner's identity collides with
+/// neither and reads apart in a trace.
+const JOINER_ID_BASE: u64 = 100;
+
+/// The `NodeId` the joiner of rank `rank` joins the pool as.
+pub(crate) fn joiner_node_id(rank: usize) -> NodeId {
+    NodeId(JOINER_ID_BASE + rank as u64)
+}
 
 /// Where the replicas' `NodeId`s start: far above any pool the campaign
 /// draws (`PROCESS_POOL_RANGE` tops out at six), so a replica's wire
@@ -70,6 +83,9 @@ pub(crate) enum Role {
     /// A replica, ranked among the replicas — a learner that is not an
     /// acceptor (#144).
     Replica(ReplicaId),
+    /// A joiner (#189), speaking as [`joiner_node_id`] of its rank: outside
+    /// the genesis pool until the registry admits it.
+    Joiner(NodeId),
 }
 
 /// The seed's deployment: sorted acceptor IPs (`NodeId(i)` ↔ `acceptors[i]`),
@@ -82,6 +98,7 @@ pub(crate) struct Deployment {
     matchmakers: Vec<String>,
     proxies: Vec<String>,
     replicas: Vec<String>,
+    joiners: Vec<String>,
 }
 
 impl Deployment {
@@ -101,7 +118,15 @@ impl Deployment {
             matchmakers,
             proxies,
             replicas,
+            joiners: Vec::new(),
         }
+    }
+
+    /// The same map with `joiners` (#189), sorted.
+    fn with_joiners(mut self, mut joiners: Vec<String>) -> Self {
+        sort_ips(&mut joiners);
+        self.joiners = joiners;
+        self
     }
 
     /// The role of `ip`, or `None` for an IP outside the pool (a workload).
@@ -115,10 +140,19 @@ impl Deployment {
         if let Some(rank) = self.proxies.iter().position(|p| p == ip) {
             return Some(Role::Proxy(ProxyId(rank as u64)));
         }
-        self.replicas
+        if let Some(rank) = self.replicas.iter().position(|r| r == ip) {
+            return Some(Role::Replica(ReplicaId(rank as u64)));
+        }
+        self.joiners
             .iter()
-            .position(|r| r == ip)
-            .map(|rank| Role::Replica(ReplicaId(rank as u64)))
+            .position(|j| j == ip)
+            .map(|rank| Role::Joiner(joiner_node_id(rank)))
+    }
+
+    /// The joiners (#189), in rank order: each joins as
+    /// [`joiner_node_id`] of its rank.
+    pub(crate) fn joiners(&self) -> &[String] {
+        &self.joiners
     }
 
     /// The acceptor pool, in `NodeId` order.
@@ -167,7 +201,9 @@ pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
     let matchmakers = topology.ips_in_group(MATCHMAKER_GROUP);
     let proxies = topology.ips_in_group(PROXY_GROUP);
     let replicas = topology.ips_in_group(REPLICA_GROUP);
-    let map = Deployment::from_groups(acceptors, matchmakers, proxies, replicas);
+    let joiners = topology.ips_in_group(JOINER_GROUP);
+    let map =
+        Deployment::from_groups(acceptors, matchmakers, proxies, replicas).with_joiners(joiners);
     assert_always!(
         !map.acceptors.is_empty(),
         "a deployment names at least one acceptor",

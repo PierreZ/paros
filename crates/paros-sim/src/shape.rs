@@ -457,6 +457,9 @@ struct Registry {
     /// Run-level: whether the nodes run on the journal store, and its
     /// layout (see [`journal_store`]), fixed by the first caller.
     journal_store: Option<StoreDraw>,
+    /// Run-level: whether the run runs the system journals (see
+    /// [`system_journals`]), fixed by the first caller.
+    system: Option<bool>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -522,6 +525,43 @@ pub(crate) fn journal_store(
         StoreDraw::World => None,
         StoreDraw::Journal(layout) => Some(layout),
     }
+}
+
+/// How many genesis nodes host the system journals (#189) — the seeds, the
+/// lowest ranks of the pool. Three is the smallest static configuration that
+/// survives a seed's loss; a smaller pool hosts them on every node. Not a
+/// tunable: the system journals run on a static configuration of the seeds,
+/// and reconfiguring them is out of scope.
+pub(crate) const SEED_COUNT: usize = 3;
+
+/// The seeds of a pool of `pool` nodes (#189): its [`SEED_COUNT`] lowest
+/// ranks.
+pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
+    (0..pool.min(SEED_COUNT) as u64).collect()
+}
+
+/// Whether the run runs the **system journals** (#189) — the directory and
+/// the node registry on the seeds, every node following them, and the
+/// joiners joining the pool through the registry — drawn once per seed: a
+/// seeded coin on a perturbed seed without matchmakers. Deployment shape,
+/// like [`journal_store`]: half the plain seeds keep #188's static
+/// deployment, whose shape and draw schedule a system seed must not move.
+/// Matchmaker seeds stay static: the matchmaker plane serving many journals
+/// is #190, and tripled traffic already livelocked a matchmaker campaign
+/// once (see [`journals`]).
+#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
+pub(crate) fn system_journals(state: &StateHandle, matchmakers: bool, perturb: bool) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.system.get_or_insert_with(|| {
+        if !perturb || matchmakers || !moonpool_sim::sim_random_bool(0.5) {
+            return false;
+        }
+        // BUGGIFY pairing: a seed genuinely runs the system journals (a
+        // cause; the outcomes are the system board's gates).
+        assert_reachable!("system: a seed runs the system journals");
+        true
+    })
 }
 
 /// The run's store draw (see [`journal_store`]).

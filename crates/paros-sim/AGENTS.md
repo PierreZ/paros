@@ -12,6 +12,8 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   groups: `ACCEPTOR_GROUP = "paros-node"`, `MATCHMAKER_GROUP = "paros-matchmaker"`,
   `PROXY_GROUP = "paros-proxy"` (#142), `REPLICA_GROUP = "paros-replica"` (#144; a
   replica speaks as `replica_node_id(rank)` = `NodeId(1000 + rank)`, outside every pool),
+  `JOINER_GROUP = "paros-joiner"` (#189; a joiner joins as `joiner_node_id(rank)` =
+  `NodeId(100 + rank)`, outside the genesis pool until the registry admits it),
   `Deployment`, `Role`.
 - `shape.rs` `NodeShape::draw`: the per-logical-node knobs
   (`DriverTunables`, seam crash bias, wipe/loss percentages,
@@ -21,7 +23,9 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   through `quorum_policy` — majority, a flexible split (#140) or an acceptor
   grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
   per node per seed and reused across restarts; the run's `JournalPlan` (`journals`,
-  #188: one to three journals, the held one) and the quarantine re-open knob; `MIN_BOOTSTRAP`, `config_floor`,
+  #188: one to three journals, the held one) and the quarantine re-open knob;
+  `system_journals` (#189: the seeded coin for the directory and the registry) and
+  `SEED_COUNT` / `seed_ranks` (the ranks that host them); `MIN_BOOTSTRAP`, `config_floor`,
   `ROUND_TRIP_FLOOR_MS`.
 - `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
   fixed bootstrap subset, the GC requests withheld; an acceptor runs
@@ -31,7 +35,10 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   `paros::run_replica` in a seam-crash recovery loop over its own **fault-free** disk,
   registered with `StorageWorld::note_replica` so the copy budget never counts it — a
   replica's record is never a copy an acceptor quorum needs), `IdleProcess`,
-  `ContractSuiteWorkload` · `lifecycle.rs` `ScriptedLifecycle` (the corpus's
+  `JoinerProcess` (#189: `run_journals` with no journal of its own and the `SystemPlan`,
+  over `SimStores` whose created seats appear at runtime; quiet seats — system and created
+  journals — sit on fault-free world stores outside the copy budget), `ContractSuiteWorkload` ·
+  `lifecycle.rs` `ScriptedLifecycle` (the corpus's
   `FaultInjector`, registered on the main campaign too for the chain client's one lifecycle
   act — rebooting every member of a configuration it installed, #173; it drains for the whole
   run) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
@@ -45,7 +52,8 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   computes, #186) · `chain_workload.rs` `ChainWorkload` + `ChainConfig`
   (every field a `buggify_knob!`; the operation-id table `PROPOSE=0 …
   CHECK_TAIL=16`, `OP_COUNT`, the weight table, the reconfiguration shape
-  rings) · `chain_workload/fold.rs` the client's `Fold` of the journal and
+  rings) · `chain_workload/system.rs` the system-journal operations (#189,
+  `CREATE_JOURNAL=17 … RETIRE_NODE=21`) and their read-back · `chain_workload/fold.rs` the client's `Fold` of the journal and
   the run's trim fence (every trim clamped below every folding client's
   cursor).
 - `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,
@@ -59,7 +67,8 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 - `audit/mod.rs` `AuditWorld` (one per journal, `audit_world_for`; `world/`'s
   `storage_world_for` likewise, keyed by `state::journal_key`), `check_run`,
   `reach_once!` · `audit/journals.rs` the journal board and the non-interference
-  oracles (#188) · `audit/state.rs`
+  oracles (#188) · `audit/system.rs` the system board (#189: fold agreement, id
+  allocation, tombstones, the joiner gates) · `audit/state.rs`
   `AuditState` (per-transition protocol safety) · `audit/client.rs`
   `ClientHistory` (linearizability, sequential-client consistency) ·
   `audit/matchmaker.rs` `MatchmakerAudit`.
@@ -70,7 +79,7 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
 
 `PROCESS_POOL_RANGE = 3..=6`, `MATCHMAKER_POOL_RANGE = 0..=5` (zero means the
 plain Multi-Paxos deployment), `PROXY_POOL_RANGE = 0..=3` (zero means every
-Phase 2 colocated), `CLIENT_COUNT_RANGE = 1..4`, `PLATEAU_SEEDS = 8`,
+Phase 2 colocated), `REPLICA_POOL_RANGE = 0..=2`, `JOINER_POOL_RANGE = 0..=2` (#189), `CLIENT_COUNT_RANGE = 1..4`, `PLATEAU_SEEDS = 8`,
 `CHAOS_DURATION_MS = 4_000`, `SMOKE_ITERATIONS = 50`, `COVERAGE_ITERATIONS = 1024`,
 `CORPUS_CI_ITERATIONS = 64`,
 `EXPLORATION_TIMELINES_PER_SEED = 8`. `chaos_surfaces()` is `Network(Swarm)`,

@@ -39,6 +39,7 @@ mod client;
 pub(crate) mod journals;
 mod matchmaker;
 mod state;
+pub(crate) mod system;
 mod world;
 
 pub(crate) use client::ClientHistory;
@@ -74,6 +75,9 @@ pub(crate) struct NodeAudit<T> {
     /// The journal this port reports for and the run's cross-journal board
     /// (#188); `None` for a port outside the journal plane (a matchmaker).
     journal: Option<(JournalId, Arc<Mutex<journals::JournalBoard>>)>,
+    /// The run's system-journal board (#189), on a node that follows the
+    /// system journals.
+    system: Option<Arc<Mutex<system::SystemBoard>>>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -116,7 +120,19 @@ impl<T: TimeProvider> NodeAudit<T> {
             time,
             world,
             journal: None,
+            system: None,
         }
+    }
+
+    /// This port also reports the system journals' folds and their effects
+    /// to `board` (#189).
+    pub(crate) fn with_system(mut self, board: Arc<Mutex<system::SystemBoard>>) -> Self {
+        self.system = Some(board);
+        self
+    }
+
+    fn system_board(&self) -> Option<MutexGuard<'_, system::SystemBoard>> {
+        self.system.as_deref().map(system::lock)
     }
 
     /// This port reports for `journal` (#188): the non-interference oracles
@@ -932,6 +948,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         applied: Option<Slot>,
         dedup: bool,
     ) {
+        // #189: a node acknowledges no append to a journal after folding its
+        // tombstone.
+        if let (Some(board), Some((journal, _))) = (self.system_board(), &self.journal) {
+            board.acked(node, *journal);
+        }
         let mut st = self.state();
         st.any_ack_checked = true;
         // Decision 1 of #144: the node asked acks, and the slot's reply
@@ -1057,6 +1078,43 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn journal_refused(&self, _node: NodeId, _journal: JournalId, _call: &'static str) {
         assert_reachable!("journal: a call naming an unserved journal is refused");
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, journal = journal.0, lsn))]
+    fn system_folded(
+        &self,
+        node: NodeId,
+        journal: JournalId,
+        lsn: u64,
+        event: &paros::system::SystemEvent,
+    ) {
+        if let Some(mut board) = self.system_board() {
+            board.folded(node, journal, lsn, event);
+        }
+    }
+
+    fn journal_started(&self, node: NodeId, _journal: JournalId) {
+        if let Some(mut board) = self.system_board() {
+            board.started(node);
+        }
+    }
+
+    fn journal_stopped(&self, _node: NodeId, _journal: JournalId) {
+        assert_reachable!(
+            "system: a node stops a journal the directory tombstoned or its retirement ended"
+        );
+    }
+
+    fn unpooled_message(&self, node: NodeId, _journal: JournalId, from: NodeId) {
+        if let Some(mut board) = self.system_board() {
+            board.refused(node, from);
+        }
+    }
+
+    fn pool_admitted(&self, node: NodeId, admitted: NodeId) {
+        if let Some(mut board) = self.system_board() {
+            board.admitted(node, admitted);
+        }
     }
 
     fn quorum_read_served(

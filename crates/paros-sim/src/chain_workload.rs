@@ -22,6 +22,7 @@ use crate::client::{ClientRuntime, client_rpc_config};
 
 mod fold;
 mod rpc;
+mod system;
 
 use crate::{CHAOS_DURATION_MS, DigestSink};
 use rpc::{
@@ -87,7 +88,23 @@ const READ: u8 = 15;
 /// exactly the checks [`READ_INDEX`] and [`QUORUM_READ`] are, which pin the
 /// path.
 const CHECK_TAIL: u8 = 16;
-const OP_COUNT: u8 = 17;
+/// Create a journal through the **directory** (#189): a `CreateJournal` of a
+/// name drawn from a four-name alphabet over three members of the pool
+/// (genesis nodes and registered joiners), appended to journal 1 at a seed,
+/// then read back — `Created` with its id, or refused for a taken name — and
+/// one record appended to a journal it created. On a seed without system
+/// journals the append is still sent, and must be refused as unknown.
+const CREATE_JOURNAL: u8 = 17;
+/// Tombstone a journal this client created (#189): a `DeleteJournal`.
+const DELETE_JOURNAL: u8 = 18;
+/// Register a joiner in the **node registry** (#189): a `RegisterNode` of
+/// its id and address, appended to journal 2 at a seed.
+const REGISTER_NODE: u8 = 19;
+/// Drain a registered joiner (#189): a `DrainNode`.
+const DRAIN_NODE: u8 = 20;
+/// Retire a draining joiner from the pool for good (#189): a `RetireNode`.
+const RETIRE_NODE: u8 = 21;
+const OP_COUNT: u8 = 22;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -240,7 +257,9 @@ impl ChainConfig {
             read_max_bytes: buggify_knob!(4096_u64, 0_u64..257_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
             // MATCHMAKE (retired), MATCH_GC (retired), RECONFIGURE,
-            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ, READ, CHECK_TAIL
+            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ, READ, CHECK_TAIL,
+            // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
+            // RETIRE_NODE
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -275,6 +294,16 @@ impl ChainConfig {
                 buggify_knob!(14_u64, 0_u64..41_u64),
                 // A tail on a drawn path costs what its path costs.
                 buggify_knob!(8_u64, 0_u64..41_u64),
+                // A create is two system appends' worth of reads and one
+                // append to the new journal; the ceiling is a client that
+                // mostly manages journals, the floor one that never does.
+                buggify_knob!(6_u64, 0_u64..41_u64),
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // Registering a joiner is one append; the joiners' own
+                // gates need it early and often.
+                buggify_knob!(6_u64, 0_u64..41_u64),
+                buggify_knob!(2_u64, 0_u64..21_u64),
+                buggify_knob!(2_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -951,6 +980,28 @@ impl Workload for ChainWorkload {
         // client is, and its tailing cursor (#185) — where its tailing reads
         // start, only ever moved forward by a page's `next_lsn`.
         let mut fold = fold::Fold::new(journal);
+        // The system-journal operations (#189), and whether the run runs
+        // the system journals at all (a seed that does not must refuse them).
+        let mut system_ops = system::SystemOps::new(
+            crate::shape::system_journals(ctx.state(), has_matchmakers, true),
+            server_count,
+            deployment
+                .joiners()
+                .iter()
+                .enumerate()
+                .filter_map(|(rank, ip)| {
+                    paros::parse_addr(ip)
+                        .ok()
+                        .map(|addr| (crate::roles::joiner_node_id(rank), addr))
+                })
+                .collect(),
+            self.plan
+                .as_ref()
+                .map(|plan| plan.ids.clone())
+                .unwrap_or_default(),
+            client_id,
+            request_timeout,
+        );
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
@@ -2278,6 +2329,37 @@ impl Workload for ChainWorkload {
                             }
                         }
                     }
+                }
+                CREATE_JOURNAL => {
+                    system_ops
+                        .create(ctx, &clients, (raw_class, raw_payload))
+                        .await;
+                }
+                DELETE_JOURNAL => system_ops.delete(ctx, &clients, raw_payload).await,
+                REGISTER_NODE => {
+                    system_ops
+                        .registry_step(ctx, &clients, None, raw_payload)
+                        .await;
+                }
+                DRAIN_NODE => {
+                    system_ops
+                        .registry_step(
+                            ctx,
+                            &clients,
+                            Some(paros::system::NodeStanding::Registered),
+                            raw_payload,
+                        )
+                        .await;
+                }
+                RETIRE_NODE => {
+                    system_ops
+                        .registry_step(
+                            ctx,
+                            &clients,
+                            Some(paros::system::NodeStanding::Draining),
+                            raw_payload,
+                        )
+                        .await;
                 }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }

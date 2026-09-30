@@ -15,7 +15,10 @@ the driver, never in a sim-only path.
   `driver/journals.rs` `JournalStores` (the list and a per-journal opener),
   `SingleStore`, the per-journal runtime, and the quarantine (a storage fault drops the
   journal's runtime and re-opens it after `quarantine_ticks`; a node with no live journal
-  exits with the fault) ·
+  exits with the fault) · `driver/system.rs` `SystemPlan` and the system journals' follower
+  (#189: a seed folds its own journals 1 and 2, every other node keeps a long-polling `Read`
+  open against a seed; `run_journals` applies the folds — created journals start, tombstoned
+  ones stop, registered nodes get a lane, an unregistered sender is refused) ·
   `driver/{boot,ready,report,transport,matchmaking,handover,operator,events}.rs`
   by stage: the format-marker check and the boot report (nothing is
   replayed: there is no application, #186), the `Ready` handshake's I/O side in
@@ -83,6 +86,11 @@ the driver, never in a sim-only path.
   `serve_deliveries` (the `Deliver` lane's edge task: ack on enqueue),
   `rpc_config` · `rpc/client.rs` `NodeClient` (the public client: one
   at-most-once attempt per call) and the driver's `MatchmakerClient`.
+- `system.rs` (`pub mod system`, #189) the system journals' entries (`SystemCommand`, one
+  record per slot, `proto/system.proto`) and their pure folds: `Directory` (id = `128 +` the
+  create's LSN, never reused, name races decided by slot order) and `Registry` (the pool is the
+  genesis pool plus every registered node not retired) — the one reading every node and every
+  client reading back shares.
 - `corruption.rs` the CTRL record classification (`classify_log`).
 - `journal/` the durable stores on `moonpool-journal` (`pub mod journal`):
   `JournalStorage` (`node.rs`, `LogStorage`), `JournalMatchmakerStorage`

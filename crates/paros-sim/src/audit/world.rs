@@ -537,6 +537,7 @@ pub(crate) fn check_run(
     audit.check_gates();
     crate::world::check_storage_gates(state, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();
+    super::system::lock(&super::system::system_board(state)).check_gates();
     let acked_max = audit.lock().lin.acked_max();
     audit.check_final_convergence(acked_max);
     audit.digest()
