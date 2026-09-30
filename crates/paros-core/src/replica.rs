@@ -363,37 +363,78 @@ impl Replica {
             .map_or(self.base, |(_, state)| *state)
     }
 
-    /// The highest slot a decided truncation lets this replica drop: every
-    /// slot below the one holding the journal's first retained record (or,
-    /// when every record is truncated, every folded slot). `None` when
-    /// nothing may go.
+    /// The highest slot a decided truncation lets this replica drop. `None`
+    /// when nothing may go.
+    ///
+    /// A floor must keep every record a retained slot's verdict read, not
+    /// only the journal's first retained one: a node that reboots (or jumps
+    /// to a peer's trim point) refolds every slot from its floor, and a
+    /// retry above it — a write at a position already inside the journal
+    /// when it folded — is judged against the record at that position,
+    /// which a `Truncate` above the retry may since have released. So the
+    /// floor starts at the slot holding the current first record and walks
+    /// down to the lowest slot holding a record some retained retry read,
+    /// until that is a fixed point (or, when every record is truncated, it
+    /// starts at the fold's head). Dropping only up to the current first
+    /// record left such a retry nothing to compare against on the refold:
+    /// `Refused` on the rebooted node where every other node had folded
+    /// `Duplicate` (the audit's "every node judges a slot to the same
+    /// outcome", witness seed 9212868850674249062 of the sweep that landed
+    /// #204).
     ///
     /// # Panics
     ///
-    /// If the positions index lost the write holding the first retained
-    /// record: a programmer error.
+    /// If the positions index lost the write holding a retained record: a
+    /// programmer error.
     #[must_use]
     pub fn compaction_target(&self) -> Option<Slot> {
-        let first = if self.state.first_seq < self.state.next_seq {
-            let (start, slot) = self
-                .positions
-                .range(..=self.state.first_seq)
-                .next_back()
-                .expect("the first retained record's write is retained");
-            let entry = self
+        let mut first = self.slot_holding(self.state.first_seq);
+        loop {
+            let needed = self
                 .chosen
-                .get(slot)
-                .and_then(Command::write)
-                .expect("an indexed write is a retained chosen write");
-            assert!(
-                *start <= self.state.first_seq && self.state.first_seq.0 < start.0 + entry.count(),
-                "the first retained record lies inside the write indexed below it"
-            );
-            *slot
-        } else {
-            self.folded
-        };
+                .range(first..self.folded)
+                .filter_map(|(slot, command)| {
+                    let entry = command.write()?;
+                    let at = self.state_at(*slot);
+                    (entry.seq >= at.first_seq && entry.seq < at.next_seq)
+                        .then(|| self.slot_holding(entry.seq))
+                })
+                .min()
+                .unwrap_or(first);
+            if needed >= first {
+                break;
+            }
+            first = needed;
+        }
+        assert!(
+            first >= self.floor && first <= self.folded,
+            "a compaction floor lies inside the retained fold"
+        );
         first.0.checked_sub(1).map(Slot)
+    }
+
+    /// The slot holding the record at `position` — the write whose batch
+    /// covers it — or the fold's head when `position` is at or past the
+    /// journal's end (no record there to keep). Never below the floor.
+    fn slot_holding(&self, position: Seq) -> Slot {
+        if position >= self.state.next_seq {
+            return self.folded;
+        }
+        let (start, slot) = self
+            .positions
+            .range(..=position)
+            .next_back()
+            .expect("a retained record's write is retained");
+        let entry = self
+            .chosen
+            .get(slot)
+            .and_then(Command::write)
+            .expect("an indexed write is a retained chosen write");
+        assert!(
+            *start <= position && position.0 < start.0 + entry.count(),
+            "a retained record lies inside the write indexed below it"
+        );
+        (*slot).max(self.floor)
     }
 
     /// One page of a **journal read** (#204, `Read(from_seq, limit)`): the
@@ -706,6 +747,38 @@ mod tests {
 
     fn bytes(page: &super::LogPage) -> Vec<Vec<u8>> {
         page.records.iter().map(|v| v.0.clone()).collect()
+    }
+
+    /// A floor keeps every record a retained slot's verdict read, not only
+    /// the journal's first retained one: a node that refolds from the floor
+    /// judges a retry above it exactly as before.
+    #[test]
+    fn a_floor_keeps_every_record_a_retained_slot_compares_against() {
+        let commands = [
+            claim(),
+            write(0, &[b"a"]),
+            write(1, &[b"b"]),
+            write(0, &[b"a"]), // a retry of position 0
+            Command::Control(Control::Truncate { up_to: Seq(1) }),
+        ];
+        let mut r = replica(&commands);
+        assert!(matches!(
+            r.outcome_at(Slot(3)),
+            Some(Outcome::Duplicate { .. })
+        ));
+        // The first retained record (position 1) sits at slot 2, but slot
+        // 3's verdict read position 0 at slot 1: the floor stops at slot 1.
+        assert_eq!(r.compaction_target(), Some(Slot(0)));
+        let first = Slot(1);
+        let sealed = r.truncate(first);
+        let mut recs = records(&commands);
+        recs.retain(|slot, _| *slot >= first);
+        let rebooted = Replica::from_boot(Some(Slot(4)), first, sealed, &recs);
+        assert!(matches!(
+            rebooted.outcome_at(Slot(3)),
+            Some(Outcome::Duplicate { .. })
+        ));
+        assert_eq!(rebooted.journal(), r.journal());
     }
 
     #[test]
