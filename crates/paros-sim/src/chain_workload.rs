@@ -628,6 +628,11 @@ const SETTLE: Duration = Duration::from_secs(1);
 struct Tail {
     registered: usize,
     done_proposing: usize,
+    /// The first moment every registered client was done proposing (#177).
+    /// The convergence budget is measured from here, not from a client's own
+    /// tail: a client whose program ended early would otherwise spend its
+    /// whole budget waiting on a sibling still in its operation program.
+    all_quiet_at: Option<Duration>,
     /// The journals some client saw converged (#188): the run ends only once
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
@@ -2411,9 +2416,28 @@ impl Workload for ChainWorkload {
             }
         }
         let tail = tail(ctx.state());
-        tail.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .done_proposing += 1;
+        {
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.done_proposing += 1;
+            if guard.done_proposing == guard.registered && guard.all_quiet_at.is_none() {
+                guard.all_quiet_at = Some(time.now());
+            }
+        }
+        // The convergence claim needs every client quiet, so its budget runs
+        // from the first moment every client is (#177), and never ends before
+        // this client's own recovery deadline. While a sibling is still in its
+        // operation program there is no deadline yet: every program is finite
+        // (its operations time out, its recovery batch has its own deadline).
+        // The threshold, `recovery_budget_ms`, is unchanged; only where it is
+        // measured from moved.
+        let budget = Duration::from_millis(config.recovery_budget_ms);
+        let convergence_deadline = || -> Option<Duration> {
+            tail.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .all_quiet_at
+                .map(|at| (at + budget).max(recovery_deadline))
+        };
+        let in_budget = || convergence_deadline().is_none_or(|deadline| time.now() < deadline);
 
         let mut converged = false;
         // The last probe, `(node, answer)` per live node in node order — the
@@ -2426,7 +2450,7 @@ impl Workload for ChainWorkload {
         // `(since, end)`: when the cluster was first seen converged at `end`,
         // reset whenever a probe disagrees.
         let mut stable: Option<(Duration, u64)> = None;
-        while time.now() < recovery_deadline && !shutdown.is_cancelled() {
+        while in_budget() && !shutdown.is_cancelled() {
             // A node terminally parked by a detected corruption (Stage 7's
             // detect ⇒ crash baseline) never answers again — the availability
             // cost the dead-node budget bounds. Convergence is demanded of
@@ -2517,7 +2541,7 @@ impl Workload for ChainWorkload {
                 .unwrap_or_else(PoisonError::into_inner)
                 .converged
                 .insert(journal);
-            while time.now() < recovery_deadline && !shutdown.is_cancelled() {
+            while in_budget() && !shutdown.is_cancelled() {
                 let all = appended_to.is_subset(
                     &tail
                         .lock()
@@ -2596,9 +2620,9 @@ impl Workload for ChainWorkload {
             // produce a red.
             let parked_now = crate::world::parked_nodes(ctx.state(), journal);
             eprintln!(
-                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node chosen ends = {:?}",
+                "chain convergence FAILED at t={}ms (deadline {:?}ms, pre_tail_count {}): per-node chosen ends = {:?}",
                 time.now().as_millis(),
-                recovery_deadline.as_millis(),
+                convergence_deadline().map(|deadline| deadline.as_millis()),
                 pre_tail_count,
                 last_probe,
             );
