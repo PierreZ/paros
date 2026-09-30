@@ -1,14 +1,21 @@
 //! The chain client's **system-journal operations** (#189): the directory's
 //! `CreateJournal` / `DeleteJournal` and the node registry's
-//! `RegisterNode` / `DrainNode` / `RetireNode`, each one `Append` of one
-//! record to journal 1 or 2 at a seed, and the read-back a creator does to
-//! learn what its request folded to.
+//! `RegisterNode` / `DrainNode` / `RetireNode`, each one record written to
+//! journal 1 or 2 at a seed, and the read-back a creator does to learn what
+//! its request folded to.
+//!
+//! A system journal is written like any journal (#204): a writer claims it
+//! with `SetLeader` against the generation it read, then `Write`s at the
+//! position the claim answered. Several clients contend for the same
+//! journal, so a claim may lose and a write may be fenced by a later claim;
+//! both are retried a bounded number of times, and what never lands is
+//! ambiguous.
 //!
 //! A client reads a system journal exactly as a node follows it: `Read` from
-//! LSN 0 and the same pure fold (`paros::system`), so what it reads back is
-//! what every node applied. On a seed that runs no system journals the
-//! request is still sent, and must be refused as naming an unknown journal —
-//! the same parity a `Reconfigure` keeps on a plain seed.
+//! position 0 and the same pure fold (`paros::system`), so what it reads
+//! back is what every node applied. On a seed that runs no system journals
+//! the request is still sent, and must be refused as naming an unknown
+//! journal — the same parity a `Reconfigure` keeps on a plain seed.
 //!
 //! No function here draws randomness: every choice is read off the caller's
 //! step draws.
@@ -20,31 +27,31 @@ use paros::system::{
     DIRECTORY, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, REGISTRY, Registry,
     SystemCommand, SystemEvent,
 };
-use paros::{AcceptorConfig, Append, JournalId, NodeId, QuorumSystem, Read, encode_records};
+use paros::{
+    AcceptorConfig, Command, Entry, Generation, JournalId, NodeId, QuorumSystem, Seq, Value,
+};
 
-use super::rpc::within;
+use super::rpc::{
+    SetLeaderResult, WriteResult, read_once, set_leader_once, state_of, within, write_once,
+};
 use crate::audit::audit_world_for;
 use crate::chain::user_command_hash;
 use crate::client::SimClient;
 
-/// Where a client's system-journal sequence numbers start: far above any
-/// user journal's, so an identity never reads as both.
-const SYSTEM_SEQ_BASE: u64 = 1 << 40;
-
-/// How many seeds a system append tries before it calls the outcome
+/// How many asks a system write spends before it calls the outcome
 /// ambiguous.
-const APPEND_ATTEMPTS: usize = 4;
+const APPEND_ATTEMPTS: usize = 6;
 
 /// The names a created journal is drawn from: few, so two creates race for
 /// one often.
 const NAMES: [&[u8]; 4] = [b"alpha", b"beta", b"gamma", b"delta"];
 
-/// A read-back page's byte budget.
-const READ_BYTES: u64 = 64 * 1024;
+/// A read-back page's record budget.
+const READ_RECORDS: u64 = 256;
 
 /// One system append's terminal outcome.
 enum Appended {
-    /// Chosen at this LSN.
+    /// Written at this position.
     At(u64),
     /// The seed serves no such journal: the run runs no system journals.
     Unknown,
@@ -69,7 +76,6 @@ pub(super) struct SystemOps {
     /// so a reconfiguration may name one.
     spares: bool,
     client_id: u64,
-    next_seq: u64,
     /// Journals this client created and has not asked to delete.
     created: Vec<JournalId>,
     timeout: Duration,
@@ -107,13 +113,12 @@ impl SystemOps {
                 && deployment.proxies().is_empty()
                 && deployment.replicas().is_empty(),
             client_id,
-            next_seq: SYSTEM_SEQ_BASE,
             created: Vec::new(),
             timeout,
         }
     }
 
-    /// Append `command` to `journal` at the seeds, starting at the one
+    /// Write `command` to `journal` at the seeds, starting at the one
     /// `draw` names and following redirects.
     async fn append(
         &mut self,
@@ -123,59 +128,97 @@ impl SystemOps {
         command: &SystemCommand,
         draw: u64,
     ) -> Appended {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        let record = command.encode();
-        // The journal's own oracles' ground truth: this identity was
-        // appended here, carrying these bytes.
+        let seeds: Vec<usize> = (0..self.seeds).collect();
+        self.claim_and_write(ctx, clients, journal, &seeds, command.encode(), draw)
+            .await
+    }
+
+    /// Claim `journal` and write `record` to it (#204), asking the nodes
+    /// `targets` names from the one `draw` picks: read the tail's state,
+    /// `SetLeader` against its generation, then `Write` at the position the
+    /// claim answered. A lost claim, a fenced write and a redirect are
+    /// retried within [`APPEND_ATTEMPTS`] asks.
+    async fn claim_and_write(
+        &mut self,
+        ctx: &SimContext,
+        clients: &[SimClient],
+        journal: JournalId,
+        targets: &[usize],
+        record: Vec<u8>,
+        draw: u64,
+    ) -> Appended {
         let audit = audit_world_for(ctx.state(), journal);
-        audit.note_appended(self.client_id, seq);
-        audit.note_submitted(user_command_hash(&encode_records(std::slice::from_ref(
-            &record,
-        ))));
-        let request = Append {
-            journal: journal.0,
-            client: self.client_id,
-            seq,
-            records: vec![record],
-        };
-        let mut target = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
+        audit.note_submitted(user_command_hash(&record));
+        let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
+        let mut claim: Option<(u64, u64)> = None;
         for _ in 0..APPEND_ATTEMPTS {
-            let client = clients[target % clients.len()].clone();
-            let answer = within(ctx, self.timeout, None, async {
-                client.append(&request).await.ok()
-            })
-            .await;
-            match answer {
-                Some(ack) if ack.unknown_journal => {
+            let node = targets[target % targets.len()] % clients.len();
+            let client = clients[node].clone();
+            let Some((generation, position)) = claim else {
+                // Read where the journal stands, then claim it.
+                let read = read_once(&client, journal.0, 0, 1, 0);
+                let Some(ack) = within(ctx, self.timeout, None, read).await else {
+                    target += 1;
+                    continue;
+                };
+                if ack.unknown_journal {
                     assert_always!(
-                        !self.active,
+                        !self.active || !paros::system::is_system(journal),
                         "system: a seed serves the system journals",
-                        { "journal" => journal.0, "seed" => target }
+                        { "journal" => journal.0, "seed" => node }
                     );
-                    assert_reachable!(
-                        "system: a system append on a seed without system journals is refused"
-                    );
+                    if paros::system::is_system(journal) {
+                        assert_reachable!(
+                            "system: a system append on a seed without system journals is refused"
+                        );
+                    }
                     return Appended::Unknown;
                 }
-                Some(ack) if ack.committed => {
-                    return ack.first_lsn.map_or(Appended::Ambiguous, Appended::At);
+                if !ack.served {
+                    target += 1;
+                    continue;
                 }
-                Some(ack) => {
-                    target = ack
-                        .leader
-                        .and_then(|leader| usize::try_from(leader).ok())
-                        .filter(|leader| *leader < self.seeds)
-                        .unwrap_or((target + 1) % self.seeds);
+                let tail = state_of(ack.state);
+                let ask =
+                    set_leader_once(clients, journal, node, tail.generation.0, self.client_id);
+                match within(ctx, self.timeout, SetLeaderResult::Ambiguous, ask).await {
+                    SetLeaderResult::Won { state } => {
+                        claim = Some((state.generation.0, state.next_seq.0));
+                    }
+                    SetLeaderResult::Lost { .. } | SetLeaderResult::Ambiguous => {}
+                    SetLeaderResult::Redirect { leader } => {
+                        target = leader
+                            .and_then(|l| targets.iter().position(|t| *t as u64 == l))
+                            .unwrap_or(target + 1);
+                    }
                 }
-                None => target = (target + 1) % self.seeds,
+                continue;
+            };
+            let entry = Entry {
+                generation: Generation(generation),
+                owner: paros::ClientId(self.client_id),
+                seq: Seq(position),
+                records: vec![Value(record.clone())],
+            };
+            audit.note_appended(paros::command_hash(&Command::Write(entry.clone())));
+            let write = write_once(clients, ctx.time(), journal, node, &entry, false);
+            match within(ctx, self.timeout, WriteResult::Ambiguous, write).await {
+                WriteResult::Written { seq, .. } => return Appended::At(seq),
+                // Fenced by a later claim, or behind: claim again.
+                WriteResult::Refused { .. } | WriteResult::Truncated { .. } => claim = None,
+                WriteResult::Redirect { leader } => {
+                    target = leader
+                        .and_then(|l| targets.iter().position(|t| *t as u64 == l))
+                        .unwrap_or(target + 1);
+                }
+                WriteResult::Ambiguous => target += 1,
             }
         }
         Appended::Ambiguous
     }
 
-    /// Read `journal` from LSN 0 to a seed's committed end and fold it: every
-    /// event with its LSN, and the folds.
+    /// Read `journal` from position 0 to a seed's tail and fold it: every
+    /// event with its position, and the folds.
     async fn read_back(
         &self,
         ctx: &SimContext,
@@ -189,30 +232,24 @@ impl SystemOps {
         let mut events = Vec::new();
         let mut from = 0;
         loop {
-            let request = Read {
-                journal: journal.0,
-                from_lsn: from,
-                max_bytes: READ_BYTES,
-            };
-            let ack = within(ctx, self.timeout, None, async {
-                client.read(&request).await.ok()
-            })
-            .await?;
-            if ack.unknown_journal || ack.trimmed_to.is_some() {
+            let read = read_once(&client, journal.0, from, READ_RECORDS, 0);
+            let ack = within(ctx, self.timeout, None, read).await?;
+            if ack.unknown_journal || ack.truncated || !ack.served {
                 return None;
             }
-            for entry in ack.entries {
+            let next = from + ack.records.len() as u64;
+            for (position, record) in (from..).zip(&ack.records) {
                 let event = if journal == DIRECTORY {
-                    SystemEvent::Directory(directory.fold(entry.lsn, &entry.records))
+                    SystemEvent::Directory(directory.fold(position, record))
                 } else {
-                    SystemEvent::Registry(registry.fold(entry.lsn, &entry.records))
+                    SystemEvent::Registry(registry.fold(position, record))
                 };
-                events.push((entry.lsn, event));
+                events.push((position, event));
             }
-            if ack.next_lsn <= from || ack.next_lsn >= ack.committed_end {
+            if next <= from || next >= state_of(ack.state).next_seq.0 {
                 return Some((events, directory, registry));
             }
-            from = ack.next_lsn;
+            from = next;
         }
     }
 
@@ -265,7 +302,7 @@ impl SystemOps {
             name,
             config: config.clone(),
         };
-        let Appended::At(lsn) = self
+        let Appended::At(position) = self
             .append(ctx, clients, DIRECTORY, &command, payload)
             .await
         else {
@@ -276,7 +313,7 @@ impl SystemOps {
         };
         match events
             .into_iter()
-            .find(|(at, _)| *at == lsn)
+            .find(|(at, _)| *at == position)
             .map(|(_, e)| e)
         {
             Some(SystemEvent::Directory(DirectoryEvent::Created { id, .. })) => {
@@ -296,7 +333,7 @@ impl SystemOps {
         }
     }
 
-    /// One record appended to a journal this client created, at a genesis
+    /// One record written to a journal this client created, at a genesis
     /// member (the client has no connection to a joiner).
     async fn append_to_created(
         &mut self,
@@ -314,40 +351,12 @@ impl SystemOps {
         if genesis.is_empty() {
             return;
         }
-        let seq = self.next_seq;
-        self.next_seq += 1;
         let record = draw.to_le_bytes().to_vec();
-        let audit = audit_world_for(ctx.state(), journal);
-        audit.note_appended(self.client_id, seq);
-        audit.note_submitted(user_command_hash(&encode_records(std::slice::from_ref(
-            &record,
-        ))));
-        let request = Append {
-            journal: journal.0,
-            client: self.client_id,
-            seq,
-            records: vec![record],
-        };
-        let mut target = usize::try_from(draw % genesis.len() as u64).unwrap_or(0);
-        for _ in 0..APPEND_ATTEMPTS {
-            let client = clients[genesis[target % genesis.len()]].clone();
-            let answer = within(ctx, self.timeout, None, async {
-                client.append(&request).await.ok()
-            })
-            .await;
-            match answer {
-                Some(ack) if ack.committed => {
-                    assert_reachable!("system: a created journal commits an append");
-                    return;
-                }
-                Some(ack) => {
-                    target = ack
-                        .leader
-                        .and_then(|leader| genesis.iter().position(|g| *g as u64 == leader))
-                        .unwrap_or(target + 1);
-                }
-                None => target += 1,
-            }
+        if let Appended::At(_) = self
+            .claim_and_write(ctx, clients, journal, &genesis, record, draw)
+            .await
+        {
+            assert_reachable!("system: a created journal commits an append");
         }
     }
 

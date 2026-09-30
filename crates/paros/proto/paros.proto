@@ -11,25 +11,23 @@ import "common.proto";
 // and schema version live in `src/rpc/methods.rs`; only the messages are
 // generated from this file.
 service Paros {
-  // Append records to a journal (#185): today's proposal plus the #94
-  // at-most-once dedup — a retry keeps `(client, seq, records)` and a
-  // duplicate is answered with the original position. All records of one
-  // append land in one slot, and the LSN is the slot. Answered once the
-  // slot is chosen (ack-on-commit), or redirected to the leader.
-  rpc Append(.paros.v1.Append) returns (.paros.v1.AppendAck);
-  // Read chosen entries from `from_lsn` up (#185), from this node's (or
-  // replica's) chosen prefix: holes — `Noop`s, control commands, #94
-  // duplicates — are skipped; above the end it waits (long-poll) until
-  // something is chosen or a deadline passes; below the trim point it
-  // answers `trimmed_to` and nothing else.
+  // Append a batch to a journal at `seq` (#204): fenced by `(generation,
+  // owner)`, contiguous by `seq`, idempotent on retry, pipelineable. Every
+  // rule is judged at apply, in slot order, by the journal state machine;
+  // the reply is held until the deciding slot applies, or redirected to
+  // the leader.
+  rpc Write(.paros.v1.Write) returns (.paros.v1.WriteAck);
+  // The committed records from `from_seq` (#204), plus `first_seq`,
+  // `next_seq` and the current writer, or `truncated` below `first_seq`.
+  // Served by any node or replica through the leaderless read (#143): a
+  // Phase-1 quorum's vote watermarks, then this server's fold once it
+  // covers them. Long-polls at the tail for `wait_ms`.
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
-  // A linearizable tail (#185): through read-index on the leader, or a
-  // leaderless quorum read (#143) on any node or replica. The result is at
-  // least every append acked before the call started.
-  rpc CheckTail(.paros.v1.CheckTail) returns (.paros.v1.CheckTailAck);
-  // Trim the journal below `up_to` (#185, formerly `Compact`): the leader
-  // proposes a decided `Truncate`, so every reader gets one trim point.
-  rpc Trim(.paros.v1.Trim) returns (.paros.v1.TrimAck);
+  // Drop every record below `up_to` (#204). Monotone, decided by consensus.
+  rpc Truncate(.paros.v1.Truncate) returns (.paros.v1.TruncateAck);
+  // Compare-and-swap the journal's writer (#204): wins iff `expected` is the
+  // current generation, which then becomes `expected + 1`.
+  rpc SetLeader(.paros.v1.SetLeader) returns (.paros.v1.SetLeaderAck);
   // Change the acceptor set (Matchmaker Paxos reconfiguration, #122). Only the
   // leader admits it, and only on a deployment that names matchmakers; every
   // other case is refused (`accepted: false`) and the client may retry.
@@ -43,92 +41,100 @@ service Paros {
 
 // Every journal call names its journal (#184): `0` is unset and always
 // refused (`unknown_journal`), as is any journal this process does not serve.
+// A reply that carries no verdict — a redirect, an unknown journal, a
+// deliberately abandoned wait — is ambiguous: the call may still take effect.
 
-message Append {
+message Write {
   uint64 journal = 1;
-  uint64 client = 2;
-  uint64 seq = 3;
-  // The records, in order. They land in one slot together.
-  repeated bytes records = 4;
+  uint64 generation = 2;
+  uint64 owner = 3;
+  // The position the batch's first record asks for.
+  uint64 seq = 4;
+  // The records, in order: accepted or refused whole, in one slot.
+  repeated bytes records = 5;
 }
 
-message AppendAck {
-  uint64 seq = 1;
+enum WriteOutcome {
+  // No verdict: redirected, unknown journal, or not answered here.
+  WRITE_OUTCOME_NONE = 0;
+  // Accepted: the records occupy `[seq, seq + count)`.
+  WRITE_OUTCOME_ACCEPTED = 1;
+  // A retry of the write accepted at `seq`: acked, nothing moved.
+  WRITE_OUTCOME_DUPLICATE = 2;
+  // Refused in place: `state` names the current writer and `next_seq`.
+  WRITE_OUTCOME_REFUSED = 3;
+  // `seq` is below `first_seq`: ambiguous, read the tail.
+  WRITE_OUTCOME_TRUNCATED = 4;
+}
+
+message WriteAck {
+  WriteOutcome outcome = 1;
+  // A redirect hint, when there is no verdict.
   optional uint64 leader = 2;
-  bool committed = 3;
-  // The slot the append landed in (its LSN), when committed.
-  optional uint64 first_lsn = 4;
-  bool unknown_journal = 5;
-}
-
-// The payload a user slot carries: the records of one append, in order. The
-// core keeps it opaque; only the journal edge frames and unframes it.
-message RecordBatch {
-  repeated bytes records = 1;
+  bool unknown_journal = 3;
+  // Accepted or duplicate: where the batch sits.
+  uint64 seq = 4;
+  uint64 count = 5;
+  // Refused or truncated: the journal state the write was judged against.
+  .paros.common.v1.JournalState state = 6;
 }
 
 message Read {
   uint64 journal = 1;
-  uint64 from_lsn = 2;
-  // A budget on the page's record bytes. A page that can hold an entry
-  // always holds at least one, whatever its size.
-  uint64 max_bytes = 3;
-}
-
-message LogEntry {
-  uint64 lsn = 1;
-  uint64 client = 2;
-  uint64 seq = 3;
-  repeated bytes records = 4;
+  uint64 from_seq = 2;
+  // At most this many records (0: the server's page size).
+  uint64 limit = 3;
+  // Wait at the tail up to this long for a record (0: answer at once).
+  uint64 wait_ms = 4;
 }
 
 message ReadAck {
-  repeated LogEntry entries = 1;
-  // Where the next read starts (entries and skipped holes alike).
-  uint64 next_lsn = 2;
-  // One past the serving node's contiguous chosen prefix.
-  uint64 committed_end = 3;
-  // Set when `from_lsn` is below the trim point: the first readable LSN.
-  // Nothing else is answered then.
-  optional uint64 trimmed_to = 4;
-  bool unknown_journal = 5;
+  // Whether this server answered: false when it could not confirm a read
+  // (its quorum did not answer in time) — retry, here or elsewhere.
+  bool served = 1;
+  bool unknown_journal = 2;
+  // `from_seq` is below `first_seq`: no records, and `state` says where the
+  // journal starts.
+  bool truncated = 3;
+  // The first record's position and the records, dense from it.
+  uint64 from_seq = 4;
+  repeated bytes records = 5;
+  // The state the page was served from: `first_seq`, `next_seq` (the
+  // committed end) and the current writer.
+  .paros.common.v1.JournalState state = 6;
 }
 
-enum TailPath {
-  // Read-index on the leader (a non-leader redirects).
-  TAIL_PATH_LEADER = 0;
-  // A leaderless quorum read (#143), on any node or replica.
-  TAIL_PATH_QUORUM = 1;
-}
-
-message CheckTail {
+message Truncate {
   uint64 journal = 1;
-  uint64 client = 2;
-  uint64 seq = 3;
-  TailPath path = 4;
-}
-
-message CheckTailAck {
-  uint64 seq = 1;
-  optional uint64 leader = 2;
-  bool committed = 3;
-  // One past the confirmed chosen prefix, when committed.
-  optional uint64 committed_end = 4;
-  bool unknown_journal = 5;
-}
-
-message Trim {
-  uint64 journal = 1;
-  // The last LSN the client permits dropping (inclusive).
+  // The first position the client still needs.
   uint64 up_to = 2;
 }
 
-message TrimAck {
-  optional uint64 leader = 1;
-  bool accepted = 2;
-  // The serving node's trim point (its first retained LSN).
-  uint64 trim_point = 3;
+message TruncateAck {
+  // Whether the truncation was decided and applied (`state` is after it).
+  bool decided = 1;
+  optional uint64 leader = 2;
+  bool unknown_journal = 3;
+  .paros.common.v1.JournalState state = 4;
+}
+
+message SetLeader {
+  uint64 journal = 1;
+  // The generation the caller believes current.
+  uint64 expected = 2;
+  // The client that should own the journal.
+  uint64 owner = 3;
+}
+
+message SetLeaderAck {
+  // Whether the compare-and-swap was judged (won or lost).
+  bool decided = 1;
+  // Whether it won: `state` is then the new generation, the new owner and
+  // the position it continues from; lost, `state` names the current writer.
+  bool won = 2;
+  optional uint64 leader = 3;
   bool unknown_journal = 4;
+  .paros.common.v1.JournalState state = 5;
 }
 
 message Reconfigure {

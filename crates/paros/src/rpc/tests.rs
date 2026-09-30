@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, Message, NodeId, Party, ProxyId, Slot,
-    Value,
+    Ballot, ClientId, Command, Control, Entry, Generation, JournalState, Message, NodeId, Party,
+    ProxyId, Seq, Slot, Value,
 };
 use prost::Message as ProstMessage;
 
@@ -56,17 +56,23 @@ fn every_variant() -> Vec<Message> {
         node: NodeId(3),
     };
     let entry = Entry {
-        client: ClientId(1),
-        seq: ClientSeq(2),
-        value: Value(vec![1, 2, 3]),
+        generation: Generation(4),
+        owner: ClientId(1),
+        seq: Seq(2),
+        records: vec![Value(vec![1, 2, 3]), Value(Vec::new())],
     };
-    let command = Command::User(entry.clone());
-    // Control commands in the accepted suffix exercise both protobuf
-    // control variants alongside the client-entry case.
-    let control = Command::Control(Control::Truncate { up_to: Slot(3) });
+    let command = Command::Write(entry.clone());
+    // Control commands in the accepted suffix exercise every protobuf
+    // control variant alongside the client-write case.
+    let control = Command::Control(Control::Truncate { up_to: Seq(3) });
+    let claim = Command::Control(Control::SetLeader {
+        expected: Generation(3),
+        owner: ClientId(9),
+    });
     let mut accepted = BTreeMap::new();
     accepted.insert(Slot(5), (ballot, command.clone()));
     accepted.insert(Slot(6), (ballot, control));
+    accepted.insert(Slot(8), (ballot, claim));
     accepted.insert(Slot(7), (ballot, Command::Control(Control::Noop)));
     let mut catchup = BTreeMap::new();
     catchup.insert(Slot(4), (ballot, command.clone()));
@@ -163,12 +169,14 @@ fn every_variant() -> Vec<Message> {
         Message::TrimmedTo {
             from: NodeId(0),
             point: Slot(6),
-            // The #94 session ledger rides with the trim point and must
-            // survive the wire round trip record-for-record.
-            sessions: vec![
-                (ClientId(1), ClientSeq(2), Slot(3)),
-                (ClientId(4), ClientSeq(0), Slot(5)),
-            ],
+            // The journal state rides with the trim point (#204) and must
+            // survive the wire round trip scalar for scalar.
+            state: JournalState {
+                owner: Some(ClientId(4)),
+                generation: Generation(2),
+                next_seq: Seq(7),
+                first_seq: Seq(3),
+            },
         },
         Message::Heartbeat {
             from: NodeId(0),
@@ -221,16 +229,17 @@ fn every_variant() -> Vec<Message> {
                         round: 6,
                         node: NodeId(2),
                     },
-                    Command::Control(Control::Truncate { up_to: Slot(2) }),
+                    Command::Control(Control::Truncate { up_to: Seq(2) }),
                 ),
             )]),
             pending: BTreeMap::from([
                 (
                     Slot(5),
-                    Command::User(Entry {
-                        client: ClientId(8),
-                        seq: ClientSeq(3),
-                        value: Value(vec![4, 5]),
+                    Command::Write(Entry {
+                        generation: Generation(1),
+                        owner: ClientId(8),
+                        seq: Seq(3),
+                        records: vec![Value(vec![4, 5])],
                     }),
                 ),
                 (Slot(6), Command::Control(Control::Noop)),

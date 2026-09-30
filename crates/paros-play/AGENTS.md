@@ -20,7 +20,8 @@ Two corollaries that bite in review:
 
 - **A judge that restates a rule is a bug.** `expected` comes from a clone — `prepare`,
   `admit`, `close_phase1`, `recovery_next`, `confirm_reads`, `Replica::advance`,
-  `Acceptor::trim_to` / `Replica::trim_to`, the two dedup ledgers. The one deliberate exception is a prompt
+  `Acceptor::trim_to` / `Replica::trim_to`, `JournalState::apply` over the replica's fold (a
+  retry is judged by the log, #204). The one deliberate exception is a prompt
   whose answer is a *constant* because the core has no other state to be in
   (`PersistOrder`, `CommitOverwrite`); each says so in its doc comment and says why.
 - **The engine validates before it calls the core.** The core asserts, and an assert in

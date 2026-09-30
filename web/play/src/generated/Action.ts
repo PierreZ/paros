@@ -193,7 +193,7 @@ seq: number, } | { "kind": "compact",
  */
 node: number, 
 /**
- * The last slot the client permits dropping, inclusive.
+ * The first position the client still needs.
  */
 up_to: number, } | { "kind": "resend_pending", 
 /**

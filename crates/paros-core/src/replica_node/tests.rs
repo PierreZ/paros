@@ -11,7 +11,7 @@ use crate::node::ColocatedNode;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
+    Ballot, ClientId, Command, Control, Entry, Generation, NodeId, Seq, Slot, Value,
 };
 use crate::write::{AcceptorWrite, WriteOp};
 
@@ -25,7 +25,7 @@ struct Disk {
     hard_state: HardState,
     records: BTreeMap<Slot, (Ballot, Command)>,
     first_slot: Slot,
-    sealed: Vec<SessionEntry>,
+    sealed: crate::JournalState,
 }
 
 impl Disk {
@@ -35,7 +35,7 @@ impl Disk {
             hard_state: HardState::default(),
             records: BTreeMap::new(),
             first_slot: Slot(0),
-            sealed: Vec::new(),
+            sealed: crate::JournalState::default(),
         }
     }
 
@@ -58,12 +58,12 @@ impl Disk {
             }
             WriteOp::SetChosenIndex(s) => self.hard_state.chosen_index = Some(*s),
             WriteOp::Truncate { first, sealed } => {
-                self.sealed.extend(sealed.iter().copied());
+                self.sealed = *sealed;
                 self.first_slot = self.first_slot.max(*first);
                 self.records = self.records.split_off(&self.first_slot);
             }
-            WriteOp::TrimmedTo { point, sessions } => {
-                self.sealed.extend(sessions.iter().copied());
+            WriteOp::TrimmedTo { point, state } => {
+                self.sealed = *state;
                 let boundary = Slot(point.0 - 1);
                 if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
                     self.hard_state.chosen_index = Some(boundary);
@@ -88,8 +88,8 @@ impl Storage for Disk {
     fn last_slot(&self) -> Slot {
         self.records.keys().next_back().copied().unwrap_or(Slot(0))
     }
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
-        self.sealed.clone()
+    fn sealed_state(&self) -> crate::JournalState {
+        self.sealed
     }
 }
 
@@ -103,10 +103,11 @@ fn config(id: u64) -> Config {
 }
 
 fn cmd(seq: u64) -> Command {
-    Command::User(Entry {
-        client: ClientId(1),
-        seq: ClientSeq(seq),
-        value: Value(vec![u8::try_from(seq).expect("small seq")]),
+    Command::Write(Entry {
+        generation: Generation(0),
+        owner: ClientId(1),
+        seq: Seq(seq),
+        records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
     })
 }
 
@@ -222,11 +223,27 @@ impl Tier {
     }
 
     fn propose(&mut self, seq: u64, keep: impl Fn(NodeId, &Message) -> bool) {
-        let _ = self.nodes[0].propose(
-            ClientId(1),
-            ClientSeq(seq),
-            Value(vec![u8::try_from(seq).expect("small seq")]),
-        );
+        self.write(0, seq, keep);
+    }
+
+    /// A `Write` of one record at `seq` under `generation`, by client 1.
+    fn write(&mut self, generation: u64, seq: u64, keep: impl Fn(NodeId, &Message) -> bool) {
+        let _ = self.nodes[0].propose(Entry {
+            generation: Generation(generation),
+            owner: ClientId(1),
+            seq: Seq(seq),
+            records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
+        });
+        let q = self.drain_node(0);
+        self.deliver(q, keep);
+    }
+
+    /// Client 1 claims the journal (generation 1) at the next slot.
+    fn claim(&mut self, keep: impl Fn(NodeId, &Message) -> bool) {
+        let _ = self.nodes[0].propose_control(Control::SetLeader {
+            expected: Generation(0),
+            owner: ClientId(1),
+        });
         let q = self.drain_node(0);
         self.deliver(q, keep);
     }
@@ -376,9 +393,9 @@ fn a_replica_reboots_from_its_learned_records() {
         "a record above the prefix is chosen: a replica writes nothing else"
     );
     assert_eq!(
-        rebooted.replica().applied_at(ClientId(1), ClientSeq(1)),
-        Some(Slot(0)),
-        "the ledger is rebuilt from the records"
+        rebooted.replica().folded(),
+        Slot(1),
+        "the journal fold is rebuilt from the records"
     );
     // The rebooted replica heals exactly as the live one would.
     tier.replicas[0] = rebooted;
@@ -388,28 +405,28 @@ fn a_replica_reboots_from_its_learned_records() {
 }
 
 #[test]
-fn a_replica_executes_a_decided_truncate_and_seals_its_ledger() {
+fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
     let mut tier = Tier::new();
     tier.elect();
-    for seq in 1..=3 {
-        tier.propose(seq, |_, _| true);
+    tier.claim(|_, _| true);
+    // Slots 1..=3 hold positions 0..=2.
+    for seq in 0..=2 {
+        tier.write(1, seq, |_, _| true);
     }
-    let _ = tier.nodes[0].propose_control(Control::Truncate { up_to: Slot(1) });
+    let _ = tier.nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
     let q = tier.drain_node(0);
     tier.deliver(q, |_, _| true);
     for r in 0..REPLICAS.len() {
-        assert_eq!(tier.replicas[r].first_slot(), Slot(2));
-        assert_eq!(tier.disks[r].first_slot, Slot(2));
-        assert!(!tier.disks[r].records.contains_key(&Slot(1)));
+        assert_eq!(tier.replicas[r].first_slot(), Slot(3));
+        assert_eq!(tier.disks[r].first_slot, Slot(3));
+        assert!(!tier.disks[r].records.contains_key(&Slot(2)));
         assert_eq!(
-            tier.disks[r].sealed,
-            vec![
-                (ClientId(1), ClientSeq(1), Slot(0)),
-                (ClientId(1), ClientSeq(2), Slot(1))
-            ],
-            "the dropped slots' ledger records are sealed durably"
+            tier.disks[r].sealed.next_seq,
+            Seq(2),
+            "the dropped slots' journal state is sealed durably"
         );
-        assert_eq!(tier.applied_slots(r), vec![0, 1, 2, 3]);
+        assert_eq!(tier.disks[r].sealed.owner, Some(ClientId(1)));
+        assert_eq!(tier.applied_slots(r), vec![0, 1, 2, 3, 4]);
     }
 }
 
@@ -419,35 +436,37 @@ fn a_replica_below_the_floor_jumps_to_the_trim_point() {
     tier.elect();
     // Replica 10 is partitioned away while the acceptors choose and truncate.
     let away = |to: NodeId, _: &Message| to != NodeId(10);
-    for seq in 1..=3 {
-        tier.propose(seq, away);
+    tier.claim(away);
+    for seq in 0..=2 {
+        tier.write(1, seq, away);
     }
-    let _ = tier.nodes[0].propose_control(Control::Truncate { up_to: Slot(1) });
+    let _ = tier.nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
     let q = tier.drain_node(0);
     tier.deliver(q, away);
-    assert_eq!(tier.nodes[0].acceptor().first_slot(), Slot(2));
+    assert_eq!(tier.nodes[0].acceptor().first_slot(), Slot(3));
     // Healed: its catch-up from slot 0 is below the leader's floor, so the
     // leader answers its trim point; the replica jumps there and catches up
     // the retained log from it.
     tier.beat(|_, _| true);
     tier.beat(|_, _| true);
     let replica = &tier.replicas[0];
-    assert_eq!(replica.replica().chosen_index(), Some(Slot(3)));
-    assert_eq!(replica.first_slot(), Slot(2));
+    assert_eq!(replica.replica().chosen_index(), Some(Slot(4)));
+    assert_eq!(replica.first_slot(), Slot(3));
     assert_eq!(replica.counters().trim_jumps, 1);
     assert_eq!(
         tier.applied_slots(0),
-        vec![2, 3],
+        vec![3, 4],
         "the walk resumes at the trim point: the slots below it are gone"
     );
     assert_eq!(
-        replica.replica().applied_at(ClientId(1), ClientSeq(2)),
-        Some(Slot(1)),
-        "the serving peer's ledger came with the trim point"
+        replica.replica().journal(),
+        tier.nodes[0].replica().journal(),
+        "the serving peer's journal state came with the trim point"
     );
     // And it learns what is chosen past the point.
-    tier.propose(4, |_, _| true);
-    assert_eq!(tier.applied_slots(0), vec![2, 3, 4]);
+    tier.write(1, 3, |_, _| true);
+    assert_eq!(tier.applied_slots(0), vec![3, 4, 5]);
+    assert_eq!(tier.replicas[0].replica().journal().next_seq, Seq(4));
 }
 
 #[test]

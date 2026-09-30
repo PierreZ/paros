@@ -36,6 +36,7 @@ macro_rules! reach_once {
 }
 
 mod client;
+mod journal_model;
 pub(crate) mod journals;
 mod matchmaker;
 mod state;
@@ -50,8 +51,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
-    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
-    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, JournalId, LEADER_RECOVERY_BATCH, LogReadAnswer,
+    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Deployment, EdgeRejection, GcAck, GcStep,
+    HANDOFF_BATCH, Handoff, HistoryPage, JournalId, LEADER_RECOVERY_BATCH, LogReadAnswer,
     LogReadReport, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     Message, NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
@@ -147,10 +148,10 @@ impl<T: TimeProvider> NodeAudit<T> {
     }
 
     /// The non-interference half of an apply (#188): on a multi-journal run
-    /// a user command's identity must be one appended to this journal, and
+    /// a write must be one a client sent to this journal, and
     /// the board learns which journal committed while a sibling was held or
     /// quarantined.
-    fn journal_applied(&self, node: NodeId, identity: Option<(u64, u64)>) {
+    fn journal_applied(&self, node: NodeId, write: Option<u64>) {
         let Some((journal, board)) = &self.journal else {
             return;
         };
@@ -158,11 +159,11 @@ impl<T: TimeProvider> NodeAudit<T> {
         if !board.is_multi() {
             return;
         }
-        if let Some((client, seq)) = identity {
+        if let Some(vhash) = write {
             assert_always!(
-                self.state().appended.contains(&(client, seq)),
+                self.state().appended.contains(&vhash),
                 "journal: a slot holds only a command appended to its own journal",
-                { "node" => node.0, "journal" => journal.0, "client" => client, "seq" => seq }
+                { "node" => node.0, "journal" => journal.0, "command" => vhash }
             );
         }
         let in_chaos = self.time.now() < crate::CHAOS_DURATION;
@@ -379,7 +380,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.observe_applied_index(node.0, landing);
     }
 
-    fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {
+    fn applied(
+        &self,
+        node: NodeId,
+        slot: Slot,
+        vhash: u64,
+        command: &Command,
+        outcome: Option<&paros::Outcome>,
+    ) {
         let mut st = self.state();
         if st.replicas.contains(&node.0) {
             st.applied_on_replica = true;
@@ -388,27 +396,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
             assert_always!(prev == vhash, "at most one value is ever chosen for a slot");
         }
-        // The at-most-once half: one (client, seq) applies at exactly one
-        // index, cluster-wide. Keyed on identity, not payload bytes (distinct
-        // requests legitimately share bytes); a boot replay of the same slot
-        // is idempotent and passes.
-        if let Some(id) = identity {
-            let first = *st.applied_identity.entry(id).or_insert(slot.0);
-            assert_always!(
-                first == slot.0,
-                "a (client, seq) command is applied at exactly one log index"
-            );
-        }
-        // The quorum-decided oracle's apply leg: a user command applied where
-        // the durable-accept tally already decided the slot must apply the
-        // decided value. Control applies are exempt on purpose — the #94
-        // suppression legitimately executes a re-chosen identity as a `Noop`
-        // (identity `None`) while the quorum durably accepted the user
-        // command, and control-slot agreement is already covered by the
-        // per-slot `chosen` check above.
-        if identity.is_some()
-            && let Some(decided_vhash) = st.decided_vhash(slot.0)
-        {
+        // The journal state machine's oracles (#204): every node's verdict
+        // at this slot is the same, and the verdicts obey section 6.
+        st.journal.applied(node.0, slot.0, command, vhash, outcome);
+        // The quorum-decided oracle's apply leg: a slot applied where the
+        // durable-accept tally already decided it must apply the decided
+        // value (no apply substitutes a command since #204: the #94
+        // suppression that did is gone with the session ledger).
+        if let Some(decided_vhash) = st.decided_vhash(slot.0) {
             assert_always!(
                 vhash == decided_vhash,
                 "an applied value matches the decided value",
@@ -434,7 +429,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
         drop(st);
-        self.journal_applied(node, identity);
+        self.journal_applied(node, command.write().map(|_| vhash));
     }
 
     fn journal_quarantined(&self, node: NodeId) {
@@ -943,22 +938,27 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().last_gap.insert(node.0, (hole.0, above.0));
     }
 
-    fn client_acked(
-        &self,
-        node: NodeId,
-        client: u64,
-        seq: u64,
-        slot: Slot,
-        applied: Option<Slot>,
-        dedup: bool,
-    ) {
-        // #189: a node acknowledges no append to a journal after folding its
+    fn answered(&self, node: NodeId, slot: Slot, command: &Command, outcome: &paros::Outcome) {
+        // #189: a node acknowledges no write to a journal after folding its
         // tombstone.
-        if let (Some(board), Some((journal, _))) = (self.system_board(), &self.journal) {
+        if command.write().is_some()
+            && let (Some(board), Some((journal, _))) = (self.system_board(), &self.journal)
+        {
             board.acked(node, *journal);
         }
         let mut st = self.state();
         st.any_ack_checked = true;
+        st.answered_max = st.answered_max.max(Some(slot.0));
+        // The verdict answered is the one every node's fold reached there.
+        st.journal.answered(node.0, slot.0, outcome);
+        // A verdict is answered only from the node's own fold: the slot is
+        // inside what it applied. The message predates #204, when it named
+        // the ack of a committed write; the property is the same.
+        assert_always!(
+            st.frontier.get(&node.0).is_some_and(|next| *next > slot.0),
+            "a committed write ack names a slot the acking node had already applied",
+            { "node" => node.0, "slot" => slot.0 }
+        );
         // Decision 1 of #144: the node asked acks, and the slot's reply
         // owner — a replica, a different process by construction — is noted
         // so the gate can prove it applied what it would have answered.
@@ -969,42 +969,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 *first = (*first).min(slot.0);
             }
         }
-        // A committed ack is a claim about a specific applied command: on both
-        // ack paths (ack-on-commit and the dedup fast path) the apply of this
-        // `(client, seq)` was folded before the ack fired — on this node, or,
-        // for a session fact adopted from a trim-point jump, on the peer that
-        // served it. The ack must name exactly the index the identity applied at; an
-        // ack for a never-applied identity fails the same check. ("Applied"
-        // is the walk over the chosen prefix: paros runs no application,
-        // #186.)
-        let applied_at = st.applied_identity.get(&(client, seq)).copied();
-        assert_always!(
-            applied_at == Some(slot.0),
-            "a committed ack names the slot its command applied at",
-            {
-                "node" => node.0,
-                "client" => client,
-                "seq" => seq,
-                "acked_slot" => slot.0,
-                "applied_at" => crate::signed_watermark(applied_at)
+        match outcome {
+            paros::Outcome::Accepted { .. } | paros::Outcome::Duplicate { .. } => {
+                if st.leader_change_ms.is_some() {
+                    st.ack_after_leader_change = true;
+                }
+                // The retry edge the reply-drop location exists for: a
+                // write's verdict was dropped, and a retry was answered from
+                // the log.
+                if matches!(outcome, paros::Outcome::Duplicate { .. }) && st.propose_reply_dropped {
+                    st.dedup_after_dropped_reply = true;
+                }
             }
-        );
-        if st.leader_change_ms.is_some() {
-            st.ack_after_leader_change = true;
+            // Feeds the "chain: compact takes effect" outcome gate.
+            paros::Outcome::Trimmed(_) => st.compact_ack_accepted = true,
+            _ => {}
         }
-        // The dedup-window edge the reply-drop location exists for: a reply
-        // was dropped after commit, and a retry then took the dedup path.
-        if dedup && st.propose_reply_dropped {
-            st.dedup_after_dropped_reply = true;
-        }
-        // `committed = true` is the promise that the write is in the register
-        // this project defines — the *applied* log prefix — so an ack that
-        // outruns the acking node's own apply is a client-visible
-        // linearizability violation on its own.
-        assert_always!(
-            applied.is_some_and(|a| a >= slot),
-            "a committed write ack names a slot the acking node had already applied"
-        );
     }
 
     fn chosen_index(&self, node: NodeId, index: Slot) {
@@ -1025,58 +1005,50 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         *watermark = (*watermark).max(index.0);
     }
 
-    fn read_confirmed(&self, node: NodeId, index: Option<Slot>) {
+    fn log_read_served(&self, node: NodeId, report: &LogReadReport<'_>) {
         let mut st = self.state();
-        st.check_read_frontier(node, index);
-        // The #141 outcome: the confirming ack set was a full column of a
-        // grid (the leader's configuration at its current ballot).
-        if let Some(round) = st.leader_round.get(&node.0).copied()
-            && st
-                .config_of(Ballot { round, node })
-                .is_some_and(|c| matches!(c.quorum_system(), QuorumSystem::Grid { .. }))
-        {
-            st.read_confirmed_on_column = true;
-        }
-    }
-
-    fn log_read_served(&self, node: NodeId, report: &LogReadReport) {
-        let mut st = self.state();
-        // A page is served from the serving process's contiguous chosen
-        // prefix and never above it: an empty long-poll answer names its own
-        // start, everything else ends inside the prefix.
+        let from = report.from.0;
+        let next = from + report.records.len() as u64;
+        // A page is served from the serving process's journal fold and never
+        // past it (the message predates positions: the fold's head is the
+        // serving prefix).
         assert_always!(
-            report.next <= report.committed_end
-                || (report.entries == 0 && report.next == report.from),
+            report.truncated || report.records.is_empty() || next <= report.state.next_seq.0,
             "journal read: a page never passes the serving prefix",
             {
                 "node" => node.0,
-                "from" => report.from.0,
-                "next" => report.next.0,
-                "committed_end" => report.committed_end.0
+                "from" => from,
+                "next" => next,
+                "next_seq" => report.state.next_seq.0
             }
         );
-        if let Some(trim) = report.trimmed_to {
-            // Trimmed only below the trim point, and a trim point only ever
-            // inside what the cluster decided (a floor moves inside the
-            // chosen prefix).
+        // The state it was served from is one the nodes' verdicts reached.
+        assert_always!(
+            report.state.next_seq.0 <= st.journal.next_seq(),
+            "journal read: a served state never passes the applied journal",
+            { "node" => node.0, "next_seq" => report.state.next_seq.0 }
+        );
+        // Every record is the one accepted at its position.
+        for (position, record) in (from..).zip(report.records) {
+            if let Some(known) = st.journal.record_at(position) {
+                assert_always!(
+                    known == journal_model::record_hash(&record.0),
+                    "journal read: a record is the one accepted at its position",
+                    { "node" => node.0, "position" => position }
+                );
+            }
+        }
+        if report.truncated {
+            // Truncated only below `first_seq` (the message predates
+            // positions: `first_seq` is the trim point).
             assert_always!(
-                report.from < trim,
+                from < report.state.first_seq.0,
                 "journal read: a trim point refuses only reads below it",
-                { "node" => node.0, "from" => report.from.0, "trim" => trim.0 }
-            );
-            assert_always!(
-                st.decided_max.is_some_and(|d| trim.0 <= d + 1),
-                "journal read: a trim point never passes the decided prefix",
-                {
-                    "node" => node.0,
-                    "trim" => trim.0,
-                    "decided_max" => crate::signed_watermark(st.decided_max)
-                }
+                { "node" => node.0, "from" => from, "first_seq" => report.state.first_seq.0 }
             );
             st.journal_read_trimmed = true;
         }
-        st.journal_read_skipped_hole |= report.skipped > 0;
-        st.journal_read_woke |= report.answer == LogReadAnswer::Woke && report.entries > 0;
+        st.journal_read_woke |= report.answer == LogReadAnswer::Woke && !report.records.is_empty();
         st.journal_read_on_replica |= st.replicas.contains(&node.0);
     }
 
@@ -1084,16 +1056,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         assert_reachable!("journal: a call naming an unserved journal is refused");
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, journal = journal.0, lsn))]
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, journal = journal.0, seq))]
     fn system_folded(
         &self,
         node: NodeId,
         journal: JournalId,
-        lsn: u64,
+        seq: u64,
         event: &paros::system::SystemEvent,
     ) {
         if let Some(mut board) = self.system_board() {
-            board.folded(node, journal, lsn, event);
+            board.folded(node, journal, seq, event);
         }
     }
 
@@ -1501,9 +1473,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let mut st = self.state();
         if matches!(
             reply,
-            paros::Reply::ProposeRedirect
-                | paros::Reply::ReadRedirect
-                | paros::Reply::Compact
+            paros::Reply::Redirect
+                | paros::Reply::ReadUnserved
+                | paros::Reply::Truncate
                 | paros::Reply::Reconfigure
                 | paros::Reply::ReconfigureMatchmakers
                 | paros::Reply::Retire
@@ -1520,26 +1492,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.reply_dropped,
             "a committed client reply is dropped at the reply seam"
         );
-        if matches!(reply, paros::Reply::Propose | paros::Reply::ProposeDedup) {
+        if matches!(reply, paros::Reply::Write) {
             st.propose_reply_dropped = true;
         }
-        if matches!(reply, paros::Reply::Read) {
+        if matches!(reply, paros::Reply::LogRead) {
             reach_once!(
                 st.read_reply_dropped,
                 "a confirmed read reply is dropped at the reply seam"
-            );
-        }
-    }
-
-    fn compact_acked(&self, _node: NodeId, accepted: bool) {
-        let mut st = self.state();
-        if accepted {
-            // Feeds the "chain: compact takes effect" outcome gate.
-            st.compact_ack_accepted = true;
-        } else {
-            reach_once!(
-                st.compact_ack_refused,
-                "a compact request is acked as refused"
             );
         }
     }
@@ -1573,7 +1532,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(st.delivery_failed, "a peer delivery RPC fails or times out");
     }
 
-    fn waiters_cleared(&self, _node: NodeId, _writes: u64, _reads: u64) {
+    fn waiters_cleared(&self, _node: NodeId, _calls: u64) {
         let mut st = self.state();
         reach_once!(
             st.waiters_cleared,
@@ -1659,17 +1618,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn quorum_lost(&self, _node: NodeId, _count: u64) {
         self.state().quorum_lost = true;
-    }
-
-    fn duplicate_suppressed(&self, _node: NodeId, _count: u64) {
-        let mut st = self.state();
-        // Reachable-only: the double-choose needs a partition-era retry plus a
-        // later election's mandatory P2c re-proposal — a per-run `sometimes`
-        // would starve saturation on seeds that never partition a leader.
-        reach_once!(
-            st.duplicate_suppressed,
-            "a re-chosen (client, seq) is suppressed at the apply seam (at-most-once)"
-        );
     }
 
     fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {
@@ -1888,11 +1836,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // a compaction floor above the slot (the below-floor `Nack` is the
         // acceptor's "already chosen"). `None` when the configuration is not
         // known yet (then nothing is judged).
-        // A slot applied as a `Noop` over a *different* durable record is the
-        // #94 duplicate substitution (a repeated `(client, seq)` executes as a
-        // no-op while its record keeps the user command): the record is the
-        // chosen value, and what every Phase 1 would find.
-        let noop = command_hash(&Command::Control(Control::Noop));
         let mut uncovered: Vec<String> = Vec::new();
         let covered = st.config_of(watermark).cloned().map(|config| {
             let holders: BTreeSet<NodeId> = config
@@ -1909,9 +1852,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                                     return false;
                                 }
                                 match (st.persisted.get(&(m, *slot)), st.chosen.get(slot)) {
-                                    (Some(held), Some(decided)) => {
-                                        held != decided && *decided != noop
-                                    }
+                                    (Some(held), Some(decided)) => held != decided,
                                     (Some(_), None) => false,
                                     (None, _) => true,
                                 }

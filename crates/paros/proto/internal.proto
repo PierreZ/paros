@@ -78,17 +78,27 @@ message ConsensusMessage {
   uint64 journal = 20;
 }
 
-message UserEntry {
-  uint64 client = 1;
-  uint64 seq = 2;
-  bytes value = 3;
+// A journal `Write` decided into one slot (#204): judged at apply by the
+// journal state machine, never at propose time.
+message WriteEntry {
+  uint64 generation = 1;
+  uint64 owner = 2;
+  uint64 seq = 3;
+  repeated bytes records = 4;
 }
 
+// Drop every record below `up_to` (a position, #204).
 message Truncate {
   uint64 up_to = 1;
 }
 
 message Noop {}
+
+// Compare-and-swap the journal's writer (#204).
+message SetLeader {
+  uint64 expected = 1;
+  uint64 owner = 2;
+}
 
 message ControlCommand {
   // 3 was Snap, the decided snapshot point, deleted with the application
@@ -97,13 +107,17 @@ message ControlCommand {
   oneof kind {
     Truncate truncate = 1;
     Noop noop = 2;
+    SetLeader set_leader = 4;
   }
 }
 
 message Command {
+  // 1 was the #185 `UserEntry` (client, seq, value), replaced by the
+  // journal `Write` (#204).
+  reserved 1;
   oneof kind {
-    UserEntry user = 1;
     ControlCommand control = 2;
+    WriteEntry write = 3;
   }
 }
 
@@ -216,20 +230,17 @@ message CatchUpResponse {
 
 // Below the serving peer's trim point (#186): the log below `point` is gone
 // there, and everything below it is chosen. The requester jumps its floor to
-// `point` and its chosen index to `point - 1`, seals the ledger, and catches
-// up from `point`. No bytes and no ballot: its promise does not move.
+// `point` and its chosen index to `point - 1`, takes the journal state the
+// log folded to below it, and catches up from `point`. No bytes and no
+// ballot: its promise does not move.
 message TrimmedTo {
   uint64 from = 1;
   uint64 point = 2;
-  // The serving peer's at-most-once session ledger below `point` (#94).
-  repeated SessionRecord sessions = 3;
-}
-
-// One at-most-once ledger record: (client, seq) applied at slot.
-message SessionRecord {
-  uint64 client = 1;
-  uint64 seq = 2;
-  uint64 slot = 3;
+  // 3 was the #94 session ledger, gone with #204: the log is the
+  // deduplication table.
+  reserved 3;
+  // The journal state the serving peer's log folded to below `point`.
+  .paros.common.v1.JournalState state = 4;
 }
 
 message Heartbeat {
@@ -332,4 +343,9 @@ message InspectReply {
   repeated uint64 retirable = 9;
   // The floor that leadership made effective, when any.
   .paros.common.v1.Ballot gc_watermark = 10;
+  // The journal fold (#204): the first slot this node has not folded, and
+  // the journal state after every slot below it. An observation of this
+  // node alone — a read of the journal is `Read`, which a quorum confirms.
+  uint64 folded = 16;
+  .paros.common.v1.JournalState journal = 17;
 }

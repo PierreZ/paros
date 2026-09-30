@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::proposer::{Campaign, Proposer};
 use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Entry, Fingerprint,
-    Message, NodeId, QuorumSystem, Slot, Value,
+    AcceptorConfig, AcceptorWrite, Ballot, ClientId, Command, Entry, Fingerprint, Generation,
+    Message, NodeId, QuorumSystem, Seq, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Phase};
@@ -123,14 +123,15 @@ fn actor(id: NodeId) -> String {
 }
 
 /// A client value, tagged with the proposer that carries it. Single-decree
-/// Paxos never looks inside, and the `(client, seq)` fields exist only because
-/// Multi-Paxos needs them for at-most-once execution.
+/// Paxos never looks inside: the writer and position fields exist only
+/// because a journal judges its writes by them (#204).
 #[must_use]
 pub fn value(proposer: u64, round: u64, text: &str) -> Command {
-    Command::User(Entry {
-        client: ClientId(proposer),
-        seq: ClientSeq(round),
-        value: Value(text.as_bytes().to_vec()),
+    Command::Write(Entry {
+        generation: Generation(round),
+        owner: ClientId(proposer),
+        seq: Seq(0),
+        records: vec![Value(text.as_bytes().to_vec())],
     })
 }
 

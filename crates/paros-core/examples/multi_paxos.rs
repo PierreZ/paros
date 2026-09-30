@@ -162,8 +162,8 @@ use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
 use paros_core::replica::Replica;
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId,
-    QuorumSystem, Slot, Value, WriteOp,
+    AcceptorConfig, Ballot, ClientId, Command, Control, Entry, Fingerprint, Generation, NodeId,
+    QuorumSystem, Seq, Slot, Value, WriteOp,
 };
 
 const N1: NodeId = NodeId(1);
@@ -178,10 +178,11 @@ fn ballot(round: u64, node: NodeId) -> Ballot {
 /// `(client, seq)` so the log can tell a retry from a new request and
 /// execute each request at most once. Every command here is distinct.
 fn command(text: &str, seq: u64) -> Command {
-    Command::User(Entry {
-        client: ClientId(1),
-        seq: ClientSeq(seq),
-        value: Value(text.as_bytes().to_vec()),
+    Command::Write(Entry {
+        generation: Generation(0),
+        owner: ClientId(1),
+        seq: Seq(seq),
+        records: vec![Value(text.as_bytes().to_vec())],
     })
 }
 
@@ -193,7 +194,7 @@ fn noop() -> Command {
 
 fn show(command: &Command) -> String {
     match command {
-        Command::User(entry) => format!("{:?}", String::from_utf8_lossy(&entry.value.0)),
+        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
         Command::Control(control) => format!("{control:?}"),
     }
 }
@@ -241,7 +242,12 @@ impl Node {
             id,
             acceptor: Acceptor::new(Ballot::zero(), BTreeMap::new(), Slot(0), BTreeMap::new()),
             proposer: Proposer::new(),
-            replica: Replica::from_boot(None, [], &BTreeMap::new()),
+            replica: Replica::from_boot(
+                None,
+                Slot(0),
+                paros_core::JournalState::default(),
+                &BTreeMap::new(),
+            ),
             disk: Vec::new(),
             alive: true,
         }

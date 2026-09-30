@@ -50,12 +50,12 @@ fn wedge_after_election() -> [ColocatedNode; 3] {
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy, so every node's chosen prefix starts at slot 0.
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    nodes[0].propose(entry(1, 1, 10));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
     // Slot 1: every `Accept` is lost, so only the leader holds it. Undecided.
-    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    nodes[0].propose(entry(1, 2, 20));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, msg| {
         !matches!(msg, Message::Accept { .. })
@@ -67,7 +67,7 @@ fn wedge_after_election() -> [ColocatedNode; 3] {
 
     // Slot 2: the `Accept` reaches node 1 only — enough for the {0,1} quorum, so
     // slot 2 *is* chosen and both followers learn it from the `Commit`.
-    nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    nodes[0].propose(entry(1, 3, 30));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, msg| {
         !(matches!(msg, Message::Accept { .. }) && to == NodeId(2))
@@ -128,7 +128,7 @@ fn election_fills_a_hole_the_promise_quorum_never_reported() {
 
     // And the leader can serve fresh proposals past it, which is what the wedge
     // used to make impossible.
-    nodes[1].propose(ClientId(1), ClientSeq(4), val(40));
+    nodes[1].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[1]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
     assert_eq!(
@@ -442,7 +442,7 @@ fn leader_never_lowers_its_promise_on_self_accept() {
     let _ = drain(&mut nodes[0]);
     assert_eq!(nodes[0].hard_state().max_promised_ballot, higher);
     // The leader (now superseded) tries to stream; self-accept must be skipped.
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     assert_eq!(
         nodes[0].hard_state().max_promised_ballot,
         higher,
@@ -455,7 +455,7 @@ fn single_node_cluster_elects_and_chooses_immediately() {
     let mut n = node(0, &[0]);
     campaign(&mut n);
     assert!(n.is_leader(), "a single node wins its own election");
-    let r = n.propose(ClientId(1), ClientSeq(1), val(42));
+    let r = n.propose(entry(1, 1, 42));
     assert_eq!(r, ProposeResult::Accepted(Slot(0)));
     assert_eq!(
         chosen_at(&n, 0),
@@ -476,12 +476,12 @@ fn truncated_quorum_refuses_a_blind_candidate() {
 
     // Slots 0 and 1 chosen everywhere.
     for (seq, b) in [(1u64, 10u8), (2, 20)] {
-        let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
+        let _ = nodes[0].propose(entry(1, seq, b));
         let q = drain(&mut nodes[0]);
         deliver_all(&mut nodes, q);
     }
     // Slot 2 chosen on the quorum {0, 1} only: drop everything addressed to node 2.
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    let _ = nodes[0].propose(entry(1, 3, 30));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
     assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(2)));

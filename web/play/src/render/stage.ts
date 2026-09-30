@@ -160,6 +160,7 @@ export function controlLabel(control: string | null | undefined): string | null 
   const known: Record<string, string> = {
     noop: 'Noop',
     truncate: 'Truncate',
+    set_leader: 'SetLeader',
   };
   return known[control.toLowerCase()] ?? control;
 }

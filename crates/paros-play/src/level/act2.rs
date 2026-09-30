@@ -20,7 +20,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Ballot, ClientId, ClientSeq, Command, Entry, NodeId, QuorumSystem, Slot, Value};
+use paros_core::{
+    Ballot, ClientId, Command, Entry, Generation, NodeId, QuorumSystem, Seq, Slot, Value,
+};
 
 use crate::action::{Action, ActionKind, Seam};
 use crate::auto::AutomationFlag;
@@ -83,15 +85,16 @@ fn with_history(
     WorldKind::Log(Box::new(World::from_disks(disks, &[CLIENT], TIMEOUT)))
 }
 
-/// A command an earlier leadership left on a disk. Its client id is **not**
-/// the level's client: a seeded command and a fresh proposal must not collide
-/// in the at-most-once ledger, or the leader would answer the new proposal
-/// with the old slot.
+/// A command an earlier leadership left on a disk. Its writer is **not**
+/// the level's client: a seeded write and a fresh proposal must never be
+/// the same write, or the journal would answer the new one as a retry of
+/// the old.
 fn carried_over(text: &str) -> Command {
-    Command::User(Entry {
-        client: ClientId(9),
-        seq: ClientSeq(1),
-        value: Value(text.as_bytes().to_vec()),
+    Command::Write(Entry {
+        generation: Generation(1),
+        owner: ClientId(9),
+        seq: Seq(0),
+        records: vec![Value(text.as_bytes().to_vec())],
     })
 }
 

@@ -50,8 +50,8 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   get-or-publish of every per-iteration singleton on the `StateHandle`).
 - `chain.rs` `ChainState` (the Chain-of-Blocks fold a journal client
   computes, #186) · `chain_workload.rs` `ChainWorkload` + `ChainConfig`
-  (every field a `buggify_knob!`; the operation-id table `PROPOSE=0 …
-  CHECK_TAIL=16`, `OP_COUNT`, the weight table, the reconfiguration shape
+  (every field a `buggify_knob!`; the operation-id table `WRITE=0 …
+  SET_LEADER=22`, `OP_COUNT`, the weight table, the reconfiguration shape
   rings) · `chain_workload/system.rs` the system-journal operations (#189,
   `CREATE_JOURNAL=17 … RETIRE_NODE=21`) and their read-back · `chain_workload/fold.rs` the client's `Fold` of the journal and
   the run's trim fence (every trim clamped below every folding client's

@@ -1,5 +1,5 @@
-//! The operator RPCs the node loop answers from the core: compaction,
-//! acceptor-set reconfiguration, retirement and inspection. Each handler
+//! The operator RPCs the node loop answers from the core: acceptor-set
+//! reconfiguration, retirement and inspection. Each handler
 //! validates the wire request, feeds or reads the core, reports the decision,
 //! and hands the loop the reply; the loop owns the settle tail and the reply
 //! seam.
@@ -7,57 +7,21 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, Control, MatchmakerId, NodeId, ProposeResult,
-    ReconfigureRefusal, ReconfigureResult, Slot, StartRefusal,
+    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, ReconfigureRefusal,
+    ReconfigureResult, StartRefusal,
 };
 
 use crate::audit::Audit;
 use crate::rpc::{
-    InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest, TrimAck, WireQuorumSystem,
-    common, quorum_system_from_proto, quorum_system_to_proto,
+    InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest, WireQuorumSystem, common,
+    journal_state_to_proto, quorum_system_from_proto, quorum_system_to_proto,
 };
 
 use super::events::reconfigure_outcome;
 use super::handover::HandoverDriver;
 
-/// A journal `Trim` (#185, formerly `Compact`): the client permits dropping
-/// the log prefix up to `up_to`. Only the leader admits it: it proposes a
-/// `Truncate` control command into the next slot, decided by ordinary Paxos
-/// and forwarded to every node, each of which truncates lazily when its walk
-/// reaches that slot — one replicated trim point, so every reader gets one
-/// answer. A non-leader redirects (like an append).
-///
-/// There is no precondition (#186): the client decides when its own state
-/// covers the prefix — the application lives in the client, and a laggard
-/// below the point jumps with `TrimmedTo`.
-#[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
-pub(crate) fn trim(node: &mut ColocatedNode, up_to: u64, self_id: u64) -> TrimAck {
-    if !node.is_leader() {
-        return TrimAck {
-            leader: node.leader().map(|n| n.0),
-            accepted: false,
-            trim_point: node.acceptor().first_slot().0,
-            unknown_journal: false,
-        };
-    }
-    // Honest ack: `accepted: true` only when the `Truncate` proposal was
-    // actually admitted — `propose_control` can refuse (a step-down raced
-    // this request), and the client's retry handles `accepted: false`.
-    let accepted = matches!(
-        node.propose_control(Control::Truncate { up_to: Slot(up_to) }),
-        ProposeResult::Accepted(_)
-    );
-    tracing::info!(node = self_id, up_to, accepted, "trim_proposed");
-    TrimAck {
-        leader: Some(self_id),
-        accepted,
-        trim_point: node.acceptor().first_slot().0,
-        unknown_journal: false,
-    }
-}
-
 /// An online reconfiguration (#122): the leader moves to a fresh ballot
-/// registered with the new acceptor set. Refusable like `Compact` — a
+/// registered with the new acceptor set. Refusable — a
 /// non-leader redirects, a plain deployment refuses outright, and an
 /// unsettled leadership asks the client to retry. Reported here; the loop
 /// settles the batch it opened before the ack leaves.
@@ -205,5 +169,7 @@ pub(crate) fn inspect(node: &ColocatedNode) -> InspectReply {
             .map_or_else(Vec::new, |set| set.members().iter().map(|m| m.0).collect()),
         retirable,
         gc_watermark,
+        folded: node.replica().folded().0,
+        journal: Some(journal_state_to_proto(node.replica().journal())),
     }
 }

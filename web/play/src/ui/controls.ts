@@ -525,11 +525,11 @@ function compactRow(view: GameView, state: ControlState, dispatch: Dispatch): HT
     { class: 'control-row' },
     h('span', { class: 'control-label' }, 'the client compacts'),
     select,
-    h('span', { class: 'control-hint' }, 'up to slot'),
+    h('span', { class: 'control-hint' }, 'before position'),
     input,
     action(
       'Compact',
-      'The client asks the leader to drop the log prefix. The leader proposes a Truncate like any value.',
+      'The client asks the leader to drop every record before a position. The leader proposes a Truncate like any value.',
       submit,
     ),
   );
@@ -563,7 +563,7 @@ function retryRows(view: GameView, state: ControlState, dispatch: Dispatch): HTM
           select,
           action(
             'Retry',
-            'The client asks again for the same write. The node must answer from its two dedup tables.',
+            'The client asks again for the same write. The journal answers it from the log.',
             () => {
               dispatch({
                 kind: 'retry',

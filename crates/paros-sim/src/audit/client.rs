@@ -33,16 +33,22 @@ impl OpSpan {
 /// the workload — the client is the only party that knows its own program order
 /// — and merged into the shared [`LinHistory`] at `check()` time.
 ///
-/// Everything is keyed by `seq`, so a retry, a duplicate re-proposal, or an
-/// ambiguous attempt that is later reconciled records one issue and at most
-/// one terminal outcome per identity: the first ack wins, and an ack retires
-/// an earlier failure of the same seq.
+/// Everything is keyed by the client's own operation number, so a retry, a
+/// duplicate re-send, or an ambiguous attempt that is later reconciled records
+/// one issue and at most one terminal outcome per operation: the first ack
+/// wins, and an ack retires an earlier failure of the same operation.
+///
+/// Since #204 the register is the journal's **positions**: a write acked
+/// written pins at the last position its batch occupies, and a read at the
+/// last position its page's state covered (`next_seq - 1`). Positions are
+/// dense and assigned in log order, so the disclosed-order checks below read
+/// them exactly as they read slots before.
 #[derive(Default)]
 pub(crate) struct ClientHistory {
     pub(super) client: u64,
     /// First issue time per write seq.
     pub(super) write_inv: BTreeMap<u64, u64>,
-    /// First committed ack per write seq: `(time, slot)`.
+    /// First written ack per write op: `(time, last position)`.
     pub(super) write_resp: BTreeMap<u64, (u64, Option<u64>)>,
     /// Write seqs that ended without a committed ack (so far).
     pub(super) write_failed: BTreeSet<u64>,
@@ -100,10 +106,11 @@ impl ClientHistory {
 /// A watermark is `Option<u64>`: an absent `read_index` is the *empty* applied
 /// prefix, and `None < Some(0)` is exactly the watermark order.
 ///
-/// The register under check is the **applied log prefix**: an acked write is a
-/// state transition at its committed `slot`, and a committed read observes the
-/// watermark. Failed / timed-out operations enter no constraint — a timed-out
-/// write may still commit later, so it is deliberately unconstrained.
+/// The register under check is the **journal's positions** (#204): an acked
+/// write is a state transition at the last position its batch took, and a
+/// committed read observes the last position its state covered. Failed /
+/// timed-out operations enter no constraint — a timed-out write may still
+/// commit later, so it is deliberately unconstrained.
 ///
 /// Its bools are independent per-run coverage flags (see [`AuditState`](crate::audit::state::AuditState)).
 #[derive(Default)]
@@ -129,11 +136,6 @@ pub(super) struct LinHistory {
 }
 
 impl LinHistory {
-    /// The highest slot any client was told was committed.
-    pub(super) fn acked_max(&self) -> Option<u64> {
-        self.write_slot.values().copied().max()
-    }
-
     /// Fold one client's record in. Called once per client, from its `check()`.
     pub(super) fn merge(&mut self, h: &ClientHistory) {
         let c = h.client;

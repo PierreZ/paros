@@ -110,46 +110,58 @@ names the first diverging draw. The nextest smoke runs two seeds under it; run a
 after any change to the harness's randomness, the driver hooks, or the process lifecycle.
 
 **Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
-operation IDs: `PROPOSE=0`, `PROPOSE_TO_NON_LEADER=1`, `COMPACT=2`, `READ_STATE=3`, `PAUSE=4`,
-`DUP_REPROPOSE=5`, `DUAL_SUBMIT=6`, `COMPACT_STORM=7`, `READ_INDEX=8` (the public
-leadership-confirmed read, vs. `READ_STATE`'s internal inspect probe), `MATCHMAKE=9` and
-`MATCH_GC=10` (**retired** no-ops: the client-side matchmaking stand-ins of #119, superseded by
-the leader's own phase — the ids stay reserved so the alphabet never shifts), `RECONFIGURE=11`
-(read the acceptor set in force, compose a new one — grow onto a spare, shrink, replace, remove
-the leader, rotate the whole set — and ask the leader; on a seed without matchmakers the request
-is still sent and must be refused; the composer draws from the *live* pool and moves a dead
-identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the matchmaker set a node believes
-authoritative, compose a successor — grow, shrink, replace, rotate through the matchmaker pool —
-and ask any node to drive the generation handover; refused on a plain seed), `RETIRE=13`
-(ask the leader which acceptors its effective GC floor released, park one in the storage world
-for good, and tell it to shut down), `QUORUM_READ=14` (#143: the public leaderless read,
-asked of a node drawn at random and never redirected; judged by the same per-client frontier,
-read-your-writes and history linearizability checks as `READ_INDEX`), `READ=15` (#185: the
-journal `Read` of a log range, asked of a node or a replica drawn at random, from the client's
-tailing cursor, its own last acked slot, the log's start or far past the end; judged as it
-arrives — every entry the audit's decided value at its slot, the page in `[from, next)` in
-order, the client's own acked appends inside the page present, the cursor monotone, a trim
-answer only below its point) and `CHECK_TAIL=16` (#185: the journal `CheckTail` on a drawn
-path — read-index or quorum — judged exactly as `READ_INDEX` and `QUORUM_READ`, which pin
-the path), and the system-journal operations of #189 — `CREATE_JOURNAL=17` (a name from a
-four-name alphabet over three members of the pool, read back as `Created` or refused for a
-taken name, then one record appended to the new journal), `DELETE_JOURNAL=18`,
-`REGISTER_NODE=19`, `DRAIN_NODE=20` and `RETIRE_NODE=21`, each one `Append` to journal 1 or 2
-at a seed, sent on every seed and refused as `unknown_journal` on one without system journals
-(`chain_workload/system.rs`). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
-`COMPACT` a `Trim`, `READ_INDEX` and `QUORUM_READ` a `CheckTail`.
-paros runs no application (#186): the client *is* the application. Every client reads the
-journal from its cursor and folds each user entry, in LSN order, into `ChainState { applied_count,
-chain_hash }` (`chain_workload/fold.rs`; holes — a `Noop`, a control command, a #94 duplicate —
-never reach a reader), and reports each step to the audit (`AuditWorld::fold_applied`), which
-asserts one command and one state per LSN across clients, a client's fold in increasing LSN
-order, and proposal validity (the message strings are the old application check's; keep them
-stable). A fold needs every entry from the start, so the clients share a **trim fence**: every
-trim is clamped below the lowest cursor of the clients still folding, and a client that leaves
-(done proposing) may be overtaken and stops folding. `READ_STATE` is a fold to the tail through a
-node or replica drawn at random. Client timeouts and deliberately
-abandoned observations are `Ambiguous`, never assumed aborted; retries preserve `(client, seq,
-bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
+operation IDs, speaking the journal API of #204 (`Write`, `Read`, `Truncate`, `SetLeader`):
+`WRITE=0` (a `Write` by an owner at the position it believes next — or, from a writer another
+owner superseded, under its old generation, which the journal must refuse; `PROPOSE` before
+#204), `WRITE_TO_NON_LEADER=1` (the redirect path), `TRUNCATE=2` (a `Truncate`, clamped by the
+fold fence; `COMPACT` before), `READ_STATE=3`, `PAUSE=4`, `DUP_WRITE=5` (a write this client saw
+written re-sent byte for byte: it must fold as a `Duplicate`, never be accepted again or
+refused), `DUAL_SUBMIT=6` (one write to two nodes at once: every verdict names one position),
+`TRUNCATE_STORM=7`, `READ_INDEX=8` (**retired** no-op: the read-index read path went with
+#204), `MATCHMAKE=9` and `MATCH_GC=10` (**retired** no-ops: the client-side matchmaking
+stand-ins of #119, superseded by the leader's own phase — the ids stay reserved so the alphabet
+never shifts), `RECONFIGURE=11` (read the acceptor set in force, compose a new one — grow onto a
+spare, shrink, replace, remove the leader, rotate the whole set — and ask the leader; on a seed
+without matchmakers the request is still sent and must be refused; the composer draws from the
+*live* pool and moves a dead identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the
+matchmaker set a node believes authoritative, compose a successor — grow, shrink, replace,
+rotate through the matchmaker pool — and ask any node to drive the generation handover; refused
+on a plain seed), `RETIRE=13` (ask the leader which acceptors its effective GC floor released,
+park one in the storage world for good, and tell it to shut down), `QUORUM_READ=14` (**retired**
+no-op: every `Read` is a quorum read now), `READ=15` (the journal `Read(from_seq, limit,
+wait_ms)`, asked of a node or a replica drawn at random, from the client's tailing cursor, its
+own last written position, the journal's start or far past the tail; judged as it arrives —
+every record the one the audit knows accepted at its position, the client's own written records
+inside the page present, the state it was served from covering every write the client saw
+written, the cursor monotone, a truncated answer only below `first_seq`), `CHECK_TAIL=16`
+(**retired** no-op with `CheckTail`), the system-journal operations of #189 —
+`CREATE_JOURNAL=17` (a name from a four-name alphabet over three members of the pool, read back
+as `Created` or refused for a taken name, then one record written to the new journal),
+`DELETE_JOURNAL=18`, `REGISTER_NODE=19`, `DRAIN_NODE=20` and `RETIRE_NODE=21`, each one claimed
+`Write` to journal 1 or 2 at a seed, sent on every seed and refused as `unknown_journal` on one
+without system journals (`chain_workload/system.rs`) — and `SET_LEADER=22` (read where the journal
+stands and `SetLeader` against its generation: the compare-and-swap that fences every other
+owner). Every client is an **owner** or a **reader** for the whole run (a `buggify_knob!`;
+client 0 is always an owner, so a run always has a writer): an owner claims before it writes and
+re-claims when a verdict says it was superseded, a reader only reads. paros runs **no user
+application, one journal-control state machine per journal** (#186, #204): the client *is* the
+application. Every client reads the journal from its cursor — a position — and folds each
+record, in position order, into `ChainState { applied_count, chain_hash }`
+(`chain_workload/fold.rs`; a `Noop`, a control command, a refused or duplicate write hold no
+position and never reach a reader), and reports each step to the audit
+(`AuditWorld::fold_applied`), which asserts one record and one state per position across
+clients, a client's fold in increasing position order, and record validity (the message
+strings are the old application check's; keep them stable). The audit's journal model
+(`audit/journal_model.rs`) holds the section-6 invariants of `docs/architecture.md` at every
+apply and at the end of the run: every node folds every slot to the same verdict, positions are
+dense in slot order, generations chain one by one, `first_seq` never moves back, and a verdict a
+node answered is the one it folded. A fold needs every record from the start, so the clients
+share a **trim fence**: every truncation is clamped below the lowest cursor of the clients still
+folding, and a client that leaves (done writing) may be overtaken and stops folding.
+`READ_STATE` is a fold to the tail through a node or replica drawn at random. Client timeouts
+and deliberately abandoned observations are `Ambiguous`, never assumed aborted; a retry is the
+same write — generation, owner, position and bytes — sent again, and the log answers it.
+Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
 recipes replay from a fresh builder. The shared assertion tables allow at most 512 sites and 256
 `sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
 
@@ -251,9 +263,23 @@ own**. The roles:
   it opens in its own log whenever its promise allows, whichever column it went to
   (`record_own_round`; a record outside the column is the stray copy the grid already admits, a
   vote that does not count).
-- `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
-  ledger. It consumes "slot chosen, value" and nothing else —
-  and answers one question about it, `covers(index)`, for the quorum reads below.
+- `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, and the **journal
+  fold** — every walked slot judged by the journal state machine below, the state at the floor
+  (sealed with a truncation, carried by a trim-point jump) and the positions index a `Read` pages
+  from. A slot whose value this node does not hold stops the fold (`fold_hole`) until catch-up
+  brings it back. It consumes "slot chosen, value" and nothing else — and answers one question
+  about it, `covers(index)`, for the quorum reads below.
+- `journal_state.rs` — `JournalState { owner, generation, next_seq, first_seq }` and its pure
+  `apply` (#204): **one journal-control state machine per journal**, the only thing paros
+  interprets in a log. Every `Write`, `SetLeader` and `Truncate` is judged at apply, in slot
+  order, on every node alike — a write is accepted only from the owner of the generation in
+  force at the next position (dense positions, a batch in one slot); a write below `next_seq`
+  is a `Duplicate` exactly when the log holds the same write there (the log *is* the
+  at-most-once table — there is no session ledger), otherwise refused with the state that says
+  why, and below `first_seq` truncated; a `SetLeader` is a pure compare-and-swap on the
+  generation; a `Truncate` raises `first_seq`, never past `next_seq`. Nothing is judged at
+  propose time: a leader proposes any write and the driver answers the call with the verdict
+  its slot folded to (`paros::driver::calls`).
 - `replica_node.rs` — `ReplicaNode` (#144, Compartmentalized Paxos §3.3): the **third
   deployment**, a `Replica` over a durable chosen log on a process that is not an acceptor. It
   steps `Commit`, `CatchUpResponse`, `TrimmedTo` and `Heartbeat` (the watermark and the
@@ -288,11 +314,12 @@ own**. The roles:
   one, and a `PreReadAck` carries the answerer's configuration ballot so a row that knows a
   successor abandons the read; the residual — a grid row wholly unaware of a completed
   successor — is what the client-history linearizability oracle judges (the chain campaign's
-  `QUORUM_READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
-  The driver half: `CheckTail` on its quorum path (#185; the `QuorumRead` RPC before it)
-  on any node, parked on the read-index path's `ctx`
-  counter and deadline but bound to no role (a leader stepping down redirects its read-index
-  reads, never its quorum reads); `DriverHooks::read_row` (a BUGGIFY location, consulted on a
+  `READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
+  The driver half (#204): **every public `Read` is a quorum read**, on any node or replica —
+  confirmed first, then served from the fold, and parked as a long-poll at the tail for its
+  `wait_ms` (`driver/log_reads.rs`); bound to no role. The read-index path
+  (`ColocatedNode::read_index`) stays in the core — the game teaches it — but no service call
+  reaches it any more. `DriverHooks::read_row` (a BUGGIFY location, consulted on a
   grid node) names the row through `ColocatedNode::quorum_read_in`; `Audit::quorum_read_served`
   reports each answer.
 - `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
@@ -473,8 +500,8 @@ location, consulted on the node loop only on a grid leader, handed to the core t
 `ColocatedNode::propose_in`; always safe, every column is a Phase-2 quorum), paired with a
 `reachable` that it fired and a `reachable` that a slot was decided on a column other than its
 own. The grid outcomes are the audit's `sometimes` gates: a slot decided on a column, an
-election covered by a row, one covered by a row across a reconfiguration, a read-index round
-confirmed by a column, a reconfiguration between a grid and a majority. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
+election covered by a row, one covered by a row across a reconfiguration, a reconfiguration
+between a grid and a majority. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
 
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
@@ -892,26 +919,29 @@ substitutes for the other:
   invariants — the two catch different bug shapes and deliberately overlap (e.g. promise
   monotonicity is asserted in `set_promise` *and* audited across restarts).
 
-**Truncation doctrine (#186: no application, no snapshot).** Entry bytes are opaque: paros never
-*interprets or compacts* application state, and since #186 it runs no application at all — a
-journal's client reads the log (`Read`) and folds what it reads, and owns compaction of its own
-state. What paros does own is its *log*, and it drops the log prefix one way:
+**Truncation doctrine (#186: no application, no snapshot; #204: positions).** Record bytes are
+opaque: paros never *interprets or compacts* application state, and since #186 it runs no
+application at all — a journal's client reads the log (`Read`) and folds what it reads, and owns
+compaction of its own state. What paros interprets is the journal-control state of each journal
+(`journal_state.rs`), and what it owns is its *log*, whose prefix it drops one way:
 
 - **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
-  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}` or the
-  `Noop` a new leader fills an undecided hole with (see *Election gap fill* below). A client asks
-  the **leader** to trim (the `Trim` RPC → `ColocatedNode::propose_control`); the leader decides
-  `Truncate` by ordinary consensus, with no precondition beyond its own leadership (a trim is the
-  client's statement that it no longer needs the prefix), and every node truncates *lazily* when
-  its contiguous chosen walk reaches that slot (`ColocatedNode::compact`, `WriteOp::Truncate`,
-  dropping every slot at or below `up_to`), giving **one cluster-wide floor** forwarded by normal
+  a `Write(Entry)` (a writer's batch of opaque records) or a `Control` metadata command —
+  `SetLeader`, `Truncate{up_to}` or the `Noop` a new leader fills an undecided hole with (see
+  *Election gap fill* below). A client asks the **leader** to truncate (the `Truncate` RPC →
+  `ColocatedNode::propose_control`); the leader decides it by ordinary consensus, with no
+  precondition beyond its own leadership (a truncation is the client's statement that it no
+  longer needs the records before position `up_to`); the fold raises `first_seq`, and every node
+  truncates *lazily* when its contiguous chosen walk reaches that slot (`ColocatedNode::compact`,
+  `WriteOp::Truncate`, dropping every slot below the one holding the first retained record and
+  sealing the journal state there), giving **one cluster-wide floor** forwarded by normal
   replication + catch-up. The consensus/acceptor paths treat `Command` fully opaquely; only the
-  replica's walk interprets a control command. A reader below the floor is answered `trimmed_to`.
+  replica's fold interprets one. A reader below `first_seq` is answered `truncated`.
 - **A trim-point jump recovers a below-floor node.** Acceptors refuse `Prepare`/`Accept` below their
   floor (safety). A node that was down while the cluster truncated past it comes back below the
   floor, where commit-replay catch-up cannot heal it (the entries are gone for everyone). A peer
   answering its `CatchUpRequest` from below its own floor sends `Message::TrimmedTo { point,
-  sessions }` — its floor and the sealed at-most-once ledger below it, **no bytes and no ballot** —
+  state }` — its floor and the journal state sealed there, **no bytes and no ballot** —
   and the node persists `WriteOp::TrimmedTo` (`LogStorage::trimmed_to`), raises its floor to the
   point and its chosen index to at least `point - 1`, then heals the rest by ordinary catch-up. Its
   promise never moves (the old `InstallSnapshot` adopted the sender's ballot; the jump carries
@@ -1082,7 +1112,7 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   simulation-only conditional compilation. Sancov crate-under-test.
 - `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
   (`run_node` over `P: Providers`, `S: LogStorage`), the default in-memory `MemStorage`, the
-  node RPC contract (the journal API of #185: `Append`, `Read`, `CheckTail`, `Trim`, every
+  node RPC contract (the journal API of #204: `Write`, `Read`, `Truncate`, `SetLeader`, every
   call naming a `JournalId`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
   + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the

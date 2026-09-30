@@ -14,8 +14,8 @@ use std::net::IpAddr;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Config, Entry, MustSync, NodeId,
-    QuorumSystem, Registration, RegistryStorage, Slot, Storage, Value,
+    AcceptorConfig, Ballot, ClientId, Command, Config, Entry, Generation, JournalState, MustSync,
+    NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
 };
 
 use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
@@ -101,10 +101,11 @@ fn ballot(round: u64) -> Ballot {
 
 /// A command whose bytes are `byte` repeated, easy to find on disk.
 fn user(seq: u64, byte: u8) -> Command {
-    Command::User(Entry {
-        client: ClientId(7),
-        seq: ClientSeq(seq),
-        value: Value(vec![byte; 48]),
+    Command::Write(Entry {
+        generation: Generation(0),
+        owner: ClientId(7),
+        seq: Seq(seq),
+        records: vec![Value(vec![byte; 48])],
     })
 }
 
@@ -294,7 +295,12 @@ fn checkpoints_drop_the_prefix_and_fold_back_to_the_same_state() {
                 if round % 25 == 0 {
                     node.truncate(
                         Slot(round / 10),
-                        &[(ClientId(1), ClientSeq(round), Slot(round / 10 - 1))],
+                        JournalState {
+                            owner: Some(ClientId(1)),
+                            generation: Generation(1),
+                            next_seq: Seq(round),
+                            first_seq: Seq(round / 2),
+                        },
                     )
                     .await
                     .expect("truncate");
@@ -666,9 +672,12 @@ async fn write(
             }
             1 => {
                 let to = Slot(first.0 + (step >> 8) % 4);
-                node.truncate(to, &[]).await?;
+                node.truncate(to, JournalState::default()).await?;
             }
-            2 => node.trimmed_to(Slot(first.0 + 1), &[]).await?,
+            2 => {
+                node.trimmed_to(Slot(first.0 + 1), JournalState::default())
+                    .await?;
+            }
             _ => {
                 let slot = Slot(first.0 + (step >> 8) % 12);
                 let command = user(

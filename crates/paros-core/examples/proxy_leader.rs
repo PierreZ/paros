@@ -58,8 +58,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, Delegation, HardState, Message,
-    NodeId, Party, ProxyId, ProxyLeader, QuorumSystem, Slot, Storage, Value,
+    Ballot, ClientId, ColocatedNode, Command, Config, Delegation, Entry, Generation, HardState,
+    Message, NodeId, Party, ProxyId, ProxyLeader, QuorumSystem, Seq, Slot, Storage, Value,
 };
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
@@ -275,9 +275,12 @@ impl Cluster {
         self.cost = LeaderCost::default();
         let leader = self.leader;
         let result = self.node(leader).propose_in(
-            ClientId(7),
-            ClientSeq(seq),
-            Value(text.as_bytes().to_vec()),
+            Entry {
+                generation: Generation(0),
+                owner: ClientId(7),
+                seq: Seq(seq),
+                records: vec![Value(text.as_bytes().to_vec())],
+            },
             None,
             delegation,
         );
@@ -391,9 +394,12 @@ fn a_dead_proxy(cluster: &mut Cluster) {
     );
     let leader = cluster.leader;
     let result = cluster.node(leader).propose_in(
-        ClientId(7),
-        ClientSeq(7),
-        Value(b"golf".to_vec()),
+        Entry {
+            generation: Generation(0),
+            owner: ClientId(7),
+            seq: Seq(7),
+            records: vec![Value(b"golf".to_vec())],
+        },
         None,
         Delegation::To(ProxyId(1)),
     );
@@ -441,9 +447,12 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
     println!("\n-- 5. node 1 hands off to node 4 with the next slot delegated and in flight");
     let leader = cluster.leader;
     let result = cluster.node(leader).propose_in(
-        ClientId(7),
-        ClientSeq(8),
-        Value(b"hotel".to_vec()),
+        Entry {
+            generation: Generation(0),
+            owner: ClientId(7),
+            seq: Seq(8),
+            records: vec![Value(b"hotel".to_vec())],
+        },
         None,
         Delegation::Auto,
     );

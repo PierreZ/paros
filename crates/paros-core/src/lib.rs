@@ -64,6 +64,7 @@
 
 pub mod acceptor;
 mod collector;
+pub mod journal_state;
 mod matchmaker;
 pub mod matchmaking;
 pub mod membership;
@@ -85,6 +86,7 @@ mod storage;
 mod types;
 mod write;
 
+pub use journal_state::{JournalState, Outcome};
 pub use matchmaker::{
     Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal,
     MatchReply, MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
@@ -113,7 +115,7 @@ pub use retained::RetainedWindow;
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, JournalId, NodeId,
-    SessionEntry, Slot, Value, command_fingerprint,
+    Ballot, ClientId, Command, Control, Entry, Fingerprint, Generation, JournalId, NodeId, Seq,
+    Slot, Value, command_fingerprint,
 };
 pub use write::{AcceptorWrite, MustSync, WriteOp};

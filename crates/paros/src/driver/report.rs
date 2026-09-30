@@ -2,16 +2,13 @@
 //! election-timeout draw, the leadership/handoff/membership transitions, and
 //! the held-reply bookkeeping a step-down performs.
 
-use std::collections::BTreeMap;
-
 use moonpool_core::{Providers, RandomProvider};
 use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole};
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, HandoffContext};
-use crate::rpc::CheckTailAck;
 
-use super::ready::{ClientWaiters, ReadPath};
+use super::ready::ClientWaiters;
 
 /// What a handoff would transfer right now, from the core's public read views:
 /// the span between this leader's contiguous chosen prefix and its allocator
@@ -134,7 +131,6 @@ fn report_handoff<A: Audit>(
 /// core counter exactly once per change.
 pub(crate) struct Deltas {
     pub(crate) role: NodeRole,
-    pub(crate) duplicates: u64,
     pub(crate) quorum_lost: u64,
     pub(crate) repair: (u64, u64, u64, u64),
     pub(crate) handoff: HandoffCounters,
@@ -153,7 +149,6 @@ impl Deltas {
     pub(crate) fn new(node: &ColocatedNode) -> Self {
         Self {
             role: node.role(),
-            duplicates: node.replica().duplicates_suppressed(),
             quorum_lost: node.quorum_lost_step_downs(),
             repair: node.repair_counters(),
             handoff: node.handoff_counters(),
@@ -253,7 +248,6 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
 ) {
     let Deltas {
         role: last_role,
-        duplicates: last_duplicates,
         quorum_lost: last_quorum_lost,
         repair: last_repair,
         handoff: last_handoff,
@@ -283,15 +277,6 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         let ticks = draw_election_timeout(providers, hooks, audit, self_id, base);
         node.set_election_timeout(ticks);
         audit.election_timeout_set(NodeId(self_id), ticks);
-    }
-    // Surface any #94 duplicate suppressions the batch's contiguous walk
-    // performed (the counter is monotone per incarnation).
-    let duplicates = node.replica().duplicates_suppressed();
-    if duplicates > *last_duplicates {
-        let count = duplicates - *last_duplicates;
-        *last_duplicates = duplicates;
-        audit.duplicate_suppressed(NodeId(self_id), count);
-        tracing::info!(node = self_id, count, "duplicate_suppressed");
     }
     // Surface any repair progress (Stage 8): in-place heals, straggler
     // resolutions, and recovery-timeout resignations.
@@ -373,37 +358,16 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             "leader_elected"
         );
     } else if *last_role == NodeRole::Leader && role != NodeRole::Leader {
-        let writes = waiters.pending.values().map(Vec::len).sum::<usize>();
-        let reads = waiters
-            .pending_reads
-            .values()
-            .filter(|parked| parked.path == ReadPath::Index)
-            .count();
-        if writes + reads > 0 {
-            audit.waiters_cleared(
-                NodeId(self_id),
-                u64::try_from(writes).unwrap_or(u64::MAX),
-                u64::try_from(reads).unwrap_or(u64::MAX),
-            );
-            tracing::info!(node = self_id, writes, reads, "waiters_cleared");
+        // Parked calls are dropped: their slots may still decide under the
+        // new leader, so the clients time out — on purpose, an ambiguous
+        // outcome — and a retried `Write` is answered from the log.
+        let calls = waiters.pending.values().map(Vec::len).sum::<usize>();
+        if calls > 0 {
+            audit.waiters_cleared(NodeId(self_id), u64::try_from(calls).unwrap_or(u64::MAX));
+            tracing::info!(node = self_id, calls, "waiters_cleared");
         }
-        waiters.pending.clear();
-        // Parked read-index reads have no slot whose commit could ever answer
-        // them: redirect explicitly so the client retries the new leader now
-        // rather than burning its deadline (writes time out instead, on
-        // purpose — their slot may still commit under the new leader). A
-        // quorum read is bound to no role and stays parked.
-        let (index, quorum): (BTreeMap<_, _>, BTreeMap<_, _>) =
-            std::mem::take(&mut waiters.pending_reads)
-                .into_iter()
-                .partition(|(_, parked)| parked.path == ReadPath::Index);
-        waiters.pending_reads = quorum;
-        for parked in index.into_values() {
-            let _ = parked.reply.send(CheckTailAck {
-                seq: parked.seq,
-                leader: node.leader().map(|n| n.0),
-                ..CheckTailAck::default()
-            });
+        for call in std::mem::take(&mut waiters.pending).into_values().flatten() {
+            drop(call);
         }
     }
     *last_role = role;

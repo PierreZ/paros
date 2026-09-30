@@ -96,7 +96,7 @@ describe('a slot box', () => {
   });
 
   it('names a control command instead of its text', () => {
-    expect(slotLabel(slot({ value: 'Truncate up to 2', control: 'truncate' }))).toBe('3: Truncate');
+    expect(slotLabel(slot({ value: 'Truncate before 2', control: 'truncate' }))).toBe('3: Truncate');
     expect(slotLabel(slot({ value: 'Noop', control: 'noop' }))).toBe('3: Noop');
   });
 

@@ -88,18 +88,21 @@ pub struct HandoffContext {
 /// A client-facing reply the driver is about to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reply {
-    /// The ack-on-commit `ProposeAck` (the slot just became durable + applied).
-    Propose,
-    /// The dedup fast-path `ProposeAck` (a retry of an already-chosen request).
-    ProposeDedup,
-    /// A confirmed `ReadAck`.
-    Read,
-    /// A `ProposeAck` redirect from a non-leader (`committed: false`).
-    ProposeRedirect,
-    /// A `ReadAck` redirect from a non-leader (`committed: false`).
-    ReadRedirect,
-    /// A `CompactAck` (accepted or refused).
-    Compact,
+    /// A `WriteAck` with the journal state machine's verdict (#204): the
+    /// deciding slot applied. Dropping it makes the client's retry meet the
+    /// write already in the log — the idempotent `Duplicate` path.
+    Write,
+    /// A `SetLeaderAck` with the compare-and-swap's verdict (#204).
+    SetLeader,
+    /// A `TruncateAck` with the applied truncation (#204).
+    Truncate,
+    /// A call answered with no verdict (#204): a redirect from a non-leader,
+    /// or a call whose slot decided another command. Ambiguous to the
+    /// client, which retries.
+    Redirect,
+    /// A `ReadAck` answered `served: false`: the read's quorum read did not
+    /// confirm in time.
+    ReadUnserved,
     /// A `ReconfigureAck` (started, refused, or redirected). Dropping it
     /// after a reconfiguration started makes the client's retry meet the
     /// change already under way.
@@ -124,7 +127,7 @@ pub enum Reply {
     /// A `RetireAck`. Dropping it after the node accepted its retirement
     /// leaves the operator to re-ask a node that is already gone.
     Retire,
-    /// A journal `ReadAck` (#185): a page, a trim point, or an empty
+    /// A journal `ReadAck` (#204): a page, a truncation, or an empty
     /// long-poll answer. Dropping it is a lost read the client re-asks.
     LogRead,
 }
@@ -136,12 +139,11 @@ impl Reply {
     pub fn label(self) -> &'static str {
         match self {
             Reply::LogRead => "log_read",
-            Reply::Propose => "propose",
-            Reply::ProposeDedup => "propose_dedup",
-            Reply::Read => "read",
-            Reply::ProposeRedirect => "propose_redirect",
-            Reply::ReadRedirect => "read_redirect",
-            Reply::Compact => "compact",
+            Reply::Write => "write",
+            Reply::SetLeader => "set_leader",
+            Reply::Truncate => "truncate",
+            Reply::Redirect => "redirect",
+            Reply::ReadUnserved => "read_unserved",
             Reply::Reconfigure => "reconfigure",
             Reply::Match => "match",
             Reply::GcAck => "gc_ack",

@@ -6,9 +6,8 @@
 //! it broke.
 
 use super::{
-    ClientId, ClientSeq, ColocatedNode, Delegation, Message, NO_CHECK_QUORUM, NodeId, NodeRole,
-    Party, ProposeResult, Slot, TestStorage, campaign, cluster, deliver_all, drain, make_leader,
-    ucmd, val,
+    ColocatedNode, Delegation, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult,
+    Slot, TestStorage, campaign, cluster, deliver_all, drain, entry, make_leader, ucmd,
 };
 use crate::membership::ProxyId;
 use crate::message::Audience;
@@ -48,7 +47,7 @@ fn a_plain_deployment_never_delegates() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     assert!(matches!(
-        nodes[0].propose_in(ClientId(1), ClientSeq(1), val(1), None, Delegation::Auto),
+        nodes[0].propose_in(entry(1, 1, 1), None, Delegation::Auto),
         ProposeResult::Accepted(Slot(0))
     ));
     assert!(nodes[0].delegated_rounds().is_empty());
@@ -86,7 +85,7 @@ fn a_delegated_round_is_handed_to_the_proxy_and_closed_by_its_commit() {
     let mut nodes = proxied_cluster(2);
     let ballot = nodes[0].ballot();
     assert!(matches!(
-        nodes[0].propose(ClientId(1), ClientSeq(1), val(1)),
+        nodes[0].propose(entry(1, 1, 1)),
         ProposeResult::Accepted(Slot(0))
     ));
     assert_eq!(nodes[0].delegated_rounds(), vec![(Slot(0), ProxyId(0))]);
@@ -147,24 +146,12 @@ fn a_delegated_round_is_handed_to_the_proxy_and_closed_by_its_commit() {
 fn the_driver_may_name_the_proxy_or_run_the_round_colocated() {
     let mut nodes = proxied_cluster(3);
     assert!(matches!(
-        nodes[0].propose_in(
-            ClientId(1),
-            ClientSeq(1),
-            val(1),
-            None,
-            Delegation::To(ProxyId(2))
-        ),
+        nodes[0].propose_in(entry(1, 1, 1), None, Delegation::To(ProxyId(2))),
         ProposeResult::Accepted(Slot(0))
     ));
     assert_eq!(nodes[0].delegated_rounds(), vec![(Slot(0), ProxyId(2))]);
     assert!(matches!(
-        nodes[0].propose_in(
-            ClientId(1),
-            ClientSeq(2),
-            val(2),
-            None,
-            Delegation::Colocated
-        ),
+        nodes[0].propose_in(entry(1, 2, 2), None, Delegation::Colocated),
         ProposeResult::Accepted(Slot(1))
     ));
     assert_eq!(nodes[0].delegated_rounds(), vec![(Slot(0), ProxyId(2))]);
@@ -182,13 +169,7 @@ fn the_driver_may_name_the_proxy_or_run_the_round_colocated() {
 #[should_panic(expected = "a delegated round names a proxy of the deployment")]
 fn naming_a_proxy_the_deployment_lacks_is_a_programmer_error() {
     let mut nodes = proxied_cluster(2);
-    let _ = nodes[0].propose_in(
-        ClientId(1),
-        ClientSeq(1),
-        val(1),
-        None,
-        Delegation::To(ProxyId(2)),
-    );
+    let _ = nodes[0].propose_in(entry(1, 1, 1), None, Delegation::To(ProxyId(2)));
 }
 
 /// A re-send re-delegates; after the budget the leader takes the round
@@ -198,7 +179,7 @@ fn naming_a_proxy_the_deployment_lacks_is_a_programmer_error() {
 fn a_stalled_delegation_is_taken_back_and_decided_colocated() {
     let mut nodes = proxied_cluster(1);
     let ballot = nodes[0].ballot();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     let _ = raw(&mut nodes[0]); // the delegation, lost with the dead proxy
     for _ in 0..2 {
         nodes[0].resend_pending();
@@ -261,7 +242,7 @@ fn a_stalled_delegation_is_taken_back_and_decided_colocated() {
 fn a_handoff_successor_redelegates_its_inherited_rounds() {
     let mut nodes = proxied_cluster(2);
     let ballot = nodes[0].ballot();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     let _ = raw(&mut nodes[0]); // the delegation is lost
     let receipt = nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
     assert_eq!(receipt.pending, 1, "the delegated round travels as pending");
@@ -297,7 +278,7 @@ fn a_handoff_successor_redelegates_its_inherited_rounds() {
 fn a_fresh_leaderships_recovery_is_never_delegated() {
     let mut nodes = proxied_cluster(1);
     let ballot = nodes[0].ballot();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     let delegation = raw(&mut nodes[0]);
     let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone());
     for (_, m) in delegation {
@@ -349,7 +330,7 @@ fn a_fresh_leaderships_recovery_is_never_delegated() {
 fn a_relayed_nack_deposes_the_delegating_leader() {
     let mut nodes = proxied_cluster(1);
     let ballot = nodes[0].ballot();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     let _ = raw(&mut nodes[0]);
     let mut proxy = ProxyLeader::new(ProxyId(0), nodes[0].acceptors().clone());
     proxy.step(Message::Accept {
@@ -384,10 +365,9 @@ fn a_relayed_nack_deposes_the_delegating_leader() {
 fn a_read_index_with_proxies_waits_for_the_rounds_in_flight() {
     let mut nodes = proxied_cluster(2);
     let _ = raw(&mut nodes[0]);
-    let slot = match nodes[0].propose_in(ClientId(1), ClientSeq(1), val(1), None, Delegation::Auto)
-    {
+    let slot = match nodes[0].propose_in(entry(1, 1, 1), None, Delegation::Auto) {
         ProposeResult::Accepted(slot) => slot,
-        other => panic!("a leader accepts a proposal: {other:?}"),
+        other @ ProposeResult::NotLeader(_) => panic!("a leader accepts a proposal: {other:?}"),
     };
     let _ = raw(&mut nodes[0]);
     assert_eq!(nodes[0].read_index(1), crate::ReadIndexResult::Pending);
@@ -404,7 +384,7 @@ fn a_read_index_with_proxies_waits_for_the_rounds_in_flight() {
     let mut plain = cluster::<3>();
     make_leader(&mut plain, 0);
     let chosen = plain[0].replica().chosen_index();
-    let _ = plain[0].propose_in(ClientId(1), ClientSeq(1), val(1), None, Delegation::Auto);
+    let _ = plain[0].propose_in(entry(1, 1, 1), None, Delegation::Auto);
     assert_eq!(plain[0].read_index(1), crate::ReadIndexResult::Pending);
     assert_eq!(
         plain[0]

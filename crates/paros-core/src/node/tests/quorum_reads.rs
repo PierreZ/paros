@@ -16,7 +16,7 @@ fn grid_with_three_chosen() -> Vec<ColocatedNode> {
     let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
     make_leader(&mut nodes, 0);
     for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
-        let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
+        let _ = nodes[0].propose(entry(1, seq, b));
         let q = drain(&mut nodes[0]);
         deliver_all(&mut nodes, q);
     }
@@ -106,7 +106,7 @@ fn a_quorum_read_waits_for_the_replica_to_cover_the_watermark() {
     // Slot 3 -> column 0 = {0, 3}. The leader self-votes; node 3 accepts but
     // its `Accepted` is lost, so the column is not whole at the leader.
     assert!(matches!(
-        nodes[0].propose(ClientId(1), ClientSeq(4), val(40)),
+        nodes[0].propose(entry(1, 4, 40)),
         ProposeResult::Accepted(Slot(3))
     ));
     let q = drain(&mut nodes[0]);

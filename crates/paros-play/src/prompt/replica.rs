@@ -1,9 +1,9 @@
 //! The replica's questions: whether a slot that just became chosen applies
-//! now, and which of the three honest answers a client's retry earns.
+//! now, and what the journal answers a client's retry with.
 
 use std::collections::BTreeMap;
 
-use paros_core::{NodeId, Slot};
+use paros_core::{Entry, JournalState, NodeId, Outcome, Slot};
 
 use super::{Choice, Prompt, PromptKind};
 use crate::narration;
@@ -72,115 +72,120 @@ impl Prompt {
         }
     }
 
-    /// A client retried a write. Which of the three honest answers is this?
+    /// A client retried a write. What does the journal answer it with?
     ///
-    /// Judged on a **clone of the replica**, through the two ledgers the core
-    /// itself consults in that order:
-    /// [`applied_at`](paros_core::replica::Replica::applied_at) says the
-    /// command is inside this node's applied prefix, so the ack may name its
-    /// slot; [`inflight_at`](paros_core::replica::Replica::inflight_at) says
-    /// it is chosen or in flight at a slot but not executed here yet, so the
-    /// client waits on **that** slot; neither says the node has never seen it,
-    /// and it takes a fresh one.
-    ///
-    /// The two tables move together, and that is the whole lesson: ack from
-    /// the wrong one and the client is told a write is durable that no node
-    /// has applied, or — worse — the retry misses both and the command is
-    /// executed twice.
+    /// Judged on a **clone of the replica**, by the journal state machine
+    /// its fold runs ([`JournalState::apply`], #204), over the state this
+    /// node has folded and the write it holds at the retried position.
+    /// There is no dedup table to consult: a retry is the same write sent
+    /// again, and the log answers it. Position taken by exactly this write:
+    /// a duplicate, acked, nothing moves. Position still ahead of the fold:
+    /// nothing can be said yet — the retry takes a slot and waits for the
+    /// fold to reach it, by which time the original has folded below it.
+    /// Position free and next: the retry is the write that fills it.
+    /// Anything else: refused, with the state that says why.
     #[must_use]
     pub fn ack_write(
         id: u64,
         node: NodeId,
-        client: u64,
+        entry: &Entry,
         seq: u64,
-        applied_at: Option<Slot>,
-        inflight_at: Option<Slot>,
+        outcome: &Outcome,
+        folded: JournalState,
         chosen_index: Option<Slot>,
     ) -> Self {
         let applied = narration::at(chosen_index);
-        let expected = match (applied_at, inflight_at) {
-            (Some(_), _) => "acked",
-            (None, Some(_)) => "inflight",
-            (None, None) => "fresh",
+        let position = entry.seq.0;
+        let next = folded.next_seq.0;
+        let expected = match outcome {
+            Outcome::Duplicate { .. } => "acked",
+            Outcome::Accepted { .. } => "fresh",
+            _ if position > next => "inflight",
+            _ => "refused",
         };
         let mut explanations = BTreeMap::new();
         explanations.insert(
             "acked".to_string(),
-            format!(
-                "This answer is the classic early ack. The applied prefix of this node ends \
-                 at {applied}, and no slot in it carries write #{seq} for client {client}. The \
-                 ack tells the client that its write is durable and readable. The client then \
-                 reads at this same node and does not find the write, because \"chosen\" is not \
-                 \"applied\". No node executes a slot decided above a hole until the hole \
-                 closes."
-            ),
+            if position >= next {
+                format!(
+                    "This answer is an early ack. The fold of this node stops before position \
+                     {position} (its next position is {next}), so nothing in the applied \
+                     journal carries write #{seq} yet. An ack now would promise the client a \
+                     write that a read at this node cannot find: \"chosen\" is not \"applied\"."
+                )
+            } else {
+                format!(
+                    "Position {position} is folded, but not with this write: another write holds \
+                     it, or this one was sent under a superseded generation. Acking it would \
+                     tell the client its records are where someone else's are."
+                )
+            },
         );
         explanations.insert(
             "inflight".to_string(),
-            match applied_at {
-                Some(slot) => format!(
-                    "This answer makes the client wait for a result that it already has. Write \
-                     #{seq} is applied here, at slot {}. If a later duplicate of it sits chosen \
-                     and unapplied above, that duplicate executes as a no-op, and the reply \
-                     never goes out.",
-                    slot.0
-                ),
-                None => format!(
-                    "There is no slot to hold the reply on. This node has no record of write \
-                     #{seq} in either table: it is not applied, and it is not in flight."
-                ),
+            if position < next {
+                format!(
+                    "The fold has already reached position {position}: the journal can answer \
+                     now, and it does not need the client to wait."
+                )
+            } else {
+                format!(
+                    "Position {position} is the journal's next position, so the fold can \
+                     answer already: nothing below it is missing."
+                )
             },
         );
         explanations.insert(
             "fresh".to_string(),
-            match (applied_at, inflight_at) {
-                (Some(slot), _) => format!(
-                    "This answer executes the command of the client a *second* time. Write \
-                     #{seq} is applied here, at slot {}. At-most-once execution exists to stop \
-                     that result, and a second execution is worse than an early ack.",
-                    slot.0
-                ),
-                (None, Some(slot)) => format!(
-                    "This answer puts the same command in the log twice. Write #{seq} is chosen \
-                     at slot {}, or it is still in flight there, and this node has not executed \
-                     it yet. The two dedup tables must move together for that reason. If the \
-                     command left the in-flight table before the applied table received it, a \
-                     retry in that window would miss both tables.",
-                    slot.0
-                ),
-                (None, None) => String::new(),
-            },
+            format!(
+                "A write is accepted only at the journal's next position, by its current \
+                 writer, and the fold's next position is {next}, not {position}. This retry \
+                 cannot be the write that fills a position now."
+            ),
         );
-        let mut choices = vec![
-            Choice::new("acked", "Ack the write, because this node applied it"),
+        explanations.insert(
+            "refused".to_string(),
+            format!(
+                "The journal does not refuse this retry: position {position} holds exactly \
+                 this write, or is still the writer's to fill."
+            ),
+        );
+        let choices = vec![
+            Choice::new(
+                "acked",
+                "Ack it: the journal already holds this write at its position",
+            ),
             Choice::new(
                 "inflight",
-                "Hold the reply on the slot that it is in flight at",
+                "Not yet: the fold has not reached its position, so the retry waits for its slot",
             ),
-            Choice::new("fresh", "Give the write the next free slot"),
+            Choice::new(
+                "fresh",
+                "Accept it: its position is the next one, and it fills it",
+            ),
+            Choice::new(
+                "refused",
+                "Refuse it: another write holds its position, or its writer was superseded",
+            ),
         ];
-        choices.retain(|choice| !choice.id.is_empty());
         Self {
             id,
             kind: PromptKind::AckWrite,
             node: node.0,
             question: format!(
-                "Client {client} asks again for its write #{seq}. What do you answer?"
+                "Client {} asks again for its write #{seq}, at position {position}. What does \
+                 the journal answer, as far as this node has folded it?",
+                entry.owner.0
             ),
             state_summary: vec![
                 format!("the applied prefix ends at: {applied}"),
+                format!("the journal's next position: {next}"),
+                format!("the journal's first position: {}", folded.first_seq.0),
                 format!(
-                    "the applied table says: {}",
-                    applied_at.map_or_else(
-                        || "nothing for this write".to_string(),
-                        |s| format!("applied at slot {}", s.0)
-                    )
-                ),
-                format!(
-                    "the in-flight table says: {}",
-                    inflight_at.map_or_else(
-                        || "nothing for this write".to_string(),
-                        |s| format!("in flight at slot {}", s.0)
+                    "the journal's writer: {}",
+                    folded.owner.map_or_else(
+                        || "nobody".to_string(),
+                        |owner| format!("client {} (generation {})", owner.0, folded.generation.0)
                     )
                 ),
             ],

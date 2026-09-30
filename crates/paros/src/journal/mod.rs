@@ -25,8 +25,8 @@
 //! | accepted / learned `(slot, ballot, command)` | `Accepted` entry | `(slot, ballot.round, ballot.node)` |
 //! | a faulty slot carried by a checkpoint | `Faulty` entry | `(slot, ballot.round, ballot.node)` |
 //! | chosen index | `ChosenIndex` entry (a `Relaxed` batch is deferred to the next `Sync`) | — |
-//! | truncation floor + sealed ledger | `Truncate` entry | — |
-//! | trim-point jump (point, sessions; #186) | `TrimmedTo` entry | — |
+//! | truncation floor + sealed journal state | `Truncate` entry | — |
+//! | trim-point jump (point, journal state; #186) | `TrimmedTo` entry | — |
 //! | matchmaker registration | `Register` entry | `(ballot.round, ballot.node)` |
 //! | matchmaker scalars (generation, freeze, decree, watermark) | `Scalars` entry, the whole image | — |
 //! | matchmaker format marker (#183) | journal **metadata** | — |
@@ -57,7 +57,7 @@
 //!   compaction whose records the log still holds, a jump the node can be
 //!   sent again), and forgetting one leaves the store in the state it had
 //!   before it — a node behind, never a node wrong;
-//! - a damaged checkpoint header or sealed ledger whose prefix the journal
+//! - a damaged checkpoint header or sealed journal state whose prefix the journal
 //!   already dropped, a damaged live matchmaker record, and anything the
 //!   journal cannot open are **crash** verdicts
 //!   ([`StorageError::Corruption`] / [`StorageError::Metadata`]).

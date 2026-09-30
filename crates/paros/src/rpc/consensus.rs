@@ -2,13 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    Ballot, ClientId, ClientSeq, Command, Message, NodeId, Party, SessionEntry, Slot,
-};
+use paros_core::{Ballot, Command, Message, NodeId, Party, Slot};
 
 use super::codec::{
     ballot_from_proto, ballot_to_proto, command_from_proto, command_to_proto, config_from_proto,
-    config_to_proto, party_from_proto, party_to_proto, unique_map,
+    config_to_proto, journal_state_from_proto, journal_state_to_proto, party_from_proto,
+    party_to_proto, unique_map,
 };
 use super::internal;
 
@@ -85,17 +84,6 @@ fn pending_commands_from_proto(
             .map(|entry| Ok((Slot(entry.slot), command_from_proto(entry.command)?))),
         "duplicate slot in message",
     )
-}
-
-fn sessions_to_proto(sessions: &[SessionEntry]) -> Vec<internal::SessionRecord> {
-    sessions
-        .iter()
-        .map(|&(client, seq, slot)| internal::SessionRecord {
-            client: client.0,
-            seq: seq.0,
-            slot: slot.0,
-        })
-        .collect()
 }
 
 /// Convert one domain message into its typed protobuf representation.
@@ -197,14 +185,10 @@ pub(crate) fn message_to_proto(
                 entries: slot_commands_to_proto(entries),
             })
         }
-        Message::TrimmedTo {
-            from,
-            point,
-            sessions,
-        } => Kind::TrimmedTo(internal::TrimmedTo {
+        Message::TrimmedTo { from, point, state } => Kind::TrimmedTo(internal::TrimmedTo {
             from: from.0,
             point: point.0,
-            sessions: sessions_to_proto(sessions),
+            state: Some(journal_state_to_proto(*state)),
         }),
         Message::Heartbeat {
             from,
@@ -334,17 +318,7 @@ pub(crate) fn message_from_proto(
         Kind::TrimmedTo(message) => Ok(Message::TrimmedTo {
             from: NodeId(message.from),
             point: Slot(message.point),
-            sessions: message
-                .sessions
-                .into_iter()
-                .map(|record| {
-                    (
-                        ClientId(record.client),
-                        ClientSeq(record.seq),
-                        Slot(record.slot),
-                    )
-                })
-                .collect(),
+            state: journal_state_from_proto(message.state)?,
         }),
         Kind::Heartbeat(message) => Ok(Message::Heartbeat {
             from: NodeId(message.from),

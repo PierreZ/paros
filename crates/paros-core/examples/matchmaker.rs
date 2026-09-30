@@ -225,12 +225,12 @@ use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Entry, Fingerprint,
+    AcceptorConfig, AcceptorWrite, Ballot, ClientId, Command, Entry, Fingerprint, Generation,
     MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
     MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
     MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Slot,
-    Value,
+    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq,
+    Slot, Value,
 };
 
 const N1: NodeId = NodeId(1);
@@ -291,10 +291,11 @@ fn config(members: &[NodeId]) -> AcceptorConfig {
 }
 
 fn command(text: &str) -> Command {
-    Command::User(Entry {
-        client: ClientId(1),
-        seq: ClientSeq(0),
-        value: Value(text.as_bytes().to_vec()),
+    Command::Write(Entry {
+        generation: Generation(0),
+        owner: ClientId(1),
+        seq: Seq(0),
+        records: vec![Value(text.as_bytes().to_vec())],
     })
 }
 

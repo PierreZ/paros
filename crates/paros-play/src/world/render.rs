@@ -260,7 +260,7 @@ fn client_view(client: &Client) -> ClientView {
             .proposals
             .iter()
             .map(|p| ProposalView {
-                seq: p.seq.0,
+                seq: p.seq,
                 value: p.value.clone(),
                 node: p.node.0,
                 slot: p.slot.map(|s| s.0),

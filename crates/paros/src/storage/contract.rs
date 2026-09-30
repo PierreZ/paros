@@ -38,17 +38,24 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     Fresh: Future<Output = S>,
     Reopened: Future<Output = S>,
 {
-    use paros_core::{ClientId, ClientSeq, Entry, Value};
+    use paros_core::{ClientId, Entry, Generation, JournalState, Seq, Value};
     let ballot = |round: u64| Ballot {
         round,
         node: paros_core::NodeId(0),
     };
     let user = |seq: u64, byte: u8| {
-        Command::User(Entry {
-            client: ClientId(7),
-            seq: ClientSeq(seq),
-            value: Value(vec![byte]),
+        Command::Write(Entry {
+            generation: Generation(1),
+            owner: ClientId(7),
+            seq: Seq(seq),
+            records: vec![Value(vec![byte])],
         })
+    };
+    let state = |next: u64, first: u64| JournalState {
+        owner: Some(ClientId(7)),
+        generation: Generation(1),
+        next_seq: Seq(next),
+        first_seq: Seq(first),
     };
 
     // The format marker (#147): absent on a fresh store, present once
@@ -117,10 +124,9 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         "append is an upsert by slot"
     );
 
-    // Truncation raises the floor, drops the prefix, and seals the ledger.
-    s.truncate(Slot(1), &[(ClientId(7), ClientSeq(1), Slot(0))])
-        .await
-        .expect("truncate");
+    // Truncation raises the floor, drops the prefix, and seals the journal
+    // state the prefix folded to.
+    s.truncate(Slot(1), state(1, 1)).await.expect("truncate");
     s.sync(MustSync::Sync).await.expect("sync truncate");
     let mut s = reopen(s).await;
     assert_eq!(s.first_slot(), Slot(1), "the floor rose");
@@ -129,19 +135,26 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         "a truncated record is unreadable"
     );
     assert_eq!(
-        s.sealed_sessions(),
-        vec![(ClientId(7), ClientSeq(1), Slot(0))],
-        "the sealed ledger survives the truncation"
+        s.sealed_state(),
+        state(1, 1),
+        "the sealed journal state survives the truncation"
     );
-    // A floor never moves backward.
-    s.truncate(Slot(0), &[]).await.expect("re-truncate lower");
+    // A floor never moves backward, and keeps the state sealed with it.
+    s.truncate(Slot(0), JournalState::default())
+        .await
+        .expect("re-truncate lower");
     s.sync(MustSync::Sync).await.expect("sync no-op truncate");
     let s = reopen(s).await;
     assert_eq!(s.first_slot(), Slot(1), "the floor is monotone");
+    assert_eq!(
+        s.sealed_state(),
+        state(1, 1),
+        "a lower truncation seals nothing"
+    );
 
     // A trim-point jump (#186): the chosen index rises to one below the
     // point, the promise does not move, the floor lands on the point, the
-    // records below it go, and the peer's ledger seals.
+    // records below it go, and the peer's journal state seals.
     let mut s = fresh().await;
     s.persist_ballot(ballot(9)).await.expect("high promise");
     s.append_accepted(Slot(0), ballot(1), user(10, 0x40))
@@ -151,9 +164,7 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         .await
         .expect("append above the point");
     s.sync(MustSync::Sync).await.expect("sync promise");
-    s.trimmed_to(Slot(5), &[(ClientId(7), ClientSeq(2), Slot(3))])
-        .await
-        .expect("jump");
+    s.trimmed_to(Slot(5), state(4, 2)).await.expect("jump");
     s.sync(MustSync::Sync).await.expect("sync jump");
     let s = reopen(s).await;
     let (hs, _config) = s.initial_state();
@@ -177,8 +188,8 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         "the records above the point stay"
     );
     assert_eq!(
-        s.sealed_sessions(),
-        vec![(ClientId(7), ClientSeq(2), Slot(3))],
-        "the jump sealed the peer's ledger"
+        s.sealed_state(),
+        state(4, 2),
+        "the jump sealed the peer's journal state"
     );
 }

@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    Ballot, Command, Config, Control, MatchmakerId, Message, NodeId, NodeRole, QuorumSystem, Slot,
+    Ballot, Command, Config, Control, MatchmakerId, Message, NodeId, NodeRole, Outcome,
+    QuorumSystem, Slot,
 };
 use paros_play::action::Seam;
 use paros_play::prompt::{PromptKind, Verdict};
@@ -131,8 +132,12 @@ fn applied_text(world: &World, node: u64) -> Vec<String> {
         .applied()
         .iter()
         .map(|(slot, command)| match command {
-            Command::User(entry) => {
-                format!("{}:{}", slot.0, String::from_utf8_lossy(&entry.value.0))
+            Command::Write(entry) => {
+                format!(
+                    "{}:{}",
+                    slot.0,
+                    String::from_utf8_lossy(&entry.records[0].0)
+                )
             }
             Command::Control(control) => format!("{}:{control:?}", slot.0),
         })
@@ -1064,7 +1069,7 @@ fn ballot(round: u64, node: u64) -> Ballot {
     }
 }
 
-// ---- the client's two dedup tables --------------------------------------------
+// ---- a retry is judged by the log (#204) ---------------------------------------
 
 #[test]
 fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
@@ -1109,13 +1114,36 @@ fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
     assert_eq!(prompt.expected(), "acked");
     let id = prompt.id;
     assert_eq!(world.answer(id, "acked"), Ok(Verdict::Right));
+    deliver_all(&mut world);
+    // The retries are slots of their own, and every one folds as a
+    // duplicate: the journal accepted the write exactly once.
+    let replica = world.node(NodeId(0)).expect("node 0 runs").replica();
+    let outcomes: Vec<&Outcome> = world
+        .disk(NodeId(0))
+        .expect("a node of this world")
+        .applied()
+        .iter()
+        .filter(|(_, command)| {
+            command
+                .write()
+                .is_some_and(|entry| entry.records[0].0 == b"bravo")
+        })
+        .filter_map(|(slot, _)| replica.outcome_at(*slot))
+        .collect();
     assert_eq!(
-        applied_text(&world, 0)
+        outcomes
             .iter()
-            .filter(|entry| entry.ends_with("bravo"))
+            .filter(|outcome| matches!(outcome, Outcome::Accepted { .. }))
             .count(),
         1,
-        "the command was executed exactly once"
+        "the write was accepted exactly once"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .skip(1)
+            .all(|outcome| matches!(outcome, Outcome::Duplicate { .. })),
+        "every retry folds as a duplicate"
     );
 }
 

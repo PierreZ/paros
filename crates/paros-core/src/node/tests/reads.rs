@@ -58,7 +58,7 @@ fn fresh_leader_read_waits_for_the_read_floor() {
     let mut nodes = cluster_with_three_chosen();
 
     // Slot 3 is accepted at node 1 only; its Accepted/Commit never land.
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
+    let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, m| {
         to == NodeId(1) && matches!(m, Message::Accept { .. })
@@ -138,7 +138,7 @@ fn single_node_read_confirms_in_the_same_batch() {
     let mut n = node(0, &[0]);
     campaign(&mut n);
     assert!(n.is_leader(), "a single node is its own quorum");
-    let _ = n.propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = n.propose(entry(1, 1, 1));
     assert_eq!(n.hard_state().chosen_index, Some(Slot(0)));
 
     assert_eq!(n.read_index(3), ReadIndexResult::Pending);

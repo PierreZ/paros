@@ -26,7 +26,7 @@ the driver, never in a sim-only path.
   `PeerMailbox` (one keep-newest lane per journal, drained round-robin, #188;
   with `LaneOpener` and `peer_address`, the lane wiring every driver opens its
   peers through), the matchmaker wire, the
-  matchmaker-set handover, the operator RPCs (trim, reconfigure, retire,
+  matchmaker-set handover, the operator RPCs (reconfigure, retire,
   inspect) ·
   `driver/edge.rs` `RpcEdge` (the inbound edge all four drivers serve
   from: a listening moonpool-rpc runtime the loop polls as a `select!`
@@ -34,9 +34,13 @@ the driver, never in a sim-only path.
   role's typed inboxes (`NodeInbox`, `ReplicaInbox`, `MatchmakerInbox`) · `driver/reply.rs`
   the one client-reply seam (`answer`, `match_answer`, `maybe_duplicate`) ·
   `driver/config.rs` `DriverTunables` and its production defaults ·
-  `driver/log_reads.rs` the journal `Read` answer and its long-poll (#185:
-  parked at the end, re-served after every batch, answered empty after
-  `read_poll_ticks`), shared by the node and the replica driver.
+  `driver/log_reads.rs` `JournalReads`, the journal `Read` (#204: confirmed by a
+  quorum read first, then served by position from the fold; parked at the tail for
+  the call's `wait_ms`, capped by `read_poll_ticks`, re-served after every batch and
+  answered empty at the deadline), shared by the node and the replica driver ·
+  `driver/calls.rs` the held `Write` / `SetLeader` / `Truncate` calls (#204: proposed
+  into a slot, parked on it, and answered by `drain_ready` with the verdict the slot
+  folded to — or no verdict when the slot decided something else).
 - `hooks.rs` `DriverHooks` (the BUGGIFY prong-1 surface, every method
   defaulting to inert, `NoHooks` for production), `Seam` (four durability
   seams), `HandoffContext`, `Reply`. The `H: DriverHooks` bound on `run_node`
@@ -64,7 +68,7 @@ the driver, never in a sim-only path.
   the deployment map's proxies beside its peers · `replica_tier/mod.rs`
   `run_replica` (#144: the fourth driver — the node contract's learner subset
   over a `LogStorage`, the node's boot scan, format marker and durability seams,
-  sends catch-up requests and pre-reads, serves clients the public `Read` and `CheckTail` (quorum path) from its
+  sends catch-up requests and pre-reads, serves clients the public `Read` (a quorum read, #204) from its
   own chosen prefix and nothing else — the module doc says why). `run_node` and `run_proxy` take the deployment's replicas and
   `Outbound::resolve` adds them to every `Audience::Learners` send; `Outbound::learners`
   is the list and their lanes sit in `peer_queues`.
@@ -73,12 +77,13 @@ the driver, never in a sim-only path.
   wire is deterministic in simulation and `paros` stays wasm-checkable):
   `rpc/methods.rs` one `RpcMethod` marker per call, each a **well-known
   endpoint** (`WellKnownMethod`, method id = well-known id, never reused) —
-  the public journal (#185: Append/Read/CheckTail/Trim, each naming a
-  `JournalId` a node refuses unless it serves it; Reconfigure/
-  ReconfigureMatchmakers; ids `0x5041_0001..=0x5041_0004`, the old
-  Propose/Read/QuorumRead/Compact, are retired), the internal contract (Deliver/Inspect/Retire; a
+  the public journal (#204: Write/Read/Truncate/SetLeader, ids
+  `0x5041_000B..=0x5041_000E`, each naming a `JournalId` a node refuses unless it serves
+  it; Reconfigure/ReconfigureMatchmakers; ids `0x5041_0001..=0x5041_0004`, the old
+  Propose/Read/QuorumRead/Compact, and `0x5041_0007..=0x5041_000A`, #185's
+  Append/Read/CheckTail/Trim, are retired), the internal contract (Deliver/Inspect/Retire; a
   proxy leader and a replica register their `Deliver` — a replica its
-  `Inspect` and the public `Read` and `CheckTail` too — and a method a role does not
+  `Inspect` and the public `Read` too — and a method a role does not
   register is refused `EndpointNotFound`), the matchmaker contract
   (Matchmake/GarbageCollect/Reconfigure) · `rpc/inbound.rs` `Inbound` (a
   request stream decoded into what the loop steps), `ReplySender` (the

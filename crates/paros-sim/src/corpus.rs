@@ -43,7 +43,10 @@ use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TimeProvider, Workload,
     assert_always, assert_reachable, assert_sometimes,
 };
-use paros::{Append, Command, Entry, InspectReply, JournalId, Read, Reconfigure, Value};
+use paros::{
+    ClientId, Command, Control, Entry, Generation, InspectReply, JournalId, JournalState, Read,
+    Reconfigure, Seq, SetLeader, Value, Write, wire::public::WriteOutcome,
+};
 
 use crate::audit::audit_world;
 use crate::chain::{ChainState, hash_text, user_command_hash};
@@ -133,20 +136,70 @@ fn payload(seq: u64) -> Vec<u8> {
     bytes
 }
 
-/// The expected chain states for a command sequence: `expected[i]` is the
-/// state a reader folds from the first `i` slots. This is the corpus's own
-/// analytic model of the log — computed from what it proposed, never read
-/// back from the cluster.
-fn expected_states(commands: &[Command]) -> Vec<ChainState> {
-    ChainState::expected(commands)
+/// Where one node's journal fold stands (#204), as its `Inspect` reports
+/// it: the first slot it has not folded, and the journal's next position
+/// after every slot below. An observation of one node — a node held at a
+/// lost slot answers no `Read`, which a quorum read confirms first and so
+/// correctly never serves past a slot nobody can fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mark {
+    folded: u64,
+    next_seq: u64,
 }
 
-fn user_command(client: u64, seq: u64, bytes: Vec<u8>) -> Command {
-    Command::User(Entry {
-        client: paros::ClientId(client),
-        seq: paros::ClientSeq(seq),
-        value: Value(bytes),
-    })
+/// The expected marks for a command sequence: `expected[i]` is where a node
+/// that folded the first `i` slots stands. This is the corpus's own
+/// analytic model of the log — computed from what it proposed, by the
+/// core's own journal state machine, never read back from the cluster.
+fn expected_marks(commands: &[Command]) -> Vec<Mark> {
+    let mut marks = vec![Mark {
+        folded: 0,
+        next_seq: 0,
+    }];
+    let mut journal = JournalState::default();
+    for (slot, command) in (1_u64..).zip(commands) {
+        let written = &commands[..usize::try_from(slot).unwrap_or(0) - 1];
+        journal.apply(command, |seq| {
+            written
+                .iter()
+                .filter_map(Command::write)
+                .find(|entry| entry.seq == seq)
+        });
+        marks.push(Mark {
+            folded: slot,
+            next_seq: journal.next_seq.0,
+        });
+    }
+    marks
+}
+
+/// What a reader folds from the whole of `commands`: the content the
+/// corpus reads back through `Read` once every node converged.
+fn full_chain(commands: &[Command]) -> ChainState {
+    ChainState::expected(commands)
+        .last()
+        .copied()
+        .unwrap_or_default()
+}
+
+/// The command the corpus decides at `slot` (#204): slot 0 claims the
+/// journal for `client` (`SetLeader` from generation 0), and every later
+/// slot is that owner's one-record write at position `slot - 1`, so a slot
+/// and a position stay a fixed offset apart and the analytic model knows
+/// every slot's command.
+fn slot_command(client: u64, slot: u64) -> Command {
+    match slot.checked_sub(1) {
+        None => Command::Control(Control::SetLeader {
+            expected: Generation(0),
+            owner: ClientId(client),
+        }),
+        Some(seq) => Command::Write(Entry {
+            generation: Generation(1),
+            owner: ClientId(client),
+            seq: Seq(seq),
+            records: vec![Value(payload(seq))],
+        }),
+    }
 }
 
 /// The corpus's client bundle: one client per node, over the case's own
@@ -221,38 +274,64 @@ impl CorpusClients {
         }
     }
 
-    /// Append `(seq, record)` until some node commits it, rotating targets
-    /// and following leader hints. Returns the committed slot, or `None` at
-    /// the deadline.
+    /// Ask for `command` (a [`slot_command`]) until some node applies it,
+    /// rotating targets and following leader hints. Returns the command's
+    /// verdict — the position a write was accepted at, or the generation a
+    /// `SetLeader` won — or `None` at the deadline.
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn propose_until_acked(
+    async fn propose_until_applied(
         &self,
         ctx: &SimContext,
-        client_id: u64,
-        seq: u64,
-        record: &[u8],
+        command: &Command,
         exclude: Option<usize>,
+        first: usize,
         deadline: Duration,
     ) -> Option<u64> {
-        let first = usize::try_from(seq).unwrap_or(0);
         self.until_accepted(ctx, first, exclude, deadline, |client| async move {
-            let ack = client
-                .append(&Append {
-                    journal: JournalId::default().0,
-                    client: client_id,
-                    seq,
-                    records: vec![record.to_vec()],
-                })
-                .await
-                .ok()?;
-            Some(if ack.committed {
-                Verdict::Accepted(ack.first_lsn)
-            } else {
-                Verdict::Refused { leader: ack.leader }
-            })
+            let journal = JournalId::default().0;
+            match command {
+                Command::Write(entry) => {
+                    let ack = client
+                        .write(&Write {
+                            journal,
+                            generation: entry.generation.0,
+                            owner: entry.owner.0,
+                            seq: entry.seq.0,
+                            records: entry.records.iter().map(|r| r.0.clone()).collect(),
+                        })
+                        .await
+                        .ok()?;
+                    Some(match ack.outcome() {
+                        WriteOutcome::Accepted | WriteOutcome::Duplicate => {
+                            Verdict::Accepted(ack.seq)
+                        }
+                        _ => Verdict::Refused { leader: ack.leader },
+                    })
+                }
+                Command::Control(Control::SetLeader { expected, owner }) => {
+                    let ack = client
+                        .set_leader(&SetLeader {
+                            journal,
+                            expected: expected.0,
+                            owner: owner.0,
+                        })
+                        .await
+                        .ok()?;
+                    // A retry whose first attempt won loses to its own
+                    // generation: the claim held either way.
+                    let held = ack
+                        .state
+                        .filter(|state| ack.won || state.owner == Some(owner.0));
+                    Some(if let (true, Some(state)) = (ack.decided, held) {
+                        Verdict::Accepted(state.generation)
+                    } else {
+                        Verdict::Refused { leader: ack.leader }
+                    })
+                }
+                Command::Control(_) => None,
+            }
         })
         .await
-        .flatten()
     }
 
     /// Ask the leader for the acceptor configuration `members` until one
@@ -299,7 +378,7 @@ impl CorpusClients {
     /// can serve (#186 — there is no application on the node to ask). `None`
     /// on a timeout or a trimmed log (no corpus case trims).
     #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
-    async fn inspect(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
+    async fn read_state(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
         let time = ctx.time();
         let client = &self.clients[i];
         let mut state = ChainState::default();
@@ -307,33 +386,71 @@ impl CorpusClients {
         for _ in 0..FOLD_PAGES {
             let request = Read {
                 journal: JournalId::default().0,
-                from_lsn: from,
-                max_bytes: 0,
+                from_seq: from,
+                limit: 0,
+                wait_ms: 0,
             };
             let ack = moonpool_sim::select! {
                 response = client.read(&request) => response.ok(),
                 _ = time.sleep(RPC_TIMEOUT) => None,
             }?;
-            if ack.trimmed_to.is_some() || ack.unknown_journal {
+            if !ack.served || ack.truncated || ack.unknown_journal {
                 return None;
             }
-            for entry in &ack.entries {
-                state = state.fold(entry.lsn, &paros::encode_records(&entry.records));
+            for (position, record) in (ack.from_seq..).zip(&ack.records) {
+                state = state.fold(position, record);
             }
-            // The end of the served prefix, or a slot the node cannot serve
-            // yet (a page that moved nothing).
-            if ack.next_lsn >= ack.committed_end || ack.next_lsn == from {
+            let next = ack.from_seq + u64::try_from(ack.records.len()).unwrap_or(0);
+            // The end of the served prefix, or a page that moved nothing.
+            let end = ack.state.map_or(next, |state| state.next_seq);
+            if next >= end || next == from {
                 return Some(state);
             }
-            from = ack.next_lsn;
+            from = next;
         }
         Some(state)
     }
 
-    /// Wait until every live node's inspected state equals `want` (`true`), or
+    /// Where node `i`'s fold stands (`None` on a timeout).
+    #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
+    async fn inspect(&self, ctx: &SimContext, i: usize) -> Option<Mark> {
+        let reply = self.inspect_reply(ctx, i).await?;
+        Some(Mark {
+            folded: reply.folded,
+            next_seq: reply.journal.map_or(0, |state| state.next_seq),
+        })
+    }
+
+    /// Wait until a `Read` of every node folds to `want` (`true`), or the
+    /// deadline passes (`false`): the content check behind a converged mark.
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn read_all_at(&self, ctx: &SimContext, want: &ChainState, deadline: Duration) -> bool {
+        let time = ctx.time();
+        loop {
+            if ctx.shutdown().is_cancelled() {
+                return false;
+            }
+            let mut all = true;
+            for i in 0..self.clients.len() {
+                if self.read_state(ctx, i).await.as_ref() != Some(want) {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                return true;
+            }
+            if time.now() >= deadline {
+                return false;
+            }
+            time.sleep(POLL_INTERVAL).await.ok();
+        }
+    }
+
+    /// Wait until every live node's inspected mark equals `want` (`true`), or
     /// the deadline passes (`false`).
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn wait_all_at(&self, ctx: &SimContext, want: &ChainState, deadline: Duration) -> bool {
+    async fn wait_all_at(&self, ctx: &SimContext, want: &Mark, deadline: Duration) -> bool {
         let all: Vec<usize> = (0..self.clients.len()).collect();
         self.wait_nodes_at(ctx, &all, want, deadline).await
     }
@@ -345,7 +462,7 @@ impl CorpusClients {
         &self,
         ctx: &SimContext,
         nodes: &[usize],
-        want: &ChainState,
+        want: &Mark,
         deadline: Duration,
     ) -> bool {
         let time = ctx.time();
@@ -380,7 +497,7 @@ impl CorpusClients {
             let probe = corpus_disk_probe(ctx.state(), ip);
             eprintln!(
                 "CORPUS-DIAG node {n}: live={:?} clean_slots={:?} floor={:?} chosen={:?}",
-                live.map(|s| (s.applied_count, s.chain_hash)),
+                live,
                 probe.as_ref().map(|p| p.clean_slots.clone()),
                 probe.as_ref().map(|p| p.floor),
                 probe.as_ref().map(|p| p.chosen_index),
@@ -391,7 +508,7 @@ impl CorpusClients {
     /// Assert every node *stays* exactly at `want` for `hold`: any progress
     /// past it would be a fabricated value for a lost slot.
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn hold_all_at(&self, ctx: &SimContext, want: &ChainState, hold: Duration) -> bool {
+    async fn hold_all_at(&self, ctx: &SimContext, want: &Mark, hold: Duration) -> bool {
         let time = ctx.time();
         let until = time.now() + hold;
         while time.now() < until && !ctx.shutdown().is_cancelled() {
@@ -400,11 +517,7 @@ impl CorpusClients {
                     && state != *want
                 {
                     eprintln!(
-                        "CORPUS-DIAG hold deviation: node {i} at ({}, {:016x}), want ({}, {:016x}), t={}ms",
-                        state.applied_count,
-                        state.chain_hash,
-                        want.applied_count,
-                        want.chain_hash,
+                        "CORPUS-DIAG hold deviation: node {i} at {state:?}, want {want:?}, t={}ms",
                         time.now().as_millis(),
                     );
                     return false;
@@ -448,8 +561,8 @@ async fn wait_replicated(
     }
 }
 
-/// Prime `count` sequential user commands (seqs `0..count`), asserting each
-/// decides its expected slot, and return the committed command list.
+/// Prime the `count` commands of slots `slot_base..` ([`slot_command`]),
+/// asserting each decides its expected slot, and return them.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn prime_prefix(
     ctx: &SimContext,
@@ -457,58 +570,63 @@ async fn prime_prefix(
     client_id: u64,
     count: u64,
     exclude: Option<usize>,
-    seq_base: u64,
     slot_base: u64,
 ) -> SimulationResult<Vec<Command>> {
     let deadline = ctx.time().now() + PRIME_BUDGET;
     let mut commands = Vec::new();
     for offset in 0..count {
-        let seq = seq_base + offset;
-        let record = payload(seq);
-        // The slot decides the append's framed records (#185).
-        let bytes = paros::encode_records(std::slice::from_ref(&record));
-        // Registered before the RPC leaves: an applied user command the audit
-        // never saw submitted is one the cluster invented.
-        audit_world(ctx.state()).note_submitted(user_command_hash(&bytes));
-        tracing::info!(
-            cmd = %hash_text(user_command_hash(&bytes)),
-            seq,
-            bytes = bytes.len() as u64,
-            "chain_command_submitted"
-        );
-        let Some(slot) = clients
-            .propose_until_acked(ctx, client_id, seq, &record, exclude, deadline)
+        let slot = slot_base + offset;
+        let command = slot_command(client_id, slot);
+        if let Command::Write(entry) = &command {
+            // Registered before the RPC leaves: a folded record the audit
+            // never saw submitted is one the cluster invented.
+            let audit = audit_world(ctx.state());
+            for record in &entry.records {
+                audit.note_submitted(user_command_hash(&record.0));
+            }
+            audit.note_appended(paros::command_hash(&command));
+            tracing::info!(
+                cmd = %hash_text(paros::command_hash(&command)),
+                seq = entry.seq.0,
+                "chain_command_submitted"
+            );
+        }
+        let first = usize::try_from(slot).unwrap_or(0);
+        let Some(verdict) = clients
+            .propose_until_applied(ctx, &command, exclude, first, deadline)
             .await
         else {
             assert_always!(
                 false,
                 "corpus: priming decides its full prefix inside the budget",
-                { "seq" => seq }
+                { "slot" => slot }
             );
             return Err(invalid("corpus priming timed out"));
         };
         // The analytic model needs to know exactly which slot holds which
-        // command; a quiet scripted cluster decides them contiguously.
+        // command; a quiet scripted cluster decides them contiguously, so a
+        // write lands at `slot - 1` and the claim wins generation 1.
+        let expected = slot.checked_sub(1).unwrap_or(1);
         assert_always!(
-            slot == slot_base + offset,
+            verdict == expected,
             "corpus: priming decides the expected contiguous slots",
-            { "seq" => seq, "slot" => slot, "expected" => slot_base + offset }
+            { "slot" => slot, "verdict" => verdict, "expected" => expected }
         );
-        commands.push(user_command(client_id, seq, bytes));
+        commands.push(command);
     }
     Ok(commands)
 }
 
 /// What [`primed_cluster`] hands a case: the acceptors, the client bundle,
 /// this client's identity, the primed user commands (seqs and slots
-/// `0..count`) and the analytic states along them (`states[i]` after the
+/// `0..count`) and the analytic marks along them (`states[i]` after the
 /// first `i` commands).
 struct Primed {
     servers: Vec<String>,
     clients: CorpusClients,
     client_id: u64,
     commands: Vec<Command>,
-    states: Vec<ChainState>,
+    states: Vec<Mark>,
 }
 
 /// The prologue every three-node corpus case shares: the deployment's
@@ -521,8 +639,8 @@ async fn primed_cluster(ctx: &SimContext, count: u64, case: &str) -> SimulationR
     let servers = corpus_servers(ctx)?;
     let clients = CorpusClients::connect(ctx, &servers)?;
     let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
-    let commands = prime_prefix(ctx, &clients, client_id, count, None, 0, 0).await?;
-    let states = expected_states(&commands);
+    let commands = prime_prefix(ctx, &clients, client_id, count, None, 0).await?;
+    let states = expected_marks(&commands);
     let slots: BTreeSet<u64> = (0..count).collect();
     let deadline = ctx.time().now() + PRIME_BUDGET;
     let replicated = wait_replicated(ctx, &servers, &slots, commands.len(), deadline).await;
@@ -589,6 +707,7 @@ impl Workload for E1MaskWorkload {
         } = primed_cluster(ctx, CORPUS_SLOTS, "corpus").await?;
         let time = ctx.time().clone();
         let full = expected[commands.len()];
+        let content = full_chain(&commands);
 
         // Phase 2: derive the mask and inject it — atomically with the
         // restarts (no await between them), so no flush can heal a mark first.
@@ -691,12 +810,8 @@ impl Workload for E1MaskWorkload {
                 // live state and durable evidence at the moment of judgment.
                 clients.print_node_diagnostics(ctx, &servers).await;
                 eprintln!(
-                    "CORPUS-DIAG mask={mask:#011b} derived={derived_unrecoverable:?} world={:?} expected_hold=({}, {:016x}) full=({}, {:016x})",
+                    "CORPUS-DIAG mask={mask:#011b} derived={derived_unrecoverable:?} world={:?} expected_hold={held_state:?} full={full:?}",
                     unrecoverable_slots(ctx.state()),
-                    held_state.applied_count,
-                    held_state.chain_hash,
-                    full.applied_count,
-                    full.chain_hash,
                 );
                 eprintln!(
                     "CORPUS-DIAG audit: {}",
@@ -717,7 +832,8 @@ impl Workload for E1MaskWorkload {
         } else {
             // Correct: every slot kept a clean copy, so the cluster must
             // converge back to the exact pre-injection state.
-            let converged = clients.wait_all_at(ctx, &full, deadline).await;
+            let converged = clients.wait_all_at(ctx, &full, deadline).await
+                && clients.read_all_at(ctx, &content, deadline).await;
             assert_always!(
                 converged,
                 "corpus: a recoverable mask converges to the pre-injection state",
@@ -793,7 +909,7 @@ impl Workload for BareQuorumWorkload {
         // the bare quorum.
         lifecycle::crash(ctx, &servers[absent]).await;
         let survivors: Vec<String> = servers[..absent].to_vec();
-        commands.extend(prime_prefix(ctx, &clients, client_id, 1, Some(absent), 2, 2).await?);
+        commands.extend(prime_prefix(ctx, &clients, client_id, 1, Some(absent), 2).await?);
         let survivors_hold = wait_replicated(
             ctx,
             &survivors,
@@ -928,10 +1044,10 @@ impl Workload for DepartedStragglerWorkload {
 
         // Phase 1: prime the prefix on the bootstrap configuration {0, 1, 2}
         // and let it replicate there (the spare holds nothing yet).
-        let commands =
-            prime_prefix(ctx, &clients, client_id, CORPUS_SLOTS, Some(spare), 0, 0).await?;
-        let expected = expected_states(&commands);
+        let commands = prime_prefix(ctx, &clients, client_id, CORPUS_SLOTS, Some(spare), 0).await?;
+        let expected = expected_marks(&commands);
         let full = expected[commands.len()];
+        let content = full_chain(&commands);
         let slots: BTreeSet<u64> = (0..CORPUS_SLOTS).collect();
         let bootstrap: Vec<String> = servers[..DEPARTED_BOOTSTRAP].to_vec();
         let replicated = wait_replicated(
@@ -1131,9 +1247,9 @@ impl Workload for DepartedStragglerWorkload {
         // clean copy is found through the configuration the reconfiguration
         // left behind, and every node converges to the pre-injection state.
         lifecycle::restart(ctx, &servers[straggler]).await;
-        let recovered = clients
-            .wait_all_at(ctx, &full, time.now() + OUTCOME_BUDGET)
-            .await;
+        let deadline = time.now() + OUTCOME_BUDGET;
+        let recovered = clients.wait_all_at(ctx, &full, deadline).await
+            && clients.read_all_at(ctx, &content, deadline).await;
         if !recovered {
             clients.print_node_diagnostics(ctx, &servers).await;
             eprintln!(

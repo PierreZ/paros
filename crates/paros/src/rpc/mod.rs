@@ -50,7 +50,6 @@ mod consensus;
 mod inbound;
 mod matchmaker_codec;
 pub mod methods;
-mod records;
 #[cfg(test)]
 mod tests;
 
@@ -67,12 +66,14 @@ pub(crate) use matchmaker::{
     ReconfigureReply as WireReconfigureReply, ReconfigureRequest as WireReconfigureRequest,
 };
 pub use public::{
-    Append, AppendAck, CheckTail, CheckTailAck, LogEntry, Read, ReadAck, Reconfigure,
-    ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RecordBatch, TailPath, Trim,
-    TrimAck,
+    Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck,
+    SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck, WriteOutcome,
 };
 
-pub use codec::{WireQuorumSystem, quorum_system_from_proto, quorum_system_to_proto};
+pub use codec::{
+    WireQuorumSystem, journal_state_from_proto, journal_state_to_proto, quorum_system_from_proto,
+    quorum_system_to_proto,
+};
 pub(crate) use codec::{config_from_proto, config_to_proto};
 pub(crate) use consensus::{message_from_proto, message_to_proto};
 pub(crate) use matchmaker_codec::{
@@ -81,4 +82,3 @@ pub(crate) use matchmaker_codec::{
     wire_garbage_collect, wire_garbage_collect_ack, wire_match_reply, wire_match_request,
     wire_reconfigure_reply, wire_reconfigure_request,
 };
-pub use records::{decode_records, encode_records};

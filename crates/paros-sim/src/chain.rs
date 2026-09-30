@@ -1,21 +1,22 @@
 //! The Chain-of-Blocks application — a **client** of the journal (#186).
 //!
-//! paros runs no application: a journal's client reads the log through
-//! `Read` (#185) and folds what it reads. [`ChainState`] is that fold for the
-//! simulation's client: every user entry, in LSN order, chained into one
-//! running digest. Holes (a `Noop`, a control command, a #94 duplicate)
-//! never reach it — a reader never sees them — so two clients that read the
-//! same journal from the start agree on the state after every entry, and the
-//! audit checks exactly that (`AuditWorld::fold_applied`).
+//! paros runs no user application: a journal's client reads the journal
+//! through `Read` (#204) and folds what it reads. [`ChainState`] is that fold
+//! for the simulation's client: every accepted record, in position order,
+//! chained into one running digest. Slots that hold no position (a `Noop`, a
+//! control command, a refused write, a retry) never reach it — a reader never
+//! sees them — so two clients that read the same journal from the start agree
+//! on the state after every record, and the audit checks exactly that
+//! (`AuditWorld::fold_applied`).
 
-use paros::{Command, Control, Slot};
+use paros::{Command, Control, JournalState, Seq};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// A client's fold of the journal: how many user entries it folded and the
-/// running digest over them, each chained with its LSN (so the same bytes at
-/// another position fold to another state).
+/// A client's fold of the journal: how many records it folded and the
+/// running digest over them, each chained with its position (so the same
+/// bytes at another position fold to another state).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChainState {
     pub(crate) applied_count: u64,
@@ -44,8 +45,7 @@ impl Default for ChainState {
 }
 
 impl ChainState {
-    /// Fold the user entry at `lsn` whose slot value is `value` (the framed
-    /// records, exactly as the slot decided them).
+    /// Fold the record at position `lsn` whose bytes are `value`.
     pub(crate) fn fold(self, lsn: u64, value: &[u8]) -> Self {
         let mut chained = self.chain_hash.to_le_bytes().to_vec();
         chained.extend_from_slice(&lsn.to_le_bytes());
@@ -58,17 +58,28 @@ impl ChainState {
     }
 
     /// The analytic fold of a decided command sequence starting at slot 0:
-    /// `states[i]` is the state after the first `i` slots, holes (control
-    /// commands) folding nothing — what a reader of that log computes.
+    /// `states[i]` is the state after the first `i` slots — what a reader of
+    /// that log computes. Each slot is judged by the core's own pure journal
+    /// state machine (`paros::JournalState::apply`, #204), and the records a
+    /// slot's write was accepted with fold at their positions; every other
+    /// slot folds nothing.
     pub(crate) fn expected(commands: &[Command]) -> Vec<Self> {
         let mut states = vec![Self::default()];
-        for (slot, command) in commands.iter().enumerate() {
+        let mut journal = JournalState::default();
+        let mut accepted: Vec<paros::Entry> = Vec::new();
+        for command in commands {
             let previous = *states.last().expect("seeded with the initial state");
-            let next = match command {
-                Command::User(entry) => {
-                    previous.fold(u64::try_from(slot).unwrap_or(u64::MAX), &entry.value.0)
+            let outcome = journal.apply(command, |seq| accepted.iter().find(|e| e.seq == seq));
+            let next = match (outcome, command) {
+                (paros::Outcome::Accepted { seq, .. }, Command::Write(entry)) => {
+                    accepted.push(entry.clone());
+                    (seq.0..)
+                        .zip(&entry.records)
+                        .fold(previous, |state, (position, record)| {
+                            state.fold(position, &record.0)
+                        })
                 }
-                Command::Control(_) => previous,
+                _ => previous,
             };
             states.push(next);
         }
@@ -76,8 +87,8 @@ impl ChainState {
     }
 }
 
-/// The hash a user command's slot value is registered under
-/// (`AuditWorld::note_submitted`) and checked against when a client folds it.
+/// The hash a record is registered under (`AuditWorld::note_submitted`) and
+/// checked against when a client folds it.
 pub(crate) fn user_command_hash(bytes: &[u8]) -> u64 {
     let mut encoded = Vec::with_capacity(1 + bytes.len());
     encoded.push(0);
@@ -89,9 +100,9 @@ pub(crate) fn hash_text(hash: u64) -> String {
     format!("{hash:016x}")
 }
 
-/// Log the `Truncate { up_to }` control command a trim request asks for.
+/// Log the `Truncate { up_to }` control command a truncation asks for.
 pub(crate) fn trace_truncate(up_to: u64) {
-    let command = Command::Control(Control::Truncate { up_to: Slot(up_to) });
+    let command = Command::Control(Control::Truncate { up_to: Seq(up_to) });
     tracing::info!(
         cmd = %hash_text(paros::command_hash(&command)),
         up_to,

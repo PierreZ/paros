@@ -6,8 +6,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::journal_state::JournalState;
 use crate::membership::{AcceptorConfig, ProxyId};
-use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot};
+use crate::types::{Ballot, Command, NodeId, Slot};
 
 /// A **party** to the Phase-2 exchange: the address an `Accept` asks its
 /// `Accepted` sent to, and the sender a `Commit` names. A node, or a proxy
@@ -347,12 +348,11 @@ pub enum Message {
         /// The serving peer's trim point: its first retained slot. Everything
         /// below it is chosen.
         point: Slot,
-        /// The serving peer's at-most-once session ledger for the slots below
-        /// `point` (#94): their records never reach the requester, so without
-        /// this its duplicate suppression would diverge from every peer's — a
-        /// mandatory P2c re-proposal of an identity already chosen below the
-        /// point would be served as a new entry here and skipped elsewhere.
-        sessions: Vec<SessionEntry>,
+        /// The journal state the serving peer's log folded to below `point`
+        /// (#204): those slots never reach the requester, so without this its
+        /// journal fold would restart from nothing and judge every later write
+        /// against the wrong writer and the wrong next position.
+        state: JournalState,
     },
 
     // ---- Cooperative leader handoff (DPaxos "Leader Handoff") ----

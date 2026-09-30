@@ -1,76 +1,94 @@
-//! The **replica**: the chosen log and its application order, and nothing
-//! else.
+//! The **replica**: the chosen log, its application order, and the journal
+//! state machine folded over it — and nothing else.
 //!
 //! A replica consumes one kind of fact — *slot `s` chose value `v`* — and
-//! turns it into the contiguous applied prefix the application consumes,
-//! never caring *why* a value was chosen (an accept quorum this node
-//! counted, a `Commit` off the wire, a catch-up replay, a handoff's decided
-//! tail). It owns:
+//! turns it into the contiguous applied prefix, never caring *why* a value
+//! was chosen (an accept quorum this node counted, a `Commit` off the wire, a
+//! catch-up replay, a handoff's decided tail). It owns:
 //!
 //! - the **chosen map** and the durable **chosen index** (the commit index:
 //!   every slot at or below it is chosen and applied in order);
 //! - the contiguous **walk** ([`Replica::advance`]) that surfaces newly
 //!   applied entries, bounded per batch;
-//! - the **at-most-once ledger** (#94): which `(client, seq)` applied at
-//!   which slot, first slot wins, so a retry served across a partition and
-//!   re-chosen at a second slot executes as a no-op cluster-wide;
-//! - the **in-flight table** — the chosen-but-not-yet-applied window a
-//!   client retry must be able to find its request in;
-//! - the **journal read** ([`Replica::read`], #185): one page of chosen
-//!   client entries, holes skipped, served from the prefix.
+//! - the **journal fold** (#204): the [`JournalState`] of the journal the log
+//!   carries, judged at apply in slot order
+//!   ([`crate::journal_state`]) — the state at the retention floor (the
+//!   `base`, sealed durably when truncation drops the slots it was folded
+//!   from and carried by a trim-point jump), the state at the fold's head,
+//!   the [`Outcome`] of every retained slot (what a driver answers the call
+//!   that proposed it from), and the **positions index** (where each
+//!   accepted write's records sit) a read and a retry are answered from;
+//! - the **journal read** ([`Replica::read`]): the records from a position
+//!   up, served from the fold's head.
 //!
-//! "Applied" here names the walk, not an application: since #186 paros runs
-//! no application (the client folds what it reads), and a slot is applied
-//! the moment the walk moves the prefix over it.
+//! "Applied" here names the walk and the fold, not an application: paros runs
+//! no user application (#186, #204), one journal-control state machine per
+//! journal, and a slot is applied the moment the walk moves the prefix over
+//! it.
+//!
+//! **The fold is contiguous or it stops.** Every slot's outcome depends on
+//! every slot before it, so the fold never steps over a slot it does not
+//! hold: a faulty record inside the chosen prefix (a boot read it back
+//! damaged, CTRL Stage 8) stops the fold there, and the walk is *held* until
+//! the record heals ([`Replica::learn`]) or a trim-point jump carries the
+//! state past it ([`Replica::trim_to`]). Walking past the hole used to
+//! decide a #94 duplicate of the missing identity as its first application
+//! (seed 16921589310752617664); with the journal fold it would judge every
+//! later write against the wrong next position.
 //!
 //! It knows nothing about ballots, promises, leadership, quorums or the
 //! network. The one cross-component fact it consults is handed to it as
-//! data: the acceptor's compaction floor (what is retained) and, for the
-//! chosen/accepted coupling the walk asserts, the accepted log itself.
-//! Durable changes are emitted as [`WriteOp`]s into the caller's batch.
+//! data: for the chosen/accepted coupling the walk asserts, a predicate over
+//! the accepted log. Durable changes are emitted as [`WriteOp`]s into the
+//! caller's batch.
 //!
 //! Hard `assert!`s throughout (AGENTS.md, *Assertion doctrine*).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, SessionEntry, Slot};
+use crate::journal_state::{JournalState, Outcome};
+use crate::types::{Command, Control, Entry, Seq, Slot, Value};
 use crate::write::WriteOp;
 
 /// Maximum slots the contiguous apply walk releases in one batch — the
 /// bound this role enforces in [`Replica::advance`], so one `Ready` never
-/// hands the application an unbounded run.
+/// hands the driver an unbounded run.
 pub const APPLY_BATCH: usize = 64;
 
-/// The answer to a journal read ([`Replica::read`], #185).
+/// The answer to a journal read ([`Replica::read`], #204).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogRead {
-    /// The read started below the retention floor: those entries are gone
-    /// here, and `trim_point` is the first slot a read may start at.
-    Trimmed {
-        /// The retention floor (the first retained slot).
-        trim_point: Slot,
-    },
-    /// A page of chosen entries.
+    /// The read started below `first_seq`: those records are gone, and the
+    /// state names where the journal now starts.
+    Truncated(JournalState),
+    /// A page of records.
     Page(LogPage),
 }
 
-/// One page of chosen client entries ([`Replica::read`]).
+/// One page of a journal read ([`Replica::read`]): the records at
+/// `[from, from + records.len())`, in order, and the state they were served
+/// from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogPage {
-    /// The client entries, by slot (the LSN), holes skipped.
-    pub entries: Vec<(Slot, Entry)>,
-    /// Where the next read starts: one past the last slot this page
-    /// covered, entries and holes alike.
-    pub next: Slot,
-    /// One past the contiguous chosen prefix: every slot below it is
-    /// chosen here.
-    pub committed_end: Slot,
-    /// How many holes (control commands, #94 duplicates) the page stepped
-    /// over.
-    pub skipped: u64,
+    /// The first record's position (the read's `from_seq`).
+    pub from: Seq,
+    /// The records, dense from `from`.
+    pub records: Vec<Value>,
+    /// The journal state at the fold's head the page was served from: its
+    /// `next_seq` is the committed end, its generation and owner the current
+    /// writer — how every tailer learns the owner changed, in-band.
+    pub state: JournalState,
 }
 
-/// The replica: chosen log, applied prefix, dedup ledger. See the module doc.
+impl LogPage {
+    /// Where the next read starts.
+    #[must_use]
+    pub fn next(&self) -> Seq {
+        Seq(self.from.0 + self.records.len() as u64)
+    }
+}
+
+/// The replica: chosen log, applied prefix, journal fold. See the module doc.
 #[derive(Clone, Debug)]
 pub struct Replica {
     /// Every slot this node knows chosen, with its value — contiguous or not.
@@ -81,18 +99,28 @@ pub struct Replica {
     /// The walk released one bounded chunk and the next slot is already
     /// chosen: a deferred continuation the caller resumes after its batch.
     advance_pending: bool,
-    /// The at-most-once ledger: `(client, seq) -> slot` for every identity
-    /// applied, at its **first** slot — rebuilt on boot from the sealed
-    /// records plus the retained log, so a restart suppresses exactly the
-    /// slots the pre-restart apply did.
-    applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>>,
-    /// Chosen-but-not-applied (or proposed-but-undecided) client identities
-    /// by slot: what a retry finds between allocation and application.
-    inflight: BTreeMap<(ClientId, ClientSeq), Slot>,
-    /// Slots executed as no-ops because their identity applied earlier (#94).
-    duplicate_slots: BTreeSet<Slot>,
-    /// How many duplicates the walk suppressed this incarnation.
-    duplicates_suppressed: u64,
+    /// The slot [`Replica::base`] was folded up to: the retention floor.
+    floor: Slot,
+    /// The journal state after every slot below `floor` — sealed durably
+    /// with each truncation, carried by a trim-point jump.
+    base: JournalState,
+    /// The first slot the fold has not applied: at or below the first
+    /// unchosen slot, and below it only at a hole (a slot of the prefix whose
+    /// value this node does not hold).
+    folded: Slot,
+    /// The journal state after every slot below `folded`.
+    state: JournalState,
+    /// The state after each retained slot that moved it, so the state at any
+    /// retained slot — a new floor's base — is one lookup.
+    history: BTreeMap<Slot, JournalState>,
+    /// The outcome of every retained folded slot that was not a `Noop`.
+    outcomes: BTreeMap<Slot, Outcome>,
+    /// The positions index: the slot of every retained accepted write, by
+    /// its first record's position.
+    positions: BTreeMap<Seq, Slot>,
+    /// A `Truncate` was folded since the last walk: the caller compacts to
+    /// [`Replica::compaction_target`] after it.
+    truncate_due: bool,
     /// Newly applied `(slot, command)` pairs, in order, for the caller's
     /// `Ready` batch.
     committed: Vec<(Slot, Command)>,
@@ -100,69 +128,49 @@ pub struct Replica {
 
 impl Replica {
     /// Rebuild the replica from what a boot scan read back: the durable
-    /// chosen index, the sealed session records, and the retained accepted
-    /// log (every record at or below the chosen index carries the chosen
-    /// value — the P2c chain).
+    /// chosen index, the retention floor and the journal state sealed at it,
+    /// and the retained accepted log (every record at or below the chosen
+    /// index carries the chosen value — the P2c chain).
     ///
-    /// The ledger starts from the sealed records — the `(client, seq) ->
-    /// slot` facts whose log records truncation (or a jump below a trim point)
-    /// already dropped — and the walk over the retained log layers on top
-    /// with first-slot-wins semantics. Sealed slots are always below the
-    /// compaction floor, so the two sources never disagree; seeding sealed
-    /// first is what keeps a restarted node's duplicate-suppression
-    /// decisions identical to a node that held the whole log in memory.
+    /// The fold starts from the sealed state at the floor and replays the
+    /// retained chosen records in slot order, stopping at the first one the
+    /// scan could not read (a faulty record): a restarted node reaches
+    /// exactly the state a node that never restarted holds. A truncation the
+    /// replay passes is not re-applied to the log: the store's floor is what
+    /// it is, and a lower floor only retains more.
     #[must_use]
     pub fn from_boot(
         chosen_index: Option<Slot>,
-        sealed: impl IntoIterator<Item = SessionEntry>,
-        records: &BTreeMap<Slot, (Ballot, Command)>,
+        floor: Slot,
+        sealed: JournalState,
+        records: &BTreeMap<Slot, (crate::types::Ballot, Command)>,
     ) -> Self {
-        let mut applied_seq: BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>> = BTreeMap::new();
-        for (client, seq, slot) in sealed {
-            applied_seq.entry(client).or_default().insert(seq, slot);
-        }
-        let mut chosen = BTreeMap::new();
-        let mut inflight = BTreeMap::new();
-        let mut duplicate_slots = BTreeSet::new();
-        for (slot, (_b, command)) in records {
-            let is_chosen = chosen_index.is_some_and(|ci| *slot <= ci);
-            if is_chosen {
-                chosen.insert(*slot, command.clone());
-                // Only client entries carry a `(client, seq)` dedup key; a
-                // control command never dedups. Every executed seq is
-                // recorded, not just the latest per client — and only at its
-                // **first** (lowest) slot: a second chosen slot for the same
-                // identity is the #94 duplicate, re-derived here exactly as
-                // the live walk derived it.
-                if let Command::User(entry) = command {
-                    let seqs = applied_seq.entry(entry.client).or_default();
-                    match seqs.get(&entry.seq) {
-                        Some(&first) if first != *slot => {
-                            duplicate_slots.insert(*slot);
-                        }
-                        _ => {
-                            seqs.insert(entry.seq, *slot);
-                        }
-                    }
-                }
-            } else if let Command::User(entry) = command {
-                inflight.insert((entry.client, entry.seq), *slot);
-            }
-        }
-        Self {
+        let chosen: BTreeMap<Slot, Command> = records
+            .iter()
+            .filter(|(slot, _)| chosen_index.is_some_and(|ci| **slot <= ci))
+            .map(|(slot, (_, command))| (*slot, command.clone()))
+            .collect();
+        let mut replica = Self {
             chosen,
             chosen_index,
             advance_pending: false,
-            applied_seq,
-            inflight,
-            duplicate_slots,
-            duplicates_suppressed: 0,
+            floor,
+            base: sealed,
+            folded: floor,
+            state: sealed,
+            history: BTreeMap::new(),
+            outcomes: BTreeMap::new(),
+            positions: BTreeMap::new(),
+            truncate_due: false,
             committed: Vec::new(),
-        }
+        };
+        replica.refold();
+        replica.truncate_due = false;
+        replica
     }
 
     /// The replica's own cross-field invariants against the retention floor
-    /// `floor` (the acceptor's compaction floor, handed in as data).
+    /// `floor` (the caller's compaction floor, handed in as data).
     ///
     /// # Panics
     ///
@@ -189,14 +197,36 @@ impl Replica {
             "no chosen record survives below the compaction floor"
         );
         assert!(
-            self.duplicate_slots.first().is_none_or(|s| *s >= floor),
-            "no duplicate marker survives below the compaction floor"
+            self.floor == floor,
+            "the journal fold's base sits at the compaction floor"
         );
-        // Floor-bound structural check needing a full scan (`inflight` is
-        // keyed by client identity, so its slots are unordered).
         assert!(
-            self.inflight.values().all(|s| *s >= floor),
-            "no in-flight dedup mapping survives below the compaction floor"
+            self.floor <= self.folded && self.folded <= self.first_unchosen(),
+            "the journal fold lies between the floor and the first unchosen slot"
+        );
+        if self.folded < self.first_unchosen() {
+            assert!(
+                !self.chosen.contains_key(&self.folded),
+                "the journal fold stops only at a slot it does not hold"
+            );
+        }
+        assert!(
+            self.outcomes.keys().next().is_none_or(|s| *s >= floor)
+                && self.history.keys().next().is_none_or(|s| *s >= floor)
+                && self
+                    .outcomes
+                    .keys()
+                    .next_back()
+                    .is_none_or(|s| *s < self.folded),
+            "the journal fold's per-slot record lies between the floor and the fold"
+        );
+        self.base.assert_invariants();
+        self.state.assert_invariants();
+        assert!(
+            self.base.next_seq <= self.state.next_seq
+                && self.base.first_seq <= self.state.first_seq
+                && self.base.generation <= self.state.generation,
+            "the fold's head never lies behind its base"
         );
     }
 
@@ -208,16 +238,15 @@ impl Replica {
         self.chosen_index
     }
 
-    /// Whether the contiguous chosen prefix covers `index` — the replica's
-    /// one answer to a quorum read (#143, Compartmentalized Paxos §3.4): a
-    /// read at watermark `index` may be served once the replica has chosen
-    /// (and, through the driver's apply seam, applied) everything up to it.
-    /// `None` is the empty watermark, covered by any prefix. The replica
-    /// consumes "applied past `index`" and nothing else — it never sees the
-    /// watermark tally that produced the index.
+    /// Whether the journal fold covers `index` — the replica's one answer to
+    /// a quorum read (#143, Compartmentalized Paxos §3.4): a read at
+    /// watermark `index` may be served once the replica has chosen *and
+    /// folded* everything up to it. `None` is the empty watermark, covered by
+    /// any prefix. The replica consumes "applied past `index`" and nothing
+    /// else — it never sees the watermark tally that produced the index.
     #[must_use]
     pub fn covers(&self, index: Option<Slot>) -> bool {
-        self.chosen_index >= index
+        index.is_none_or(|i| i < self.folded)
     }
 
     /// First slot not in the contiguous chosen prefix.
@@ -247,44 +276,38 @@ impl Replica {
         self.chosen.get(&slot)
     }
 
-    /// The slot `(client, seq)` applied at, if it did.
+    /// The journal state at the fold's head.
     #[must_use]
-    pub fn applied_at(&self, client: ClientId, seq: ClientSeq) -> Option<Slot> {
-        self.applied_seq
-            .get(&client)
-            .and_then(|m| m.get(&seq))
-            .copied()
+    pub fn journal(&self) -> JournalState {
+        self.state
     }
 
-    /// The slot `(client, seq)` is in flight at, if it is.
+    /// The journal state at the retention floor (sealed with the last
+    /// truncation, or carried by the last trim-point jump).
     #[must_use]
-    pub fn inflight_at(&self, client: ClientId, seq: ClientSeq) -> Option<Slot> {
-        self.inflight.get(&(client, seq)).copied()
+    pub fn journal_base(&self) -> JournalState {
+        self.base
     }
 
-    /// Whether `entry`'s `(client, seq)` identity is recorded in the applied
-    /// ledger at a slot **other than** `slot` — the #94 duplicate test.
-    fn applied_elsewhere(&self, entry: &Entry, slot: Slot) -> bool {
-        self.applied_at(entry.client, entry.seq)
-            .is_some_and(|first| first != slot)
+    /// The first slot the fold has not applied.
+    #[must_use]
+    pub fn folded(&self) -> Slot {
+        self.folded
     }
 
-    /// The at-most-once ledger, whole.
+    /// The slot the fold is stopped at, when it is stopped below the first
+    /// unchosen slot: a slot of the prefix whose value this node does not
+    /// hold, that a catch-up must bring back before anything past it applies.
     #[must_use]
-    pub fn session_ledger(&self) -> &BTreeMap<ClientId, BTreeMap<ClientSeq, Slot>> {
-        &self.applied_seq
+    pub fn fold_hole(&self) -> Option<Slot> {
+        (self.folded < self.first_unchosen()).then_some(self.folded)
     }
 
-    /// Slots executed as no-ops because their identity applied earlier.
+    /// The outcome of the folded slot `slot`, if it is retained and was not
+    /// a `Noop`.
     #[must_use]
-    pub fn duplicate_slots(&self) -> &BTreeSet<Slot> {
-        &self.duplicate_slots
-    }
-
-    /// How many duplicates the walk suppressed this incarnation.
-    #[must_use]
-    pub fn duplicates_suppressed(&self) -> u64 {
-        self.duplicates_suppressed
+    pub fn outcome_at(&self, slot: Slot) -> Option<&Outcome> {
+        self.outcomes.get(&slot)
     }
 
     /// Newly applied entries this batch, in order.
@@ -317,139 +340,135 @@ impl Replica {
         Some((hole, highest))
     }
 
-    /// The session records whose slots lie in `[from, to)` — what a
-    /// truncation seals so a restart still recognizes them. Read from the
-    /// *ledger*, not from the dropped chosen range: a duplicate slot's chosen
-    /// command is a `User` entry whose ledger record points at its first
-    /// slot, and sealing the duplicate's own slot would corrupt the ledger.
+    /// The write accepted with its first record at `seq`, if it is retained
+    /// — what the journal state machine compares a retry against.
     #[must_use]
-    pub fn seal(&self, from: Slot, to: Slot) -> Vec<SessionEntry> {
-        self.applied_seq
-            .iter()
-            .flat_map(|(client, seqs)| {
-                seqs.iter()
-                    .filter(|entry| *entry.1 >= from && *entry.1 < to)
-                    .map(|(&seq, &slot)| (*client, seq, slot))
-            })
-            .collect()
+    pub fn accepted_at(&self, seq: Seq) -> Option<&Entry> {
+        self.positions
+            .get(&seq)
+            .and_then(|slot| self.chosen.get(slot))
+            .and_then(Command::write)
     }
 
-    /// One page of a **journal read** (#185, `Read(journal, from_lsn,
-    /// max_bytes)`): the chosen client entries from `from` up, served from
-    /// this replica's contiguous chosen prefix and never above it.
-    ///
-    /// The log sequence number *is* the slot. A slot holding a control
-    /// command (a `Noop` gap fill, a `Truncate`) or a #94
-    /// duplicate is a **hole**: skipped, counted in [`LogPage::skipped`],
-    /// and invisible to the client except that [`LogPage::next`] steps past
-    /// it — a reader never has to know why a slot was skipped.
-    ///
-    /// `floor` is the retention floor the caller holds (the acceptor's
-    /// compaction floor on a node, the replica's own on a replica): a read
-    /// that starts below it is [`LogRead::Trimmed`], and nothing else, since
-    /// the entries there are gone. `max_bytes` bounds the page by the sum of
-    /// the entries' payload bytes, except that a page that could hold an
-    /// entry always holds at least one — a single entry larger than the
-    /// budget must still be readable.
-    ///
-    /// A `from` at or past the prefix's end returns an empty page whose
-    /// `next` is `from`: the caller (the driver) decides whether to wait for
-    /// the prefix to grow — the long-poll is not the core's.
-    ///
-    /// A slot inside the prefix whose value this node does not hold (a
-    /// corrupted record under repair) ends the page early, never skipped:
-    /// skipping it would tell the reader the slot is a hole.
+    /// The journal state after every slot below `slot` (a retained slot at
+    /// or past the floor, at or below the fold).
+    fn state_at(&self, slot: Slot) -> JournalState {
+        assert!(
+            slot >= self.floor && slot <= self.folded,
+            "the journal state is asked at a folded slot"
+        );
+        self.history
+            .range(..slot)
+            .next_back()
+            .map_or(self.base, |(_, state)| *state)
+    }
+
+    /// The highest slot a decided truncation lets this replica drop: every
+    /// slot below the one holding the journal's first retained record (or,
+    /// when every record is truncated, every folded slot). `None` when
+    /// nothing may go.
     ///
     /// # Panics
     ///
-    /// If the page it built breaks its own shape (entries outside
-    /// `[from, next)` or out of order): a programmer error.
+    /// If the positions index lost the write holding the first retained
+    /// record: a programmer error.
     #[must_use]
-    pub fn read(&self, from: Slot, floor: Slot, max_bytes: usize) -> LogRead {
-        if from < floor {
-            return LogRead::Trimmed { trim_point: floor };
+    pub fn compaction_target(&self) -> Option<Slot> {
+        let first = if self.state.first_seq < self.state.next_seq {
+            let (start, slot) = self
+                .positions
+                .range(..=self.state.first_seq)
+                .next_back()
+                .expect("the first retained record's write is retained");
+            let entry = self
+                .chosen
+                .get(slot)
+                .and_then(Command::write)
+                .expect("an indexed write is a retained chosen write");
+            assert!(
+                *start <= self.state.first_seq && self.state.first_seq.0 < start.0 + entry.count(),
+                "the first retained record lies inside the write indexed below it"
+            );
+            *slot
+        } else {
+            self.folded
+        };
+        first.0.checked_sub(1).map(Slot)
+    }
+
+    /// One page of a **journal read** (#204, `Read(from_seq, limit)`): the
+    /// records from position `from` up, served from the fold's head and
+    /// never past it.
+    ///
+    /// A read that starts below `first_seq` is [`LogRead::Truncated`], and
+    /// nothing else, since the records there are gone. `limit` bounds the
+    /// page's record count and `max_bytes` the sum of its records' bytes,
+    /// except that a page that could hold a record always holds at least one
+    /// — a single record larger than the budget must still be readable. A
+    /// read may start inside a batch: positions are per record.
+    ///
+    /// A `from` at or past `next_seq` returns an empty page: the caller (the
+    /// driver) decides whether to wait for the journal to grow — the
+    /// long-poll is not the core's.
+    ///
+    /// # Panics
+    ///
+    /// If the positions index does not cover a position below `next_seq`
+    /// (a programmer error).
+    #[must_use]
+    pub fn read(&self, from: Seq, limit: usize, max_bytes: usize) -> LogRead {
+        let state = self.state;
+        if from < state.first_seq {
+            return LogRead::Truncated(state);
         }
-        let end = self.first_unchosen();
         let mut page = LogPage {
-            entries: Vec::new(),
-            next: from.max(floor),
-            committed_end: end,
-            skipped: 0,
+            from,
+            records: Vec::new(),
+            state,
         };
         let mut bytes = 0_usize;
-        while page.next < end {
-            let slot = page.next;
-            // A slot of the prefix whose value this node lost (a CTRL
-            // `faulty` record whose repair is still open) ends the page:
-            // the reader's next read starts there and is served once the
-            // value is healed, or by another node.
-            let Some(command) = self.chosen.get(&slot) else {
-                break;
-            };
-            let entry = command
-                .user()
-                .filter(|_| !self.duplicate_slots.contains(&slot));
-            match entry {
-                Some(entry) => {
-                    let size = entry.value.0.len();
-                    if !page.entries.is_empty() && bytes.saturating_add(size) > max_bytes {
-                        break;
-                    }
-                    bytes = bytes.saturating_add(size);
-                    page.entries.push((slot, entry.clone()));
+        let mut at = from;
+        'writes: while at < state.next_seq && page.records.len() < limit {
+            let (start, slot) = self
+                .positions
+                .range(..=at)
+                .next_back()
+                .expect("every position below next_seq lies in a retained write");
+            let entry = self
+                .chosen
+                .get(slot)
+                .and_then(Command::write)
+                .expect("an indexed write is a retained chosen write");
+            let offset = usize::try_from(at.0 - start.0).expect("a batch fits in memory");
+            assert!(
+                offset < entry.records.len(),
+                "a position below next_seq lies inside the write indexed below it"
+            );
+            for record in &entry.records[offset..] {
+                let size = record.0.len();
+                if page.records.len() >= limit
+                    || (!page.records.is_empty() && bytes.saturating_add(size) > max_bytes)
+                {
+                    break 'writes;
                 }
-                None => page.skipped += 1,
+                bytes = bytes.saturating_add(size);
+                page.records.push(record.clone());
+                at = Seq(at.0 + 1);
             }
-            page.next = Slot(slot.0 + 1);
         }
-        // Postconditions: the page never passes the prefix, and every entry
-        // lies in `[from, next)` in strictly increasing order.
+        // Postcondition: the page never passes the fold's head.
         assert!(
-            page.next <= end || page.next == from,
-            "a read page ends inside the chosen prefix"
-        );
-        assert!(
-            page.entries.windows(2).all(|w| w[0].0 < w[1].0)
-                && page
-                    .entries
-                    .iter()
-                    .all(|(s, _)| *s >= from && *s < page.next),
-            "a read page's entries lie in [from, next) in slot order"
+            from >= state.next_seq || page.next() <= state.next_seq,
+            "a read page ends at or below the journal's next position"
         );
         LogRead::Page(page)
     }
 
     // ---- learning -------------------------------------------------------------
 
-    /// Point the in-flight table at `slot` for `(client, seq)` — a fresh
-    /// allocation, or a re-proposal of an inherited client entry.
-    pub fn track_inflight(&mut self, client: ClientId, seq: ClientSeq, slot: Slot) {
-        self.inflight.insert((client, seq), slot);
-    }
-
-    /// Track `command` in flight at `slot` if it is a client entry whose
-    /// identity has not already applied at another slot — a re-proposed or
-    /// learned #94 duplicate suppresses to a no-op at apply, so a retry must
-    /// hit the ledger fast path instead of parking on it.
-    pub fn track_command(&mut self, slot: Slot, command: &Command) {
-        if let Command::User(entry) = command
-            && !self.applied_elsewhere(entry, slot)
-        {
-            self.inflight.insert((entry.client, entry.seq), slot);
-        }
-    }
-
     /// Learn `slot` chosen with `command`. The caller has already checked the
-    /// slot is retained and not yet known chosen here.
-    ///
-    /// Re-points `inflight` at what this slot actually decided: whatever was
-    /// in flight *for this slot* is dropped (the slot can no longer be the
-    /// landing place of some other request), and the entry this slot did
-    /// decide is mapped to it unless its identity already applied elsewhere
-    /// (a #94 duplicate suppresses to a no-op at apply, so a retry must hit
-    /// the ledger fast path instead of parking on it). A slot healed *below*
-    /// the contiguous prefix never reaches the walk, so its ledger fold
-    /// happens here, min-slot-wins.
+    /// slot is retained and not yet known chosen here. A slot that fills the
+    /// hole the fold is stopped at resumes the fold at once.
     ///
     /// # Panics
     ///
@@ -459,42 +478,65 @@ impl Replica {
             !self.chosen.contains_key(&slot),
             "a slot is learned chosen once"
         );
+        assert!(slot >= self.folded, "a folded slot is never relearned");
         self.chosen.insert(slot, command.clone());
-        self.inflight.retain(|_, s| *s != slot);
-        self.track_command(slot, command);
-        if slot < self.first_unchosen()
-            && let Command::User(entry) = command
-        {
-            let seqs = self.applied_seq.entry(entry.client).or_default();
-            match seqs.get(&entry.seq).copied() {
-                Some(first) if first < slot => {
-                    self.duplicate_slots.insert(slot);
-                }
-                Some(first) if first > slot => {
-                    self.duplicate_slots.insert(first);
-                    self.duplicate_slots.remove(&slot);
-                    seqs.insert(entry.seq, slot);
-                }
-                _ => {
-                    seqs.insert(entry.seq, slot);
-                }
-            }
+        if slot == self.folded && slot < self.first_unchosen() {
+            self.refold();
         }
     }
 
-    /// Walk the contiguous chosen prefix forward, surfacing each newly
-    /// applied `(slot, command)` in order (no gaps), bounded per batch, and
-    /// moving each identity's dedup state from "in flight" to "applied".
-    /// Returns the highest `up_to` of any [`Control::Truncate`] the walk
-    /// applied, for the caller to compact *after* the walk.
+    /// Fold one slot at the fold's head.
+    fn fold_one(&mut self, slot: Slot, command: &Command) {
+        assert!(
+            slot == self.folded,
+            "the journal fold advances one slot at a time"
+        );
+        let before = self.state;
+        let mut state = self.state;
+        let outcome = state.apply(command, |seq| self.accepted_at(seq));
+        self.state = state;
+        if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
+            self.positions.insert(*seq, slot);
+        }
+        if matches!(command, Command::Control(Control::Truncate { .. })) {
+            self.truncate_due = true;
+        }
+        if self.state != before {
+            self.history.insert(slot, self.state);
+        }
+        if outcome != Outcome::Noop {
+            self.outcomes.insert(slot, outcome);
+        }
+        self.folded = Slot(slot.0 + 1);
+    }
+
+    /// Resume the fold below the first unchosen slot, through every chosen
+    /// slot it now holds.
+    fn refold(&mut self) {
+        let end = self.first_unchosen();
+        while self.folded < end {
+            let slot = self.folded;
+            let Some(command) = self.chosen.get(&slot).cloned() else {
+                break;
+            };
+            self.fold_one(slot, &command);
+        }
+    }
+
+    /// Walk the contiguous chosen prefix forward, folding and surfacing each
+    /// newly applied `(slot, command)` in order (no gaps), bounded per batch.
+    /// Returns the compaction target ([`Replica::compaction_target`]) when a
+    /// `Truncate` was folded, for the caller to compact *after* the walk.
+    ///
+    /// A fold stopped at a hole below the prefix **holds** the walk: nothing
+    /// past the hole is judged until it heals.
     ///
     /// `records_agree(slot, command)` answers "does the authoritative
     /// accepted record for `slot` hold exactly this command?" — the coupling
     /// assertion, and the only thing the walk needs to know about the
     /// acceptor. A predicate, not the acceptor's map: the replica consumes
     /// "slot chosen, value" and must not acquire the accepted log merely
-    /// because one deployment colocates the two roles (the same shape as
-    /// `close_phase1(is_chosen)`).
+    /// because one deployment colocates the two roles.
     ///
     /// # Panics
     ///
@@ -504,122 +546,110 @@ impl Replica {
         records_agree: impl Fn(Slot, &Command) -> bool,
         writes: &mut Vec<WriteOp>,
     ) -> Option<Slot> {
-        let mut next = self.first_unchosen();
-        let mut advanced = 0_usize;
-        let mut truncate_up_to: Option<Slot> = None;
-        while advanced < APPLY_BATCH
-            && let Some(mut command) = self.chosen.get(&next).cloned()
-        {
-            // The walk is the *only* writer of `chosen_index`, and it
-            // advances exactly one slot per iteration — the contiguity the
-            // apply seam and the boot rebuild are built on.
-            assert!(
-                next == self.first_unchosen(),
-                "the chosen prefix advances one slot at a time"
-            );
-            // The chosen/accepted coupling, per applied slot.
-            assert!(
-                records_agree(next, &command),
-                "an applied slot's accepted record carries the applied command"
-            );
-            self.chosen_index = Some(next);
-            writes.push(WriteOp::SetChosenIndex(next));
-            if let Command::Control(Control::Truncate { up_to }) = &command {
-                truncate_up_to = Some(truncate_up_to.map_or(*up_to, |u| u.max(*up_to)));
+        self.refold();
+        if self.folded == self.first_unchosen() {
+            let mut next = self.first_unchosen();
+            let mut advanced = 0_usize;
+            while advanced < APPLY_BATCH
+                && let Some(command) = self.chosen.get(&next).cloned()
+            {
+                // The walk is the *only* writer of `chosen_index`, and it
+                // advances exactly one slot per iteration — the contiguity the
+                // apply seam and the boot rebuild are built on.
+                assert!(
+                    next == self.first_unchosen(),
+                    "the chosen prefix advances one slot at a time"
+                );
+                // The chosen/accepted coupling, per applied slot.
+                assert!(
+                    records_agree(next, &command),
+                    "an applied slot's accepted record carries the applied command"
+                );
+                self.chosen_index = Some(next);
+                writes.push(WriteOp::SetChosenIndex(next));
+                self.fold_one(next, &command);
+                self.committed.push((next, command));
+                next = Slot(next.0 + 1);
+                advanced += 1;
             }
-            self.inflight.retain(|_, s| *s != next);
-            if let Command::User(entry) = &command {
-                let seqs = self.applied_seq.entry(entry.client).or_default();
-                match seqs.get(&entry.seq) {
-                    // The #94 duplicate: execute the slot as a no-op. The
-                    // decision reads only the replicated ledger, and the walk
-                    // runs in slot order on every node, so first-slot-wins is
-                    // cluster-wide deterministic.
-                    Some(&first) if first != next => {
-                        self.duplicate_slots.insert(next);
-                        self.duplicates_suppressed += 1;
-                        command = Command::Control(Control::Noop);
-                    }
-                    _ => {
-                        seqs.insert(entry.seq, next);
-                    }
-                }
-            }
-            self.committed.push((next, command));
-            next = Slot(next.0 + 1);
-            advanced += 1;
+            // Postcondition: either the walk consumed the entire contiguous
+            // chosen prefix, or exactly one bounded chunk was released.
+            assert!(
+                advanced == APPLY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
+                "the walk consumes or bounds the contiguous chosen prefix"
+            );
         }
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
-        // Postcondition: either the walk consumed the entire contiguous
-        // chosen prefix, or exactly one bounded chunk was released.
-        assert!(
-            advanced == APPLY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
-            "the walk consumes or bounds the contiguous chosen prefix"
-        );
-        truncate_up_to
-    }
-
-    /// **Hold** the walk instead of running it: the caller knows the
-    /// at-most-once ledger is incomplete — a chosen record inside the prefix
-    /// is faulty (a boot read it back damaged, CTRL Stage 8), so the identity
-    /// it decided is missing from the ledger until the record heals
-    /// ([`Replica::learn`]'s below-prefix fold) or a trim-point jump seals
-    /// it ([`Replica::trim_to`]). Walking past the hole would decide a later
-    /// #94 duplicate of that identity as its first application — a user
-    /// entry here, a `Noop` on every node whose ledger is whole. Only the
-    /// deferred-continuation flag is kept in step, so the first walk after
-    /// the heal resumes from the same slot.
-    pub fn hold(&mut self) {
-        self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        if std::mem::take(&mut self.truncate_due) {
+            self.compaction_target()
+        } else {
+            None
+        }
     }
 
     // ---- log prefix drops -----------------------------------------------------
 
-    /// Drop everything below `first` after a decided truncation: the walked
-    /// prefix is applied, its ledger records were sealed by the caller.
-    pub fn truncate(&mut self, first: Slot) {
+    /// Drop everything below `first` after a decided truncation, and return
+    /// the journal state there — the new base, which the caller seals
+    /// durably with the truncation.
+    ///
+    /// # Panics
+    ///
+    /// If `first` lies outside `[floor, folded]`, or would drop a record at
+    /// or past the journal's first retained position.
+    pub fn truncate(&mut self, first: Slot) -> JournalState {
+        assert!(
+            self.compaction_target().is_some_and(|t| first.0 <= t.0 + 1),
+            "a truncation never drops a retained record"
+        );
+        let base = self.state_at(first);
+        self.base = base;
+        self.floor = first;
         self.chosen = self.chosen.split_off(&first);
+        self.history = self.history.split_off(&first);
+        self.outcomes = self.outcomes.split_off(&first);
+        self.positions.retain(|_, slot| *slot >= first);
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
-        // The contiguous walk already handed every applied slot's `inflight`
-        // entry over, except the below-prefix heals of a faulty record — and
-        // a mapping into the truncated prefix would answer a retry with a
-        // `Duplicate` whose commit can never ack anyone.
-        self.inflight.retain(|_, s| *s >= first);
-        // The markers for the dropped prefix are spent: a restarted node
-        // re-derives the set from the *retained* log only.
-        self.duplicate_slots = self.duplicate_slots.split_off(&first);
+        base
     }
 
     /// Jump below a peer's trim point (#186, [`crate::Message::TrimmedTo`]):
     /// drop everything below `point`, move the chosen index to at least
-    /// `point - 1` (everything below a trim point is chosen), and adopt the
-    /// serving peer's session records for the dropped prefix (`or_insert`:
-    /// the prefixes agree cluster-wide). A chosen index already past the
-    /// point stays where it is — only the prefix below the point goes.
+    /// `point - 1` (everything below a trim point is chosen), and take the
+    /// journal state the peer sealed at its floor when this node's own fold
+    /// has not reached it. A fold already past the point keeps its own state
+    /// (the prefixes agree cluster-wide) and only the prefix below the point
+    /// goes. Returns the new base, for the caller to seal.
     ///
     /// # Panics
     ///
     /// If `point` is slot zero (nothing lies below it, and no honest peer
     /// trims nothing).
-    pub fn trim_to(&mut self, point: Slot, sessions: &[SessionEntry]) {
+    pub fn trim_to(&mut self, point: Slot, sealed: JournalState) -> JournalState {
         assert!(point.0 > 0, "a trim point has a chosen slot below it");
         let boundary = Slot(point.0 - 1);
         if self.chosen_index.is_none_or(|ci| ci < boundary) {
             self.chosen_index = Some(boundary);
         }
+        let base = if self.folded >= point {
+            self.state_at(point)
+        } else {
+            self.history.clear();
+            self.outcomes.clear();
+            self.positions.clear();
+            self.state = sealed;
+            self.folded = point;
+            sealed
+        };
+        self.base = base;
+        self.floor = point;
         self.chosen = self.chosen.split_off(&point);
-        self.duplicate_slots = self.duplicate_slots.split_off(&point);
+        self.history = self.history.split_off(&point);
+        self.outcomes = self.outcomes.split_off(&point);
+        self.positions.retain(|_, slot| *slot >= point);
+        self.refold();
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
-        // The prefix jumped without the walk running, so nothing handed the
-        // dropped slots' `inflight` entries over. Drop them.
-        self.inflight.retain(|_, s| *s >= point);
-        for (client, seq, slot) in sessions {
-            self.applied_seq
-                .entry(*client)
-                .or_default()
-                .entry(*seq)
-                .or_insert(*slot);
-        }
+        base
     }
 }
 
@@ -628,79 +658,146 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{LogRead, Replica};
-    use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
+    use crate::journal_state::{JournalState, Outcome};
+    use crate::types::{
+        Ballot, ClientId, Command, Control, Entry, Generation, NodeId, Seq, Slot, Value,
+    };
 
-    fn user(client: u64, seq: u64, bytes: &[u8]) -> Command {
-        Command::User(Entry {
-            client: ClientId(client),
-            seq: ClientSeq(seq),
-            value: Value(bytes.to_vec()),
+    fn write(seq: u64, records: &[&[u8]]) -> Command {
+        Command::Write(Entry {
+            generation: Generation(1),
+            owner: ClientId(1),
+            seq: Seq(seq),
+            records: records.iter().map(|r| Value(r.to_vec())).collect(),
         })
     }
 
-    /// A replica whose chosen prefix is `commands` from slot 0.
-    fn replica(commands: &[Command]) -> Replica {
+    fn claim() -> Command {
+        Command::Control(Control::SetLeader {
+            expected: Generation(0),
+            owner: ClientId(1),
+        })
+    }
+
+    fn records(commands: &[Command]) -> BTreeMap<Slot, (Ballot, Command)> {
         let ballot = Ballot {
             round: 1,
             node: NodeId(1),
         };
-        let records: BTreeMap<Slot, (Ballot, Command)> = commands
+        commands
             .iter()
             .enumerate()
             .map(|(i, c)| (Slot(i as u64), (ballot, c.clone())))
-            .collect();
+            .collect()
+    }
+
+    /// A replica whose chosen prefix is `commands` from slot 0.
+    fn replica(commands: &[Command]) -> Replica {
         let ci = commands.len().checked_sub(1).map(|i| Slot(i as u64));
-        Replica::from_boot(ci, [], &records)
+        Replica::from_boot(ci, Slot(0), JournalState::default(), &records(commands))
     }
 
     fn page(read: LogRead) -> super::LogPage {
         match read {
             LogRead::Page(page) => page,
-            LogRead::Trimmed { .. } => panic!("expected a page"),
+            LogRead::Truncated(_) => panic!("expected a page"),
         }
     }
 
+    fn bytes(page: &super::LogPage) -> Vec<Vec<u8>> {
+        page.records.iter().map(|v| v.0.clone()).collect()
+    }
+
     #[test]
-    fn a_read_skips_holes_and_names_where_the_next_one_starts() {
+    fn a_read_is_dense_by_position_and_skips_every_hole() {
         let r = replica(&[
-            user(1, 1, b"a"),
+            claim(),
+            write(0, &[b"a", b"b"]),
             Command::Control(Control::Noop),
-            user(1, 1, b"a"), // a #94 duplicate of slot 0
-            Command::Control(Control::Truncate { up_to: Slot(0) }),
-            user(2, 1, b"b"),
+            write(0, &[b"a", b"b"]), // a retry: acked, no position
+            write(9, &[b"gap"]),     // refused: no position
+            write(2, &[b"c"]),
         ]);
-        let p = page(r.read(Slot(0), Slot(0), 1024));
-        let slots: Vec<u64> = p.entries.iter().map(|(s, _)| s.0).collect();
-        assert_eq!(slots, vec![0, 4]);
-        assert_eq!(p.skipped, 3);
-        assert_eq!(p.next, Slot(5));
-        assert_eq!(p.committed_end, Slot(5));
+        let p = page(r.read(Seq(0), 64, 1024));
+        assert_eq!(bytes(&p), vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(p.next(), Seq(3));
+        assert_eq!(p.state.next_seq, Seq(3));
+        assert!(matches!(
+            r.outcome_at(Slot(3)),
+            Some(Outcome::Duplicate { .. })
+        ));
+        assert!(matches!(r.outcome_at(Slot(4)), Some(Outcome::Refused(_))));
     }
 
     #[test]
-    fn a_read_is_bounded_by_bytes_but_always_carries_one_entry() {
-        let r = replica(&[user(1, 1, b"xxxx"), user(1, 2, b"yyyy"), user(1, 3, b"z")]);
-        let p = page(r.read(Slot(0), Slot(0), 1));
-        assert_eq!(p.entries.len(), 1);
-        assert_eq!(p.next, Slot(1));
-        let p = page(r.read(Slot(0), Slot(0), 8));
-        assert_eq!(p.entries.len(), 2);
-        assert_eq!(p.next, Slot(2));
+    fn a_read_may_start_inside_a_batch_and_is_bounded() {
+        let r = replica(&[claim(), write(0, &[b"xxxx", b"yyyy", b"z"])]);
+        let p = page(r.read(Seq(1), 64, 1024));
+        assert_eq!(bytes(&p), vec![b"yyyy".to_vec(), b"z".to_vec()]);
+        let p = page(r.read(Seq(0), 64, 1));
+        assert_eq!(p.records.len(), 1, "a page always carries one record");
+        let p = page(r.read(Seq(0), 2, 1024));
+        assert_eq!(p.next(), Seq(2));
     }
 
     #[test]
-    fn a_read_at_the_end_is_empty_and_a_read_below_the_floor_is_trimmed() {
-        let r = replica(&[user(1, 1, b"a")]);
-        let p = page(r.read(Slot(1), Slot(0), 64));
-        assert!(p.entries.is_empty());
-        assert_eq!(p.next, Slot(1));
-        let p = page(r.read(Slot(7), Slot(0), 64));
-        assert_eq!(p.next, Slot(7));
-        assert_eq!(
-            r.read(Slot(0), Slot(1), 64),
-            LogRead::Trimmed {
-                trim_point: Slot(1)
-            }
-        );
+    fn a_read_at_the_end_is_empty_and_below_first_seq_is_truncated() {
+        let r = replica(&[
+            claim(),
+            write(0, &[b"a"]),
+            write(1, &[b"b"]),
+            Command::Control(Control::Truncate { up_to: Seq(1) }),
+        ]);
+        let p = page(r.read(Seq(2), 64, 64));
+        assert!(p.records.is_empty());
+        let p = page(r.read(Seq(7), 64, 64));
+        assert_eq!(p.next(), Seq(7));
+        assert!(matches!(r.read(Seq(0), 64, 64), LogRead::Truncated(s) if s.first_seq == Seq(1)));
+    }
+
+    #[test]
+    fn truncation_keeps_the_write_holding_the_first_record_and_seals_its_base() {
+        let mut r = replica(&[
+            claim(),
+            write(0, &[b"a"]),
+            write(1, &[b"b", b"c"]),
+            Command::Control(Control::Truncate { up_to: Seq(2) }),
+        ]);
+        // Slot 2 holds position 2: everything below it may go.
+        assert_eq!(r.compaction_target(), Some(Slot(1)));
+        let base = r.truncate(Slot(2));
+        assert_eq!(base.next_seq, Seq(1));
+        assert_eq!(base.generation, Generation(1));
+        let p = page(r.read(Seq(2), 64, 64));
+        assert_eq!(bytes(&p), vec![b"c".to_vec()]);
+        // A reboot from the sealed base folds to the same head.
+        let kept: Vec<Command> = r.chosen().values().cloned().collect();
+        let mut recs = BTreeMap::new();
+        for (i, c) in kept.iter().enumerate() {
+            recs.insert(
+                Slot(2 + i as u64),
+                (
+                    Ballot {
+                        round: 1,
+                        node: NodeId(1),
+                    },
+                    c.clone(),
+                ),
+            );
+        }
+        let rebooted = Replica::from_boot(Some(Slot(3)), Slot(2), base, &recs);
+        assert_eq!(rebooted.journal(), r.journal());
+    }
+
+    #[test]
+    fn a_hole_below_the_prefix_stops_the_fold_until_it_heals() {
+        let mut recs = records(&[claim(), write(0, &[b"a"]), write(1, &[b"b"])]);
+        let lost = recs.remove(&Slot(1)).expect("slot 1").1;
+        let mut r = Replica::from_boot(Some(Slot(2)), Slot(0), JournalState::default(), &recs);
+        assert_eq!(r.fold_hole(), Some(Slot(1)));
+        assert!(!r.covers(Some(Slot(1))));
+        r.learn(Slot(1), &lost);
+        assert_eq!(r.fold_hole(), None);
+        assert_eq!(r.journal().next_seq, Seq(2));
     }
 }

@@ -52,34 +52,34 @@ impl AuditWorld {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The workload registered a user command it is about to propose. Fed
-    /// before the RPC leaves, so an applied user command that was never
-    /// registered is one the cluster invented.
-    pub(crate) fn note_submitted(&self, cmd_hash: u64) {
-        self.lock().submitted.insert(cmd_hash);
+    /// The workload registered a record it is about to write, hashed with
+    /// [`record_hash`](super::journal_model::record_hash). Fed before the
+    /// RPC leaves, so a folded record that was never registered is one the
+    /// cluster invented.
+    pub(crate) fn note_submitted(&self, record_hash: u64) {
+        self.lock().submitted.insert(record_hash);
     }
 
-    /// A client appended `(client, seq)` to this world's journal (#188) —
-    /// the identity the non-interference oracle requires of every user
-    /// command a slot of the journal applies.
-    pub(crate) fn note_appended(&self, client: u64, seq: u64) {
-        self.lock().appended.insert((client, seq));
+    /// A client sent the write hashing to `vhash` (`paros::command_hash`)
+    /// to this world's journal (#188) — what the non-interference oracle
+    /// requires of every write a slot of the journal applies.
+    pub(crate) fn note_appended(&self, vhash: u64) {
+        self.lock().appended.insert(vhash);
     }
 
-    /// The value the audit knows was decided at `slot` (a durable accept
-    /// quorum at one ballot), as `paros::command_hash` — what a journal
-    /// read's entry there must hash to (#185). `None` when the audit has not
-    /// seen that slot decided.
-    pub(crate) fn decided_vhash(&self, slot: u64) -> Option<u64> {
-        self.lock().decided_vhash(slot)
+    /// The hash of the record the nodes' verdicts accepted at `position`
+    /// (#204) — what a journal read's record there must hash to. `None`
+    /// when the audit has not seen it accepted.
+    pub(crate) fn record_at(&self, position: u64) -> Option<u64> {
+        self.lock().journal.record_at(position)
     }
 
-    /// A client folded the user entry at `lsn` (#186: the application is
-    /// the client's, fed by `Read`), whose slot value hashes to `cmd_hash`,
-    /// reaching `state`. Strictly increasing per client, one command and one
-    /// state per LSN across every client, and a user entry traces to a
-    /// submission. The message strings are the application check's, which
-    /// this fold inherited from the storage layer.
+    /// A client folded the record at position `lsn` (#186: the application
+    /// is the client's, fed by `Read`), hashing to `cmd_hash`, reaching
+    /// `state`. Strictly increasing per client, one record and one state per
+    /// position across every client, and a record traces to a submission.
+    /// The message strings are the application check's, which this fold
+    /// inherited from the storage layer.
     #[tracing::instrument(level = "trace", skip_all)]
     pub(crate) fn fold_applied(&self, client: u64, lsn: u64, cmd_hash: u64, state: u64) {
         let mut st = self.lock();
@@ -178,11 +178,12 @@ impl AuditWorld {
             "a committed write ack is checked against the acking node's applied prefix"
         );
         // The application check lives on the clients' folds (#186): it is
-        // only as good as two folds meeting at one LSN.
+        // only as good as two folds meeting at one position.
         assert_sometimes!(
             st.fold_agreed,
             "chain: two clients fold the same entry to the same state"
         );
+        st.journal.check();
         st.check_protocol_gates();
         st.check_tier_gates();
         st.check_driver_hook_gates();
@@ -548,7 +549,10 @@ pub(crate) fn check_run(
     crate::world::check_storage_gates(state, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();
     super::system::lock(&super::system::system_board(state)).check_gates();
-    let acked_max = audit.lock().lin.acked_max();
+    // Every slot a call was answered at is inside what every live node
+    // walked by the end (#204: answers name positions to the client, slots
+    // to the audit).
+    let acked_max = audit.lock().answered_max;
     audit.check_final_convergence(acked_max);
     audit.digest()
 }

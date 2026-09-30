@@ -148,7 +148,7 @@ fn a_duplicate_decision_with_the_same_value_is_idempotent() {
 #[should_panic(expected = "a decision at the open round's ballot carries the round's command")]
 fn a_decision_contradicting_the_open_round_trips_the_leader() {
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
+    let _ = nodes[0].propose(entry(1, 4, 40));
     drain(&mut nodes[0]);
     let b = nodes[0].ballot();
     nodes[0].step(commit(1, b, 3, ucmd(9, 9, 99)));
@@ -211,19 +211,9 @@ fn a_stale_trim_point_never_rewinds_a_frontier() {
     nodes[1].step(Message::TrimmedTo {
         from: NodeId(0),
         point: floor,
-        sessions: Vec::new(),
+        state: crate::JournalState::default(),
     });
     assert_eq!(nodes[1].hard_state(), before);
     assert_eq!(nodes[1].acceptor().first_slot(), floor);
     assert!(nodes[1].pending_writes.is_empty());
-}
-
-/// The immediate `Chosen` names the identity's own applied slot.
-#[test]
-fn an_immediate_chosen_names_the_identitys_applied_slot() {
-    let mut nodes = cluster_with_three_chosen();
-    assert_eq!(
-        nodes[0].propose(ClientId(1), ClientSeq(2), val(20)),
-        ProposeResult::Chosen(Slot(1))
-    );
 }

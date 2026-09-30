@@ -323,11 +323,12 @@ pub enum Action {
         /// The sequence number of the write being retried.
         seq: u64,
     },
-    /// A client asks `node` to drop the log prefix up to `up_to`.
+    /// A client asks `node` to drop every journal record before position
+    /// `up_to`.
     Compact {
         /// The node the client asks (must be the leader).
         node: u64,
-        /// The last slot the client permits dropping, inclusive.
+        /// The first position the client still needs.
         up_to: u64,
     },
     /// Re-broadcast a leader's still-pending `Accept`s.
@@ -559,7 +560,7 @@ impl Action {
             Action::Retry { node, client, seq } => {
                 format!("retry write {seq} of client {client} at node {node}")
             }
-            Action::Compact { node, up_to } => format!("compact node {node} up to slot {up_to}"),
+            Action::Compact { node, up_to } => format!("compact node {node} before seq {up_to}"),
             Action::ResendPending { node } => {
                 format!("tell node {node} to re-send its pending Accepts")
             }

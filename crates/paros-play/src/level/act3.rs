@@ -22,8 +22,8 @@ use paros_core::{NodeId, QuorumSystem, Slot};
 use crate::action::{Action, ActionKind};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
-    CLIENT, REPLIES_AND_BEATS, TIMEOUT, all_but, applied, crash, fresh, is_phase2, propose_as,
-    read_index_as, restart, slot_traffic, start_election, tick,
+    CLIENT, REPLIES_AND_BEATS, TIMEOUT, accepted, all_but, applied, crash, fresh, is_phase2,
+    propose_as, read_index_as, restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, to};
 use crate::level::{GoalStatus, Level, WorldKind};
@@ -765,30 +765,27 @@ meanings.
 
 A slot is **chosen** when a quorum votes for it. That fact belongs to the \
 cluster and it is permanent. The leader pipelines, so slot 6 can become chosen \
-while slot 5 is still open. A slot is **applied** when this node gives it to its \
-state machine, and that step is strictly in order. Slot 6 therefore waits for \
-slot 5. Between those two moments the command is decided and not executed, and a \
+while slot 5 is still open. A slot is **applied** when this node folds it into \
+the journal, and that step is strictly in order. Slot 6 therefore waits for \
+slot 5. Between those two moments the write is decided and not judged, and a \
 node that acked it would promise the client an unreadable result.
 
-A client retry arrives in that window, and the leader removes duplicates by \
-`(client, seq)`. The leader keeps **two** tables: the applied commands, and the \
-commands in flight. If you answer from the applied table while the command is \
-only chosen, you ack a write that no node executed. If you answer that you did \
-not see the command, the cluster gives a decided command a second slot and \
-executes it twice. The two tables move together: the identity moves inside the \
-in-flight table onto the chosen slot, and only the apply walk writes the applied \
-one.
+A client retry is the **same write** sent again: the same writer, the same \
+position, the same bytes. The leader keeps no table of what it has seen. It \
+gives the retry the next free slot like any write, and the journal answers it \
+when that slot folds. By then the original has folded below it, so the \
+position holds exactly this write and the retry is a duplicate: acked, and \
+nothing moves. At-most-once is a property of the log.
 
 In this level the second write of the client is chosen above a hole. The client \
-asks twice: once while the hole is open, and once after it closes. Answer for \
-the leader both times.",
+asks twice: once while the hole is open, and once after it closes. Say, both \
+times, what the journal answers as far as the leader has folded it.",
     field_guide: "linearizable-reads.html",
     symbols: &[
-        "Replica::applied_at",
-        "Replica::inflight_at",
-        "Replica::track_inflight",
-        "ProposeResult::Duplicate",
-        "ProposeResult::Chosen",
+        "JournalState::apply",
+        "Outcome::Duplicate",
+        "Replica::accepted_at",
+        "Replica::outcome_at",
     ],
     automation_on: NO_ACK_WRITE,
     pinned_off: &[AutomationFlag::AckWrite],
@@ -800,7 +797,7 @@ the leader both times.",
         let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
-        let executed = applied(world, 0);
+        let executed = accepted(world, 0);
         // At most once, for every value the client asked for: which values
         // those are is the client's business, and the history reports them.
         let asked = log.proposed_values();
@@ -809,8 +806,8 @@ the leader both times.",
             .find(|value| executed.iter().filter(|command| command == value).count() > 1)
         {
             return GoalStatus::Failed(format!(
-                "The cluster executed the command {twice} twice. A retry that misses both dedup \
-                 tables gets a fresh slot, and the command runs a second time."
+                "The journal accepted the write {twice} twice. A retry of a write the journal \
+                 holds must fold as a duplicate."
             ));
         }
         let all_executed = !asked.is_empty()
@@ -825,28 +822,17 @@ the leader both times.",
             .retries()
             .iter()
             .any(|outcome| matches!(outcome.answer, RetryAnswer::Applied(_)));
-        if log
-            .retries()
-            .iter()
-            .any(|outcome| matches!(outcome.answer, RetryAnswer::Fresh(_)))
-        {
-            return GoalStatus::Failed(
-                "A retry got a fresh slot. The leader did not recognise a command that it \
-                 already held, so the write of the client is now in the log twice."
-                    .to_string(),
-            );
-        }
         match (all_executed, held, acked) {
             (true, true, true) => GoalStatus::Reached(format!(
-                "The cluster executed the command exactly once ({}). The leader answered both \
-                 retries from the table that knew where the command was. It held the retry \
-                 while the hole was open. It acknowledged the retry after the hole closed. \
-                 \"Chosen\" and \"applied\" are two different facts, and a leader may acknowledge \
-                 only one of them.",
+                "The journal accepted each write exactly once ({}). The first retry came while \
+                 the hole was open: the fold had not reached its position, so it waited in its \
+                 own slot and folded as a duplicate. The second came after the hole closed, \
+                 and the log already held it. \"Chosen\" and \"applied\" are two different \
+                 facts, and a journal answers only from the second.",
                 executed.join(", ")
             )),
             (true, false, _) => GoalStatus::Open(
-                "Let the client ask again *while* its command is chosen above the hole. That \
+                "Let the client ask again *while* its write is chosen above the hole. That \
                  window is the subject of this level."
                     .to_string(),
             ),
@@ -854,8 +840,8 @@ the leader both times.",
                 GoalStatus::Open("Now close the hole, and let the client ask again.".to_string())
             }
             _ => GoalStatus::Open(
-                "Get both commands chosen, but not in order, so the second command waits above \
-                 a hole. Then answer the retries of the client."
+                "Get both writes chosen, but not in order, so the second waits above a hole. \
+                 Then answer the retries of the client."
                     .to_string(),
             ),
         }
@@ -863,15 +849,14 @@ the leader both times.",
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Read the two lines on the card. One table knows where the command *is*. The \
-             other table knows that the cluster *ran* it."
+            "Read the journal's next position on the card, and compare it with the position \
+             the retry asks for."
                 .to_string(),
         ),
         _ => Some(
-            "While the hole is open, the command is chosen and not executed. It is in the \
-             in-flight table, not in the applied table, so the client waits on that slot. After \
-             the hole closes, the command is in the applied table, and the leader may \
-             acknowledge it."
+            "While the hole is open, the fold stops below the retried position: nothing can be \
+             said yet, and the retry waits for its slot. After the hole closes, the position \
+             holds exactly this write, and the journal acks it as a duplicate."
                 .to_string(),
         ),
     },

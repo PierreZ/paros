@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slot, Storage};
+use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
 
 use super::{LogStorage, StorageError};
 
@@ -23,9 +23,8 @@ pub struct MemStorage {
     /// The compaction floor: the first slot still retained. Everything below it
     /// has been truncated away.
     first: Slot,
-    /// Sealed at-most-once ledger records for truncated slots, keyed by
-    /// `(client, seq)` (see [`LogStorage::truncate`]).
-    sealed: BTreeMap<(paros_core::ClientId, paros_core::ClientSeq), Slot>,
+    /// The journal state sealed at the floor (see [`LogStorage::truncate`]).
+    sealed: JournalState,
     /// The format marker (#147): set by [`LogStorage::format`], never
     /// cleared.
     formatted: bool,
@@ -40,13 +39,13 @@ impl MemStorage {
             accepted: BTreeMap::new(),
             config,
             first: Slot(0),
-            sealed: BTreeMap::new(),
+            sealed: JournalState::default(),
             formatted: false,
         }
     }
 
     /// A storage rebuilt from durable records already read back: the scalars,
-    /// the compaction floor, the retained accepted log and the sealed ledger.
+    /// the compaction floor, the retained accepted log and the sealed state.
     /// Synchronous by design — this is the in-memory index a boot loads, the
     /// one the core's read-only [`Storage`] port is answered from once the
     /// async [`LogStorage::boot_scan`] has brought the records in. Records
@@ -58,9 +57,9 @@ impl MemStorage {
         hard_state: HardState,
         first: Slot,
         accepted: impl IntoIterator<Item = (Slot, Ballot, Command)>,
-        sealed: &[SessionEntry],
+        sealed: JournalState,
     ) -> Self {
-        let mut storage = Self {
+        Self {
             hard_state,
             accepted: accepted
                 .into_iter()
@@ -69,19 +68,21 @@ impl MemStorage {
                 .collect(),
             config,
             first,
-            sealed: BTreeMap::new(),
+            sealed,
             // Records read back from a formatted store: the marker was
             // written before any of them could be.
             formatted: true,
-        };
-        storage.seal(sealed);
-        storage
+        }
     }
 
-    fn seal(&mut self, sealed: &[SessionEntry]) {
-        for &(client, seq, slot) in sealed {
-            self.sealed.entry((client, seq)).or_insert(slot);
+    /// Raise the floor to `first`, sealing `state` with it; a floor that
+    /// does not rise keeps the state sealed with the higher one.
+    fn raise_floor(&mut self, first: Slot, state: JournalState) {
+        if first >= self.first {
+            self.sealed = state;
         }
+        self.first = self.first.max(first);
+        self.accepted.retain(|slot, _| *slot >= self.first);
     }
 }
 
@@ -125,27 +126,19 @@ impl LogStorage for MemStorage {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(first = first.0, sealed = sealed.len()))]
-    async fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
-        self.seal(sealed);
-        self.first = self.first.max(first);
-        self.accepted.retain(|slot, _| *slot >= self.first);
+    #[tracing::instrument(level = "debug", skip_all, fields(first = first.0))]
+    async fn truncate(&mut self, first: Slot, sealed: JournalState) -> Result<(), StorageError> {
+        self.raise_floor(first, sealed);
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(point = point.0, sessions = sessions.len()))]
-    async fn trimmed_to(
-        &mut self,
-        point: Slot,
-        sessions: &[SessionEntry],
-    ) -> Result<(), StorageError> {
-        self.seal(sessions);
+    #[tracing::instrument(level = "debug", skip_all, fields(point = point.0))]
+    async fn trimmed_to(&mut self, point: Slot, state: JournalState) -> Result<(), StorageError> {
         let boundary = Slot(point.0.saturating_sub(1));
         if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
             self.hard_state.chosen_index = Some(boundary);
         }
-        self.first = self.first.max(point);
-        self.accepted.retain(|slot, _| *slot >= self.first);
+        self.raise_floor(point, state);
         Ok(())
     }
 }
@@ -167,11 +160,8 @@ impl Storage for MemStorage {
         self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
     }
 
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
+    fn sealed_state(&self) -> JournalState {
         self.sealed
-            .iter()
-            .map(|(&(client, seq), &slot)| (client, seq, slot))
-            .collect()
     }
 }
 

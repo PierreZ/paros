@@ -7,8 +7,8 @@
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Control, HANDOFF_BATCH, LeadershipOrigin,
-    MatchmakerId, Message, NodeId, ProposeResult, QuorumSystem, Slot, Value,
+    Ballot, ClientId, ColocatedNode, Command, Control, Entry, Generation, HANDOFF_BATCH,
+    LeadershipOrigin, MatchmakerId, Message, NodeId, ProposeResult, QuorumSystem, Seq, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode};
@@ -23,15 +23,16 @@ use crate::world::{Envelope, NO_CHECK_QUORUM, Party, World, name, not_leader, un
 /// What a leader answered one `Compact` request with.
 ///
 /// A trim is a decided `Truncate` control command: the leader proposes it
-/// like any client value, and every node drops its prefix when it applies
-/// that slot. A node that was away and comes back below the floor jumps to a
+/// like any client value, the journal moves its first position when the slot
+/// folds, and every node drops the slots below the first retained record. A node that was away and comes back below the floor jumps to a
 /// peer's trim point instead of replaying the dropped slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactOutcome {
     /// The node the client asked.
     pub node: NodeId,
-    /// The prefix the client asked to drop, inclusive.
-    pub requested: Slot,
+    /// The first journal position the client still needs: every record
+    /// before it may go (#204).
+    pub requested: Seq,
     /// Whether a `Truncate` was proposed.
     pub accepted: bool,
 }
@@ -487,35 +488,37 @@ impl World {
         column: Option<usize>,
     ) -> Result<(), ActionError> {
         let slot = self.require_client(client)?;
-        let seq = ClientSeq(self.clients[slot].next_seq);
+        let seq = self.clients[slot].next_seq;
+        // The level's writer holds generation 1 from the start (see
+        // `Disk::provision_owner`); its write asks for the position after its
+        // last admitted one, and the journal judges it when its slot folds.
+        let entry = Entry {
+            generation: Generation(1),
+            owner: ClientId(client),
+            seq: Seq(self.clients[slot].next_position),
+            records: vec![Value(value.as_bytes().to_vec())],
+        };
         let mark = self.narration.len();
-        let bytes = Value(value.as_bytes().to_vec());
         let issued = self.take_event();
+        let proposed = entry.clone();
         let result = self.drive(id, index, move |node| {
-            node.propose_in(
-                ClientId(client),
-                seq,
-                bytes,
-                column,
-                paros_core::Delegation::Auto,
-            )
+            node.propose_in(proposed, column, paros_core::Delegation::Auto)
         });
-        let fresh = matches!(result, Some(ProposeResult::Accepted(_)));
         let admitted = match result {
             Some(ProposeResult::NotLeader(hint)) => {
                 self.narration.truncate(mark);
                 return Err(not_leader(id, hint, "the client must ask"));
             }
-            Some(
-                ProposeResult::Accepted(slot)
-                | ProposeResult::Duplicate(slot)
-                | ProposeResult::Chosen(slot),
-            ) => Some(slot),
+            Some(ProposeResult::Accepted(slot)) => Some(slot),
             None => None,
         };
         self.clients[slot].next_seq += 1;
+        if admitted.is_some() {
+            self.clients[slot].next_position += 1;
+        }
         self.clients[slot].proposals.push(Proposal {
             seq,
+            entry,
             value: value.to_string(),
             node: id,
             slot: admitted,
@@ -528,20 +531,12 @@ impl World {
             format!(
                 "Client {client} asks {} to get {value} chosen. {}",
                 who(id),
-                match (admitted, fresh) {
-                    (None, _) => "It is not running, so nothing happens.".to_string(),
-                    (Some(slot), true) => format!(
+                match admitted {
+                    None => "It is not running, so nothing happens.".to_string(),
+                    Some(slot) => format!(
                         "The leader gives it the next free slot, {}, and goes directly to Phase \
                          2. That costs one round trip, because the ballot the leader holds \
                          already covers the whole log suffix.",
-                        slot.0
-                    ),
-                    // `Duplicate` and `Chosen`: no new slot, no new round. The
-                    // narration must not claim one was opened.
-                    (Some(slot), false) => format!(
-                        "The leader recognises this command. It is already at slot {}, so the \
-                         leader proposes nothing new. At-most-once execution is a property of \
-                         the log, and not of the network.",
                         slot.0
                     ),
                 }
@@ -611,14 +606,21 @@ impl World {
         if !self.clients[position]
             .proposals
             .iter()
-            .any(|proposal| proposal.seq == ClientSeq(seq))
+            .any(|proposal| proposal.seq == seq)
         {
             return Err(ActionError::new(
                 ActionErrorCode::UnknownParty,
                 format!("client {client} did not send a write with sequence number {seq}"),
             ));
         }
-        if let Some(prompt) = self.ack_write_prompt(id, index, ClientId(client), ClientSeq(seq)) {
+        let entry = self.clients[position]
+            .proposals
+            .iter()
+            .find(|proposal| proposal.seq == seq)
+            .map(|proposal| proposal.entry.clone());
+        if let Some(entry) = entry
+            && let Some(prompt) = self.ack_write_prompt(id, index, &entry, seq)
+        {
             self.narrate(
                 NarrationKind::Client,
                 format!(
@@ -641,6 +643,13 @@ impl World {
     }
 
     /// Send the retry for real, once nobody owes an answer for it.
+    ///
+    /// A retry is the same write — the same generation, position and bytes —
+    /// proposed again (#204). The leader has no table to consult: it gives
+    /// the retry the next free slot like any write, and the journal answers
+    /// it when that slot folds. What the answer will be is already written in
+    /// the log below it; [`RetryAnswer`] records what the fold said when the
+    /// client asked.
     pub(super) fn retry_now(&mut self, id: NodeId, client: u64, seq: u64) {
         let Some(index) = self.index_of(id) else {
             return;
@@ -648,23 +657,41 @@ impl World {
         let Some(position) = self.client_position(client) else {
             return;
         };
-        let Some(bytes) = self.clients[position]
+        let Some(entry) = self.clients[position]
             .proposals
             .iter()
-            .find(|proposal| proposal.seq == ClientSeq(seq))
-            .map(|proposal| Value(proposal.value.as_bytes().to_vec()))
+            .find(|proposal| proposal.seq == seq)
+            .map(|proposal| proposal.entry.clone())
         else {
             return;
         };
-        let mark = self.narration.len();
-        let result = self.drive(id, index, move |node| {
-            node.propose(ClientId(client), ClientSeq(seq), bytes)
+        let judged = self.nodes[index].as_ref().map(|node| {
+            let replica = node.replica();
+            let mut state = replica.journal();
+            let original = replica.accepted_at(entry.seq).map(|_| {
+                replica
+                    .chosen()
+                    .iter()
+                    .find(|(_, command)| command.write() == Some(&entry))
+                    .map_or(Slot(0), |(slot, _)| *slot)
+            });
+            let outcome = state.apply(&Command::Write(entry.clone()), |at| replica.accepted_at(at));
+            (outcome, original, replica.journal().next_seq)
         });
-        let answer = match result {
-            Some(ProposeResult::Chosen(slot)) => RetryAnswer::Applied(slot),
-            Some(ProposeResult::Duplicate(slot)) => RetryAnswer::InFlight(slot),
-            Some(ProposeResult::Accepted(slot)) => RetryAnswer::Fresh(slot),
-            Some(ProposeResult::NotLeader(_)) | None => RetryAnswer::Refused,
+        let mark = self.narration.len();
+        let proposed = entry.clone();
+        let result = self.drive(id, index, move |node| node.propose(proposed));
+        let answer = match (result, judged) {
+            (Some(ProposeResult::Accepted(slot)), Some((outcome, original, next))) => match outcome
+            {
+                paros_core::Outcome::Duplicate { .. } => {
+                    RetryAnswer::Applied(original.unwrap_or(slot))
+                }
+                paros_core::Outcome::Accepted { .. } => RetryAnswer::Fresh(slot),
+                _ if entry.seq > next => RetryAnswer::InFlight(slot),
+                _ => RetryAnswer::Refused,
+            },
+            _ => RetryAnswer::Refused,
         };
         self.retries.push(RetryOutcome {
             node: id,
@@ -672,31 +699,32 @@ impl World {
             seq,
             answer,
         });
-        let text = match result {
-            Some(ProposeResult::Chosen(slot)) => format!(
-                "{} answers at once: it applied write #{seq} at slot {}. The contiguous walk \
-                 writes a ledger, and that ledger is the only thing that permits this answer. \
-                 An ack names a slot this node has really executed.",
+        let position = entry.seq.0;
+        let text = match answer {
+            RetryAnswer::Applied(slot) => format!(
+                "{} proposes the retry of write #{seq} into a new slot. Its fold already holds \
+                 that write at position {position}, from slot {}, so the retry's slot will be \
+                 answered as a duplicate: acked, and nothing moves. The log itself is the \
+                 at-most-once table.",
                 who(id),
                 slot.0
             ),
-            Some(ProposeResult::Duplicate(slot)) => format!(
-                "{} holds write #{seq} in flight at slot {}. That slot may be chosen already, \
-                 but this node has not applied it yet. The client waits, and it waits on the \
-                 *same* slot. That is why the command is not executed twice.",
+            RetryAnswer::InFlight(slot) => format!(
+                "{} proposes the retry of write #{seq} into slot {}. Its fold has not reached \
+                 position {position} yet: the original is decided, maybe, but not applied. The \
+                 retry waits in its own slot, and by the time that slot folds, the original \
+                 has folded below it. That is why the command is not executed twice.",
                 who(id),
                 slot.0
             ),
-            Some(ProposeResult::Accepted(slot)) => format!(
-                "{} has not seen write #{seq} before, so it takes the next free slot, {}. \
-                 Neither at-most-once table held this identity. For the log, this really is a \
-                 first attempt.",
+            RetryAnswer::Fresh(slot) => format!(
+                "{} proposes the retry of write #{seq} into slot {}. Position {position} is \
+                 still free in its fold, so if nothing below takes it first, this is the write \
+                 that fills it.",
                 who(id),
                 slot.0
             ),
-            Some(ProposeResult::NotLeader(_)) | None => {
-                format!("{} cannot answer for write #{seq}.", who(id))
-            }
+            RetryAnswer::Refused => format!("{} cannot answer for write #{seq}.", who(id)),
         };
         self.narration
             .insert(mark, say(NarrationKind::Client, text));
@@ -729,30 +757,30 @@ impl World {
         let accepted = self
             .drive(id, index, move |node| {
                 matches!(
-                    node.propose_control(Control::Truncate { up_to: Slot(up_to) }),
+                    node.propose_control(Control::Truncate { up_to: Seq(up_to) }),
                     ProposeResult::Accepted(_)
                 )
             })
             .unwrap_or(false);
         self.compacts.push(CompactOutcome {
             node: id,
-            requested: Slot(up_to),
+            requested: Seq(up_to),
             accepted,
         });
         let opening = say(
             NarrationKind::Truncate,
             if accepted {
                 format!(
-                    "A client asks {} to drop everything up to slot {up_to}, and the leader \
-                     proposes a Truncate. The Truncate goes through ordinary consensus, into the \
-                     next free slot, exactly like a client value. Every node drops its prefix \
-                     when it *applies* that slot.",
+                    "A client asks {} to drop every record before position {up_to}, and the \
+                     leader proposes a Truncate. The Truncate goes through ordinary consensus, \
+                     into the next free slot, exactly like a client value. Every node drops its \
+                     prefix when it *applies* that slot.",
                     who(id)
                 )
             } else {
                 format!(
-                    "A client asks {} to drop everything up to slot {up_to}, but the leader did \
-                     not admit the proposal.",
+                    "A client asks {} to drop every record before position {up_to}, but the \
+                     leader did not admit the proposal.",
                     who(id)
                 )
             },

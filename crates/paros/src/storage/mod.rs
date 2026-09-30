@@ -9,7 +9,7 @@
 use std::fmt;
 use std::future::Future;
 
-use paros_core::{Ballot, Command, MustSync, SessionEntry, Slot, Storage};
+use paros_core::{Ballot, Command, JournalState, MustSync, Slot, Storage};
 
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 
@@ -27,7 +27,7 @@ pub enum StorageRecord {
     Accepted(Slot),
     /// The chosen-index (commit index) scalar.
     ChosenIndex,
-    /// The truncation record (the durable compaction floor + sealed sessions)
+    /// The truncation record (the durable compaction floor + sealed journal state)
     /// — a decided `Truncate` or a jump below a peer's trim point.
     Truncation,
     /// The whole staged batch: an fsync flushes every record staged since the
@@ -248,7 +248,7 @@ pub trait LogStorage: Storage {
     ///
     /// - **Every persisted record is checksummed**: each accepted entry, the
     ///   `HardState` scalars (promise + chosen index +
-    ///   truncation floor), and the sealed-sessions ledger.
+    ///   truncation floor), and the sealed journal state.
     /// - **Each log entry has an identifier physically separate from the
     ///   entry** — `⟨slot, accepted_ballot, offset, cksum⟩`, atomically
     ///   writable, itself checksummed. The identifier doubles as the entry's
@@ -357,25 +357,25 @@ pub trait LogStorage: Storage {
     /// record `first` as the durable compaction floor (returned by
     /// [`Storage::first_slot`] after a restart). A decided `Truncate` drives
     /// this via [`paros_core::ColocatedNode::compact`], which only ever names slots within the
-    /// chosen prefix, so nothing undecided is dropped. `sealed` carries the
-    /// at-most-once ledger records whose slots this truncation drops; persist
-    /// them durably (upsert by `(client, seq)`) so [`Storage::sealed_sessions`]
-    /// returns them after a restart — losing them would let a restarted node
-    /// re-execute a truncated identity every peer suppresses (#94).
+    /// chosen prefix, so nothing undecided is dropped. `sealed` is the journal
+    /// state the dropped slots folded to (#204); persist it durably with the
+    /// floor so [`Storage::sealed_state`] returns it after a restart — losing
+    /// it would let a restarted node fold the retained log from the wrong
+    /// writer and the wrong next position.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn truncate(
         &mut self,
         first: Slot,
-        sealed: &[SessionEntry],
+        sealed: JournalState,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Jump below a peer's trim point (#186, [`paros_core::WriteOp::TrimmedTo`]):
     /// record `point` as the durable compaction floor, raise the durable
     /// chosen index to at least `point - 1` (everything below a trim point is
-    /// chosen), drop every record below `point`, and persist `sessions` as
-    /// sealed records (upsert), exactly like [`LogStorage::truncate`]'s
+    /// chosen), drop every record below `point`, and persist `state` as the
+    /// sealed journal state, exactly like [`LogStorage::truncate`]'s
     /// `sealed`. The promise does not move.
     ///
     /// # Errors
@@ -383,7 +383,7 @@ pub trait LogStorage: Storage {
     fn trimmed_to(
         &mut self,
         point: Slot,
-        sessions: &[SessionEntry],
+        state: JournalState,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 }
 

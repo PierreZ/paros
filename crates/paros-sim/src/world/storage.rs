@@ -24,9 +24,9 @@ use super::{
 };
 use crate::audit::AuditWorld;
 use paros::{
-    Ballot, Command, Config, CorruptionVerdict, HardState, IntegrityFault, LogStorage, MemStorage,
-    MetadataFault, MustSync, RecoveryCase, SessionEntry, Slot, SlotRecord, Storage, StorageError,
-    StorageRecord, WitnessStatus, WriteOutcome, classify_log, command_hash,
+    Ballot, Command, Config, CorruptionVerdict, HardState, IntegrityFault, JournalState,
+    LogStorage, MemStorage, MetadataFault, MustSync, RecoveryCase, Slot, SlotRecord, Storage,
+    StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log, command_hash,
 };
 
 /// **Default** per-call firing probability of the write-`EIO` BUGGIFY site (one
@@ -322,7 +322,9 @@ pub(crate) struct DurableStorage<T> {
     staged_jump: Option<Slot>,
     /// Sealed ledger records staged with a truncate / trim-point jump (#94),
     /// flushed to the durable world with the rest of the batch.
-    staged_sealed: Vec<SessionEntry>,
+    /// The journal state sealed at the highest staged floor: it lands with
+    /// that floor, never with a lower one.
+    staged_sealed: Option<(Slot, JournalState)>,
 }
 
 impl<T: TimeProvider> DurableStorage<T> {
@@ -387,11 +389,6 @@ impl<T: TimeProvider> DurableStorage<T> {
                 // witnessed records enter the read view. Anything else either
                 // crashes the scan (so the view is never consulted) or is a
                 // crash-truncatable tail the scan discards.
-                let sealed: Vec<SessionEntry> = disk
-                    .sealed
-                    .iter()
-                    .map(|(&(client, seq), &slot)| (client, seq, slot))
-                    .collect();
                 let accepted = disk
                     .accepted
                     .iter()
@@ -402,7 +399,7 @@ impl<T: TimeProvider> DurableStorage<T> {
                     disk.hard_state,
                     disk.first_slot,
                     accepted,
-                    &sealed,
+                    disk.sealed,
                 );
             }
         }
@@ -422,7 +419,14 @@ impl<T: TimeProvider> DurableStorage<T> {
             staged_jump: None,
             formatted,
             staged_format: false,
-            staged_sealed: Vec::new(),
+            staged_sealed: None,
+        }
+    }
+
+    /// Stage the journal state sealed at `floor`, keeping the highest floor's.
+    fn stage_sealed(&mut self, floor: Slot, state: JournalState) {
+        if self.staged_sealed.is_none_or(|(at, _)| at <= floor) {
+            self.staged_sealed = Some((floor, state));
         }
     }
 
@@ -672,7 +676,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         let chosen = self.staged_chosen.take();
         let floor = self.staged_floor.take();
         let jump = self.staged_jump.take();
-        let sealed = std::mem::take(&mut self.staged_sealed);
+        let sealed = self.staged_sealed.take();
         let flushed_slots: Vec<u64> = accepted.keys().map(|s| s.0).collect();
         let flushed_hashes: Vec<(u64, u64)> = accepted
             .iter()
@@ -692,11 +696,6 @@ impl<T: TimeProvider> DurableStorage<T> {
             let d = w.disk_mut(&key);
             if format {
                 d.formatted = true;
-            }
-            // Sealed ledger records are upserts keyed by (client, seq); the
-            // first-slot claim wins, matching the core's ledger semantics.
-            for (client, seq, slot) in sealed {
-                d.sealed.entry((client, seq)).or_insert(slot);
             }
             if let Some(b) = ballot {
                 // The promise is monotonic: never let a flush lower it (a
@@ -732,6 +731,13 @@ impl<T: TimeProvider> DurableStorage<T> {
             // Apply the truncation last, after the chosen index it sits behind, so
             // a flushed floor never outruns the flushed chosen index.
             if let Some(f) = floor {
+                // The journal state sealed at the floor lands with it, and
+                // only when the floor does not move backwards (#204).
+                if let Some((at, state)) = sealed
+                    && at >= d.first_slot
+                {
+                    d.sealed = state;
+                }
                 d.first_slot = d.first_slot.max(f);
                 d.accepted.retain(|s, _| *s >= d.first_slot);
                 let new_floor = d.first_slot;
@@ -1149,33 +1155,28 @@ impl<T: TimeProvider> LogStorage for DurableStorage<T> {
         self.flush_stage()
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(first = first.0, sealed = sealed.len()))]
-    async fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
+    #[tracing::instrument(level = "debug", skip_all, fields(first = first.0))]
+    async fn truncate(&mut self, first: Slot, sealed: JournalState) -> Result<(), StorageError> {
         // Stage the floor like every other write: it reaches the durable world
         // only on the next Sync flush (Truncate classifies as MustSync::Sync).
-        // The sealed ledger records ride in the same staged batch.
-        let sealed = sealed.to_vec();
+        // The journal state sealed at it rides in the same staged batch.
         self.write_record(StorageRecord::Truncation, |s| {
             s.staged_floor = Some(s.staged_floor.map_or(first, |f| f.max(first)));
-            s.staged_sealed.extend_from_slice(&sealed);
+            s.stage_sealed(first, sealed);
         })
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(point = point.0, sessions = sessions.len()))]
-    async fn trimmed_to(
-        &mut self,
-        point: Slot,
-        sessions: &[SessionEntry],
-    ) -> Result<(), StorageError> {
+    #[tracing::instrument(level = "debug", skip_all, fields(point = point.0))]
+    async fn trimmed_to(&mut self, point: Slot, state: JournalState) -> Result<(), StorageError> {
         // A jump below a peer's trim point (#186): the floor, the chosen
-        // index it implies and the peer's ledger, staged like every other
-        // write and durable on the next Sync flush. The promise does not move.
-        let sessions = sessions.to_vec();
+        // index it implies and the journal state sealed there, staged like
+        // every other write and durable on the next Sync flush. The promise
+        // does not move.
         let landing = Slot(point.0.saturating_sub(1));
         self.write_record(StorageRecord::Truncation, |s| {
             s.staged_floor = Some(s.staged_floor.map_or(point, |f| f.max(point)));
             s.staged_jump = Some(s.staged_jump.map_or(landing, |l| l.max(landing)));
-            s.staged_sealed.extend_from_slice(&sessions);
+            s.stage_sealed(point, state);
         })
     }
 }
@@ -1193,8 +1194,8 @@ impl<T: TimeProvider> Storage for DurableStorage<T> {
     fn last_slot(&self) -> Slot {
         self.boot.last_slot()
     }
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
-        self.boot.sealed_sessions()
+    fn sealed_state(&self) -> JournalState {
+        self.boot.sealed_state()
     }
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.faulty_list.clone()
