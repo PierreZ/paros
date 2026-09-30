@@ -112,7 +112,11 @@ desired state. Every tenant gets a control journal when it is created.
 Bootstrap: the admin tenant's control journal starts as the seeds' static plain journal, exactly
 as the system journals do today. The first coordinator claims it with
 `SetLeader(expected_gen = 0, me)` and writes journals 1 to 3 under its generation from then on.
-System journals are written with `Write` like any journal; there is no special path.
+System journals are written with `Write` like any journal; there is no special path. The
+admin tenant's journals are the one matchmaker-free exception at bootstrap: they run plain over
+the seeds until the first coordinator has enough registered machines to give the admin tenant
+its matchmaker set through reconfiguration, and from then on they are reconfigured like any
+tenant's.
 
 ### 3.2 Machines
 
