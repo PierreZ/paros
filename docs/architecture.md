@@ -118,7 +118,13 @@ System journals are written with `Write` like any journal; there is no special p
 
 Every `parosd` is uniform. At start it registers in the machine registry with its address, its
 failure domain, its class and its capacity, and it starts the driver for every
-`(tenant, journal, role)` assigned to it. Classes are FDB's:
+`(tenant, journal, role)` assigned to it. There is no cluster file: a machine holds one
+rendezvous name that resolves to whoever serves the admin tenant's journals, publishes its RPC
+interface reference (moonpool-rpc's incarnation-bearing `InterfaceRef`) in its registration,
+and learns every other address from the registry fold. A rebooted machine publishes a new
+reference, holders of the old one are refused by the transport, and the coordinator re-places
+on the publication rather than on a heartbeat window. The decision and its alternatives are
+#216. Classes are FDB's:
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
 - `stateless`: the front door, proxy leaders, batchers, unbatchers, tenant coordinators.
@@ -270,7 +276,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision`, the uniform binary with class and capacity, Compose, the `paros` CLI, a tracing subscriber, exit codes; the API-independent parts start in parallel with M7 |
-| M9 | Tenants and control plane (#192, #211, #190, #210, #212, #191, #213) | the admin tenant over the system journals, the tenant and journal creation API, the machine registry with class and capacity, the per-tenant coordinator via `SetLeader`, placement as fenced writes, the front door with JWT `Authz`, per-tenant matchmaker sets, `paros status` |
+| M9 | Tenants and control plane (#216, #192, #211, #190, #210, #212, #191, #213) | the admin tenant over the system journals, the tenant and journal creation API, the machine registry with class and capacity, the per-tenant coordinator via `SetLeader`, placement as fenced writes, the front door with JWT `Authz`, per-tenant matchmaker sets, `paros status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers, tenant modes applied by the reconciler, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 
