@@ -2528,6 +2528,12 @@ impl Workload for ChainWorkload {
             }
             let raw = ctx.random().random::<u64>();
             let mut acknowledged = false;
+            // The write being retried: one operation for as long as its
+            // generation and position still stand. A retry is the same write
+            // (#204); re-submitting its bytes as a new operation would record
+            // the log's `Duplicate` answer as a second write invoked after
+            // reads that already saw the first.
+            let mut pending: Option<Submission> = None;
             while time.now() < recovery_deadline && !shutdown.is_cancelled() {
                 if writer.owned.is_none() {
                     match claim(ctx, &clients, journal, target, client_id, request_timeout).await {
@@ -2549,8 +2555,15 @@ impl Workload for ChainWorkload {
                         continue;
                     }
                 }
-                let submission =
-                    self.submit(&audit, &config, writer, &mut next_op, raw, raw, now_ms());
+                let submission = match pending.take() {
+                    Some(retry)
+                        if retry.entry.generation.0 == writer.generation()
+                            && retry.entry.seq.0 == writer.next_seq =>
+                    {
+                        retry
+                    }
+                    _ => self.submit(&audit, &config, writer, &mut next_op, raw, raw, now_ms()),
+                };
                 let result = within(
                     ctx,
                     request_timeout,
@@ -2584,6 +2597,7 @@ impl Workload for ChainWorkload {
                         target = (target + 1) % server_count;
                     }
                 }
+                pending = Some(submission);
                 time.sleep(Duration::from_millis(config.retry_backoff_ms))
                     .await
                     .ok();
