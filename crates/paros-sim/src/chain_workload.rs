@@ -1072,6 +1072,9 @@ impl Workload for ChainWorkload {
         } else {
             Vec::new()
         };
+        // Every process that serves a journal `Read`: the nodes, then the
+        // replicas (a fold's rotation, `Fold::read_to_tail`).
+        let readers: Vec<SimClient> = clients.iter().chain(&replica_clients).cloned().collect();
 
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
@@ -1617,18 +1620,23 @@ impl Workload for ChainWorkload {
                         fold.read_to_tail(
                             ctx,
                             &audit,
-                            &clients[target],
+                            &readers,
+                            target,
                             client_id,
                             config.read_limit,
                             request_timeout,
                         )
                         .await;
-                        truncate_traced(hint.current.unwrap_or(target), writer.next_seq).await;
+                        // Everything this client has read is what it may
+                        // drop: its fold's cursor, or its own writes' end
+                        // when it wrote past what it read.
+                        let up_to = writer.next_seq.max(fold.cursor());
+                        truncate_traced(hint.current.unwrap_or(target), up_to).await;
                     }
                 }
                 TRUNCATE_STORM => {
-                    if config.compaction && writer.next_seq > 0 {
-                        let base = writer.next_seq;
+                    let base = writer.next_seq.max(fold.cursor());
+                    if config.compaction && base > 0 {
                         let first_mode = usize::try_from(raw_pause % 3).unwrap_or(0);
                         for attempt in 0..config.compact_storm_attempts {
                             let mode = (first_mode + attempt) % 3;
@@ -1815,14 +1823,11 @@ impl Workload for ChainWorkload {
                     // application's state is this client's fold (#186).
                     let span = server_count + replica_clients.len();
                     let drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
-                    let via = match drawn.checked_sub(server_count) {
-                        Some(replica) => replica_clients[replica].clone(),
-                        None => clients[drawn].clone(),
-                    };
                     fold.read_to_tail(
                         ctx,
                         &audit,
-                        &via,
+                        &readers,
+                        drawn,
                         client_id,
                         config.read_limit,
                         request_timeout,
@@ -2732,14 +2737,11 @@ impl Workload for ChainWorkload {
         // last fold from this client's cursor to the tail, so every client's
         // fold meets every other's on the entries they share.
         if converged && let Some(&(node, _)) = last_probe.first() {
-            let via = match node.checked_sub(server_count) {
-                Some(replica) => replica_clients[replica].clone(),
-                None => clients[node].clone(),
-            };
             fold.read_to_tail(
                 ctx,
                 &audit,
-                &via,
+                &readers,
+                node,
                 client_id,
                 config.read_limit,
                 request_timeout,

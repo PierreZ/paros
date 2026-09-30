@@ -176,27 +176,47 @@ impl Fold {
 
     /// Read from the cursor until the serving node has nothing more, folding
     /// every page. Returns whether the read reached the journal's tail
-    /// (`false` on a timeout, a refusal, an unserved read or the page
+    /// (`false` on a refusal, a page no server would serve, or the page
     /// bound).
+    ///
+    /// Every page is a quorum read (#204), which a server answers unserved
+    /// when its row does not confirm in time — an honest unavailability, not
+    /// a refusal — so a page that goes unserved or unanswered is asked of
+    /// the next server in `vias`, starting at `first`, one attempt per
+    /// server. A fold that gave up at the first such page would leave its
+    /// cursor, and so every truncation the fence clamps to it, behind.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_to_tail(
         &mut self,
         ctx: &SimContext,
         audit: &AuditWorld,
-        via: &SimClient,
+        vias: &[SimClient],
+        first: usize,
         client: u64,
         limit: u64,
         timeout: Duration,
     ) -> bool {
+        let mut via = first;
         for _ in 0..FOLD_PAGES {
-            if self.detached {
+            if self.detached || vias.is_empty() {
                 return false;
             }
             let from = self.cursor;
-            let call = read_once(via, self.journal.0, from, limit, 0);
-            let Some(ack) = within(ctx, timeout, None, call).await else {
+            let mut served = None;
+            for _ in 0..vias.len() {
+                let call = read_once(&vias[via % vias.len()], self.journal.0, from, limit, 0);
+                match within(ctx, timeout, None, call).await {
+                    Some(ack) if ack.served || ack.unknown_journal => {
+                        served = Some(ack);
+                        break;
+                    }
+                    _ => via += 1,
+                }
+            }
+            let Some(ack) = served else {
                 return false;
             };
-            if ack.unknown_journal || !ack.served {
+            if ack.unknown_journal {
                 return false;
             }
             super::judge_read(audit, from, &ack, &[]);
