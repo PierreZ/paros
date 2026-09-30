@@ -418,16 +418,26 @@ impl Replica {
 
     /// The slot holding the record at `position` — the write whose batch
     /// covers it — or the fold's head when `position` is at or past the
-    /// journal's end (no record there to keep). Never below the floor.
+    /// journal's end (no record there to keep), or the floor when the record
+    /// already lies below it (a node that jumped to a peer's trim point holds
+    /// nothing below the jump, and a later `Truncate` may still name a
+    /// position there). Never below the floor.
     fn slot_holding(&self, position: Seq) -> Slot {
         if position >= self.state.next_seq {
             return self.folded;
         }
-        let (start, slot) = self
-            .positions
-            .range(..=position)
-            .next_back()
-            .expect("a retained record's write is retained");
+        let Some((start, slot)) = self.positions.range(..=position).next_back() else {
+            // Nothing indexed at or below it: the record sits in a slot below
+            // the floor — every position the floor's base counts is there.
+            // Red→green: canary seed 3961852116714272941 (a joiner jumped to
+            // slot 15, base `next_seq` 9, then folded a `Truncate` to 8 and
+            // panicked looking for the record at 8).
+            assert!(
+                position < self.base.next_seq,
+                "a record the index lacks lies below the floor"
+            );
+            return self.floor;
+        };
         let entry = self
             .chosen
             .get(slot)
@@ -783,6 +793,30 @@ mod tests {
             Some(Outcome::Duplicate { .. })
         ));
         assert_eq!(rebooted.journal(), r.journal());
+    }
+
+    #[test]
+    fn a_truncation_below_a_jumped_floor_keeps_the_floor() {
+        // A node that jumped to slot 2 holds nothing below it: positions 0
+        // and 1 lie in slots it never saw. A `Truncate` to position 1 folded
+        // after the jump names a record that is already gone here.
+        let base = JournalState {
+            owner: Some(ClientId(1)),
+            generation: Generation(1),
+            next_seq: Seq(2),
+            first_seq: Seq(0),
+        };
+        let commands = [
+            claim(),
+            write(0, &[b"a"]),
+            write(2, &[b"c"]),
+            Command::Control(Control::Truncate { up_to: Seq(1) }),
+        ];
+        let mut recs = records(&commands);
+        recs.retain(|slot, _| *slot >= Slot(2));
+        let r = Replica::from_boot(Some(Slot(3)), Slot(2), base, &recs);
+        assert_eq!(r.journal().first_seq, Seq(1));
+        assert_eq!(r.compaction_target(), Some(Slot(1)), "the floor stays");
     }
 
     #[test]
