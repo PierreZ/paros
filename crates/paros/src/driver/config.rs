@@ -23,9 +23,6 @@ const DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 /// network I/O, and current heartbeats/resends repair anything dropped here.
 /// Overflow evicts the *oldest* undelivered message (see [`PeerMailbox`]).
 const PEER_QUEUE_CAPACITY: usize = 4096;
-/// Snapshot offers use an independent delivery lane so their opaque bytes
-/// cannot sit in front of heartbeats and normal replication.
-const SNAPSHOT_QUEUE_CAPACITY: usize = 4;
 /// Leave headroom below the RPC runtime's 4 MiB frame limit
 /// (`rpc::inbound`'s `MAX_FRAME_BYTES`) for the protobuf and RPC envelopes.
 /// An earlier transport capped a complete payload at 1 MiB; this preserves
@@ -86,8 +83,32 @@ pub struct DriverTunables {
     /// exceed it or no read ever confirms. A client whose deadline is shorter
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
-    /// Capacity of the snapshot offers' independent delivery lane. Floor 1.
-    pub snapshot_queue_capacity: usize,
+    /// Ticks a journal `Read` at or past the serving node's end may wait
+    /// (the long-poll, #185) for something to be chosen before the driver
+    /// answers an empty page. Floor 0: a zero wait answers every such read
+    /// at once, empty, and the client simply re-asks — a busier client,
+    /// never a wrong one. A client whose deadline is shorter than the wait
+    /// times out (ambiguous, never wrong).
+    pub read_poll_ticks: u64,
+    /// Ticks a journal quarantined by a storage fault (#188) stays down on
+    /// this node before the driver re-opens it from its store — the
+    /// per-journal twin of a crashed process's restart delay. Floor 1: a
+    /// re-open the same tick is a restart loop with no room for the rest of
+    /// the node; a long quarantine is a node that is slow to heal one
+    /// journal, never a wrong one.
+    pub quarantine_ticks: u64,
+    /// How many times a node's election timeout base may double across
+    /// consecutive failed campaigns (no leader known between two expiries):
+    /// the `k`-th consecutive expiry draws from `[T·2^j, 2·T·2^j)` with
+    /// `j = min(k - 1, election_backoff_doublings)`, and knowing a leader
+    /// (or being one) resets it. A fixed timeout below a Phase-1 round trip
+    /// livelocks for good: a sole candidate whose slowest promise always
+    /// lands one round late abandons every round it opens (witness
+    /// 2881076808784637484: `q1 = n` over a degraded link, 180 rounds in
+    /// 63 s and never a leader). Floor 2: `T × 4` outruns any round trip the
+    /// base's own floor is sized against; a larger ceiling is a slower
+    /// recovery after a leader dies behind a partition, never a wrong one.
+    pub election_backoff_doublings: u32,
     /// Capacity of each client-facing endpoint queue (propose, read, compact,
     /// inspect, …) between the RPC runtime and the node loop
     /// (`RpcConfig::endpoint_queue_capacity`). Floor 1: overload is visible as
@@ -187,7 +208,9 @@ impl Default for DriverTunables {
             connection_timeout: DELIVERY_TIMEOUT,
             delivery_timeout: DELIVERY_TIMEOUT,
             read_retry_ticks: READ_RETRY_TICKS,
-            snapshot_queue_capacity: SNAPSHOT_QUEUE_CAPACITY,
+            read_poll_ticks: READ_POLL_TICKS,
+            quarantine_ticks: QUARANTINE_TICKS,
+            election_backoff_doublings: ELECTION_BACKOFF_DOUBLINGS,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
             peer_queue_capacity: PEER_QUEUE_CAPACITY,
@@ -209,12 +232,26 @@ impl Default for DriverTunables {
 /// confirmation just finds the ctx gone and is ignored).
 const READ_RETRY_TICKS: u64 = 10;
 
+/// Ticks a journal `Read` above the end long-polls before an empty answer
+/// (#185): 400 ms at the default tick, inside the sim client's 1000 ms
+/// deadline.
+const READ_POLL_TICKS: u64 = 8;
+/// Default [`DriverTunables::quarantine_ticks`]: eight election timeouts —
+/// long enough that a journal's re-open is not a restart loop against a
+/// still-faulty device, short enough that the node rejoins the journal well
+/// inside a recovery tail.
+const QUARANTINE_TICKS: u64 = 8 * ELECTION_TIMEOUT_BASE;
+
 /// Base election timeout, in ticks. Each node's actual timeout is drawn
 /// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,
 /// never the zero-dep core) to break the dueling-proposer livelock. `T`
 /// dominates the core's heartbeat interval, so a live leader always beats before
 /// a follower's election clock fires.
 const ELECTION_TIMEOUT_BASE: u64 = 5;
+
+/// Default [`DriverTunables::election_backoff_doublings`]: up to `8 × T`
+/// (two to four seconds at the default tick) after three failed campaigns.
+const ELECTION_BACKOFF_DOUBLINGS: u32 = 3;
 
 /// Default take-back budget for a delegated round (#142), in re-delegations
 /// — one per beat, so two election-timeout bases of ticks: long enough for a
@@ -263,7 +300,7 @@ pub fn parse_addr(ip: &str) -> SimulationResult<String> {
 /// (#147): configuration data, never inferred from the store's contents.
 ///
 /// The claim is judged against the store's **format marker**
-/// ([`crate::NodeStorage::is_formatted`]): a store that has ever belonged to
+/// ([`crate::LogStorage::is_formatted`]): a store that has ever belonged to
 /// a member carries one, written by the driver on the identity's first boot
 /// and never removed. An existing member whose store carries no marker has
 /// lost its disk — *amnesia*, not a clean crash — and its durable promise
@@ -311,7 +348,7 @@ pub enum RunError {
     /// recovers by re-running the driver loop, which rebuilds volatile state
     /// from durable storage.
     SeamCrash(Seam),
-    /// A [`crate::NodeStorage`] (or [`crate::MatchmakerStorage`]) call failed
+    /// A [`crate::LogStorage`] (or [`crate::MatchmakerStorage`]) call failed
     /// and the driver took its fail-stop crash
     /// decision — never an incidental error propagation. In **production**
     /// this is a crash-only process exit; recovery is the next boot. In

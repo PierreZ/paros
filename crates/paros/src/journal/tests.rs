@@ -21,9 +21,7 @@ use paros_core::{
 use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 use crate::corruption::CorruptionVerdict;
 use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
-use crate::storage::{
-    NodeStorage, SNAP_CHUNK_BYTES, StorageError, StorageRecord, storage_contract_suite,
-};
+use crate::storage::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
 
 type Node = JournalStorage<SimStorageProvider>;
 type Registry = JournalMatchmakerStorage<SimStorageProvider>;
@@ -272,58 +270,6 @@ fn a_damaged_accepted_record_is_reported_faulty_mid_log_and_at_the_tail() {
                 .expect("reboots repaired");
             assert_eq!(node.faulty_entries(), vec![(Slot(1), ballot(5))]);
             assert_eq!(node.accepted(Slot(2)).map(|(_, c)| c), Some(user(2, 0xB3)));
-        })
-        .await;
-    });
-}
-
-#[test]
-fn a_damaged_snapshot_chunk_is_faulty_until_a_verified_repair() {
-    runtime().block_on(async {
-        let mut sim = sim(4);
-        run(&mut sim, |provider| async move {
-            let store = small(1_000);
-            let mut node = open_node(provider.clone(), "s", store).await.expect("open");
-            node.set_chosen_index(Slot(0x5A5A_5A5A_5A5A_5A5A))
-                .await
-                .expect("index");
-            node.record_snapshot(Slot(9)).await.expect("point");
-            node.sync(MustSync::Sync).await.expect("sync");
-            let chunk0 = node.read_snap_chunk(Slot(9), 0).await.expect("chunk 0");
-            assert!(chunk0.len() <= SNAP_CHUNK_BYTES);
-            drop(node);
-            assert!(
-                rot(&provider, "s", &[0x5A; 8]).await,
-                "the chunk is on disk"
-            );
-            let mut node = open_node(provider.clone(), "s", store)
-                .await
-                .expect("reboots");
-            assert_eq!(node.faulty_snap_chunks(), vec![(Slot(9), 0)]);
-            assert!(
-                node.read_snap_chunk(Slot(9), 0).await.is_none(),
-                "a rotted chunk is not served"
-            );
-            let mut wrong = chunk0.clone();
-            wrong[0] ^= 1;
-            assert!(
-                !node
-                    .write_snap_chunk(Slot(9), 0, &wrong)
-                    .await
-                    .expect("write"),
-                "a chunk that fails the point's checksum is refused"
-            );
-            assert!(
-                node.write_snap_chunk(Slot(9), 0, &chunk0)
-                    .await
-                    .expect("write")
-            );
-            node.sync(MustSync::Sync).await.expect("sync repair");
-            let node = open_node(provider, "s", store)
-                .await
-                .expect("reboots repaired");
-            assert!(node.faulty_snap_chunks().is_empty());
-            assert_eq!(node.read_snap_chunk(Slot(9), 0).await, Some(chunk0));
         })
         .await;
     });
@@ -698,7 +644,7 @@ fn judge(
 }
 
 /// The writer: each step raises the promise, accepts at a slot, truncates or
-/// records a snapshot point, and syncs.
+/// jumps below a trim point, and syncs.
 async fn write(
     provider: SimStorageProvider,
     plan: Vec<u64>,
@@ -722,7 +668,7 @@ async fn write(
                 let to = Slot(first.0 + (step >> 8) % 4);
                 node.truncate(to, &[]).await?;
             }
-            2 => node.record_snapshot(Slot(first.0 + 1)).await?,
+            2 => node.trimmed_to(Slot(first.0 + 1), &[]).await?,
             _ => {
                 let slot = Slot(first.0 + (step >> 8) % 12);
                 let command = user(

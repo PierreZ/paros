@@ -343,117 +343,97 @@ fn serve_catchup_sends_nothing_below_the_floor() {
 }
 
 #[test]
-fn below_floor_catchup_request_offers_a_snapshot() {
+fn below_floor_catchup_request_is_answered_with_the_trim_point() {
     // A node truncated its chosen prefix; a peer that missed it asks for a slot
-    // below the floor. We cannot replay the truncated entries, so we offer a
-    // snapshot at our chosen prefix instead of serving nothing.
+    // below the floor. We cannot replay the trimmed entries, so we tell it
+    // where the retained log starts — no bytes, no ballot (#186).
     let mut nodes = cluster_with_three_chosen();
     let n = &mut nodes[0];
-    n.compact(Slot(2)); // floor -> 3, chosen_index 2
+    n.compact(Slot(1)); // floor -> 2, chosen_index 2
     let _ = drain(n);
 
     n.step(Message::CatchUpRequest {
         from: NodeId(1),
         from_slot: Slot(0), // below our floor
     });
-    assert_eq!(n.pending_snapshot_offers.len(), 1, "a snapshot was offered");
-    let (to, chosen_index, _ballot) = n.pending_snapshot_offers[0];
-    assert_eq!(to, NodeId(1), "offered to the requester");
-    assert_eq!(
-        chosen_index,
-        Slot(2),
-        "snapshot brings it up to our chosen prefix"
-    );
-    // The offer carries no bytes (the driver attaches them); no CatchUpResponse.
     let out = drain(n);
+    assert!(
+        out.iter().any(|(to, m)| *to == NodeId(1)
+            && matches!(m, Message::TrimmedTo { point, .. } if *point == Slot(2))),
+        "the requester is told the trim point"
+    );
     assert!(
         !out.iter()
             .any(|(_, m)| matches!(m, Message::CatchUpResponse { .. })),
-        "a below-floor request is answered by a snapshot offer, not a replay"
+        "a below-floor request is answered by the trim point, not a replay"
     );
 }
 
 #[test]
-fn install_snapshot_jumps_a_below_floor_node_and_never_lowers_the_promise() {
+fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
     use crate::write::WriteOp;
 
-    // A node that missed a truncated prefix installs a snapshot at chosen_index 5
-    // under ballot {3,0}: it jumps its chosen prefix, fully compacts to floor 6,
-    // and adopts the ballot as its promise.
+    // A node that missed a trimmed prefix learns the trim point 6: it jumps
+    // its chosen prefix to 5, raises its floor to 6, and keeps its promise
+    // (#180's rule).
     let mut n = node(1, &[0, 1, 2]);
     assert_eq!(n.hard_state().chosen_index, None);
+    let promised = n.hard_state().max_promised_ballot;
 
-    n.step(Message::InstallSnapshot {
+    n.step(Message::TrimmedTo {
         from: NodeId(0),
-        ballot: ballot(3, 0),
-        chosen_index: Slot(5),
-        snapshot: Value(vec![1, 2, 3]),
-        sessions: vec![],
+        point: Slot(6),
+        sessions: vec![(ClientId(7), ClientSeq(1), Slot(3))],
     });
     assert_eq!(
         n.hard_state().chosen_index,
         Some(Slot(5)),
-        "jumped to the snapshot's chosen prefix"
+        "jumped to one below the trim point"
     );
-    assert_eq!(
-        n.acceptor().first_slot(),
-        Slot(6),
-        "fully compacted up to the snapshot"
-    );
+    assert_eq!(n.acceptor().first_slot(), Slot(6), "the floor is the point");
     assert_eq!(
         n.hard_state().max_promised_ballot,
-        ballot(3, 0),
-        "adopted the choosing ballot as the promise"
+        promised,
+        "a trim-point jump never moves the promise"
+    );
+    assert_eq!(
+        n.replica().applied_at(ClientId(7), ClientSeq(1)),
+        Some(Slot(3)),
+        "the ledger below the point is adopted"
     );
 
     let r = n.ready();
     assert!(
-        r.writes().iter().any(WriteOp::needs_sync),
-        "an install is fsync'd before send"
-    );
-    assert!(
         r.writes().iter().any(|w| matches!(
             w,
-            WriteOp::InstallSnapshot { chosen_index, .. } if *chosen_index == Slot(5)
+            WriteOp::TrimmedTo { point, .. } if *point == Slot(6)
         )),
-        "the install surfaced a durable WriteOp::InstallSnapshot"
+        "the jump surfaced a durable WriteOp::TrimmedTo"
     );
     assert!(
         r.committed().is_empty(),
-        "snapshot-xor-entries: no committed user entries for the folded prefix"
+        "a jump walks nothing: the slots below the point are gone"
     );
     r.advance();
 
-    // A stale snapshot at or below our prefix is ignored (no going backward), even
-    // though it carries a higher ballot.
-    n.step(Message::InstallSnapshot {
+    // A stale point at or below our floor is ignored.
+    n.step(Message::TrimmedTo {
         from: NodeId(0),
-        ballot: ballot(9, 0),
-        chosen_index: Slot(4),
-        snapshot: Value(vec![]),
+        point: Slot(4),
         sessions: vec![],
     });
-    assert_eq!(
-        n.hard_state().chosen_index,
-        Some(Slot(5)),
-        "a stale snapshot does not move the chosen prefix backward"
-    );
-    assert_eq!(
-        n.hard_state().max_promised_ballot,
-        ballot(3, 0),
-        "an ignored stale snapshot changes nothing"
-    );
+    assert_eq!(n.hard_state().chosen_index, Some(Slot(5)));
+    assert_eq!(n.acceptor().first_slot(), Slot(6));
 }
 
-/// A snapshot install must re-drive the contiguous walk: a `Commit` learned
-/// out of order can already sit in `chosen` just above the boundary, and
-/// without the walk the node freezes at `boundary` forever — catch-up loops
+/// A trim-point jump must re-drive the contiguous walk: a `Commit` learned
+/// out of order can already sit in `chosen` just above the point, and
+/// without the walk the node freezes at `point - 1` forever — catch-up loops
 /// (`mark_chosen`'s already-chosen early return never re-drives either), and
 /// if the node later leads, its read fence sits above its prefix so no read
-/// ever confirms. Red before the fix: `chosen_index` stuck at 9 with
-/// `chosen[10]` in hand.
+/// ever confirms.
 #[test]
-fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
+fn a_trim_point_jump_advances_over_an_out_of_order_chosen_slot() {
     let mut x = node(0, &[0, 1, 2]);
 
     // Slot 10 arrives out of order (reordered/duplicated `Commit`): chosen,
@@ -468,12 +448,10 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
     assert_eq!(x.hard_state().chosen_index, None, "nothing contiguous yet");
     assert!(x.replica.is_chosen(Slot(10)));
 
-    // A peer answers the below-floor catch-up with a snapshot at boundary 9.
-    x.step(Message::InstallSnapshot {
+    // A peer answers the below-floor catch-up with its trim point 10.
+    x.step(Message::TrimmedTo {
         from: NodeId(2),
-        ballot: ballot(3, 2),
-        chosen_index: Slot(9),
-        snapshot: val(0xEE),
+        point: Slot(10),
         sessions: vec![],
     });
     let _ = drain(&mut x);
@@ -481,11 +459,11 @@ fn a_snapshot_install_advances_over_an_out_of_order_chosen_slot() {
     assert_eq!(
         x.hard_state().chosen_index,
         Some(Slot(10)),
-        "the walk resumed over the out-of-order chosen slot at the boundary"
+        "the walk resumed over the out-of-order chosen slot at the point"
     );
     assert_eq!(
         x.replica().chosen_gap(),
         None,
-        "no stranded chosen slot survives the install"
+        "no stranded chosen slot survives the jump"
     );
 }

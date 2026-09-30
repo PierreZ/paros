@@ -2,7 +2,7 @@
 //!
 //! This module is the typed half of the durable-record contract documented in
 //! `docs/analysis/storage/clstore-record-contract.md` and on
-//! [`NodeStorage::boot_scan`](crate::NodeStorage::boot_scan): every persisted
+//! [`LogStorage::boot_scan`](crate::LogStorage::boot_scan): every persisted
 //! record is checksummed, every log entry carries a physically separate,
 //! itself-checksummed **identifier** `⟨slot, accepted_ballot, offset, cksum⟩`
 //! (the entry's persist record), identity lives inside the checksummed region

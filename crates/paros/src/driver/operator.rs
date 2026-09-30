@@ -13,91 +13,46 @@ use paros_core::{
 
 use crate::audit::Audit;
 use crate::rpc::{
-    CompactAck, InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest,
-    WireQuorumSystem, common, quorum_system_from_proto, quorum_system_to_proto,
+    InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest, TrimAck, WireQuorumSystem,
+    common, quorum_system_from_proto, quorum_system_to_proto,
 };
-use crate::storage::NodeStorage;
 
 use super::events::reconfigure_outcome;
 use super::handover::HandoverDriver;
-use super::snap_repair::SnapRepair;
 
-/// The application permits dropping the log prefix up to `up_to`. Only the
-/// leader admits it: it proposes a `Truncate` control command into the next
-/// slot, decided by ordinary Paxos and forwarded to every node, each of which
-/// truncates lazily when it applies that slot. A non-leader redirects (like
-/// `propose`).
+/// A journal `Trim` (#185, formerly `Compact`): the client permits dropping
+/// the log prefix up to `up_to`. Only the leader admits it: it proposes a
+/// `Truncate` control command into the next slot, decided by ordinary Paxos
+/// and forwarded to every node, each of which truncates lazily when its walk
+/// reaches that slot — one replicated trim point, so every reader gets one
+/// answer. A non-leader redirects (like an append).
 ///
-/// The coupling rule (#101, CTRL §3.5): a `Truncate{up_to}` is proposed only
-/// once a quorum holds the decided snapshot at (or past) `up_to` — that is
-/// what makes chunk repair sound once the log below the floor is gone. A
-/// request no decided point covers first seeds a `Snap` marker and answers
-/// `accepted: false`; the client's retry finds the point once the quorum's
-/// custody advertisements land. Proposal-side policy only — the acceptor
-/// paths stay fully opaque.
+/// There is no precondition (#186): the client decides when its own state
+/// covers the prefix — the application lives in the client, and a laggard
+/// below the point jumps with `TrimmedTo`.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
-pub(crate) fn compact(
-    node: &mut ColocatedNode,
-    snap: &mut SnapRepair,
-    up_to: u64,
-    self_id: u64,
-) -> CompactAck {
+pub(crate) fn trim(node: &mut ColocatedNode, up_to: u64, self_id: u64) -> TrimAck {
     if !node.is_leader() {
-        return CompactAck {
+        return TrimAck {
             leader: node.leader().map(|n| n.0),
             accepted: false,
-            first_slot: node.acceptor().first_slot().0,
+            trim_point: node.acceptor().first_slot().0,
+            unknown_journal: false,
         };
     }
-    // The quorum question goes through the configuration in force, never a
-    // raw count: an ack from a node the current acceptor set no longer names
-    // does not witness custody.
-    let covered = snap
-        .acks
-        .iter()
-        .filter(|(_, holders)| node.acceptors().has_phase2_quorum(holders))
-        .map(|(&point, _)| point)
-        .max();
-    let propose_marker = |node: &mut ColocatedNode, snap: &mut SnapRepair| {
-        if snap.marker_pending.is_none()
-            && let ProposeResult::Accepted(slot) = node.propose_snap_marker()
-        {
-            snap.marker_pending = Some(slot);
-            tracing::info!(node = self_id, at = slot.0, "snap_marker_proposed");
-        }
-    };
-    let accepted = if let Some(point) = covered {
-        let truncate_to = Slot(up_to.min(point.0));
-        // Honest ack: `accepted: true` only when the Truncate proposal was
-        // actually admitted. `propose_control` can refuse (a step-down raced
-        // this request), and the client's retry handles `accepted: false`
-        // exactly like the coupling refusal below.
-        let proposed = matches!(
-            node.propose_control(Control::Truncate { up_to: truncate_to }),
-            ProposeResult::Accepted(_)
-        );
-        tracing::info!(
-            node = self_id,
-            requested = up_to,
-            up_to = truncate_to.0,
-            point = point.0,
-            accepted = proposed,
-            "truncate_coupled_to_snap_point"
-        );
-        if up_to > point.0 {
-            // The request outruns the covered prefix: seed the next point so
-            // a later compact can go further.
-            propose_marker(node, snap);
-        }
-        proposed
-    } else {
-        propose_marker(node, snap);
-        false
-    };
-    CompactAck {
+    // Honest ack: `accepted: true` only when the `Truncate` proposal was
+    // actually admitted — `propose_control` can refuse (a step-down raced
+    // this request), and the client's retry handles `accepted: false`.
+    let accepted = matches!(
+        node.propose_control(Control::Truncate { up_to: Slot(up_to) }),
+        ProposeResult::Accepted(_)
+    );
+    tracing::info!(node = self_id, up_to, accepted, "trim_proposed");
+    TrimAck {
         leader: Some(self_id),
         accepted,
-        first_slot: node.acceptor().first_slot().0,
+        trim_point: node.acceptor().first_slot().0,
+        unknown_journal: false,
     }
 }
 
@@ -212,10 +167,10 @@ pub(crate) fn reconfigure_matchmakers(
     }
 }
 
-/// A pure read of the core and the store: what an operator (or a client's
-/// composer) sees of this node.
+/// A pure read of the core: what an operator (or a client's composer) sees
+/// of this node.
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
-pub(crate) async fn inspect<S: NodeStorage>(node: &ColocatedNode, storage: &S) -> InspectReply {
+pub(crate) fn inspect(node: &ColocatedNode) -> InspectReply {
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();
     let (gc_watermark, retirable) =
@@ -234,7 +189,6 @@ pub(crate) async fn inspect<S: NodeStorage>(node: &ColocatedNode, storage: &S) -
     InspectReply {
         chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
         first_slot: node.acceptor().first_slot().0,
-        snapshot: storage.snapshot().await,
         members: node.acceptors().members().iter().map(|n| n.0).collect(),
         quorum_system,
         phase1_quorum,

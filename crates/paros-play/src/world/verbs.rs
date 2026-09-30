@@ -6,10 +6,8 @@
 //! accessor lives beside the verb that fills it: `compacts()` beside
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
-use std::collections::BTreeSet;
-
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Control, HANDOFF_BATCH, LeadershipOrigin,
+    Ballot, ClientId, ClientSeq, ColocatedNode, Control, HANDOFF_BATCH, LeadershipOrigin,
     MatchmakerId, Message, NodeId, ProposeResult, QuorumSystem, Slot, Value,
 };
 
@@ -24,12 +22,10 @@ use crate::world::{Envelope, NO_CHECK_QUORUM, Party, World, name, not_leader, un
 
 /// What a leader answered one `Compact` request with.
 ///
-/// The refusal is the interesting one, and it is not a failure: a `Truncate`
-/// may only be proposed once a **quorum holds a decided snapshot point**
-/// covering it, because past that floor the log is gone and the snapshot is
-/// the only thing left to recover a stranded node from. A request no point
-/// covers seeds the next point instead and is answered `accepted: false`; the
-/// client retries once the marker is decided.
+/// A trim is a decided `Truncate` control command: the leader proposes it
+/// like any client value, and every node drops its prefix when it applies
+/// that slot. A node that was away and comes back below the floor jumps to a
+/// peer's trim point instead of replaying the dropped slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactOutcome {
     /// The node the client asked.
@@ -38,11 +34,6 @@ pub struct CompactOutcome {
     pub requested: Slot,
     /// Whether a `Truncate` was proposed.
     pub accepted: bool,
-    /// The decided snapshot point a quorum held, if any — what the request was
-    /// clamped to.
-    pub covered: Option<Slot>,
-    /// Whether the refusal seeded a fresh `Snap` marker.
-    pub seeded_marker: bool,
 }
 
 /// What the leader answered one client **retry** with.
@@ -713,13 +704,11 @@ impl World {
 
     /// A client asks `id` to drop the log prefix up to `up_to`.
     ///
-    /// The coupling rule is what makes this more than "raise a number": a
-    /// `Truncate` may only be proposed once a **quorum holds a decided
-    /// snapshot point** at or past what is being dropped. Below the floor the
-    /// entries are gone everywhere, and the snapshot is the only thing left to
-    /// rescue a node that was away. A request no point covers is therefore
-    /// **refused** — and the refusal seeds the next snapshot point, so the
-    /// client's retry can go further.
+    /// A trim is a decided `Truncate`: the leader proposes it into the next
+    /// free slot like a client value, and each node drops its prefix — clamped
+    /// to its own chosen index — when it *applies* that slot. There is no
+    /// coupling to anything else: everything below the floor is chosen, and a
+    /// node that was away jumps to a peer's trim point.
     ///
     /// # Errors
     ///
@@ -736,120 +725,40 @@ impl World {
                 "a compaction request goes to",
             ));
         }
-        let covered = self.covered_snap_point(index);
-        let marker_open = node
-            .proposer()
-            .rounds()
-            .values()
-            .any(|round| matches!(round.command(), Command::Control(Control::Snap { .. })));
         let mark = self.narration.len();
-        let (accepted, seeded) = if let Some(point) = covered {
-            {
-                let clamped = Slot(up_to.min(point.0));
-                let accepted = self
-                    .drive(id, index, move |node| {
-                        matches!(
-                            node.propose_control(Control::Truncate { up_to: clamped }),
-                            ProposeResult::Accepted(_)
-                        )
-                    })
-                    .unwrap_or(false);
-                // The request outran the covered prefix: seed the next point so
-                // a later compaction may go further.
-                let seed = up_to > point.0 && !marker_open;
-                if seed {
-                    self.seed_snap_marker(id, index);
-                }
-                (accepted, seed)
-            }
-        } else {
-            let seed = !marker_open;
-            if seed {
-                self.seed_snap_marker(id, index);
-            }
-            (false, seed)
-        };
+        let accepted = self
+            .drive(id, index, move |node| {
+                matches!(
+                    node.propose_control(Control::Truncate { up_to: Slot(up_to) }),
+                    ProposeResult::Accepted(_)
+                )
+            })
+            .unwrap_or(false);
         self.compacts.push(CompactOutcome {
             node: id,
             requested: Slot(up_to),
             accepted,
-            covered,
-            seeded_marker: seeded,
         });
         let opening = say(
             NarrationKind::Truncate,
-            match (accepted, covered) {
-                (true, Some(point)) => format!(
-                    "A client asks {} to drop everything up to slot {up_to}. A quorum holds a \
-                     decided snapshot at slot {}, so the leader proposes a Truncate. The \
-                     Truncate goes through ordinary consensus, into the next free slot, exactly \
-                     like a client value. Every node drops its prefix when it *applies* that \
-                     slot.",
-                    who(id),
-                    point.0
-                ),
-                (_, None) => format!(
+            if accepted {
+                format!(
                     "A client asks {} to drop everything up to slot {up_to}, and the leader \
-                     refuses. No quorum holds a decided snapshot that covers that prefix. Below \
-                     a floor the entries are gone on every node, and the snapshot is the only \
-                     way to recover a node that was away. The leader seeds a snapshot point \
-                     instead. Ask again once that point is decided.",
+                     proposes a Truncate. The Truncate goes through ordinary consensus, into the \
+                     next free slot, exactly like a client value. Every node drops its prefix \
+                     when it *applies* that slot.",
                     who(id)
-                ),
-                (false, Some(point)) => format!(
-                    "A client asks {} to drop everything up to slot {up_to}. A quorum's snapshot \
-                     covers slot {}, but the leader did not admit the proposal.",
-                    who(id),
-                    point.0
-                ),
+                )
+            } else {
+                format!(
+                    "A client asks {} to drop everything up to slot {up_to}, but the leader did \
+                     not admit the proposal.",
+                    who(id)
+                )
             },
         );
         self.narration.insert(mark, opening);
         Ok(())
-    }
-
-    /// The highest decided snapshot point a **Phase-2 quorum** of the
-    /// configuration in force holds.
-    ///
-    /// The custody tally is read straight off the disks: a real driver learns
-    /// it from the per-tick `SnapAck` advertisements, which are driver-terminal
-    /// and never enter the core, so the game reads the same fact from the one
-    /// place it already owns rather than modelling a message the player would
-    /// have nothing to decide about. The quorum question itself goes through
-    /// the membership boundary, never a count.
-    fn covered_snap_point(&self, index: usize) -> Option<Slot> {
-        let node = self.nodes[index].as_ref()?;
-        let acceptors = node.acceptors();
-        let mut points: Vec<Slot> = self
-            .disks
-            .iter()
-            .filter_map(Disk::snapshot_point)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        points.sort_unstable();
-        points.into_iter().rev().find(|point| {
-            let holders: BTreeSet<NodeId> = self
-                .pool
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|(index, _)| {
-                    self.disks[*index]
-                        .snapshot_point()
-                        .is_some_and(|held| held >= *point)
-                })
-                .map(|(_, id)| id)
-                .collect();
-            acceptors.has_phase2_quorum(&holders)
-        })
-    }
-
-    /// Ask the leader to decide the next snapshot point.
-    fn seed_snap_marker(&mut self, id: NodeId, index: usize) {
-        self.drive(id, index, move |node| {
-            node.propose_snap_marker();
-        });
     }
 
     /// A leader hands its Phase-2 authority to `to`, under the **same ballot**
@@ -958,12 +867,11 @@ impl World {
         if node.proposer().recovery().is_some()
             || node.proposer().probe().is_some()
             || node.proposer().election().is_some()
-            || node.replica().app_repair().is_some()
             || !node.acceptor().faulty().is_empty()
         {
             return Some(format!(
                 "node {} still has work that only a promise quorum can finish. It must settle \
-                 an inherited slot, repair a damaged record, or complete an application prefix. \
+                 an inherited slot or repair a damaged record. \
                  A successor runs no Phase 1, so it cannot finish that work. An election can \
                  finish it.",
                 id.0
@@ -1026,17 +934,6 @@ impl World {
             .collect()
     }
 
-    /// Every node's retained decided snapshot point, in pool order.
-    #[must_use]
-    pub fn snapshot_points(&self) -> Vec<(NodeId, Option<Slot>)> {
-        self.pool
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, self.disks[index].snapshot_point()))
-            .collect()
-    }
-
     /// Every `Compact` the player asked for and what the leader answered.
     #[must_use]
     pub fn compacts(&self) -> &[CompactOutcome] {
@@ -1056,8 +953,8 @@ impl World {
     }
 
     /// Whether some live node's chosen prefix sits **below** another node's
-    /// compaction floor — a node truncation has stranded, which only a
-    /// snapshot can rescue.
+    /// compaction floor — a node truncation has stranded, which only a jump
+    /// to a peer's trim point can rescue.
     #[must_use]
     pub fn stranded(&self) -> Vec<NodeId> {
         let highest_floor = self.disks.iter().map(Disk::floor).max().unwrap_or(Slot(0));

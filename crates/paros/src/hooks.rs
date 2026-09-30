@@ -8,8 +8,7 @@
 //! the driver's optional policy decisions: delaying an `Accept` re-send,
 //! resigning leadership, choosing the shortest valid election timeout, the peer mailbox's
 //! choices (overtake the queue, evict across kinds, and — armed at enqueue,
-//! applied at the drain — hold a batch or reverse it), skipping a snapshot
-//! offer, and stretching a tick.
+//! applied at the drain — hold a batch or reverse it), and stretching a tick.
 //! Production passes [`NoHooks`], whose defaults never perturb the driver.
 //!
 //! **Every hook is consulted from the driver's node loop, never from a spawned
@@ -19,7 +18,7 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
+use paros_core::{JournalId, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,32 +32,6 @@ pub enum Seam {
     /// here keeps the durable writes but drops the batch's outbound messages;
     /// the peers must recover from the restarted node re-deriving them.
     AfterSyncBeforeSend,
-    /// After the batch's committed entries are applied to the application state
-    /// but **before** the application fsync. A crash here lands a node whose
-    /// consensus prefix is durable while its application prefix is behind —
-    /// the state the boot replay's idempotent re-apply exists to heal, and the
-    /// only durability seam process-level attrition cannot reach.
-    AfterApplyBeforeSync,
-    /// Inside the chunk-repair pipeline: repaired snapshot chunks from a peer
-    /// are written but **before** their fsync. A crash here may lose any
-    /// staged, un-synced installs (a store with atomic per-chunk replace keeps
-    /// them); either way the reboot's scan re-derives the truth — still-faulty
-    /// chunks re-arm the per-tick pull, and a whole-but-unrestored point falls
-    /// back to the ordinary below-floor recovery path.
-    BeforeChunkSync,
-    /// Inside the chunk-repair pipeline: the now-whole snapshot point has been
-    /// restored into the application (staged) but **before** the restore's
-    /// fsync. A crash here loses the staged restore while keeping the durable,
-    /// fully clean chunks; the reboot lands below the floor again and recovers
-    /// through the ordinary peer `InstallSnapshot` path instead.
-    AfterChunkRestoreBeforeSync,
-    /// At boot, after the replay re-applied the committed prefix the previous
-    /// incarnation had persisted but not yet applied, and **before** that
-    /// application fsync. A crash here repeats the boot replay from the same
-    /// durable state: the idempotent re-apply must converge on the second
-    /// attempt exactly as on the first, and nothing the first attempt staged
-    /// may leak into what the second one reads.
-    AfterBootReplayBeforeSync,
     /// Inside the **matchmaker** driver: a registration (or a watermark raise)
     /// is staged but **before** its fsync. A crash here loses the staged
     /// write, and no reply was sent (replies come after the fsync), so it is a
@@ -82,10 +55,6 @@ impl Seam {
         match self {
             Seam::BeforeSync => "before_sync",
             Seam::AfterSyncBeforeSend => "after_sync_before_send",
-            Seam::AfterApplyBeforeSync => "after_apply_before_sync",
-            Seam::BeforeChunkSync => "before_chunk_sync",
-            Seam::AfterChunkRestoreBeforeSync => "after_chunk_restore_before_sync",
-            Seam::AfterBootReplayBeforeSync => "after_boot_replay_before_sync",
             Seam::MatchBeforeSync => "match_before_sync",
             Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
         }
@@ -155,6 +124,9 @@ pub enum Reply {
     /// A `RetireAck`. Dropping it after the node accepted its retirement
     /// leaves the operator to re-ask a node that is already gone.
     Retire,
+    /// A journal `ReadAck` (#185): a page, a trim point, or an empty
+    /// long-poll answer. Dropping it is a lost read the client re-asks.
+    LogRead,
 }
 
 impl Reply {
@@ -163,6 +135,7 @@ impl Reply {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Reply::LogRead => "log_read",
             Reply::Propose => "propose",
             Reply::ProposeDedup => "propose_dedup",
             Reply::Read => "read",
@@ -212,6 +185,29 @@ pub trait DriverHooks {
     /// beat ([`paros_core::ColocatedNode::resend_gc`]). Consulted only when a
     /// re-send is due; skipping always costs a beat, never safety.
     fn skip_gc_resend(&self) -> bool {
+        false
+    }
+
+    /// Whether to withhold every garbage-collection request (#123) this
+    /// node would send — the first send of a request and its re-sends alike.
+    /// Consulted on the node loop whenever a batch carries GC requests or a
+    /// re-send is due. Always safe: GC is optional work, and a floor that
+    /// never becomes effective costs only the retirements it would have
+    /// licensed. Production and the main campaign answer `false`; a scripted
+    /// corpus case that must keep a prior configuration answerable answers
+    /// `true` (the departed straggler, #124).
+    fn withhold_gc_requests(&self) -> bool {
+        false
+    }
+
+    /// Whether `journal` sits out this beat on this node (#188): its tick is
+    /// skipped and the peer messages that arrive for it are dropped. Consulted
+    /// on the node loop only when the node runs more than one journal — once
+    /// per journal per beat and once per inbound message — so a held journal
+    /// is a slow, partitioned journal, and its siblings on the same node must
+    /// not notice (the non-interference claim). Always safe: a slow node and
+    /// a lossy network are both within the model.
+    fn hold_journal(&self, _journal: JournalId) -> bool {
         false
     }
 
@@ -286,21 +282,6 @@ pub trait DriverHooks {
     /// [`DriverHooks::shortest_election_timeout`] did not fire, so the two
     /// extremes stay independent locations and never both apply to one draw.
     fn longest_election_timeout(&self) -> bool {
-        false
-    }
-
-    /// Whether to skip this beat's snapshot-custody advertisement
-    /// (`SnapAck` toward the leader). Always safe: the advertisement is
-    /// re-sent every tick, so a skipped beat only delays the leader's
-    /// truncation-coupling tally.
-    fn skip_snap_advertisement(&self) -> bool {
-        false
-    }
-
-    /// Whether to skip this beat's chunk-repair pull (`SnapChunkRequest`
-    /// toward the peers). Always safe: the pull is re-issued every tick while
-    /// rotted chunks remain, so a skipped beat only delays the repair.
-    fn skip_chunk_pull(&self) -> bool {
         false
     }
 
@@ -384,17 +365,6 @@ pub trait DriverHooks {
         false
     }
 
-    /// Whether to skip sending this snapshot offer. Always safe: the offer is
-    /// an *answer* to a below-floor peer's `CatchUpRequest`, which that peer
-    /// re-issues every tick until it is served, and any other custodian may
-    /// serve it instead. This is the driver's own mismatch-skip path (an offer
-    /// whose application prefix has fallen behind is dropped, never sent wrong)
-    /// taken spuriously, so the recovery path that must tolerate an unserved
-    /// beat is exercised without needing an application repair to be open.
-    fn skip_snapshot_offer(&self, _to: Party) -> bool {
-        false
-    }
-
     /// Whether the next tick should wait **twice** the normal interval. Always
     /// safe: the tick interval is a pacing choice, not a protocol bound — every
     /// timeout the core owns is counted in ticks, so a node that ticks at half
@@ -430,17 +400,6 @@ pub trait DriverHooks {
     /// delivered exactly once, and the *client's* retry is the duplicate that
     /// path has to survive, which `drop_client_reply` already produces.
     fn duplicate_client_reply(&self, _reply: Reply) -> bool {
-        false
-    }
-
-    /// Whether to stay silent about one chunk a peer asked for, even though
-    /// this node holds it clean. Always safe: the chunk-repair protocol is
-    /// built on silence — a peer answers what it holds and says nothing about
-    /// what it lacks — and the requester re-asks every tick for whatever is
-    /// still missing, from every peer. This reaches the partial-answer
-    /// shapes (a point repaired from two custodians, a pull that takes several
-    /// beats) without needing the custodians' own rot to line up.
-    fn withhold_snap_chunk(&self, _to: NodeId) -> bool {
         false
     }
 

@@ -7,7 +7,7 @@
 //! [`SchemaVersion`], which a server refuses before decoding.
 //!
 //! - `0x5041_0001..` — the public journal (`proto/paros.proto`), served by
-//!   a node; `QuorumRead` also by a replica.
+//!   a node; `Read` and `CheckTail` also by a replica.
 //! - `0x5041_0101..` — cluster-internal (`proto/internal.proto`), served by a
 //!   node; `Deliver` also by a proxy leader and a replica, `Inspect` also by
 //!   a replica.
@@ -49,21 +49,27 @@ macro_rules! well_known_method {
     };
 }
 
+// 0x5041_0001..=0x5041_0004 were `Propose`, the read-index `Read`,
+// `QuorumRead` and `Compact`, superseded by the journal calls below (#185).
+// Retired, never reused.
 well_known_method!(
-    /// Propose a client command; answered once it commits, or redirected.
-    ProposeRpc, 0x5041_0001, public::Propose => public::ProposeAck, "paros.Propose"
+    /// Append records to a journal; answered once they commit, or
+    /// redirected (#185).
+    AppendRpc, 0x5041_0007, public::Append => public::AppendAck, "paros.Append"
 );
 well_known_method!(
-    /// A read-index read, asked of the leader.
-    ReadRpc, 0x5041_0002, public::Read => public::ReadAck, "paros.Read"
+    /// Read a journal's chosen entries from an LSN up (#185); served by any
+    /// node or replica, long-polling above the end.
+    LogReadRpc, 0x5041_0008, public::Read => public::ReadAck, "paros.Read"
 );
 well_known_method!(
-    /// A leaderless quorum read (#143), asked of any node or replica.
-    QuorumReadRpc, 0x5041_0003, public::Read => public::ReadAck, "paros.QuorumRead"
+    /// A linearizable tail (#185): read-index on the leader, or a quorum
+    /// read (#143) on any node or replica.
+    CheckTailRpc, 0x5041_0009, public::CheckTail => public::CheckTailAck, "paros.CheckTail"
 );
 well_known_method!(
-    /// Ask the leader to truncate the log.
-    CompactRpc, 0x5041_0004, public::Compact => public::CompactAck, "paros.Compact"
+    /// Ask the leader to trim the journal (#185, formerly `Compact`).
+    TrimRpc, 0x5041_000A, public::Trim => public::TrimAck, "paros.Trim"
 );
 well_known_method!(
     /// Ask the leader to reconfigure the acceptor set.

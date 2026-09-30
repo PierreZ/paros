@@ -13,7 +13,7 @@
 - [From one value to a log](replicated-log.md)
 - [The stable leader](stable-leader.md)
 - [Crash and restart safety](restart-safety.md)
-- [Truncation and snapshot restore](truncation-and-snapshots.md)
+- [Truncation and the trim point](truncation-and-snapshots.md)
 - [Why reads are not free](linearizable-reads.md)
 
 # Beyond Multi-Paxos

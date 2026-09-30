@@ -1,4 +1,4 @@
-//! Act III — truncation, snapshots, and reads.
+//! Act III — truncation, the trim point, and reads.
 //!
 //! Six levels over the **log world**, and one question runs through all of
 //! them: what does a node know, and what is it entitled to *say*? Act II built
@@ -8,7 +8,7 @@
 //! starts being the difference between a correct database and a lying one.
 //!
 //! The order is the order the mechanisms depend on each other: truncation
-//! first (it is what strands a node), then the snapshot that rescues it, then
+//! first (it is what strands a node), then the trim-point jump that rescues it, then
 //! the read path — the confirmation round, the fresh-leader fence, the
 //! client-visible property all of it exists for — and finally the write ack,
 //! which is the other half of that property.
@@ -58,13 +58,13 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
     AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
+    AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
 ];
 
-/// Every role but the promise a snapshot install keeps.
-const NO_SNAPSHOT_PROMISE: &[AutomationFlag] =
-    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::SnapshotPromise]);
+/// Every role but the jump to a peer's trim point.
+const NO_TRIM_POINT: &[AutomationFlag] =
+    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::TrimPoint]);
 
 /// Every role but serving a read.
 const NO_READ_SERVE: &[AutomationFlag] =
@@ -132,18 +132,14 @@ Every node drops its prefix when it applies that slot. The result is one \
 cluster-wide floor, carried by ordinary replication, with no separate broadcast \
 and no separate agreement protocol.
 
-The leader enforces a coupling rule here, and that rule is the reason for the \
-two steps of this level. Below the floor the entries are gone on every disk, so \
-only a **snapshot** can recover a node that was away. A snapshot that no node \
-holds recovers no node. The leader therefore proposes a `Truncate` only after a \
-quorum holds a decided snapshot point that covers it. If you ask for a \
-compaction before that point exists, the leader refuses you and seeds a snapshot \
-point, and your second request succeeds. Look at the floor on every node: each \
-floor moves when that node applies the decision.",
+Each node drops only what it has itself chosen: the `Truncate` names the last \
+slot it permits dropping, and a node clamps that to its own chosen prefix. Ask \
+the leader to compact, and deliver the decision. Look at the floor on every \
+node: each floor moves when that node applies the decision, and never when the \
+leader proposes it.",
     field_guide: "truncation-and-snapshots.html",
     symbols: &[
         "Control::Truncate",
-        "Control::Snap",
         "ColocatedNode::propose_control",
         "ColocatedNode::compact",
         "WriteOp::Truncate",
@@ -158,7 +154,6 @@ floor moves when that node applies the decision.",
         let Some(log) = world.log() else {
             return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
         };
-        let refused = log.compacts().iter().any(|outcome| !outcome.accepted);
         let accepted = log.compacts().iter().any(|outcome| outcome.accepted);
         let floors = distinct_floors(world);
         let stranded = log.stranded();
@@ -169,34 +164,28 @@ floor moves when that node applies the decision.",
                 stranded[0].0
             ));
         }
-        match (refused, accepted, floors.as_slice()) {
-            (_, true, [first]) if *first > 0 => GoalStatus::Reached(format!(
+        match (accepted, floors.as_slice()) {
+            (true, [first]) if *first > 0 => GoalStatus::Reached(format!(
                 "The floor of every node is slot {first}, and no node is stranded. No message \
                  sent that number. Each node computed it when it applied the same decided \
                  command, at the same place in the same log."
             )),
-            (false, _, _) => GoalStatus::Open(
-                "Ask the leader to compact the log. Look closely at the first answer.".to_string(),
+            (false, _) => GoalStatus::Open(
+                "Get some values chosen, then ask the leader to compact the log.".to_string(),
             ),
-            (_, false, _) => GoalStatus::Open(
-                "The leader refused you and seeded a snapshot point. Get that point decided, \
-                 then ask again."
-                    .to_string(),
-            ),
-            (_, _, floors) => GoalStatus::Open(format!(
+            (_, floors) => GoalStatus::Open(format!(
                 "The floors are still {floors:?}. Deliver the decision to every node. Each \
                  node truncates when it *applies* that slot, not when the leader proposes it."
             )),
         }
     },
     hint: |world, mistakes| {
-        let refused = world
+        let asked = world
             .log()
-            .is_some_and(|log| log.compacts().iter().any(|outcome| !outcome.accepted));
-        (mistakes > 0 || refused).then(|| {
-            "A refusal is not a failure here. The leader does not drop a prefix that no \
-             quorum can replace with a snapshot, so it seeds a snapshot point. Deliver that \
-             decision, then ask to compact again."
+            .is_some_and(|log| log.compacts().iter().any(|outcome| outcome.accepted));
+        (mistakes > 0 || asked).then(|| {
+            "The Truncate is a slot like any other. Deliver its Accepts and its Commit, and \
+             every node drops its prefix when it applies that slot."
                 .to_string()
         })
     },
@@ -207,9 +196,6 @@ floor moves when that node applies the decision.",
             .play(propose_as(CLIENT, 0, "alpha"))
             .play(propose_as(CLIENT, 0, "bravo"))
             .settle_all();
-        // No decided snapshot point exists yet, so this is refused — and the
-        // refusal seeds the marker that makes the retry work.
-        script.play(compact(0, 8)).settle_all();
         script.play(compact(0, 8)).settle_all();
         script.finish()
     },
@@ -244,32 +230,34 @@ also right to refuse a `Prepare` about a truncated range. Such a peer would \
 report \"nothing accepted\" when the true answer is \"I do not know any more\", and \
 the floor guard prevents that report.
 
-paros performs one kind of state transfer, and it is the answer here. When a \
-peer sees a catch-up request below its floor, it offers a **snapshot**. The \
-snapshot is the opaque application state at the chosen prefix of that peer. The \
-application produced those bytes, and paros sends them without a read of any \
-byte. The receiver moves its chosen prefix to the boundary of the snapshot, \
-compacts everything below it, and installs the state.
+The answer is that the node does not need those slots at all. Everything below \
+a floor is **chosen**: a decided `Truncate` put the floor there, and a node \
+truncates only what it has chosen. When a peer sees a catch-up request below its \
+floor, it answers with its **trim point**: \"my log starts at this slot\". The \
+node jumps there. It raises its own floor to that slot, counts every slot below \
+it as chosen, and asks for the rest by ordinary catch-up. No bytes travel. The \
+application folds the chosen values into its own state, and paros runs no \
+application.
 
-One rule is the subject of this level: a snapshot restores the **log** — the \
-values, the prefix and the state of the application. It says nothing about \
-**promises**, and the peer that sent it does not know what this node promised. \
-The node that installs the snapshot therefore keeps the *higher* of its own \
-promise and the ballot of the snapshot. Node 2 comes back, hears no leader, and \
-campaigns. That campaign pulls the snapshot, and it raises the promise above the \
-ballot of the prefix. The game then asks you for its promise, and a wrong answer \
-lets the node vote for a ballot that it refused.",
+One rule is the subject of this level: a trim point says where the **log** \
+starts, and it says nothing about **promises**. It carries no ballot, and the \
+peer that sent it does not know what this node promised. The node that jumps \
+keeps the promise it made, exactly as it was. Node 2 comes back, hears no \
+leader, and campaigns. That campaign asks its peers for the range it misses, and \
+a peer answers with its trim point. The game then asks you what node 2 does, and \
+a wrong answer either waits forever for slots that no disk holds or lets the \
+node vote for a ballot that it refused.",
     field_guide: "truncation-and-snapshots.html",
     symbols: &[
-        "Message::InstallSnapshot",
-        "Ready::snapshot_offers",
-        "Acceptor::install",
-        "WriteOp::InstallSnapshot",
+        "Message::TrimmedTo",
+        "WriteOp::TrimmedTo",
+        "Acceptor::trim_to",
+        "Replica::trim_to",
     ],
-    automation_on: NO_SNAPSHOT_PROMISE,
-    pinned_off: &[AutomationFlag::SnapshotPromise],
+    automation_on: NO_TRIM_POINT,
+    pinned_off: &[AutomationFlag::TrimPoint],
     unlocked: REPLIES_AND_BEATS,
-    unlocks: &[AutomationFlag::SnapshotPromise],
+    unlocks: &[AutomationFlag::TrimPoint],
     allowed_actions: STRANDED_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
@@ -279,18 +267,28 @@ lets the node vote for a ballot that it refused.",
         if let Some(node) = log.promise_regressed() {
             return GoalStatus::Failed(format!(
                 "The durable promise of node {} came back lower than a promise that it \
-                 already made. A snapshot restores the log, not a promise.",
+                 already made. A trim point says where the log starts, not what a node promised.",
                 node.0
             ));
         }
-        let healed = applied(world, 2);
         let leader_log = applied(world, 0);
-        let floor = log.disk(NodeId(2)).map_or(0, |disk| disk.floor().0);
         if leader_log.is_empty() {
             return GoalStatus::Open(
                 "Get some commands chosen through the two nodes that are up.".to_string(),
             );
         }
+        let cluster_floor = log.disk(NodeId(0)).map_or(0, |disk| disk.floor().0);
+        if cluster_floor == 0 {
+            return GoalStatus::Open(
+                "Ask the leader to compact the log past node 2's position.".to_string(),
+            );
+        }
+        let floor = log.disk(NodeId(2)).map_or(0, |disk| disk.floor().0);
+        let chosen = |node: u64| {
+            log.disk(NodeId(node))
+                .and_then(|disk| disk.hard_state().chosen_index)
+                .map(|slot| slot.0)
+        };
         if floor == 0 {
             return GoalStatus::Open(
                 "Start node 2 again, and let it find that it is below the floor. It campaigns \
@@ -299,29 +297,29 @@ lets the node vote for a ballot that it refused.",
                     .to_string(),
             );
         }
-        if healed == leader_log {
+        if floor == cluster_floor && chosen(2) >= chosen(0) {
             GoalStatus::Reached(format!(
-                "Node 2 is back with the whole prefix ({}), and it kept its promise. No peer \
-                 replayed those slots, because they do not exist any more. A peer gave node 2 \
-                 the state of the application and the boundary slot.",
-                healed.join(", ")
+                "Node 2's log starts at slot {floor}, like every other node's, and it kept its \
+                 promise. No peer replayed the slots below it, because they do not exist any \
+                 more. A peer told node 2 where its log starts, and everything below that slot \
+                 is chosen."
             ))
         } else {
             GoalStatus::Open(format!(
-                "Node 2 executed {healed:?}, and the cluster executed {leader_log:?}."
+                "Node 2's floor is slot {floor}, and the cluster's is slot {cluster_floor}."
             ))
         }
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "Compare the two ballots on the card. One of them is a promise that this node \
-             made, and no other node knows about it."
+            "Everything below the peer's trim point is chosen, and no disk holds it any more. \
+             What is left to wait for?"
                 .to_string(),
         ),
         _ => Some(
-            "Keep the higher of the two ballots. A node must not take back a promise, and the \
-             peer that sent the snapshot does not know what this node promised."
+            "Jump to the trim point and keep your promise. A node must not take back a \
+             promise, and a trim point carries no ballot."
                 .to_string(),
         ),
     },
@@ -334,8 +332,7 @@ lets the node vote for a ballot that it refused.",
             .play(propose_as(CLIENT, 0, "alpha"))
             .play(propose_as(CLIENT, 0, "bravo"))
             .settle_all();
-        // Seed a snapshot point, then truncate past node 2's position.
-        script.play(compact(0, 8)).settle_all();
+        // Truncate past node 2's position.
         script.play(compact(0, 8)).settle_all();
         // Node 2 comes back and campaigns: it has heard from no leader, and the
         // campaign broadcasts the catch-up request that finds it below the
@@ -347,7 +344,7 @@ lets the node vote for a ballot that it refused.",
         }
         script.drop_all(kind("Prepare"));
         script.settle(kind("CatchUpRequest"));
-        script.settle(kind("InstallSnapshot"));
+        script.settle(kind("TrimmedTo"));
         script.answer_all();
         script.finish()
     },

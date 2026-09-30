@@ -16,8 +16,12 @@
 //!   re-chosen at a second slot executes as a no-op cluster-wide;
 //! - the **in-flight table** — the chosen-but-not-yet-applied window a
 //!   client retry must be able to find its request in;
-//! - the **application repair** cursor (Stage 8): the range the driver's
-//!   boot replay could not walk, re-emitted in order as the values arrive.
+//! - the **journal read** ([`Replica::read`], #185): one page of chosen
+//!   client entries, holes skipped, served from the prefix.
+//!
+//! "Applied" here names the walk, not an application: since #186 paros runs
+//! no application (the client folds what it reads), and a slot is applied
+//! the moment the walk moves the prefix over it.
 //!
 //! It knows nothing about ballots, promises, leadership, quorums or the
 //! network. The one cross-component fact it consults is handed to it as
@@ -37,9 +41,34 @@ use crate::write::WriteOp;
 /// hands the application an unbounded run.
 pub const APPLY_BATCH: usize = 64;
 
-/// Maximum decided commands one application-repair pump re-emits — the bound
-/// this role enforces in [`Replica::pump_app_repair`].
-pub const APP_REPAIR_BATCH: usize = 64;
+/// The answer to a journal read ([`Replica::read`], #185).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogRead {
+    /// The read started below the retention floor: those entries are gone
+    /// here, and `trim_point` is the first slot a read may start at.
+    Trimmed {
+        /// The retention floor (the first retained slot).
+        trim_point: Slot,
+    },
+    /// A page of chosen entries.
+    Page(LogPage),
+}
+
+/// One page of chosen client entries ([`Replica::read`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogPage {
+    /// The client entries, by slot (the LSN), holes skipped.
+    pub entries: Vec<(Slot, Entry)>,
+    /// Where the next read starts: one past the last slot this page
+    /// covered, entries and holes alike.
+    pub next: Slot,
+    /// One past the contiguous chosen prefix: every slot below it is
+    /// chosen here.
+    pub committed_end: Slot,
+    /// How many holes (control commands, #94 duplicates) the page stepped
+    /// over.
+    pub skipped: u64,
+}
 
 /// The replica: chosen log, applied prefix, dedup ledger. See the module doc.
 #[derive(Clone, Debug)]
@@ -64,9 +93,6 @@ pub struct Replica {
     duplicate_slots: BTreeSet<Slot>,
     /// How many duplicates the walk suppressed this incarnation.
     duplicates_suppressed: u64,
-    /// The open application repair's cursor: the next decided slot to
-    /// re-emit, always inside the chosen prefix.
-    app_repair: Option<Slot>,
     /// Newly applied `(slot, command)` pairs, in order, for the caller's
     /// `Ready` batch.
     committed: Vec<(Slot, Command)>,
@@ -79,7 +105,7 @@ impl Replica {
     /// value — the P2c chain).
     ///
     /// The ledger starts from the sealed records — the `(client, seq) ->
-    /// slot` facts whose log records truncation (or a snapshot install)
+    /// slot` facts whose log records truncation (or a jump below a trim point)
     /// already dropped — and the walk over the retained log layers on top
     /// with first-slot-wins semantics. Sealed slots are always below the
     /// compaction floor, so the two sources never disagree; seeding sealed
@@ -131,7 +157,6 @@ impl Replica {
             inflight,
             duplicate_slots,
             duplicates_suppressed: 0,
-            app_repair: None,
             committed: Vec::new(),
         }
     }
@@ -159,12 +184,6 @@ impl Replica {
                 "a deferred prefix continuation names a chosen first-unchosen slot"
             );
         }
-        // The application repair cursor only ever points inside the chosen
-        // prefix (there is nothing decided to re-emit past it).
-        assert!(
-            self.app_repair.is_none_or(|s| s < self.first_unchosen()),
-            "the application repair cursor stays inside the chosen prefix"
-        );
         assert!(
             self.chosen.keys().next().is_none_or(|s| *s >= floor),
             "no chosen record survives below the compaction floor"
@@ -268,12 +287,6 @@ impl Replica {
         self.duplicates_suppressed
     }
 
-    /// The open application repair's cursor, if any.
-    #[must_use]
-    pub fn app_repair(&self) -> Option<Slot> {
-        self.app_repair
-    }
-
     /// Newly applied entries this batch, in order.
     #[must_use]
     pub fn committed(&self) -> &[(Slot, Command)] {
@@ -288,8 +301,7 @@ impl Replica {
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where
     /// `hole` is the first slot missing from the contiguous prefix and
     /// `highest` the highest slot above it already known chosen. `None` when
-    /// the chosen set is contiguous. An open application repair's cursor is
-    /// the hole while it is open.
+    /// the chosen set is contiguous.
     ///
     /// A read-only observability accessor: the core cannot trace, and the gap
     /// is invisible from outside because [`Ready::committed`](crate::Ready::committed)
@@ -300,16 +312,6 @@ impl Replica {
     /// keep being chosen.
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
-        if let Some(hole) = self.app_repair {
-            let highest = self
-                .chosen
-                .keys()
-                .next_back()
-                .copied()
-                .unwrap_or(hole)
-                .max(self.chosen_index.unwrap_or(hole));
-            return Some((hole, highest));
-        }
         let hole = self.first_unchosen();
         let highest = *self.chosen.range(hole..).next_back()?.0;
         Some((hole, highest))
@@ -330,6 +332,91 @@ impl Replica {
                     .map(|(&seq, &slot)| (*client, seq, slot))
             })
             .collect()
+    }
+
+    /// One page of a **journal read** (#185, `Read(journal, from_lsn,
+    /// max_bytes)`): the chosen client entries from `from` up, served from
+    /// this replica's contiguous chosen prefix and never above it.
+    ///
+    /// The log sequence number *is* the slot. A slot holding a control
+    /// command (a `Noop` gap fill, a `Truncate`) or a #94
+    /// duplicate is a **hole**: skipped, counted in [`LogPage::skipped`],
+    /// and invisible to the client except that [`LogPage::next`] steps past
+    /// it — a reader never has to know why a slot was skipped.
+    ///
+    /// `floor` is the retention floor the caller holds (the acceptor's
+    /// compaction floor on a node, the replica's own on a replica): a read
+    /// that starts below it is [`LogRead::Trimmed`], and nothing else, since
+    /// the entries there are gone. `max_bytes` bounds the page by the sum of
+    /// the entries' payload bytes, except that a page that could hold an
+    /// entry always holds at least one — a single entry larger than the
+    /// budget must still be readable.
+    ///
+    /// A `from` at or past the prefix's end returns an empty page whose
+    /// `next` is `from`: the caller (the driver) decides whether to wait for
+    /// the prefix to grow — the long-poll is not the core's.
+    ///
+    /// A slot inside the prefix whose value this node does not hold (a
+    /// corrupted record under repair) ends the page early, never skipped:
+    /// skipping it would tell the reader the slot is a hole.
+    ///
+    /// # Panics
+    ///
+    /// If the page it built breaks its own shape (entries outside
+    /// `[from, next)` or out of order): a programmer error.
+    #[must_use]
+    pub fn read(&self, from: Slot, floor: Slot, max_bytes: usize) -> LogRead {
+        if from < floor {
+            return LogRead::Trimmed { trim_point: floor };
+        }
+        let end = self.first_unchosen();
+        let mut page = LogPage {
+            entries: Vec::new(),
+            next: from.max(floor),
+            committed_end: end,
+            skipped: 0,
+        };
+        let mut bytes = 0_usize;
+        while page.next < end {
+            let slot = page.next;
+            // A slot of the prefix whose value this node lost (a CTRL
+            // `faulty` record whose repair is still open) ends the page:
+            // the reader's next read starts there and is served once the
+            // value is healed, or by another node.
+            let Some(command) = self.chosen.get(&slot) else {
+                break;
+            };
+            let entry = command
+                .user()
+                .filter(|_| !self.duplicate_slots.contains(&slot));
+            match entry {
+                Some(entry) => {
+                    let size = entry.value.0.len();
+                    if !page.entries.is_empty() && bytes.saturating_add(size) > max_bytes {
+                        break;
+                    }
+                    bytes = bytes.saturating_add(size);
+                    page.entries.push((slot, entry.clone()));
+                }
+                None => page.skipped += 1,
+            }
+            page.next = Slot(slot.0 + 1);
+        }
+        // Postconditions: the page never passes the prefix, and every entry
+        // lies in `[from, next)` in strictly increasing order.
+        assert!(
+            page.next <= end || page.next == from,
+            "a read page ends inside the chosen prefix"
+        );
+        assert!(
+            page.entries.windows(2).all(|w| w[0].0 < w[1].0)
+                && page
+                    .entries
+                    .iter()
+                    .all(|(s, _)| *s >= from && *s < page.next),
+            "a read page's entries lie in [from, next) in slot order"
+        );
+        LogRead::Page(page)
     }
 
     // ---- learning -------------------------------------------------------------
@@ -458,12 +545,7 @@ impl Replica {
                     }
                 }
             }
-            // While an application repair is open, the driver's application
-            // sits below this walk's frontier: the repair pump re-emits every
-            // decided slot in order from its cursor instead.
-            if self.app_repair.is_none() {
-                self.committed.push((next, command));
-            }
+            self.committed.push((next, command));
             next = Slot(next.0 + 1);
             advanced += 1;
         }
@@ -477,51 +559,18 @@ impl Replica {
         truncate_up_to
     }
 
-    // ---- application repair ---------------------------------------------------
-
-    /// Open an application repair from `from` (inside the chosen prefix).
-    ///
-    /// # Panics
-    ///
-    /// If `from` lies past the contiguous chosen prefix.
-    pub fn open_app_repair(&mut self, from: Slot) {
-        assert!(
-            from <= self.first_unchosen(),
-            "an application repair starts inside the chosen prefix"
-        );
-        if from >= self.first_unchosen() {
-            return;
-        }
-        self.app_repair = Some(from);
-    }
-
-    /// Re-emit the next run of decided commands the open repair can serve:
-    /// from the cursor, while each slot's value is present, bounded per
-    /// batch. Stops at `floor` (only a snapshot heals below it) or at the
-    /// first still-missing value. Closes the repair at the prefix frontier.
-    pub fn pump_app_repair(&mut self, floor: Slot) {
-        let Some(mut cursor) = self.app_repair else {
-            return;
-        };
-        let end = self.first_unchosen();
-        let mut emitted = 0_usize;
-        while cursor < end && emitted < APP_REPAIR_BATCH {
-            if cursor < floor {
-                break;
-            }
-            let Some(command) = self.chosen.get(&cursor).cloned() else {
-                break;
-            };
-            let command = if self.duplicate_slots.contains(&cursor) {
-                Command::Control(Control::Noop)
-            } else {
-                command
-            };
-            self.committed.push((cursor, command));
-            cursor = Slot(cursor.0 + 1);
-            emitted += 1;
-        }
-        self.app_repair = if cursor >= end { None } else { Some(cursor) };
+    /// **Hold** the walk instead of running it: the caller knows the
+    /// at-most-once ledger is incomplete — a chosen record inside the prefix
+    /// is faulty (a boot read it back damaged, CTRL Stage 8), so the identity
+    /// it decided is missing from the ledger until the record heals
+    /// ([`Replica::learn`]'s below-prefix fold) or a trim-point jump seals
+    /// it ([`Replica::trim_to`]). Walking past the hole would decide a later
+    /// #94 duplicate of that identity as its first application — a user
+    /// entry here, a `Noop` on every node whose ledger is whole. Only the
+    /// deferred-continuation flag is kept in step, so the first walk after
+    /// the heal resumes from the same slot.
+    pub fn hold(&mut self) {
+        self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
     }
 
     // ---- log prefix drops -----------------------------------------------------
@@ -532,33 +581,38 @@ impl Replica {
         self.chosen = self.chosen.split_off(&first);
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
         // The contiguous walk already handed every applied slot's `inflight`
-        // entry over, except the below-prefix heals recorded while an
-        // application repair is open — and a mapping into the truncated
-        // prefix would answer a retry with a `Duplicate` whose commit can
-        // never ack anyone.
+        // entry over, except the below-prefix heals of a faulty record — and
+        // a mapping into the truncated prefix would answer a retry with a
+        // `Duplicate` whose commit can never ack anyone.
         self.inflight.retain(|_, s| *s >= first);
         // The markers for the dropped prefix are spent: a restarted node
         // re-derives the set from the *retained* log only.
         self.duplicate_slots = self.duplicate_slots.split_off(&first);
     }
 
-    /// Install a snapshot boundary: jump the chosen index to `chosen_index`,
-    /// fold everything at or below it (its state is in the opaque bytes),
-    /// close an application repair the boundary covers, and adopt the
-    /// serving peer's session records for the folded prefix (`or_insert`:
-    /// the prefixes agree cluster-wide).
-    pub fn install(&mut self, chosen_index: Slot, sessions: &[SessionEntry]) {
-        let first = Slot(chosen_index.0.saturating_add(1));
-        self.chosen_index = Some(chosen_index);
-        self.chosen = self.chosen.split_off(&first);
-        self.duplicate_slots = self.duplicate_slots.split_off(&first);
-        if self.app_repair.is_some_and(|cursor| cursor <= chosen_index) {
-            self.app_repair = None;
+    /// Jump below a peer's trim point (#186, [`crate::Message::TrimmedTo`]):
+    /// drop everything below `point`, move the chosen index to at least
+    /// `point - 1` (everything below a trim point is chosen), and adopt the
+    /// serving peer's session records for the dropped prefix (`or_insert`:
+    /// the prefixes agree cluster-wide). A chosen index already past the
+    /// point stays where it is — only the prefix below the point goes.
+    ///
+    /// # Panics
+    ///
+    /// If `point` is slot zero (nothing lies below it, and no honest peer
+    /// trims nothing).
+    pub fn trim_to(&mut self, point: Slot, sessions: &[SessionEntry]) {
+        assert!(point.0 > 0, "a trim point has a chosen slot below it");
+        let boundary = Slot(point.0 - 1);
+        if self.chosen_index.is_none_or(|ci| ci < boundary) {
+            self.chosen_index = Some(boundary);
         }
+        self.chosen = self.chosen.split_off(&point);
+        self.duplicate_slots = self.duplicate_slots.split_off(&point);
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
         // The prefix jumped without the walk running, so nothing handed the
-        // folded slots' `inflight` entries over. Drop them.
-        self.inflight.retain(|_, s| *s >= first);
+        // dropped slots' `inflight` entries over. Drop them.
+        self.inflight.retain(|_, s| *s >= point);
         for (client, seq, slot) in sessions {
             self.applied_seq
                 .entry(*client)
@@ -566,5 +620,87 @@ impl Replica {
                 .entry(*seq)
                 .or_insert(*slot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{LogRead, Replica};
+    use crate::types::{Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value};
+
+    fn user(client: u64, seq: u64, bytes: &[u8]) -> Command {
+        Command::User(Entry {
+            client: ClientId(client),
+            seq: ClientSeq(seq),
+            value: Value(bytes.to_vec()),
+        })
+    }
+
+    /// A replica whose chosen prefix is `commands` from slot 0.
+    fn replica(commands: &[Command]) -> Replica {
+        let ballot = Ballot {
+            round: 1,
+            node: NodeId(1),
+        };
+        let records: BTreeMap<Slot, (Ballot, Command)> = commands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (Slot(i as u64), (ballot, c.clone())))
+            .collect();
+        let ci = commands.len().checked_sub(1).map(|i| Slot(i as u64));
+        Replica::from_boot(ci, [], &records)
+    }
+
+    fn page(read: LogRead) -> super::LogPage {
+        match read {
+            LogRead::Page(page) => page,
+            LogRead::Trimmed { .. } => panic!("expected a page"),
+        }
+    }
+
+    #[test]
+    fn a_read_skips_holes_and_names_where_the_next_one_starts() {
+        let r = replica(&[
+            user(1, 1, b"a"),
+            Command::Control(Control::Noop),
+            user(1, 1, b"a"), // a #94 duplicate of slot 0
+            Command::Control(Control::Truncate { up_to: Slot(0) }),
+            user(2, 1, b"b"),
+        ]);
+        let p = page(r.read(Slot(0), Slot(0), 1024));
+        let slots: Vec<u64> = p.entries.iter().map(|(s, _)| s.0).collect();
+        assert_eq!(slots, vec![0, 4]);
+        assert_eq!(p.skipped, 3);
+        assert_eq!(p.next, Slot(5));
+        assert_eq!(p.committed_end, Slot(5));
+    }
+
+    #[test]
+    fn a_read_is_bounded_by_bytes_but_always_carries_one_entry() {
+        let r = replica(&[user(1, 1, b"xxxx"), user(1, 2, b"yyyy"), user(1, 3, b"z")]);
+        let p = page(r.read(Slot(0), Slot(0), 1));
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.next, Slot(1));
+        let p = page(r.read(Slot(0), Slot(0), 8));
+        assert_eq!(p.entries.len(), 2);
+        assert_eq!(p.next, Slot(2));
+    }
+
+    #[test]
+    fn a_read_at_the_end_is_empty_and_a_read_below_the_floor_is_trimmed() {
+        let r = replica(&[user(1, 1, b"a")]);
+        let p = page(r.read(Slot(1), Slot(0), 64));
+        assert!(p.entries.is_empty());
+        assert_eq!(p.next, Slot(1));
+        let p = page(r.read(Slot(7), Slot(0), 64));
+        assert_eq!(p.next, Slot(7));
+        assert_eq!(
+            r.read(Slot(0), Slot(1), 64),
+            LogRead::Trimmed {
+                trim_point: Slot(1)
+            }
+        );
     }
 }

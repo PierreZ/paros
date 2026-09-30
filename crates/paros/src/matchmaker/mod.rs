@@ -13,7 +13,7 @@
 //! bootstrap, a decree promise or vote, and an activation (#125). The registry
 //! is read back through the core's [`RegistryStorage`](paros_core::RegistryStorage)
 //! port and written through [`MatchmakerStorage`] — the node's `Storage` /
-//! `NodeStorage` split, mirrored so the log's CTRL recovery applies to the
+//! `LogStorage` split, mirrored so the log's CTRL recovery applies to the
 //! registry (see [`storage`]).
 //!
 //! A cluster deployed without matchmakers never runs this loop; the node

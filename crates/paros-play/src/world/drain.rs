@@ -15,10 +15,8 @@
 //! 3. Send: one wire entry per resolved addressee.
 //! 4. Apply `committed` to the application log, then flush the held-back
 //!    truncates.
-//! 5. Serve the batch's snapshot offers — after the apply, so the bytes read
-//!    back really do cover the boundary the message advertises.
-//! 6. Answer the batch's read states.
-//! 7. `advance_recovery()`, and drain again until the node is quiet.
+//! 5. Answer the batch's read states.
+//! 6. `advance_recovery()`, and drain again until the node is quiet.
 
 use std::collections::BTreeMap;
 
@@ -45,11 +43,6 @@ pub(super) struct Batch {
     messages: Vec<(NodeId, Message)>,
     committed: Vec<(Slot, Command)>,
     read_states: Vec<ReadState>,
-    /// `(to, chosen_index, ballot)` per peer the core decided needs a
-    /// snapshot. The core holds no application state, so the *world* — which
-    /// owns the disks — fills in the opaque bytes (see
-    /// [`World::serve_snapshot_offers`]).
-    snapshot_offers: Vec<(NodeId, Slot, Ballot)>,
     /// `(started, gap fills, remaining)` when this batch carried a
     /// leader-recovery page — the marker the `LeaderRecovery` prompt gates on.
     recovery: Option<(usize, usize, usize)>,
@@ -69,7 +62,6 @@ impl Batch {
             && self.messages.is_empty()
             && self.committed.is_empty()
             && self.read_states.is_empty()
-            && self.snapshot_offers.is_empty()
             && self.match_requests.is_empty()
             && self.gc_requests.is_empty()
     }
@@ -392,7 +384,6 @@ impl World {
                 .collect(),
             committed: ready.committed().to_vec(),
             read_states: ready.read_states().to_vec(),
-            snapshot_offers: ready.snapshot_offers().to_vec(),
             recovery: ready.recovery_batch(),
             match_requests: ready.match_requests().to_vec(),
             gc_requests: ready.gc_requests().to_vec(),
@@ -431,7 +422,7 @@ impl World {
         Some(batch)
     }
 
-    /// Persist, send, apply, truncate, offer, answer — in that order.
+    /// Persist, send, apply, truncate, answer — in that order.
     fn commit_batch(&mut self, index: usize, batch: Batch) {
         let id = self.pool[index];
         // `Truncate` waits until after the application apply: see the module
@@ -443,7 +434,7 @@ impl World {
         for write in &writes {
             self.disks[index].apply(write);
         }
-        self.narrate_installs(id, &writes);
+        self.narrate_jumps(id, &writes);
         for (to, message) in batch.messages {
             if matches!(message, Message::Heartbeat { .. }) {
                 self.beats_broadcast = self.beats_broadcast.saturating_add(1);
@@ -465,24 +456,7 @@ impl World {
             );
         }
         for (slot, command) in batch.committed {
-            let marker = match &command {
-                Command::Control(Control::Snap { .. }) => Some(slot),
-                _ => None,
-            };
             self.disks[index].apply_committed(slot, command);
-            if let Some(at) = marker {
-                self.narrate(
-                    NarrationKind::Snapshot,
-                    format!(
-                        "{} retains a snapshot of its application at slot {}. A snapshot point \
-                         is a *decided* slot, so every node takes it at the same place in the \
-                         same order. That is why one node's copy can replace another node's \
-                         log.",
-                        who(id),
-                        at.0
-                    ),
-                );
-            }
         }
         for write in &truncates {
             if let WriteOp::Truncate { first, .. } = write {
@@ -506,95 +480,32 @@ impl World {
             }
             self.disks[index].apply(write);
         }
-        self.serve_snapshot_offers(index, &batch.snapshot_offers);
         for state in batch.read_states {
             self.serve_read(state);
         }
     }
 
-    /// Say what an `InstallSnapshot` write did to this node's disk.
-    fn narrate_installs(&mut self, id: NodeId, writes: &[WriteOp]) {
+    /// Say what a trim-point jump did to this node's disk.
+    fn narrate_jumps(&mut self, id: NodeId, writes: &[WriteOp]) {
         for write in writes {
-            let WriteOp::InstallSnapshot {
-                chosen_index,
-                ballot,
-                ..
-            } = write
-            else {
+            let WriteOp::TrimmedTo { point, .. } = write else {
                 continue;
             };
             let promised = self
                 .index_of(id)
                 .map(|index| self.disks[index].hard_state().max_promised_ballot);
             self.narrate(
-                NarrationKind::Snapshot,
+                NarrationKind::TrimPoint,
                 format!(
-                    "{} installs the snapshot. Its chosen prefix moves to slot {}, and its log \
-                     below that slot is gone, because the state is in the bytes now. Its durable \
-                     promise is {}. The snapshot's ballot was {}, and a promise only ever rises. \
-                     A snapshot restores the log, and it does not restore a promise.",
+                    "{} jumps to the trim point. Its floor is now slot {}, and it counts every \
+                     slot below that as chosen. It never walks those slots: they are gone on \
+                     every node, and a decided Truncate put them there. Its durable promise is \
+                     still {}. A trim point says where the log starts, and nothing about a \
+                     ballot.",
                     who(id),
-                    chosen_index.0,
+                    point.0,
                     promised.map_or_else(|| "unchanged".to_string(), crate::view::show_ballot),
-                    crate::view::show_ballot(*ballot)
                 ),
-            );
-        }
-    }
-
-    /// Fill in the opaque bytes for every snapshot offer the core recorded, and
-    /// put the `InstallSnapshot` on the wire like any other message.
-    ///
-    /// This is the driver's half of the seam (`paros::driver::ready`): the core
-    /// decided *who* needs a snapshot and *up to where* and holds no
-    /// application state, so the world, which owns the disks, reads the bytes.
-    /// The guard is the driver's too — an offer must describe **exactly** the
-    /// application prefix its message names, so an offer whose boundary the
-    /// applied log does not reach is skipped rather than sent wrong. The peer
-    /// re-asks on its next catch-up.
-    fn serve_snapshot_offers(&mut self, index: usize, offers: &[(NodeId, Slot, Ballot)]) {
-        let id = self.pool[index];
-        for &(to, at, ballot) in offers {
-            if self.disks[index].applied_slot() != Some(at) {
-                self.narrate(
-                    NarrationKind::Snapshot,
-                    format!(
-                        "{} does not serve a snapshot at slot {}. Its own application has not \
-                         executed that far, so the bytes would not describe the boundary the \
-                         message claims. The peer asks again.",
-                        who(id),
-                        at.0
-                    ),
-                );
-                continue;
-            }
-            let sessions = self.nodes[index]
-                .as_ref()
-                .map(ColocatedNode::session_ledger)
-                .unwrap_or_default();
-            let snapshot = self.disks[index].snapshot();
-            self.narrate(
-                NarrationKind::Snapshot,
-                format!(
-                    "{} offers {} a snapshot instead of a replay. The slots it asked for are \
-                     below this node's floor, and they no longer exist anywhere. The bytes are \
-                     the application's own state at slot {}. paros ships those bytes and never \
-                     reads them.",
-                    who(id),
-                    who(to),
-                    at.0
-                ),
-            );
-            self.send(
-                Party::Node(id),
-                Party::Node(to),
-                Envelope::Node(Message::InstallSnapshot {
-                    from: id,
-                    ballot,
-                    chosen_index: at,
-                    snapshot,
-                    sessions,
-                }),
             );
         }
     }

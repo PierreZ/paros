@@ -1,6 +1,6 @@
 //! Chain-of-Blocks client workload.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -11,12 +11,16 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
     buggify_with_prob, swarm_op_enabled,
 };
-use paros::{QuorumSystem, Read, RetireRequest, WireQuorumSystem, quorum_system_from_proto};
+use paros::{
+    CheckTail, ClientId, ClientSeq, Command, Entry, JournalId, QuorumSystem, Read, RetireRequest,
+    TailPath, Value, WireQuorumSystem, command_hash, encode_records, quorum_system_from_proto,
+};
 
-use crate::audit::{AuditWorld, ClientHistory, audit_world, check_run};
-use crate::chain::{ChainState, hash_text, trace_truncate, user_command_hash};
+use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
+use crate::chain::{hash_text, trace_truncate, user_command_hash};
 use crate::client::{ClientRuntime, client_rpc_config};
 
+mod fold;
 mod rpc;
 
 use crate::{CHAOS_DURATION_MS, DigestSink};
@@ -33,7 +37,7 @@ const DUP_REPROPOSE: u8 = 5;
 const DUAL_SUBMIT: u8 = 6;
 const COMPACT_STORM: u8 = 7;
 /// The PUBLIC read-index RPC (the driver's leadership-confirmed linearizable
-/// read), as opposed to [`READ_STATE`]'s internal inspect probe.
+/// read), as opposed to [`READ_STATE`]'s fold of the journal to its tail.
 const READ_INDEX: u8 = 8;
 /// **Retired.** Once a client-side stand-in for the leader's matchmaking
 /// phase (#119); superseded by the real phase in `paros_core::ColocatedNode`
@@ -70,7 +74,20 @@ const RETIRE: u8 = 13;
 /// by exactly the checks [`READ_INDEX`] is: the per-client frontier, read
 /// your writes, and the merged history's linearizability.
 const QUORUM_READ: u8 = 14;
-const OP_COUNT: u8 = 15;
+/// The PUBLIC **journal read** (#185): `Read(from_lsn, max_bytes)` asked of
+/// a node or a replica drawn at random, from this client's tailing cursor,
+/// from its own last acked slot, from the start of the log, or far past the
+/// end. Judged here as it arrives: every entry is the value the audit knows
+/// was decided at its slot, the page lies in `[from, next)` in order, this
+/// client's own acked appends inside the page are in it, the cursor never
+/// moves backwards, and a trim answer refuses only reads below it.
+const READ: u8 = 15;
+/// The PUBLIC **linearizable tail** (#185, `CheckTail`) on a path this step
+/// draws — read-index at the leader or a quorum read anywhere — judged by
+/// exactly the checks [`READ_INDEX`] and [`QUORUM_READ`] are, which pin the
+/// path.
+const CHECK_TAIL: u8 = 16;
+const OP_COUNT: u8 = 17;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -172,6 +189,10 @@ struct ChainConfig {
     /// How long a connection may stay silent after a ping. Floor 250 ms: a
     /// timeout under the round trip fails a healthy connection on every ping.
     keep_alive_timeout_ms: u64,
+    /// The byte budget a journal `READ` asks a page for. Floor 0: a page
+    /// that can hold an entry always holds one, so the floor is a reader
+    /// that walks the log one entry per call — slower, never stuck.
+    read_max_bytes: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -216,9 +237,10 @@ impl ChainConfig {
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
+            read_max_bytes: buggify_knob!(4096_u64, 0_u64..257_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
             // MATCHMAKE (retired), MATCH_GC (retired), RECONFIGURE,
-            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ
+            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ, READ, CHECK_TAIL
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -248,6 +270,11 @@ impl ChainConfig {
                 // server's prefix; the ceiling is a read-heavy client, the
                 // floor one that never takes the leaderless path.
                 buggify_knob!(10_u64, 0_u64..41_u64),
+                // A journal read is a pure read of one process's prefix (or
+                // a long-poll at its end); the ceiling is a tailing reader.
+                buggify_knob!(14_u64, 0_u64..41_u64),
+                // A tail on a drawn path costs what its path costs.
+                buggify_knob!(8_u64, 0_u64..41_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -523,6 +550,65 @@ struct AckedCommand {
     node: usize,
 }
 
+/// Judge one journal `Read` answer (#185) against the audit and this
+/// client's own acked appends: every entry is the value decided at its slot,
+/// the page lies in `[from, next)` in slot order, this client's acked appends
+/// inside `[from, next)` are in it (a page never hides a real entry as a
+/// hole), and a trim answer carries nothing.
+fn judge_read(
+    audit: &AuditWorld,
+    client_id: u64,
+    from: u64,
+    ack: &paros::ReadAck,
+    acked: &[AckedCommand],
+) {
+    if let Some(trim) = ack.trimmed_to {
+        assert_always!(
+            ack.entries.is_empty() && from < trim,
+            "chain: a trimmed read carries nothing and names a point above its start",
+            { "from" => from, "trim" => trim }
+        );
+        return;
+    }
+    let mut previous: Option<u64> = None;
+    for entry in &ack.entries {
+        assert_always!(
+            entry.lsn >= from
+                && entry.lsn < ack.next_lsn
+                && previous.is_none_or(|p| p < entry.lsn),
+            "chain: a read page lies in [from, next) in slot order",
+            { "from" => from, "lsn" => entry.lsn, "next" => ack.next_lsn }
+        );
+        previous = Some(entry.lsn);
+        // The slot's decided value, rebuilt from the page: the identity and
+        // the framed records are exactly what the slot holds.
+        let command = Command::User(Entry {
+            client: ClientId(entry.client),
+            seq: ClientSeq(entry.seq),
+            value: Value(encode_records(&entry.records)),
+        });
+        if let Some(decided) = audit.decided_vhash(entry.lsn) {
+            assert_always!(
+                decided == command_hash(&command),
+                "chain: a read entry is the value decided at its slot",
+                { "lsn" => entry.lsn, "client" => entry.client, "seq" => entry.seq }
+            );
+        }
+    }
+    for own in acked
+        .iter()
+        .filter(|own| own.slot >= from && own.slot < ack.next_lsn)
+    {
+        assert_always!(
+            ack.entries
+                .iter()
+                .any(|e| e.lsn == own.slot && e.client == client_id && e.seq == own.seq),
+            "chain: a read covering an acked append returns it",
+            { "slot" => own.slot, "seq" => own.seq, "from" => from, "next" => ack.next_lsn }
+        );
+    }
+}
+
 const TAIL_KEY: &str = "paros-chain-tail";
 
 /// How long the cluster must stay converged and unchanged before the run is
@@ -534,38 +620,6 @@ const TAIL_KEY: &str = "paros-chain-tail";
 /// of the tail's end, not a shape the run takes.
 const SETTLE: Duration = Duration::from_secs(1);
 
-/// The replicas of one full probe (every live node answered, all at the same
-/// applied count) whose digest disagrees with the lowest-id replica's. Each
-/// entry keeps its **real node id**: the probe skips parked nodes, so the
-/// position in the answer list is not the node, and a diagnostic that used it
-/// would blame the wrong replica whenever a lower-id node was parked.
-fn divergent_replicas(observed: &[(usize, ChainState)]) -> Vec<(usize, ChainState)> {
-    let Some(&(_, reference)) = observed.first() else {
-        return Vec::new();
-    };
-    observed
-        .iter()
-        .skip(1)
-        .filter(|(_, state)| state.chain_hash != reference.chain_hash)
-        .copied()
-        .collect()
-}
-
-/// `node=<id> count=<n> state=<digest>` per replica, for a detail map.
-fn describe_replicas(replicas: &[(usize, ChainState)]) -> String {
-    replicas
-        .iter()
-        .map(|(node, state)| {
-            format!(
-                "node={node} count={} state={}",
-                state.applied_count,
-                hash_text(state.chain_hash)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// The run's shared tail bookkeeping, one per iteration: how many clients the
 /// run has and how many have finished proposing. Convergence is only called
 /// once *every* client is quiet — the first client to see it ends the run, and
@@ -574,6 +628,10 @@ fn describe_replicas(replicas: &[(usize, ChainState)]) -> String {
 struct Tail {
     registered: usize,
     done_proposing: usize,
+    /// The journals some client saw converged (#188): the run ends only once
+    /// every journal a client appends to is, or a sibling journal still
+    /// settling would be cut short.
+    converged: BTreeSet<JournalId>,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -595,6 +653,10 @@ struct AdversarialCoverage {
     read_index_committed: bool,
     /// A `QUORUM_READ` step ran (the draw fired).
     quorum_read_executed: bool,
+    /// A `CHECK_TAIL` step ran.
+    check_tail_executed: bool,
+    /// A `READ` step ran.
+    read_executed: bool,
     /// One flag per [`RECONFIGURE_SHAPES`] entry: the shape was requested and
     /// the leader started it.
     reconfigure_started: [bool; 5],
@@ -630,6 +692,12 @@ pub(crate) struct ChainWorkload {
     history: ClientHistory,
     /// Where to publish the audit's end-of-run digest (the determinism proof).
     digest: Option<DigestSink>,
+    /// The journal this client appends to and reads (#188), and the run's
+    /// plan (set in `setup`).
+    journal: JournalId,
+    plan: Option<crate::shape::JournalPlan>,
+    /// This client's id (set in `setup`).
+    client_id: u64,
 }
 
 impl ChainWorkload {
@@ -639,6 +707,9 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
+            journal: JournalId::default(),
+            plan: None,
+            client_id: 0,
         }
     }
 
@@ -681,6 +752,9 @@ impl ChainWorkload {
     ) -> Submission {
         let seq = *next_seq;
         *next_seq = next_seq.saturating_add(1);
+        // The non-interference oracle's ground truth (#188): this identity
+        // belongs to this client's journal and to no other.
+        audit.note_appended(self.client_id, seq);
         let payload_class = usize::try_from(class % 4).unwrap_or(0);
         let payload = Self::payload(
             class,
@@ -688,7 +762,9 @@ impl ChainWorkload {
             config.large_command_bytes,
             seed,
         );
-        let cmd_hash = user_command_hash(&payload);
+        // The slot decides the append's framed records (#185), not the raw
+        // payload: the application folds what the slot holds.
+        let cmd_hash = user_command_hash(&paros::encode_records(std::slice::from_ref(&payload)));
         audit.note_submitted(cmd_hash);
         self.history.record_write_issued(seq, now_ms);
         tracing::info!(
@@ -760,6 +836,19 @@ impl Workload for ChainWorkload {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .registered += 1;
+        // The run's journals (#188): drawn once per seed by whoever asks
+        // first, the same for every node and client; clients are spread over
+        // them round-robin.
+        let has_matchmakers = !crate::roles::deployment(ctx.topology())
+            .matchmakers()
+            .is_empty();
+        let plan = crate::shape::journals(ctx.state(), has_matchmakers, true);
+        self.client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+        self.journal = plan.for_client(ctx.client_id());
+        self.plan = Some(plan);
+        // Every client folds its journal from the start, so the trim fence
+        // holds every trim back until this client has folded past it.
+        fold::register(ctx.state(), self.journal, self.client_id);
         Ok(())
     }
 
@@ -793,9 +882,6 @@ impl Workload for ChainWorkload {
         // whoever asked first — a node or this client — and the same for
         // both.
         let policy = crate::shape::quorum_policy(ctx.state(), servers.len(), true);
-        // Bare acceptors (#144): the pool votes and applies nothing, so its
-        // application state is never probed — the replicas hold it.
-        let bare = crate::shape::bare_acceptors(ctx.state(), deployment.replica_count(), true);
         // The matchmaker pool's address book and the floor no matchmaker set
         // this client asks for goes below (#125): the bootstrap set's size,
         // capped at three — the smallest set that keeps a quorum after the
@@ -824,7 +910,12 @@ impl Workload for ChainWorkload {
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
-        let replica_clients = runtime.clients(deployment.replicas())?;
+        // The replica tier serves the default journal alone (#188).
+        let replica_clients = if self.journal == JournalId::default() {
+            runtime.clients(deployment.replicas())?
+        } else {
+            Vec::new()
+        };
 
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
@@ -832,7 +923,8 @@ impl Workload for ChainWorkload {
         let shutdown = ctx.shutdown().clone();
         let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         self.history.set_client(client_id);
-        let audit = audit_world(ctx.state());
+        let journal = self.journal;
+        let audit = audit_world_for(ctx.state(), journal);
         let now_ms = {
             let time = time.clone();
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
@@ -843,7 +935,6 @@ impl Workload for ChainWorkload {
         let mut hint = LeaderHint::default();
         let mut max_acked_slot: Option<u64> = None;
         let mut successful_after_ambiguity = false;
-        let mut live_states = BTreeMap::<u64, u64>::new();
         let mut acked_commands = Vec::<AckedCommand>::new();
         // The highest read-index watermark this client has observed committed
         // (`None` is the empty applied prefix, ordered below `Some(0)`). This
@@ -851,20 +942,38 @@ impl Workload for ChainWorkload {
         // starts after an earlier one completed: linearizability demands its
         // watermark never move backwards.
         let mut last_read_frontier: Option<u64> = None;
+        // This client's fold of the journal (#186): the application this
+        // client is, and its tailing cursor (#185) — where its tailing reads
+        // start, only ever moved forward by a page's `next_lsn`.
+        let mut fold = fold::Fold::new(journal);
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
-            rpc::propose_once(&clients, &time, client_id, target, seq, payload, abandon)
+            rpc::propose_once(
+                &clients,
+                &time,
+                (journal, client_id),
+                target,
+                seq,
+                payload,
+                abandon,
+            )
         };
-        let compact_once =
-            |target: usize, up_to: u64| rpc::compact_once(&clients, &time, &config, target, up_to);
+        let compact_once = |target: usize, up_to: u64| {
+            rpc::compact_once(&clients, &time, journal, &config, target, up_to)
+        };
         // One compaction request as the trace tells it: the `Truncate` it asks
-        // for, then whether the leader accepted it.
+        // for, clamped below every folding client's cursor (the trim fence,
+        // `fold`), then whether the leader accepted it.
         let compact_traced = |target: usize, up_to: u64| {
-            trace_truncate(up_to);
-            let attempt = compact_once(target, up_to);
+            let attempt = fold::clamp(ctx.state(), journal, up_to).map(|up_to| {
+                trace_truncate(up_to);
+                (up_to, compact_once(target, up_to))
+            });
             async move {
-                if matches!(attempt.await, CompactResult::Accepted { .. }) {
+                if let Some((up_to, attempt)) = attempt
+                    && matches!(attempt.await, CompactResult::Accepted { .. })
+                {
                     tracing::info!(up_to, "chain_compact_accepted");
                 }
             }
@@ -947,6 +1056,16 @@ impl Workload for ChainWorkload {
             let raw_pause = ctx.random().random::<u64>();
             let raw_policy = ctx.random().random::<u64>();
             let op = Self::choose_operation(&config, &operations, raw_op);
+            // The matchmaker plane — an acceptor or matchmaker
+            // reconfiguration, a retirement — belongs to the default journal
+            // (#188): a client of another journal pauses instead.
+            let op = if journal != JournalId::default()
+                && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
+            {
+                PAUSE
+            } else {
+                op
+            };
             let target =
                 usize::try_from(raw_target % u64::try_from(server_count).unwrap_or(1)).unwrap_or(0);
             let retarget = Retarget::from_draw(raw_policy);
@@ -1250,6 +1369,17 @@ impl Workload for ChainWorkload {
                         && config.compaction
                         && raw_pause % config.compact_every == 0
                     {
+                        // Fold first: the fence holds a trim below this
+                        // client's own cursor too.
+                        fold.read_to_tail(
+                            ctx,
+                            &audit,
+                            &clients[target],
+                            client_id,
+                            config.read_max_bytes,
+                            request_timeout,
+                        )
+                        .await;
                         compact_traced(hint.current.unwrap_or(target), up_to).await;
                     }
                 }
@@ -1259,6 +1389,12 @@ impl Workload for ChainWorkload {
                         for attempt in 0..config.compact_storm_attempts {
                             let mode = (first_mode + attempt) % 3;
                             let (mode_name, up_to, request_target) = match mode {
+                                // Far past any chosen prefix. A trim is the
+                                // client's permission (#186), so the leader
+                                // decides it and every node drops up to its
+                                // chosen index when it walks the slot: the
+                                // fence below turns it into the furthest trim
+                                // every folding client allows.
                                 0 => (
                                     "overask",
                                     base.saturating_add(10_000 + raw_payload % 10_000),
@@ -1278,9 +1414,11 @@ impl Workload for ChainWorkload {
                                 }
                                 _ => continue,
                             };
-                            let cmd_hash = trace_truncate(up_to);
+                            let Some(up_to) = fold::clamp(ctx.state(), journal, up_to) else {
+                                continue;
+                            };
+                            trace_truncate(up_to);
                             tracing::info!(
-                                cmd = %hash_text(cmd_hash),
                                 up_to,
                                 target = request_target,
                                 mode = mode_name,
@@ -1334,17 +1472,29 @@ impl Workload for ChainWorkload {
                         }
                     }
                 }
-                READ_INDEX | QUORUM_READ => {
-                    // The two public linearizable reads, judged alike. The
-                    // read-index read: the driver captures the leader's
-                    // applied watermark, confirms leadership with a
-                    // heartbeat-ack quorum round, and only then answers. The
-                    // quorum read (#143): any node asks a row for its vote
-                    // watermarks and answers once its prefix covers the
-                    // maximum — so it goes to a node drawn at random, never
-                    // to the hint. A timeout is Ambiguous — nothing is
-                    // recorded or assumed.
-                    let quorum = op == QUORUM_READ;
+                READ_INDEX | QUORUM_READ | CHECK_TAIL => {
+                    // The public linearizable tail (`CheckTail`, #185) on
+                    // its two paths, judged alike. The read-index path: the
+                    // driver captures the leader's chosen watermark, confirms
+                    // leadership with a heartbeat-ack quorum round, and only
+                    // then answers. The quorum path (#143): any node asks a
+                    // row for its vote watermarks and answers once its prefix
+                    // covers the maximum — so it goes to a node drawn at
+                    // random, never to the hint. `READ_INDEX` and
+                    // `QUORUM_READ` pin the path; `CHECK_TAIL` draws it, as a
+                    // journal client that does not care would. A timeout is
+                    // Ambiguous — nothing is recorded or assumed.
+                    let quorum = match op {
+                        QUORUM_READ => true,
+                        CHECK_TAIL => {
+                            if !self.adversarial.check_tail_executed {
+                                assert_reachable!("chain: check-tail operation executes");
+                                self.adversarial.check_tail_executed = true;
+                            }
+                            raw_target & (1 << 20) != 0
+                        }
+                        _ => false,
+                    };
                     let seq = next_seq;
                     next_seq = next_seq.saturating_add(1);
                     if quorum {
@@ -1384,18 +1534,18 @@ impl Workload for ChainWorkload {
                             Some(replica) => replica_clients[replica].clone(),
                             None => clients[attempt_target].clone(),
                         };
-                        let request = Read {
+                        let request = CheckTail {
+                            journal: journal.0,
                             client: client_id,
                             seq,
-                        };
-                        let call = async move {
-                            let response = if quorum {
-                                client.quorum_read(&request).await
+                            path: if quorum {
+                                TailPath::Quorum
                             } else {
-                                client.read(&request).await
-                            };
-                            response.ok()
+                                TailPath::Leader
+                            }
+                            .into(),
                         };
+                        let call = async move { client.check_tail(&request).await.ok() };
                         let attempt = within(ctx, remaining, None, call).await;
                         match attempt {
                             Some(ack) => {
@@ -1403,8 +1553,16 @@ impl Workload for ChainWorkload {
                                     ack.seq == seq,
                                     "chain: read-index ack echoes request"
                                 );
+                                assert_always!(
+                                    !ack.unknown_journal,
+                                    "chain: a node serves the journal the client names"
+                                );
                                 if ack.committed {
-                                    break Some(ack.read_index);
+                                    // The tail is exclusive; the history
+                                    // judges the last chosen slot.
+                                    break Some(
+                                        ack.committed_end.and_then(|end| end.checked_sub(1)),
+                                    );
                                 }
                                 // Redirect, by this step's policy, inside
                                 // the same deadline. An overdue quorum read
@@ -1476,33 +1634,104 @@ impl Workload for ChainWorkload {
                         );
                     }
                 }
-                READ_STATE => {
-                    // On a bare seed the application lives on the replicas:
-                    // the probe reads one of them instead.
-                    let client = if bare {
-                        let span = replica_clients.len().max(1);
-                        match replica_clients.get(target % span) {
-                            Some(replica) => replica.clone(),
-                            None => clients[target].clone(),
+                READ => {
+                    if !self.adversarial.read_executed {
+                        assert_reachable!("chain: journal-read operation executes");
+                        self.adversarial.read_executed = true;
+                    }
+                    // Where the read starts, from the class draw: the
+                    // tailing cursor (most often — the reader that long-polls
+                    // at the end and meets the trim point as the log moves),
+                    // this client's own last acked slot, the log's start, or
+                    // far past any end (a long-poll answered empty).
+                    let tailing = raw_class % 4 < 2;
+                    let from = match raw_class % 4 {
+                        0 | 1 => fold.cursor(),
+                        2 => max_acked_slot.unwrap_or(0),
+                        _ => {
+                            if raw_class & (1 << 8) != 0 {
+                                0
+                            } else {
+                                fold.cursor().saturating_add(1 << 20)
+                            }
+                        }
+                    };
+                    // Any node or replica serves a journal read.
+                    let replica_count = replica_clients.len();
+                    let span = u64::try_from(server_count + replica_count)
+                        .unwrap_or(1)
+                        .max(1);
+                    let drawn = usize::try_from((raw_target >> 32) % span).unwrap_or(0);
+                    let client = match drawn.checked_sub(server_count) {
+                        Some(replica) => replica_clients[replica].clone(),
+                        None => clients[drawn].clone(),
+                    };
+                    // A client naming a journal this deployment does not
+                    // serve (`0`, the unset id, or another user journal) must
+                    // be refused, never answered from the wrong log.
+                    let stray = buggify_with_prob!(0.05);
+                    let journal = if stray {
+                        assert_reachable!("chain: a client asks for a journal nobody serves");
+                        if raw_policy & 1 == 0 {
+                            0
+                        } else {
+                            // Past every journal a run serves (#188: at
+                            // most three, from `FIRST_USER`).
+                            JournalId::FIRST_USER.0 + 1000
                         }
                     } else {
-                        clients[target].clone()
+                        journal.0
                     };
-                    if let Some(state) = inspect(ctx, &client, request_timeout)
-                        .await
-                        .and_then(|reply| ChainState::decode(&reply.snapshot).ok())
-                    {
-                        let prior = live_states.insert(state.applied_count, state.chain_hash);
-                        assert_always!(
-                            prior.is_none_or(|hash| hash == state.chain_hash),
-                            "chain: live reads agree at equal count"
-                        );
-                        tracing::info!(
-                            index = state.applied_count,
-                            state = %hash_text(state.chain_hash),
-                            "chain_state_read"
-                        );
+                    let request = Read {
+                        journal,
+                        from_lsn: from,
+                        max_bytes: config.read_max_bytes,
+                    };
+                    let call = async move { client.read(&request).await.ok() };
+                    if let Some(ack) = within(ctx, request_timeout, None, call).await {
+                        if stray {
+                            assert_always!(
+                                ack.unknown_journal && ack.entries.is_empty(),
+                                "chain: a read naming another journal is refused",
+                                { "journal" => journal }
+                            );
+                        } else {
+                            assert_always!(
+                                !ack.unknown_journal,
+                                "chain: a node serves the journal the client names"
+                            );
+                            judge_read(&audit, client_id, from, &ack, &acked_commands);
+                            if tailing {
+                                // A tailing page folds into this client's
+                                // state and moves its cursor forward.
+                                fold.absorb(&audit, ctx.state(), client_id, from, &ack);
+                            }
+                        }
                     }
+                }
+                READ_STATE => {
+                    // Fold to the tail through any node or replica: the
+                    // application's state is this client's fold (#186).
+                    let span = server_count + replica_clients.len();
+                    let drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
+                    let via = match drawn.checked_sub(server_count) {
+                        Some(replica) => replica_clients[replica].clone(),
+                        None => clients[drawn].clone(),
+                    };
+                    fold.read_to_tail(
+                        ctx,
+                        &audit,
+                        &via,
+                        client_id,
+                        config.read_max_bytes,
+                        request_timeout,
+                    )
+                    .await;
+                    tracing::info!(
+                        index = fold.state().applied_count,
+                        state = %hash_text(fold.state().chain_hash),
+                        "chain_state_read"
+                    );
                 }
                 PAUSE => {
                     let delay = 1 + raw_pause % config.pause_ms;
@@ -1522,16 +1751,19 @@ impl Workload for ChainWorkload {
                     // operating condition, never a wrong state.
                     let probe_target = hint.current.unwrap_or(target);
                     let probe = clients[probe_target].clone();
-                    let in_force = inspect(ctx, &probe, request_timeout).await.map(|reply| {
-                        let wire = WireQuorumSystem {
-                            quorum_system: reply.quorum_system,
-                            phase1_quorum: reply.phase1_quorum,
-                            phase2_quorum: reply.phase2_quorum,
-                            rows: reply.rows,
-                            cols: reply.cols,
-                        };
-                        (reply.members, quorum_system_from_proto(&wire).ok())
-                    });
+                    let in_force =
+                        inspect(ctx, &probe, journal, request_timeout)
+                            .await
+                            .map(|reply| {
+                                let wire = WireQuorumSystem {
+                                    quorum_system: reply.quorum_system,
+                                    phase1_quorum: reply.phase1_quorum,
+                                    phase2_quorum: reply.phase2_quorum,
+                                    rows: reply.rows,
+                                    cols: reply.cols,
+                                };
+                                (reply.members, quorum_system_from_proto(&wire).ok())
+                            });
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
@@ -1539,7 +1771,10 @@ impl Workload for ChainWorkload {
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
-                    let live = live_candidates(&servers, &crate::world::parked_nodes(ctx.state()));
+                    let live = live_candidates(
+                        &servers,
+                        &crate::world::parked_nodes(ctx.state(), journal),
+                    );
                     // The adversarial draw (R5): compose from *every* rank
                     // instead, so the request may name an identity the run
                     // lost for good. A well-behaved operator would not, and
@@ -1772,9 +2007,10 @@ impl Workload for ChainWorkload {
                     // only makes the handover superseded or refused — an
                     // operating condition, never a wrong state.
                     let probe = clients[target].clone();
-                    let current: Option<(u64, Vec<u64>)> = inspect(ctx, &probe, request_timeout)
-                        .await
-                        .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
+                    let current: Option<(u64, Vec<u64>)> =
+                        inspect(ctx, &probe, journal, request_timeout)
+                            .await
+                            .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
                     let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
                     let candidates = live_candidates(
                         &matchmaker_ips,
@@ -1877,7 +2113,7 @@ impl Workload for ChainWorkload {
                     // outside C_b", and the node itself refuses the request
                     // unless the watermark proves every configuration it was
                     // a member of is forgotten (#123).
-                    let inspected = inspect(ctx, &probe, request_timeout).await;
+                    let inspected = inspect(ctx, &probe, journal, request_timeout).await;
                     let (retirable, in_force, gc_watermark) = inspected
                         .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
                         .unwrap_or_default();
@@ -1885,7 +2121,7 @@ impl Workload for ChainWorkload {
                         retirable.is_empty() || has_matchmakers,
                         "gc: a deployment without matchmakers never names a retirable node"
                     );
-                    let parked = crate::world::parked_nodes(ctx.state());
+                    let parked = crate::world::parked_nodes(ctx.state(), journal);
                     let live = |id: &u64| {
                         usize::try_from(*id)
                             .ok()
@@ -1910,7 +2146,7 @@ impl Workload for ChainWorkload {
                         let beliefs = join_all(
                             candidates
                                 .iter()
-                                .map(|i| inspect(ctx, &clients[*i], request_timeout)),
+                                .map(|i| inspect(ctx, &clients[*i], journal, request_timeout)),
                         )
                         .await;
                         stale_member = candidates.iter().zip(beliefs).find_map(|(i, reply)| {
@@ -2181,43 +2417,43 @@ impl Workload for ChainWorkload {
 
         let mut converged = false;
         // The last probe, `(node, answer)` per live node in node order — the
-        // node id travels with its state from the read through the settle
+        // node id travels with its answer from the read through the settle
         // decision to the red-path print, so a parked node dropping out of the
-        // live set can never shift the blame onto its neighbour.
-        let mut last_probe: Vec<(usize, Option<ChainState>)> = Vec::new();
-        // `(since, state)`: when the cluster was first seen converged at
-        // `state`, reset whenever a probe disagrees.
-        let mut stable: Option<(Duration, ChainState)> = None;
+        // live set can never shift the blame onto its neighbour. An answer is
+        // one past the node's contiguous chosen prefix (#186: the prefix *is*
+        // a node's state; there is no application behind it to compare).
+        let mut last_probe: Vec<(usize, Option<u64>)> = Vec::new();
+        // `(since, end)`: when the cluster was first seen converged at `end`,
+        // reset whenever a probe disagrees.
+        let mut stable: Option<(Duration, u64)> = None;
         while time.now() < recovery_deadline && !shutdown.is_cancelled() {
             // A node terminally parked by a detected corruption (Stage 7's
             // detect ⇒ crash baseline) never answers again — the availability
             // cost the dead-node budget bounds. Convergence is demanded of
             // every *live* node; the parked set's unavailability is separately
             // asserted as explained (audit + storage gates).
-            let parked = crate::world::parked_nodes(ctx.state());
+            let parked = crate::world::parked_nodes(ctx.state(), journal);
             // A replica is probed after the acceptors, numbered past them
             // (`server_count + rank`); its disk is never parked.
-            // A bare acceptor holds no application state to compare; its
-            // chosen prefix is the audit's convergence claim.
             let live: Vec<usize> = (0..server_count)
-                .filter(|i| !bare && !parked.contains(&servers[*i]))
+                .filter(|i| !parked.contains(&servers[*i]))
                 .chain(server_count..server_count + replica_clients.len())
                 .collect();
-            let mut observed: Vec<(usize, ChainState)> = Vec::with_capacity(live.len());
+            let mut observed: Vec<(usize, u64)> = Vec::with_capacity(live.len());
             let mut unanswered = false;
             for &node in &live {
                 let client = match node.checked_sub(server_count) {
                     Some(replica) => replica_clients[replica].clone(),
                     None => clients[node].clone(),
                 };
-                let state = inspect(ctx, &client, request_timeout)
+                let end = inspect(ctx, &client, journal, request_timeout)
                     .await
-                    .and_then(|reply| ChainState::decode(&reply.snapshot).ok());
-                let Some(state) = state else {
+                    .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
+                let Some(end) = end else {
                     unanswered = true;
                     break;
                 };
-                observed.push((node, state));
+                observed.push((node, end));
             }
             last_probe = live
                 .iter()
@@ -2225,91 +2461,101 @@ impl Workload for ChainWorkload {
                     let answer = observed
                         .iter()
                         .find(|(observed_node, _)| *observed_node == node)
-                        .map(|(_, state)| *state);
+                        .map(|(_, end)| *end);
                     (node, answer)
                 })
                 .collect();
-            // This is deliberately independent of `command_applied`: these are
-            // live RPC reads of each application's opaque snapshot. A driver or
-            // trace bug cannot manufacture agreement here. Different counts may
-            // be ordinary catch-up; equal counts with different digests are an
-            // immediate state-machine-safety violation.
-            // On a bare seed (#144) the acceptors hold no application state,
-            // but the tail still waits for every live one's chosen prefix to
-            // reach the replicas' applied count: a partitioned acceptor must
-            // heal before the run is judged, exactly as a colocated one must.
-            let bare_lagging = match (bare, observed.first()) {
-                (true, Some((_, reference))) if !unanswered => {
-                    let mut lagging = false;
-                    for i in (0..server_count).filter(|i| !parked.contains(&servers[*i])) {
-                        let client = clients[i].clone();
-                        let chosen = inspect(ctx, &client, request_timeout)
-                            .await
-                            .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
-                        if chosen != Some(reference.applied_count) {
-                            lagging = true;
-                            break;
-                        }
-                    }
-                    lagging
-                }
-                _ => false,
+            let all_quiet = {
+                let guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.done_proposing == guard.registered
             };
-            if let Some((reference_node, reference)) =
-                (!unanswered).then(|| observed.first().copied()).flatten()
-            {
-                let equal_count = observed
-                    .iter()
-                    .all(|(_, state)| state.applied_count == reference.applied_count);
-                if equal_count {
+            match (!unanswered).then(|| observed.first().copied()).flatten() {
+                Some((_, reference))
+                    if all_quiet
+                        && reference > pre_tail_count
+                        && observed.iter().all(|(_, end)| *end == reference) =>
+                {
                     if !self.external_digests_compared {
                         assert_reachable!(
                             "chain: external replica digests are compared after chaos"
                         );
                         self.external_digests_compared = true;
                     }
-                    let divergent = divergent_replicas(&observed);
-                    assert_always!(
-                        divergent.is_empty(),
-                        "chain: live reads agree at equal count",
-                        {
-                            "reference_node" => reference_node,
-                            "applied_count" => reference.applied_count,
-                            "expected_state" => hash_text(reference.chain_hash),
-                            "divergent" => describe_replicas(&divergent),
-                        }
-                    );
-                    let all_quiet = {
-                        let guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
-                        guard.done_proposing == guard.registered
-                    };
-                    if all_quiet
-                        && !bare_lagging
-                        && reference.applied_count > pre_tail_count
-                        && observed.iter().all(|(_, state)| *state == reference)
-                    {
-                        match stable {
-                            Some((since, state)) if state == reference => {
-                                if time.now().saturating_sub(since) >= SETTLE {
-                                    converged = true;
-                                    break;
-                                }
+                    match stable {
+                        Some((since, end)) if end == reference => {
+                            if time.now().saturating_sub(since) >= SETTLE {
+                                converged = true;
+                                break;
                             }
-                            _ => stable = Some((time.now(), reference)),
                         }
-                    } else {
-                        stable = None;
+                        _ => stable = Some((time.now(), reference)),
                     }
-                } else {
-                    stable = None;
                 }
-            } else {
-                stable = None;
+                _ => stable = None,
             }
             time.sleep(Duration::from_millis(config.probe_interval_ms))
                 .await
                 .ok();
         }
+        // #188: this journal converged; the run ends only once every journal
+        // a client appends to has, so wait (to the same deadline) for the
+        // siblings — a client whose journal is quiet keeps the run alive for
+        // one still settling.
+        if converged {
+            let appended_to: BTreeSet<JournalId> = self
+                .plan
+                .as_ref()
+                .map(|plan| {
+                    plan.ids
+                        .iter()
+                        .take(ctx.client_count().max(1))
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default();
+            tail.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .converged
+                .insert(journal);
+            while time.now() < recovery_deadline && !shutdown.is_cancelled() {
+                let all = appended_to.is_subset(
+                    &tail
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .converged,
+                );
+                if all {
+                    break;
+                }
+                time.sleep(Duration::from_millis(config.probe_interval_ms))
+                    .await
+                    .ok();
+            }
+        }
+        // The converged cluster, read the way a journal client reads it: one
+        // last fold from this client's cursor to the tail, so every client's
+        // fold meets every other's on the entries they share.
+        if converged && let Some(&(node, _)) = last_probe.first() {
+            let via = match node.checked_sub(server_count) {
+                Some(replica) => replica_clients[replica].clone(),
+                None => clients[node].clone(),
+            };
+            fold.read_to_tail(
+                ctx,
+                &audit,
+                &via,
+                client_id,
+                config.read_max_bytes,
+                request_timeout,
+            )
+            .await;
+            tracing::info!(
+                index = fold.state().applied_count,
+                state = %hash_text(fold.state().chain_hash),
+                "chain_state_read"
+            );
+        }
+        fold.leave(ctx.state(), client_id);
 
         // Availability oracle (issue #19 E): the budget bounds storage faults a
         // priori, and this independently re-derives — from world state, never
@@ -2322,7 +2568,7 @@ impl Workload for ChainWorkload {
         // client was quiet) cuts this client's own observation short; the
         // audit's final-convergence claim is the arbiter for that run.
         let ended_by_sibling = !converged && shutdown.is_cancelled();
-        let storage = crate::world::storage_fault_stats(ctx.state());
+        let storage = crate::world::storage_fault_stats(ctx.state(), journal);
         assert_always!(
             converged || ended_by_sibling || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
@@ -2336,7 +2582,7 @@ impl Workload for ChainWorkload {
         );
         // The CTRL availability trade, measured: a corruption-parked node
         // stays down (detect ⇒ crash) while the live quorum still converges.
-        let corruption = crate::world::corruption_stats(ctx.state());
+        let corruption = crate::world::corruption_stats(ctx.state(), journal);
         assert_sometimes!(
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
@@ -2348,9 +2594,9 @@ impl Workload for ChainWorkload {
             // probe inside its timeout. The seed's buggified shape is printed
             // too — a knob at its extreme is one of the things that can
             // produce a red.
-            let parked_now = crate::world::parked_nodes(ctx.state());
+            let parked_now = crate::world::parked_nodes(ctx.state(), journal);
             eprintln!(
-                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node states = {:?}",
+                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node chosen ends = {:?}",
                 time.now().as_millis(),
                 recovery_deadline.as_millis(),
                 pre_tail_count,
@@ -2359,14 +2605,33 @@ impl Workload for ChainWorkload {
             eprintln!("  CONFIG {config:?}");
             eprintln!("  PROBE parked={parked_now:?} servers={server_count}");
             eprintln!("  AUDIT {}", audit.diagnostics());
-            for ip in &servers {
-                if let Some(probe) = crate::world::corpus_disk_probe(ctx.state(), ip) {
+            let journals = self
+                .plan
+                .as_ref()
+                .map(|plan| plan.ids.clone())
+                .unwrap_or_default();
+            eprintln!(
+                "  JOURNAL {} of {journals:?} (held {:?})",
+                journal.0,
+                self.plan.as_ref().and_then(|plan| plan.held)
+            );
+            for other in &journals {
+                eprintln!(
+                    "  AUDIT[{}] {}",
+                    other.0,
+                    crate::audit::audit_world_for(ctx.state(), *other).diagnostics()
+                );
+            }
+            for (ip, disk_journal) in journals
+                .iter()
+                .flat_map(|j| servers.iter().map(move |ip| (ip, *j)))
+            {
+                if let Some(probe) = crate::world::disk_probe_for(ctx.state(), disk_journal, ip) {
+                    eprint!("  [journal {}]", disk_journal.0);
                     eprintln!(
-                        "  DISK {ip}: floor={} applied={} snap_point={:?} faulty_chunks={:?} clean_slots={}..={}",
+                        "  DISK {ip}: floor={} chosen={:?} clean_slots={}..={}",
                         probe.floor,
-                        probe.applied_count,
-                        probe.snap_point,
-                        probe.faulty_chunks,
+                        probe.chosen_index,
                         probe.clean_slots.first().copied().unwrap_or(0),
                         probe.clean_slots.last().copied().unwrap_or(0),
                     );
@@ -2390,7 +2655,17 @@ impl Workload for ChainWorkload {
         // The two perspectives, and nothing else: the client's own history
         // (linearizability over what it was told), and the audit's fold of
         // every driver transition (safety, restart, and the one liveness claim).
-        let digest = check_run(ctx.state(), &self.history);
+        let mut digest = check_run(ctx.state(), self.journal, &self.history);
+        // A journal no client appends to (#188: more journals than clients)
+        // is judged by client 0, on an empty history: its audit's safety
+        // oracles ran all along, and its final claim holds too.
+        if self.client_id == 0
+            && let Some(plan) = &self.plan
+        {
+            for idle in plan.ids.iter().skip(ctx.client_count()) {
+                digest ^= check_run(ctx.state(), *idle, &ClientHistory::default());
+            }
+        }
         if let Some(sink) = &self.digest {
             *sink
                 .lock()
@@ -2405,14 +2680,6 @@ impl Workload for ChainWorkload {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn state(applied_count: u64, chain_hash: u64) -> ChainState {
-        ChainState {
-            applied_count,
-            chain_hash,
-            ..ChainState::default()
-        }
-    }
 
     /// The shape composer, pinned at the mechanism: each shape moves the set
     /// the way its name says, never below the floor, never onto a node outside
@@ -2493,29 +2760,5 @@ mod tests {
             compose_reconfiguration(4, &[0, 1, 2], &[0, 1, 2], 3, None, 0, false).is_none(),
             "a rotation through a pool with no spare is the same set"
         );
-    }
-
-    /// The identity regression: node 1 is parked and absent from the probe,
-    /// node 3 diverges. The report must name node 3 — the positional answer
-    /// (index 2 of the live list) would have blamed node 2, which agrees.
-    #[test]
-    fn a_divergent_replica_is_named_by_its_node_id_not_its_position() {
-        let observed = vec![
-            (0, state(7, 0xaa)),
-            (2, state(7, 0xaa)),
-            (3, state(7, 0xbb)),
-        ];
-        let divergent = divergent_replicas(&observed);
-        assert_eq!(divergent.len(), 1);
-        assert_eq!(divergent[0].0, 3);
-        assert_eq!(divergent[0].1.chain_hash, 0xbb);
-        assert!(describe_replicas(&divergent).starts_with("node=3 count=7 "));
-    }
-
-    #[test]
-    fn agreeing_replicas_report_no_divergence() {
-        let observed = vec![(0, state(3, 0x11)), (2, state(3, 0x11))];
-        assert!(divergent_replicas(&observed).is_empty());
-        assert!(divergent_replicas(&[]).is_empty());
     }
 }

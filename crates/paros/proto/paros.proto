@@ -11,14 +11,25 @@ import "common.proto";
 // and schema version live in `src/rpc/methods.rs`; only the messages are
 // generated from this file.
 service Paros {
-  rpc Propose(.paros.v1.Propose) returns (.paros.v1.ProposeAck);
+  // Append records to a journal (#185): today's proposal plus the #94
+  // at-most-once dedup — a retry keeps `(client, seq, records)` and a
+  // duplicate is answered with the original position. All records of one
+  // append land in one slot, and the LSN is the slot. Answered once the
+  // slot is chosen (ack-on-commit), or redirected to the leader.
+  rpc Append(.paros.v1.Append) returns (.paros.v1.AppendAck);
+  // Read chosen entries from `from_lsn` up (#185), from this node's (or
+  // replica's) chosen prefix: holes — `Noop`s, control commands, #94
+  // duplicates — are skipped; above the end it waits (long-poll) until
+  // something is chosen or a deadline passes; below the trim point it
+  // answers `trimmed_to` and nothing else.
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
-  // A leaderless linearizable read (Paxos Quorum Reads, #143): served by any
-  // node — leader, follower, spare — once a Phase-1 quorum's highest vote
-  // watermark is inside its applied prefix. Never redirected; an answer with
-  // `committed: false` is an overdue read the client retries elsewhere.
-  rpc QuorumRead(.paros.v1.Read) returns (.paros.v1.ReadAck);
-  rpc Compact(.paros.v1.Compact) returns (.paros.v1.CompactAck);
+  // A linearizable tail (#185): through read-index on the leader, or a
+  // leaderless quorum read (#143) on any node or replica. The result is at
+  // least every append acked before the call started.
+  rpc CheckTail(.paros.v1.CheckTail) returns (.paros.v1.CheckTailAck);
+  // Trim the journal below `up_to` (#185, formerly `Compact`): the leader
+  // proposes a decided `Truncate`, so every reader gets one trim point.
+  rpc Trim(.paros.v1.Trim) returns (.paros.v1.TrimAck);
   // Change the acceptor set (Matchmaker Paxos reconfiguration, #122). Only the
   // leader admits it, and only on a deployment that names matchmakers; every
   // other case is refused (`accepted: false`) and the client may retry.
@@ -30,39 +41,94 @@ service Paros {
   rpc ReconfigureMatchmakers(.paros.v1.ReconfigureMatchmakers) returns (.paros.v1.ReconfigureMatchmakersAck);
 }
 
-message Propose {
-  uint64 client = 1;
-  uint64 seq = 2;
-  bytes command = 3;
+// Every journal call names its journal (#184): `0` is unset and always
+// refused (`unknown_journal`), as is any journal this process does not serve.
+
+message Append {
+  uint64 journal = 1;
+  uint64 client = 2;
+  uint64 seq = 3;
+  // The records, in order. They land in one slot together.
+  repeated bytes records = 4;
 }
 
-message ProposeAck {
+message AppendAck {
   uint64 seq = 1;
   optional uint64 leader = 2;
   bool committed = 3;
-  optional uint64 slot = 4;
+  // The slot the append landed in (its LSN), when committed.
+  optional uint64 first_lsn = 4;
+  bool unknown_journal = 5;
+}
+
+// The payload a user slot carries: the records of one append, in order. The
+// core keeps it opaque; only the journal edge frames and unframes it.
+message RecordBatch {
+  repeated bytes records = 1;
 }
 
 message Read {
-  uint64 client = 1;
-  uint64 seq = 2;
+  uint64 journal = 1;
+  uint64 from_lsn = 2;
+  // A budget on the page's record bytes. A page that can hold an entry
+  // always holds at least one, whatever its size.
+  uint64 max_bytes = 3;
+}
+
+message LogEntry {
+  uint64 lsn = 1;
+  uint64 client = 2;
+  uint64 seq = 3;
+  repeated bytes records = 4;
 }
 
 message ReadAck {
+  repeated LogEntry entries = 1;
+  // Where the next read starts (entries and skipped holes alike).
+  uint64 next_lsn = 2;
+  // One past the serving node's contiguous chosen prefix.
+  uint64 committed_end = 3;
+  // Set when `from_lsn` is below the trim point: the first readable LSN.
+  // Nothing else is answered then.
+  optional uint64 trimmed_to = 4;
+  bool unknown_journal = 5;
+}
+
+enum TailPath {
+  // Read-index on the leader (a non-leader redirects).
+  TAIL_PATH_LEADER = 0;
+  // A leaderless quorum read (#143), on any node or replica.
+  TAIL_PATH_QUORUM = 1;
+}
+
+message CheckTail {
+  uint64 journal = 1;
+  uint64 client = 2;
+  uint64 seq = 3;
+  TailPath path = 4;
+}
+
+message CheckTailAck {
   uint64 seq = 1;
   optional uint64 leader = 2;
   bool committed = 3;
-  optional uint64 read_index = 4;
+  // One past the confirmed chosen prefix, when committed.
+  optional uint64 committed_end = 4;
+  bool unknown_journal = 5;
 }
 
-message Compact {
-  uint64 up_to = 1;
+message Trim {
+  uint64 journal = 1;
+  // The last LSN the client permits dropping (inclusive).
+  uint64 up_to = 2;
 }
 
-message CompactAck {
+message TrimAck {
   optional uint64 leader = 1;
   bool accepted = 2;
-  uint64 first_slot = 3;
+  // The serving node's trim point (its first retained LSN).
+  uint64 trim_point = 3;
+  bool unknown_journal = 4;
 }
 
 message Reconfigure {

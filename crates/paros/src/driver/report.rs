@@ -9,7 +9,7 @@ use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeI
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, HandoffContext};
-use crate::rpc::ReadAck;
+use crate::rpc::CheckTailAck;
 
 use super::ready::{ClientWaiters, ReadPath};
 
@@ -142,6 +142,10 @@ pub(crate) struct Deltas {
     pub(crate) matchmaking: Option<Ballot>,
     pub(crate) matchmaking_timeouts: u64,
     pub(crate) matchmaker_generation: u64,
+    /// Consecutive election-clock expiries with no leader known between
+    /// them: the election backoff's streak
+    /// ([`DriverTunables::election_backoff_doublings`](super::DriverTunables)).
+    pub(crate) failed_campaigns: u32,
 }
 
 impl Deltas {
@@ -157,6 +161,7 @@ impl Deltas {
             matchmaking: None,
             matchmaking_timeouts: node.matchmaking_timeouts(),
             matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
+            failed_campaigns: 0,
         }
     }
 }
@@ -242,7 +247,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     last: &mut Deltas,
     waiters: &mut ClientWaiters,
     self_id: u64,
-    election_base: u64,
+    (election_base, backoff_doublings): (u64, u32),
     hooks: &H,
     audit: &A,
 ) {
@@ -256,9 +261,26 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         matchmaking: _,
         matchmaking_timeouts: last_matchmaking_timeouts,
         matchmaker_generation: last_generation,
+        failed_campaigns,
     } = last;
     if node.needs_election_timeout() {
-        let ticks = draw_election_timeout(providers, hooks, audit, self_id, election_base);
+        // The election backoff: a clock that reset while this node is still
+        // a candidate with no leader known is a campaign that failed, and
+        // each consecutive one doubles the base (capped), so a round
+        // eventually outlasts the slowest promise it waits on. Knowing a
+        // leader, or being one, ends the streak.
+        if node.role() == NodeRole::Candidate && node.leader().is_none() {
+            *failed_campaigns = failed_campaigns.saturating_add(1);
+        } else {
+            *failed_campaigns = 0;
+        }
+        let doublings = failed_campaigns.saturating_sub(1).min(backoff_doublings);
+        let base = election_base.saturating_mul(1_u64 << doublings.min(16));
+        if doublings > 0 {
+            tracing::info!(node = self_id, doublings, base, "election_backoff");
+            audit.election_backoff(NodeId(self_id), doublings);
+        }
+        let ticks = draw_election_timeout(providers, hooks, audit, self_id, base);
         node.set_election_timeout(ticks);
         audit.election_timeout_set(NodeId(self_id), ticks);
     }
@@ -377,11 +399,10 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
                 .partition(|(_, parked)| parked.path == ReadPath::Index);
         waiters.pending_reads = quorum;
         for parked in index.into_values() {
-            let _ = parked.reply.send(ReadAck {
+            let _ = parked.reply.send(CheckTailAck {
                 seq: parked.seq,
                 leader: node.leader().map(|n| n.0),
-                committed: false,
-                read_index: None,
+                ..CheckTailAck::default()
             });
         }
     }

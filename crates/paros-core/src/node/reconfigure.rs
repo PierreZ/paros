@@ -40,7 +40,7 @@
 //! (§4.3: new acceptors need no warm-up — the `Prepare` fans out to `C_new`
 //! too, so they promise the ballot and learn the configuration first) and
 //! heals its log as a replica through ordinary heartbeat-driven catch-up and
-//! `InstallSnapshot`. A node in `C_old` but not `C_new` stops being addressed
+//! `TrimmedTo`. A node in `C_old` but not `C_new` stops being addressed
 //! for the new ballot's accepts but keeps answering Phase 1 for the ballots it
 //! took part in (its `on_prepare` guard is pool-based, never
 //! configuration-based) until GC retires those configurations (#123) —
@@ -81,8 +81,8 @@ pub enum ReconfigureRefusal {
     /// [`AcceptorConfig`], which cannot exist malformed — and carried here so
     /// a refusal is one type wherever it is judged.
     Malformed,
-    /// The leadership is not settled: a Phase-1-shaped recovery, a repair
-    /// probe, or an application repair is still open. A reconfiguration moves
+    /// The leadership is not settled: a Phase-1-shaped recovery or a
+    /// repair probe is still open. A reconfiguration moves
     /// a *settled* leadership to a new ballot; the caller retries once the
     /// recovery closes.
     Unsettled,
@@ -131,8 +131,7 @@ impl ColocatedNode {
             return ReconfigureResult::Refused(ReconfigureRefusal::Unchanged);
         }
         // A reconfiguration moves a *settled* leadership: Phase-1-shaped work
-        // still open (an inherited recovery, a CTRL repair probe, an
-        // application repair) is tied to the quorum that reported it, and a
+        // still open (an inherited recovery, a CTRL repair probe) is tied to the quorum that reported it, and a
         // leadership a higher `Prepare` already passed holds nothing worth
         // moving. The same narrowness as `can_relinquish`.
         if !self.leadership_settled() || self.ballot < self.acceptor.promised() {

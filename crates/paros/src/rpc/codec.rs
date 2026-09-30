@@ -206,11 +206,6 @@ pub(super) fn command_to_proto(command: &Command) -> internal::Command {
                     internal::control_command::Kind::Truncate(internal::Truncate { up_to: up_to.0 })
                 }
                 Control::Noop => internal::control_command::Kind::Noop(internal::Noop {}),
-                Control::Snap { at_index } => {
-                    internal::control_command::Kind::Snap(internal::Snap {
-                        at_index: at_index.0,
-                    })
-                }
             };
             internal::command::Kind::Control(internal::ControlCommand { kind: Some(kind) })
         }
@@ -237,9 +232,6 @@ pub(super) fn command_from_proto(
                     up_to: Slot(truncate.up_to),
                 },
                 internal::control_command::Kind::Noop(_) => Control::Noop,
-                internal::control_command::Kind::Snap(snap) => Control::Snap {
-                    at_index: Slot(snap.at_index),
-                },
             };
             Ok(Command::Control(control))
         }

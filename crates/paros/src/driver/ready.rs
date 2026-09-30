@@ -1,20 +1,19 @@
 //! The [`paros_core::Ready`] handshake's I/O side: one linear durability
-//! pipeline (persist → send → apply → app-fsync → truncate → offers → acks),
-//! the durable-write staging and reporting it splits into, the held client
-//! replies it answers, and the driver's fail-stop storage-fault decision.
+//! pipeline (persist → send → learn → acks), the durable-write staging and
+//! reporting it splits into, the held client replies it answers, and the
+//! driver's fail-stop storage-fault decision.
 
 use std::collections::BTreeMap;
 
-use moonpool_core::SimulationError;
 use paros_core::{
-    AcceptorWrite, Ballot, ColocatedNode, Command, Control, GcRequest, MatchRequest, MatchmakerId,
-    Message, NodeId, NodeRole, Party, ReadState, SessionEntry, Slot, Value, WriteOp,
+    AcceptorWrite, Ballot, ColocatedNode, Command, GcRequest, MatchRequest, MatchmakerId, Message,
+    NodeId, NodeRole, Party, ReadState, Slot, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
 use crate::hooks::{DriverHooks, Reply, Seam};
-use crate::rpc::{ProposeAck, ReadAck, ReplySender};
-use crate::storage::{NodeStorage, StorageError};
+use crate::rpc::{AppendAck, CheckTailAck, ReplySender};
+use crate::storage::{LogStorage, StorageError};
 
 use super::config::RunError;
 use super::events::command_hash;
@@ -28,8 +27,10 @@ use super::transport::{Outbound, send_messages};
 #[derive(Default)]
 pub(crate) struct ClientWaiters {
     /// `(client id, client seq, the held reply)` per slot.
-    pub(crate) pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<ProposeAck>)>>,
+    pub(crate) pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<AppendAck>)>>,
     pub(crate) pending_reads: BTreeMap<u64, ParkedRead>,
+    /// Journal reads long-polling at the end (#185).
+    pub(crate) log_reads: super::log_reads::LogReads,
 }
 
 /// Which of the two read tallies a parked read waits on.
@@ -58,126 +59,24 @@ pub(crate) struct ParkedRead {
     /// The tally it waits on.
     pub(crate) path: ReadPath,
     /// The held reply.
-    pub(crate) reply: ReplySender<ReadAck>,
+    pub(crate) reply: ReplySender<CheckTailAck>,
 }
 
-/// Materialize and send this batch's snapshot offers. An offered snapshot must
-/// describe exactly the application prefix named by the protocol message, so
-/// this runs only after the batch's committed entries are durably applied.
-#[tracing::instrument(level = "debug", skip_all, fields(offers = snapshot_offers.len()))]
-async fn send_snapshot_offers<S, H, A>(
-    storage: &mut S,
-    out: &Outbound,
-    hooks: &H,
-    audit: &A,
-    snapshot_offers: &[(NodeId, Slot, Ballot)],
-    sessions: &[SessionEntry],
-) where
-    S: NodeStorage,
-    H: DriverHooks,
-    A: Audit,
-{
-    let me = out.self_node();
-    let mut offers: Vec<(Party, Message)> = Vec::with_capacity(snapshot_offers.len());
-    for &(to, offered_index, ballot) in snapshot_offers {
-        // The mismatch skip below, taken spuriously: the requester re-asks
-        // every tick and any other custodian may answer, so an unserved beat
-        // is always safe — and this reaches the "nobody served me this round"
-        // state without needing an application repair to be open.
-        //
-        // Deliberately *not* reported through `Audit::snapshot_offer_skipped`:
-        // that channel's coverage gate claims a **mismatched** offer was
-        // withheld, and a hook that can fire on a perfectly matched offer would
-        // satisfy it trivially. The hook's own BUGGIFY pairing proves this
-        // location fires; the trace field says which of the two skips a reader
-        // is looking at.
-        if hooks.skip_snapshot_offer(Party::Node(to)) {
-            tracing::info!(
-                node = me.0,
-                offered = offered_index.0,
-                reason = "hook",
-                "snapshot_offer_skipped"
-            );
-            continue;
-        }
-        if storage.applied_slot() != Some(offered_index) {
-            // An offered snapshot must describe exactly the application prefix
-            // the protocol message names. Stage 8 makes a mismatch a
-            // legitimate transient — an open application repair holds the
-            // applied prefix behind the chosen index — so the offer is
-            // *skipped*, never sent wrong and never fatal: the requester
-            // re-asks each beat and another peer (or this one, once healed)
-            // serves it. The core already withholds offers while its own
-            // repair is open; this driver-side guard covers any other
-            // application lag the core cannot see.
-            audit.snapshot_offer_skipped(me, offered_index);
-            tracing::info!(
-                node = me.0,
-                offered = offered_index.0,
-                reason = "mismatch",
-                "snapshot_offer_skipped"
-            );
-            continue;
-        }
-        offers.push((
-            Party::Node(to),
-            Message::InstallSnapshot {
-                from: me,
-                ballot,
-                chosen_index: offered_index,
-                snapshot: Value(storage.snapshot().await),
-                // The at-most-once ledger travels beside the opaque bytes (#94):
-                // the receiver seals it so its duplicate-suppression decisions
-                // for the folded prefix match every peer's.
-                sessions: sessions.to_vec(),
-            },
-        ));
-    }
-    // The offers that survived the per-offer checks go out through the one
-    // send seam every other message uses (drop hook → transmit → duplicate
-    // hook, in that order per message).
-    send_messages(out, hooks, audit, offers);
+/// The prefix this node's acks and reads are answered from: its contiguous
+/// chosen prefix. paros runs no application (#186), so the journal a client
+/// reads *is* the chosen log.
+pub(crate) fn served_prefix(node: &ColocatedNode) -> Option<Slot> {
+    node.replica().chosen_index()
 }
 
-/// Surface the #88 window: a snapshot install persisted while this node's own
-/// campaign is open (`on_install_snapshot` deliberately does not touch the
-/// election), so the sweep can prove the interleaving is visited.
-fn note_mid_election_snapshot<A: Audit>(
-    node: &ColocatedNode,
-    writes: &[WriteOp],
-    self_id: u64,
-    audit: &A,
-) {
-    if node.role() == NodeRole::Candidate
-        && writes
-            .iter()
-            .any(|w| matches!(w, WriteOp::InstallSnapshot { .. }))
-    {
-        audit.snapshot_mid_election(NodeId(self_id));
-        tracing::info!(node = self_id, "snapshot_mid_election");
-    }
-}
-
-/// The prefix this node's acks and reads are answered from: the
-/// application's durable prefix on a colocated node, the chosen prefix on a
-/// bare acceptor (#144), which applies nothing.
-pub(crate) fn served_prefix<S: NodeStorage>(node: &ColocatedNode, storage: &S) -> Option<Slot> {
-    if node.config().runs_application() {
-        storage.applied_slot()
-    } else {
-        node.replica().chosen_index()
-    }
-}
-
-/// A **bare acceptor's** acks (#144, `Application::Shed`): it applies
-/// nothing, so a proposal it parked is answered once its slot is inside the
-/// contiguous chosen prefix — the register a bare deployment defines is the
-/// chosen log; the application lives on the replicas. Each parked slot is
-/// paired with the command chosen there (a #94 duplicate as the `Noop` the
-/// walk treats it as, a slot no longer retained as a `Noop` too — neither
-/// matches a waiter, so the client retries through the dedup path), and the
-/// ordinary ack path judges the identity exactly as it does on a colocated
-/// node.
+/// The acks a batch can answer: every parked proposal whose slot is inside
+/// the contiguous chosen prefix, paired with the command chosen there (a #94
+/// duplicate as the `Noop` the walk treats it as, a slot no longer retained
+/// — trimmed, or jumped over below a peer's trim point — as a `Noop` too;
+/// neither matches a waiter, so the client retries through the dedup path).
+/// The ack path then judges the identity. Swept over the whole prefix, not
+/// only the slots this batch walked, so a jump that chose slots without
+/// walking them still answers the proposals parked there.
 fn chosen_waiters(node: &ColocatedNode, waiters: &ClientWaiters) -> Vec<(Slot, Command)> {
     let Some(ci) = node.replica().chosen_index() else {
         return Vec::new();
@@ -197,9 +96,8 @@ fn chosen_waiters(node: &ColocatedNode, waiters: &ClientWaiters) -> Vec<(Slot, C
         .collect()
 }
 
-/// Ack-on-commit: only now can a client learn success — both the chosen index
-/// and the application transition are durable. Controls have no proposal
-/// waiter. The reply may be deliberately dropped at the reply seam
+/// Ack-on-commit: only now can a client learn success — the chosen index is
+/// durable. Controls have no proposal waiter. The reply may be deliberately dropped at the reply seam
 /// ([`DriverHooks::drop_client_reply`]): the server state has advanced either
 /// way, and the client's retry takes the `(client, seq)` dedup path.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, committed = committed.len()))]
@@ -237,11 +135,12 @@ fn ack_committed_waiters<H, A>(
                 // the honest `(client, seq)` dedup path.
                 audit.waiter_superseded(NodeId(self_id), *slot);
                 tracing::info!(node = self_id, slot = slot.0, "propose_waiter_superseded");
-                let _ = waiter.send(ProposeAck {
+                let _ = waiter.send(AppendAck {
                     seq,
                     leader: Some(self_id),
                     committed: false,
-                    slot: None,
+                    first_lsn: None,
+                    unknown_journal: false,
                 });
                 continue;
             }
@@ -252,14 +151,35 @@ fn ack_committed_waiters<H, A>(
                 NodeId(self_id),
                 Reply::Propose,
                 waiter,
-                ProposeAck {
+                AppendAck {
                     seq,
                     leader: Some(self_id),
                     committed: true,
-                    slot: Some(slot.0),
+                    first_lsn: Some(slot.0),
+                    unknown_journal: false,
                 },
             );
         }
+    }
+}
+
+/// Report one leader-recovery batch this `Ready` carried: how many recovered
+/// slots it started, how many of them were gap fills, and how many remain.
+fn report_recovery_batch<A: Audit>(audit: &A, self_id: u64, batch: (usize, usize, usize)) {
+    let (started, gap_fills, remaining) = batch;
+    let started = u64::try_from(started).unwrap_or(u64::MAX);
+    let gap_fills = u64::try_from(gap_fills).unwrap_or(u64::MAX);
+    let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
+    audit.recovery_batch(NodeId(self_id), started, gap_fills, remaining);
+    tracing::info!(
+        node = self_id,
+        started,
+        gap_fills,
+        remaining,
+        "leader_recovery_batch"
+    );
+    if gap_fills > 0 {
+        tracing::info!(node = self_id, gaps = gap_fills, "election_gap_filled");
     }
 }
 
@@ -267,9 +187,8 @@ fn ack_committed_waiters<H, A>(
 /// persist `hard_state`, *then* send the addressed messages, *then* surface the
 /// chosen entries — and emit the observability events the safety oracle reads.
 // One linear durability pipeline: every step is ordered against its neighbors
-// (persist → send → apply → app-fsync → truncate → offers → acks), so slicing
-// it into helpers would scatter the ordering contract this function *is*.
-#[allow(clippy::too_many_lines)]
+// (persist → send → learn → acks), so slicing it into helpers would scatter
+// the ordering contract this function *is*.
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
 pub(crate) async fn drain_ready<S, H, A>(
     node: &mut ColocatedNode,
@@ -280,11 +199,16 @@ pub(crate) async fn drain_ready<S, H, A>(
     audit: &A,
 ) -> Result<Outbox, RunError>
 where
-    S: NodeStorage,
+    S: LogStorage,
     H: DriverHooks,
     A: Audit,
 {
     let self_id = out.self_node().0;
+    // The journal every message of this batch is framed by (#188).
+    let journal = node.config().journal;
+    // The replica tier serves one journal (#188): a journal with no replica
+    // in its configuration never addresses one.
+    let with_learners = node.config().replica_count > 0;
     // The deployment map an `Audience` is resolved against, read before the
     // batch takes the node's borrow.
     let pool: Vec<NodeId> = node.config().pool().to_vec();
@@ -293,20 +217,11 @@ where
     // documented async pattern; persist-before-send still holds because the
     // persist loop below precedes the send loop.
     let ready = node.ready();
-    // A durable compaction floor must never outrun the durable *application*
-    // state covering the slots it drops: flushing a `Truncate` in step 1
-    // discards the accepted records, and a crash at the `AfterApplyBeforeSync`
-    // seam then lands a node whose application prefix is behind a floor nothing
-    // can replay — its apply stream stays shifted forever (network-axis seed
-    // 8398193358524544360). Split the truncates out of the batch and flush them
-    // only after the application fsync below. A truncate lost to a crash in
-    // that window is safe: the floor is pure space reclamation, re-raised by
-    // the next decided `Truncate`.
-    let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
-        .writes()
-        .iter()
-        .cloned()
-        .partition(|w| matches!(w, WriteOp::Truncate { .. }));
+    // One flush for the whole batch, truncates included: the split that held
+    // a `Truncate` behind the application fsync protected an application
+    // prefix, and there is none (#186) — a floor only ever moves inside the
+    // durable chosen prefix, which the same flush carries.
+    let writes: Vec<WriteOp> = ready.writes().to_vec();
     let must_sync = if writes.iter().any(WriteOp::needs_sync) {
         paros_core::MustSync::Sync
     } else {
@@ -322,7 +237,11 @@ where
         .iter()
         .flat_map(|(audience, msg)| {
             let proxy = audience.proxy().map(Party::Proxy);
-            let nodes = out.resolve(audience, &pool).into_iter().map(Party::Node);
+            let nodes = out
+                .resolve(audience, &pool)
+                .into_iter()
+                .filter(|node| with_learners || !out.learners.contains(node))
+                .map(Party::Node);
             proxy
                 .into_iter()
                 .chain(nodes)
@@ -330,7 +249,6 @@ where
         })
         .collect();
     let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
-    let snapshot_offers: Vec<(NodeId, Slot, Ballot)> = ready.snapshot_offers().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     // The matchmaking requests ride the same persist-before-send edge as the
@@ -349,40 +267,8 @@ where
     let promised = node.hard_state().max_promised_ballot;
     persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit).await?;
 
-    if let Some((started, gap_fills, remaining)) = recovery_batch {
-        let started = u64::try_from(started).unwrap_or(u64::MAX);
-        let gap_fills = u64::try_from(gap_fills).unwrap_or(u64::MAX);
-        let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
-        audit.recovery_batch(NodeId(self_id), started, gap_fills, remaining);
-        tracing::info!(
-            node = self_id,
-            started,
-            gap_fills,
-            remaining,
-            "leader_recovery_batch"
-        );
-        if gap_fills > 0 {
-            tracing::info!(node = self_id, gaps = gap_fills, "election_gap_filled");
-        }
-    }
-
-    note_mid_election_snapshot(node, &writes, self_id, audit);
-
-    // Snapshot offers are outbound protocol messages too. Count them before the
-    // after-sync seam so a crash can drop an offer-only batch just as it can any
-    // other outbound batch. Their bytes are materialized after application below:
-    // an application snapshot must cover exactly the boundary it advertises.
-    let snapshot_offer_count = snapshot_offers.len();
-    if snapshot_offer_count > 0 {
-        audit.snapshot_offered(
-            NodeId(self_id),
-            u64::try_from(snapshot_offer_count).unwrap_or(u64::MAX),
-        );
-        tracing::info!(
-            node = self_id,
-            snapshot_offers = snapshot_offer_count as u64,
-            "snapshot_offered"
-        );
+    if let Some(batch) = recovery_batch {
+        report_recovery_batch(audit, self_id, batch);
     }
 
     // Crash seam: after the batch is durable but before its messages leave. The
@@ -392,123 +278,64 @@ where
     if (!writes.is_empty()
         || !messages.is_empty()
         || !match_requests.is_empty()
-        || !gc_requests.is_empty()
-        || snapshot_offer_count > 0)
+        || !gc_requests.is_empty())
         && hooks.crash_at(Seam::AfterSyncBeforeSend)
     {
         audit.crashed(NodeId(self_id), Seam::AfterSyncBeforeSend);
         tracing::info!(
             node = self_id,
             seam = Seam::AfterSyncBeforeSend.label(),
-            snapshot_offers = snapshot_offer_count as u64,
             "crashed"
         );
         return Err(RunError::SeamCrash(Seam::AfterSyncBeforeSend));
     }
 
     // 2. Send messages — only after (1) is durable.
-    send_messages(out, hooks, audit, messages);
+    send_messages(out, hooks, audit, journal, messages);
 
-    // 3. Apply newly chosen entries (already durable, in contiguous order) —
-    //    surface them to the oracles and ack any clients waiting on each slot
-    //    (ack-on-commit: a held reply fires only now that its slot is chosen).
-    let chosen_index = node.hard_state().chosen_index;
-    let mut snap_markers: Vec<Slot> = Vec::new();
+    // 3. Learn the entries the chosen prefix walked over (already durable, in
+    //    contiguous order) — surface them to the oracles and ack any clients
+    //    waiting on a slot the prefix now covers (ack-on-commit: a held reply
+    //    fires only now that its slot is chosen).
     for (slot, command) in &committed {
-        let chosen_index = chosen_index.ok_or_else(|| {
-            SimulationError::InvalidState("committed command without chosen prefix".into())
-        })?;
-        storage
-            .apply(chosen_index, *slot, command)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-        // A decided snapshot point (#101): the marker's boundary state is the
-        // application state at exactly this instant of the contiguous walk,
-        // so the point is captured here, mid-loop, and flushed with the
-        // batch's application fsync below. The point is recorded at the
-        // marker's *own slot* — a marker minted by `propose_snap_marker`
-        // carries the identical `at_index`, and a hand-built mismatch is
-        // external input (never asserted, only noted).
-        if let Command::Control(Control::Snap { at_index }) = command {
-            if at_index != slot {
-                tracing::warn!(
-                    node = self_id,
-                    slot = slot.0,
-                    at_index = at_index.0,
-                    "snap_marker_index_mismatch"
-                );
-            }
-            storage
-                .record_snapshot(*slot)
-                .await
-                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-            snap_markers.push(*slot);
-        }
         report_applied(audit, self_id, *slot, command);
     }
+    let applied = served_prefix(node);
+    let decided = chosen_waiters(node, waiters);
+    ack_committed_waiters(applied, waiters, hooks, audit, self_id, &decided);
 
-    // Application state is part of the durable replica contract. Flush all
-    // staged transitions before an acknowledgement can escape this batch. This
-    // also makes a chosen-index-only Ready durable before its application effect,
-    // so reboot replay can never observe an application prefix ahead of consensus.
-    if !committed.is_empty() {
-        // Crash seam: the consensus prefix is durable and the application
-        // transitions are staged, but their fsync has not happened. A crash
-        // here is the only way to land "consensus ahead of application" on
-        // disk — the state the boot replay's idempotent re-apply heals.
-        crash_if(
-            true,
-            hooks,
-            audit,
-            NodeId(self_id),
-            Seam::AfterApplyBeforeSync,
-        )?;
-        storage
-            .sync(paros_core::MustSync::Sync)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-    }
-
-    // The decided snapshot points captured above are durable with the
-    // application fsync; only now are they reported (never claiming a point a
-    // crash-before-sync would discard).
-    report_snap_recorded(audit, self_id, &snap_markers);
-
-    // Only now that the application state covering the dropped slots is
-    // fsync-durable may the compaction floor become durable (see the batch
-    // split above). Runs through the same persist path, so the truncate keeps
-    // its `BeforeSync` crash location and its after-fsync audit report.
-    if !truncates.is_empty() {
-        persist_writes(
-            storage,
-            &truncates,
-            paros_core::MustSync::Sync,
-            promised,
-            self_id,
-            hooks,
-            audit,
-        )
-        .await?;
-    }
-
-    if !snapshot_offers.is_empty() {
-        let sessions = node.session_ledger();
-        send_snapshot_offers(storage, out, hooks, audit, &snapshot_offers, &sessions).await;
-    }
-
-    let applied = served_prefix(node, storage);
-    if node.config().runs_application() {
-        ack_committed_waiters(applied, waiters, hooks, audit, self_id, &committed);
-    } else {
-        let decided = chosen_waiters(node, waiters);
-        ack_committed_waiters(applied, waiters, hooks, audit, self_id, &decided);
-    }
-
-    // 3b. Answer confirmed reads — after the apply loop, so the applied prefix
-    //     this same batch carried is covered by what the read observes. The ack
+    // 3b. Answer confirmed reads — after the learn step, so the prefix this
+    //     same batch carried is covered by what the read observes. The ack
     //     reports the *serve-time* chosen index (at or past the confirmed read
     //     index): that is the local state actually served.
-    for state in &read_states {
+    answer_confirmed_reads(node, waiters, &read_states, hooks, audit, self_id);
+
+    // The previous recovery page is now fully durable, sent, and applied. Only
+    // at this boundary may the core materialize the next bounded Ready page;
+    // doing it inside `Ready::advance` would move single-node state ahead of the
+    // I/O the async driver is still performing.
+    node.advance_recovery();
+
+    Ok(Outbox {
+        match_requests,
+        gc_requests,
+        gc_fence,
+    })
+}
+
+/// Answer the reads this batch confirmed: a parked read-index or quorum read
+/// whose `ctx` came back in `Ready::read_states`, answered with the
+/// serve-time chosen index (at or past the confirmed read index — the local
+/// state actually served).
+fn answer_confirmed_reads<H: DriverHooks, A: Audit>(
+    node: &ColocatedNode,
+    waiters: &mut ClientWaiters,
+    read_states: &[ReadState],
+    hooks: &H,
+    audit: &A,
+    self_id: u64,
+) {
+    for state in read_states {
         if let Some(parked) = waiters.pending_reads.remove(&state.ctx) {
             let read_index = node.hard_state().chosen_index;
             // The leader hint: a read-index answer comes from the leader
@@ -547,32 +374,27 @@ where
                 NodeId(self_id),
                 Reply::Read,
                 parked.reply,
-                ReadAck {
+                CheckTailAck {
                     seq: parked.seq,
                     leader,
                     committed: true,
-                    read_index: read_index.map(|s| s.0),
+                    committed_end: Some(committed_end(read_index)),
+                    unknown_journal: false,
                 },
             );
         }
     }
-
-    // The previous recovery page is now fully durable, sent, and applied. Only
-    // at this boundary may the core materialize the next bounded Ready page;
-    // doing it inside `Ready::advance` would move single-node state ahead of the
-    // I/O the async driver is still performing.
-    node.advance_recovery();
-
-    Ok(Outbox {
-        match_requests,
-        gc_requests,
-        gc_fence,
-    })
 }
 
-/// Report one slot applied — by the live batch walk or by the boot replay,
-/// which apply it identically: the audit's apply callback, then the
-/// `value_chosen` and `log_applied` traces.
+/// The exclusive end of a chosen prefix whose last slot is `index` — what
+/// a `CheckTail` answers (#185): every LSN below it is chosen.
+pub(crate) fn committed_end(index: Option<Slot>) -> u64 {
+    index.map_or(0, |slot| slot.0 + 1)
+}
+
+/// Report one slot the contiguous walk moved over — "applied" names the walk,
+/// there is no application behind it (#186): the audit's apply callback, then
+/// the `value_chosen` and `log_applied` traces.
 pub(crate) fn report_applied<A: Audit>(audit: &A, self_id: u64, slot: Slot, command: &Command) {
     let vhash = command_hash(command);
     audit.applied(
@@ -590,15 +412,6 @@ pub(crate) fn report_applied<A: Audit>(audit: &A, self_id: u64, slot: Slot, comm
     );
 }
 
-/// Report decided snapshot points recorded durably — only after the fsync
-/// that made them so (never claiming a point a crash-before-sync discards).
-pub(crate) fn report_snap_recorded<A: Audit>(audit: &A, self_id: u64, points: &[Slot]) {
-    for at in points {
-        audit.snap_recorded(NodeId(self_id), *at);
-        tracing::info!(node = self_id, at = at.0, "snap_recorded");
-    }
-}
-
 /// Persist a batch's [`WriteOp`]s in order (persist-before-send step 1), flush per
 /// [`MustSync`], and surface the persisted state for the safety + recovery
 /// oracles: a `node_state` event when the promised ballot rose, and a per-slot
@@ -610,7 +423,7 @@ pub(crate) fn report_snap_recorded<A: Audit>(audit: &A, self_id: u64, points: &[
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, writes = writes.len(), must_sync = ?must_sync))]
-pub(crate) async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
+pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,
@@ -645,16 +458,7 @@ pub(crate) async fn persist_writes<S: NodeStorage, H: DriverHooks, A: Audit>(
             }
             WriteOp::SetChosenIndex(slot) => storage.set_chosen_index(*slot).await,
             WriteOp::Truncate { first, sealed } => storage.truncate(*first, sealed).await,
-            WriteOp::InstallSnapshot {
-                chosen_index,
-                ballot,
-                snapshot,
-                sessions,
-            } => {
-                storage
-                    .install_snapshot(*chosen_index, *ballot, snapshot.0.clone(), sessions)
-                    .await
-            }
+            WriteOp::TrimmedTo { point, sessions } => storage.trimmed_to(*point, sessions).await,
         };
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
@@ -739,31 +543,13 @@ fn surface_persisted<A: Audit>(
                 audit.truncated(NodeId(self_id), *first);
                 tracing::info!(node = self_id, first = first.0, "compacted");
             }
-            WriteOp::InstallSnapshot {
-                chosen_index,
-                ballot,
-                ..
-            } => {
-                let first = chosen_index.0 + 1;
-                // The install jumps the applied prefix to `chosen_index` without
-                // replaying entries (snapshot-xor-entries); the audit callback
-                // reports both the install and that jump.
-                audit.snapshot_installed(NodeId(self_id), *chosen_index, *ballot);
-                tracing::info!(
-                    node = self_id,
-                    chosen_index = chosen_index.0,
-                    first,
-                    "snapshot_installed"
-                );
-                // Surface the jump so the no-gaps oracle (which admits it as a
-                // snapshot jump) and the convergence oracle see the node reach the
-                // cluster prefix.
-                tracing::info!(
-                    node = self_id,
-                    slot = chosen_index.0,
-                    applied_index = chosen_index.0,
-                    "log_applied"
-                );
+            WriteOp::TrimmedTo { point, .. } => {
+                // The jump moves the prefix to `point - 1` without walking the
+                // slots below it (they are trimmed cluster-wide); the audit
+                // callback reports the jump so the no-gaps oracle admits it
+                // and the convergence oracle sees the node reach the point.
+                audit.trimmed_to(NodeId(self_id), *point);
+                tracing::info!(node = self_id, point = point.0, "trimmed_to");
             }
             // A learned record is not an accept: no quorum oracle may fold it.
             WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) | WriteOp::Learned { .. } => {}

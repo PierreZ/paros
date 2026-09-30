@@ -13,7 +13,7 @@
 //!   never decide; build with `default-features = false` for a dependency-free
 //!   core with the identical state machine.
 //!
-//! The application drives the core: feed events via [`ColocatedNode::step`] and logical time
+//! The driver drives the core: feed events via [`ColocatedNode::step`] and logical time
 //! via [`ColocatedNode::tick`], drain a batch of work via [`ColocatedNode::ready`], and
 //! acknowledge it via [`Ready::advance`]. The core *describes* the side effects
 //! to perform; the caller *performs* them.
@@ -21,8 +21,8 @@
 //! # The durability contract
 //!
 //! Each [`Ready`] batch must be processed in order: **persist [`HardState`] →
-//! send [`Message`]s (only once the state is durable) → apply committed values →
-//! [`Ready::advance`]**. This persist-before-send edge is the heart of Paxos
+//! send [`Message`]s (only once the state is durable) → learn the committed
+//! prefix → [`Ready::advance`]**. This persist-before-send edge is the heart of Paxos
 //! safety; see [`Ready`] and [`HardState`] for the details.
 //!
 //! # The handshake is type-enforced
@@ -58,9 +58,9 @@
 //! `quorum_read.rs` change the *data* the same roles run over, and
 //! `proxy_leader.rs` runs the first **second deployment**: a
 //! [`ProxyLeader`] beside a leader, the Phase-2 tally on another process.
-//! `replica_tier.rs` runs the third: [`ReplicaNode`]s that learn and apply
-//! without voting, beside bare acceptors that vote and apply nothing
-//! ([`Application::Shed`]).
+//! `replica_tier.rs` runs the third: [`ReplicaNode`]s that learn and serve
+//! reads without voting, beside acceptors that vote — none of them runs an
+//! application: a journal's client folds what it reads (#186).
 
 pub mod acceptor;
 mod collector;
@@ -107,12 +107,13 @@ pub use node::{
 pub use proxy_leader::{ProxyLeader, ProxyReady};
 pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
 pub use ready::Ready;
+pub use replica::{LogPage, LogRead};
 pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};
 pub use retained::RetainedWindow;
-pub use state::{Application, Config, HardState};
+pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, NodeId, SessionEntry, Slot,
-    Value, command_fingerprint,
+    Ballot, ClientId, ClientSeq, Command, Control, Entry, Fingerprint, JournalId, NodeId,
+    SessionEntry, Slot, Value, command_fingerprint,
 };
 pub use write::{AcceptorWrite, MustSync, WriteOp};

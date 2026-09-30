@@ -55,7 +55,6 @@ pub fn value_text(command: &Command) -> String {
         Command::User(entry) => String::from_utf8_lossy(&entry.value.0).into_owned(),
         Command::Control(Control::Noop) => "Noop".to_string(),
         Command::Control(Control::Truncate { up_to }) => format!("Truncate up to {}", up_to.0),
-        Command::Control(Control::Snap { at_index }) => format!("Snap at {}", at_index.0),
     }
 }
 
@@ -68,7 +67,6 @@ pub fn control_kind(command: &Command) -> Option<String> {
         Command::User(_) => None,
         Command::Control(Control::Noop) => Some("noop".to_string()),
         Command::Control(Control::Truncate { .. }) => Some("truncate".to_string()),
-        Command::Control(Control::Snap { .. }) => Some("snap".to_string()),
     }
 }
 
@@ -429,7 +427,7 @@ pub struct SlotView {
     pub ballot: Option<String>,
     /// The command's plain text (see [`value_text`]) — no Rust quoting.
     pub value: String,
-    /// Which control command it is (`noop`, `truncate`, `snap`), or `None` for
+    /// Which control command it is (`noop`, `truncate`), or `None` for
     /// an opaque client entry.
     pub control: Option<String>,
     /// Whether this node knows the slot is chosen.
@@ -476,11 +474,11 @@ pub struct MessageView {
     /// A one-line description for the wire list.
     pub summary: String,
     /// The render family: `prepare`, `promise`, `accept`, `accepted`, `nack`,
-    /// `commit`, `heartbeat`, `catchup`, `snapshot`, `read`, `handoff`,
+    /// `commit`, `heartbeat`, `catchup`, `read`, `handoff`,
     /// `match`, `gc`, `reconfigure`.
     pub phase: String,
     /// Whether this message **answers** one (a `Promise`, an `Accepted`, a
-    /// `Nack`, an ack, a catch-up or snapshot reply) rather than asking
+    /// `Nack`, an ack, a catch-up reply or a trim point) rather than asking
     /// something. The stage draws the two directions differently, and this is
     /// the fact it draws from — never the variant's name.
     pub reply: bool,
@@ -839,7 +837,8 @@ pub fn show_role(role: NodeRole) -> RoleView {
 ///
 /// `phase` is the render family the SVG stage colours by, and it is
 /// deliberately coarser than the variant: `CatchUpRequest` and
-/// `CatchUpResponse` are one family, so are the four snapshot messages.
+/// `CatchUpResponse` are one family, and so is the `TrimmedTo` that answers a
+/// catch-up below the floor.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn message_view(
@@ -948,53 +947,12 @@ pub fn message_view(
             entries.keys().next().copied(),
             format!("Catch-up: {} decided slot(s)", entries.len()),
         ),
-        M::InstallSnapshot {
-            ballot,
-            chosen_index,
-            ..
-        } => (
-            "InstallSnapshot",
-            "snapshot",
-            Some(*ballot),
-            Some(*chosen_index),
-            format!(
-                "InstallSnapshot at slot {} ({})",
-                chosen_index.0,
-                show_ballot(*ballot)
-            ),
-        ),
-        M::SnapAck { at_index, .. } => (
-            "SnapAck",
-            "snapshot",
+        M::TrimmedTo { point, .. } => (
+            "TrimmedTo",
+            "catchup",
             None,
-            Some(*at_index),
-            format!("SnapAck at slot {}", at_index.0),
-        ),
-        M::SnapChunkRequest {
-            at_index, chunks, ..
-        } => (
-            "SnapChunkRequest",
-            "snapshot",
-            None,
-            Some(*at_index),
-            format!(
-                "{} chunk(s) of the snapshot at {}",
-                chunks.len(),
-                at_index.0
-            ),
-        ),
-        M::SnapChunkResponse {
-            at_index, chunks, ..
-        } => (
-            "SnapChunkResponse",
-            "snapshot",
-            None,
-            Some(*at_index),
-            format!(
-                "{} chunk(s) for the snapshot at {}",
-                chunks.len(),
-                at_index.0
-            ),
+            Some(*point),
+            format!("My log starts at slot {}", point.0),
         ),
         M::Relinquish {
             ballot, next_slot, ..
@@ -1086,9 +1044,7 @@ fn is_reply(message: &paros_core::Message) -> bool {
             | M::Nack { .. }
             | M::HeartbeatAck { .. }
             | M::CatchUpResponse { .. }
-            | M::InstallSnapshot { .. }
-            | M::SnapAck { .. }
-            | M::SnapChunkResponse { .. }
+            | M::TrimmedTo { .. }
             | M::PreReadAck { .. }
     )
 }

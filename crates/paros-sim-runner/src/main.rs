@@ -6,8 +6,7 @@ mod common;
 
 use common::{arg, is_clean, print_never_fired, print_seed_counts};
 use paros_sim::{
-    AssertKind, CHUNK_CORPUS_CI_ITERATIONS, CORPUS_CI_ITERATIONS, COVERAGE_ITERATIONS,
-    SimulationReport, chunk_corpus_hunt, corpus_hunt, explore,
+    AssertKind, CORPUS_CI_ITERATIONS, COVERAGE_ITERATIONS, SimulationReport, corpus_hunt, explore,
 };
 
 fn main() {
@@ -105,16 +104,11 @@ fn gate_corpus(name: &str, report: &SimulationReport) {
     println!("  green");
 }
 
-/// The two scripted evaluation corpora (E1 masks, per-chunk masks): seeded-mask
-/// sampling with the recovery gates armed. Fast per seed — every fault is a
+/// The scripted evaluation corpus (E1 masks): seeded-mask sampling with the recovery gates armed. Fast per seed — every fault is a
 /// targeted injection, not swarm chaos.
 fn run_corpus_axes() {
     gate_corpus(
         "CTRL E1 mask corpus axis",
         &corpus_hunt(CORPUS_CI_ITERATIONS),
-    );
-    gate_corpus(
-        "CTRL chunk mask corpus axis",
-        &chunk_corpus_hunt(CHUNK_CORPUS_CI_ITERATIONS),
     );
 }

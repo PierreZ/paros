@@ -14,7 +14,10 @@ use super::{common, internal};
 
 #[test]
 fn protobuf_rejects_a_missing_message_kind() {
-    let result = message_from_proto(internal::ConsensusMessage { kind: None });
+    let result = message_from_proto(internal::ConsensusMessage {
+        kind: None,
+        journal: 0,
+    });
     assert!(matches!(result, Err("missing Paxos message kind")));
 }
 
@@ -36,6 +39,7 @@ fn protobuf_rejects_duplicate_slots_in_a_suffix() {
                 entries: vec![entry.clone(), entry],
             },
         )),
+        journal: 0,
     };
 
     assert!(matches!(
@@ -156,12 +160,10 @@ fn every_variant() -> Vec<Message> {
             from: NodeId(0),
             entries: catchup,
         },
-        Message::InstallSnapshot {
+        Message::TrimmedTo {
             from: NodeId(0),
-            ballot,
-            chosen_index: Slot(5),
-            snapshot: Value(vec![9, 9, 9]),
-            // The #94 session ledger rides beside the opaque bytes and must
+            point: Slot(6),
+            // The #94 session ledger rides with the trim point and must
             // survive the wire round trip record-for-record.
             sessions: vec![
                 (ClientId(1), ClientSeq(2), Slot(3)),
@@ -201,22 +203,6 @@ fn every_variant() -> Vec<Message> {
             seq: 9,
             chosen: Some(Slot(4)),
         },
-        // The driver-terminal snap-repair trio carries the configuration
-        // identity too (guarded by the driver on receipt, never asserted).
-        Message::SnapAck {
-            from: NodeId(2),
-            at_index: Slot(4),
-        },
-        Message::SnapChunkRequest {
-            from: NodeId(1),
-            at_index: Slot(4),
-            chunks: vec![0, 3],
-        },
-        Message::SnapChunkResponse {
-            from: NodeId(0),
-            at_index: Slot(4),
-            chunks: vec![(0, Value(vec![1, 2])), (3, Value(vec![]))],
-        },
         // Cooperative leader handoff: the intended successor, the
         // transferred allocator frontier, and both halves of the tail —
         // `pending` deliberately carries no per-slot ballot on the wire
@@ -235,7 +221,7 @@ fn every_variant() -> Vec<Message> {
                         round: 6,
                         node: NodeId(2),
                     },
-                    Command::Control(Control::Snap { at_index: Slot(4) }),
+                    Command::Control(Control::Truncate { up_to: Slot(2) }),
                 ),
             )]),
             pending: BTreeMap::from([

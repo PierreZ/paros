@@ -99,7 +99,6 @@ impl ColocatedNode {
             replica,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
-            pending_snapshot_offers: Vec::new(),
             pending_read_states: Vec::new(),
             quorum_reads: QuorumReads::new(),
             pending_recovery_batch: None,

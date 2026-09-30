@@ -49,13 +49,13 @@ column: number | null,
 summary: string, 
 /**
  * The render family: `prepare`, `promise`, `accept`, `accepted`, `nack`,
- * `commit`, `heartbeat`, `catchup`, `snapshot`, `read`, `handoff`,
+ * `commit`, `heartbeat`, `catchup`, `read`, `handoff`,
  * `match`, `gc`, `reconfigure`.
  */
 phase: string, 
 /**
  * Whether this message **answers** one (a `Promise`, an `Accepted`, a
- * `Nack`, an ack, a catch-up or snapshot reply) rather than asking
+ * `Nack`, an ack, a catch-up reply or a trim point) rather than asking
  * something. The stage draws the two directions differently, and this is
  * the fact it draws from — never the variant's name.
  */

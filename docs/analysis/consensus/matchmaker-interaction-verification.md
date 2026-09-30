@@ -195,7 +195,7 @@ decree builds a `QuorumSystem::Majority` over the set it replaces.
 | `proposer/rounds.rs:191` (`decided`) | Phase 2, in the round's column | no later ballot decided behind this accept set | yes |
 | `proposer/authority.rs:100`, `:183` (CheckQuorum, the read fence) | Phase 2 | the leadership is still unrefuted | yes |
 | `collector.rs:176` (the GC licence) | Phase 2 of `C_b` | a Phase-2 quorum knows the chosen prefix | yes — and *not* Phase 1: a Phase-1 quorum reporting a chosen index proves nothing about a later ballot |
-| `driver/mod.rs:970`, `snap_repair.rs:323` (snapshot custody) | Phase 2 | a decided point is held by a set every later Phase 1 intersects | yes |
+| ~~`driver/mod.rs:970`, `snap_repair.rs:323` (snapshot custody)~~ — deleted with the snapshots (#186) | Phase 2 | a decided point is held by a set every later Phase 1 intersects | yes |
 | `collector.rs:220`, `matchmaking.rs:347` (GC acks, the matchmaking tally) | matchmaker majority | a matchmaker quorum durably holds it | yes |
 | `reconfigurer.rs:438`, `:475`, `:893` (freeze, close, publication) | matchmaker majority of `M_g` (`:893`: of the successor) | frozen / reconstructed / activated at a quorum | yes |
 | `matchmaker/decree.rs` | the shared `Proposer` over `Majority(M_g)` | the ordinary Paxos claims at slot zero | yes |

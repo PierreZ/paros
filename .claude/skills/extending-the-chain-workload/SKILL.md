@@ -1,16 +1,31 @@
 ---
 name: extending-the-chain-workload
-description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (PROPOSE=0 through QUORUM_READ=14, retired ids reserved), OP_COUNT and the weight table, swarm_op_enabled, buggify_knob! tunables in ChainConfig, recording every observation in ClientHistory with Ambiguous timeouts, retries that preserve (client, seq, bytes), and the reach_once gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, or when changing how the client retries or judges a reply.
+description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (PROPOSE=0 through CHECK_TAIL=16, retired ids reserved), OP_COUNT and the weight table, swarm_op_enabled, buggify_knob! tunables in ChainConfig, recording every observation in ClientHistory with Ambiguous timeouts, retries that preserve (client, seq, bytes), and the reach_once gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, or when changing how the client retries or judges a reply.
 ---
 
 # Extending the chain workload
 
 `ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`) is the only
-main-campaign workload: one to three factory-created clients driving the
-Chain-of-Blocks application against a chaotic pool. There is no second
+main-campaign workload: one to three factory-created clients driving a
+chaotic pool through the journal API (`PROPOSE` is an `Append`, `COMPACT` a
+`Trim`, `READ_INDEX`/`QUORUM_READ` a `CheckTail`). paros runs no application
+(#186): each client *is* the Chain-of-Blocks application, reading the journal
+and folding every user entry into its own `ChainState`
+(`chain_workload/fold.rs`), which the audit compares across clients
+(`AuditWorld::fold_applied`). A fold needs every entry from the start, so every
+trim a client asks for is clamped below the shared trim fence (the lowest
+cursor of the clients still folding). There is no second
 main-campaign workload and no per-scenario process type; a new behaviour is a
 new operation in this alphabet, judged by the same `ClientHistory` and the
 same `AuditWorld`.
+
+Since #188 a client belongs to one journal (`JournalPlan::for_client`, round-robin
+over the seed's one to three journals): every RPC names `self.journal`, every world
+it reads is that journal's (`audit_world_for`, `storage_world_for`, the per-journal
+trim fence), the matchmaker-plane operations (`RECONFIGURE`,
+`RECONFIGURE_MATCHMAKERS`, `RETIRE`) run only on the default journal (a client of
+another journal pauses instead), and the run ends only once every journal a client
+appends to has converged (`Tail::converged`).
 
 ## The alphabet is a wire format
 
@@ -18,7 +33,8 @@ same `AuditWorld`.
 PROPOSE=0  PROPOSE_TO_NON_LEADER=1  COMPACT=2  READ_STATE=3  PAUSE=4
 DUP_REPROPOSE=5  DUAL_SUBMIT=6  COMPACT_STORM=7  READ_INDEX=8
 MATCHMAKE=9 (retired)  MATCH_GC=10 (retired)  RECONFIGURE=11
-RECONFIGURE_MATCHMAKERS=12  RETIRE=13  QUORUM_READ=14  OP_COUNT=15
+RECONFIGURE_MATCHMAKERS=12  RETIRE=13  QUORUM_READ=14  READ=15
+CHECK_TAIL=16  OP_COUNT=17
 ```
 
 moonpool's operation swarm decides per seed which ids are on as a pure
@@ -57,7 +73,7 @@ its number as a no-op (that is why 9 and 10 exist), and a new operation takes
 ## What the workload never does
 
 It never reads the trace, never inspects node internals except through the
-`Inspect` RPC (`READ_STATE`), never pins a seed, and never decides safety on
+`Inspect` RPC, never pins a seed, never trims past the fence, and never decides safety on
 its own: linearizability and sequential-client consistency are checked in
 `ClientHistory` at `check()`, protocol safety in the audit. Keep the
 assertion messages stable; they are slots.

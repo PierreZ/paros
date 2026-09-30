@@ -8,12 +8,12 @@
 //! or leave the floor and its write in two hands, which is the ordering bug
 //! the rule exists to prevent. So the ops stay methods of [`Acceptor`]; what
 //! this file separates is the concern — truncation decided by consensus and
-//! the fold an installed snapshot performs — from the voting state machine
+//! the jump below a peer's trim point — from the voting state machine
 //! beside it. The two callers differ only in the durable op they emit
 //! beside the same private `drop_prefix`.
 
 use super::Acceptor;
-use crate::types::{Ballot, SessionEntry, Slot, Value};
+use crate::types::{SessionEntry, Slot};
 use crate::write::WriteOp;
 
 impl<V: Clone + PartialEq> Acceptor<V> {
@@ -31,41 +31,19 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         writes.push(WriteOp::Truncate { first, sealed });
     }
 
-    /// Fold the prefix an installed snapshot covers: drop every record and
-    /// faulty entry at or below `chosen_index` (their decided effects live in
-    /// the opaque bytes now), raise the floor one past it, and emit the
-    /// durable [`WriteOp::InstallSnapshot`]. Returns the new floor.
-    ///
-    /// The caller adopts the snapshot's ballot through [`Self::set_promise`]
-    /// *before* this call (the promise never regresses) and owns everything
-    /// outside the acceptor — the replica's prefix jump, the proposer's
-    /// blocked work. What the acceptor owns is the floor and the write.
+    /// Jump below the trim point (#186): drop every record and faulty
+    /// entry below `point` (everything there is chosen, and the log is
+    /// trimmed cluster-wide), raise the floor to it, and emit the durable
+    /// [`WriteOp::TrimmedTo`]. The promise does not move. The caller owns
+    /// everything outside the acceptor — the replica's prefix jump, the
+    /// proposer's blocked work.
     ///
     /// # Panics
     ///
-    /// If the resulting floor is below the floor held, or `chosen_index` is
-    /// the numeric ceiling (the caller's wire guard refuses one).
-    pub fn install(
-        &mut self,
-        chosen_index: Slot,
-        ballot: Ballot,
-        snapshot: Value,
-        sessions: Vec<SessionEntry>,
-        writes: &mut Vec<WriteOp>,
-    ) -> Slot {
-        assert!(
-            chosen_index.0 < u64::MAX,
-            "a snapshot boundary has a floor one past it"
-        );
-        let first = Slot(chosen_index.0 + 1);
-        self.drop_prefix(first);
-        writes.push(WriteOp::InstallSnapshot {
-            chosen_index,
-            ballot,
-            snapshot,
-            sessions,
-        });
-        first
+    /// If `point` is below the floor held.
+    pub fn trim_to(&mut self, point: Slot, sessions: Vec<SessionEntry>, writes: &mut Vec<WriteOp>) {
+        self.drop_prefix(point);
+        writes.push(WriteOp::TrimmedTo { point, sessions });
     }
 
     /// Drop every record and faulty entry below `first` and raise the floor

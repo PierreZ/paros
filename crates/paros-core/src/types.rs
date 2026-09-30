@@ -12,6 +12,50 @@ pub struct NodeId(pub u64);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Slot(pub u64);
 
+/// The identity of one **journal** (#184, M6): an independent ordered log
+/// with its own ballots, its own chosen prefix and its own store. Every
+/// client call names one, and a process serves a static list of them.
+///
+/// `0` means *unset* and is never served ([`JournalId::is_set`]): a request
+/// that names no journal is refused at the wire, never routed to a default.
+/// `1..=127` are reserved for system journals
+/// ([`JournalId::FIRST_USER`]` - 1` and below); user journals start at
+/// [`JournalId::FIRST_USER`]. The core never makes a protocol decision on
+/// the id — a [`crate::ColocatedNode`] carries it in its [`crate::Config`]
+/// for assertions and tracing only; routing a message to its journal is
+/// the driver's envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct JournalId(pub u64);
+
+impl JournalId {
+    /// The unset id: refused wherever a journal must be named.
+    pub const UNSET: Self = Self(0);
+    /// The first id a user journal may take (`1..=127` are system journals).
+    pub const FIRST_USER: Self = Self(128);
+
+    /// Whether this id names a journal at all (`0` does not).
+    #[must_use]
+    pub const fn is_set(self) -> bool {
+        self.0 != 0
+    }
+
+    /// Whether this id is a user journal's (`>= 128`).
+    #[must_use]
+    pub const fn is_user(self) -> bool {
+        self.0 >= Self::FIRST_USER.0
+    }
+}
+
+impl Default for JournalId {
+    /// The one user journal of a single-journal deployment
+    /// ([`JournalId::FIRST_USER`]) — never [`JournalId::UNSET`], so a
+    /// defaulted [`crate::Config`] serves a journal a client can name.
+    fn default() -> Self {
+        Self::FIRST_USER
+    }
+}
+
 /// Opaque client-supplied identity, used to dedupe requests for at-most-once
 /// execution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -32,8 +76,8 @@ pub struct Value(pub Vec<u8>);
 /// One at-most-once session-ledger record: the client request `(client, seq)`
 /// was applied at `slot` (the *first* — lowest — slot it entered the applied
 /// prefix at). The ledger is paros-owned metadata: it is **sealed** durably when
-/// truncation drops the log records it was derived from, and it travels beside
-/// the opaque bytes in [`crate::Message::InstallSnapshot`], so every node — and
+/// truncation drops the log records it was derived from, and it travels in
+/// [`crate::Message::TrimmedTo`], so every node — and
 /// every restart — reproduces the identical duplicate-suppression decision at
 /// the apply seam (see `ColocatedNode::advance_chosen_index`'s doc).
 pub type SessionEntry = (ClientId, ClientSeq, Slot);
@@ -66,34 +110,14 @@ pub struct Entry {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Control {
     /// Truncate the log: every node drops its retained prefix up to `up_to`
-    /// (clamped to its own chosen index) when it applies this slot. The
+    /// (clamped to its own chosen index) when its contiguous walk reaches this
+    /// slot. The
     /// leader-decided, cluster-wide analogue of a local
     /// [`crate::ColocatedNode::compact`] call, forwarded by normal replication +
     /// catch-up.
     Truncate {
-        /// The last slot the application permits dropping (inclusive).
+        /// The last slot the journal's client permits dropping (inclusive).
         up_to: Slot,
-    },
-    /// A **decided snapshot point** (CTRL §3.5's `snap` marker): when this
-    /// slot enters a node's contiguous chosen prefix, the node snapshots its
-    /// application state *at this slot's boundary* — independent execution,
-    /// identical results, because the marker is applied at the same index
-    /// everywhere. That identity is what makes chunk-level snapshot repair
-    /// sound: byte-wise identical snapshots can be repaired chunk by chunk
-    /// from any peer, where self-chosen snapshot points could only ever ship
-    /// whole blobs.
-    ///
-    /// `at_index` is the slot the proposing leader allocated for the marker.
-    /// Paxos never moves an accepted command between slots, so a *decided*
-    /// marker always sits at `at_index` (the apply seam may assert it); the
-    /// field makes the decided snapshot point self-describing wherever the
-    /// command travels. Its partner rule — `Truncate{up_to}` is only proposed
-    /// once a quorum has reported snapshotting at `up_to` — is proposal-side
-    /// driver policy, never an acceptor-side check: the consensus paths treat
-    /// this command as opaquely as any other.
-    Snap {
-        /// The log index the marker snapshots at (its own decided slot).
-        at_index: Slot,
     },
     /// A **no-op**: decides the slot without doing anything at apply time.
     ///
@@ -171,10 +195,6 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             fnv1a(hash, &up_to.0.to_le_bytes())
         }
         Command::Control(Control::Noop) => fnv1a(FNV_OFFSET, &[2]),
-        Command::Control(Control::Snap { at_index }) => {
-            let hash = fnv1a(FNV_OFFSET, &[3]);
-            fnv1a(hash, &at_index.0.to_le_bytes())
-        }
     }
 }
 

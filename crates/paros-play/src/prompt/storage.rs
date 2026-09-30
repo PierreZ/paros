@@ -1,9 +1,11 @@
-//! The disk's questions: the order a batch reaches it, the promise a snapshot
-//! leaves behind, the CTRL case a damaged record puts a slot in, and the boot
+//! The disk's questions: the order a batch reaches it, the jump a peer's trim
+//! point asks for, the CTRL case a damaged record puts a slot in, and the boot
 //! an erased disk earns.
 
 use std::collections::BTreeMap;
 
+use paros_core::acceptor::Acceptor;
+use paros_core::replica::Replica;
 use paros_core::{Ballot, Command, NodeId, Slot};
 
 use crate::view::{show_ballot, show_command};
@@ -53,71 +55,100 @@ impl Prompt {
         }
     }
 
-    /// A peer's snapshot arrived at a node stranded below the cluster's floor.
-    /// What is its durable promise afterwards?
+    /// A peer answered this node's catch-up with its **trim point**: the slots
+    /// the node asked for are gone there, and the log starts at `point`.
+    /// Where does this node's log start afterwards, and what does it promise?
     ///
-    /// Judged on a **clone of the acceptor**, driven exactly as
-    /// `ColocatedNode::on_install_snapshot` drives the real one: raise the
-    /// promise to the snapshot's ballot only if that ballot is higher, then
-    /// [`paros_core::acceptor::Acceptor::install`]. `promised` is what the
-    /// clone holds afterwards, and the offered ballots are matched against it
-    /// — so the answer is the core's, not a comparison restated here.
+    /// Judged on **clones of the acceptor and the replica**, driven through
+    /// the same two calls `ColocatedNode`'s `TrimmedTo` handler makes
+    /// ([`Acceptor::trim_to`] and [`Replica::trim_to`]): `acceptor` and
+    /// `replica` are those clones afterwards, and the
+    /// choices are built from them — so the answer is the core's, not a rule
+    /// restated here.
     ///
-    /// The two choices are the two concrete ballots that differ: the higher of
-    /// the pair, and the other one. When the snapshot's ballot is the lower,
-    /// picking it is the mistake the whole level exists for — a snapshot
-    /// restores the log, never a promise, and a node that forgot a promise it
-    /// had already made is free to vote for a ballot it had sworn to refuse.
+    /// The two wrong choices are the two ways to get a jump wrong: wait for a
+    /// replay of slots that no longer exist anywhere, or treat the jump as a
+    /// new start and forget the promise this node already made.
     #[must_use]
-    pub fn snapshot_promise(
+    pub fn trim_point(
         id: u64,
         node: NodeId,
-        at: Slot,
-        snapshot_ballot: Ballot,
-        held: Ballot,
-        promised: Ballot,
+        from: NodeId,
+        point: Slot,
+        old_floor: Slot,
+        acceptor: &Acceptor<Command>,
+        replica: &Replica,
     ) -> Self {
-        let sb = show_ballot(snapshot_ballot);
-        let hb = show_ballot(held);
-        let higher = held.max(snapshot_ballot);
-        let lower = held.min(snapshot_ballot);
-        let expected = if promised == higher {
-            "higher"
-        } else {
-            "lower"
-        };
+        let floor = acceptor.first_slot();
+        let chosen = replica.chosen_index();
+        let promised = acceptor.promised();
+        let held = show_ballot(promised);
+        let chosen_text = chosen.map_or_else(|| "none".to_string(), |slot| slot.0.to_string());
+        // The core moved the floor: the jump is the answer. A clone that did
+        // not move it (never raised: the world only asks when it would) would
+        // make waiting the answer.
+        let expected = if floor > old_floor { "jump" } else { "wait" };
         let mut explanations = BTreeMap::new();
         explanations.insert(
-            "lower".to_string(),
+            "wait".to_string(),
             format!(
-                "This answer lowers the durable promise of this node to {}. A node must not \
-                 take back a promise. When it promised {hb}, it told a proposer that every \
-                 lower ballot was finished here, and that proposer possibly chose a value from \
-                 that answer. A snapshot restores the *log*: the values, the prefix and the \
-                 state of the application. It says nothing about promises, and the peer that \
-                 sent it does not know what this node promised. Always take the higher of the \
-                 two ballots. For the same reason, a node whose disk was *erased* cannot \
-                 rejoin: a snapshot cannot give back a promise that the node no longer holds.",
-                show_ballot(lower)
+                "Nobody will ever send slots {} to {}. Node {} truncated them after a decided \
+                 Truncate, and so did every node that applied it. A node that waits for a \
+                 replay of them waits forever, and its log never grows again. Everything below \
+                 slot {} is chosen, so the node jumps there and asks for the rest.",
+                old_floor.0,
+                point.0.saturating_sub(1),
+                from.0,
+                point.0
+            ),
+        );
+        explanations.insert(
+            "reset".to_string(),
+            format!(
+                "This answer forgets the promise {held}. When the node promised {held}, it told \
+                 a proposer that every lower ballot was finished here, and that proposer \
+                 possibly chose a value from that answer. A trim point says where the log \
+                 starts. It carries no ballot, and the peer that sent it does not know what \
+                 this node promised. The promise stays exactly where it was."
             ),
         );
         Self {
             id,
-            kind: PromptKind::SnapshotPromise,
+            kind: PromptKind::TrimPoint,
             node: node.0,
             question: format!(
-                "A snapshot arrived. It covers every slot up to slot {}, and a node took it \
-                 under ballot {sb}. You promised {hb}. What is your promise now?",
-                at.0
+                "Node {} answered your catch-up: its log starts at slot {}. You hold nothing \
+                 from slot {}. What do you do?",
+                from.0, point.0, old_floor.0
             ),
             state_summary: vec![
-                format!("my own durable promise: {hb}"),
-                format!("the ballot of the snapshot: {sb}"),
-                format!("the snapshot covers every slot up to slot {}", at.0),
+                format!("my own durable promise: {held}"),
+                format!("my floor: slot {}", old_floor.0),
+                format!("the trim point of node {}: slot {}", from.0, point.0),
             ],
             choices: vec![
-                Choice::new("higher", format!("Promise {}", show_ballot(higher))),
-                Choice::new("lower", format!("Promise {}", show_ballot(lower))),
+                Choice::new(
+                    "jump",
+                    format!(
+                        "Move the floor to slot {}, count every slot up to {chosen_text} as \
+                         chosen, and keep the promise {held}",
+                        floor.0
+                    ),
+                ),
+                Choice::new(
+                    "wait",
+                    format!(
+                        "Keep the floor at slot {}, and wait for a replay of the missing slots",
+                        old_floor.0
+                    ),
+                ),
+                Choice::new(
+                    "reset",
+                    format!(
+                        "Move the floor to slot {}, and start again with no promise",
+                        floor.0
+                    ),
+                ),
             ],
             expected: expected.to_string(),
             explanations,
@@ -270,9 +301,9 @@ impl Prompt {
                  it votes for the value of that ballot. A proposer already ran Phase 1 at \
                  {held}. That proposer learned that this acceptor held nothing newer, and it \
                  possibly chose a value from that answer. A quorum of this node and the \
-                 acceptors at the older ballot then chooses a second value for one slot. A \
-                 snapshot does not repair that, because a snapshot restores the log and not a \
-                 promise, and no peer knows what this node promised. Refuse the boot: the \
+                 acceptors at the older ballot then chooses a second value for one slot. No \
+                 peer can repair that: a peer can say where the log starts, and no peer knows \
+                 what this node promised. Refuse the boot: the \
                  cluster changes its acceptor set instead, and that change leaves this identity \
                  out of every quorum."
             ),

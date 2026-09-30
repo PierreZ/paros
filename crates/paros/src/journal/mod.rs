@@ -1,4 +1,4 @@
-//! The **durable stores**: [`JournalStorage`] ([`NodeStorage`](crate::NodeStorage)) and
+//! The **durable stores**: [`JournalStorage`] ([`LogStorage`](crate::LogStorage)) and
 //! [`JournalMatchmakerStorage`] ([`MatchmakerStorage`](crate::MatchmakerStorage)), both on
 //! `moonpool-journal` — the CLSTORE write-ahead journal over moonpool's
 //! `BlockFile`, generic over the provider's `StorageProvider`, so the same
@@ -26,8 +26,7 @@
 //! | a faulty slot carried by a checkpoint | `Faulty` entry | `(slot, ballot.round, ballot.node)` |
 //! | chosen index | `ChosenIndex` entry (a `Relaxed` batch is deferred to the next `Sync`) | — |
 //! | truncation floor + sealed ledger | `Truncate` entry | — |
-//! | snapshot install (index, floor, sessions) | `InstallSnapshot` entry (its ballot goes to the metadata) | — |
-//! | decided snapshot point (#101) | `SnapPoint` header (length, per-chunk CRC) + one `SnapChunk` per chunk | `(at)` / `(at, chunk)` |
+//! | trim-point jump (point, sessions; #186) | `TrimmedTo` entry | — |
 //! | matchmaker registration | `Register` entry | `(ballot.round, ballot.node)` |
 //! | matchmaker scalars (generation, freeze, decree, watermark) | `Scalars` entry, the whole image | — |
 //!
@@ -52,12 +51,10 @@
 //!   [`faulty(slot, ballot)`](paros_core::Storage::faulty_entries) from its
 //!   tag — CTRL's recoverable class, repaired from peers, never counted as
 //!   "nothing accepted here";
-//! - a damaged **snapshot chunk** is a [faulty chunk](crate::NodeStorage::faulty_snap_chunks),
-//!   repaired chunk by chunk;
-//! - a damaged chosen index, truncation or snapshot install is **forgotten**:
+//! - a damaged chosen index, truncation or trim-point jump is **forgotten**:
 //!   each is a local, re-derivable fact (the relaxed commit index, a lazy
-//!   compaction whose records the log still holds, an install the node can
-//!   be sent again), and forgetting one leaves the store in the state it had
+//!   compaction whose records the log still holds, a jump the node can be
+//!   sent again), and forgetting one leaves the store in the state it had
 //!   before it — a node behind, never a node wrong;
 //! - a damaged checkpoint header or sealed ledger whose prefix the journal
 //!   already dropped, a damaged live matchmaker record, and anything the
@@ -66,7 +63,7 @@
 //!
 //! The in-memory image is loaded once, by the boot scan, and every
 //! synchronous accessor answers from it — the contract on
-//! [`NodeStorage::boot_scan`](crate::NodeStorage::boot_scan).
+//! [`LogStorage::boot_scan`](crate::LogStorage::boot_scan).
 
 mod frame;
 mod matchmaker;
@@ -84,7 +81,7 @@ use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::storage::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 
 pub use matchmaker::JournalMatchmakerStorage;
-pub use node::JournalStorage;
+pub use node::{JournalBootFacts, JournalStorage};
 
 /// The index the first entry of every journal gets: a store whose log still
 /// starts here has never dropped a prefix, so its whole history is on disk.

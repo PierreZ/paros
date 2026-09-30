@@ -11,7 +11,7 @@
 //!
 //! After **any** call into a node, exactly once: `ready()`, copy the buckets
 //! out, `advance()`, persist (`Truncate` held back), send, apply, flush the
-//! truncates, serve the snapshot offers, answer the reads, `advance_recovery()`
+//! truncates, answer the reads, `advance_recovery()`
 //! — and drain again until the node is quiet. The `Ready` guard is never held
 //! across anything else: not a disk write, not a prompt, not a player action.
 //! It lives in the crate-private `drain` module, with the durability seams and

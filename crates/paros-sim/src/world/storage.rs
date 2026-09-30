@@ -1,4 +1,4 @@
-//! A node's handle onto the [`StorageWorld`]: the [`NodeStorage`] implementation
+//! A node's handle onto the [`StorageWorld`]: the [`LogStorage`] implementation
 //! the driver runs on, with the write-path fault sites and the boot scan.
 //!
 //! Writes stage locally and reach the durable world only on a `sync`; a crash
@@ -23,12 +23,10 @@ use super::{
     NodeDisk, RecordHealth, SlotHealth, StorageWorld,
 };
 use crate::audit::AuditWorld;
-use crate::chain::{AppliedTransition, ChainState, hash_text};
 use paros::{
-    Ballot, Command, Config, CorruptionVerdict, HardState, IntegrityFault, MemStorage,
-    MetadataFault, MustSync, NodeStorage, RecoveryCase, SNAP_CHUNK_BYTES, SessionEntry, Slot,
-    SlotRecord, Storage, StorageError, StorageRecord, WitnessStatus, WriteOutcome, classify_log,
-    command_hash, snap_chunk_count,
+    Ballot, Command, Config, CorruptionVerdict, HardState, IntegrityFault, LogStorage, MemStorage,
+    MetadataFault, MustSync, RecoveryCase, SessionEntry, Slot, SlotRecord, Storage, StorageError,
+    StorageRecord, WitnessStatus, WriteOutcome, classify_log, command_hash,
 };
 
 /// **Default** per-call firing probability of the write-`EIO` BUGGIFY site (one
@@ -105,11 +103,8 @@ struct BootEvidence {
     promise: [RecordHealth; 2],
     chosen: RecordHealth,
     truncation: RecordHealth,
-    snapshot: RecordHealth,
     meta: Option<MetadataFault>,
     read_eio: Option<StorageRecord>,
-    /// The retained decided snapshot point's per-chunk health (#101), if any.
-    snap_point: Option<(u64, Vec<RecordHealth>)>,
 }
 
 impl BootEvidence {
@@ -123,12 +118,8 @@ impl BootEvidence {
             promise: disk.promise_health,
             chosen: disk.chosen_health,
             truncation: disk.truncation_health,
-            snapshot: disk.snapshot_health,
             meta: disk.meta_fault,
             read_eio: disk.read_eio,
-            snap_point: disk
-                .snap_point
-                .map(|(at, _)| (at, disk.snap_chunk_health.clone())),
         }
     }
 }
@@ -272,7 +263,7 @@ impl<T: TimeProvider> StorageFaults<T> {
     }
 }
 
-/// A [`NodeStorage`] handle onto one node's slice of the shared [`StorageWorld`].
+/// A [`LogStorage`] handle onto one node's slice of the shared [`StorageWorld`].
 ///
 /// It holds a `Weak` to the world, upgraded per op (moonpool's "world held via
 /// Weak, upgraded per op" convention). Reads are served from `boot` — a snapshot
@@ -280,7 +271,7 @@ impl<T: TimeProvider> StorageFaults<T> {
 /// reads storage once, at boot.
 ///
 /// Writes stage locally and reach the durable world only on a
-/// [`sync`](NodeStorage::sync): a [`MustSync::Sync`] batch flushes the stage
+/// [`sync`](LogStorage::sync): a [`MustSync::Sync`] batch flushes the stage
 /// through (fsync); a [`MustSync::Relaxed`] batch leaves it staged, so it is lost
 /// if the incarnation is dropped before a later sync. Because the stage lives in
 /// this handle (dropped when `run_node` unwinds on a seam crash), a crash *before*
@@ -304,47 +295,34 @@ pub(crate) struct DurableStorage<T> {
     world: Weak<Mutex<StorageWorld>>,
     /// This node's IP — its key into the world.
     pub(crate) key: String,
-    /// Stable numeric identity used only on application trace facts.
+    /// Stable numeric identity the audit and the world's ledgers key on.
     pub(crate) node_id: u64,
     /// The budgeted fault switchboard (see the type-level fault model note).
     faults: StorageFaults<T>,
     /// The shared checker, fed the world's flush ground truth (see
     /// [`AuditWorld::note_flushed_ground_truth`]).
     pub(crate) checker: Arc<AuditWorld>,
-    /// This incarnation's application state, including transitions staged for
-    /// the next durability flush.
-    application: ChainState,
     /// This boot's durable-record evidence, consumed by the boot scan.
     evidence: BootEvidence,
     /// The scan's recoverable classification, served to the core through
     /// [`Storage::faulty_entries`].
     faulty_list: Vec<(Slot, Ballot)>,
-    /// The scan's rotted-chunk classification of the retained decided
-    /// snapshot point (#101), served through
-    /// [`NodeStorage::faulty_snap_chunks`].
-    faulty_chunks: Vec<(Slot, u32)>,
     /// The format marker as of boot (#147), served through
-    /// [`NodeStorage::is_formatted`].
+    /// [`LogStorage::is_formatted`].
     formatted: bool,
     /// A format marker staged for the next durability flush (#147).
     staged_format: bool,
-    /// A decided snapshot point staged for the next durability flush (#101).
-    staged_snap_point: Option<(Slot, ChainState)>,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Command)>,
     staged_chosen: Option<Slot>,
     staged_floor: Option<Slot>,
-    staged_snapshot: Option<ChainState>,
-    staged_applies: Vec<PendingApply>,
-    /// Sealed ledger records staged with a truncate / snapshot install (#94),
+    /// A trim-point jump staged for the next flush (#186): the chosen index
+    /// it lands at (`point - 1`), reported to the audit as a landing.
+    staged_jump: Option<Slot>,
+    /// Sealed ledger records staged with a truncate / trim-point jump (#94),
     /// flushed to the durable world with the rest of the batch.
     staged_sealed: Vec<SessionEntry>,
-}
-
-struct PendingApply {
-    slot: Slot,
-    transition: AppliedTransition,
 }
 
 impl<T: TimeProvider> DurableStorage<T> {
@@ -360,12 +338,10 @@ impl<T: TimeProvider> DurableStorage<T> {
         checker: Arc<AuditWorld>,
     ) -> Self {
         let mut boot = MemStorage::new(config.clone());
-        let mut application = ChainState::default();
         let mut evidence = BootEvidence::default();
         let mut formatted = false;
         if let Some(strong) = world.upgrade() {
             let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
-            application = ChainState::empty(guard.lane_count());
             // Stage 7 rot: latent faults that surfaced while the node was
             // down, rolled at the boot that immediately scans them. Gated on
             // the chaos window like every other injection.
@@ -381,7 +357,6 @@ impl<T: TimeProvider> DurableStorage<T> {
                 "a node boots from a prior incarnation's durable records"
             );
             if let Some(disk) = guard.disks.get(&key) {
-                application = disk.chain;
                 formatted = disk.formatted;
                 // Read-back pair of the flush ordering `sync` claims: a floor
                 // that reached the disk never outruns the chosen index that
@@ -438,28 +413,17 @@ impl<T: TimeProvider> DurableStorage<T> {
             node_id,
             faults,
             checker,
-            application,
             evidence,
             faulty_list: Vec::new(),
-            faulty_chunks: Vec::new(),
-            staged_snap_point: None,
             staged_ballot: None,
             staged_accepted: BTreeMap::new(),
             staged_chosen: None,
             staged_floor: None,
-            staged_snapshot: None,
+            staged_jump: None,
             formatted,
             staged_format: false,
-            staged_applies: Vec::new(),
             staged_sealed: Vec::new(),
         }
-    }
-
-    /// The run's digest-lane count (the world's, or the default when the
-    /// world is gone).
-    fn lane_count(&self) -> u8 {
-        self.with_world(|w| w.lane_count())
-            .unwrap_or(crate::chain::DEFAULT_LANES)
     }
 
     /// Run `f` against the shared world.
@@ -489,14 +453,6 @@ impl<T: TimeProvider> DurableStorage<T> {
         if self.staged_floor.is_some() {
             records.push(StorageRecord::Truncation);
         }
-        if self.staged_snapshot.is_some() {
-            records.push(StorageRecord::Snapshot);
-        }
-        records.extend(
-            self.staged_applies
-                .iter()
-                .map(|p| StorageRecord::Application(p.slot)),
-        );
         records
     }
 
@@ -715,9 +671,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         let accepted = std::mem::take(&mut self.staged_accepted);
         let chosen = self.staged_chosen.take();
         let floor = self.staged_floor.take();
-        let snapshot = self.staged_snapshot.take();
-        let snap_point = self.staged_snap_point.take();
-        let applies = std::mem::take(&mut self.staged_applies);
+        let jump = self.staged_jump.take();
         let sealed = std::mem::take(&mut self.staged_sealed);
         let flushed_slots: Vec<u64> = accepted.keys().map(|s| s.0).collect();
         let flushed_hashes: Vec<(u64, u64)> = accepted
@@ -745,10 +699,9 @@ impl<T: TimeProvider> DurableStorage<T> {
                 d.sealed.entry((client, seq)).or_insert(slot);
             }
             if let Some(b) = ballot {
-                // The promise is monotonic: never let a flush lower it. A
-                // SetPromise write only ever raises it, but an InstallSnapshot
-                // carries the *server's* ballot, which can be below this node's own
-                // promise, so take the max (matching `MemStorage::install_snapshot`).
+                // The promise is monotonic: never let a flush lower it (a
+                // SetPromise write only ever raises it; the max is the
+                // write-side guard).
                 d.hard_state.max_promised_ballot = d.hard_state.max_promised_ballot.max(b);
                 // A clean re-write of the HardState copies restores their
                 // health — genuine recovery, not the world healing anything.
@@ -768,6 +721,14 @@ impl<T: TimeProvider> DurableStorage<T> {
                 d.hard_state.chosen_index = Some(c);
                 d.chosen_health = RecordHealth::Clean;
             }
+            // A trim-point jump (#186) chooses everything below its point: the
+            // chosen index rises to at least the landing, never falls.
+            if let Some(landing) = jump
+                && d.hard_state.chosen_index.is_none_or(|ci| ci < landing)
+            {
+                d.hard_state.chosen_index = Some(landing);
+                d.chosen_health = RecordHealth::Clean;
+            }
             // Apply the truncation last, after the chosen index it sits behind, so
             // a flushed floor never outruns the flushed chosen index.
             if let Some(f) = floor {
@@ -775,9 +736,9 @@ impl<T: TimeProvider> DurableStorage<T> {
                 d.accepted.retain(|s, _| *s >= d.first_slot);
                 let new_floor = d.first_slot;
                 // A fault mark dropped by the floor raise is superseded, not
-                // repaired: the record's information migrated into the applied
-                // application state (truncation is decided over the applied
-                // prefix) — resolve its report as recovered-by-custodianship.
+                // repaired: the slot is chosen and trimmed cluster-wide (a
+                // floor only moves inside the chosen prefix), so no peer will
+                // ever ask for this copy — resolve its report as recovered.
                 healed.extend(
                     d.entry_health
                         .range(..new_floor)
@@ -786,36 +747,6 @@ impl<T: TimeProvider> DurableStorage<T> {
                 );
                 d.entry_health.retain(|s, _| *s >= new_floor);
                 d.truncation_health = RecordHealth::Clean;
-            }
-            if let Some(installed) = snapshot {
-                d.chain = installed;
-                d.snapshot_health = RecordHealth::Clean;
-            }
-            if let Some(last) = applies.last() {
-                d.chain = last.transition.next;
-                d.snapshot_health = RecordHealth::Clean;
-            }
-            // A decided snapshot point (#101): retain the new point with a
-            // fresh all-clean chunk map. Advancing the point supersedes the
-            // old one's outstanding chunk reports — custody moved to the new
-            // byte-identical blob.
-            let mut superseded_chunks: Vec<(u64, u32)> = Vec::new();
-            if let Some((at, state)) = snap_point {
-                if let Some((old_at, _)) = d.snap_point
-                    && old_at != at.0
-                {
-                    superseded_chunks = d
-                        .snap_chunk_health
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, health)| **health != RecordHealth::Clean)
-                        .map(|(index, _)| (old_at, u32::try_from(index).unwrap_or(u32::MAX)))
-                        .collect();
-                }
-                let chunks = snap_chunk_count(state.encode().len());
-                d.snap_point = Some((at.0, state));
-                d.snap_chunk_health =
-                    vec![RecordHealth::Clean; usize::try_from(chunks).unwrap_or(0)];
             }
             // Write-side pair of the `restore` read-back check: the floor is
             // applied last, behind the chosen index it sits under, so no flush
@@ -833,25 +764,18 @@ impl<T: TimeProvider> DurableStorage<T> {
                 }
             );
             // A floor raise retires the fault marks of the records it drops:
-            // truncation (or a snapshot install) is only ever decided for the
-            // applied prefix, so the record's information has migrated into
-            // the application snapshot — clearing the mark is custodianship
-            // transfer, not the world healing a fault.
+            // a floor (a decided trim, or a jump below a peer's trim point)
+            // only ever covers chosen slots trimmed cluster-wide — clearing
+            // the mark is the prefix leaving the log, not the world healing a
+            // fault.
             let new_floor = d.first_slot;
             if let Some(marks) = w.marks.get_mut(&key) {
                 marks.retain(|slot| *slot >= new_floor.0);
             }
             // Resolve the reports the flush genuinely healed (or truncation
-            // superseded), and the snapshot report once fresh application
-            // state landed (an install, or replayed applies).
+            // superseded).
             for slot in healed {
                 w.note_recovered(node, StorageRecord::Accepted(slot));
-            }
-            if snapshot.is_some() || !applies.is_empty() {
-                w.note_recovered(node, StorageRecord::Snapshot);
-            }
-            for (old_at, chunk) in superseded_chunks {
-                w.note_recovered(node, StorageRecord::SnapChunk(Slot(old_at), chunk));
             }
         })?;
 
@@ -862,11 +786,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         // holds. A clean flush notes the same values the driver is about to
         // report, so the double entry is idempotent.
         let now_ms = u64::try_from(self.faults.time.now().as_millis()).unwrap_or(u64::MAX);
-        let landing = if snapshot.is_some() {
-            chosen.map(|slot| slot.0)
-        } else {
-            None
-        };
+        let landing = jump.map(|slot| slot.0);
         self.checker.note_flushed_ground_truth(
             self.node_id,
             now_ms,
@@ -875,45 +795,11 @@ impl<T: TimeProvider> DurableStorage<T> {
             landing,
         );
 
-        // The application-state facts, reported to the audit as they become
-        // durable (and traced for humans). An install is a jump; every apply
-        // is one contiguous transition.
-        if let Some(installed) = snapshot {
-            self.checker
-                .app_snapshot(self.node_id, installed.applied_count, installed.chain_hash);
-            tracing::info!(
-                node = self.node_id,
-                index = installed.applied_count,
-                state = %hash_text(installed.chain_hash),
-                "chain_snapshot_installed"
-            );
-        }
-        for pending in applies {
-            let next = pending.transition.next;
-            self.checker.app_applied(
-                self.node_id,
-                next.applied_count,
-                pending.transition.cmd_hash,
-                pending.transition.kind == "user",
-                pending.transition.kind == "noop",
-                next.chain_hash,
-            );
-            tracing::info!(
-                target: "chain",
-                node = self.node_id,
-                slot = pending.slot.0,
-                index = next.applied_count,
-                cmd = %hash_text(pending.transition.cmd_hash),
-                state = %hash_text(next.chain_hash),
-                kind = pending.transition.kind,
-                "command_applied"
-            );
-        }
         Ok(())
     }
 }
 
-impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
+impl<T: TimeProvider> LogStorage for DurableStorage<T> {
     fn is_formatted(&self) -> bool {
         self.formatted
     }
@@ -1039,129 +925,6 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
                     fault,
                     verdict: CorruptionVerdict::Corrupted,
                 });
-            }
-        }
-        // Snapshot corruption: its own kind and its own gate (#71). Stage 8
-        // recovers instead of crashing — a snapshot is never discardable and
-        // all its data is committed by definition, so the node must never
-        // install or serve the garbage, and must recover the state: with the
-        // log intact from slot 0 the ordinary boot replay rebuilds it locally
-        // (CTRL's cheap path, with the core's duplicate-suppression decisions
-        // re-derived exactly); under a truncated log only a peer's
-        // `InstallSnapshot` covers the folded prefix, so the driver opens a
-        // below-floor application repair and the node *waits* on it — serving
-        // consensus for every slot it can read, applying nothing.
-        if evidence.snapshot.integrity_fault().is_some() {
-            let floor = self.boot.first_slot();
-            // #101: a fully clean decided snapshot point that covers the
-            // floor restores the lost application state *locally* — the
-            // CTRL payoff of consensus-decided snapshot points: no whole-blob
-            // transfer, no wait, just the retained byte-identical state.
-            let point_state = self
-                .with_world(|w| {
-                    let disk = w.disks.get(&key)?;
-                    let (at, state) = disk.snap_point?;
-                    let all_clean = disk
-                        .snap_chunk_health
-                        .iter()
-                        .all(|health| *health == RecordHealth::Clean);
-                    (all_clean && at + 1 >= floor.0).then_some((at, state))
-                })
-                .ok()
-                .flatten();
-            if floor.0 > 0
-                && let Some((at, state)) = point_state
-            {
-                let _ = self.with_world(|w| {
-                    w.s7.snapshot_detected = true;
-                    if let Some(disk) = w.disks.get_mut(&key) {
-                        disk.chain = state;
-                        disk.snapshot_health = RecordHealth::Clean;
-                    }
-                    w.resolve_corruption(
-                        node,
-                        StorageRecord::Snapshot,
-                        CorruptionOutcome::Reported,
-                    );
-                    w.note_recovered(node, StorageRecord::Snapshot);
-                });
-                self.application = state;
-                tracing::info!(node, at, "snapshot_restored_from_point");
-                // For the application-agreement checker this is a reset (the
-                // pre-crash prefix may sit past the point, so the jump can go
-                // backward) followed by an install-shaped landing at the
-                // point; the re-walk from there is contiguous again.
-                self.checker.app_reset(node);
-                self.checker
-                    .app_snapshot(node, state.applied_count, state.chain_hash);
-                tracing::info!(node, floor = floor.0, "snapshot_reset_for_recovery");
-                tracing::info!(
-                    node,
-                    index = state.applied_count,
-                    state = %hash_text(state.chain_hash),
-                    "chain_snapshot_installed"
-                );
-                assert_reachable!(
-                    "storage: a corrupted snapshot is restored from the decided snapshot point"
-                );
-            } else {
-                let _ = self.with_world(|w| {
-                    w.s7.snapshot_detected = true;
-                    let lanes = w.lane_count();
-                    if let Some(disk) = w.disks.get_mut(&key) {
-                        disk.chain = ChainState::empty(lanes);
-                        disk.snapshot_health = RecordHealth::Clean;
-                    }
-                    w.resolve_corruption(
-                        node,
-                        StorageRecord::Snapshot,
-                        CorruptionOutcome::Reported,
-                    );
-                });
-                self.application = ChainState::empty(self.lane_count());
-                self.checker.app_reset(node);
-                tracing::info!(node, floor = floor.0, "snapshot_reset_for_recovery");
-                if floor.0 == 0 {
-                    assert_reachable!(
-                        "storage: a corrupted snapshot is rebuilt from the local log"
-                    );
-                } else {
-                    assert_reachable!(
-                        "storage: a corrupted snapshot awaits a peer snapshot transfer"
-                    );
-                }
-            }
-        }
-        // #101: rotted chunks of the retained decided snapshot point are the
-        // recoverable class by construction — the point's identity survives
-        // and every peer holds the byte-identical blob — so they are
-        // classified and reported for the driver's chunk-repair pull, never a
-        // crash.
-        if let Some((at, chunk_health)) = &evidence.snap_point {
-            let rotted: Vec<(Slot, u32)> = chunk_health
-                .iter()
-                .enumerate()
-                .filter(|(_, health)| **health != RecordHealth::Clean)
-                .map(|(index, _)| (Slot(*at), u32::try_from(index).unwrap_or(u32::MAX)))
-                .collect();
-            if !rotted.is_empty() {
-                let _ = self.with_world(|w| {
-                    for (point, chunk) in &rotted {
-                        w.resolve_corruption(
-                            node,
-                            StorageRecord::SnapChunk(*point, *chunk),
-                            CorruptionOutcome::Reported,
-                        );
-                    }
-                });
-                tracing::info!(
-                    node,
-                    at = *at,
-                    chunks = rotted.len() as u64,
-                    "snap_chunks_classified"
-                );
-                assert_reachable!("storage: rotted snapshot chunks are classified for peer repair");
-                self.faulty_chunks = rotted;
             }
         }
         // The log: reduce every retained record to its evidence booleans and
@@ -1398,255 +1161,22 @@ impl<T: TimeProvider> NodeStorage for DurableStorage<T> {
         })
     }
 
-    async fn snapshot(&self) -> Vec<u8> {
-        self.application.encode()
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn install_snapshot(
+    #[tracing::instrument(level = "debug", skip_all, fields(point = point.0, sessions = sessions.len()))]
+    async fn trimmed_to(
         &mut self,
-        chosen_index: Slot,
-        ballot: Ballot,
-        snapshot: Vec<u8>,
+        point: Slot,
         sessions: &[SessionEntry],
     ) -> Result<(), StorageError> {
-        // Stage the install like every other write (InstallSnapshot is
-        // MustSync::Sync): the chosen index, the adopted ballot, the floor
-        // (`chosen_index + 1`), and the serving peer's session ledger reach the
-        // durable world on the next Sync flush, where the floor is applied last
-        // so it never outruns the chosen index.
-        // A transferred snapshot that fails to decode is a mismatch on the
-        // wire-to-disk path; if it ever fires, the injected⇔detected
-        // correlation flags the uninjected detection as a bug.
-        let installed = ChainState::decode(&snapshot).map_err(|_| StorageError::Corruption {
-            record: StorageRecord::Snapshot,
-            fault: IntegrityFault::ChecksumMismatch,
-            verdict: CorruptionVerdict::Corrupted,
-        })?;
-        assert_always!(
-            installed.applied_slot() == Some(chosen_index),
-            "chain: snapshot state matches its boundary"
-        );
-        assert_always!(
-            installed.applied_count >= self.application.applied_count,
-            "chain: snapshot install does not regress state"
-        );
+        // A jump below a peer's trim point (#186): the floor, the chosen
+        // index it implies and the peer's ledger, staged like every other
+        // write and durable on the next Sync flush. The promise does not move.
         let sessions = sessions.to_vec();
-        self.write_record(StorageRecord::Snapshot, |s| {
+        let landing = Slot(point.0.saturating_sub(1));
+        self.write_record(StorageRecord::Truncation, |s| {
+            s.staged_floor = Some(s.staged_floor.map_or(point, |f| f.max(point)));
+            s.staged_jump = Some(s.staged_jump.map_or(landing, |l| l.max(landing)));
             s.staged_sealed.extend_from_slice(&sessions);
-            s.staged_chosen = Some(chosen_index);
-            s.staged_ballot = Some(ballot);
-            let first = Slot(chosen_index.0 + 1);
-            s.staged_floor = Some(s.staged_floor.map_or(first, |f| f.max(first)));
-            s.application = installed;
-            s.staged_snapshot = Some(installed);
         })
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn apply(
-        &mut self,
-        chosen_index: Slot,
-        slot: Slot,
-        command: &Command,
-    ) -> Result<(), StorageError> {
-        assert_always!(
-            slot <= chosen_index,
-            "chain: apply does not outrun chosen prefix"
-        );
-        if self
-            .application
-            .applied_slot()
-            .is_some_and(|applied| slot <= applied)
-        {
-            // The driver's boot replay re-walks the retained chosen prefix; a
-            // node whose application state survived (clean reboot, or a crash
-            // after the app fsync) skips the already-applied prefix here.
-            assert_reachable!("a boot replay skips an already-applied slot");
-            return Ok(());
-        }
-        let expected = self
-            .application
-            .applied_slot()
-            .map_or(Slot(0), |applied| Slot(applied.0.saturating_add(1)));
-        assert_always!(
-            slot == expected,
-            "chain: local application transition is contiguous"
-        );
-        let transition = self.application.apply(command);
-        self.write_record(StorageRecord::Application(slot), |s| {
-            s.application = transition.next;
-            s.staged_applies.push(PendingApply { slot, transition });
-        })
-    }
-
-    fn applied_slot(&self) -> Option<Slot> {
-        self.application.applied_slot()
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(at = at.0))]
-    async fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
-        // Captured at the apply seam, when the staged application state IS the
-        // marker's boundary state; durable with the batch's application fsync.
-        self.staged_snap_point = Some((at, self.application));
-        Ok(())
-    }
-
-    fn latest_snap_point(&self) -> Option<Slot> {
-        if let Some((at, _)) = self.staged_snap_point {
-            return Some(at);
-        }
-        let key = self.key.clone();
-        self.with_world(|w| {
-            w.disks
-                .get(&key)
-                .and_then(|d| d.snap_point.map(|(at, _)| Slot(at)))
-        })
-        .ok()
-        .flatten()
-    }
-
-    fn snap_chunk_count(&self, at: Slot) -> Option<u32> {
-        let key = self.key.clone();
-        self.with_world(|w| {
-            let disk = w.disks.get(&key)?;
-            let (point, state) = disk.snap_point?;
-            (point == at.0).then(|| snap_chunk_count(state.encode().len()))
-        })
-        .ok()
-        .flatten()
-    }
-
-    async fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
-        let key = self.key.clone();
-        self.with_world(|w| {
-            let disk = w.disks.get(&key)?;
-            let (point, state) = disk.snap_point?;
-            if point != at.0 {
-                return None;
-            }
-            let index = usize::try_from(chunk).ok()?;
-            // A rotted chunk answers nothing (silence, never garbage).
-            if disk
-                .snap_chunk_health
-                .get(index)
-                .is_some_and(|health| *health != RecordHealth::Clean)
-            {
-                return None;
-            }
-            let blob = state.encode();
-            let start = index.checked_mul(SNAP_CHUNK_BYTES)?;
-            if start >= blob.len() {
-                return None;
-            }
-            let end = (start + SNAP_CHUNK_BYTES).min(blob.len());
-            Some(blob[start..end].to_vec())
-        })
-        .ok()
-        .flatten()
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn write_snap_chunk(
-        &mut self,
-        at: Slot,
-        chunk: u32,
-        bytes: &[u8],
-    ) -> Result<bool, StorageError> {
-        let key = self.key.clone();
-        let node = self.node_id;
-        let bytes = bytes.to_vec();
-        self.with_world(move |w| {
-            let outcome = {
-                let Some(disk) = w.disks.get_mut(&key) else {
-                    return false;
-                };
-                let Some((point, state)) = disk.snap_point else {
-                    return false;
-                };
-                if point != at.0 {
-                    return false;
-                }
-                let Some(index) = usize::try_from(chunk).ok() else {
-                    return false;
-                };
-                let blob = state.encode();
-                let Some(start) = index.checked_mul(SNAP_CHUNK_BYTES) else {
-                    return false;
-                };
-                if start >= blob.len() {
-                    return false;
-                }
-                let end = (start + SNAP_CHUNK_BYTES).min(blob.len());
-                // The received chunk must be byte-identical to the decided
-                // state — the identity the `Snap` marker exists to guarantee,
-                // asserted against the world's ground truth.
-                assert_always!(
-                    bytes == blob[start..end],
-                    "chain: a repaired snapshot chunk matches the decided point",
-                    { "at" => at.0, "chunk" => chunk }
-                );
-                if bytes != blob[start..end] {
-                    return false;
-                }
-                if disk.snap_chunk_health.len() <= index {
-                    disk.snap_chunk_health.resize(
-                        usize::try_from(snap_chunk_count(blob.len())).unwrap_or(0),
-                        RecordHealth::Clean,
-                    );
-                }
-                let was_faulty = disk.snap_chunk_health[index] != RecordHealth::Clean;
-                // Models an atomic per-chunk file replace; the driver flushes
-                // right after installing a response's chunks.
-                disk.snap_chunk_health[index] = RecordHealth::Clean;
-                let all_clean = disk
-                    .snap_chunk_health
-                    .iter()
-                    .all(|health| *health == RecordHealth::Clean);
-                (was_faulty, all_clean)
-            };
-            let (was_faulty, all_clean) = outcome;
-            if was_faulty {
-                w.note_recovered(node, StorageRecord::SnapChunk(at, chunk));
-            }
-            all_clean
-        })
-    }
-
-    fn faulty_snap_chunks(&self) -> Vec<(Slot, u32)> {
-        self.faulty_chunks.clone()
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn restore_from_snap_point(&mut self) -> Result<Option<Slot>, StorageError> {
-        let key = self.key.clone();
-        let candidate = self.with_world(|w| {
-            let disk = w.disks.get(&key)?;
-            let (at, state) = disk.snap_point?;
-            let all_clean = disk
-                .snap_chunk_health
-                .iter()
-                .all(|health| *health == RecordHealth::Clean);
-            // The point must be whole and must cover the compaction floor —
-            // replay from the floor is contiguous only from `at + 1`.
-            (all_clean && at + 1 >= disk.first_slot.0).then_some((at, state))
-        })?;
-        let Some((at, state)) = candidate else {
-            return Ok(None);
-        };
-        if self
-            .application
-            .applied_slot()
-            .is_some_and(|applied| applied.0 >= at)
-        {
-            return Ok(None);
-        }
-        // Stage the restored state exactly like a snapshot install: the flush
-        // sets the durable application state, heals the live-snapshot health,
-        // and emits the `chain_snapshot_installed` fact.
-        self.application = state;
-        self.staged_snapshot = Some(state);
-        Ok(Some(Slot(at)))
     }
 }
 

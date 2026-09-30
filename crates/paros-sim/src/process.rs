@@ -22,7 +22,7 @@
 //! [`StorageWorld`]: crate::world::StorageWorld
 
 use std::future::Future;
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,18 +31,20 @@ use moonpool_sim::{
     assert_always, assert_reachable, buggify_knob,
 };
 
-use crate::audit::{AuditWorld, NodeAudit, audit_world};
-use crate::hooks::{BuggifyHooks, ScriptedCrash};
+use crate::audit::journals::{journal_board, lock as board_lock};
+use crate::audit::{AuditWorld, NodeAudit, audit_world, audit_world_for};
+use crate::hooks::BuggifyHooks;
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
 use crate::world::matchmaker::DurableMatchmakerStorage;
+use crate::world::node_store::{LedgeredJournal, NodeStore};
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
-use crate::world::{ParkReason, storage_world};
+use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
-    AcceptorConfig, Application, BootKind, BootRefusal, Config, MatchmakerConfig, MatchmakerId,
-    NodeId, ProxyConfig, ProxyId, ReplicaId, RunError, Seam, parse_addr, run_matchmaker, run_node,
-    run_proxy, run_replica,
+    AcceptorConfig, BootKind, BootRefusal, Config, JournalStorage, JournalStoreConfig,
+    JournalStores, LogStorage, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId,
+    ReplicaId, RunError, parse_addr, run_journals, run_matchmaker, run_proxy, run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -171,7 +173,7 @@ fn stay_down(checker: &AuditWorld, down: Down) {
 /// stretches the durability-seam crash window process-level attrition
 /// cannot reach — a node held down while the cluster keeps committing and
 /// truncating returns below the compaction floor and independently
-/// exercises snapshot recovery. Drawn per *crash*, deliberately not per node
+/// exercises the trim-point jump. Drawn per *crash*, deliberately not per node
 /// (it is not part of the node's shape): the delay describes one event, and
 /// two crashes of the same node should be free to look different. The floor
 /// is structural: a held-down node is a recovery the tail must absorb, never
@@ -210,9 +212,10 @@ pub(crate) struct ScriptedOptions {
     /// acceptors, the rest spares — a case that needs a spare); `None`
     /// bootstraps on the whole pool.
     pub(crate) bootstrap: Option<usize>,
-    /// One targeted seam crash (`crate::hooks::ScriptedCrash`, #146): the
-    /// first node to reach the seam crashes there, once per run.
-    pub(crate) seam_crash: Option<Seam>,
+    /// Withhold every GC request (`DriverHooks::withhold_gc_requests`): a
+    /// case whose prior configuration must stay answerable (#124) cannot
+    /// race the new leader's GC floor.
+    pub(crate) withhold_gc: bool,
 }
 
 /// How a process is perturbed.
@@ -507,15 +510,8 @@ async fn run_acceptor(
     // the swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let quorum_system = policy.system(bootstrap.len());
-    // A bare acceptor (#144) is deployment data too, drawn once per seed and
-    // only where a replica tier runs the application.
-    let application =
-        if crate::shape::bare_acceptors(ctx.state(), deployment.replica_count(), perturb) {
-            Application::Shed
-        } else {
-            Application::Colocated
-        };
     let config = Config {
+        journal: paros::JournalId::default(),
         id: self_rank,
         peers: bootstrap,
         quorum_system,
@@ -524,14 +520,17 @@ async fn run_acceptor(
         matchmaker_pool,
         proxy_count: proxies.len(),
         replica_count: deployment.replica_count(),
-        application,
     };
+    // The run's journals (#188): the static list every node serves — the
+    // default journal alone unless the deployment is plain and the seed drew
+    // more — and the one held on every node for the chaos window, if any.
+    let plan = crate::shape::journals(ctx.state(), !matchmakers.is_empty(), perturb);
+    // The store (#187): the world-backed store, or — on a plain seed that
+    // drew it — the library's `JournalStorage` on the simulated disk.
+    let journal_store = crate::shape::journal_store(ctx.state(), !matchmakers.is_empty(), perturb);
+    let board = journal_board(ctx.state());
+    board_lock(&board).arm(&plan);
 
-    // The per-iteration durable-storage world, shared by every node and
-    // surviving crash/restart (it lives in the `StateHandle`, fresh per seed
-    // but stable across a process's reboots). Each node reaches it through a
-    // `Weak` handle upgraded per op.
-    let world = storage_world(ctx.state());
     // This node's rig: every knob the swarm draws *for the node* (the driver
     // tunables, the write-window crash bias, the disk's fault rates), drawn
     // by its first incarnation of the seed and handed back unchanged to
@@ -539,10 +538,16 @@ async fn run_acceptor(
     // seed's draw schedule keeps its order.
     let RoleRig {
         incarnation,
-        mut hooks,
-        checker,
-        audit,
+        hooks,
+        checker: _,
+        audit: _,
     } = arm_role(ctx, my_ip, perturb);
+    let hooks = if options.withhold_gc {
+        hooks.withholding_gc()
+    } else {
+        hooks
+    };
+    let hooks = hooks.holding_journal(plan.held);
     let shape = incarnation.shape;
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
@@ -552,36 +557,82 @@ async fn run_acceptor(
     // split's Phase-1 quorum, or — on a grid seed — the whole floor: a grid
     // tolerates no permanent loss). The storage world's budget and the
     // audit's restart note below read the same two numbers.
-    let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
-    let clean_copies = policy.clean_copies(floor, config.pool().len());
-    {
-        let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.set_budget(floor, clean_copies);
-        // The pool above that floor is the retirement budget (#123): every
-        // identity a configuration may leave behind.
-        guard.set_pool_size(config.pool().len());
-        if !perturb {
-            guard.set_unbudgeted();
-        }
-        guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
-    }
-    if let Some(seam) = options.seam_crash {
-        hooks = hooks.with_scripted_crash(ScriptedCrash::arm(ctx.state(), seam));
-    }
+    // One seat per journal (#188): its own configuration, its own
+    // per-iteration durable world (shared by every node's copy of the
+    // journal, surviving crash/restart, reached through a `Weak` handle
+    // upgraded per op), its own audit world and audit port. Nothing crosses:
+    // a journal's budget, fault ledger, parked identities and oracles are
+    // its own. The default journal is the seed's deployment (its
+    // matchmakers, proxies, replicas and bootstrap); every other journal is
+    // plain Multi-Paxos over the whole pool — the matchmaker plane, the
+    // proxy leaders and the replica tier each serve one journal.
+    let seats: Vec<Seat> = plan
+        .ids
+        .iter()
+        .map(|&journal| {
+            let config = if journal == paros::JournalId::default() {
+                config.clone()
+            } else {
+                Config {
+                    journal,
+                    peers: config.pool().to_vec(),
+                    quorum_system: policy.system(config.pool().len()),
+                    matchmakers: Vec::new(),
+                    matchmaker_pool: Vec::new(),
+                    proxy_count: 0,
+                    replica_count: 0,
+                    ..config.clone()
+                }
+            };
+            let floor = crate::shape::config_floor(config.pool().len(), config.has_matchmakers());
+            let clean_copies = policy.clean_copies(floor, config.pool().len());
+            let world = storage_world_for(ctx.state(), journal);
+            {
+                let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.set_budget(floor, clean_copies);
+                // The pool above that floor is the retirement budget (#123):
+                // every identity a configuration may leave behind.
+                guard.set_pool_size(config.pool().len());
+                if !perturb {
+                    guard.set_unbudgeted();
+                }
+            }
+            let checker = audit_world_for(ctx.state(), journal);
+            let audit = NodeAudit::new(ctx.time().clone(), checker.clone())
+                .in_journal(journal, board.clone());
+            Seat {
+                journal,
+                config,
+                world,
+                checker,
+                audit,
+                floor,
+                clean_copies,
+            }
+        })
+        .collect();
     let faults = storage_faults(ctx, perturb, shape.write_rates);
     let tunables = shape.tunables;
     if incarnation.is_restart() {
         // A process-level revival (attrition on the main campaign, the
-        // script on the corpus). Told to the audit so it can judge the
-        // overlap this boot may be ending: a node that was down while a
-        // peer sat terminally parked (persistent storage loss + transient
-        // process loss at once) is the composition that costs a small
-        // cluster its quorum until exactly this boot returns it.
-        let parked_peers = world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .parked_count_excluding(my_ip);
-        checker.note_process_restart(self_rank.0, parked_peers, floor, clean_copies);
+        // script on the corpus). Told to every journal's audit so it can
+        // judge the overlap this boot may be ending: a node that was down
+        // while a peer sat terminally parked (persistent storage loss +
+        // transient process loss at once) is the composition that costs a
+        // small cluster its quorum until exactly this boot returns it.
+        for seat in &seats {
+            let parked_peers = seat
+                .world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .parked_count_excluding(my_ip);
+            seat.checker.note_process_restart(
+                self_rank.0,
+                parked_peers,
+                seat.floor,
+                seat.clean_copies,
+            );
+        }
         // The disk's wipe coin (#124): a restart that comes back on an empty
         // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
         // which paros does not use (the fake disk is the world), so the
@@ -593,13 +644,15 @@ async fn run_acceptor(
         // rejoined (an empty disk under an old identity would answer a
         // Phase 1 with "nothing accepted" for slots it voted on). Only a
         // matchmaker deployment can replace, so the coin is dark on a plain
-        // seed; the world's dead-node budget bounds it either way.
+        // seed — and a matchmaker deployment runs one journal; the world's
+        // dead-node budget bounds it either way.
         let wipe = perturb
             && config.has_matchmakers()
             && ctx.time().now() < crate::CHAOS_DURATION
             && moonpool_sim::buggify_with_prob!(f64::from(shape.wipe_pct) / 100.0);
         if wipe
-            && world
+            && seats[0]
+                .world
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .wipe(my_ip, self_rank.0)
@@ -610,68 +663,41 @@ async fn run_acceptor(
         }
     }
 
-    // Recovery loop: a `buggify`-injected seam crash unwinds `run_node`, we
-    // drop the volatile node, rebuild storage from the (surviving) world, and
-    // re-run — a faithful clean crash + recovery. Attrition (process kill) is
-    // handled by the harness; this covers the seams *inside* a Ready batch
-    // that attrition cannot reach.
+    // Recovery loop: a `buggify`-injected seam crash unwinds the driver, we
+    // drop the volatile nodes, rebuild storage from the (surviving) worlds,
+    // and re-run — a faithful clean crash + recovery. Attrition (process
+    // kill) is handled by the harness; this covers the seams *inside* a
+    // Ready batch that attrition cannot reach. A journal that is down for
+    // good on this node — retired by the operator (#123), or terminally
+    // parked by a detected persistent corruption — is one the opener
+    // declines (`SimStores::open`), and a node with every journal down
+    // exits cleanly: it stays down. A **wiped** identity (#124) is not on
+    // that list: it boots, and the library refuses it (#147, below).
     loop {
-        // A node that is down for good never boots again: retired by the
-        // operator (#123), or terminally parked by a detected persistent
-        // corruption (attrition may revive the *process*, but the boot scan
-        // would re-detect the same rotted record forever, and a second crash
-        // report for one detection would break the 1:1 injected⇔detected
-        // correlation). Exit before touching the store. A **wiped** identity
-        // (#124) is deliberately not on this list any more: it boots, and
-        // the library refuses it (#147, below).
-        let (parked, boot) = {
-            let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-            (
-                guard.park_reason(my_ip),
-                // The operator's claim (#147): an identity the world's
-                // provisioning ledger knows is an existing member — a wiped
-                // one included, which is the whole point — and any other is
-                // a first boot the driver formats.
-                if guard.provisioned(my_ip) {
-                    BootKind::ExistingMember
-                } else {
-                    BootKind::FirstBoot
-                },
-            )
-        };
-        match parked {
-            Some(ParkReason::Retired) => {
-                stay_down(&checker, Down::Retired(self_rank.0));
-                return Ok(());
-            }
-            Some(ParkReason::Corruption) => {
-                stay_down(&checker, Down::StorageParked(self_rank.0));
-                return Ok(());
-            }
-            Some(ParkReason::Wiped) | None => {}
+        if journal_store.is_some() {
+            resolve_provisioning(ctx, &seats, my_ip, journal_store).await;
         }
-        let storage = DurableStorage::restore(
-            config.clone(),
-            Arc::downgrade(&world),
-            my_ip.to_string(),
-            self_rank.0,
-            faults.clone(),
-            checker.clone(),
-        );
-        match run_node(
+        let stores = SimStores {
+            seats: &seats,
+            ip: my_ip,
+            rank: self_rank.0,
+            faults: &faults,
+            journal_store: journal_store.map(|layout| (ctx.storage().clone(), layout)),
+        };
+        // Boxed: the node loop's future is large (every arm's state lives
+        // in it), and this incarnation loop awaits it on its own frame.
+        match Box::pin(run_journals(
             ctx.providers().clone(),
-            storage,
+            stores,
             parse_addr(my_ip)?,
             members.clone(),
             matchmakers.clone(),
             proxies.clone(),
             replicas.clone(),
-            boot,
             tunables,
             ctx.shutdown().clone(),
             &hooks,
-            &audit,
-        )
+        ))
         .await
         {
             // Simulated crash at a durability seam: fall through to recover
@@ -681,28 +707,35 @@ async fn run_acceptor(
                 restart_delay!(ctx, "a seam-crashed node restarts after a buggified delay");
             }
             // An injected storage fault surfaced as the driver's typed
-            // crash decision (issue #19 A): fail-stop, so the node re-enters
-            // the same Stage-4 crash/restart path — the next iteration
-            // boots from whatever the disk *actually* holds, which is how
-            // an ambiguous write's two possible outcomes both resolve.
-            // Its restart delay is its own independent BUGGIFY location.
+            // crash decision (issue #19 A) and took the node's last live
+            // journal (#188: a fault quarantines its journal; a node left
+            // with none is the fail-stop crash), so the node re-enters the
+            // same Stage-4 crash/restart path — the next iteration boots from
+            // whatever the disks *actually* hold, which is how an ambiguous
+            // write's two possible outcomes both resolve. Its restart delay
+            // is its own independent BUGGIFY location.
             Err(RunError::Storage(_)) => {
                 // Stage 7's baseline for a *persistent* detected fault —
                 // a rotted record or an FS-metadata fault — is detect ⇒
                 // crash, and restarting cannot help: the boot scan would
-                // re-detect the same record forever. The node stays down
-                // for the run (the availability disaster the CTRL paper
-                // measures; Stage 8 buys it back), bounded by the world's
-                // dead-node budget so the cluster keeps a live quorum. The
-                // audit is told so convergence excuses exactly these
+                // re-detect the same record forever. The journal stays down
+                // on this node for the run (the availability disaster the
+                // CTRL paper measures; Stage 8 buys it back), bounded by its
+                // world's dead-node budget so the cluster keeps a live
+                // quorum. A node whose every journal is parked stays down;
+                // its audits are told so convergence excuses exactly these
                 // nodes, and only these.
-                let parked = world
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_parked(my_ip);
+                let parked = seats.iter().all(|seat| {
+                    seat.world
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_parked(my_ip)
+                });
                 if parked {
                     assert_reachable!("storage: a corruption-crashed node stays down");
-                    stay_down(&checker, Down::StorageParked(self_rank.0));
+                    for seat in &seats {
+                        stay_down(&seat.checker, Down::StorageParked(self_rank.0));
+                    }
                     return Ok(());
                 }
                 assert_reachable!("a storage-fault crash recovers through the restart path");
@@ -719,10 +752,12 @@ async fn run_acceptor(
             // against its own injection: only a wiped disk is ever
             // amnesiac here.
             Err(RunError::Refused(BootRefusal::Amnesia)) => {
-                let wiped = world
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_wiped(my_ip);
+                let wiped = seats.iter().any(|seat| {
+                    seat.world
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_wiped(my_ip)
+                });
                 assert_always!(
                     wiped,
                     "storage: an amnesia refusal names a wiped identity",
@@ -749,6 +784,154 @@ async fn run_acceptor(
             Err(RunError::Infra(e)) => return Err(e),
             Ok(()) => return Ok(()),
         }
+    }
+}
+
+/// One journal's seat on an acceptor process (#188): its configuration, its
+/// storage world, its audit world and its audit port.
+struct Seat {
+    journal: paros::JournalId,
+    config: Config,
+    world: Arc<Mutex<StorageWorld>>,
+    checker: Arc<AuditWorld>,
+    audit: NodeAudit<SimTimeProvider>,
+    /// The journal's configuration floor and its clean-copy budget (the
+    /// numbers its storage world was sized by).
+    floor: usize,
+    clean_copies: usize,
+}
+
+/// The acceptor's journal stores (#188): each journal's world-backed disk,
+/// opened as a process restart finds it (`DurableStorage::restore`), with the
+/// operator's boot claim read off the journal's provisioning ledger (#147).
+/// A journal down for good on this node — retired, or parked by a detected
+/// corruption — is declined, and its audit is told it stays down.
+struct SimStores<'a> {
+    seats: &'a [Seat],
+    ip: &'a str,
+    rank: u64,
+    faults: &'a StorageFaults<SimTimeProvider>,
+    /// The simulated disk and the journal layout, on a journal-store seed
+    /// (#187).
+    journal_store: Option<(SimStorageProvider, JournalStoreConfig)>,
+}
+
+/// The directory a journal's store lives in on a node's simulated disk
+/// (#187, #188: one directory per journal).
+fn journal_dir(journal: paros::JournalId) -> String {
+    format!("paros/journals/{}", journal.0)
+}
+
+/// Resolve an interrupted provisioning before a boot (#187): a journal
+/// store's format marker lands only with the sync after the format, and a
+/// process killed in between leaves the operator's ledger saying "begun"
+/// and nothing else. The operator does what an operator would: looks at the
+/// disk — a store that carries the marker was provisioned, one that does
+/// not was not, and its next boot is a first boot again.
+#[tracing::instrument(level = "debug", skip_all, fields(ip = %ip))]
+async fn resolve_provisioning(
+    ctx: &SimContext,
+    seats: &[Seat],
+    ip: &str,
+    journal_store: Option<JournalStoreConfig>,
+) {
+    let Some(layout) = journal_store else {
+        return;
+    };
+    for seat in seats {
+        let ambiguous = seat
+            .world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .provisioning_ambiguous(ip);
+        if !ambiguous {
+            continue;
+        }
+        let mut probe = JournalStorage::new(
+            ctx.storage().clone(),
+            journal_dir(seat.journal),
+            seat.config.clone(),
+            layout,
+        );
+        let formatted = probe.boot_scan().await.is_ok() && probe.is_formatted();
+        drop(probe);
+        let mut guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
+        if formatted {
+            guard.note_provisioned(ip);
+        } else {
+            guard.abandon_provisioning(ip);
+        }
+        assert_reachable!("journal store: an interrupted provisioning is resolved from the disk");
+    }
+}
+
+impl SimStores<'_> {
+    fn seat(&self, journal: paros::JournalId) -> Option<&Seat> {
+        self.seats.iter().find(|seat| seat.journal == journal)
+    }
+}
+
+impl JournalStores for SimStores<'_> {
+    type Store = NodeStore;
+    type Audit = NodeAudit<SimTimeProvider>;
+
+    fn journals(&self) -> Vec<paros::JournalId> {
+        self.seats.iter().map(|seat| seat.journal).collect()
+    }
+
+    fn open(&mut self, journal: paros::JournalId) -> Option<(Self::Store, BootKind)> {
+        let seat = self.seat(journal)?;
+        let (parked, boot) = {
+            let guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
+            (
+                guard.park_reason(self.ip),
+                // The operator's claim (#147): an identity the world's
+                // provisioning ledger knows is an existing member — a wiped
+                // one included, which is the whole point — and any other is
+                // a first boot the driver formats.
+                if guard.provisioned(self.ip) {
+                    BootKind::ExistingMember
+                } else {
+                    BootKind::FirstBoot
+                },
+            )
+        };
+        match parked {
+            Some(ParkReason::Retired) => {
+                stay_down(&seat.checker, Down::Retired(self.rank));
+                return None;
+            }
+            Some(ParkReason::Corruption) => {
+                stay_down(&seat.checker, Down::StorageParked(self.rank));
+                return None;
+            }
+            Some(ParkReason::Wiped) | None => {}
+        }
+        if let Some((provider, layout)) = &self.journal_store {
+            let journal = JournalStorage::new(
+                provider.clone(),
+                journal_dir(journal),
+                seat.config.clone(),
+                *layout,
+            );
+            let store =
+                LedgeredJournal::new(journal, Arc::downgrade(&seat.world), self.ip.to_string());
+            return Some((NodeStore::Journal(store), boot));
+        }
+        let storage = DurableStorage::restore(
+            seat.config.clone(),
+            Arc::downgrade(&seat.world),
+            self.ip.to_string(),
+            self.rank,
+            self.faults.clone(),
+            seat.checker.clone(),
+        );
+        Some((NodeStore::World(storage), boot))
+    }
+
+    fn audit(&self, journal: paros::JournalId) -> Self::Audit {
+        self.seat(journal)
+            .map_or_else(|| self.seats[0].audit.clone(), |seat| seat.audit.clone())
     }
 }
 
@@ -890,6 +1073,7 @@ async fn run_proxy_role(
     let config = ProxyConfig {
         id,
         acceptors: bootstrap_config(ctx, members.len(), has_matchmakers, perturb),
+        journal: paros::JournalId::default(),
     };
     // A proxy has a shape too — its tick cadence and transport tunables —
     // drawn once per seed like a node's and kept across its reboots.
@@ -957,10 +1141,6 @@ async fn run_replica_role(
     {
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
         guard.note_replica(my_ip);
-        // The application's digest-lane count is one per-run value every
-        // applier must slice by; a replica may boot before any acceptor
-        // published it, so it publishes the seed's own draw too.
-        guard.set_lane_count(crate::shape::lane_count(ctx.state(), perturb));
     }
     let faults = StorageFaults::new(
         ctx.time().clone(),
@@ -1045,8 +1225,7 @@ use moonpool_sim::SimStorageProvider;
 #[tracing::instrument(level = "debug", skip_all)]
 async fn journal_contract_suites(provider: SimStorageProvider) {
     use paros::{
-        JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, MatchmakerStorage,
-        NodeStorage,
+        JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, LogStorage, MatchmakerStorage,
     };
     let config = Config {
         id: NodeId(0),

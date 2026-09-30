@@ -1,8 +1,8 @@
 //! The **replica tier** (#144, Compartmentalized Paxos §3.3,
-//! Compartmentalization 3): [`ReplicaNode`], a node that learns and applies
-//! the chosen log and never votes, and — for its mirror, the bare acceptor
-//! that votes and applies nothing — the coupling analysis that says what an
-//! acceptor must keep when it sheds the application.
+//! Compartmentalization 3): [`ReplicaNode`], a node that learns the chosen
+//! log and never votes — since #186 a **read replica**: it serves journal
+//! reads and applies nothing — and the coupling analysis that says what an
+//! acceptor must keep beside its votes.
 //!
 //! # `ReplicaNode`: the third deployment
 //!
@@ -14,41 +14,38 @@
 //! at all**: it answers no `Prepare` and no `Accept`, is never a member of a
 //! configuration, never sits in `Config::peers` or the node pool, acks no
 //! beat and counts toward no quorum. It scales independently of the
-//! acceptors — adding a replica adds application throughput and read
-//! capacity, never a vote.
+//! acceptors — adding a replica adds read capacity, never a vote.
 //!
 //! - **In:** `Commit` (from a leader or a proxy leader, the two alike), the
-//!   `CatchUpResponse` its own requests draw, the `InstallSnapshot` a peer
-//!   serves when it asked below that peer's floor, `Heartbeat` — for the
+//!   `CatchUpResponse` its own requests draw, the `TrimmedTo` a peer serves
+//!   when it asked below that peer's trim point, `Heartbeat` — for the
 //!   commit watermark, the leader hint and, on a matchmaker deployment, the
 //!   configuration in force, never the ballot — and the `PreReadAck`s its
 //!   own quorum reads draw. Every other message is not a replica's to hear
 //!   and is ignored.
 //! - **Out:** `CatchUpRequest`, to the beat's sender when its watermark is
-//!   ahead of this replica's prefix, and on the driver's tick while an
-//!   application repair or a faulty record is open; `PreRead`, to a row of
-//!   acceptors, for a quorum read. A replica serves no peer: healing it is
-//!   the acceptors' job, as healing a lagging acceptor is.
-//! - **Reads** (§3.4, the paper's own reader): [`ReplicaNode::quorum_read_in`]
-//!   runs the node's [`QuorumReads`] tally — a row's vote watermarks, the
-//!   maximum — and [`ReplicaReady::read_states`] surfaces the read once
-//!   *this replica's* applied prefix covers it, so the client reads the
-//!   replica's own state. The reader is never an addressee of its own row
-//!   (it votes nothing), and a read over a superseded configuration is
-//!   abandoned when a beat names a newer one.
+//!   ahead of this replica's prefix, and on the driver's tick while a faulty
+//!   record is open; `PreRead`, to a row of acceptors, for a quorum read. A
+//!   replica serves no peer: healing it is the acceptors' job, as healing a
+//!   lagging acceptor is.
+//! - **Reads:** the journal read ([`ReplicaNode::read_log`], #185) is served
+//!   from this replica's own chosen prefix, so read load leaves the
+//!   acceptors; the leaderless read (§3.4, the paper's own reader,
+//!   [`ReplicaNode::quorum_read_in`]) runs the node's [`QuorumReads`] tally —
+//!   a row's vote watermarks, the maximum — and [`ReplicaReady::read_states`]
+//!   surfaces the read once *this replica's* prefix covers it. The reader is
+//!   never an addressee of its own row (it votes nothing), and a read over a
+//!   superseded configuration is abandoned when a beat names a newer one.
 //! - **Durable:** the chosen log through the same record surface a node
 //!   uses — [`WriteOp::Learned`] where a node writes an accepted record, the
 //!   relaxed [`WriteOp::SetChosenIndex`] from the walk, and the floor-moving
-//!   [`WriteOp::Truncate`] / [`WriteOp::InstallSnapshot`] — never an
+//!   [`WriteOp::Truncate`] / [`WriteOp::TrimmedTo`] — never an
 //!   [`WriteOp::Acceptor`] op. A boot scan reads it back through the same
 //!   [`Storage`] port and [`Replica::from_boot`] rebuilds the prefix and
-//!   the at-most-once ledger as it does on a node. The durable promise a
-//!   snapshot install's ballot may leave in the store is never read: a
-//!   replica has no promise to keep.
-//! - **The application:** exactly the node's contract —
-//!   [`ReplicaReady::committed`] in contiguous slot order, and
-//!   [`ReplicaNode::open_app_repair`] when the driver's boot replay could not
-//!   walk the whole prefix.
+//!   the at-most-once ledger as it does on a node.
+//! - **The walk:** [`ReplicaReady::committed`] in contiguous slot order, the
+//!   slots the prefix just moved over — reported by the driver, handed to no
+//!   application (#186: the client folds what it reads).
 //! - **The reply:** [`Config::reply_owner`] names the one replica that owns
 //!   a slot's client reply (§3.3, `slot % replica_count`). Nothing routes on
 //!   it yet: the node a client asked keeps acking what it serves, until a
@@ -56,11 +53,12 @@
 //!
 //! # The couplings: what forces an acceptor to keep a chosen index?
 //!
-//! The bare acceptor ([`Application::Shed`](crate::Application::Shed)) was
-//! decided on the condition that an acceptor stays a learner and sheds only
-//! the application. That is a claim about the code, so here it is derived
-//! from the code, coupling by coupling — every place `ColocatedNode` lets its
-//! acceptor half read the replica half, or the other way round.
+//! #144 introduced the *bare acceptor*, an acceptor that shed the
+//! application and stayed a learner; #186 made every acceptor one, since
+//! paros runs no application at all. That an acceptor must stay a learner
+//! is a claim about the code, so here it is derived from the code, coupling
+//! by coupling — every place `ColocatedNode` lets its acceptor half read the
+//! replica half, or the other way round.
 //!
 //! **Load-bearing — an acceptor must keep them, so a bare acceptor keeps a
 //! chosen index and a chosen prefix:**
@@ -89,46 +87,27 @@
 //!    is a Phase-2 quorum of `C_b` whose chosen index covers the election
 //!    fence. An acceptor without one could never let GC complete.
 //! 5. **Catch-up is served from the chosen prefix and the records beside
-//!    it** (`serve_catchup`, `node/catch_up_snapshot.rs`): the entries a
+//!    it** (`serve_catchup`, `node/catch_up.rs`): the entries a
 //!    lagging node — or a replica — learns are read from `chosen`, each
 //!    with the choosing ballot its accepted record holds. The acceptors are
 //!    the durable tier; a replica tier is healed *from* them.
 //! 6. **The handoff's decided tail and the successor's read fence**
 //!    (`node/handoff.rs`) name chosen slots and a covered chosen index; a
 //!    bare acceptor can lead, so it must be able to describe its tail.
-//! 7. **The at-most-once ledger** (`Replica::seal`, the `sessions` of an
-//!    `InstallSnapshot`): a truncation seals the `(client, seq) -> slot`
-//!    facts it drops and a snapshot install hands them on. A bare acceptor
-//!    applies nothing, but it truncates and it serves snapshots to replicas
-//!    that do, so the ledger — derived by the walk, not by the application —
-//!    stays. So does the fast path in `propose` that answers an identity
-//!    already chosen at its first slot: it reads the ledger, not
-//!    application state.
+//! 7. **The at-most-once ledger** (`Replica::seal`, the `sessions` of a
+//!    `TrimmedTo`): a truncation seals the `(client, seq) -> slot` facts it
+//!    drops and a trim-point jump hands them on. The ledger is derived by the
+//!    walk, never by an application, and it is what makes a journal read
+//!    skip a #94 duplicate identically on every node. So does the fast path
+//!    in `propose` that answers an identity already chosen at its first
+//!    slot: it reads the ledger.
 //!
-//! **Reflecting only the colocation — a bare acceptor sheds them:**
-//!
-//! - **The `committed` output** of the walk ([`crate::Ready::committed`]):
-//!   the application's input, nothing else reads it. A bare acceptor's is
-//!   always empty; the walk still runs and still writes the chosen index.
-//! - **The application repair** (`open_app_repair`): it re-emits
-//!   `committed` for an application whose durable prefix is behind the
-//!   chosen index. No application, nothing to repair; opening one on a bare
-//!   acceptor is a programmer error.
-//! - **The application snapshot.** A bare acceptor below the floor installs
-//!   a peer's snapshot boundary into its *log* (the floor, the chosen index,
-//!   the sealed ledger, the opaque bytes it keeps in custody) and restores
-//!   no application from it. Which bytes it serves onward is the driver's
-//!   (the custody it holds); the core only records the offer, as on any
-//!   node.
-//! - **The answer to a read.** A read-index or quorum read on a bare
-//!   acceptor is still certified by the core — the certificate is a
-//!   statement about the chosen prefix — but the state that answers it lives
-//!   on a replica.
-//!
-//! So a bare acceptor is a `ColocatedNode` constructed with
-//! `Application::Shed`: one code path for every learner line, and three
-//! outputs it never produces. The GC rule stays the stronger one paros has
-//! (`node/gc.rs`, *Re-read against a replica tier*).
+//! **What #144 shed and #186 deleted:** the application's input (the walk's
+//! output, which survives only as the driver's report and the acks), the
+//! application repair that re-emitted it, and the application snapshot a node
+//! below the floor used to install — replaced by the bare `TrimmedTo` jump.
+//! The GC rule stays the stronger one paros has (`node/gc.rs`, *Re-read
+//! against a replica tier*).
 //!
 //! Hard `assert!`s throughout (AGENTS.md, *Assertion doctrine*).
 
@@ -142,7 +121,7 @@ use crate::quorum_read::QuorumReads;
 use crate::replica::Replica;
 use crate::state::Config;
 use crate::storage::Storage;
-use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
+use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot};
 use crate::write::WriteOp;
 
 /// Monotone counters this incarnation, for the driver's audit report and
@@ -156,8 +135,8 @@ pub struct ReplicaCounters {
     pub relearned: u64,
     /// `CatchUpRequest`s sent.
     pub catch_up_requests: u64,
-    /// Snapshot boundaries installed.
-    pub snapshots_installed: u64,
+    /// Trim-point jumps taken (#186).
+    pub trim_jumps: u64,
     /// Quorum reads opened here (#143 on a replica, §3.4).
     pub quorum_reads: u64,
     /// Messages that are not a replica's to hear (`Prepare`, `Accept`, …),
@@ -165,7 +144,7 @@ pub struct ReplicaCounters {
     pub ignored: u64,
 }
 
-/// A replica that is not an acceptor: learns, applies, never votes. See the
+/// A replica that is not an acceptor: learns and serves reads, never votes. See the
 /// module doc. Driven through the same `step` / `tick` → `ready` → `advance`
 /// shape as every other handle.
 #[derive(Clone, Debug)]
@@ -173,7 +152,7 @@ pub struct ReplicaNode {
     /// Who this replica is (outside the pool), the acceptors it pulls from
     /// before it has heard a leader, and the deployment's replica count.
     config: Config,
-    /// The chosen prefix, the apply walk, the ledger, the repair cursor.
+    /// The chosen prefix, the walk, the ledger.
     replica: Replica,
     /// The compaction floor: the first slot whose record is still retained.
     floor: Slot,
@@ -282,7 +261,7 @@ impl ReplicaNode {
     // ---- inputs ---------------------------------------------------------------
 
     /// The single wire entry point: `Commit`, `CatchUpResponse`,
-    /// `InstallSnapshot` and `Heartbeat`. Everything else is not a
+    /// `TrimmedTo` and `Heartbeat`. Everything else is not a
     /// replica's to hear and is ignored — in particular a `Prepare` or an
     /// `Accept`, which a replica never answers.
     ///
@@ -305,13 +284,9 @@ impl ReplicaNode {
                     self.learn(slot, ballot, &command);
                 }
             }
-            Message::InstallSnapshot {
-                ballot,
-                chosen_index,
-                snapshot,
-                sessions,
-                ..
-            } => self.install(ballot, chosen_index, snapshot, sessions),
+            Message::TrimmedTo {
+                point, sessions, ..
+            } => self.trim_to(point, sessions),
             Message::Heartbeat {
                 from,
                 ballot,
@@ -331,8 +306,7 @@ impl ReplicaNode {
         self.assert_invariants();
     }
 
-    /// Advance logical time by one tick: while an application repair or a
-    /// faulty record is open, pull the decided range from its first missing
+    /// Advance logical time by one tick: while a faulty record is open, pull the decided range from its first missing
     /// slot — from the leader heard last, or from every bootstrap acceptor
     /// when none was. The same once-per-tick cadence a node's repair pull
     /// uses; the heartbeat drives every other catch-up.
@@ -346,7 +320,7 @@ impl ReplicaNode {
         self.quorum_reads.expire(self.tick_count, READ_TTL_TICKS);
         self.serve_quorum_reads();
         let first_faulty = self.faulty.first().copied();
-        if let Some(from_slot) = self.replica.app_repair().or(first_faulty) {
+        if let Some(from_slot) = first_faulty {
             let targets: Vec<NodeId> = match self.leader {
                 Some(leader) => vec![leader],
                 None => self.config.peers.clone(),
@@ -355,24 +329,6 @@ impl ReplicaNode {
                 self.request_catch_up(to, from_slot);
             }
         }
-        self.assert_invariants();
-    }
-
-    /// Open an **application repair**, exactly as on a node
-    /// ([`crate::ColocatedNode::open_app_repair`]): the driver's boot replay
-    /// could not walk the whole chosen prefix, and the application's durable
-    /// prefix stops just below `from`. The replica re-emits every decided
-    /// command from `from` through [`ReplicaReady::committed`] as the values
-    /// arrive, and pulls them on the tick.
-    ///
-    /// # Panics
-    ///
-    /// If `from` lies past the contiguous chosen prefix, or an internal
-    /// invariant is broken.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, from = from.0)))]
-    pub fn open_app_repair(&mut self, from: Slot) {
-        self.replica.open_app_repair(from);
-        self.replica.pump_app_repair(self.floor);
         self.assert_invariants();
     }
 
@@ -547,7 +503,7 @@ impl ReplicaNode {
                 "a slot already chosen at a replica is relearned with the same value"
             );
             self.counters.relearned += 1;
-            // A snapshot install can leave the prefix below a slot already
+            // A trim-point jump can leave the prefix below a slot already
             // known, so a replay of that slot re-drives the walk, as on a
             // node.
             self.advance();
@@ -564,9 +520,16 @@ impl ReplicaNode {
         self.advance();
     }
 
-    /// Walk the contiguous prefix, execute a decided truncation *after* the
-    /// walk, and pump an open application repair.
+    /// Walk the contiguous prefix and execute a decided truncation *after*
+    /// the walk.
     fn advance(&mut self) {
+        // Every faulty record here sits inside the chosen prefix (the boot
+        // keeps only those): a hole in the at-most-once ledger, so the walk
+        // holds until it heals, exactly as a node's does.
+        if !self.faulty.is_empty() {
+            self.replica.hold();
+            return;
+        }
         // The coupling a node asserts per applied slot — "the authoritative
         // record carries the applied command" — holds here by construction:
         // the record is `WriteOp::Learned` from the very command `learn`
@@ -576,23 +539,16 @@ impl ReplicaNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        self.replica.pump_app_repair(self.floor);
     }
 
     /// Execute a decided `Truncate { up_to }` on this replica's log, as a
-    /// node's `compact` does: clamped to the chosen prefix and below an open
-    /// application repair's cursor, sealing the ledger records it drops.
+    /// node's `compact` does: clamped to the chosen prefix, sealing the
+    /// ledger records it drops.
     fn compact(&mut self, up_to: Slot) {
         let Some(ci) = self.replica.chosen_index() else {
             return;
         };
-        let mut highest_drop = up_to.min(ci);
-        if let Some(cursor) = self.replica.app_repair() {
-            let Some(cap) = cursor.0.checked_sub(1) else {
-                return;
-            };
-            highest_drop = highest_drop.min(Slot(cap));
-        }
+        let highest_drop = up_to.min(ci);
         let first = Slot(highest_drop.0 + 1).max(self.floor);
         if first <= self.floor {
             return;
@@ -609,53 +565,33 @@ impl ReplicaNode {
         );
     }
 
-    /// Install a peer's snapshot boundary: the node's guards
-    /// (`on_install_snapshot`), without the promise — a replica adopts no
-    /// ballot. The `ballot` is persisted with the install because the store's
-    /// install op carries it; nothing here reads it back.
-    fn install(
-        &mut self,
-        ballot: Ballot,
-        chosen_index: Slot,
-        snapshot: Value,
-        mut sessions: Vec<SessionEntry>,
-    ) {
-        // Wire guard: a boundary with no floor one past it.
-        if chosen_index.0 == u64::MAX {
+    /// Jump below a peer's trim point (#186): the node's
+    /// `on_trimmed_to`, for a replica — drop what lies below `point`, move
+    /// the chosen index to at least `point - 1`, raise the floor to `point`,
+    /// adopt the ledger for the dropped prefix. A replica holds no promise,
+    /// so there is nothing else to leave alone.
+    fn trim_to(&mut self, point: Slot, mut sessions: Vec<SessionEntry>) {
+        if point <= self.floor {
             return;
         }
-        // Never go backward; a snapshot *at* the prefix heals only an open
-        // application repair (the node's Stage 8 exception).
-        if let Some(ci) = self.replica.chosen_index() {
-            if chosen_index < ci {
-                return;
-            }
-            if chosen_index == ci && self.replica.app_repair().is_none() {
-                return;
-            }
-        }
-        // The boundary is the validation line for the ledger it carries.
-        sessions.retain(|(_, _, slot)| *slot <= chosen_index);
-        let old_floor = self.floor;
-        self.replica.install(chosen_index, &sessions);
-        self.floor = Slot(chosen_index.0 + 1);
-        self.faulty = self.faulty.split_off(&self.floor);
-        self.pending_writes.push(WriteOp::InstallSnapshot {
-            chosen_index,
-            ballot,
-            snapshot,
-            sessions,
-        });
-        self.counters.snapshots_installed += 1;
+        // The point is the validation line for the ledger it carries.
+        sessions.retain(|(_, _, slot)| *slot < point);
+        let old_chosen_index = self.replica.chosen_index();
+        self.replica.trim_to(point, &sessions);
+        self.floor = point;
+        self.faulty = self.faulty.split_off(&point);
+        self.pending_writes
+            .push(WriteOp::TrimmedTo { point, sessions });
+        self.counters.trim_jumps += 1;
         assert!(
-            self.floor >= old_floor,
-            "a replica's snapshot install never lowers its floor"
+            self.replica.chosen_index() >= old_chosen_index,
+            "a replica's trim-point jump never rewinds its chosen index"
         );
         assert!(
-            self.floor == self.replica.first_unchosen(),
-            "a replica's snapshot install raises the floor to its boundary"
+            self.floor <= self.replica.first_unchosen(),
+            "a replica's trim-point jump keeps its floor inside the prefix"
         );
-        // A `Commit` learned out of order may sit just above the boundary.
+        // A `Commit` learned out of order may sit just above the point.
         self.advance();
     }
 
@@ -732,6 +668,14 @@ impl ReplicaNode {
         self.floor
     }
 
+    /// A **journal read** (#185) from this replica's chosen prefix, against
+    /// its own floor — read replicas serve `Read` so read load leaves the
+    /// acceptors. A pure read.
+    #[must_use]
+    pub fn read_log(&self, from: Slot, max_bytes: usize) -> crate::LogRead {
+        self.replica.read(from, self.floor, max_bytes)
+    }
+
     /// The node whose beat this replica heard last, if any.
     #[must_use]
     pub fn leader(&self) -> Option<NodeId> {
@@ -797,7 +741,7 @@ fn assert_replica_config_shape(config: &Config) {
 /// One batch of a replica's work, and the compile-time gate that enforces
 /// one batch in flight — the replica's [`crate::Ready`]. Process it in the
 /// node's order: persist [`ReplicaReady::writes`], send
-/// [`ReplicaReady::messages`], apply [`ReplicaReady::committed`], then
+/// [`ReplicaReady::messages`], report [`ReplicaReady::committed`], then
 /// [`ReplicaReady::advance`].
 #[must_use = "a ReplicaReady must be processed and then advanced; dropping it silently skips a batch"]
 pub struct ReplicaReady<'a> {
@@ -807,7 +751,7 @@ pub struct ReplicaReady<'a> {
 impl ReplicaReady<'_> {
     /// The durable writes to persist first, in order: [`WriteOp::Learned`],
     /// [`WriteOp::SetChosenIndex`], [`WriteOp::Truncate`],
-    /// [`WriteOp::InstallSnapshot`] — never an acceptor op.
+    /// [`WriteOp::TrimmedTo`] — never an acceptor op.
     #[must_use]
     pub fn writes(&self) -> &[WriteOp] {
         &self.node.pending_writes
@@ -829,8 +773,8 @@ impl ReplicaReady<'_> {
         &self.node.pending_read_states
     }
 
-    /// Newly chosen `(slot, command)` pairs to apply, in contiguous slot
-    /// order, after the writes are durable — the node's
+    /// The `(slot, command)` pairs the prefix just walked over, in
+    /// contiguous slot order, after the writes are durable — the node's
     /// [`crate::Ready::committed`] contract.
     #[must_use]
     pub fn committed(&self) -> &[(Slot, Command)] {

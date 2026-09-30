@@ -82,7 +82,8 @@ describe('a message is a request or a reply', () => {
 
 describe('phases', () => {
   it('names the known families and falls back to other', () => {
-    expect(phaseClass('snapshot')).toBe('phase-snapshot');
+    expect(phaseClass('catchup')).toBe('phase-catchup');
+    expect(phaseClass('snapshot')).toBe('phase-other');
     expect(phaseClass('prepare')).toBe('phase-prepare');
     expect(phaseClass('nonsense')).toBe('phase-other');
   });
@@ -97,7 +98,6 @@ describe('a slot box', () => {
   it('names a control command instead of its text', () => {
     expect(slotLabel(slot({ value: 'Truncate up to 2', control: 'truncate' }))).toBe('3: Truncate');
     expect(slotLabel(slot({ value: 'Noop', control: 'noop' }))).toBe('3: Noop');
-    expect(slotLabel(slot({ value: 'Snap at 4', control: 'snap' }))).toBe('3: Snap');
   });
 
   it('marks a control command, so the box does not look like a client value', () => {

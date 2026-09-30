@@ -62,17 +62,13 @@ impl Disk {
                 self.first_slot = self.first_slot.max(*first);
                 self.records = self.records.split_off(&self.first_slot);
             }
-            WriteOp::InstallSnapshot {
-                chosen_index,
-                ballot,
-                sessions,
-                ..
-            } => {
+            WriteOp::TrimmedTo { point, sessions } => {
                 self.sealed.extend(sessions.iter().copied());
-                self.hard_state.chosen_index = Some(*chosen_index);
-                self.hard_state.max_promised_ballot =
-                    self.hard_state.max_promised_ballot.max(*ballot);
-                self.first_slot = self.first_slot.max(Slot(chosen_index.0 + 1));
+                let boundary = Slot(point.0 - 1);
+                if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
+                    self.hard_state.chosen_index = Some(boundary);
+                }
+                self.first_slot = self.first_slot.max(*point);
                 self.records = self.records.split_off(&self.first_slot);
             }
         }
@@ -144,15 +140,10 @@ impl Tier {
         REPLICAS.iter().position(|id| NodeId(*id) == to)
     }
 
-    /// Drain acceptor `i`, routing `Learners` to the replicas too, and
-    /// turning a snapshot offer into the `InstallSnapshot` a driver would
-    /// build (opaque bytes, the ledger up to the boundary).
+    /// Drain acceptor `i`, routing `Learners` to the replicas too.
     fn drain_node(&mut self, i: usize) -> Vec<(NodeId, Message)> {
         let pool: Vec<NodeId> = self.nodes[i].config().pool().to_vec();
         let me = self.nodes[i].config().id;
-        let ledger = self.nodes[i]
-            .replica()
-            .seal(Slot(0), self.nodes[i].replica().first_unchosen());
         let ready = self.nodes[i].ready();
         let mut out = Vec::new();
         for (audience, msg) in ready.messages() {
@@ -164,18 +155,6 @@ impl Tier {
                     out.push((NodeId(id), msg.clone()));
                 }
             }
-        }
-        for (to, chosen_index, ballot) in ready.snapshot_offers() {
-            out.push((
-                *to,
-                Message::InstallSnapshot {
-                    from: me,
-                    ballot: *ballot,
-                    chosen_index: *chosen_index,
-                    snapshot: Value(b"opaque".to_vec()),
-                    sessions: ledger.clone(),
-                },
-            ));
         }
         ready.advance();
         out
@@ -435,7 +414,7 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_ledger() {
 }
 
 #[test]
-fn a_replica_below_the_floor_installs_a_snapshot_boundary() {
+fn a_replica_below_the_floor_jumps_to_the_trim_point() {
     let mut tier = Tier::new();
     tier.elect();
     // Replica 10 is partitioned away while the acceptors choose and truncate.
@@ -448,25 +427,27 @@ fn a_replica_below_the_floor_installs_a_snapshot_boundary() {
     tier.deliver(q, away);
     assert_eq!(tier.nodes[0].acceptor().first_slot(), Slot(2));
     // Healed: its catch-up from slot 0 is below the leader's floor, so the
-    // leader offers a snapshot and the replica installs the boundary.
+    // leader answers its trim point; the replica jumps there and catches up
+    // the retained log from it.
+    tier.beat(|_, _| true);
     tier.beat(|_, _| true);
     let replica = &tier.replicas[0];
     assert_eq!(replica.replica().chosen_index(), Some(Slot(3)));
-    assert_eq!(replica.first_slot(), Slot(4));
-    assert_eq!(replica.counters().snapshots_installed, 1);
-    assert!(
-        tier.applied[0].is_empty(),
-        "snapshot-xor-entries: the folded prefix is in the bytes, not in committed"
+    assert_eq!(replica.first_slot(), Slot(2));
+    assert_eq!(replica.counters().trim_jumps, 1);
+    assert_eq!(
+        tier.applied_slots(0),
+        vec![2, 3],
+        "the walk resumes at the trim point: the slots below it are gone"
     );
-    assert_eq!(tier.disks[0].hard_state.chosen_index, Some(Slot(3)));
     assert_eq!(
         replica.replica().applied_at(ClientId(1), ClientSeq(2)),
         Some(Slot(1)),
-        "the serving peer's ledger came with the boundary"
+        "the serving peer's ledger came with the trim point"
     );
-    // And it applies what is chosen past the boundary.
+    // And it learns what is chosen past the point.
     tier.propose(4, |_, _| true);
-    assert_eq!(tier.applied_slots(0), vec![4]);
+    assert_eq!(tier.applied_slots(0), vec![2, 3, 4]);
 }
 
 #[test]

@@ -62,7 +62,7 @@ snapshot machinery's, and nothing new is added to make GC possible. The rule liv
 `ColocatedNode::gc_covered`; the derivation is the module doc of `node/gc.rs`.
 
 Two more preconditions keep the "Region 2 is decided" half honest: GC waits while any
-Phase-1-shaped work is open (`leader_recovery`, the CTRL `repair_probe`, `app_repair`), the
+Phase-1-shaped work is open (`leader_recovery`, the CTRL `repair_probe`; the `app_repair` gate went with the application in #186), the
 same gates that refuse a handoff.
 
 ### The protocol
@@ -124,7 +124,7 @@ never rejoins**; the acceptor set heals around it by reconfiguration.
   chaotic restart on a matchmaker seed, within the same dead-node budget as a corruption
   park (a wipe is one more way to lose every copy a node holds).
 - **The library keeps it down (#147), not the harness.** Every store carries a durable
-  format marker (`NodeStorage::is_formatted` / `format`), written by `run_node` on the
+  format marker (`LogStorage::is_formatted` / `format`), written by `run_node` on the
   identity's first boot before the core reads a byte. `run_node` takes the operator's claim
   as data (`BootKind::{FirstBoot, ExistingMember}`) and refuses an existing member whose
   store has no marker (`RunError::Refused(BootRefusal::Amnesia)`, reported through

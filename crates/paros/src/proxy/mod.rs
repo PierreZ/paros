@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    AcceptorConfig, Audience, Ballot, Message, NodeId, Party, ProxyId, ProxyLeader, Slot,
+    AcceptorConfig, Audience, Ballot, JournalId, Message, NodeId, Party, ProxyId, ProxyLeader, Slot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -56,6 +56,10 @@ pub struct ProxyConfig {
     /// The bootstrap acceptor configuration (the node's `Config::peers`
     /// under its quorum system).
     pub acceptors: AcceptorConfig,
+    /// The one journal this proxy serves (#188): it tags every send with it
+    /// and drops a message naming another. Journal-tagged proxies serving
+    /// several journals are #193.
+    pub journal: JournalId,
 }
 
 /// The coordinates of a delegated `Accept` the report needs once the core
@@ -151,6 +155,7 @@ fn report_delegation<A: Audit>(
 #[tracing::instrument(level = "trace", skip_all, fields(proxy = proxy.id().0))]
 fn drain<H: DriverHooks, A: Audit>(
     proxy: &mut ProxyLeader,
+    journal: JournalId,
     pool: &[NodeId],
     out: &Outbound,
     hooks: &H,
@@ -234,7 +239,7 @@ fn drain<H: DriverHooks, A: Audit>(
         );
     }
     ready.advance();
-    send_messages(out, hooks, audit, messages);
+    send_messages(out, hooks, audit, journal, messages);
 }
 
 /// Drive a paros proxy leader to completion over the given providers.
@@ -332,13 +337,7 @@ where
                 Party::Node(node),
                 tunables.peer_queue_capacity,
             );
-            Ok((
-                node,
-                PeerQueues {
-                    regular,
-                    snapshot: None,
-                },
-            ))
+            Ok((node, PeerQueues { regular }))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
     let out = Outbound {
@@ -356,7 +355,11 @@ where
     loop {
         moonpool_core::select! {
             error = edge.run() => return Err(error.into()),
-            Some(msg) = inbox.recv() => {
+            Some((journal, msg)) = inbox.recv() => {
+                if journal != config.journal {
+                    tracing::info!(proxy = id.0, journal = journal.0, "foreign_journal_dropped");
+                    continue;
+                }
                 // A delegated `Accept`, an `Accepted`, a `Nack` → the core's
                 // single input router; anything else is not a proxy's to
                 // hear and the core ignores it.
@@ -378,7 +381,7 @@ where
                 let before = proxy.counters();
                 proxy.step(msg);
                 report_delegation(audit, id, before, proxy.counters(), accept);
-                drain(&mut proxy, &pool, &out, hooks, audit);
+                drain(&mut proxy, config.journal, &pool, &out, hooks, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
@@ -401,7 +404,7 @@ where
                         tracing::info!(proxy = id.0, "proxy_resend_skipped");
                     } else {
                         proxy.resend_pending();
-                        drain(&mut proxy, &pool, &out, hooks, audit);
+                        drain(&mut proxy, config.journal, &pool, &out, hooks, audit);
                     }
                 }
                 tracing::info!(proxy = id.0, "proxy_tick");

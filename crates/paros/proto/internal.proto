@@ -15,7 +15,7 @@ service ParosInternal {
   // entered the peer's bounded inbox — not that its node loop processed them.
   rpc Deliver(.paros.internal.v1.Deliver) returns (.paros.internal.v1.DeliverAck);
   // Private replica inspection used by deterministic workloads and future
-  // operational tooling. The application bytes remain opaque to paros.
+  // operational tooling.
   rpc Inspect(.paros.internal.v1.InspectRequest) returns (.paros.internal.v1.InspectReply);
   // Operator decommissioning (#123): shut this node down for good once a
   // leader's garbage collection named it retirable. Refused while the node
@@ -52,7 +52,10 @@ message DeliverAck {}
 
 message ConsensusMessage {
   // 10 was CheckLeader, a tick-injected self-event that never crossed the wire.
-  reserved 10;
+  // 9 was InstallSnapshot and 13..=15 the snapshot-point repair plane
+  // (SnapAck, SnapChunkRequest, SnapChunkResponse), deleted with the
+  // application (#186).
+  reserved 9, 10, 13, 14, 15;
   oneof kind {
     Prepare prepare = 1;
     Promise promise = 2;
@@ -62,16 +65,17 @@ message ConsensusMessage {
     Commit commit = 6;
     CatchUpRequest catch_up_request = 7;
     CatchUpResponse catch_up_response = 8;
-    InstallSnapshot install_snapshot = 9;
     Heartbeat heartbeat = 11;
     HeartbeatAck heartbeat_ack = 12;
-    SnapAck snap_ack = 13;
-    SnapChunkRequest snap_chunk_request = 14;
-    SnapChunkResponse snap_chunk_response = 15;
     Relinquish relinquish = 16;
     PreRead pre_read = 17;
     PreReadAck pre_read_ack = 18;
+    TrimmedTo trimmed_to = 19;
   }
+  // The journal this message belongs to (#188): the envelope, per message,
+  // that keeps one journal's protocol state out of another's. Every node
+  // demuxes on it; `0` (unset) is refused at the edge.
+  uint64 journal = 20;
 }
 
 message UserEntry {
@@ -86,18 +90,13 @@ message Truncate {
 
 message Noop {}
 
-// A decided snapshot point (CTRL's `snap` marker): every node snapshots at
-// this marker's slot when it applies it, so the snapshots are byte-identical
-// cluster-wide and chunk-level repair is sound.
-message Snap {
-  uint64 at_index = 1;
-}
-
 message ControlCommand {
+  // 3 was Snap, the decided snapshot point, deleted with the application
+  // (#186).
+  reserved 3;
   oneof kind {
     Truncate truncate = 1;
     Noop noop = 2;
-    Snap snap = 3;
   }
 }
 
@@ -215,16 +214,15 @@ message CatchUpResponse {
   repeated SlotCommand entries = 2;
 }
 
-message InstallSnapshot {
+// Below the serving peer's trim point (#186): the log below `point` is gone
+// there, and everything below it is chosen. The requester jumps its floor to
+// `point` and its chosen index to `point - 1`, seals the ledger, and catches
+// up from `point`. No bytes and no ballot: its promise does not move.
+message TrimmedTo {
   uint64 from = 1;
-  .paros.common.v1.Ballot ballot = 2;
-  uint64 chosen_index = 3;
-  bytes snapshot = 4;
-  // The serving peer's at-most-once session ledger for the folded prefix —
-  // paros-owned metadata beside the opaque application bytes (#94). The
-  // receiver persists these as sealed dedup records.
-  repeated SessionRecord sessions = 5;
-  reserved 6; // was config_id, the dropped configuration tag
+  uint64 point = 2;
+  // The serving peer's at-most-once session ledger below `point` (#94).
+  repeated SessionRecord sessions = 3;
 }
 
 // One at-most-once ledger record: (client, seq) applied at slot.
@@ -251,32 +249,6 @@ message HeartbeatAck {
   reserved 4; // was config_id, the dropped configuration tag
   // The follower's chosen index (absent on plain Multi-Paxos).
   optional uint64 chosen = 5;
-}
-
-// Driver-terminal snapshot-repair traffic (never enters consensus).
-message SnapAck {
-  uint64 from = 1;
-  uint64 at_index = 2;
-  reserved 3; // was config_id, the dropped configuration tag
-}
-
-message SnapChunkRequest {
-  uint64 from = 1;
-  uint64 at_index = 2;
-  repeated uint32 chunks = 3;
-  reserved 4; // was config_id, the dropped configuration tag
-}
-
-message SnapChunk {
-  uint32 index = 1;
-  bytes bytes = 2;
-}
-
-message SnapChunkResponse {
-  uint64 from = 1;
-  uint64 at_index = 2;
-  repeated SnapChunk chunks = 3;
-  reserved 4; // was config_id, the dropped configuration tag
 }
 
 // Cooperative leader handoff (DPaxos "Leader Handoff"): the outgoing leader
@@ -324,12 +296,17 @@ message PreReadAck {
   optional .paros.common.v1.Ballot config_since = 4;
 }
 
-message InspectRequest {}
+message InspectRequest {
+  // The journal to inspect (#188); `0` asks for the node's first journal.
+  uint64 journal = 1;
+}
 
 message InspectReply {
   optional uint64 chosen_index = 1;
   uint64 first_slot = 2;
-  bytes snapshot = 3;
+  // 3 was the application's opaque snapshot, deleted with the application
+  // (#186): a client reads the journal through `Read`.
+  reserved 3;
   // The acceptor configuration this node believes is the latest (its
   // bootstrap membership on plain Multi-Paxos), and the ballot it was
   // registered under.

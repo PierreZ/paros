@@ -98,8 +98,8 @@ impl Disk {
                 self.accepted.insert(*slot, (*ballot, value.clone()));
             }
             WriteOp::SetChosenIndex(s) => self.hard_state.chosen_index = Some(*s),
-            // The model never proposes a `Truncate` and serves no snapshot.
-            WriteOp::Truncate { .. } | WriteOp::InstallSnapshot { .. } => {
+            // The model never proposes a `Truncate`, so no node trims.
+            WriteOp::Truncate { .. } | WriteOp::TrimmedTo { .. } => {
                 unreachable!("the proxy model never compacts")
             }
             // Only a `ReplicaNode` learns without accepting; the model runs none.

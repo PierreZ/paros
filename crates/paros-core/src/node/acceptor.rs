@@ -81,7 +81,7 @@ impl ColocatedNode {
             }
             PrepareOutcome::Promised { raised } => {
                 // A same-ballot continuation can arrive after this node
-                // learned the ballot through Commit/snapshot while it still
+                // learned the ballot through Commit/catch-up while it still
                 // held a different live campaign. The other proposer is leader
                 // contact even though the durable promise need not rise, so
                 // close that stale campaign before following the prepared

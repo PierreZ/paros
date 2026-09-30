@@ -8,7 +8,7 @@ doctrine; this file is the map.
 ## Map
 
 - `acceptor.rs` `Acceptor` + `acceptor/retention.rs` (the two floor-moving ops, `truncate` and
-  `install`: a module, not a role, because the role that moves the floor emits the write) ·
+  `trim_to`, the trim-point jump of #186: a module, not a role, because the role that moves the floor emits the write) ·
   `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
   `Proposer` (its Phase-2 tally is the standalone `proposer::Rounds` it embeds and delegates
   to — the one tally a proxy leader runs without the rest of the role, #142; a round's
@@ -20,12 +20,14 @@ doctrine; this file is the map.
   emits the `Commit`, relays a `Nack`, re-fans-out on its beat, evicts a round nobody answers
   on the driver's retention budget (`expire_stale`), and works for the highest ballot it was
   handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
-  `node.replica().chosen_gap()`) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
+  `node.replica().chosen_gap()`; `read` serves one journal page, #185 — `LogRead`, holes
+  skipped, trimmed below the floor — through `ColocatedNode::read_log` and
+  `ReplicaNode::read_log`) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
   deployment**, #144: a `Replica` over a durable chosen log with no `Acceptor` — steps `Commit`,
-  `CatchUpResponse`, `InstallSnapshot`, `Heartbeat`, `PreReadAck`; sends `CatchUpRequest`
+  `CatchUpResponse`, `TrimmedTo`, `Heartbeat`, `PreReadAck`; sends `CatchUpRequest`
   and, for the quorum reads it serves from its own state (§3.4), `PreRead`; writes
   `WriteOp::Learned`, never an acceptor op; never in the pool; its module doc holds the
-  coupling analysis behind the bare acceptor, `Application::Shed` on `ColocatedNode`) ·
+  coupling analysis — why an acceptor keeps a chosen prefix) ·
   `membership.rs` `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
   `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,
   `is_phase2_addressee`, `has_phase2_quorum_in` — is the one place a column is chosen, and
@@ -48,14 +50,13 @@ doctrine; this file is the map.
   `handoff`, `gc`, `matchmaking`, `reconfigure`, `reads` — the read-index wiring and the back
   half both read tallies share: `READ_TTL_TICKS`, `serve_reads`, `tick_reads`, the one seam
   into `Ready::read_states` — `quorum_reads`,
-  `catch_up_snapshot`, `boot`, `acceptor`, `helpers`, `invariants`). Wiring only; no
+  `catch_up` — the commit-replay answer and the trim-point jump, #186 — `boot`, `acceptor`, `helpers`, `invariants`). Wiring only; no
   protocol tally lives here.
 - `message.rs` `Message` + `Audience` + `Party` (a node or a proxy: the reply party of an
   `Accept`, the sender of a `Commit`) · `ready.rs` `Ready<'a>` (the borrow
   guard that makes a second `ready()` before `advance()` a compile error) ·
   `state.rs` `HardState` (two scalars, `#[non_exhaustive]`) and `Config` (`proxy_count` and
-  `replica_count`, zero on the plain deployment; `application`, `Colocated` unless the node is
-  a bare acceptor) · `storage.rs` the read-only `Storage` recovery port ·
+  `replica_count`, zero on the plain deployment) · `storage.rs` the read-only `Storage` recovery port ·
   `types.rs` · `write.rs` `WriteOp`.
 - `proxy_model.rs` the proxy model checker and `model_support.rs` the seeded RNG and lossy
   mailbox both model checkers share (test-only).
@@ -79,11 +80,11 @@ doctrine; this file is the map.
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` are the only environment variables the
   workspace reads.
-- **A bare acceptor is a learner.** `Application::Shed` sheds only what the application
-  needed — `Ready::committed` (cleared after the walk in `node/learn.rs`), the application
-  repair (`open_app_repair` asserts) and the application snapshot; the chosen index, the
-  prefix and the ledger stay (`assert_deployment_invariants`). A new learner line is written
-  once, on the shared path, never behind the policy.
+- **No application, no snapshot (#186).** The replica's walk is the learner line every node
+  runs the same (`Ready::committed` is the walk stream the driver reports and acks from); a
+  below-floor node jumps to a peer's trim point (`Message::TrimmedTo`, `WriteOp::TrimmedTo`,
+  `Replica::trim_to` + `Acceptor::trim_to`) and never moves its promise. Do not reintroduce a
+  per-node application or a snapshot path here — a journal client folds what it reads.
 - **The allocator frontier is durable by construction**: a leader records every round it
   opens in its own log whenever its promise allows, colocated or delegated, in its column or
   not (`node/phase2.rs`, `record_own_round`), so a reboot rederives the frontier and the

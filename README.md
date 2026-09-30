@@ -70,8 +70,7 @@ property each one teaches. Read them in order:
    votes and announces the `Commit`; a dead proxy's round is taken back, and a handoff
    successor re-delegates what it inherited.
 8. [`replica_tier.rs`](crates/paros-core/examples/replica_tier.rs) — the replica tier: three
-   bare acceptors (`Application::Shed`) vote and keep the chosen prefix but apply nothing, two
-   `ReplicaNode`s apply it and never vote, a replica that lost a `Commit` catches up from the
+   acceptors vote and keep the chosen prefix, two `ReplicaNode`s learn it and never vote, a replica that lost a `Commit` catches up from the
    leader's beat, and each slot's reply is owned by one replica (`slot % replica_count`).
 
 ```sh

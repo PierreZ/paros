@@ -19,8 +19,7 @@ cargo run -p paros-sim-runner --bin sim-paros-hunt replay-canary <seed>    # run
 ```
 
 Corpus seeds have their own commands (`replay-corpus`, `replay-corpus-mask`,
-`replay-bare-quorum`, `replay-lifecycle`, `replay-departed`,
-`replay-chunk-mask`, `replay-chunk-seed`). The binary prints `GREEN`/`RED`
+`replay-bare-quorum`, `replay-departed`). The binary prints `GREEN`/`RED`
 and the `assertion_violations` list. The nextest smoke
 (`crates/paros-sim/tests/sim.rs`) drives the same entry points
 (`run_chain_seed`, `chain_seed_canary`, `chain_smoke`) if you want it inside a
@@ -38,9 +37,11 @@ Every oracle message is a stable string and its detail map carries the ids
   and sequential-client consistency;
 - `audit/matchmaker.rs` — the registry, the leader-side matchmaking, GC and
   generation oracles;
-- `audit/mod.rs` — `AuditWorld`, `check_run` (the end-of-run convergence and
-  chosen-gap claims), `reach_once!`;
-- `chain.rs` — the application state machine check.
+- `audit/world.rs` — `AuditWorld`, `check_run` (the end-of-run convergence and
+  chosen-gap claims) and `fold_applied`, the application check over the
+  clients' folds of the journal (#186: the client is the application;
+  `ChainState` in `chain.rs`, the fold in `chain_workload/fold.rs`);
+- `audit/mod.rs` — the `Audit` port's implementation, `reach_once!`.
 
 The message tells you which invariant; the check's code tells you which
 `Audit` callback fed it (`crates/paros/src/audit.rs`), and that callback sits

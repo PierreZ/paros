@@ -6,7 +6,7 @@
 //! The split is the node's, mirrored on purpose: [`RegistryStorage`] is to the
 //! matchmaker what [`paros_core::Storage`] is to the node — the core reads its
 //! durable state back through it once, at construction, record by record — and
-//! [`MatchmakerStorage`] is the [`NodeStorage`](crate::NodeStorage) twin: the
+//! [`MatchmakerStorage`] is the [`LogStorage`](crate::LogStorage) twin: the
 //! driver owns every write, applies each
 //! [`MatchmakerWriteOp`](paros_core::MatchmakerWriteOp) through the matching
 //! method here, then [`sync`](MatchmakerStorage::sync)s the batch **before** its
@@ -48,17 +48,17 @@ use std::future::Future;
 use crate::storage::StorageError;
 
 /// The write side of matchmaker storage: **semantic per-record ops**, the
-/// [`NodeStorage`](crate::NodeStorage) twin over the [`RegistryStorage`] port.
+/// [`LogStorage`](crate::LogStorage) twin over the [`RegistryStorage`] port.
 ///
 /// The seam is **async** exactly as the node's is (see *Async seam* on
-/// [`NodeStorage`](crate::NodeStorage)): every method here may touch the
+/// [`LogStorage`](crate::LogStorage)): every method here may touch the
 /// device, so every one returns a `Send` future the driver awaits in
 /// persist-before-reply order; an implementation writes plain `async fn`s.
 /// The [`RegistryStorage`] read port stays synchronous, answered from what
 /// [`boot_scan`](MatchmakerStorage::boot_scan) loaded.
 pub trait MatchmakerStorage: RegistryStorage {
     /// Boot-time integrity scan, run once per incarnation **before** the core
-    /// reads the store (the [`NodeStorage::boot_scan`](crate::NodeStorage::boot_scan)
+    /// reads the store (the [`LogStorage::boot_scan`](crate::LogStorage::boot_scan)
     /// twin): verify every registration record and the watermark scalar,
     /// classify every mismatch, discard only a crash-truncatable tail (a
     /// registration is acknowledged only after its fsync, so an un-synced

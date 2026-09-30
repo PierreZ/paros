@@ -334,8 +334,9 @@ impl ColocatedNode {
     /// A campaign whose ballot has fallen **below the node's own promise** is
     /// refused even with a quorum behind it (#67/#88). Mid-election, two paths
     /// raise `max_promised_ballot` without closing the campaign: `mark_chosen`
-    /// on a learned `Commit`/`CatchUpResponse`, and `on_install_snapshot` on a
-    /// snapshot whose serving peer minted its promise with no quorum at all.
+    /// on a learned `Commit`/`CatchUpResponse` (and, until #186 deleted it, a
+    /// snapshot install whose serving peer minted its promise with no quorum
+    /// at all).
     /// Winning below the own promise breaks "a leader's ballot >= its own
     /// promise": every self-accept is skipped (`start_accept_round`'s
     /// `ballot >= max_promised_ballot` check), so recovered slots reach

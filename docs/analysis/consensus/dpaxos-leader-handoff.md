@@ -47,7 +47,7 @@ Read off `ColocatedNode`, a leadership consists of:
 | `read_floor` | derived (`next_slot - 1`) | identical rule to a fresh leader's fence |
 | `heartbeat_seq`, `read_rounds`, `CheckQuorum` window | reset | fresh-leadership state, exactly as `try_become_leader` resets it |
 | `chosen` / `accepted` / `chosen_index` / `first_slot` | no | replicated state, not leadership; catch-up carries it |
-| `election`, `leader_recovery`, `repair_probe`, `faulty`, `app_repair` | no — **handoff refused while any is open** | Phase-1-shaped work, meaningless without the quorum report behind it |
+| `election`, `leader_recovery`, `repair_probe`, `faulty` (and `app_repair` until #186 deleted the application) | no — **handoff refused while any is open** | Phase-1-shaped work, meaningless without the quorum report behind it |
 
 So the transferred object is small and its safety meaning is stateable:
 
@@ -183,7 +183,8 @@ redirect clients to itself.
 ## Interaction with the rest of the protocol
 
 - **CTRL / PAR recovery.** A handoff is refused while a repair probe is open, while any
-  local record is `faulty`, and while an application repair is open. Blocked commitment
+  local record is `faulty` (and, until #186 deleted the application, while an application
+  repair was open). Blocked commitment
   determination and in-place value repair are resolved *from a promise quorum's reports*;
   there is no honest way to hand that mid-flight state to a node that gathered no quorum.
   A leader that resigns on the CTRL §4.2 recovery timeout is unaffected — it is not
@@ -225,7 +226,7 @@ is a caller that calls differently).
   stale/rewind guards exist for.
 
 Crash coverage comes for free: the existing `BeforeSync` / `AfterSyncBeforeSend` /
-`AfterApplyBeforeSync` seams and moonpool's attrition already cut the run at every point
+`AfterApplyBeforeSync` (deleted with the application, #186) seams and moonpool's attrition already cut the run at every point
 around the relinquish, and the successor's promise raise rides the ordinary
 persist-before-send edge.
 

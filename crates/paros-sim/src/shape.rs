@@ -36,7 +36,7 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
-use paros::{DriverTunables, QuorumSystem};
+use paros::{DriverTunables, JournalId, JournalStoreConfig, QuorumSystem};
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -158,12 +158,11 @@ impl NodeShape {
             connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(floor_ticks),
-            // Floor 1: the snapshot lane is a keep-newest `PeerMailbox` that
-            // carries one class (`InstallSnapshot`), so a one-slot lane only
-            // ever evicts an older offer to the same peer in favour of the
-            // newer one, and the requester re-asks every beat — a slower
-            // transfer, never a starved class.
-            snapshot_queue_capacity: buggify_knob!(4_usize, 1_usize..9_usize),
+            // Floor 0: a zero wait answers every journal read at the end at
+            // once, empty, and the client re-asks; the ceiling crosses the
+            // client's deadline, where a long-poll the client stops waiting
+            // for is an ambiguous read, never a wrong one (#185).
+            read_poll_ticks: buggify_knob!(8_u64, 0_u64..41_u64),
             // Floor 1: the client inboxes are the RPC runtime's per-endpoint
             // queues, which refuse a request beyond capacity as `Overloaded`
             // (never admitted, so never a lost *executed* request); the loop
@@ -231,7 +230,23 @@ impl NodeShape {
             // round for a compacted slot is re-fanned-out; the tail
             // outlasts it.
             proxy_round_resends: buggify_knob!(20_u64, 1_u64..81_u64),
+            // A quarantined journal's re-open delay (#188), in ticks. Floor
+            // 1: a journal re-opened the next beat is a restart loop that
+            // still leaves the node's other journals their beats; the
+            // ceiling holds one journal down on one node for a few seconds,
+            // which the recovery tail outlasts.
+            quarantine_ticks: buggify_knob!(40_u64, 1_u64..161_u64),
+            // The election backoff's ceiling (doublings of the base across
+            // consecutive failed campaigns). Floor 2: below it a sole
+            // candidate over a degraded link can still abandon every round
+            // before its slowest promise returns; the ceiling only slows a
+            // leaderless cluster's re-election.
+            election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
         };
+        if tunables.election_backoff_doublings != 3 {
+            // BUGGIFY pairing: the election backoff extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme election backoff ceiling");
+        }
         if tunables.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme GC re-send cadence");
@@ -426,9 +441,6 @@ impl QuorumPolicy {
 
 #[derive(Default)]
 struct Registry {
-    /// Run-level: the application's digest-lane count, fixed by the first
-    /// node to boot.
-    lanes: Option<u8>,
     /// Run-level: the quorum-system policy (see [`quorum_policy`]), fixed by
     /// the first caller — a node or a client.
     quorum: Option<QuorumPolicy>,
@@ -438,10 +450,136 @@ struct Registry {
     /// Run-level: the bootstrap matchmaker ranks (see
     /// [`matchmaker_bootstrap_ranks`]), fixed by the first caller.
     matchmaker_bootstrap: Option<Vec<u64>>,
-    /// Run-level: whether the acceptor pool is bare (see
-    /// [`bare_acceptors`]), fixed by the first caller.
-    bare: Option<bool>,
+    /// Run-level: the journals every node serves and the one held for the
+    /// chaos window (see [`journals`]), fixed by the first caller.
+    journals: Option<JournalPlan>,
+    /// Run-level: whether the nodes run on the journal store, and its
+    /// layout (see [`journal_store`]), fixed by the first caller.
+    journal_store: Option<StoreDraw>,
     nodes: BTreeMap<String, Entry>,
+}
+
+/// The run's journals (#188): the static list every node serves, in id
+/// order, and the journal held on every node for the chaos window (the
+/// non-interference stall), if the seed drew one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JournalPlan {
+    pub(crate) ids: Vec<JournalId>,
+    pub(crate) held: Option<JournalId>,
+}
+
+impl JournalPlan {
+    /// The journal client `client` appends to: clients are spread over the
+    /// journals round-robin.
+    pub(crate) fn for_client(&self, client: usize) -> JournalId {
+        self.ids
+            .get(client % self.ids.len().max(1))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Whether the run serves more than one journal.
+    pub(crate) fn is_multi(&self) -> bool {
+        self.ids.len() > 1
+    }
+}
+
+/// Whether the run's acceptors store on the library's `JournalStorage` over
+/// the simulated disk instead of the world-backed store (#187), and with
+/// which layout — drawn once per seed, a seeded coin on a perturbed seed
+/// without matchmakers (the only seeds that may): the world store's copy budget and fault ledger
+/// exist because the world injects disk corruption, and a journal seed
+/// injects none (no rot, no write-path coin, no wipe — a plain seed never
+/// wipes); matchmaker seeds and the corpus stay on the world store until
+/// #176. The draw is paired with a `reachable`; the layout is the library's
+/// `JournalStoreConfig::small()`. A tighter geometry (16-slot segments, a
+/// checkpoint every append) is not a knob: moonpool's `BuggifyKnobs` also
+/// slows the simulated disk (IOPS, bandwidth, stalls), and the two together
+/// held every node's sync past the end of the run (witness
+/// 2281271371631374953) — a permanent partition wearing a knob's clothes.
+#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
+pub(crate) fn journal_store(
+    state: &StateHandle,
+    matchmakers: bool,
+    perturb: bool,
+) -> Option<JournalStoreConfig> {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    let draw = *guard.journal_store.get_or_insert_with(|| {
+        // Deployment shape, like the process groups' counts: a seeded coin,
+        // not a knob's extreme — half the plain seeds keep the world store,
+        // whose corruption coins and budget are the plain deployment's
+        // CTRL coverage.
+        if !perturb || matchmakers || !moonpool_sim::sim_random_bool(0.5) {
+            return StoreDraw::World;
+        }
+        // BUGGIFY pairing: a seed genuinely runs its nodes on the journal.
+        assert_reachable!("journal store: a seed runs its nodes on JournalStorage");
+        StoreDraw::Journal(JournalStoreConfig::small())
+    });
+    match draw {
+        StoreDraw::World => None,
+        StoreDraw::Journal(layout) => Some(layout),
+    }
+}
+
+/// The run's store draw (see [`journal_store`]).
+#[derive(Clone, Copy, Debug)]
+enum StoreDraw {
+    /// The world-backed store.
+    World,
+    /// The journal store, with its layout.
+    Journal(JournalStoreConfig),
+}
+
+/// The run's journals (#188), drawn once per seed by whoever asks first — a
+/// node or a client. The count is a `buggify_knob!` (default 1, extreme
+/// 2..=3; floor 1, the one-journal campaign); a corpus run (`perturb ==
+/// false`) serves the default journal alone, and so does a seed with
+/// matchmakers (`matchmakers`): a matchmaker campaign is two round trips
+/// (matchmaking, then Phase 1), and tripling a degraded link's traffic
+/// livelocked its candidates past every election timeout (witness
+/// 7568743934611962292 on the first multi-journal hunt: the matchmaker
+/// journal dueled from round 2 to 201 for 80 s while its plain siblings on
+/// the same nodes elected) — the matchmaker plane serving many journals is
+/// its own milestone. The **default** journal is the seed's deployment — its
+/// proxies, replicas and bootstrap; every other journal is a plain
+/// Multi-Paxos journal over the whole pool (`crate::process`: the proxy
+/// leaders and the replica tier serve one journal each). On a multi-journal seed a second
+/// location draws whether one journal is **held** on every node for the
+/// chaos window (`DriverHooks::hold_journal`): its siblings must keep
+/// committing.
+#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
+pub(crate) fn journals(state: &StateHandle, matchmakers: bool, perturb: bool) -> JournalPlan {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .journals
+        .get_or_insert_with(|| {
+            let count = if perturb && !matchmakers {
+                buggify_knob!(1_u64, 2_u64..4_u64)
+            } else {
+                1
+            };
+            let ids: Vec<JournalId> = (0..count)
+                .map(|k| JournalId(JournalId::FIRST_USER.0 + k))
+                .collect();
+            if ids.len() < 2 {
+                return JournalPlan { ids, held: None };
+            }
+            // BUGGIFY pairing: a seed genuinely runs several journals (a
+            // cause; the outcomes are the non-interference gates).
+            assert_reachable!("journal: a seed runs more than one journal");
+            let held = moonpool_sim::buggify_with_prob!(0.5).then(|| {
+                // BUGGIFY pairing: the hold genuinely fires on some seed.
+                assert_reachable!(
+                    "journal: one journal is held on every node for the chaos window"
+                );
+                ids[usize::try_from(count - 1).unwrap_or(0)]
+            });
+            JournalPlan { ids, held }
+        })
+        .clone()
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
@@ -475,23 +613,6 @@ pub(crate) fn boot(state: &StateHandle, ip: &str, perturb: bool) -> Incarnation 
         assert_reachable!("a restarted node boots under its first incarnation's shape");
     }
     incarnation
-}
-
-/// The run's digest-lane count, drawn once by the first caller (a perturbing
-/// node draws a knob; the corpus pins the default). 1 to 128 lanes is a blob
-/// of 1 to 17 chunks, so the chunk-repair plane sees the single-chunk and the
-/// many-chunk shapes instead of always five. Floor 1: one lane is a complete,
-/// valid application.
-pub(crate) fn lane_count(state: &StateHandle, perturb: bool) -> u8 {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.lanes.get_or_insert_with(|| {
-        if perturb {
-            buggify_knob!(crate::chain::DEFAULT_LANES, 1_u8..129_u8)
-        } else {
-            crate::chain::DEFAULT_LANES
-        }
-    })
 }
 
 /// The run's **quorum-system policy** (#140, #141), drawn once per seed by
@@ -543,37 +664,6 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize, perturb: bool) -> 
         // a row — are the audit's gates).
         assert_reachable!("a run draws an acceptor grid");
         QuorumPolicy::Grid { rows, cols }
-    })
-}
-
-/// Whether the run's acceptors are **bare** (#144, `Application::Shed`):
-/// drawn once per seed by whichever process or workload asks first, on a
-/// seed that deploys a replica tier only — a bare acceptor applies nothing,
-/// so a deployment without replicas would run no application at all. One
-/// `buggify_knob!` location, default colocated; the extreme is the
-/// log-and-storage split (the whole pool votes and keeps the chosen log, the
-/// replicas alone apply). Whole-pool, not per node: a bare acceptor records
-/// no snapshot point, so on a bare seed no quorum ever holds custody, the
-/// leader refuses every `Truncate`, and no floor ever forms — the snapshot
-/// plane a mixed pool would need a bare leader to serve (it holds no
-/// application bytes) is never asked for. Floor: a replica tier of at least
-/// one; a corpus run never draws.
-#[tracing::instrument(level = "debug", skip(state), fields(replicas, perturb))]
-pub(crate) fn bare_acceptors(state: &StateHandle, replicas: usize, perturb: bool) -> bool {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.bare.get_or_insert_with(|| {
-        if !perturb || replicas == 0 {
-            return false;
-        }
-        let bare = buggify_knob!(0_u8, 1_u8..2_u8) == 1;
-        if bare {
-            // BUGGIFY pairing: a seed genuinely runs bare acceptors (a
-            // cause; the outcome — a slot decided and acked on an acceptor
-            // that never applied it — is the audit's gate).
-            assert_reachable!("a run draws bare acceptors");
-        }
-        bare
     })
 }
 
@@ -767,15 +857,6 @@ mod tests {
         let entry = &guard.nodes["10.0.1.1"];
         assert_eq!(entry.incarnations, 2);
         assert_eq!(guard.nodes["10.0.1.2"].incarnations, 1);
-    }
-
-    /// The lane count is a run-level shape: the first caller fixes it.
-    #[test]
-    fn the_lane_count_is_fixed_by_the_first_caller() {
-        let state = StateHandle::new();
-        let first = lane_count(&state, true);
-        assert_eq!(lane_count(&state, true), first);
-        assert_eq!(lane_count(&state, false), first);
     }
 
     /// A scripted node takes the production shape and never draws.

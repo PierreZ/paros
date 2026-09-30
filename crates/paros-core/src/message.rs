@@ -7,14 +7,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::membership::{AcceptorConfig, ProxyId};
-use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot, Value};
+use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot};
 
 /// A **party** to the Phase-2 exchange: the address an `Accept` asks its
 /// `Accepted` sent to, and the sender a `Commit` names. A node, or a proxy
 /// leader (#142) — two identity namespaces, because a proxy is not an
 /// acceptor and never has a [`NodeId`]. Every other message keeps naming
 /// nodes: Phase 1 is never proxied, a learner is always a node, and a
-/// proxy holds nothing a snapshot or a catch-up could serve.
+/// proxy holds nothing a catch-up could serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Party {
@@ -150,7 +150,7 @@ impl Audience {
 /// Every protocol stimulus the core understands. Peer RPCs and tick-injected
 /// self-events all enter through the single [`crate::ColocatedNode::step`] router.
 ///
-/// `#[non_exhaustive]` so later stages can add variants (e.g. snapshot transfer,
+/// `#[non_exhaustive]` so later stages can add variants (e.g. a trim point,
 /// reconfiguration) without a breaking change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -327,79 +327,32 @@ pub enum Message {
         entries: BTreeMap<Slot, (Ballot, Command)>,
     },
 
-    // ---- Snapshot transfer (below-floor recovery) ----
+    // ---- Below the trim point (#186) ----
     /// An up-to-date peer → a requester whose needed prefix sits **below the
-    /// server's compaction floor** (it was truncated, so no [`CatchUpResponse`](Message::CatchUpResponse)
-    /// could replay it). Carries an **opaque application snapshot** at
-    /// `chosen_index` (the core never interprets `snapshot`; the application
-    /// produced it). The requester jumps its chosen prefix to `chosen_index`,
-    /// adopts `max(promise, ballot)` (so its durable promise never regresses —
-    /// the safety hinge), and truncates to a fully-compacted log above it.
+    /// server's trim point** (it was trimmed, so no
+    /// [`CatchUpResponse`](Message::CatchUpResponse) can replay it): "the log
+    /// below `point` is gone here." The requester jumps its chosen index to
+    /// `point - 1` and its floor to `point`, drops what it held below, seals
+    /// the ledger it is handed, and catches up from `point` like any laggard.
     ///
-    /// This is a recovery accelerator, not log bounding: it exists precisely for a
-    /// node that was down while the cluster advanced and truncated past it, so
-    /// commit-replay catch-up can no longer heal it.
-    InstallSnapshot {
+    /// It carries **no bytes and no ballot**, and the requester's promise does
+    /// not move (#180's rule): everything below the trim point is chosen, the
+    /// application that folded it lives in the client, and a trim point is
+    /// replicated by consensus (a decided `Truncate`), so the only facts a
+    /// laggard needs are where the retained log starts and the at-most-once
+    /// ledger of what it will never walk.
+    TrimmedTo {
         /// Sender (the serving peer).
         from: NodeId,
-        /// The ballot the requester adopts (`>=` every ballot the snapshot's
-        /// prefix was chosen under); it takes `max(promise, ballot)`.
-        ballot: Ballot,
-        /// The chosen index the snapshot brings the requester up to. Everything at
-        /// or below it is decided and folded into `snapshot`.
-        chosen_index: Slot,
-        /// Opaque application snapshot bytes at `chosen_index`. Paros never
-        /// interprets them; the application owns their meaning.
-        snapshot: Value,
-        /// The serving peer's at-most-once session ledger — every
-        /// `(client, seq) -> slot` fact in its applied prefix — carried as
-        /// **paros-owned metadata beside the opaque bytes** (#94). The folded
-        /// prefix's log records never reach the receiver, so without this the
-        /// receiver's walk-derived ledger would silently miss them, and its
-        /// duplicate-suppression decision at the apply seam would diverge from
-        /// every peer's: a mandatory P2c re-proposal of an already-applied
-        /// identity would apply for real here and as a no-op elsewhere.
+        /// The serving peer's trim point: its first retained slot. Everything
+        /// below it is chosen.
+        point: Slot,
+        /// The serving peer's at-most-once session ledger for the slots below
+        /// `point` (#94): their records never reach the requester, so without
+        /// this its duplicate suppression would diverge from every peer's — a
+        /// mandatory P2c re-proposal of an identity already chosen below the
+        /// point would be served as a new entry here and skipped elsewhere.
         sessions: Vec<SessionEntry>,
-    },
-
-    // ---- Snapshot-point repair (driver-terminal; CTRL §3.5 chunk repair) ----
-    /// Follower → leader: "I have durably recorded the decided snapshot at
-    /// `at_index`." The leader tallies these for the `Truncate`-coupling rule
-    /// (truncation is proposed only once a quorum has snapshotted at the
-    /// index). **Driver-terminal**: the driver's snapshot-repair layer owns
-    /// it end to end; [`crate::ColocatedNode::step`] ignores it — consensus state
-    /// never depends on snapshot custody.
-    SnapAck {
-        /// The acknowledging node.
-        from: NodeId,
-        /// The decided snapshot point recorded (the `Snap` marker's slot).
-        at_index: Slot,
-    },
-    /// A node with rotted chunks of its decided snapshot → its peers: "send me
-    /// chunks `chunks` of the snapshot at `at_index`." Byte-wise snapshot
-    /// identity (the `Snap` marker) is what makes the answer verifiable.
-    /// Driver-terminal, like [`Message::SnapAck`].
-    SnapChunkRequest {
-        /// The requesting node.
-        from: NodeId,
-        /// The decided snapshot point whose chunks are needed.
-        at_index: Slot,
-        /// The chunk indexes needed (the driver's fixed chunk size).
-        chunks: Vec<u32>,
-    },
-    /// A peer holding the identical decided snapshot → the requester: the
-    /// requested chunks' bytes. A peer *lacking* the snapshot stays silent
-    /// (absence answers nothing — CTRL Figure 6 Box B); a peer holding only a
-    /// more advanced snapshot answers with a whole-blob
-    /// [`Message::InstallSnapshot`] instead (the unchanged fallback).
-    /// Driver-terminal, like [`Message::SnapAck`].
-    SnapChunkResponse {
-        /// The serving peer.
-        from: NodeId,
-        /// The decided snapshot point the chunks belong to.
-        at_index: Slot,
-        /// `(chunk index, chunk bytes)` for each chunk this peer holds clean.
-        chunks: Vec<(u32, Value)>,
     },
 
     // ---- Cooperative leader handoff (DPaxos "Leader Handoff") ----

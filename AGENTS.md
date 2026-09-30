@@ -39,14 +39,14 @@ oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the
 green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
 
 **The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
-three-to-six process pool of `NodeProcess::chaotic()` plus zero to five `MatchmakerProcess`es
-plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
+three-to-six process pool of `NodeProcess::chaotic()`, each serving one to three journals
+(#188, on a seed without matchmakers: the default journal is the seed's deployment, every other
+a plain journal over the whole pool), plus zero to five `MatchmakerProcess`es plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
 IP order — the count is every node's `Config::proxy_count`, zero the plain deployment)
-plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that apply and never vote,
+plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that walk the chosen prefix and never vote,
 `ReplicaId(rank)` in IP order and `NodeId(1000 + rank)` on the wire — the count is every node's
 `Config::replica_count`, zero the plain deployment; each on a fault-free disk outside the copy
-budget, and each judged by the same `ChainState` application check and final convergence claim
-as a node)
+budget, and each judged by the same final convergence claim as a node)
 under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
 three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
 three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
@@ -67,8 +67,8 @@ as *spares* a `Reconfigure` pulls in. A seed whose matchmaker group drew zero me
 matchmakers, every node an acceptor — is the plain Multi-Paxos deployment and the shape of every
 existing axis (the corpus registers no matchmaker group and never draws). Every run is judged by
 the same two things: the client's own history (`ClientHistory`, linearizability and
-sequential-client consistency) and the shared `AuditWorld` (protocol safety, the application
-state machine, the storage gates, the matchmaker registry, the leader-side matchmaking and
+sequential-client consistency) and the shared `AuditWorld` (protocol safety, the clients'
+folds of the journal, the storage gates, the matchmaker registry, the leader-side matchmaking and
 reconfiguration oracles, and one convergence claim at the end of the recovery tail). There is no
 third workload, no per-scenario process type, and no check that reads a trace.
 
@@ -83,7 +83,7 @@ message as the red→green evidence it was, never pinned as a live artifact. Wha
 volume plus reach: the coverage-guided sweep, the raw hunt, and — where a rare-but-valid state
 needs to be *likely* rather than lucky — a new BUGGIFY location. A test may still hard-code a seed
 when the seed is not a witness: a determinism replay (the same seed twice), a scripted corpus case
-whose seed *is* its input (an E1 mask, a chunk mask), or an arbitrary display seed.
+whose seed *is* its input (an E1 mask), or an arbitrary display seed.
 
 **Raw hunt budget.** For `sim-paros-hunt`, 2,000–3,000 ordinary seeds is the normal evidence
 target. Raise that to 10,000 only when a substantial protocol, harness, or fault-model change is
@@ -111,14 +111,27 @@ identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the matchmaker set a nod
 authoritative, compose a successor — grow, shrink, replace, rotate through the matchmaker pool —
 and ask any node to drive the generation handover; refused on a plain seed), `RETIRE=13`
 (ask the leader which acceptors its effective GC floor released, park one in the storage world
-for good, and tell it to shut down) and `QUORUM_READ=14` (#143: the public leaderless read,
+for good, and tell it to shut down), `QUORUM_READ=14` (#143: the public leaderless read,
 asked of a node drawn at random and never redirected; judged by the same per-client frontier,
-read-your-writes and history linearizability checks as `READ_INDEX`).
-Its application state folds every user, `Truncate`, and `Noop` command into `(applied_count,
-chain_hash)`; `NodeStorage::apply` is the production-generic application seam and snapshots carry
-that opaque state. The audit's application check (over the `ChainState` the storage layer reports
-through `app_applied`) asserts one command/state per applied index, contiguous local
-application, and proposal validity. Keep its messages stable. Client timeouts and deliberately
+read-your-writes and history linearizability checks as `READ_INDEX`), `READ=15` (#185: the
+journal `Read` of a log range, asked of a node or a replica drawn at random, from the client's
+tailing cursor, its own last acked slot, the log's start or far past the end; judged as it
+arrives — every entry the audit's decided value at its slot, the page in `[from, next)` in
+order, the client's own acked appends inside the page present, the cursor monotone, a trim
+answer only below its point) and `CHECK_TAIL=16` (#185: the journal `CheckTail` on a drawn
+path — read-index or quorum — judged exactly as `READ_INDEX` and `QUORUM_READ`, which pin
+the path). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
+`COMPACT` a `Trim`, `READ_INDEX` and `QUORUM_READ` a `CheckTail`.
+paros runs no application (#186): the client *is* the application. Every client reads the
+journal from its cursor and folds each user entry, in LSN order, into `ChainState { applied_count,
+chain_hash }` (`chain_workload/fold.rs`; holes — a `Noop`, a control command, a #94 duplicate —
+never reach a reader), and reports each step to the audit (`AuditWorld::fold_applied`), which
+asserts one command and one state per LSN across clients, a client's fold in increasing LSN
+order, and proposal validity (the message strings are the old application check's; keep them
+stable). A fold needs every entry from the start, so the clients share a **trim fence**: every
+trim is clamped below the lowest cursor of the clients still folding, and a client that leaves
+(done proposing) may be overtaken and stops folding. `READ_STATE` is a fold to the tail through a
+node or replica drawn at random. Client timeouts and deliberately
 abandoned observations are `Ambiguous`, never assumed aborted; retries preserve `(client, seq,
 bytes)`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
 recipes replay from a fresh builder. The shared assertion tables allow at most 512 sites and 256
@@ -223,21 +236,18 @@ own**. The roles:
   (`record_own_round`; a record outside the column is the stray copy the grid already admits, a
   vote that does not count).
 - `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, the at-most-once
-  ledger, the application repair cursor. It consumes "slot chosen, value" and nothing else —
+  ledger. It consumes "slot chosen, value" and nothing else —
   and answers one question about it, `covers(index)`, for the quorum reads below.
 - `replica_node.rs` — `ReplicaNode` (#144, Compartmentalized Paxos §3.3): the **third
   deployment**, a `Replica` over a durable chosen log on a process that is not an acceptor. It
-  steps `Commit`, `CatchUpResponse`, `InstallSnapshot` and `Heartbeat` (the watermark and the
+  steps `Commit`, `CatchUpResponse`, `TrimmedTo` and `Heartbeat` (the watermark and the
   leader hint and the configuration, never the ballot) and the `PreReadAck`s of the quorum
   reads it serves from its own applied state (§3.4, `quorum_read_in`), sends `CatchUpRequest`
   and `PreRead`, persists `WriteOp::Learned` —
   the accepted record's durable shape, never a vote, and a distinct op so no audit folds it
-  into a quorum — plus `SetChosenIndex`, `Truncate` and `InstallSnapshot`, and never an
+  into a quorum — plus `SetChosenIndex`, `Truncate` and `TrimmedTo`, and never an
   acceptor op. It is never in `Config::peers` or the pool (asserted at boot), answers no
-  `Prepare` or `Accept`, and acks no beat. Its mirror is the **bare acceptor**: a
-  `ColocatedNode` with `Config::application = Application::Shed` — one code path for every
-  learner line, and the three outputs it sheds (`Ready::committed`, the application repair,
-  the application snapshot). The module doc holds the **coupling analysis** — why an acceptor
+  `Prepare` or `Accept`, and acks no beat. The module doc holds the **coupling analysis** — why an acceptor
   keeps a chosen index and a chosen prefix (the authoritative record, the floor inside the
   prefix, the CTRL probe and recovery skipping chosen slots, the GC fence, catch-up served
   from the prefix, the handoff tail, the sealed ledger) and what only reflects the
@@ -263,7 +273,8 @@ own**. The roles:
   successor abandons the read; the residual — a grid row wholly unaware of a completed
   successor — is what the client-history linearizability oracle judges (the chain campaign's
   `QUORUM_READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
-  The driver half: a `QuorumRead` RPC on any node, parked on the read-index path's `ctx`
+  The driver half: `CheckTail` on its quorum path (#185; the `QuorumRead` RPC before it)
+  on any node, parked on the read-index path's `ctx`
   counter and deadline but bound to no role (a leader stepping down redirects its read-index
   reads, never its quorum reads); `DriverHooks::read_row` (a BUGGIFY location, consulted on a
   grid node) names the row through `ColocatedNode::quorum_read_in`; `Audit::quorum_read_served`
@@ -316,15 +327,14 @@ changes); the acceptor grid is deployment data too (`QuorumSystem::Grid { rows, 
 the first second deployment (`proxy_leader.rs`, #142 — the embedded `Rounds` on another
 process, a count in `Config`, zero tally lines; its driver `paros::run_proxy` and its process
 group `paros-proxy` are the harness's third role); the replica tier is the third
-(`replica_node.rs`, #144 — the `Replica` on a process with no `Acceptor`, a count in `Config`,
-and the bare acceptor as `Application::Shed` on the same `ColocatedNode`; its driver
-`paros::run_replica` and its process group `paros-replica` are the harness's fourth role; the
-bare acceptor is drawn per seed, whole-pool, on a seed with replicas — `shape::bare_acceptors`).
+(`replica_node.rs`, #144 — the `Replica` on a process with no `Acceptor`, a count in `Config`;
+its driver `paros::run_replica` and its process group `paros-replica` are the harness's fourth
+role).
 
 The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O;
 `paros::run_matchmaker`, `paros::run_proxy` and `paros::run_replica` are the same shape for
 the three other roles.
-It is written **once, generic over moonpool's `P: Providers`** (and `S: NodeStorage`), so the *same*
+It is written **once, generic over moonpool's `P: Providers`** (and `S: LogStorage`), so the *same*
 code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
@@ -350,6 +360,10 @@ today's guarantees. The rules, which every later session reads before touching `
   never quietly honored.
 - Removing every matchmaker feature must leave the plain program's behaviour unchanged — the same
   test the turbulence doctrine below applies to BUGGIFY.
+- Since M6 every peer and client message is framed by a `JournalId` (`>= 1`). A plain deployment
+  is one user journal (plus the system journals once they exist). Inside that frame it exchanges
+  today's messages and persists today's scalars; no matchmaker message, no `HardState` field and
+  no extra round trip enters it. Byte identity with pre-M6 builds is not kept.
 
 The general rule this instantiates: **flexible quorums, matchmaker reconfiguration, and
 compartmentalized Paxos are opt-in features** of paros. The default is plain Multi-Paxos; each
@@ -449,18 +463,18 @@ confirmed by a column, a reconfiguration between a grid and a majority. Module d
 **Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
 future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
 paros does not implement the paper's Scenario 3 — a replica tier (#144) makes it *available*, and
-paros still counts only acceptors, bare or colocated, since both keep the chosen prefix; what it
+paros still counts only acceptors, since every acceptor keeps the chosen prefix; what it
 has is stronger for the purpose — a node that learns a slot chosen records it as its authoritative
 accepted record before its chosen index advances, and a truncated member refuses a `Prepare`
 below its floor — so the condition is: the leadership is settled (no leader recovery, CTRL probe
-or application repair open) and **a Phase-2 quorum of `C_b` reports a chosen index at or past the
+open) and **a Phase-2 quorum of `C_b` reports a chosen index at or past the
 election fence** (`HeartbeatAck.chosen`, populated only on a matchmaker deployment). The leader
 then asks the current generation's matchmakers to raise the watermark to its own ballot
 (`GcRequest`, re-sent each beat, `DriverHooks::skip_gc_resend`); each matchmaker raises it
 **durably before acking** and refuses campaigns below it; the floor is **effective only once a
 matchmaker quorum acked** (`GcStep::Effective`), and only then does the leader name the
 **retirable** acceptors — `members(H_b) \ C_b` — through `Inspect.retirable`. The compaction floor
-(per node: "these slots are gone here, recover from a snapshot") and the GC watermark (per
+(per node: "these slots are gone here, jump to the trim point") and the GC watermark (per
 matchmaker: "these configurations are never returned again") never need each other to move.
 Retirement is an operator act: "removed is not shut down" until GC says nobody will ask again,
 and the `Retire` RPC **carries the evidence**. The operator reads the effective watermark from a
@@ -564,8 +578,48 @@ re-deriving the decree, on the protocol precondition that only a reconfigurer ho
 Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable
 state recovers — there is deliberately no matchmaker-specific in-place repair.
 
-**Storage direction.** The seam stays the high-level `NodeStorage` / `MatchmakerStorage`
-traits (apply / snapshot / truncate / install_snapshot semantics, the boot scan, the format
+**Journals doctrine (M6, #185–#188).** paros is a journal service: one process serves a
+**static list of journals** (`paros::run_journals` over a `JournalStores`; `run_node` is the
+one-journal case), and the rule is **share processes, disks and connections, never protocol
+state**. Each journal is its own namespace — its own `ColocatedNode` (`Config::journal`, read
+for assertions and tracing only), its own ballots, its own log and its own store — so every
+existing proof holds per journal and the one new property is **non-interference**. Ids: `0` is
+unset and refused at the edge, `1..=127` are reserved for system journals, user journals start
+at `JournalId::FIRST_USER` (128, the default). The id rides **the `Deliver` envelope, per
+message** (`ConsensusMessage.journal`) — never folded into a command fingerprint, which would
+protect only `Accepted`'s vhash while `Prepare`, `Promise`, `Commit`, `Heartbeat` and catch-up
+crossed journals — and the driver demuxes on it before the core sees a byte; a message for a
+journal the node does not run now is dropped (the sender's re-send repairs it). Every client
+call names its journal: an unknown id is answered `unknown_journal`, a journal the node serves
+but has quarantined is left unanswered. One `Deliver` per peer carries every journal, and the
+peer mailbox gives **each journal its own keep-newest lane, drained round-robin**, so a busy
+journal only ever evicts its own messages. The **matchmaker plane, the proxy leaders and the
+replica tier serve one journal each — the node's first** (asserted at boot): every other
+journal is plain Multi-Paxos over the whole pool (journal-tagged proxies are #193), a
+retirement retires the first journal and the node keeps serving the rest.
+**A storage fault quarantines its journal, not the process** (#188's decision): the damage is
+scoped to one store, so the journal's runtime is dropped — it sends and answers nothing — while
+the node serves its other journals, and after `DriverTunables::quarantine_ticks` (born
+buggified) the driver re-opens it from its store as a restart of that journal alone; a store
+that will not open (parked, retired) keeps it down for good. A node whose every journal is
+quarantined at once has nothing left and exits with the fault — for one journal exactly the
+pre-M6 fail-stop crash, so the one-journal campaign is unchanged. A seam crash is the process
+dying, for every journal. The copy budget is therefore **per journal**. In simulation the plan
+is drawn once per seed (`paros_sim::shape::journals`, a `buggify_knob!` for the count, floor 1;
+one journal on a seed with matchmakers, whose two-round-trip campaigns livelocked under a
+tripled load — witness in the doc comment) and every journal gets **its own `AuditWorld` and `StorageWorld`** (`audit_world_for`,
+`storage_world_for`, keyed by `state::journal_key`): safety, the clients' folds, convergence,
+the storage gates and the budget are keyed by journal without any oracle knowing, and no
+message gains an interpolated id. Clients are spread over the journals round-robin; the
+matchmaker-plane operations stay on the default journal. What no single world sees lives on
+the shared **journal board** (`paros_sim::audit::journals`): every slot of journal `j` applies
+only an identity appended to `j`, a quarantined journal sends nothing, a journal keeps
+committing while a sibling is **held** on every node for the chaos window
+(`DriverHooks::hold_journal`, a per-seed BUGGIFY location), and a node keeps serving its other
+journals while one is quarantined.
+
+**Storage direction.** The seam stays the high-level `LogStorage` / `MatchmakerStorage`
+traits (the durable writes, truncate / trimmed-to semantics, the boot scan, the format
 marker); what sits behind it changed. paros's **durable, production-generic stores are built on
 `moonpool-journal`** — the CLSTORE write-ahead journal over moonpool's `BlockFile`, generic over
 the provider's `StorageProvider` — as `paros::journal` (`JournalStorage`,
@@ -579,32 +633,36 @@ metadata self-repair, the whole last batch reported as ambiguous) went upstream
 mapping is a **log of write operations folded at boot**, never the state itself (an acceptor
 re-accepts a slot while later slots stay; the journal's index is dense): each staged write is
 one entry whose far identifier carries its kind (as the epoch) and its identity tag
-(`(slot, ballot)` for a vote, `(point, chunk)` for a snapshot chunk, a ballot for a
-registration); the promise and the format marker live in the journal's two-copy metadata,
+(`(slot, ballot)` for a vote, a ballot for a registration); the promise and the format marker live in the journal's two-copy metadata,
 flushed before the log so a record never outruns the promise covering it; periodic bracketed
 checkpoints let the journal drop whole segments. The journal's corruption report is wired to
-CTRL: a damaged vote becomes `faulty(slot, ballot)` from its tag, a damaged chunk a faulty
-chunk, a damaged chosen index / truncation / install is forgotten (each is re-derivable, and
+CTRL: a damaged vote becomes `faulty(slot, ballot)` from its tag, a damaged chosen index /
+truncation / trim jump is forgotten (each is re-derivable, and
 forgetting leaves the store as it was before it), a damaged registry record or trusted
 checkpoint header is a crash verdict; the per-kind table is on `paros::journal`. The stores
-carry **no application** (like `MemStorage`): the application seam is the next piece a
-production `parosd` needs. **The simulation harness does not run on them yet** — the campaign's
-nodes and matchmakers still use the world-backed stores (`crates/paros-sim/src/world/`), because
-those carry what a moonpool disk fault cannot: the cross-node copy budget (a clean Phase-1
-quorum copy of every record survives), the ground-truth fault ledger the audit resolves every
-injected fault against, the `ChainState` application and its audit callbacks, the provisioning
-ledger, and the corpus's per-record masks. The journal stores are proven by their own crash
-loops on the simulated disk (`crates/paros/src/journal/tests.rs`, two fault models) and by both
-contract suites, which also run inside the harness's contract workload on the simulation's own
-disk. Switching the harness means rebuilding those five surfaces over journal files, not
-dropping them. **The seam is async.** Every
-`NodeStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
-the boot scan, producing or reading snapshot bytes, restoring the application — returns a `Send`
+carry **no application** and neither does paros (#186): a journal's client folds what it reads.
+**The simulation harness runs them on half the plain seeds (#187)**: `paros_sim::shape::journal_store`
+draws a seeded coin on a perturbed seed without matchmakers, and a heads seed runs every
+acceptor on `JournalStorage` over `SimStorageProvider` (`world/node_store.rs`, `NodeStore`)
+under every network fault, attrition and moonpool's own disk model (unsynced writes resolved at
+a crash, the `BuggifyKnobs` disk extremes) — but no world-injected corruption. The other seeds,
+every matchmaker seed and the corpus stay on the world-backed stores (`crates/paros-sim/src/world/`),
+because those carry what a moonpool disk fault cannot: the cross-node copy budget (a clean
+Phase-1 quorum copy of every record survives), the ground-truth fault ledger the audit resolves
+every injected fault against, and the corpus's per-record masks. What a journal seed keeps of
+the world is the **provisioning ledger** (#147), in two steps (`LedgeredJournal`: begun at the
+format, landed with the sync that makes the marker durable; a kill between the two is resolved
+at the next boot by reading the disk), and a fault ledger of its own: every error the journal
+store surfaced is counted at the store boundary, so "every fault surfaces as exactly one typed
+crash decision" still binds. The journal stores are also proven by their own crash loops on the
+simulated disk (`crates/paros/src/journal/tests.rs`, two fault models) and by both contract
+suites. Moving matchmaker seeds and injected corruption onto the journal is #176. **The seam is async.** Every
+`LogStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
+the boot scan — returns a `Send`
 future (declared `-> impl Future<…> + Send`, moonpool's provider convention; implementations
 write plain `async fn`s), and the driver awaits each one in persist-before-send order. The core's
 read-only recovery ports (`paros_core::Storage`, `RegistryStorage`) and the accessors that
-report what a store already knows about itself (`applied_slot`, `latest_snap_point`,
-`snap_chunk_count`, `faulty_snap_chunks`) stay synchronous: `boot_scan` is where a store loads
+report what a store already knows about itself (`is_formatted`) stay synchronous: `boot_scan` is where a store loads
 and verifies its records, and everything the synchronous ports answer afterwards is served from
 memory (`MemStorage::from_records` is that in-memory index). The sim's world-backed disks complete
 every operation on the poll that started it, so the async seam moves no seed's draw schedule;
@@ -677,10 +735,10 @@ separation; #81 removed the message-class nemesis, which mixed them):
   all, and say so where they are defined.
 
 The driver's provider-generic `DriverHooks` also exposes the durability seams process-level
-attrition cannot reach — eight today (`Seam` in `crates/paros/src/hooks.rs`): the node driver's
-`BeforeSync`, `AfterSyncBeforeSend`, `AfterApplyBeforeSync` and `AfterBootReplayBeforeSync`, the
-chunk-repair pair `BeforeChunkSync` / `AfterChunkRestoreBeforeSync`, and the matchmaker driver's
-`MatchBeforeSync` / `MatchAfterSyncBeforeReply`. Give each seam its
+attrition cannot reach — four today (`Seam` in `crates/paros/src/hooks.rs`): the node driver's
+`BeforeSync` and `AfterSyncBeforeSend`, and the matchmaker driver's `MatchBeforeSync` /
+`MatchAfterSyncBeforeReply` (the apply, boot-replay and chunk-repair seams went with the
+application, #186). Give each seam its
 own BUGGIFY location; sharing one location prevents the sweep from independently selecting the
 distinct failure modes.
 
@@ -698,10 +756,9 @@ bit-identical. Hooks perturb; the audit only watches.
 storage world, factory-created per seed): every callback folds one transition into O(1) incremental
 state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
 the **workload**, which records its own operation history and checks it in `check()`; the client is
-the only party that knows its own program order. The application state machine
-(`ChainState`: one command and one state per applied index, contiguous local application)
-lives in the audit too, fed by the storage layer's `app_applied`/`app_snapshot`/`app_reset`
-callbacks. Tracing is for humans only: nothing reads the trace back, and there is no `Invariant`
+the only party that knows its own program order. The clients' folds of the journal
+(`ChainState`: one command and one state per LSN, each client's fold in LSN order) meet in the
+audit too, reported by each client as it folds (`AuditWorld::fold_applied`). Tracing is for humans only: nothing reads the trace back, and there is no `Invariant`
 type to add one to. If a fact a check needs exists nowhere the audit can see, add the `Audit`
 callback that reports it — never a scan over the event stream (it is O(trace²) across a run's
 observability pumps). Preserve assertion **message strings** when moving a check — the assertion
@@ -710,8 +767,8 @@ history.
 
 **Tracing spans.** Every important method carries a `#[tracing::instrument]` span, and the rule is
 by layer. In `paros` and `paros-sim` the spans are **non-optional**: the driver's loop stages
-(`run_node`, `drain_ready`, `persist_writes`, `maintain`, `replay_boot_state`, the peer-delivery
-task, the snapshot repair plane), the RPC handlers, the `NodeStorage` implementations, the process
+(`run_node`, `drain_ready`, `persist_writes`, `maintain`, `report_boot_state`, the peer-delivery
+task), the RPC handlers, the `LogStorage` implementations, the process
 and workload lifecycles, the fault world's injections, and the audit's gate checks. In `paros-core`
 the same attribute is written `#[cfg_attr(feature = "tracing", tracing::instrument(..))]` behind
 the default-on `tracing` feature, so a `default-features = false` build is the bare state machine
@@ -731,7 +788,7 @@ substitutes for the other:
 
 - **`paros-core` uses hard `assert!` — always on, in production too.** A broken invariant is a
   programmer error, never an operating condition: crash beats corruption. Operating errors (a
-  non-leader proposal, a stale snapshot, a below-floor prepare) stay result values / guarded
+  non-leader proposal, a stale trim point, a below-floor prepare) stay result values / guarded
   returns — never assert on external input; re-assert it only once it has crossed the validation
   boundary. Style rules: precondition stacks at function entry, postconditions at exit, split
   compound conditions, assert positive *and* negative space, pair each property across two code
@@ -750,7 +807,7 @@ substitutes for the other:
   branch-guarded `assert_reachable!` (the `reach_once!` idiom; creates no slot when unreached, so
   it can never fail coverage); guidance is the numeric/`sometimes_all`/`sometimes_each` family.
   **Which one:** a `sometimes` names an *outcome* the run must be proven to reach — a leader is
-  elected, a below-floor node recovers through a snapshot, a read commits across a leader change,
+  elected, a below-floor node recovers by a trim-point jump, a read commits across a leader change,
   a corruption class is detected — and its failing is a finding about the harness's reach. A
   `reachable` names a *cause* that fired — a hook, a knob extreme, a fault coin, an operation the
   client happened to draw — and only records that it did. A perturbation never gets a
@@ -766,42 +823,36 @@ substitutes for the other:
   invariants — the two catch different bug shapes and deliberately overlap (e.g. promise
   monotonicity is asserted in `set_promise` *and* audited across restarts).
 
-**Truncation & snapshot doctrine.** Entry bytes are opaque: paros never *interprets or compacts*
-application state. The application owns compaction of its own state. What paros does own is its
-*log*, and it drops the log prefix two ways, both keeping the bytes opaque:
+**Truncation doctrine (#186: no application, no snapshot).** Entry bytes are opaque: paros never
+*interprets or compacts* application state, and since #186 it runs no application at all — a
+journal's client reads the log (`Read`) and folds what it reads, and owns compaction of its own
+state. What paros does own is its *log*, and it drops the log prefix one way:
 
 - **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
-  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}`, the
-  `Noop` a new leader fills an undecided hole with (see *Election gap fill* below), or the
-  `Snap{at_index}` marker that decides a snapshot point (#101). A client
-  asks the **leader** to truncate (the `Compact` RPC → `ColocatedNode::propose_control`); the leader
-  proposes `Truncate` only once a quorum advertises custody of a decided snapshot point covering
-  it (otherwise it seeds a `Snap` marker and answers `accepted: false` — clients can be refused
-  and retry), decides it by ordinary consensus, and every node truncates *lazily* when it
-  applies that slot (`ColocatedNode::compact`, `WriteOp::Truncate`), giving **one cluster-wide floor**
-  forwarded by normal replication + catch-up. The consensus/acceptor paths treat `Command` fully
-  opaquely (exactly as Compartmentalized Paxos treats a `Noop`); only the replica/apply path
-  interprets a control command, which keeps the eventual M5 compartment split clean.
-- **Snapshot transfer recovers a below-floor node.** Acceptors refuse `Prepare`/`Accept` below their
-  truncation floor (safety). A node that was down while the cluster truncated past it comes back
-  below the floor, where commit-replay catch-up cannot heal it (the entries are gone). paros **does**
-  transfer a snapshot to recover it: a peer offers `Message::InstallSnapshot` carrying the
-  **opaque, application-produced** snapshot (from `NodeStorage::snapshot()`, the same hook a backup
-  would use) plus the boundary `chosen_index`/ballot; the node jumps its chosen prefix, adopts
-  `max(promise, ballot)` (its durable promise never regresses), and installs via
-  `NodeStorage::install_snapshot()`. paros transfers and tracks the boundary slot; it never
-  interprets the bytes. "No compaction" was never "no snapshot transfer": the *application* produces
-  the snapshot, paros ships it — and, since #101, also *retains* it: a decided `Snap` point's blob
-  is kept durably (the `NodeStorage` custody surface: `record_snapshot`/`read_snap_chunk`/
-  `write_snap_chunk`/`restore_from_snap_point`), advertised to peers, and healed chunk-by-chunk
-  through a driver-terminal repair plane (`SnapAck`/`SnapChunkRequest`/`SnapChunkResponse` never
-  enter `ColocatedNode`); a node can restore its application from a decided point it holds. The bytes
-  stay opaque throughout — paros ships, stores, and checksums them, never reads them.
+  a `User(Entry)` (opaque client bytes) or a `Control` metadata command — `Truncate{up_to}` or the
+  `Noop` a new leader fills an undecided hole with (see *Election gap fill* below). A client asks
+  the **leader** to trim (the `Trim` RPC → `ColocatedNode::propose_control`); the leader decides
+  `Truncate` by ordinary consensus, with no precondition beyond its own leadership (a trim is the
+  client's statement that it no longer needs the prefix), and every node truncates *lazily* when
+  its contiguous chosen walk reaches that slot (`ColocatedNode::compact`, `WriteOp::Truncate`,
+  dropping every slot at or below `up_to`), giving **one cluster-wide floor** forwarded by normal
+  replication + catch-up. The consensus/acceptor paths treat `Command` fully opaquely; only the
+  replica's walk interprets a control command. A reader below the floor is answered `trimmed_to`.
+- **A trim-point jump recovers a below-floor node.** Acceptors refuse `Prepare`/`Accept` below their
+  floor (safety). A node that was down while the cluster truncated past it comes back below the
+  floor, where commit-replay catch-up cannot heal it (the entries are gone for everyone). A peer
+  answering its `CatchUpRequest` from below its own floor sends `Message::TrimmedTo { point,
+  sessions }` — its floor and the sealed at-most-once ledger below it, **no bytes and no ballot** —
+  and the node persists `WriteOp::TrimmedTo` (`LogStorage::trimmed_to`), raises its floor to the
+  point and its chosen index to at least `point - 1`, then heals the rest by ordinary catch-up. Its
+  promise never moves (the old `InstallSnapshot` adopted the sender's ballot; the jump carries
+  none). The snapshot machinery of #101 — `Snap` markers, custody, the chunk-repair plane,
+  `InstallSnapshot`, the application and its repair — is gone, not dormant.
 
 A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) **never
-rejoins** (#124): a snapshot restores the log, not the promise, so a naive rejoin could regress a
+rejoins** (#124): a trim jump restores the log's floor, not the promise, so a naive rejoin could regress a
 promise it once made. **The library enforces that rule (#147), not the harness.** Every store
-carries a durable **format marker** (`NodeStorage::is_formatted` / `format`, TigerBeetle's
+carries a durable **format marker** (`LogStorage::is_formatted` / `format`, TigerBeetle's
 superblock idea): `run_node` takes the operator's claim as data (`BootKind::{FirstBoot,
 ExistingMember}`, never inferred from the store), formats the store durably on a first boot
 *before* the core reads a byte, and **refuses** an existing member whose store has no marker
@@ -854,7 +905,7 @@ carry the safety:
   that mints a fresh ballot.
 
 A handoff is refused while any Phase-1-shaped work is open (leader recovery, CTRL repair
-probe, local `faulty` records, application repair) and while the tail exceeds
+probe, local `faulty` records) and while the tail exceeds
 `HANDOFF_BATCH`. A successor whose inherited read fence stays uncovered for
 `HANDOFF_FENCE_ELECTIONS` election timeouts resigns: ordinary Phase 1 is always the
 fallback, and a failed handoff costs availability, never safety. Design note:
@@ -890,8 +941,8 @@ test. Reproduce it as a **failing simulation**:
 3. Add or strengthen a check so the violation surfaces as a
    `SimulationReport.assertion_violation`. Put it where the fact arrives: a driver-observable
    transition goes in `paros_sim::audit` (adding an `Audit` callback if the driver does not report
-   it yet), a client-observable one in the workload's own history + `check()`, an application
-   or storage fact in the storage layer's audit callbacks. The trace is never read back.
+   it yet), a client-observable one in the workload's own history + `check()`, a
+   storage fact in the storage layer's audit callbacks. The trace is never read back.
 4. Run the sweep, confirm it goes **red** on the unfixed code, and replay that seed while you work.
 5. Fix `paros-core`.
 6. Run the sweep, confirm it goes **green** and saturates.
@@ -950,8 +1001,9 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no
   simulation-only conditional compilation. Sancov crate-under-test.
 - `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
-  (`run_node` over `P: Providers`, `S: NodeStorage`), the default in-memory `MemStorage`, the
-  node RPC contract (`Propose`/`ProposeAck`), and the matchmaker's driver + storage seam
+  (`run_node` over `P: Providers`, `S: LogStorage`), the default in-memory `MemStorage`, the
+  node RPC contract (the journal API of #185: `Append`, `Read`, `CheckTail`, `Trim`, every
+  call naming a `JournalId`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
   + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
   transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and

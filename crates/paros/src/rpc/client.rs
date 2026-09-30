@@ -9,13 +9,14 @@ use moonpool_rpc::{
 };
 
 use super::methods::{
-    CompactRpc, GarbageCollectRpc, InspectRpc, MatchmakeRpc, MatchmakerReconfigureRpc, ProposeRpc,
-    QuorumReadRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, WellKnownMethod,
+    AppendRpc, CheckTailRpc, GarbageCollectRpc, InspectRpc, LogReadRpc, MatchmakeRpc,
+    MatchmakerReconfigureRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, TrimRpc,
+    WellKnownMethod,
 };
 use super::{
-    Compact, CompactAck, InspectReply, InspectRequest, Propose, ProposeAck, Read, ReadAck,
+    Append, AppendAck, CheckTail, CheckTailAck, InspectReply, InspectRequest, Read, ReadAck,
     Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck,
-    RetireRequest,
+    RetireRequest, Trim, TrimAck,
 };
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
@@ -39,10 +40,10 @@ pub(crate) fn well_known<P: Providers, M: WellKnownMethod>(
 /// dropping its future — releases the reply route; the node may still run
 /// it.
 pub struct NodeClient<P: Providers> {
-    propose: ServiceClient<P, ProposeRpc>,
-    read: ServiceClient<P, ReadRpc>,
-    quorum_read: ServiceClient<P, QuorumReadRpc>,
-    compact: ServiceClient<P, CompactRpc>,
+    append: ServiceClient<P, AppendRpc>,
+    read: ServiceClient<P, LogReadRpc>,
+    check_tail: ServiceClient<P, CheckTailRpc>,
+    trim: ServiceClient<P, TrimRpc>,
     reconfigure: ServiceClient<P, ReconfigureRpc>,
     reconfigure_matchmakers: ServiceClient<P, ReconfigureMatchmakersRpc>,
     inspect: ServiceClient<P, InspectRpc>,
@@ -52,10 +53,10 @@ pub struct NodeClient<P: Providers> {
 impl<P: Providers> Clone for NodeClient<P> {
     fn clone(&self) -> Self {
         Self {
-            propose: self.propose.clone(),
+            append: self.append.clone(),
             read: self.read.clone(),
-            quorum_read: self.quorum_read.clone(),
-            compact: self.compact.clone(),
+            check_tail: self.check_tail.clone(),
+            trim: self.trim.clone(),
             reconfigure: self.reconfigure.clone(),
             reconfigure_matchmakers: self.reconfigure_matchmakers.clone(),
             inspect: self.inspect.clone(),
@@ -69,10 +70,10 @@ impl<P: Providers> NodeClient<P> {
     #[must_use]
     pub fn new(rpc: &RpcHandle<P>, addr: SocketAddr) -> Self {
         Self {
-            propose: well_known(rpc, addr),
+            append: well_known(rpc, addr),
             read: well_known(rpc, addr),
-            quorum_read: well_known(rpc, addr),
-            compact: well_known(rpc, addr),
+            check_tail: well_known(rpc, addr),
+            trim: well_known(rpc, addr),
             reconfigure: well_known(rpc, addr),
             reconfigure_matchmakers: well_known(rpc, addr),
             inspect: well_known(rpc, addr),
@@ -80,16 +81,18 @@ impl<P: Providers> NodeClient<P> {
         }
     }
 
-    /// Propose a command; answered once it commits, or with a redirect.
+    /// Append records to a journal; answered once they commit (naming the
+    /// slot they landed in), or with a redirect.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn propose(&self, request: &Propose) -> Result<ProposeAck, RpcError> {
-        self.propose.try_get_reply(request).await
+    pub async fn append(&self, request: &Append) -> Result<AppendAck, RpcError> {
+        self.append.try_get_reply(request).await
     }
 
-    /// A read-index read (the leader's).
+    /// Read a journal's chosen entries from an LSN up; long-polls above the
+    /// serving node's end. Any node or replica serves it.
     ///
     /// # Errors
     ///
@@ -98,22 +101,23 @@ impl<P: Providers> NodeClient<P> {
         self.read.try_get_reply(request).await
     }
 
-    /// A leaderless quorum read (#143), served by any node or replica.
+    /// A linearizable tail: read-index on the leader, or a quorum read on
+    /// any node or replica, as the request's path says.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn quorum_read(&self, request: &Read) -> Result<ReadAck, RpcError> {
-        self.quorum_read.try_get_reply(request).await
+    pub async fn check_tail(&self, request: &CheckTail) -> Result<CheckTailAck, RpcError> {
+        self.check_tail.try_get_reply(request).await
     }
 
-    /// Ask the leader to truncate the log.
+    /// Ask the leader to trim the journal.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn compact(&self, request: &Compact) -> Result<CompactAck, RpcError> {
-        self.compact.try_get_reply(request).await
+    pub async fn trim(&self, request: &Trim) -> Result<TrimAck, RpcError> {
+        self.trim.try_get_reply(request).await
     }
 
     /// Ask the leader to reconfigure the acceptor set.
@@ -137,13 +141,25 @@ impl<P: Providers> NodeClient<P> {
         self.reconfigure_matchmakers.try_get_reply(request).await
     }
 
-    /// Inspect the node's chosen prefix, configuration and application.
+    /// Inspect the node's first journal: its chosen prefix and
+    /// configuration.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
     pub async fn inspect(&self) -> Result<InspectReply, RpcError> {
-        self.inspect.try_get_reply(&InspectRequest {}).await
+        self.inspect_journal(0).await
+    }
+
+    /// Inspect `journal` on the node (#188; `0` names its first journal).
+    ///
+    /// # Errors
+    ///
+    /// The attempt's [`RpcError`].
+    pub async fn inspect_journal(&self, journal: u64) -> Result<InspectReply, RpcError> {
+        self.inspect
+            .try_get_reply(&InspectRequest { journal })
+            .await
     }
 
     /// Decommission the node (#123).

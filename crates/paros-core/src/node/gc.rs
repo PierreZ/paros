@@ -39,7 +39,7 @@
 //!
 //! Scenario 3 as written (a separate replica tier) is therefore **not** what
 //! paros implements, and the restriction is deliberate: the chosen prefix's
-//! durability is the existing chosen-index / truncation / snapshot
+//! durability is the existing chosen-index / truncation / trim-point
 //! machinery's, and the condition above is what it licenses. It is also
 //! exactly what the wrong rule lacks — an installed `C_b` whose members have
 //! not yet learned the prefix, a leader that GCs at once and dies, and a
@@ -47,12 +47,11 @@
 //! chose: a `Noop` gap fill over a chosen value, two values for one slot.
 //!
 //! **Re-read against a replica tier (#144).** A deployment may now run
-//! [`ReplicaNode`](crate::ReplicaNode)s beside its acceptors and bare
-//! acceptors ([`Application::Shed`](crate::Application::Shed)) among them,
-//! and neither moves the rule. A bare acceptor sheds only the application:
-//! `mark_chosen` still records the chosen value as its authoritative record
-//! and its chosen index still rides its `HeartbeatAck`, so it satisfies the
-//! condition exactly as a colocated member does. A replica is in no
+//! [`ReplicaNode`](crate::ReplicaNode)s beside its acceptors, and since #186
+//! no acceptor runs an application; neither moves the rule. An acceptor
+//! records the chosen value as its authoritative record (`mark_chosen`) and
+//! its chosen index rides its `HeartbeatAck`, so it satisfies the condition
+//! whatever else it runs. A replica is in no
 //! configuration and acks no beat, so its chosen index is never counted
 //! toward the fence. A replica tier makes Scenario 3 *available* — the
 //! chosen prefix persisted on replicas that are not acceptors — but paros
@@ -63,8 +62,8 @@
 //!
 //! The two floors relate as follows. The **compaction floor**
 //! (`ColocatedNode::first_slot`, `Control::Truncate`) is per node and says "these
-//! slots are chosen and their records are gone here; recover them from a
-//! snapshot" — the acceptor's below-floor `Nack` is the paper's acceptor-side
+//! slots are chosen and their records are gone here; a laggard below
+//! them jumps with `TrimmedTo`" — the acceptor's below-floor `Nack` is the paper's acceptor-side
 //! persisted watermark, already in place. The **GC watermark** is per
 //! matchmaker and says "these configurations will never be returned again".
 //! The first is what makes the second safe for Region 1: a `C_b` member that
@@ -147,8 +146,8 @@ impl ColocatedNode {
     }
 
     /// Whether the forgettability condition holds (the module doc): the
-    /// leadership is settled (no inherited recovery, repair probe or
-    /// application repair open — Region 2 is decided) and a Phase-2 quorum
+    /// leadership is settled (no inherited recovery or repair probe open —
+    /// Region 2 is decided) and a Phase-2 quorum
     /// of the current configuration reports a chosen index at or past the
     /// fence (Region 1, the collector's own tally).
     fn gc_covered(&self) -> bool {

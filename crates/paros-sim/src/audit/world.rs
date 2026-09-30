@@ -17,7 +17,18 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 /// Get-or-create the singleton [`AuditWorld`] for this iteration
 /// (`crate::state::published_arc`).
 pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
-    crate::state::published_arc(state, AUDIT_WORLD_KEY, AuditWorld::default)
+    audit_world_for(state, paros::JournalId::default())
+}
+
+/// `journal`'s own [`AuditWorld`] (#188): every oracle folds one journal's
+/// transitions, so safety, the clients' folds, convergence and the storage
+/// gates are all keyed by journal without any of them knowing.
+pub(crate) fn audit_world_for(state: &StateHandle, journal: paros::JournalId) -> Arc<AuditWorld> {
+    crate::state::published_arc(
+        state,
+        &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
+        AuditWorld::default,
+    )
 }
 
 /// The per-iteration shared checker.
@@ -48,115 +59,62 @@ impl AuditWorld {
         self.lock().submitted.insert(cmd_hash);
     }
 
-    /// The application applied one command at `index` (its 1-based applied
-    /// count), reaching `state`. Reported by the storage layer as the
-    /// transition is made durable. Contiguous per node, one command and one
-    /// state per index cluster-wide, and a user command traces to a submission.
+    /// A client appended `(client, seq)` to this world's journal (#188) —
+    /// the identity the non-interference oracle requires of every user
+    /// command a slot of the journal applies.
+    pub(crate) fn note_appended(&self, client: u64, seq: u64) {
+        self.lock().appended.insert((client, seq));
+    }
+
+    /// The value the audit knows was decided at `slot` (a durable accept
+    /// quorum at one ballot), as `paros::command_hash` — what a journal
+    /// read's entry there must hash to (#185). `None` when the audit has not
+    /// seen that slot decided.
+    pub(crate) fn decided_vhash(&self, slot: u64) -> Option<u64> {
+        self.lock().decided_vhash(slot)
+    }
+
+    /// A client folded the user entry at `lsn` (#186: the application is
+    /// the client's, fed by `Read`), whose slot value hashes to `cmd_hash`,
+    /// reaching `state`. Strictly increasing per client, one command and one
+    /// state per LSN across every client, and a user entry traces to a
+    /// submission. The message strings are the application check's, which
+    /// this fold inherited from the storage layer.
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) fn app_applied(
-        &self,
-        node: u64,
-        index: u64,
-        cmd_hash: u64,
-        user: bool,
-        noop: bool,
-        state: u64,
-    ) {
+    pub(crate) fn fold_applied(&self, client: u64, lsn: u64, cmd_hash: u64, state: u64) {
         let mut st = self.lock();
-        if noop {
-            reach_once!(st.noop_applied, "chain: noop gap fill is applied");
-        }
-        let expected = st
-            .app_index
-            .get(&node)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
+        let previous = st.fold_lsn.get(&client).copied();
         assert_always!(
-            index == expected,
+            previous.is_none_or(|previous| lsn > previous),
             "chain: applies are contiguous per node",
-            { "node" => node, "index" => index, "expected" => expected }
+            {
+                "client" => client,
+                "lsn" => lsn,
+                "previous" => crate::signed_watermark(previous)
+            }
         );
-        st.app_index.insert(node, index);
-        let prior_command = *st.app_command.entry(index).or_insert(cmd_hash);
-        let prior_state = *st.app_state.entry(index).or_insert(state);
+        st.fold_lsn.insert(client, lsn);
+        let met = st.fold_state.contains_key(&lsn);
+        let prior_command = *st.fold_command.entry(lsn).or_insert(cmd_hash);
+        let prior_state = *st.fold_state.entry(lsn).or_insert(state);
         assert_always!(
             prior_command == cmd_hash && prior_state == state,
             "chain: one state per applied index",
             {
-                "node" => node,
-                "index" => index,
+                "client" => client,
+                "lsn" => lsn,
                 "expected_command" => prior_command,
                 "observed_command" => cmd_hash,
                 "expected_state" => prior_state,
                 "observed_state" => state
             }
         );
-        // The was-proposed claim guards *client* commands: a control command
-        // is minted inside the system (a leader's `Noop` gap fill, a `Snap`
-        // marker, a `Truncate`), so only a user entry must trace back to a
-        // submission.
+        st.fold_agreed |= met;
         assert_always!(
-            !user || st.client_free || st.submitted.contains(&cmd_hash),
+            st.client_free || st.submitted.contains(&cmd_hash),
             "chain: applied command was proposed",
-            { "node" => node, "index" => index, "command" => cmd_hash }
+            { "client" => client, "lsn" => lsn, "command" => cmd_hash }
         );
-    }
-
-    /// The application jumped to `state` at `index` through a snapshot install
-    /// or a decided-point restore. Never backward per node, and agreeing at its
-    /// index with every apply and install that reached it.
-    #[tracing::instrument(level = "debug", skip(self), fields(node, index, state))]
-    pub(crate) fn app_snapshot(&self, node: u64, index: u64, state: u64) {
-        let mut st = self.lock();
-        let previous = st.app_index.get(&node).copied();
-        assert_always!(
-            previous.is_none_or(|previous| index >= previous),
-            "chain: a snapshot jump never moves the applied index backward",
-            {
-                "node" => node,
-                "from" => crate::signed_watermark(previous),
-                "to" => index
-            }
-        );
-        st.app_index.insert(node, index);
-        let prior_state = *st.app_state.entry(index).or_insert(state);
-        assert_always!(
-            prior_state == state,
-            "chain: one state per applied index",
-            {
-                "node" => node,
-                "index" => index,
-                "expected_state" => prior_state,
-                "observed_state" => state
-            }
-        );
-    }
-
-    /// A corrupted application snapshot was reset for recovery: the node's
-    /// applied index legally restarts from zero, and the replay that follows
-    /// re-derives the same per-index states.
-    #[tracing::instrument(level = "debug", skip(self), fields(node))]
-    pub(crate) fn app_reset(&self, node: u64) {
-        self.lock().app_index.remove(&node);
-    }
-
-    /// How many below-floor `Prepare`s the acceptors ranked `min_node` and
-    /// above have refused so far, summed.
-    pub(crate) fn below_floor_refusals_from(&self, min_node: u64) -> u64 {
-        self.lock()
-            .below_floor_refusals
-            .range(min_node..)
-            .map(|(_, count)| count)
-            .sum()
-    }
-
-    /// Whether `node` installed a snapshot landing at or past `index`.
-    pub(crate) fn snapshot_landed_at_least(&self, node: u64, index: u64) -> bool {
-        self.lock()
-            .snap_landings
-            .get(&node)
-            .is_some_and(|landings| landings.iter().any(|landing| *landing >= index))
     }
 
     /// The cluster's applied high-water mark so far (`None` before any apply).
@@ -185,7 +143,7 @@ impl AuditWorld {
     pub(crate) fn diagnostics(&self) -> String {
         let st = self.lock();
         format!(
-            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} snap_chunks_rejected={}@{:?} matchmakers=[{}]",
+            "applied_max={:?} cluster_max={:?} booted={:?} storage_dead={:?} leader_rounds={:?} last_gap={:?} promised={:?} sent={:?} delivery_failures={} edge_rejections={} matchmakers=[{}]",
             st.applied_max,
             st.cluster_applied_max,
             st.booted,
@@ -196,8 +154,6 @@ impl AuditWorld {
             st.sent_kinds,
             st.delivery_failures,
             st.edge_rejections,
-            st.snap_chunks_rejected,
-            st.snap_chunk_rejected_at,
             st.matchmaker.diagnostics()
         )
     }
@@ -220,6 +176,12 @@ impl AuditWorld {
         assert_sometimes!(
             st.any_ack_checked,
             "a committed write ack is checked against the acking node's applied prefix"
+        );
+        // The application check lives on the clients' folds (#186): it is
+        // only as good as two folds meeting at one LSN.
+        assert_sometimes!(
+            st.fold_agreed,
+            "chain: two clients fold the same entry to the same state"
         );
         st.check_protocol_gates();
         st.check_tier_gates();
@@ -351,7 +313,7 @@ impl AuditWorld {
     /// would trip the cross-restart checks as false positives. The world owns
     /// the ground truth, so every flush refreshes the **reference data** those
     /// checks compare against: the per-`(node, slot)` persisted value, the
-    /// compaction floor, and the admitted snapshot landings. Reference data
+    /// compaction floor, and the admitted trim-point landings. Reference data
     /// only — progress/liveness state (`applied_max`, quiescence clocks) stays
     /// driver-reported, so this observation cannot mask a liveness bug. This
     /// is what keeps recovered-equals-persisted checkable against *actual*
@@ -362,7 +324,7 @@ impl AuditWorld {
         now_ms: u64,
         accepted: &[(u64, u64)],
         floor: Option<u64>,
-        snapshot_landing: Option<u64>,
+        landing: Option<u64>,
     ) {
         let mut st = self.lock();
         for &(slot, vhash) in accepted {
@@ -371,8 +333,8 @@ impl AuditWorld {
         if let Some(first) = floor {
             st.floor.entry(node).or_default().raise(first, now_ms);
         }
-        if let Some(landing) = snapshot_landing {
-            st.snap_landings.entry(node).or_default().insert(landing);
+        if let Some(landing) = landing {
+            st.landings.entry(node).or_default().insert(landing);
         }
     }
 
@@ -524,21 +486,6 @@ impl AuditWorld {
             {
                 continue;
             }
-            // A bare acceptor (#144) applies nothing: what converges is its
-            // chosen prefix, onto the same frontier the appliers reached.
-            if st.bare.contains(&node) {
-                let chosen = st.chosen_watermark.get(&node).copied();
-                assert_always!(
-                    chosen.is_some_and(|c| c >= cluster_max),
-                    "bare acceptor: its chosen prefix covers the cluster's applied prefix at the end of the tail",
-                    {
-                        "node" => node,
-                        "chosen" => crate::signed_watermark(chosen),
-                        "cluster_max" => cluster_max
-                    }
-                );
-                continue;
-            }
             let prefix = st.applied_max.get(&node).copied();
             assert_always!(
                 prefix == Some(cluster_max),
@@ -577,13 +524,19 @@ impl AuditWorld {
 /// applied map. **Audit side** — the coverage gates recorded once per run, the
 /// storage world's injected⇔detected correlation, and the one liveness claim:
 /// every live node ends on the cluster's applied prefix, which covers every
-/// acked slot. Returns the run's digest for the determinism proof.
+/// acked slot. All of it over `journal`'s own worlds (#188). Returns the
+/// run's digest for the determinism proof.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn check_run(state: &StateHandle, history: &ClientHistory) -> u64 {
-    let audit = audit_world(state);
+pub(crate) fn check_run(
+    state: &StateHandle,
+    journal: paros::JournalId,
+    history: &ClientHistory,
+) -> u64 {
+    let audit = audit_world_for(state, journal);
     audit.check_client_history(history);
     audit.check_gates();
-    crate::world::check_storage_gates(state);
+    crate::world::check_storage_gates(state, journal);
+    super::journals::lock(&super::journals::journal_board(state)).check_gates();
     let acked_max = audit.lock().lin.acked_max();
     audit.check_final_convergence(acked_max);
     audit.digest()

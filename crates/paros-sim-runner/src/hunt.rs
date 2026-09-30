@@ -3,7 +3,7 @@
 //! saturation gate), a hunt never stops at a coverage plateau and treats
 //! coverage gates as irrelevant — its only deliverable is failing seeds.
 //!
-//! Usage: `sim-paros-hunt [main|canary|corpus|corpus-chunks] [iterations]`
+//! Usage: `sim-paros-hunt [main|canary|corpus] [iterations]`
 //!        `sim-paros-hunt replay-main <seed>` — deterministic single-seed
 //!        replay on the main campaign (the red→green witness command).
 //!        `sim-paros-hunt canary [iterations]` — the main campaign under
@@ -17,30 +17,18 @@
 //!        analytically derived outcome (Correct vs `CorrectlyUnavailable`).
 //!        `sim-paros-hunt replay-corpus <seed>` — deterministic replay.
 //!        `sim-paros-hunt replay-corpus-mask <mask>` — one explicit mask.
-//!        `sim-paros-hunt corpus-chunks [iterations]` — the per-chunk mask
-//!        corpus over the decided snapshot point; `replay-chunk-mask <mask>` /
-//!        `replay-chunk-seed <seed>` replay one case, and
-//!        `replay-chunk-restore-crash <mask>` the mask with node 0's live
-//!        snapshot lost and a scripted crash after its point restore (#146).
-//!        `sim-paros-hunt replay-bare-quorum <seed>` / `replay-lifecycle
-//!        <seed>` — the bare-quorum lost-slot case and the §5.1.2
-//!        snapshot-lifecycle compound; `replay-departed <seed>` — the
-//!        departed-straggler case (#124).
+//!        `sim-paros-hunt replay-bare-quorum <seed>` — the bare-quorum
+//!        lost-slot case; `replay-departed <seed>` — the departed-straggler
+//!        case (#124).
 
 mod common;
 
 use common::{arg, is_clean, print_never_fired, print_seed_counts};
 use paros_sim::{
-    ChunkLiveCase, EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt,
-    chain_seed_canary, chain_smoke, chunk_corpus_hunt, corpus_hunt, explore_chain_seed,
-    run_bare_quorum_case, run_chain_seed, run_chunk_corpus_seed, run_chunk_mask, run_corpus_mask,
-    run_corpus_seed, run_departed_straggler_case, run_snapshot_lifecycle_case,
+    EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
+    chain_smoke, corpus_hunt, explore_chain_seed, run_bare_quorum_case, run_chain_seed,
+    run_corpus_mask, run_corpus_seed, run_departed_straggler_case,
 };
-
-/// The chunk-corpus mask a replay argument names (its low 15 bits).
-fn chunk_mask(seed: u64) -> u32 {
-    u32::try_from(seed & 0x7FFF).unwrap_or_default()
-}
 
 /// The single-seed replay a `replay-*` / `explore-main` axis names, if any.
 fn replay_for(axis: &str) -> Option<fn(u64) -> SimulationReport> {
@@ -53,13 +41,7 @@ fn replay_for(axis: &str) -> Option<fn(u64) -> SimulationReport> {
             |seed| run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default())
         }
         "replay-bare-quorum" => run_bare_quorum_case,
-        "replay-lifecycle" => run_snapshot_lifecycle_case,
         "replay-departed" => run_departed_straggler_case,
-        "replay-chunk-mask" => |seed| run_chunk_mask(chunk_mask(seed), ChunkLiveCase::Intact),
-        "replay-chunk-restore-crash" => {
-            |seed| run_chunk_mask(chunk_mask(seed), ChunkLiveCase::LostThenRestoreCrash)
-        }
-        "replay-chunk-seed" => run_chunk_corpus_seed,
         _ => return None,
     })
 }
@@ -90,11 +72,8 @@ fn main() {
         "main" => chain_smoke(iterations),
         "canary" => chain_canary_hunt(iterations),
         "corpus" => corpus_hunt(iterations),
-        "corpus-chunks" => chunk_corpus_hunt(iterations),
         other => {
-            eprintln!(
-                "unknown axis: {other} (expected 'main', 'canary', 'corpus', or 'corpus-chunks')"
-            );
+            eprintln!("unknown axis: {other} (expected 'main', 'canary' or 'corpus')");
             std::process::exit(2);
         }
     };

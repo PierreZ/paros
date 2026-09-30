@@ -9,7 +9,7 @@
 //! the shipped program bit-identical.
 //!
 //! Each callback fires **after** the transition it reports is real: a durable
-//! write after its fsync, an apply after the application saw it, a send beside
+//! write after its fsync, a walked slot after the prefix moved over it, a send beside
 //! the transmit. They sit exactly where the driver's `tracing` events already
 //! are — the trace stays for humans, while correctness checking lives here,
 //! where an implementation can fold each transition into O(1) incremental
@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcStep, Handoff, MatchRefusal, MatchmakerHardState,
+    AcceptorConfig, Ballot, GcAck, GcStep, Handoff, JournalId, MatchRefusal, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, Party, PendingBootstrap,
     ProxyId, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep,
     Registration, RegistrationKind, Slot,
@@ -74,10 +74,39 @@ pub struct Deployment {
     /// How many replicas the deployment runs (`Config::replica_count`, #144):
     /// the modulus of `Config::reply_owner`, zero on the plain deployment.
     pub replica_count: usize,
-    /// **This node's** application policy (`Config::application`): whether
-    /// it applies what it learns or is a bare acceptor. The one per-node
-    /// field of the report.
-    pub application: paros_core::Application,
+}
+
+/// How a journal `Read` (#185) was answered, as reported by
+/// [`Audit::log_read_served`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogReadAnswer {
+    /// Served on arrival.
+    Immediate,
+    /// Parked at the end (the long-poll) and woken by a newly chosen slot
+    /// (or by a trim that overtook it).
+    Woke,
+    /// Parked at the end and answered empty when its wait ran out.
+    Expired,
+}
+
+/// One journal `Read` answer (#185), as it leaves a node or a replica.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogReadReport {
+    /// Where the read started.
+    pub from: Slot,
+    /// Set when the read started below the trim point: the first readable
+    /// slot. Nothing else was answered.
+    pub trimmed_to: Option<Slot>,
+    /// Where the next read starts.
+    pub next: Slot,
+    /// One past the serving node's contiguous chosen prefix.
+    pub committed_end: Slot,
+    /// How many entries the page carried.
+    pub entries: u64,
+    /// How many holes it stepped over.
+    pub skipped: u64,
+    /// How it was answered.
+    pub answer: LogReadAnswer,
 }
 
 /// One `MatchB` page as it leaves a matchmaker: where it starts, the
@@ -126,9 +155,20 @@ pub trait Audit {
     /// compaction floor (the first slot still retained).
     fn truncated(&self, node: NodeId, first: Slot) {}
 
-    /// This node installed an opaque application snapshot from a peer, jumping
-    /// its chosen prefix to `chosen_index` and adopting `ballot`.
-    fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, ballot: Ballot) {}
+    /// This node (or replica) durably jumped below a peer's trim point
+    /// (#186, `TrimmedTo`): its floor is `point` and its chosen prefix
+    /// covers everything below it, without the walk having moved over those
+    /// slots. Its promise did not move.
+    fn trimmed_to(&self, node: NodeId, point: Slot) {}
+
+    /// This node (or replica) answered a journal `Read` (#185) — reported
+    /// once, as the answer is handed to the reply seam (a reply the seam
+    /// then drops was still served).
+    fn log_read_served(&self, node: NodeId, report: &LogReadReport) {}
+
+    /// This node refused a client call naming a journal it does not serve
+    /// (`0`, or any other id than its own, #185). `call` names the RPC.
+    fn journal_refused(&self, node: NodeId, journal: JournalId, call: &'static str) {}
 
     /// This node applied the chosen command at `slot` (hashed to `vhash`),
     /// advancing its contiguous applied prefix.
@@ -298,12 +338,20 @@ pub trait Audit {
     /// written and no message left.
     fn boot_refused(&self, node: NodeId, refusal: BootRefusal) {}
 
-    /// A [`NodeStorage`](crate::NodeStorage) call surfaced `error` and the
+    /// A [`LogStorage`](crate::LogStorage) call surfaced `error` and the
     /// driver decided `decision` — reported at the instant of the decision,
     /// before the crash unwinds. The error carries the fault kind, the record
     /// identity, and the durability outcome as data, so a checker can fold
     /// injected-vs-detected accounting into O(1) state without string parsing.
     fn storage_fault(&self, node: NodeId, error: &StorageError, decision: StorageFaultDecision) {}
+
+    /// A storage fault ended this journal's incarnation on `node` (#188):
+    /// the journal is quarantined — it sends nothing and answers nothing —
+    /// while the node serves its other journals, until the driver re-opens
+    /// it from its store (the next [`Audit::recovered`] boot report) or the
+    /// store refuses to open for good. Reported to the quarantined
+    /// journal's own audit port.
+    fn journal_quarantined(&self, node: NodeId) {}
 
     /// `from` (a node, or a proxy leader) dropped one outbound message at
     /// the send seam (hook-decided per-message loss, indistinguishable from
@@ -325,15 +373,6 @@ pub trait Audit {
     /// idempotency claim the matchmaker plane's answers rest on.
     fn client_reply_duplicated(&self, node: NodeId, reply: crate::hooks::Reply) {}
 
-    /// A snapshot install persisted while this node was a live Candidate — the
-    /// #88 window (`on_install_snapshot` deliberately does not touch the
-    /// election, so the campaign stays open across the install).
-    fn snapshot_mid_election(&self, node: NodeId) {}
-
-    /// This node materialized `offers` snapshot transfers into the common
-    /// outbound path (reported before the after-sync/before-send seam).
-    fn snapshot_offered(&self, node: NodeId, offers: u64) {}
-
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.
     fn recovery_batch(&self, node: NodeId, started: u64, gap_fills: u64, remaining: u64) {}
@@ -343,6 +382,11 @@ pub trait Audit {
 
     /// This node selected the shortest valid election timeout.
     fn election_timeout_extreme(&self, node: NodeId, ticks: u64) {}
+
+    /// This node's election timeout base was doubled `doublings` times: its
+    /// previous campaigns expired with no leader known (the election
+    /// backoff, [`crate::DriverTunables::election_backoff_doublings`]).
+    fn election_backoff(&self, node: NodeId, doublings: u32) {}
 
     /// This node now runs with an election timeout of `ticks` (the driver's
     /// randomized draw, re-drawn at every demotion). The `CheckQuorum`
@@ -391,12 +435,6 @@ pub trait Audit {
     /// divergence checks can key their explained-only rule on it.
     fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {}
 
-    /// This node opened an **application repair** at boot: the replay could
-    /// not walk the whole chosen prefix (`below_floor` says whether the cursor
-    /// sits under the compaction floor — the snapshot-recovery path — or at a
-    /// faulty/missing chosen record the catch-up heal will re-learn).
-    fn app_repair_started(&self, node: NodeId, from: Slot, below_floor: bool) {}
-
     /// Monotone repair-progress totals for this incarnation, reported when
     /// they change: local faulty records repaired in place, Case-1 straggler
     /// re-proposals, Case-2 straggler no-op fills, and recovery-timeout
@@ -411,58 +449,11 @@ pub trait Audit {
     ) {
     }
 
-    /// This node durably recorded the decided snapshot point at `at` — the
-    /// applied [`Control::Snap`](paros_core::Control::Snap) marker's slot
-    /// (#101). Reported after the recording batch's fsync.
-    fn snap_recorded(&self, node: NodeId, at: Slot) {}
-
-    /// This node's boot scan classified `chunks` rotted chunks of its
-    /// retained decided snapshot at `at` — value lost, identity known: the
-    /// chunk-repair layer pulls them from peers.
-    fn snap_chunks_reported(&self, node: NodeId, at: Slot, chunks: u64) {}
-
-    /// This node installed `chunks` repaired chunks of the decided snapshot
-    /// at `at`, received from a peer: `bytes` chunk payload against the
-    /// point's `blob_bytes` — the CTRL §5.2 chunk-repair cost (a chunk repair
-    /// ships chunks, never the blob).
-    fn snap_chunk_repaired(
-        &self,
-        node: NodeId,
-        at: Slot,
-        chunks: u64,
-        bytes: u64,
-        blob_bytes: u64,
-    ) {
-    }
-
-    /// This node's store **refused** a repaired chunk of the decided snapshot
-    /// at `at`: every chunk the point still lacked arrived and every write
-    /// returned `Ok`, yet the store does not call the point whole. The pull
-    /// keeps asking — the point stays incomplete until a custodian serves
-    /// bytes the store accepts.
-    fn snap_chunk_rejected(&self, node: NodeId, at: Slot) {}
-
-    /// This node answered a chunk request for a point it no longer retains
-    /// with its full, more advanced snapshot (`Message::InstallSnapshot`) —
-    /// the unchanged whole-blob fallback.
-    fn snap_advanced_fallback(&self, node: NodeId, to: NodeId) {}
-
-    /// This node restored its lost application state locally from its own
-    /// (chunk-repaired) decided snapshot point at `at`, instead of a
-    /// whole-blob transfer.
-    fn snap_point_restored(&self, node: NodeId, at: Slot) {}
-
     /// This node answered a client `Compact` request; `accepted` is the honest
     /// outcome the ack carried (`true` only when the `Truncate` control
     /// proposal was actually admitted — a redirect, a coupling refusal, or a
     /// failed proposal all report `false`).
     fn compact_acked(&self, node: NodeId, accepted: bool) {}
-
-    /// This node held a snapshot chunk `to` asked for, clean, and stayed
-    /// silent about it (the `withhold_snap_chunk` hook fired). Reported so a
-    /// checker can tie a later chunk repair at the requester to the silence it
-    /// had to work around.
-    fn snap_chunk_withheld(&self, node: NodeId, to: NodeId) {}
 
     /// This node answered a parked read with a retry redirect instead of a
     /// confirmation: `early` when the `expire_parked_read_early` hook fired
@@ -478,11 +469,6 @@ pub trait Audit {
     /// (heartbeats/resends repair it); surfaced so a sweep can see the loss
     /// instead of inferring it.
     fn dropped_at_mailbox(&self, from: Party, to: Party, kind: &'static str) {}
-
-    /// This node skipped materializing a snapshot offer because its applied
-    /// application state did not cover the offered boundary (a legitimate
-    /// transient under an open application repair); the requester re-asks.
-    fn snapshot_offer_skipped(&self, node: NodeId, offered: Slot) {}
 
     /// One peer-delivery RPC toward `to` failed or timed out, so the batch
     /// never (provably) entered the peer's inbox: the connection was down, or
@@ -508,7 +494,7 @@ pub trait Audit {
     /// The replica `replica` (#144, a learner outside the pool that is not
     /// an acceptor) (re)booted from its durable chosen log: the chosen
     /// index it rebuilt (`None` = an empty prefix) and its compaction floor.
-    /// Reported before its boot replay walks the application.
+    /// Reported as it boots, before it learns anything new.
     fn replica_booted(&self, replica: NodeId, chosen_index: Option<Slot>, floor: Slot) {}
 
     /// The proxy leader `proxy` (re)booted, empty, over the bootstrap

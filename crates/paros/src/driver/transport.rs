@@ -12,7 +12,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::ServiceClient;
-use paros_core::{Audience, Message, NodeId, Party, ProxyId};
+use paros_core::{Audience, JournalId, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -24,14 +24,11 @@ use crate::rpc::{internal, message_to_proto};
 use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
 
-/// One peer's outbound mailboxes: `regular` for ordinary protocol traffic
-/// and `snapshot` for the bulky `InstallSnapshot` class. Separate bounded
-/// queues, so a snapshot push can never evict the beats and `Accept`s queued
-/// beside it (and vice versa). A proxy leader opens no snapshot lane: it
-/// never serves one.
+/// One peer's outbound mailbox. Since #186 nothing bulky travels between
+/// peers (a laggard below the trim point gets a `TrimmedTo`, never bytes),
+/// so the snapshot lane is gone and one lane carries every class.
 pub(crate) struct PeerQueues {
     pub(crate) regular: PeerMailbox,
-    pub(crate) snapshot: Option<PeerMailbox>,
 }
 
 /// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd
@@ -68,6 +65,13 @@ pub(crate) struct PeerQueues {
 /// gets from carrying heartbeats and appends on distinct streams. The scan is
 /// linear in the mailbox and runs only on overflow.
 ///
+/// **One lane per journal (#188).** A node runs several journals over one
+/// mailbox per peer, and a busy journal must not evict another's messages:
+/// each journal (the message's envelope id) gets its own keep-newest lane of
+/// `capacity` messages, and the drain takes lanes **round-robin**, one
+/// message per non-empty lane in journal order. The per-kind eviction rule
+/// holds inside a lane; a journal is never crowded out by another.
+///
 /// The mailbox also carries the two **drain-side** hook decisions
 /// ([`DriverHooks::hold_peer_delivery`], [`DriverHooks::reverse_delivery_batch`]).
 /// They are taken here, at enqueue time on the node loop, and merely *read* by
@@ -83,7 +87,8 @@ pub(crate) struct PeerQueues {
 /// randomness is drawn only where the simulation is stepping deterministically.**
 #[derive(Clone)]
 pub(crate) struct PeerMailbox {
-    inner: Arc<Mutex<VecDeque<internal::ConsensusMessage>>>,
+    inner: Arc<Mutex<Lanes>>,
+    /// Each lane's capacity.
     capacity: usize,
     wake: Arc<tokio::sync::Notify>,
     /// Set by the enqueue side: the next drained batch waits one tick before
@@ -94,11 +99,44 @@ pub(crate) struct PeerMailbox {
     reverse_next: Arc<AtomicBool>,
 }
 
+/// A mailbox's journal lanes and the round-robin cursor over them.
+#[derive(Default)]
+struct Lanes {
+    /// Journal id → its keep-newest lane (`BTreeMap`: the drain order is
+    /// part of determinism).
+    by_journal: BTreeMap<u64, VecDeque<internal::ConsensusMessage>>,
+    /// The journal the next drain starts looking from.
+    cursor: u64,
+    /// Messages queued over every lane.
+    total: usize,
+}
+
+impl Lanes {
+    /// Pop one message round-robin: the first non-empty lane at or after the
+    /// cursor, wrapping; the cursor then moves past that lane.
+    fn pop(&mut self) -> Option<internal::ConsensusMessage> {
+        let journal = self
+            .by_journal
+            .range(self.cursor..)
+            .chain(self.by_journal.range(..self.cursor))
+            .find(|(_, lane)| !lane.is_empty())
+            .map(|(journal, _)| *journal)?;
+        let message = self.by_journal.get_mut(&journal)?.pop_front()?;
+        self.total -= 1;
+        self.cursor = journal.saturating_add(1);
+        Some(message)
+    }
+
+    fn lane_len(&self, journal: u64) -> usize {
+        self.by_journal.get(&journal).map_or(0, VecDeque::len)
+    }
+}
+
 impl PeerMailbox {
     pub(crate) fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "a peer mailbox holds at least one message");
         Self {
-            inner: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            inner: Arc::new(Mutex::new(Lanes::default())),
             capacity,
             wake: Arc::new(tokio::sync::Notify::new()),
             hold_next: Arc::new(AtomicBool::new(false)),
@@ -106,16 +144,17 @@ impl PeerMailbox {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<internal::ConsensusMessage>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Lanes> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn is_empty(&self) -> bool {
-        self.lock().is_empty()
+        self.lock().total == 0
     }
 
-    fn is_full(&self) -> bool {
-        self.lock().len() >= self.capacity
+    /// Whether `journal`'s lane is full (the next push into it evicts).
+    fn is_full(&self, journal: u64) -> bool {
+        self.lock().lane_len(journal) >= self.capacity
     }
 
     /// Enqueue `message`, evicting and returning one undelivered message when
@@ -133,7 +172,10 @@ impl PeerMailbox {
         evict_across_kinds: bool,
     ) -> Option<internal::ConsensusMessage> {
         let evicted = {
-            let mut queue = self.lock();
+            let mut lanes = self.lock();
+            let journal = message.journal;
+            let lanes = &mut *lanes;
+            let queue = lanes.by_journal.entry(journal).or_default();
             let evicted = if queue.len() >= self.capacity {
                 let kind = proto_message_kind(&message);
                 let victim = if evict_across_kinds {
@@ -157,6 +199,9 @@ impl PeerMailbox {
                 queue.len() <= self.capacity,
                 "a peer mailbox never exceeds its capacity"
             );
+            if evicted.is_none() {
+                lanes.total += 1;
+            }
             evicted
         };
         self.wake.notify_one();
@@ -164,7 +209,7 @@ impl PeerMailbox {
     }
 
     fn try_pop(&self) -> Option<internal::ConsensusMessage> {
-        self.lock().pop_front()
+        self.lock().pop()
     }
 
     /// Take the enqueue side's "hold the next drain" decision, clearing it.
@@ -178,7 +223,7 @@ impl PeerMailbox {
     }
 
     fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().total
     }
 
     /// Wait for the next message. A `Notify` permit is stored when nobody is
@@ -201,13 +246,12 @@ impl PeerMailbox {
 /// Bundled so `drain_ready` takes one handle.
 pub(crate) struct Outbound {
     pub(crate) peer_queues: BTreeMap<NodeId, PeerQueues>,
-    /// The proxy leaders' regular mailboxes: a node delegates through them,
-    /// and nothing bulky ever goes to a proxy (a proxy holds no snapshot).
+    /// The proxy leaders' mailboxes: a node delegates through them.
     pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
     /// The deployment's replicas (#144): learners that are not in the node
     /// pool, reached by every [`Audience::Learners`] message beside the pool
-    /// and addressed by their own `NodeId` (a catch-up answer, a snapshot
-    /// offer). Their lanes are in `peer_queues`. Empty on a deployment
+    /// and addressed by their own `NodeId` (a catch-up answer, a trim
+    /// point). Their lanes are in `peer_queues`. Empty on a deployment
     /// without a replica tier, and on a replica itself — a replica sends to
     /// no learner.
     pub(crate) learners: Vec<NodeId>,
@@ -233,8 +277,7 @@ impl Outbound {
     }
 
     /// The node this handle sends as. The node driver's own paths (the
-    /// `Ready` drain, the snapshot repair plane) are the only callers, and
-    /// they never run on a proxy.
+    /// `Ready` drain) are the only callers, and they never run on a proxy.
     ///
     /// # Panics
     ///
@@ -264,15 +307,9 @@ impl Outbound {
 
     /// The mailbox `to`'s copy of `msg` goes into, if the deployment map
     /// names `to` at all.
-    fn mailbox_for(&self, to: Party, msg: &Message) -> Option<&PeerMailbox> {
+    fn mailbox_for(&self, to: Party) -> Option<&PeerMailbox> {
         match to {
-            Party::Node(node) => self.peer_queues.get(&node).map(|queues| {
-                if matches!(msg, Message::InstallSnapshot { .. }) {
-                    queues.snapshot.as_ref().unwrap_or(&queues.regular)
-                } else {
-                    &queues.regular
-                }
-            }),
+            Party::Node(node) => self.peer_queues.get(&node).map(|queues| &queues.regular),
             Party::Proxy(proxy) => self.proxy_queues.get(&proxy),
         }
     }
@@ -289,6 +326,7 @@ impl Outbound {
         &self,
         hooks: &H,
         audit: &A,
+        journal: JournalId,
         to: Party,
         msg: &Message,
     ) {
@@ -341,8 +379,8 @@ impl Outbound {
                 None => tracing::info!(from = %self.sender, to = %to, kind, "msg_sent"),
             },
         }
-        if let Some(queue) = self.mailbox_for(to, msg) {
-            let Ok(message) = message_to_proto(msg) else {
+        if let Some(queue) = self.mailbox_for(to) {
+            let Ok(mut message) = message_to_proto(msg) else {
                 tracing::warn!(
                     from = %self.sender,
                     to = %to,
@@ -350,13 +388,15 @@ impl Outbound {
                 );
                 return;
             };
+            // The envelope (#188): the receiver demuxes on it.
+            message.journal = journal.0;
             // The mailbox's four decisions, all taken here on the node loop,
             // each consulted only where it can have an observable effect.
             //
             // Two act on this enqueue: overtake needs something already queued
             // to jump, evicting across kinds needs a full queue to evict from.
             let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
-            let evict_across_kinds = queue.is_full() && hooks.evict_across_kinds(to, msg);
+            let evict_across_kinds = queue.is_full(journal.0) && hooks.evict_across_kinds(to, msg);
             // Two arm the *drain*: this message's arrival is what makes the
             // next batch worth holding or reversing. Holding needs a queue that
             // is already non-empty (parking a drain of nothing changes
@@ -598,6 +638,7 @@ pub(crate) fn send_messages<H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
+    journal: JournalId,
     messages: Vec<(Party, Message)>,
 ) where
     H: DriverHooks,
@@ -609,7 +650,7 @@ pub(crate) fn send_messages<H, A>(
             trace_send_drop(audit, from, to, &msg);
             continue;
         }
-        out.transmit(hooks, audit, to, &msg);
+        out.transmit(hooks, audit, journal, to, &msg);
         if hooks.duplicate_outgoing(to, &msg) {
             audit.duplicated_at_send(from, to, &msg);
             tracing::info!(
@@ -618,7 +659,52 @@ pub(crate) fn send_messages<H, A>(
                 kind = message_kind(&msg),
                 "msg_duplicated_at_send"
             );
-            out.transmit(hooks, audit, to, &msg);
+            out.transmit(hooks, audit, journal, to, &msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A heartbeat of `journal`, as the wire carries it.
+    fn beat(journal: u64, seq: u64) -> internal::ConsensusMessage {
+        let mut message = message_to_proto(&Message::HeartbeatAck {
+            from: NodeId(1),
+            ballot: paros_core::Ballot::zero(),
+            seq,
+            chosen: None,
+        })
+        .expect("a heartbeat ack encodes");
+        message.journal = journal;
+        message
+    }
+
+    /// #188's fair lanes, pinned at the mechanism: a journal that floods its
+    /// lane evicts only its own messages, and the drain alternates between
+    /// journals instead of emptying the busy one first.
+    #[test]
+    fn a_busy_journal_never_evicts_another_journals_messages() {
+        let mailbox = PeerMailbox::new(2);
+        assert!(mailbox.push(beat(129, 0), false, false).is_none());
+        for seq in 0..10 {
+            let evicted = mailbox.push(beat(128, seq), false, false);
+            if let Some(evicted) = evicted {
+                assert_eq!(evicted.journal, 128, "only the busy journal's lane evicts");
+            }
+        }
+        assert!(mailbox.is_full(128));
+        assert!(!mailbox.is_full(129));
+        assert_eq!(mailbox.len(), 3);
+        let order: Vec<u64> = std::iter::from_fn(|| mailbox.try_pop())
+            .map(|m| m.journal)
+            .collect();
+        assert_eq!(
+            order,
+            vec![128, 129, 128],
+            "the drain takes lanes round-robin"
+        );
+        assert!(mailbox.is_empty());
     }
 }

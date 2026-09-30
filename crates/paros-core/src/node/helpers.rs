@@ -230,14 +230,14 @@ impl ColocatedNode {
     // delegation asks (`may_delegate`: a proxy never runs the rounds a fresh
     // leadership's recovery depends on) and what the non-member step-down in
     // `tick` asks (a removed leader resigns once its recovery and repair
-    // closed and its rounds decided; an application repair does not hold
-    // it, since a resigned node keeps repairing as a replica).
+    // closed and its rounds decided).
     //
-    // `leadership_settled` adds the replica's *application repair*: the
-    // three things that must be closed before the leadership is moved or
-    // built on — a GC floor (`gc_covered`), a reconfiguration
+    // `leadership_settled` is the same question asked where the leadership
+    // is moved or built on — a GC floor (`gc_covered`), a reconfiguration
     // (`reconfigure`) and a handoff (`can_relinquish`, which further
-    // requires no local `faulty` record, a condition of its own).
+    // requires no local `faulty` record, a condition of its own). It used
+    // to add the replica's application repair, which #186 deleted with the
+    // application.
 
     /// Whether Phase-1-shaped work is open on the proposer: an election
     /// recovery or a repair probe (see the note above).
@@ -246,9 +246,8 @@ impl ColocatedNode {
     }
 
     /// Whether the leadership is **settled**: no Phase-1-shaped work open
-    /// on the proposer ([`ColocatedNode::phase1_work_open`]) and no
-    /// application repair open on the replica (see the note above).
+    /// on the proposer ([`ColocatedNode::phase1_work_open`]).
     pub(super) fn leadership_settled(&self) -> bool {
-        !self.phase1_work_open() && self.replica.app_repair().is_none()
+        !self.phase1_work_open()
     }
 }

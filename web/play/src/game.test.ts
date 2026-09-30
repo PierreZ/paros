@@ -238,10 +238,8 @@ describe.skipIf(!built)('the real engine (wasm)', () => {
     expect(game.act({ kind: 'propose', node: 0, client, value: 'bravo', column: null })).toBe(true);
     settle(game);
 
-    // No quorum holds a decided snapshot point yet, so the first request is
-    // refused — and the refusal seeds the point the retry needs.
-    expect(game.act({ kind: 'compact', node: 0, up_to: 8 })).toBe(true);
-    settle(game);
+    // The Truncate is proposed like any value, and every node drops its
+    // prefix when it applies that slot.
     expect(game.act({ kind: 'compact', node: 0, up_to: 8 })).toBe(true);
     settle(game);
 
@@ -260,10 +258,7 @@ describe.skipIf(!built)('the real engine (wasm)', () => {
         node.accepted.map((slot) => slot.control).filter((control) => control !== null),
       ),
     );
-    expect(controls).toContain('snap');
-    expect([...controls].every((control) => ['noop', 'truncate', 'snap'].includes(control))).toBe(
-      true,
-    );
+    expect([...controls].every((control) => ['noop', 'truncate'].includes(control))).toBe(true);
     expect(game.view.log.some((entry) => entry.kind === 'compact')).toBe(true);
     const said = game.view.log.flatMap((entry) => entry.narration.map((line) => line.kind));
     expect(said).toContain('truncate');

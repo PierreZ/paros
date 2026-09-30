@@ -5,7 +5,7 @@
 use moonpool_sim::{assert_reachable, buggify_knob, buggify_with_prob, sim::sim_random};
 
 use super::{CorruptionInjection, CorruptionKind, RecordHealth, SlotHealth, StorageWorld};
-use paros::{MetadataFault, Slot, StorageRecord, WitnessStatus, snap_chunk_count};
+use paros::{MetadataFault, Slot, StorageRecord, WitnessStatus};
 
 /// Per-boot firing probabilities of the Stage-7 rot BUGGIFY sites — each fault
 /// family its own independent location (per-seed activation × per-boot
@@ -14,14 +14,9 @@ use paros::{MetadataFault, Slot, StorageRecord, WitnessStatus, snap_chunk_count}
 const P_ENTRY_ROT: f64 = 0.06;
 const P_LOST_WRITE: f64 = 0.04;
 const P_MISDIRECT: f64 = 0.04;
-const P_SNAPSHOT_ROT: f64 = 0.05;
 const P_PROMISE_ROT: f64 = 0.04;
 const P_META_FAULT: f64 = 0.03;
 const P_READ_EIO: f64 = 0.05;
-/// Per-boot chunk rot on the retained decided snapshot point (#101): one
-/// chunk's bytes fail their checksum while the point's identity survives —
-/// the recoverable class the driver's chunk-repair layer pulls from peers.
-const P_SNAP_CHUNK_ROT: f64 = 0.05;
 /// Per-boot rot firing rates, one **independent knob location per fault
 /// family** (AGENTS.md prong 2). The defaults are this module's documented
 /// `P_*` constants; an activated seed multiplies one family's rate toward its
@@ -39,11 +34,9 @@ struct RotRates {
     entry: f64,
     lost_write: f64,
     misdirect: f64,
-    snapshot: f64,
     promise: f64,
     meta: f64,
     read_eio: f64,
-    snap_chunk: f64,
 }
 
 impl RotRates {
@@ -54,11 +47,9 @@ impl RotRates {
             entry: dense(P_ENTRY_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
             lost_write: dense(P_LOST_WRITE, buggify_knob!(1_u64, 2_u64..6_u64)),
             misdirect: dense(P_MISDIRECT, buggify_knob!(1_u64, 2_u64..6_u64)),
-            snapshot: dense(P_SNAPSHOT_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
             promise: dense(P_PROMISE_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
             meta: dense(P_META_FAULT, buggify_knob!(1_u64, 2_u64..6_u64)),
             read_eio: dense(P_READ_EIO, buggify_knob!(1_u64, 2_u64..6_u64)),
-            snap_chunk: dense(P_SNAP_CHUNK_ROT, buggify_knob!(1_u64, 2_u64..6_u64)),
         }
     }
 
@@ -68,11 +59,9 @@ impl RotRates {
         self.entry > P_ENTRY_ROT
             || self.lost_write > P_LOST_WRITE
             || self.misdirect > P_MISDIRECT
-            || self.snapshot > P_SNAPSHOT_ROT
             || self.promise > P_PROMISE_ROT
             || self.meta > P_META_FAULT
             || self.read_eio > P_READ_EIO
-            || self.snap_chunk > P_SNAP_CHUNK_ROT
     }
 }
 
@@ -235,37 +224,6 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
             world.note_if_unrecoverable(slot.0);
         }
     }
-    // Snapshot corruption is its own kind and its own gate (#71) — a
-    // first-class target, not a byproduct of log-entry coverage. Stage 8
-    // recovers it (local log replay at floor 0, a peer's InstallSnapshot
-    // otherwise), so no park; a singleton under a truncated log has no peer
-    // to recover from, so budget-on skips that one unrecoverable shape.
-    if buggify_with_prob!(rates.snapshot)
-        && world
-            .disks
-            .get(key)
-            .is_some_and(|d| d.chain.applied_count > 0)
-        && (world.unbudgeted
-            || world.cluster_size > 1
-            || world.disks.get(key).is_some_and(|d| d.first_slot.0 == 0))
-    {
-        if let Some(disk) = world.disks.get_mut(key) {
-            disk.snapshot_health = RecordHealth::Faulty;
-        }
-        world.note_corruption(CorruptionInjection::dormant(
-            node,
-            StorageRecord::Snapshot,
-            CorruptionKind::BitFlip,
-        ));
-        // Slots this node truncated past lose their local custody: re-derive
-        // the unrecoverable ground truth over the folded prefix (mirrors
-        // `corpus_corrupt_snapshot`; unbudgeted only — a budgeted run never
-        // permits the shape).
-        let floor = world.disks.get(key).map_or(0, |d| d.first_slot.0);
-        for slot in 0..floor {
-            world.note_if_unrecoverable(slot);
-        }
-    }
     // HardState copy rot (CTRL metainfo doctrine): usually one copy — used and
     // repaired from its twin, no availability cost — and rarely both, which is
     // the one unrecoverable scalar loss (the node cannot know what it
@@ -329,62 +287,6 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
             CorruptionKind::Metadata,
         ));
     }
-    // #101: chunk rot on the retained decided snapshot point — the value of
-    // one fixed-size chunk is lost while the point's identity (and every
-    // other chunk) survives. Recoverable by construction: the point is
-    // byte-identical cluster-wide, so any peer can serve the chunk back. The
-    // budget keeps a clean quorum of each chunk across the holders of the
-    // same point (budget-off lifts it, like every other family).
-    if buggify_with_prob!(rates.snap_chunk)
-        && let Some((at, state)) = world.disks.get(key).and_then(|d| d.snap_point)
-    {
-        let chunks = snap_chunk_count(state.encode().len());
-        // How many chunks of the point rot at once: one by default, a knob
-        // toward all of them — each still passes the per-chunk clean-quorum
-        // check below, which is the floor.
-        let rotting = buggify_knob!(1_u32, 1_u32..17_u32).min(chunks);
-        let first = u32::try_from(sim_random::<u64>()).unwrap_or(0) % chunks.max(1);
-        for offset in 0..rotting {
-            let chunk = (first + offset) % chunks.max(1);
-            let clean_copies = world
-                .disks
-                .iter()
-                .filter(|(peer, d)| {
-                    !world.parked.contains_key(*peer)
-                        && d.snap_point.is_some_and(|(peer_at, _)| peer_at == at)
-                        && d.snap_chunk_health
-                            .get(usize::try_from(chunk).unwrap_or(0))
-                            .is_none_or(|h| *h == RecordHealth::Clean)
-                })
-                .count();
-            let quorum = world.quorum();
-            if (world.unbudgeted || clean_copies.saturating_sub(1) >= quorum)
-                && let Some(disk) = world.disks.get_mut(key)
-            {
-                let index = usize::try_from(chunk).unwrap_or(0);
-                if disk.snap_chunk_health.len() <= index {
-                    disk.snap_chunk_health
-                        .resize(usize::try_from(chunks).unwrap_or(0), RecordHealth::Clean);
-                }
-                if disk.snap_chunk_health[index] == RecordHealth::Clean {
-                    disk.snap_chunk_health[index] = RecordHealth::Faulty;
-                    world.note_corruption(CorruptionInjection::dormant(
-                        node,
-                        StorageRecord::SnapChunk(Slot(at), chunk),
-                        CorruptionKind::BitFlip,
-                    ));
-                    // The point is custody for the folded prefix: losing its
-                    // last clean copy of a chunk can strand every slot below
-                    // the floor. Re-derive the unrecoverable ground truth
-                    // (mirrors `corpus_corrupt_snap_chunk`; unbudgeted only).
-                    let floor = world.disks.get(key).map_or(0, |d| d.first_slot.0);
-                    for slot in 0..floor {
-                        world.note_if_unrecoverable(slot);
-                    }
-                }
-            }
-        }
-    }
     // A transient EIO on the read path: collapses into the corruption channel
     // (one detection path), crashes the node once, and the retry — the next
     // boot — reads clean. The only Stage-7 family with no availability cost.
@@ -396,10 +298,9 @@ pub(super) fn roll_boot_rot(world: &mut StorageWorld, key: &str, node: u64) {
             .get(key)
             .map(|d| d.accepted.keys().copied().collect())
             .unwrap_or_default();
-        let record = match sim_random::<u64>() % 5 {
+        let record = match sim_random::<u64>() % 4 {
             0 => StorageRecord::ChosenIndex,
             1 => StorageRecord::Truncation,
-            2 => StorageRecord::Snapshot,
             _ if !slots.is_empty() => StorageRecord::Accepted(
                 slots[usize::try_from(sim_random::<u64>()).unwrap_or(0) % slots.len()],
             ),

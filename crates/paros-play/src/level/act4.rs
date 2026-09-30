@@ -74,7 +74,7 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
     AutomationFlag::ReadServe,
-    AutomationFlag::SnapshotPromise,
+    AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
     AutomationFlag::GridColumn,
     AutomationFlag::QuorumReadServe,
@@ -192,11 +192,7 @@ fn deployed(
 fn commands(world: &WorldKind, node: u64) -> Vec<String> {
     applied(world, node)
         .into_iter()
-        .filter(|command| {
-            !command.starts_with("Noop")
-                && !command.starts_with("Truncate")
-                && !command.starts_with("Snap")
-        })
+        .filter(|command| !command.starts_with("Noop") && !command.starts_with("Truncate"))
         .collect()
 }
 
@@ -1564,9 +1560,9 @@ proposer that every lower ballot is finished there, and that proposer \
 possibly chose a value from that answer. A node that boots with an empty disk \
 holds no record of that promise. It answers a lower ballot and votes for the \
 value of that ballot. A quorum at the older ballot then chooses a second \
-value for a slot that already holds one. A snapshot does not help, because a \
-snapshot restores the log and the peer that sends it does not know what this \
-node promised.
+value for a slot that already holds one. No peer can help, because a peer \
+can tell the node where the log starts, and it does not know what this node \
+promised.
 
 A node that lost its disk therefore does not rejoin: the library refuses the \
 boot, and it does not depend on the memory of an operator. Every store \
@@ -1578,7 +1574,7 @@ the other nodes keep deciding. A change of the acceptor set heals the \
 cluster, and the next levels cover that change.",
     field_guide: "play.html",
     symbols: &[
-        "NodeStorage::is_formatted",
+        "LogStorage::is_formatted",
         "BootKind::ExistingMember",
         "BootRefusal::Amnesia",
         "Acceptor::promised",

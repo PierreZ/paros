@@ -1,17 +1,17 @@
-//! The boot replay: on every (re)boot the core rebuilt its volatile state from
-//! durable storage, and this re-emits that recovered belief for the oracles,
-//! walks the retained chosen prefix back through the application, and opens the
-//! application repair when the prefix cannot be replayed locally.
+//! The boot report: on every (re)boot the core rebuilt its volatile state from
+//! durable storage, and this re-emits that recovered belief for the oracles —
+//! and the format-marker check (#147) that runs before the core reads a byte.
+//! There is no application to replay (#186): the chosen prefix a node
+//! recovered is its whole state.
 
-use paros_core::{AcceptorConfig, Ballot, ColocatedNode, Command, Control, NodeId, Slot};
+use paros_core::{AcceptorConfig, Ballot, ColocatedNode, NodeId, Slot};
 
 use crate::audit::{Audit, Deployment};
-use crate::hooks::{DriverHooks, Seam};
-use crate::storage::NodeStorage;
+use crate::storage::LogStorage;
 
 use super::config::{BootKind, BootRefusal, RunError};
 use super::events::command_hash;
-use super::ready::{crash_if, report_applied, report_snap_recorded, storage_fault_crash};
+use super::ready::storage_fault_crash;
 
 /// #147: judge the operator's claim against the store's format marker,
 /// before the core reads a byte. The marker is what makes "a wiped identity
@@ -26,7 +26,7 @@ use super::ready::{crash_if, report_applied, report_snap_recorded, storage_fault
 /// [`RunError::Refused`] when the claim and the marker disagree (nothing was
 /// written); [`RunError::Storage`] when formatting the store failed.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
-pub(crate) async fn check_format_marker<S: NodeStorage, A: Audit>(
+pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
     storage: &mut S,
     boot: BootKind,
     self_id: u64,
@@ -63,24 +63,11 @@ pub(crate) async fn check_format_marker<S: NodeStorage, A: Audit>(
 /// recovered promised ballot (`node_state`, feeding the monotonic-promise check
 /// across the restart seam), each recovered accepted record (`recovered`, feeding
 /// the recovery oracle's "a restart never changes a pre-crash accepted value"
-/// check), and each rebuilt chosen entry (`value_chosen`, feeding
-/// at-most-one-value-chosen). The apply replay (`log_applied`) covers a crash
-/// between "`chosen_index` durable" and "apply side-effects done"; it is
-/// idempotent (the chosen index is the applied index). A compacted node's
-/// accepted log starts at its floor, so the replay naturally covers only the
-/// retained prefix. A clean first boot has empty scalars/log, so this is a near
-/// no-op.
-// One linear boot replay: report → walk → repair; splitting it would scatter
-// the ordering contract between the three.
-#[allow(clippy::too_many_lines)]
+/// check), and the recovered chosen index, which is the node's whole walked
+/// prefix: nothing is replayed, because no application sits behind it
+/// (#186). A clean first boot has empty scalars/log, so this is a near no-op.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
-pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
-    node: &mut ColocatedNode,
-    storage: &mut S,
-    self_id: u64,
-    hooks: &H,
-    audit: &A,
-) -> Result<(), RunError> {
+pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, audit: &A) {
     // Mark this incarnation coming up (every `booted` after a node's first is
     // a restart).
     tracing::info!(node = self_id, "booted");
@@ -140,7 +127,6 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         matchmakers: node.config().matchmakers.clone(),
         matchmaker_pool: node.config().matchmaker_pool().to_vec(),
         replica_count: node.config().replica_count,
-        application: node.config().application,
     };
     audit.recovered(
         NodeId(self_id),
@@ -149,105 +135,4 @@ pub(crate) async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         &deployment,
         &records,
     );
-    let mut replayed_application = false;
-    let mut replayed_snap_points: Vec<Slot> = Vec::new();
-    let mut repair_from: Option<Slot> = None;
-    // A bare acceptor (#144, `Application::Shed`) has no application to
-    // replay into and nothing to repair: its log is the whole of its state.
-    let replayed_prefix = node
-        .hard_state()
-        .chosen_index
-        .filter(|_| node.config().runs_application());
-    if let Some(ci) = replayed_prefix {
-        let applied_slot = storage.applied_slot();
-        let floor = node.acceptor().first_slot();
-        let resume = applied_slot.map_or(Slot(0), |a| Slot(a.0.saturating_add(1)));
-        if resume < floor {
-            // The application prefix stops below the compaction floor (the
-            // snapshot state was lost): the log cannot replay the missing
-            // range — only a peer's InstallSnapshot can. Open the repair and
-            // apply nothing; consensus keeps serving every slot it can read.
-            repair_from = Some(resume);
-        } else {
-            for s in floor.0..=ci.0 {
-                let slot = Slot(s);
-                let record = node.acceptor().records().get(&slot);
-                let Some((_b, stored)) = record else {
-                    if applied_slot.is_some_and(|applied| slot <= applied) {
-                        // The record rotted but its effect is already durable
-                        // in the application state, which is the authority for
-                        // its own prefix; the reported-faulty event explains
-                        // the emission gap to the oracles.
-                        continue;
-                    }
-                    // A chosen record this node cannot read, not yet applied:
-                    // the replay stops here — contiguity is the contract — and
-                    // the repair pump re-emits the healed range via catch-up.
-                    repair_from = Some(slot);
-                    break;
-                };
-                // A #94 duplicate slot replays exactly as the live walk applied
-                // it: a no-op. The core re-derived `duplicate_slots` from the
-                // sealed sessions + the retained log in `ColocatedNode::new`, so the
-                // substitution is deterministic across the restart.
-                let noop = Command::Control(Control::Noop);
-                let command = if node.replica().duplicate_slots().contains(&slot) {
-                    &noop
-                } else {
-                    stored
-                };
-                if applied_slot.is_none_or(|applied| slot > applied) {
-                    storage
-                        .apply(ci, slot, command)
-                        .await
-                        .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-                    // A freshly replayed `Snap` marker re-captures its decided
-                    // point (#101): the application state at this walk instant
-                    // is the boundary state, exactly as in the live apply
-                    // loop. An already-applied marker is skipped — its point
-                    // flushed with the same batch as its apply.
-                    if let Command::Control(Control::Snap { .. }) = command {
-                        storage
-                            .record_snapshot(slot)
-                            .await
-                            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-                        replayed_snap_points.push(slot);
-                    }
-                    replayed_application = true;
-                }
-                report_applied(audit, self_id, slot, command);
-            }
-        }
-    }
-    if replayed_application {
-        // Crash seam: the replayed prefix is staged but not yet flushed. The
-        // next incarnation replays the same prefix from the same durable
-        // state, so this is the idempotence of the boot replay itself under
-        // test — the one seam a crash *between* batches can never reach,
-        // because it sits before the first batch.
-        crash_if(
-            true,
-            hooks,
-            audit,
-            NodeId(self_id),
-            Seam::AfterBootReplayBeforeSync,
-        )?;
-        storage
-            .sync(paros_core::MustSync::Sync)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-    }
-    report_snap_recorded(audit, self_id, &replayed_snap_points);
-    if let Some(from) = repair_from {
-        let below_floor = from < node.acceptor().first_slot();
-        node.open_app_repair(from);
-        audit.app_repair_started(NodeId(self_id), from, below_floor);
-        tracing::info!(
-            node = self_id,
-            from = from.0,
-            below_floor,
-            "app_repair_started"
-        );
-    }
-    Ok(())
 }

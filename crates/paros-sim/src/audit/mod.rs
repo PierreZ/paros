@@ -36,24 +36,25 @@ macro_rules! reach_once {
 }
 
 mod client;
+pub(crate) mod journals;
 mod matchmaker;
 mod state;
 mod world;
 
 pub(crate) use client::ClientHistory;
-pub(crate) use world::{AuditWorld, audit_world, check_run};
+pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
-    AcceptorConfig, Application, Audit, Ballot, BootRefusal, Command, Control, Deployment,
-    EdgeRejection, GcAck, GcStep, HANDOFF_BATCH, Handoff, HistoryPage, LEADER_RECOVERY_BATCH,
-    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
-    NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem, ReconfigureReply,
-    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind,
-    SNAP_CHUNK_BYTES, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    AcceptorConfig, Audit, Ballot, BootRefusal, Command, Control, Deployment, EdgeRejection, GcAck,
+    GcStep, HANDOFF_BATCH, Handoff, HistoryPage, JournalId, LEADER_RECOVERY_BATCH, LogReadAnswer,
+    LogReadReport, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
+    Message, NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem,
+    ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
+    RegistrationKind, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
     message_kind,
 };
 
@@ -70,6 +71,9 @@ use self::state::AuditState;
 pub(crate) struct NodeAudit<T> {
     time: T,
     world: Arc<AuditWorld>,
+    /// The journal this port reports for and the run's cross-journal board
+    /// (#188); `None` for a port outside the journal plane (a matchmaker).
+    journal: Option<(JournalId, Arc<Mutex<journals::JournalBoard>>)>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -108,7 +112,45 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
     }
     pub(crate) fn new(time: T, world: Arc<AuditWorld>) -> Self {
-        Self { time, world }
+        Self {
+            time,
+            world,
+            journal: None,
+        }
+    }
+
+    /// This port reports for `journal` (#188): the non-interference oracles
+    /// on `board` see its applies, its sends and its quarantines.
+    pub(crate) fn in_journal(
+        mut self,
+        journal: JournalId,
+        board: Arc<Mutex<journals::JournalBoard>>,
+    ) -> Self {
+        self.journal = Some((journal, board));
+        self
+    }
+
+    /// The non-interference half of an apply (#188): on a multi-journal run
+    /// a user command's identity must be one appended to this journal, and
+    /// the board learns which journal committed while a sibling was held or
+    /// quarantined.
+    fn journal_applied(&self, node: NodeId, identity: Option<(u64, u64)>) {
+        let Some((journal, board)) = &self.journal else {
+            return;
+        };
+        let mut board = journals::lock(board);
+        if !board.is_multi() {
+            return;
+        }
+        if let Some((client, seq)) = identity {
+            assert_always!(
+                self.state().appended.contains(&(client, seq)),
+                "journal: a slot holds only a command appended to its own journal",
+                { "node" => node.0, "journal" => journal.0, "client" => client, "seq" => seq }
+            );
+        }
+        let in_chaos = self.time.now() < crate::CHAOS_DURATION;
+        board.applied(*journal, in_chaos);
     }
 
     fn now_ms(&self) -> u64 {
@@ -259,10 +301,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // batches flush in order, and a report only ever follows a successful
         // fsync — so the *truncated reports themselves* are monotone per
         // node, within and across incarnations. Judged against their own
-        // watermark, never the folded floor: a same-batch snapshot install
-        // jumps the folded floor higher while the driver's split flushes the
-        // (now stale-lower, no-op-on-disk) truncate after it, and the
-        // ground-truth feed likewise forwards raw requests the storage
+        // watermark, never the folded floor: a same-batch trim-point jump
+        // raises the folded floor higher than a truncate in the batch, and
+        // the ground-truth feed likewise forwards raw requests the storage
         // contract treats as no-ops. Equality is an idempotent re-raise.
         let was = st.truncate_watermark.get(&node.0).copied().unwrap_or(0);
         assert_always!(
@@ -277,38 +318,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 st.compacted,
                 "a node truncates its log prefix behind the chosen index"
             );
-            // The #101 coupling, checked at the cluster level: a `Truncate`
-            // is only ever proposed once a quorum has durably recorded the
-            // covering decided snapshot point, so by the time ANY node
-            // applies it, that point is already in the shared audit's custody
-            // map. Deliberately not per-node: a node with an open application
-            // repair advances consensus (and its floor) while its own marker
-            // emission is deferred to the repair pump, and an
-            // install-recovered node never applies the folded marker at all —
-            // both legitimately truncate on points *others* recorded. A
-            // truncation no node's recorded point covers evaded the coupling
-            // policy.
-            let covered = st
-                .snap_points
-                .values()
-                .flatten()
-                .any(|point| point + 1 >= first.0);
-            assert_always!(
-                covered,
-                "storage: a truncation is covered by a recorded snapshot point",
-                { "node" => node.0, "first" => first.0 }
-            );
-            // Once a truncation at `first` is validated, a point too low to
-            // cover it can never cover any later (higher) truncation either —
-            // coverage is `point + 1 >= first` and floors only rise — so drop
-            // it. Only after a *passed* check: pruning on a red run could
-            // cascade the one root cause into noise. The surviving covering
-            // point keeps every lagging node's smaller `first` covered too.
-            if covered {
-                for points in st.snap_points.values_mut() {
-                    *points = points.split_off(&(first.0.saturating_sub(1)));
-                }
-            }
         }
         // Below the *cluster-wide* minimum floor every node has truncated, so
         // the per-slot safety tallies can never be consulted again: reclaim
@@ -317,95 +326,47 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.prune_below_floor();
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, chosen_index = chosen_index.0))]
-    fn snapshot_installed(&self, node: NodeId, chosen_index: Slot, ballot: Ballot) {
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, point = point.0))]
+    fn trimmed_to(&self, node: NodeId, point: Slot) {
+        let now = self.now_ms();
         let mut st = self.state();
-        reach_once!(
-            st.snapshot_installed,
-            "a snapshot was installed to recover a below-floor node"
-        );
-        // The core adopts `max(promise, ballot)` on install and any raise is
-        // surfaced (as the batch's `SetPromise`) before this write's report,
-        // so by now the folded promise must already cover the snapshot's
-        // ballot — a lower fold would mean the adoption was lost. A replica
-        // (#144) holds no promise at all: the claim is an acceptor's.
+        st.trim_jumped = true;
         if st.replicas.contains(&node.0) {
-            st.replica_installed_snapshot = true;
-        } else {
-            let folded = st.promised.get(&node.0).copied();
-            assert_always!(
-                folded.is_some_and(|p| p >= ballot),
-                "an installed snapshot's ballot is covered by the node's promise",
-                {
-                    "node" => node.0,
-                    "round" => ballot.round,
-                    "folded_round" => folded.map_or(0, |p| p.round)
-                }
-            );
+            st.replica_jumped = true;
         }
-        // An offer is only ever materialized from state the serving peer had
-        // durably applied (the driver skips a mismatched offer), and that
-        // apply was folded before the offer left — so a landing past the
-        // cluster's applied frontier is a fabricated prefix.
+        let landing = point.0.saturating_sub(1);
+        // A trim point is a floor some peer holds, and a floor only ever
+        // moves inside a walked chosen prefix — so the landing sits inside
+        // the cluster's applied frontier, or it names slots nobody chose.
+        // The message keeps its pre-#186 wording — the same claim the
+        // snapshot install made, and an assertion's slot is its hash.
         assert_always!(
-            st.cluster_applied_max
-                .is_some_and(|max| chosen_index.0 <= max),
+            st.cluster_applied_max.is_some_and(|max| landing <= max),
             "an installed snapshot lands within the cluster's applied frontier",
             {
                 "node" => node.0,
-                "landing" => chosen_index.0,
+                "landing" => landing,
                 "cluster_max" => st.cluster_applied_max.unwrap_or(0)
             }
         );
-        // (Deliberately NOT asserted: `landing >= this node's own applied
-        // fold`. The applied fold is reported before the application fsync,
-        // so a crash at the after-apply seam legally leaves the fold above
-        // the durable state a rebooted node then heals from — a lower
-        // landing from a lagging-but-sufficient peer is legitimate there.)
-        //
-        // The install also jumps the durable chosen index to the landing;
-        // keep the per-incarnation watermark in step so a later
-        // `SetChosenIndex` report is judged against it.
+        // The jump raises the durable floor and the chosen index with it:
+        // keep the per-incarnation watermarks in step so a later
+        // `SetChosenIndex` or `Truncate` report is judged against them.
         let watermark = st.chosen_watermark.entry(node.0).or_insert(0);
-        *watermark = (*watermark).max(chosen_index.0);
-        // A node can install more than one snapshot in a single drain (two peers
-        // each serve it), so the admitted landings are a set.
-        st.snap_landings
-            .entry(node.0)
-            .or_default()
-            .insert(chosen_index.0);
-        // The install jumps the applied prefix straight to the snapshot's
-        // boundary without replaying entries.
-        st.observe_applied_index(node.0, chosen_index.0);
-    }
-
-    fn snapshot_mid_election(&self, _node: NodeId) {
-        let mut st = self.state();
-        reach_once!(
-            st.snapshot_mid_election,
-            "a snapshot lands during a live election"
-        );
+        *watermark = (*watermark).max(landing);
+        let was = st.truncate_watermark.get(&node.0).copied().unwrap_or(0);
+        st.truncate_watermark.insert(node.0, point.0.max(was));
+        st.floor.entry(node.0).or_default().raise(point.0, now);
+        // The jump moves the walked prefix straight to the landing without
+        // walking the slots below it: an admitted forward jump.
+        st.landings.entry(node.0).or_default().insert(landing);
+        st.observe_applied_index(node.0, landing);
     }
 
     fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {
         let mut st = self.state();
         if st.replicas.contains(&node.0) {
             st.applied_on_replica = true;
-        }
-        if let Some((client, seq)) = identity
-            && let Some(acked) = st.bare_acks_pending.remove(&(client, seq))
-        {
-            assert_always!(
-                acked == slot.0,
-                "a committed ack names the slot its command applied at",
-                {
-                    "node" => node.0,
-                    "client" => client,
-                    "seq" => seq,
-                    "acked_slot" => acked,
-                    "applied_at" => slot.0
-                }
-            );
         }
         // The crown jewel: at most one value is ever chosen per slot, cluster-wide.
         if let Some(prev) = st.chosen.insert(slot.0, vhash) {
@@ -456,9 +417,29 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
+        drop(st);
+        self.journal_applied(node, identity);
+    }
+
+    fn journal_quarantined(&self, node: NodeId) {
+        if let Some((journal, board)) = &self.journal {
+            journals::lock(board).quarantine(node.0, *journal);
+            // A cause: the storage fault that took one journal down on a
+            // node; the outcome is the board's "serves its other journals".
+            assert_reachable!("journal: a storage fault quarantines one journal of a node");
+        }
     }
 
     fn sent(&self, node: NodeId, to: NodeId, msg: &Message) {
+        if let Some((journal, board)) = &self.journal {
+            let mut board = journals::lock(board);
+            assert_always!(
+                !board.is_quarantined(node.0, *journal),
+                "journal: a quarantined journal sends nothing",
+                { "node" => node.0, "journal" => journal.0 }
+            );
+            board.sent(node.0, *journal);
+        }
         self.count_sent(msg);
         if let Message::Prepare { ballot, config, .. } = msg {
             self.check_prepare_licence(node, to, *ballot, config.as_ref());
@@ -591,7 +572,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn replica_booted(&self, replica: NodeId, _chosen_index: Option<Slot>, _floor: Slot) {
+    fn replica_booted(&self, replica: NodeId, chosen_index: Option<Slot>, _floor: Slot) {
         let mut st = self.state();
         // A replica's id is outside the pool by construction; a collision
         // would fold a replica's reports into an acceptor's state.
@@ -603,6 +584,19 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.replicas.insert(replica.0);
         // A replica's read frontier is per boot, as a node's.
         st.read_watermark.remove(&replica.0);
+        // The recovered prefix is walked, exactly as a node's boot report
+        // says in `recovered`: with no application to replay (#186) the
+        // walk resumes one past the durable chosen index, so a crash that
+        // made the index durable before the walk over it was reported
+        // (the `AfterSyncBeforeSend` seam) lands the next incarnation past
+        // slots the audit never saw walked. Admitted as a landing — before
+        // this, a replica's boot was not, and its first walked slot tripped
+        // the no-gaps check (seeds 6838332052396296126,
+        // 13879836091973256863, 3245387034260967674).
+        if let Some(ci) = chosen_index {
+            st.landings.entry(replica.0).or_default().insert(ci.0);
+            st.observe_applied_index(replica.0, ci.0);
+        }
     }
 
     fn delegation_taken_back(&self, _node: NodeId, _slot: Slot, _proxy: ProxyId) {
@@ -953,22 +947,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // A committed ack is a claim about a specific applied command: on both
         // ack paths (ack-on-commit and the dedup fast path) the apply of this
         // `(client, seq)` was folded before the ack fired — on this node, or,
-        // for a session fact adopted from a snapshot, on the peer that served
-        // it. The ack must name exactly the index the identity applied at; an
-        // ack for a never-applied identity fails the same check.
+        // for a session fact adopted from a trim-point jump, on the peer that
+        // served it. The ack must name exactly the index the identity applied at; an
+        // ack for a never-applied identity fails the same check. ("Applied"
+        // is the walk over the chosen prefix: paros runs no application,
+        // #186.)
         let applied_at = st.applied_identity.get(&(client, seq)).copied();
-        // A bare acceptor (#144) acks on the chosen prefix and applies
-        // nothing, so the replicas may not have applied the identity yet: the
-        // claim is then held until they do (`applied`), judged there by the
-        // same message.
-        if st.bare.contains(&node.0) {
-            st.bare_acked = true;
-            if applied_at.is_none() {
-                st.bare_acks_pending.insert((client, seq), slot.0);
-            }
-        }
         assert_always!(
-            applied_at == Some(slot.0) || (applied_at.is_none() && st.bare.contains(&node.0)),
+            applied_at == Some(slot.0),
             "a committed ack names the slot its command applied at",
             {
                 "node" => node.0,
@@ -1028,6 +1014,51 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn log_read_served(&self, node: NodeId, report: &LogReadReport) {
+        let mut st = self.state();
+        // A page is served from the serving process's contiguous chosen
+        // prefix and never above it: an empty long-poll answer names its own
+        // start, everything else ends inside the prefix.
+        assert_always!(
+            report.next <= report.committed_end
+                || (report.entries == 0 && report.next == report.from),
+            "journal read: a page never passes the serving prefix",
+            {
+                "node" => node.0,
+                "from" => report.from.0,
+                "next" => report.next.0,
+                "committed_end" => report.committed_end.0
+            }
+        );
+        if let Some(trim) = report.trimmed_to {
+            // Trimmed only below the trim point, and a trim point only ever
+            // inside what the cluster decided (a floor moves inside the
+            // chosen prefix).
+            assert_always!(
+                report.from < trim,
+                "journal read: a trim point refuses only reads below it",
+                { "node" => node.0, "from" => report.from.0, "trim" => trim.0 }
+            );
+            assert_always!(
+                st.decided_max.is_some_and(|d| trim.0 <= d + 1),
+                "journal read: a trim point never passes the decided prefix",
+                {
+                    "node" => node.0,
+                    "trim" => trim.0,
+                    "decided_max" => crate::signed_watermark(st.decided_max)
+                }
+            );
+            st.journal_read_trimmed = true;
+        }
+        st.journal_read_skipped_hole |= report.skipped > 0;
+        st.journal_read_woke |= report.answer == LogReadAnswer::Woke && report.entries > 0;
+        st.journal_read_on_replica |= st.replicas.contains(&node.0);
+    }
+
+    fn journal_refused(&self, _node: NodeId, _journal: JournalId, _call: &'static str) {
+        assert_reachable!("journal: a call naming an unserved journal is refused");
+    }
+
     fn quorum_read_served(
         &self,
         node: NodeId,
@@ -1074,6 +1105,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         accepted: &[(Slot, Ballot, u64)],
     ) {
         let now = self.now_ms();
+        if let Some((journal, board)) = &self.journal {
+            journals::lock(board).reopened(node.0, *journal);
+        }
         let mut st = self.state();
         st.booted.insert(node.0);
         // One shared deployment per run: every node's durable configuration
@@ -1094,11 +1128,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "pool" => pool.len() }
         );
         st.replica_count = deployment.replica_count;
-        if deployment.application == Application::Shed {
-            st.bare.insert(node.0);
-        } else {
-            st.bare.remove(&node.0);
-        }
         st.matchmaker.note_deployment(&deployment.matchmakers);
         st.matchmaker.note_bootstrap(&deployment.bootstrap);
         st.matchmaker.node_booted(node);
@@ -1165,6 +1194,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "frontier" => crate::signed_watermark(frontier)
                 }
             );
+            // The recovered prefix is walked: with no application to replay
+            // (#186), a boot resumes its walk one past the durable chosen
+            // index — an admitted forward jump when the previous incarnation
+            // made the index durable before reporting the walk over it.
+            st.landings.entry(node.0).or_default().insert(ci.0);
+            st.observe_applied_index(node.0, ci.0);
         }
         // The #71 explained-divergence form, first leg (Stage 7): a recovered
         // log missing a record this node durably persisted is legal iff a
@@ -1289,30 +1324,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver crashes after sync and before sending a batch"
                 );
             }
-            Seam::AfterApplyBeforeSync => {
-                reach_once!(
-                    st.crashed_after_apply,
-                    "the driver crashes after applying a batch and before its application fsync"
-                );
-            }
-            Seam::BeforeChunkSync => {
-                reach_once!(
-                    st.crashed_before_chunk_sync,
-                    "the driver crashes before syncing repaired snapshot chunks"
-                );
-            }
-            Seam::AfterChunkRestoreBeforeSync => {
-                reach_once!(
-                    st.crashed_after_chunk_restore,
-                    "the driver crashes after a snap-point restore and before its sync"
-                );
-            }
-            Seam::AfterBootReplayBeforeSync => {
-                reach_once!(
-                    st.crashed_after_boot_replay,
-                    "the driver crashes after the boot replay and before its sync"
-                );
-            }
             // The matchmaker's seams are reported through
             // `matchmaker_crashed`, in their own namespace.
             Seam::MatchBeforeSync | Seam::MatchAfterSyncBeforeReply => {}
@@ -1352,7 +1363,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver drops a heartbeat at the send seam"
                 );
             }
-            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+            Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
                 reach_once!(
                     st.dropped_repair,
                     "the driver drops a repair message at the send seam"
@@ -1364,10 +1375,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "the driver drops a catch-up request at the send seam"
                 );
             }
-            // The snap-repair plane's losses (custody ack, chunk request,
-            // chunk response) carry no gate of their own: the repair is
-            // re-asked every beat and its outcome gates are the storage
-            // ones ("a rotted snapshot chunk is repaired from a peer").
             // The whole cooperative handoff, lost in one message: the outgoing
             // leader has already stepped down and the successor never starts,
             // so this must cost availability only — an ordinary Phase 1 is the
@@ -1447,13 +1454,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             );
         }
     }
-    fn snapshot_offered(&self, _node: NodeId, _offers: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.snapshot_offered,
-            "the driver queues a snapshot offer before the send seam"
-        );
-    }
 
     fn compact_acked(&self, _node: NodeId, accepted: bool) {
         let mut st = self.state();
@@ -1473,33 +1473,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(st.mailbox_dropped, "mailbox overflow dropped a message");
     }
 
-    fn snap_chunk_rejected(&self, _node: NodeId, at: Slot) {
-        let mut st = self.state();
-        // The store took every repaired chunk of the point and still refuses
-        // to call it whole: a `write_snap_chunk` that returned `Ok` and a
-        // verdict that says otherwise. The repair plane keeps pulling, so
-        // this costs liveness on that point, never safety — a *cause* that
-        // fired, hence a reachable rather than a `sometimes`.
-        st.snap_chunks_rejected += 1;
-        st.snap_chunk_rejected_at = Some(at.0);
-        reach_once!(
-            st.snap_chunk_rejected,
-            "snapshot: the store refused a repaired chunk after a successful write"
-        );
-    }
-
-    fn snap_chunk_withheld(&self, _node: NodeId, to: NodeId) {
-        let mut st = self.state();
-        // BUGGIFY pairing for `withhold_snap_chunk`: the fired half. The
-        // recovery half fires in `snap_chunk_repaired` for a requester that
-        // was withheld from.
-        reach_once!(
-            st.chunk_withheld,
-            "a custodian withholds a requested snapshot chunk"
-        );
-        st.withheld_from.insert(to.0);
-    }
-
     fn read_expired(&self, _node: NodeId, early: bool) {
         let mut st = self.state();
         if early {
@@ -1516,14 +1489,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "a parked read outlives its confirmation deadline and is redirected"
             );
         }
-    }
-
-    fn snapshot_offer_skipped(&self, _node: NodeId, _offered: Slot) {
-        let mut st = self.state();
-        reach_once!(
-            st.offer_skipped,
-            "the driver skips a mismatched snapshot offer"
-        );
     }
 
     fn delivery_failed(&self, _from: Party, _to: Party) {
@@ -1598,6 +1563,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
+    fn election_backoff(&self, _node: NodeId, _doublings: u32) {
+        // A cause, not an outcome: failed campaigns are the swarm's business;
+        // what the backoff buys is the convergence claim.
+        let mut st = self.state();
+        reach_once!(
+            st.election_backoff,
+            "the driver backs off its election timeout after a failed campaign"
+        );
+    }
+
     fn waiter_superseded(&self, _node: NodeId, _slot: Slot) {
         let mut st = self.state();
         reach_once!(
@@ -1629,21 +1604,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         let staged = st.faulty_staged.entry(node.0).or_default();
         for &(slot, _ballot) in entries {
             staged.insert(slot.0);
-        }
-    }
-
-    fn app_repair_started(&self, _node: NodeId, _from: Slot, below_floor: bool) {
-        let mut st = self.state();
-        if below_floor {
-            reach_once!(
-                st.app_repair_below_floor_seen,
-                "a node with a lost snapshot waits on a peer InstallSnapshot below its floor"
-            );
-        } else {
-            reach_once!(
-                st.app_repair_seen,
-                "a faulty chosen record stalls the apply seam and opens a repair"
-            );
         }
     }
 
@@ -1702,72 +1662,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn snap_recorded(&self, node: NodeId, at: Slot) {
+    fn prepare_below_floor(&self, _node: NodeId, _from_slot: Slot, _floor: Slot) {
         let mut st = self.state();
-        st.snap_points.entry(node.0).or_default().insert(at.0);
-        reach_once!(
-            st.snap_recorded_seen,
-            "storage: a decided snapshot point is recorded at its marker slot"
-        );
-    }
-
-    fn snap_chunks_reported(&self, _node: NodeId, _at: Slot, _chunks: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.snap_chunks_reported_seen,
-            "storage: rotted snapshot chunks are reported for peer repair"
-        );
-    }
-
-    fn snap_chunk_repaired(
-        &self,
-        node: NodeId,
-        _at: Slot,
-        chunks: u64,
-        bytes: u64,
-        blob_bytes: u64,
-    ) {
-        let mut st = self.state();
-        if st.withheld_from.contains(&node.0) {
-            // The `withhold_snap_chunk` recovery half: the silence cost this
-            // requester beats or a second custodian, and it still repaired.
-            reach_once!(
-                st.repaired_after_withhold,
-                "a requester repairs its snapshot chunks after a custodian withheld one"
-            );
-        }
-        // The CTRL §5.2 chunk-repair cost metric: an install ships at most the
-        // chunks it names — never the whole blob riding along.
-        assert_always!(
-            bytes <= chunks.saturating_mul(SNAP_CHUNK_BYTES as u64),
-            "storage: a chunk repair ships at most the chunks it installs",
-            { "chunks" => chunks, "bytes" => bytes, "blob_bytes" => blob_bytes }
-        );
-        reach_once!(
-            st.snap_chunk_repaired_seen,
-            "storage: a rotted snapshot chunk is repaired from a peer"
-        );
-    }
-
-    fn snap_advanced_fallback(&self, _node: NodeId, _to: NodeId) {
-        let mut st = self.state();
-        reach_once!(
-            st.snap_fallback_seen,
-            "storage: a chunk request is answered with the advanced whole snapshot"
-        );
-    }
-
-    fn snap_point_restored(&self, _node: NodeId, _at: Slot) {
-        let mut st = self.state();
-        reach_once!(
-            st.snap_restore_seen,
-            "storage: a lost application state is restored from the decided snapshot point"
-        );
-    }
-
-    fn prepare_below_floor(&self, node: NodeId, _from_slot: Slot, _floor: Slot) {
-        let mut st = self.state();
-        *st.below_floor_refusals.entry(node.0).or_insert(0) += 1;
         // Rare (only a lagging node below a compacted peer's floor triggers it),
         // so reachable-only: it must be hit at least once across exploration,
         // not on every seed.

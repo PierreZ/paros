@@ -1,7 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
-use crate::types::{Ballot, NodeId, Slot};
+use crate::types::{Ballot, JournalId, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.
@@ -105,40 +105,13 @@ pub struct Config {
     /// carries no quorum obligation, and which process answers to a
     /// `ReplicaId` is the driver's deployment map.
     pub replica_count: usize,
-    /// Whether this node runs the application beside its acceptor (#144):
-    /// [`Application::Colocated`] is today's node and the default;
-    /// [`Application::Shed`] is the **bare acceptor** — it votes, learns and
-    /// keeps the chosen prefix exactly as a colocated node does, and hands
-    /// the application nothing. Deployment data, never a feature: one code
-    /// path runs the learner logic for both.
-    pub application: Application,
-}
-
-/// Whether a [`crate::ColocatedNode`] runs the **application** or sheds it
-/// (#144, the bare acceptor).
-///
-/// An explicit type rather than a flag, because what it names is a
-/// deployment, not a switch: the `FoundationDB` log/storage split, a small
-/// durable acceptor tier plus a replica tier that runs the application.
-/// Shedding the application sheds exactly what the colocation put there —
-/// the [`Ready::committed`](crate::Ready::committed) output, the application
-/// repair that re-emits it, and the application snapshot the driver would
-/// produce from it. Everything a learner needs stays: the chosen index, the
-/// chosen prefix, the at-most-once ledger a truncation seals and a snapshot
-/// install hands on. Why each of those stays is the coupling analysis in
-/// [`crate::replica_node`]'s module doc.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Application {
-    /// The node applies the chosen prefix to the application in order — the
-    /// only deployment before #144, and the default.
-    #[default]
-    Colocated,
-    /// The **bare acceptor**: a learner that applies nothing. Its
-    /// [`Ready::committed`](crate::Ready::committed) is always empty and it
-    /// never opens an application repair; a snapshot it installs restores
-    /// its *log* to the boundary, never an application.
-    Shed,
+    /// The journal this node serves (#184): carried for assertions and
+    /// tracing, never read by a protocol decision — the driver routes a
+    /// message to its journal before the core sees it, and a client call
+    /// naming any other journal is refused at the wire. Defaults to the one
+    /// user journal of a single-journal deployment
+    /// ([`JournalId::FIRST_USER`]).
+    pub journal: JournalId,
 }
 
 impl Config {
@@ -184,13 +157,6 @@ impl Config {
     #[must_use]
     pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
         ReplicaId::of(slot, self.replica_count)
-    }
-
-    /// Whether this node applies what it learns ([`Application::Colocated`])
-    /// rather than shedding it (the bare acceptor).
-    #[must_use]
-    pub fn runs_application(&self) -> bool {
-        self.application == Application::Colocated
     }
 
     /// The matchmaker pool: `matchmaker_pool`, or `matchmakers` when empty.

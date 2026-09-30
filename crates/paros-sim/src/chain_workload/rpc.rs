@@ -12,8 +12,8 @@ use std::time::Duration;
 use moonpool_rpc::RpcError;
 use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always};
 use paros::{
-    Compact, InspectReply, Propose, ProposeAck, QuorumSystem, Reconfigure, ReconfigureMatchmakers,
-    quorum_system_to_proto,
+    Append, AppendAck, InspectReply, JournalId, QuorumSystem, Reconfigure, ReconfigureMatchmakers,
+    Trim, quorum_system_to_proto,
 };
 
 use super::ChainConfig;
@@ -26,17 +26,21 @@ pub(super) enum ProposalResult {
 }
 
 impl ProposalResult {
-    /// Judge one `Propose` RPC's answer: a transport error is ambiguous, a
+    /// Judge one `Append` RPC's answer: a transport error is ambiguous, a
     /// reply is committed or a redirect.
-    fn from_response(response: Result<ProposeAck, RpcError>, seq: u64) -> Self {
+    fn from_response(response: Result<AppendAck, RpcError>, seq: u64) -> Self {
         let Some(ack) = response.ok() else {
             return Self::Ambiguous;
         };
         assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
+        assert_always!(
+            !ack.unknown_journal,
+            "chain: a node serves the journal the client names"
+        );
         if ack.committed {
             Self::Acked {
                 leader: ack.leader,
-                slot: ack.slot.unwrap_or_default(),
+                slot: ack.first_lsn.unwrap_or_default(),
             }
         } else {
             Self::Rejected { leader: ack.leader }
@@ -91,19 +95,21 @@ pub(super) async fn within<T>(
 pub(super) async fn inspect(
     ctx: &SimContext,
     client: &SimClient,
+    journal: JournalId,
     timeout: Duration,
 ) -> Option<InspectReply> {
-    let probe = async { client.inspect().await.ok() };
+    let probe = async { client.inspect_journal(journal.0).await.ok() };
     within(ctx, timeout, None, probe).await
 }
 
-/// One `Propose` of `payload` as `(client_id, seq)` to `target`. With
+/// One `Append` of `payload` (a single record) to `journal` as
+/// `(client_id, seq)` to `target`. With
 /// `abandon` the client stops listening after 10 ms and records the
 /// observation as ambiguous.
 pub(super) fn propose_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
-    client_id: u64,
+    (journal, client_id): (JournalId, u64),
     target: usize,
     seq: u64,
     payload: Vec<u8>,
@@ -112,12 +118,13 @@ pub(super) fn propose_once(
     let client = clients[target].clone();
     let time = time.clone();
     async move {
-        let request = Propose {
+        let request = Append {
+            journal: journal.0,
             client: client_id,
             seq,
-            command: payload,
+            records: vec![payload],
         };
-        let call = client.propose(&request);
+        let call = client.append(&request);
         if abandon {
             moonpool_sim::select! {
                 response = call => ProposalResult::from_response(response, seq),
@@ -134,6 +141,7 @@ pub(super) fn propose_once(
 pub(super) fn compact_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
+    journal: JournalId,
     config: &ChainConfig,
     target: usize,
     up_to: u64,
@@ -143,19 +151,17 @@ pub(super) fn compact_once(
     let config = *config;
     async move {
         let mut client = clients[target].clone();
-        // The #101 coupling makes compaction a two-phase dance: the
-        // first ask usually seeds the `Snap` marker and answers
-        // `accepted: false`; once a quorum advertises the decided
-        // point, a retry gets the `Truncate` proposed. A few
-        // beat-spaced retries at the same leader complete the dance
-        // within one workload operation, keeping truncation pressure
-        // (and everything downstream of raised floors) at its
-        // pre-coupling cadence.
+        // A few beat-spaced asks, following the leader hint: a trim is
+        // proposed by the leader alone (#186), so a redirect or a lost
+        // answer is all a retry can meet.
         let mut attempt_target = target;
         for _attempt in 0..config.compact_attempts {
-            let request = Compact { up_to };
+            let request = Trim {
+                journal: journal.0,
+                up_to,
+            };
             let outcome = moonpool_sim::select! {
-                response = client.compact(&request) => match response {
+                response = client.trim(&request) => match response {
                     Ok(ack) => {
                         if ack.accepted {
                             CompactResult::Accepted { leader: ack.leader }

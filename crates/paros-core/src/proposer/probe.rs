@@ -40,7 +40,7 @@ pub struct RepairProbe<Id, V> {
     pub(super) blocked: BTreeSet<Slot>,
     /// Driver ticks this probe has been open (the caller's resign clock).
     /// It lives here, with the probe it times, so that closing a probe —
-    /// by a decision, a commit, a snapshot install or an abandoned
+    /// by a decision, a commit, a trim-point jump or an abandoned
     /// leadership — takes the clock with it and no caller has to remember
     /// to reset one.
     pub(super) elapsed: u64,
@@ -199,7 +199,7 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         }
     }
 
-    /// A snapshot install folded everything below `first`: a probe blocked
+    /// A trim-point jump dropped everything below `first`: a probe blocked
     /// below the boundary is resolved by the fold as well, and the probe
     /// closes when nothing stays blocked.
     pub fn probe_retain_from(&mut self, first: Slot) {

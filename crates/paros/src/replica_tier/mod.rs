@@ -7,40 +7,36 @@
 //! production and deterministic simulation. The loop serves the node
 //! contract's **learner subset** — it receives the `Commit`s a leader or a
 //! proxy leader sends to every learner, the leader's beats, and the
-//! `CatchUpResponse` / `InstallSnapshot` answers its own requests draw,
-//! through the same `Deliver` lane a node does — and drains every batch the
-//! core produces in the node's own order: persist (the learned records, the
-//! chosen index) → send (catch-up requests and pre-reads) → apply the contiguous
-//! prefix to the application → application fsync → the compaction floor.
+//! `CatchUpResponse` / `TrimmedTo` answers its own requests draw, through
+//! the same `Deliver` lane a node does — and drains every batch the core
+//! produces in the node's own order: persist (the learned records, the
+//! chosen index, the floor) → send (catch-up requests and pre-reads) →
+//! report the walk. It runs no application (#186).
 //!
 //! **Durable, and never a vote.** A replica keeps its chosen log on the same
-//! [`NodeStorage`] a node uses — the boot scan, the format marker (#147) and
+//! [`LogStorage`] a node uses — the boot scan, the format marker (#147) and
 //! the durability seams all apply — but it writes a learned record
 //! ([`paros_core::WriteOp::Learned`]) where a node writes an accepted one, it
 //! answers no `Prepare` and no `Accept`, and it is in no configuration, so no
 //! quorum ever counts it. It serves no peer either: a lagging replica is
-//! healed from the acceptors, never from another replica, so it offers no
-//! snapshot and answers no catch-up.
+//! healed from the acceptors, never from another replica, so it answers no
+//! catch-up.
 //!
-//! **It serves clients one thing: the leaderless read** (§3.4). The public
-//! `QuorumRead` RPC opens a quorum read in the core (the grid row is the
-//! node's `read_row` hook), parks the reply exactly as the node driver does,
-//! answers it after the apply that covers the confirmed index, and expires
-//! it on `read_retry_ticks`. Every other public call is refused as
+//! **It serves clients reads, and only reads.** The journal `Read` (#185)
+//! is served from its own chosen prefix — read replicas take read load off
+//! the acceptors — and long-polls at its end exactly as a node's does. A
+//! `CheckTail` on the quorum path is the leaderless read (§3.4): it opens a
+//! quorum read in the core (the grid row is the node's `read_row` hook),
+//! parks the reply exactly as the node driver does, answers it after the
+//! walk that covers the confirmed index, and expires it on
+//! `read_retry_ticks`; on the leader path it redirects, since a replica
+//! confirms no leadership. Every other public call is refused as
 //! unimplemented.
 //!
-//! **No snapshot custody, by decision.** A replica records the decided
-//! snapshot points it applies, like a node, but it neither advertises
-//! custody nor runs the chunk repair plane (`SnapAck` /
-//! `SnapChunkRequest` / `SnapChunkResponse` reach the core, which ignores
-//! them). The `Truncate` precondition — a quorum advertises custody of a
-//! decided snapshot point — exists so that a node left below the new floor
-//! can be served a snapshot; the only processes that serve one are
-//! acceptors, so the custodians it counts are acceptors, and re-derived with
-//! a replica tier it stays exactly that. A replica below the floor is healed
-//! by an acceptor's `InstallSnapshot`. A deployment of bare acceptors holds
-//! no custody at all, so its leader never truncates: the log grows and no
-//! floor forms, the price of an acceptor that keeps no application bytes.
+//! **A replica below the floor jumps.** A replica left below a trim point
+//! the acceptors decided while it was away asks for catch-up from where it
+//! stopped, and an acceptor answers `TrimmedTo` (#186): it jumps its floor
+//! and chosen index to the point and catches up from there.
 //!
 //! A deployment whose `Config::replica_count` is zero runs no replica; the
 //! node driver then sends its learner traffic to the pool alone, exactly the
@@ -48,10 +44,9 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_core::{Providers, SimulationError, SimulationResult, TimeProvider};
+use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    Ballot, Command, Control, MustSync, NodeId, Party, QuorumSystem, ReadState, ReplicaNode, Slot,
-    WriteOp,
+    Ballot, Command, MustSync, NodeId, Party, QuorumSystem, ReadState, ReplicaNode, Slot, WriteOp,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -59,32 +54,26 @@ use crate::audit::Audit;
 use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
+use crate::driver::log_reads::{LogReads, refuse_journal};
+use crate::driver::ready::committed_end;
 use crate::driver::ready::{
-    ParkedRead, ReadPath, crash_if, persist_writes, report_applied, report_snap_recorded,
-    storage_fault_crash,
+    ParkedRead, ReadPath, crash_if, persist_writes, report_applied, storage_fault_crash,
 };
 use crate::driver::reply::answer;
 use crate::driver::transport::{LaneOpener, Outbound, PeerQueues, peer_address, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::hooks::{DriverHooks, Reply, Seam};
-use crate::rpc::{InspectReply, ReadAck, ReplySender, quorum_system_to_proto, well_known};
-use crate::storage::NodeStorage;
+use crate::rpc::{
+    CheckTail, CheckTailAck, InspectReply, ReplySender, TailPath, quorum_system_to_proto,
+    well_known,
+};
+use crate::storage::LogStorage;
 
-/// Walk the retained chosen prefix back through the application on a
-/// (re)boot, exactly as the node driver's boot replay does: from one past the
-/// application's durable prefix to the chosen index, a #94 duplicate slot as
-/// the `Noop` the live walk applied, a `Snap` marker re-capturing its point.
-/// A prefix that cannot be walked — the application behind the floor, or a
-/// chosen record this replica cannot read — opens the application repair
-/// instead, and the core pulls the missing range from the acceptors.
+/// Report a (re)boot: the chosen index this replica rebuilt from its log
+/// and its floor. Nothing is replayed — a replica runs no application
+/// (#186); its chosen prefix is its whole state.
 #[tracing::instrument(level = "debug", skip_all, fields(replica = self_id))]
-async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
-    replica: &mut ReplicaNode,
-    storage: &mut S,
-    self_id: u64,
-    hooks: &H,
-    audit: &A,
-) -> Result<(), RunError> {
+fn report_boot<A: Audit>(replica: &ReplicaNode, self_id: u64, audit: &A) {
     let chosen_index = replica.replica().chosen_index();
     let floor = replica.first_slot();
     audit.replica_booted(NodeId(self_id), chosen_index, floor);
@@ -94,86 +83,17 @@ async fn replay_boot_state<S: NodeStorage, H: DriverHooks, A: Audit>(
         floor = floor.0,
         "replica_booted"
     );
-    let Some(ci) = chosen_index else {
-        return Ok(());
-    };
-    let applied_slot = storage.applied_slot();
-    let resume = applied_slot.map_or(Slot(0), |a| Slot(a.0.saturating_add(1)));
-    let mut repair_from: Option<Slot> = None;
-    let mut replayed = false;
-    let mut snap_points: Vec<Slot> = Vec::new();
-    if resume < floor {
-        repair_from = Some(resume);
-    } else {
-        for s in resume.0..=ci.0 {
-            let slot = Slot(s);
-            let Some(stored) = replica.replica().chosen_at(slot).cloned() else {
-                // A record the boot scan could not read, not yet applied:
-                // contiguity is the contract, so the replay stops and the
-                // repair pump re-emits the healed range.
-                repair_from = Some(slot);
-                break;
-            };
-            let command = if replica.replica().duplicate_slots().contains(&slot) {
-                Command::Control(Control::Noop)
-            } else {
-                stored
-            };
-            storage
-                .apply(ci, slot, &command)
-                .await
-                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-            if let Command::Control(Control::Snap { .. }) = command {
-                storage
-                    .record_snapshot(slot)
-                    .await
-                    .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-                snap_points.push(slot);
-            }
-            replayed = true;
-            report_applied(audit, self_id, slot, &command);
-        }
-    }
-    if replayed {
-        crash_if(
-            true,
-            hooks,
-            audit,
-            NodeId(self_id),
-            Seam::AfterBootReplayBeforeSync,
-        )?;
-        storage
-            .sync(MustSync::Sync)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-    }
-    report_snap_recorded(audit, self_id, &snap_points);
-    if let Some(from) = repair_from {
-        let below_floor = from < floor;
-        replica.open_app_repair(from);
-        audit.app_repair_started(NodeId(self_id), from, below_floor);
-        tracing::info!(
-            replica = self_id,
-            from = from.0,
-            below_floor,
-            "app_repair_started"
-        );
-    }
-    Ok(())
 }
 
 /// Run the [`ReplicaReady`](paros_core::ReplicaReady) handshake once, in the
-/// node driver's order and with its seams: persist the learned records and
-/// the chosen index (the `BeforeSync` seam inside), send the catch-up
-/// requests (after the `AfterSyncBeforeSend` seam), apply the contiguous
-/// prefix to the application and fsync it (the `AfterApplyBeforeSync` seam
-/// between), and only then make a decided compaction floor durable — a
-/// floor never outruns the application state covering the slots it drops.
-/// Then release the next page of a deferred walk, and hand back the quorum
-/// reads this batch confirmed: answered only now, after the apply that
-/// covers them (the node's order, `drain_ready` step 3b).
+/// node driver's order and with its seams: persist the learned records, the
+/// chosen index and a decided floor (the `BeforeSync` seam inside), send the
+/// catch-up requests (after the `AfterSyncBeforeSend` seam), report the
+/// slots the walk moved over, release the next page of a deferred walk, and
+/// hand back the quorum reads this batch confirmed: answered only now, after
+/// the walk that covers them (the node's order, `drain_ready` step 3b).
 #[tracing::instrument(level = "trace", skip_all, fields(replica = self_id))]
-async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
+async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
     replica: &mut ReplicaNode,
     storage: &mut S,
     out: &Outbound,
@@ -182,11 +102,7 @@ async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
     audit: &A,
 ) -> Result<Vec<ReadState>, RunError> {
     let ready = replica.ready();
-    let (truncates, writes): (Vec<WriteOp>, Vec<WriteOp>) = ready
-        .writes()
-        .iter()
-        .cloned()
-        .partition(|w| matches!(w, WriteOp::Truncate { .. }));
+    let writes: Vec<WriteOp> = ready.writes().to_vec();
     let messages: Vec<(Party, paros_core::Message)> = ready
         .messages()
         .iter()
@@ -223,61 +139,20 @@ async fn drain<S: NodeStorage, H: DriverHooks, A: Audit>(
         NodeId(self_id),
         Seam::AfterSyncBeforeSend,
     )?;
-    send_messages(out, hooks, audit, messages);
-
-    let chosen_index = replica.replica().chosen_index();
-    let mut snap_points: Vec<Slot> = Vec::new();
+    send_messages(out, hooks, audit, replica.config().journal, messages);
     for (slot, command) in &committed {
-        let chosen_index = chosen_index.ok_or_else(|| {
-            SimulationError::InvalidState("committed command without chosen prefix".into())
-        })?;
-        storage
-            .apply(chosen_index, *slot, command)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-        if let Command::Control(Control::Snap { .. }) = command {
-            storage
-                .record_snapshot(*slot)
-                .await
-                .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-            snap_points.push(*slot);
-        }
         report_applied(audit, self_id, *slot, command);
-    }
-    if !committed.is_empty() {
-        crash_if(
-            true,
-            hooks,
-            audit,
-            NodeId(self_id),
-            Seam::AfterApplyBeforeSync,
-        )?;
-        storage
-            .sync(MustSync::Sync)
-            .await
-            .map_err(|e| storage_fault_crash(audit, self_id, e))?;
-    }
-    report_snap_recorded(audit, self_id, &snap_points);
-    if !truncates.is_empty() {
-        persist_writes(
-            storage,
-            &truncates,
-            MustSync::Sync,
-            Ballot::zero(),
-            self_id,
-            hooks,
-            audit,
-        )
-        .await?;
     }
     replica.advance_recovery();
     Ok(read_states)
 }
 
-/// The replica's held client reads, keyed by the core's `ctx` token.
+/// The replica's held client reads: the tails, keyed by the core's `ctx`
+/// token, and the journal reads long-polling at its end (#185).
 struct ParkedReads {
     reads: BTreeMap<u64, ParkedRead>,
     next_ctx: u64,
+    journal: LogReads,
 }
 
 impl ParkedReads {
@@ -290,7 +165,7 @@ impl ParkedReads {
         &mut self,
         replica: &mut ReplicaNode,
         seq: u64,
-        reply: ReplySender<ReadAck>,
+        reply: ReplySender<CheckTailAck>,
         ticks: u64,
         hooks: &H,
     ) {
@@ -355,28 +230,47 @@ impl ParkedReads {
                 NodeId(self_id),
                 Reply::Read,
                 parked.reply,
-                ReadAck {
+                CheckTailAck {
                     seq: parked.seq,
                     leader: replica.leader().map(|n| n.0),
                     committed: true,
-                    read_index: read_index.map(|s| s.0),
+                    committed_end: Some(committed_end(read_index)),
+                    unknown_journal: false,
                 },
             );
         }
+        // The chosen prefix only grows inside a batch: a journal read at the
+        // end is re-served after each one.
+        self.journal.wake(
+            |from, max| replica.read_log(from, max),
+            NodeId(self_id),
+            hooks,
+            audit,
+        );
     }
 
     /// Answer a retry redirect to every read whose confirmation is overdue
     /// (a row that never answered whole, a watermark this replica has not
-    /// reached): the client records it ambiguous and asks again.
+    /// reached): the client records it ambiguous and asks again. A journal
+    /// read whose long-poll ran out is answered empty.
     fn expire<H: DriverHooks, A: Audit>(
         &mut self,
         ticks: u64,
-        retry_ticks: u64,
+        tunables: &DriverTunables,
         replica: &ReplicaNode,
         self_id: u64,
         hooks: &H,
         audit: &A,
     ) {
+        let retry_ticks = tunables.read_retry_ticks;
+        self.journal.expire(
+            |from, max| replica.read_log(from, max),
+            ticks,
+            tunables.read_poll_ticks,
+            NodeId(self_id),
+            hooks,
+            audit,
+        );
         let overdue: Vec<u64> = self
             .reads
             .iter()
@@ -392,16 +286,40 @@ impl ParkedReads {
                     NodeId(self_id),
                     Reply::ReadRedirect,
                     parked.reply,
-                    ReadAck {
+                    CheckTailAck {
                         seq: parked.seq,
                         leader: replica.leader().map(|n| n.0),
-                        committed: false,
-                        read_index: None,
+                        ..CheckTailAck::default()
                     },
                 );
             }
         }
     }
+}
+
+/// The refusal a replica answers a `CheckTail` with before opening
+/// anything: a journal it does not serve, or the leader path — a replica
+/// holds no leadership to confirm, so it redirects to the leader it heard
+/// last. `None` when it serves the read (a quorum read, §3.4).
+fn refused_tail<A: Audit>(
+    req: &CheckTail,
+    journal: paros_core::JournalId,
+    replica: &ReplicaNode,
+    me: NodeId,
+    audit: &A,
+) -> Option<CheckTailAck> {
+    if refuse_journal(journal, req.journal, "check_tail", me, audit) {
+        return Some(CheckTailAck {
+            seq: req.seq,
+            unknown_journal: true,
+            ..CheckTailAck::default()
+        });
+    }
+    (req.path() == TailPath::Leader).then(|| CheckTailAck {
+        seq: req.seq,
+        leader: replica.leader().map(|n| n.0),
+        ..CheckTailAck::default()
+    })
 }
 
 /// Surface an inbound message's arrival for a human reading the trace, the
@@ -426,7 +344,7 @@ fn trace_received(self_id: u64, msg: &paros_core::Message) {
 /// Drive a paros replica to completion over the given providers.
 ///
 /// Generic over `P: Providers` (production *or* simulation) and
-/// `S: NodeStorage` (the injected durable storage, the same trait a node
+/// `S: LogStorage` (the injected durable storage, the same trait a node
 /// runs on). The loop owns a [`ReplicaNode`] rebuilt from `storage`, serves
 /// the node contract's learner subset on `local_addr`, and sends its
 /// catch-up requests to the acceptors named in `members` — the full **node
@@ -468,7 +386,7 @@ pub async fn run_replica<P, S, H, A>(
 ) -> Result<(), RunError>
 where
     P: Providers,
-    S: NodeStorage,
+    S: LogStorage,
     // Not `Send + 'static`, as on `run_node`: a hook is consulted from this
     // loop and never from a spawned task.
     H: DriverHooks,
@@ -484,11 +402,13 @@ where
     let incarnation_shutdown = CancellationToken::new();
     let _incarnation_guard = incarnation_shutdown.clone().drop_guard();
 
-    let me = Party::Node(NodeId(self_id));
+    let me_id = NodeId(self_id);
+    let me = Party::Node(me_id);
     let mut edge = RpcEdge::listen(&providers, &local_addr, "replica", &tunables).await?;
     let ReplicaInbox {
         inspect: mut inspects,
-        quorum_read: mut quorum_reads,
+        log_read: mut log_reads,
+        check_tail: mut tails,
         deliver: mut inbox,
     } = ReplicaInbox::serve(
         &providers,
@@ -500,7 +420,7 @@ where
     )?;
 
     let mut replica = ReplicaNode::new(&storage);
-    replay_boot_state(&mut replica, &mut storage, self_id, hooks, audit).await?;
+    report_boot(&replica, self_id, audit);
 
     let out = acceptor_lanes(
         &providers,
@@ -519,23 +439,48 @@ where
     let mut parked = ParkedReads {
         reads: BTreeMap::new(),
         next_ctx: 0,
+        journal: LogReads::default(),
     };
+    let journal = replica.config().journal;
     let mut ticks: u64 = 0;
     let time = providers.time().clone();
     let mut next_tick = time.now() + tunables.tick_interval;
     loop {
         moonpool_core::select! {
             error = edge.run() => return Err(error.into()),
-            Some(msg) = inbox.recv() => {
+            Some((to, msg)) = inbox.recv() => {
+                if to != journal {
+                    tracing::info!(node = self_id, journal = to.0, "foreign_journal_dropped");
+                    continue;
+                }
                 trace_received(self_id, &msg);
                 replica.step(msg);
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 parked.answer_served(&served, &replica, self_id, hooks, audit);
             }
-            Some((req, reply)) = quorum_reads.recv() => {
+            Some((req, reply)) = tails.recv() => {
+                if let Some(refused) = refused_tail(&req, journal, &replica, me_id, audit) {
+                    answer(hooks, audit, me_id, Reply::ReadRedirect, reply, refused);
+                    continue;
+                }
                 parked.open(&mut replica, req.seq, reply, ticks, hooks);
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 parked.answer_served(&served, &replica, self_id, hooks, audit);
+            }
+            Some((req, reply)) = log_reads.recv() => {
+                // A journal read (#185), served from this replica's own
+                // chosen prefix — read replicas take read load off the
+                // acceptors — or parked at its end.
+                parked.journal.serve(
+                    |from, max| replica.read_log(from, max),
+                    journal,
+                    &req,
+                    reply,
+                    ticks,
+                    me_id,
+                    hooks,
+                    audit,
+                );
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
@@ -543,7 +488,7 @@ where
                 replica.tick();
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 parked.answer_served(&served, &replica, self_id, hooks, audit);
-                parked.expire(ticks, tunables.read_retry_ticks, &replica, self_id, hooks, audit);
+                parked.expire(ticks, &tunables, &replica, self_id, hooks, audit);
                 if let Some((hole, above)) = replica.replica().chosen_gap() {
                     audit.chosen_gap(NodeId(self_id), hole, above);
                     tracing::info!(replica = self_id, hole = hole.0, above = above.0, "chosen_gap");
@@ -552,7 +497,7 @@ where
             }
             Some((_req, reply)) = inspects.recv() => {
                 // No batch: an inspect reads the replica and its store.
-                let _ = reply.send(inspect(&replica, &storage).await);
+                let _ = reply.send(inspect(&replica));
             }
             () = shutdown.cancelled() => return Ok(()),
         }
@@ -587,13 +532,7 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
                 Party::Node(node),
                 tunables.peer_queue_capacity,
             );
-            Ok((
-                node,
-                PeerQueues {
-                    regular,
-                    snapshot: None,
-                },
-            ))
+            Ok((node, PeerQueues { regular }))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
     let out = Outbound {
@@ -605,18 +544,16 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
     Ok(out)
 }
 
-/// Answer an operator's or a probe's `Inspect`: the replica's chosen prefix,
-/// its floor and its application's state — the opaque snapshot a probe
-/// compares across every applier. The configuration fields name the
+/// Answer an operator's or a probe's `Inspect`: the replica's chosen prefix
+/// and its floor. The configuration fields name the
 /// bootstrap acceptors this replica learns from; a replica never leads and
 /// holds no matchmaker belief or GC floor.
-async fn inspect<S: NodeStorage>(replica: &ReplicaNode, storage: &S) -> InspectReply {
+fn inspect(replica: &ReplicaNode) -> InspectReply {
     let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
         quorum_system_to_proto(replica.config().quorum_system).into_parts();
     InspectReply {
         chosen_index: replica.replica().chosen_index().map(|slot| slot.0),
         first_slot: replica.first_slot().0,
-        snapshot: storage.snapshot().await,
         members: replica.config().peers.iter().map(|n| n.0).collect(),
         quorum_system,
         phase1_quorum,

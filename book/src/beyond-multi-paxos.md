@@ -131,14 +131,14 @@ The argument is single-configuration, so a read is bound to the configuration it
 opened against. A `PreReadAck` carries the answerer's configuration ballot, and a
 node abandons its open reads when it learns a newer configuration.
 
-A client reaches this path through its own RPC, `QuorumRead`. It may ask any
+A client reaches this path through `CheckTail` on its quorum path. It may ask any
 node, and the node never redirects it: the leader, a follower and a spare all
 serve the read the same way. The simulation's client draws the node at random,
 and the same history check that judges read-index reads judges these reads.
 
 **In the code.** `QuorumRead`, `QuorumReads` (`quorum_read.rs`);
 `ColocatedNode::quorum_read(ctx)` and `quorum_read_in(ctx, row)`
-(`node/quorum_reads.rs`); the `QuorumRead` RPC (`paros.proto`), which the driver
+(`node/quorum_reads.rs`); the `CheckTail` RPC's quorum path (`paros.proto`), which the driver
 parks like a read-index read;
 `Acceptor::vote_watermark` (`acceptor.rs`); `Message::PreRead`,
 `Message::PreReadAck` (`message.rs`); `Replica::covers`, `Ready::read_states`.
@@ -221,43 +221,44 @@ al., *Compartmentalized Paxos* §3.1. No level yet.
 ## The replica tier
 
 Every node in the previous sections has two jobs. As an **acceptor** it votes on
-the log. As a **replica** it applies the chosen log to the application and
-answers the client. The two jobs scale in opposite directions. An extra acceptor
-makes each quorum bigger, so the protocol gets slower. An extra replica only
-learns, so the application gets more throughput and more read capacity. When
-both jobs share one process, you cannot scale one without the other.
+the log. As a **replica** it learns the chosen log, walks it in slot order and
+serves it to the clients that read it. The two jobs scale in opposite directions.
+An extra acceptor makes each quorum bigger, so the protocol gets slower. An extra
+replica only learns, so the clients get more read capacity. When both jobs share
+one process, you cannot scale one without the other.
 
-So paros can split them. A **replica node** learns and applies, and it never
+So paros can split them. A **replica node** learns and serves reads, and it never
 votes. It receives the `Commit`s that the leader or a proxy leader sends to every
 learner, and it persists each chosen value in the same record format a node uses.
 That record is not a vote: a replica is in no configuration, it answers no
 `Prepare` and no `Accept`, and it acks no beat. When a `Commit` is lost, the
 replica sees the gap in the next beat's watermark and asks the leader for the
-missing range. When the range was truncated, the leader offers a snapshot, as it
-does for any node below its floor. The one replica that answers the client for
+missing range. When the range was truncated, the acceptor that answers sends a
+`TrimmedTo` instead, and the replica jumps to the trim point, as any node below
+the floor does. The one replica that answers the client for
 slot `s` is `s % replica_count`, so each replica sends a share of the replies.
 Today the node that the client asked still sends the reply; the reply owner is
 the data a future client library will use.
 
-The mirror image is the **bare acceptor**: a node that votes and applies nothing.
-The code answers the question "what must an acceptor keep when it drops the
-application?" one coupling at a time. It keeps its chosen index and the chosen
-values. An acceptor only truncates chosen slots. A new leader skips the slots that
-are already chosen. Garbage collection counts the chosen indices of a Phase-2
-quorum. A lagging node or replica is healed from the acceptors' chosen values.
-What a bare acceptor drops is only what the application needed: the `committed`
-output, the application repair and the application snapshot. So a bare acceptor
-is the same node with one setting changed, not a second code path.
+Splitting the tiers raises a question about the other side: must an acceptor
+that no longer serves clients still keep the chosen log? The code answers it one
+coupling at a time, and the answer is yes. An acceptor only truncates chosen
+slots. A new leader skips the slots that are already chosen. Garbage collection
+counts the chosen indices of a Phase-2 quorum. A lagging node or replica is
+healed from the acceptors' chosen values. So every acceptor keeps its chosen
+index and the chosen values. Since paros runs no application at all, there is
+nothing else an acceptor could shed: every acceptor is the same learner, whether
+or not replicas run beside it.
 
 ```mermaid
 flowchart LR
     L[leader]
-    subgraph acceptors [bare acceptors: vote, keep the chosen log]
+    subgraph acceptors [acceptors: vote, keep the chosen log]
         A0[acceptor 0]
         A1[acceptor 1]
         A2[acceptor 2]
     end
-    subgraph replicas [replicas: apply, never vote]
+    subgraph replicas [replicas: learn, serve reads, never vote]
         R0[replica 0]
         R1[replica 1]
     end
@@ -278,11 +279,12 @@ The leader's beats and `Commit`s reach it because the deployment map adds the
 replicas to every message addressed to the learners. In the simulation the
 replicas are their own process group, drawn per seed like the proxies and killed
 by their own attrition regime. Their disks sit outside the storage budget,
-because a replica's record is never a copy a quorum needs. The same application
-check that judges every node judges them, as does the claim that every learner
-has converged at the end of the run. A killed replica that comes back below the
-floor the acceptors kept raising is healed by a snapshot install, and the sweep
-proves that path is taken.
+because a replica's record is never a copy a quorum needs. The same checks that
+judge every node's walk judge them, as does the claim that every learner has
+converged at the end of the run. A killed replica that comes back below the
+floor the acceptors kept raising is healed by a trim-point jump, and the sweep
+proves that path is taken. Clients read the journal from replicas too, and the
+simulation requires that a replica served one.
 
 A replica is also where the paper's leaderless read happens. A client asks a
 replica for a quorum read; the replica asks a row of acceptors how far each has
@@ -298,31 +300,20 @@ computed all the same, and the simulation requires that the owner of an
 acknowledged slot applied it, which is the fact a future client library that
 talks to replicas would rely on.
 
-The bare acceptor runs in the simulation too. On a seed with replicas, one draw
-can make the whole acceptor pool bare. The acceptors then vote and keep the log,
-and only the replicas apply. A bare acceptor acknowledges a write once the slot
-is chosen, and the check that the acknowledged command is really the one chosen
-there is made when a replica applies it. A bare acceptor keeps no application
-bytes, so it can never offer a snapshot. On such a seed no acceptor can vouch for
-a snapshot point, the leader refuses every truncation, and the log is never
-compacted. Replicas do not stand in for acceptors here: the truncation rule
-counts the processes that may have to serve a snapshot to a node left below the
-new floor, and only acceptors ever serve one.
-
 The garbage collection rule does not change. The paper's Scenario 3 lets a
 configuration be forgotten once replicas outside it hold the chosen prefix. paros
-still counts only acceptors, bare or colocated, because they are the ones whose
-records the next Phase 1 reads.
+still counts only acceptors, because they are the ones whose records the next
+Phase 1 reads.
 
 **In the code.** `ReplicaNode`, `ReplicaReady`, `ReplicaCounters`
 (`replica_node.rs`, whose module doc holds the coupling analysis);
-`Application::Shed`, `Config::replica_count`, `Config::reply_owner` (`state.rs`);
+`Config::replica_count`, `Config::reply_owner` (`state.rs`);
 `ReplicaId` (`membership.rs`); `WriteOp::Learned` (`write.rs`); the example
 `paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
 (`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
 `REPLICA_GROUP` (`paros-sim/src/process.rs`, `roles.rs`); the replica's quorum
-read `ReplicaNode::quorum_read_in`; the bare-acceptor draw `shape::bare_acceptors`
-(`paros-sim/src/shape.rs`). Paper: Whittaker et al., *Compartmentalized
+read `ReplicaNode::quorum_read_in` and its journal read `ReplicaNode::read_log`;
+the jump below the floor `ReplicaNode::trim_to`. Paper: Whittaker et al., *Compartmentalized
 Paxos* §2.3, §3.3 and §3.4. No level yet.
 
 ## Cooperative leader handoff
@@ -560,8 +551,10 @@ disk has no memory of it. The node answers a lower ballot and votes for what tha
 ballot proposes. A quorum behind the older ballot then chooses a second value for
 a slot that already holds one.
 
-A snapshot does not help, because a snapshot restores the log and the sending peer
-does not know what this node has sworn. So a node that lost its disk **does not
+Catching up does not help either. Commit replay restores chosen values, and a
+[trim-point jump](truncation-and-snapshots.md) restores where the log starts;
+neither restores a promise, and the peer that answers does not know what this
+node has sworn. So a node that lost its disk **does not
 rejoin**, and the **library** enforces that rather than the harness or the
 operator.
 
@@ -574,8 +567,49 @@ The marker is a store property and not protocol state, so the plain deployment
 persists the same two scalars it always did. What heals the cluster is a change of
 the acceptor set, which draws its successors from the live nodes.
 
-**In the code.** `NodeStorage::is_formatted`, `NodeStorage::format`
-(`crates/paros/src/storage.rs`); `BootKind::FirstBoot`,
+**In the code.** `LogStorage::is_formatted`, `LogStorage::format`
+(`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`
 (`crates/paros/src/driver/config.rs`); `Audit::boot_refused`. Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
+
+## Many journals on one process
+
+A journal service runs many logs on the same machines. The tempting design shares
+one Paxos instance and partitions its log by key. paros goes the other way: it
+shares **processes, disks and connections, and never protocol state**. Each
+journal is its own namespace, with its own `ColocatedNode`, its own ballots, its
+own log and its own store. Every proof in this book then holds per journal
+unchanged, and exactly one new property has to be shown: **non-interference**.
+
+The journal id travels on the `Deliver` envelope, one per message, and the driver
+routes each message to its journal's node before the core sees a byte. Folding the
+id into the command fingerprint would not be enough. That protects the value an
+`Accepted` names, but a `Prepare`, a `Promise`, a `Commit` or a heartbeat carries
+no command at all, and it would cross journals silently. One `Deliver` per peer
+carries every journal. Inside the peer mailbox each journal has its own
+keep-newest lane, and the drain takes them round-robin, so a busy journal can only
+evict its own messages.
+
+A storage fault **quarantines its journal**, not the process. The damage is
+scoped to one store. The journal's node is dropped and sends nothing, while the
+process keeps serving its other journals. After a short delay the driver re-opens
+the journal from its store, as if that one journal had restarted. A process whose
+every journal is quarantined at once has nothing left and crashes, which with one
+journal is exactly the old fail-stop rule. The copy budget is therefore per
+journal.
+
+The simulation gives every journal its own audit and its own storage world, so
+every oracle in the campaign is keyed by journal without knowing it. A shared
+board carries what no single journal can see:
+
+- every slot of a journal applies only a command appended to that journal;
+- a quarantined journal sends nothing;
+- a journal keeps committing while a sibling is held on every node for the chaos
+  window;
+- a node keeps serving its other journals while one is quarantined.
+
+**In the code.** `run_journals`, `JournalStores` (`crates/paros/src/driver/`,
+`journals.rs`); `PeerMailbox` (`crates/paros/src/driver/transport.rs`);
+`DriverHooks::hold_journal`, `Audit::journal_quarantined`;
+`crates/paros-sim/src/audit/journals.rs`; `paros_sim::shape::journals`.

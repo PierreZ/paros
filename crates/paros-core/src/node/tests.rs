@@ -356,18 +356,18 @@ fn step_at(nodes: &mut [ColocatedNode], to: NodeId, msg: Message) {
 // whether a Candidate that learns a higher ballot mid-campaign can go on to win
 // at its now-stale ballot; the answer used to be yes, through the two
 // promise-raising paths that deliberately leave the campaign open: `mark_chosen`
-// (a learned `Commit`/`CatchUpResponse`) and `on_install_snapshot` (a snapshot
-// whose serving peer minted its promise with no quorum behind it — the #88
-// route, uncontained by quorum intersection at n >= 5). `try_become_leader` now
+// (a learned `Commit`/`CatchUpResponse`) and the snapshot install #186 deleted
+// (a snapshot whose serving peer minted its promise with no quorum behind it —
+// the #88 route, uncontained by quorum intersection at n >= 5; a trim-point
+// jump moves no promise, so the route is gone for good). `try_become_leader` now
 // refuses any win whose election ballot sits below the node's own
 // `max_promised_ballot`, restoring "a leader's ballot >= its own promise".
 // These tests pin the refusal, the self-heal (the next campaign ratchets past
 // the learned promise), and the healthy re-propose the stale win used to break.
 
 mod acceptor;
-mod bare_acceptor;
 mod bounds;
-mod catch_up_snapshot;
+mod catch_up;
 mod decide_apply;
 mod election;
 mod handoff;

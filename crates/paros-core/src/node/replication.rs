@@ -132,7 +132,7 @@ impl ColocatedNode {
             // Serve from one PAST the sender's contiguous chosen index: it
             // already holds everything at and below `commit`. Serving from
             // `commit` itself wasted one batch entry — and at the floor
-            // boundary it converted a one-slot-behind peer into a snapshot
+            // boundary it converted a one-slot-behind peer into a trim-point jump
             // install (`commit == first_slot - 1` tripped the below-floor
             // branch for a replay we can serve normally).
             self.serve_catchup(from, commit.map_or(Slot(0), |c| Slot(c.0 + 1)));

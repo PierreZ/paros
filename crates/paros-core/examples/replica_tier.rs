@@ -1,46 +1,46 @@
-//! **The replica tier: acceptors vote, replicas apply.**
+//! **The replica tier: acceptors vote, replicas serve reads.**
 //!
 //! Run it: `cargo run -p paros-core --example replica_tier`
 //!
 //! The lesson after `proxy_leader`, and the third deployment in this
 //! crate. Every other example colocates the roles: each node is an
-//! acceptor *and* a replica, so each node votes on the log and also runs
-//! the application over it. Here the two are split onto different
-//! processes:
+//! acceptor *and* a replica, so each node votes on the log and also learns
+//! it. Here the learning is also done by processes that never vote:
 //!
-//! - three **bare acceptors** — [`ColocatedNode`]s with
-//!   [`Application::Shed`] — vote, learn and keep the chosen log, and apply
-//!   nothing;
+//! - three **acceptors** — [`ColocatedNode`]s — vote, learn and keep the
+//!   chosen log;
 //! - two **replicas** — [`ReplicaNode`]s — learn the chosen log from the
-//!   leader's `Commit`s and apply it, and never vote.
+//!   leader's `Commit`s and serve journal reads from it, and never vote.
+//!
+//! Neither runs an application: paros is a journal, and the application
+//! lives in the client that reads it (#186).
 //!
 //! # Why split them (Compartmentalized Paxos §3.3)
 //!
 //! Adding an acceptor makes every quorum bigger, so it makes the protocol
 //! *slower*. Adding a replica only adds a process that learns, so it adds
-//! application throughput and read capacity for free. With the two roles on
+//! read capacity for free. With the two roles on
 //! the same process they cannot be scaled apart: this deployment can. It is
 //! also the shape operators know from `FoundationDB`: a small durable log
-//! tier plus a storage tier that runs the application.
+//! tier plus a tier that serves reads.
 //!
-//! # What a bare acceptor keeps
+//! # What an acceptor keeps
 //!
 //! It stays a **learner**. It keeps its chosen index and the chosen values,
 //! because Paxos needs them: an acceptor only truncates what is chosen, a
 //! recovering leader skips what is chosen, garbage collection counts chosen
-//! indices, and a lagging replica is healed *from* the acceptors. What it
-//! sheds is only what the application needed: the `committed` output, the
-//! application repair and the application snapshot. The full analysis is in
-//! the module doc of `paros_core::replica_node`.
+//! indices, and a lagging replica is healed *from* the acceptors. The full
+//! analysis is in the module doc of `paros_core::replica_node`.
 //!
 //! # What the trace below shows
 //!
 //! 1. Node 0 leads. Six commands are chosen by the three acceptors alone.
-//! 2. The acceptors hold the chosen prefix and hand the application nothing.
-//! 3. One `Commit` to replica 11 is lost. Replica 11 applies up to the hole,
+//! 2. The acceptors hold the chosen prefix.
+//! 3. One `Commit` to replica 11 is lost. Replica 11 learns up to the hole,
 //!    then the leader's next beat shows it is behind, it asks for the
 //!    missing range (`CatchUpRequest`), and the answer
-//!    (`CatchUpResponse`) lets it apply the rest in order.
+//!    (`CatchUpResponse`) lets it learn the rest in order. A journal read
+//!    on replica 11 then returns the whole log.
 //! 4. Each slot has one **reply owner**, `slot % replica_count`
 //!    ([`Config::reply_owner`]): the replica that answers the client for
 //!    that slot, so each replica sends half of the replies.
@@ -49,7 +49,7 @@
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
 use paros_core::{
-    Application, Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, HardState,
+    Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, HardState, LogRead,
     Message, NodeId, ReplicaId, ReplicaNode, Slot, Storage, Value,
 };
 
@@ -78,14 +78,13 @@ impl Storage for FreshStore {
     }
 }
 
-/// The deployment data every process shares: the acceptors, the replica
-/// count and, for the acceptors, that they shed the application.
-fn config(id: u64, application: Application) -> Config {
+/// The deployment data every process shares: the acceptors and the
+/// replica count.
+fn config(id: u64) -> Config {
     Config {
         id: NodeId(id),
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        application,
         ..Config::default()
     }
 }
@@ -105,13 +104,12 @@ fn kind(m: &Message) -> &'static str {
     }
 }
 
-/// The deployment: three bare acceptors, two replicas, what each replica
-/// applied, and how many entries each acceptor handed an application.
+/// The deployment: three acceptors, two replicas, and the slots each
+/// replica's walk moved over.
 struct Deployment {
     acceptors: Vec<ColocatedNode>,
     replicas: Vec<ReplicaNode>,
     applied: Vec<Vec<(Slot, Command)>>,
-    acceptor_committed: usize,
     /// Print each delivery?
     verbose: bool,
 }
@@ -123,7 +121,7 @@ impl Deployment {
                 .iter()
                 .map(|id| {
                     ColocatedNode::new(&FreshStore {
-                        config: config(*id, Application::Shed),
+                        config: config(*id),
                     })
                 })
                 .collect(),
@@ -131,12 +129,11 @@ impl Deployment {
                 .iter()
                 .map(|id| {
                     ReplicaNode::new(&FreshStore {
-                        config: config(*id, Application::Colocated),
+                        config: config(*id),
                     })
                 })
                 .collect(),
             applied: vec![Vec::new(); REPLICAS.len()],
-            acceptor_committed: 0,
             verbose: false,
         }
     }
@@ -151,7 +148,6 @@ impl Deployment {
         let pool: Vec<NodeId> = self.acceptors[i].config().pool().to_vec();
         let me = self.acceptors[i].config().id;
         let ready = self.acceptors[i].ready();
-        self.acceptor_committed += ready.committed().len();
         let mut out = Vec::new();
         for (audience, msg) in ready.messages() {
             for to in audience.resolve(&pool, me) {
@@ -168,7 +164,8 @@ impl Deployment {
     }
 
     /// Drain replica `r`: its writes would be persisted here, its
-    /// `committed` goes to the application, its messages to one node each.
+    /// `committed` is the slots its walk moved over, its messages go to one
+    /// node each.
     fn drain_replica(&mut self, r: usize) -> Vec<(NodeId, Message)> {
         let ready = self.replicas[r].ready();
         self.applied[r].extend(ready.committed().iter().cloned());
@@ -249,10 +246,10 @@ fn main() {
     }
     d.verbose = false;
 
-    println!("\n== 3. the acceptors: a chosen prefix, no application");
+    println!("\n== 3. the acceptors: a chosen prefix");
     for n in &d.acceptors {
         println!(
-            "   acceptor {}: chosen index {:?}, {} records, applied nothing",
+            "   acceptor {}: chosen index {:?}, {} records",
             n.config().id.0,
             n.replica().chosen_index().map(|s| s.0),
             n.acceptor().records().len()
@@ -260,14 +257,10 @@ fn main() {
         assert_eq!(n.replica().chosen_index(), Some(Slot(5)));
         assert_eq!(n.acceptor().records().len(), 6);
     }
-    assert_eq!(
-        d.acceptor_committed, 0,
-        "a bare acceptor hands the application nothing"
-    );
 
     println!("\n== 4. the replicas: replica 11 stops at the hole");
     for (r, id) in REPLICAS.iter().enumerate() {
-        println!("   replica {id}: applied slots {:?}", d.applied_slots(r));
+        println!("   replica {id}: learned slots {:?}", d.applied_slots(r));
     }
     assert_eq!(d.applied_slots(0), vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(d.applied_slots(1), vec![0, 1]);
@@ -283,9 +276,21 @@ fn main() {
     let q = d.drain_acceptor(0);
     d.deliver(q, |_, _| true);
     d.verbose = false;
-    println!("   replica 11: applied slots {:?}", d.applied_slots(1));
+    println!("   replica 11: learned slots {:?}", d.applied_slots(1));
     assert_eq!(d.applied_slots(1), vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(d.applied[0], d.applied[1], "one order on every replica");
+    // A journal read served by replica 11: the whole log, from its own
+    // chosen prefix — the acceptors are not asked.
+    let LogRead::Page(page) = d.replicas[1].read_log(Slot(0), usize::MAX) else {
+        panic!("nothing is trimmed");
+    };
+    println!(
+        "   a journal read on replica 11: {} entries, next LSN {}",
+        page.entries.len(),
+        page.next.0
+    );
+    assert_eq!(page.entries.len(), 6);
+    assert_eq!(page.next, Slot(6));
     // The one message a replica ignored: the candidate's proactive
     // `CatchUpRequest` to every learner — a replica serves no peer.
     assert_eq!(d.replicas[0].counters().ignored, 1);

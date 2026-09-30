@@ -240,8 +240,6 @@ impl ColocatedNode {
     /// - No open CTRL repair probe and no locally faulty record: blocked
     ///   commitment determination and in-place value repair are Phase-1-shaped
     ///   work, tied to the quorum that reported them.
-    /// - No open application repair: the successor cannot re-emit an apply
-    ///   stream it never had.
     /// - A tail bounded by [`HANDOFF_BATCH`].
     /// - More than one member (a singleton has nobody to hand to).
     ///
@@ -517,7 +515,7 @@ impl ColocatedNode {
             }
         };
         // The successor must be able to *use* the leadership it is handed. A
-        // node holding faulty records, or an open application repair, needs
+        // node holding faulty records needs
         // Phase-1-shaped work to heal: the repair probe that resolves a blocked
         // faulty slot is created only by winning an election, and the promise
         // quorum's reports are the only thing that can decide one. An installed
@@ -531,7 +529,7 @@ impl ColocatedNode {
         // between nodes that are both in a position to keep it settled.
         // Refusing costs one ordinary election, which is precisely the
         // machinery the repair needs anyway.
-        if !self.acceptor.faulty().is_empty() || self.replica.app_repair().is_some() {
+        if !self.acceptor.faulty().is_empty() {
             self.handoff.rejected_unfit = self.handoff.rejected_unfit.saturating_add(1);
             return;
         }

@@ -202,7 +202,7 @@ impl World {
             format!(
                 "{}'s disk is erased. It had promised {}, and that promise is gone from the one \
                  place it was written down. Nothing in the cluster returns it. No peer knows \
-                 what this node promised, and a snapshot restores the log and not a promise.",
+                 what this node promised, and a peer can only say where the log starts.",
                 who(id),
                 show_ballot(promised)
             ),

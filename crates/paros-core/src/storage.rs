@@ -9,7 +9,7 @@ use crate::types::{Ballot, Command, SessionEntry, Slot};
 ///
 /// This mirrors etcd-raft's `Storage`: every method is a read. Writers
 /// (`persist_ballot`, `append_accepted`, `set_chosen_index`, `truncate`, ...
-/// on `paros::NodeStorage`) live on the store the driver writes while
+/// on `paros::LogStorage`) live on the store the driver writes while
 /// processing a [`crate::Ready`], never on this trait, which keeps the core
 /// trivially testable against an in-memory fake.
 ///
@@ -35,7 +35,7 @@ pub trait Storage {
     fn last_slot(&self) -> Slot;
 
     /// The **sealed** at-most-once session ledger: every `(client, seq) -> slot`
-    /// record persisted when truncation (or a snapshot install) dropped the log
+    /// record persisted when truncation (or a trim-point jump) dropped the log
     /// records it was derived from. Read once at construction and merged under
     /// the walk-derived ledger, so a restart after truncation reproduces the
     /// same duplicate-suppression decisions as a node that never restarted

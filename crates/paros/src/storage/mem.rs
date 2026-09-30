@@ -1,11 +1,11 @@
-//! The library's default in-memory [`NodeStorage`]: the durable scalars and
+//! The library's default in-memory [`LogStorage`]: the durable scalars and
 //! the per-slot accepted log kept apart, never a single blob.
 
 use std::collections::BTreeMap;
 
 use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slot, Storage};
 
-use super::{NodeStorage, SNAP_CHUNK_BYTES, StorageError, snap_chunk_count};
+use super::{LogStorage, StorageError};
 
 /// The library's default in-memory storage: enough to *construct* a
 /// [`paros_core::ColocatedNode`] and to receive the semantic writes the driver makes
@@ -14,7 +14,7 @@ use super::{NodeStorage, SNAP_CHUNK_BYTES, StorageError, snap_chunk_count};
 ///
 /// The crash-testable faulty store (fail-stop, corruption, protocol-aware
 /// recovery) is the harness's world-backed disk in `paros-sim`; the driver is
-/// generic over [`NodeStorage`], so it swaps in without touching the loop.
+/// generic over [`LogStorage`], so it swaps in without touching the loop.
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage {
     hard_state: HardState,
@@ -24,11 +24,9 @@ pub struct MemStorage {
     /// has been truncated away.
     first: Slot,
     /// Sealed at-most-once ledger records for truncated slots, keyed by
-    /// `(client, seq)` (see [`NodeStorage::truncate`]).
+    /// `(client, seq)` (see [`LogStorage::truncate`]).
     sealed: BTreeMap<(paros_core::ClientId, paros_core::ClientSeq), Slot>,
-    /// The latest decided snapshot point (#101): `(marker slot, blob)`.
-    snap_point: Option<(Slot, Vec<u8>)>,
-    /// The format marker (#147): set by [`NodeStorage::format`], never
+    /// The format marker (#147): set by [`LogStorage::format`], never
     /// cleared.
     formatted: bool,
 }
@@ -43,7 +41,6 @@ impl MemStorage {
             config,
             first: Slot(0),
             sealed: BTreeMap::new(),
-            snap_point: None,
             formatted: false,
         }
     }
@@ -52,8 +49,8 @@ impl MemStorage {
     /// the compaction floor, the retained accepted log and the sealed ledger.
     /// Synchronous by design — this is the in-memory index a boot loads, the
     /// one the core's read-only [`Storage`] port is answered from once the
-    /// async [`NodeStorage::boot_scan`] has brought the records in. Records
-    /// below `first` are dropped, exactly as a durable [`truncate`](NodeStorage::truncate)
+    /// async [`LogStorage::boot_scan`] has brought the records in. Records
+    /// below `first` are dropped, exactly as a durable [`truncate`](LogStorage::truncate)
     /// would have left them.
     #[must_use]
     pub fn from_records(
@@ -73,7 +70,6 @@ impl MemStorage {
             config,
             first,
             sealed: BTreeMap::new(),
-            snap_point: None,
             // Records read back from a formatted store: the marker was
             // written before any of them could be.
             formatted: true,
@@ -89,7 +85,7 @@ impl MemStorage {
     }
 }
 
-impl NodeStorage for MemStorage {
+impl LogStorage for MemStorage {
     fn is_formatted(&self) -> bool {
         self.formatted
     }
@@ -137,107 +133,20 @@ impl NodeStorage for MemStorage {
         Ok(())
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn snapshot(&self) -> Vec<u8> {
-        // The default in-memory storage has no application state machine, so its
-        // opaque "snapshot" is a deterministic marker of the chosen prefix. A real
-        // application supplies a NodeStorage whose snapshot() folds its own state.
-        self.hard_state
-            .chosen_index
-            .map_or_else(Vec::new, |ci| ci.0.to_le_bytes().to_vec())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all)]
-    async fn install_snapshot(
+    #[tracing::instrument(level = "debug", skip_all, fields(point = point.0, sessions = sessions.len()))]
+    async fn trimmed_to(
         &mut self,
-        chosen_index: Slot,
-        ballot: Ballot,
-        _snapshot: Vec<u8>,
+        point: Slot,
         sessions: &[SessionEntry],
     ) -> Result<(), StorageError> {
         self.seal(sessions);
-        self.hard_state.chosen_index = Some(chosen_index);
-        self.hard_state.max_promised_ballot = self.hard_state.max_promised_ballot.max(ballot);
-        let first = Slot(chosen_index.0 + 1);
-        self.first = self.first.max(first);
+        let boundary = Slot(point.0.saturating_sub(1));
+        if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
+            self.hard_state.chosen_index = Some(boundary);
+        }
+        self.first = self.first.max(point);
         self.accepted.retain(|slot, _| *slot >= self.first);
         Ok(())
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn apply(
-        &mut self,
-        _chosen_index: Slot,
-        _slot: Slot,
-        _command: &Command,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    fn applied_slot(&self) -> Option<Slot> {
-        self.hard_state.chosen_index
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(at = at.0))]
-    async fn record_snapshot(&mut self, at: Slot) -> Result<(), StorageError> {
-        self.snap_point = Some((at, self.snapshot().await));
-        Ok(())
-    }
-
-    fn latest_snap_point(&self) -> Option<Slot> {
-        self.snap_point.as_ref().map(|(at, _)| *at)
-    }
-
-    fn snap_chunk_count(&self, at: Slot) -> Option<u32> {
-        self.snap_point
-            .as_ref()
-            .filter(|(point, _)| *point == at)
-            .map(|(_, blob)| snap_chunk_count(blob.len()))
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, fields(at = at.0, chunk))]
-    async fn read_snap_chunk(&self, at: Slot, chunk: u32) -> Option<Vec<u8>> {
-        let (point, blob) = self.snap_point.as_ref()?;
-        if *point != at {
-            return None;
-        }
-        let start = usize::try_from(chunk).ok()?.checked_mul(SNAP_CHUNK_BYTES)?;
-        if start >= blob.len() {
-            return None;
-        }
-        let end = (start + SNAP_CHUNK_BYTES).min(blob.len());
-        Some(blob[start..end].to_vec())
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn write_snap_chunk(
-        &mut self,
-        at: Slot,
-        chunk: u32,
-        bytes: &[u8],
-    ) -> Result<bool, StorageError> {
-        let Some((point, blob)) = self.snap_point.as_mut() else {
-            return Ok(false);
-        };
-        if *point != at {
-            return Ok(false);
-        }
-        let Some(start) = usize::try_from(chunk)
-            .ok()
-            .and_then(|c| c.checked_mul(SNAP_CHUNK_BYTES))
-        else {
-            return Ok(false);
-        };
-        if start >= blob.len() {
-            return Ok(false);
-        }
-        let end = (start + SNAP_CHUNK_BYTES).min(blob.len());
-        if bytes.len() != end - start {
-            return Ok(false);
-        }
-        blob[start..end].copy_from_slice(bytes);
-        // In-memory chunks cannot rot; a write leaves the point fully clean.
-        Ok(true)
     }
 }
 

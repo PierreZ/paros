@@ -33,7 +33,7 @@ impl ColocatedNode {
         self.replica.assert_invariants(self.acceptor.first_slot());
         self.proposer.assert_invariants();
         // The repair clock lives inside the probe it times, so closing a
-        // probe — by a decision, a commit, a snapshot install or an
+        // probe — by a decision, a commit, a trim-point jump or an
         // abandoned leadership — takes the clock with it and no path has to
         // remember to reset one. What the wiring owns is who advances it.
         assert!(
@@ -43,7 +43,7 @@ impl ColocatedNode {
             "only a leader's repair probe ages"
         );
         // The cross-role couplings against the acceptor's floor: a compaction
-        // and a snapshot install both retain the rounds above the floor they
+        // and a trim-point jump both retain the rounds above the floor they
         // raise, so an in-flight Phase-2 round below it would address a slot
         // whose record is gone.
         assert!(
@@ -63,19 +63,6 @@ impl ColocatedNode {
     /// leaves its bootstrap configuration; a matchmaker deployment runs
     /// Phase 2 under a configuration drawn from the pool.
     fn assert_deployment_invariants(&self) {
-        // The bare acceptor (#144): it keeps the learner's state — the chosen
-        // index, the prefix, the ledger — and hands the application nothing,
-        // so it never holds an applied batch or an application repair.
-        if !self.config.runs_application() {
-            assert!(
-                self.replica.committed().is_empty(),
-                "a bare acceptor surfaces nothing to an application"
-            );
-            assert!(
-                self.replica.app_repair().is_none(),
-                "a bare acceptor never opens an application repair"
-            );
-        }
         // The deployment couplings: plain Multi-Paxos never matchmakes and
         // never leaves its bootstrap configuration; a matchmaker deployment
         // runs Phase 2 under a configuration drawn from the pool.

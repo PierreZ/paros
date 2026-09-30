@@ -38,7 +38,6 @@
 //! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
 //! | `drop_client_reply` (per kind) | audit `client_reply_dropped` / `match_reply_dropped`, one per family | "…retry takes the dedup path", read retry, the duplicate matchmaking re-answer |
 //! | `duplicate_client_reply` (matchmaker plane) | audit `client_reply_duplicated`, one per kind | the idempotency of every answer the node loop folds |
-//! | `withhold_snap_chunk` | audit `snap_chunk_withheld` | "…repairs its snapshot chunks after a custodian withheld one" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
 //! | `phase2_column` | inline | "grid: a slot is decided on a column other than its own" |
 //! | `read_row` | inline | "grid: a quorum read is served by a row of a grid" |
@@ -46,92 +45,22 @@
 //! | `skip_proxy_resend` | audit `proxy_resend_skipped` | "proxy: a leader takes a delegated round back" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
+//! | `withhold_gc_requests` | scripted, never drawn (`ScriptedOptions::withhold_gc`) | the departed-straggler case's non-vacuous floor |
 //!
 //! Message kinds keep their own gates where they walk different Paxos paths:
 //! a lost `Accept` is the stranded-slot terrain, a lost `Accepted` is the
 //! lost-ack re-propose, a lost `Promise`/`Prepare`/`Nack` stretches an
-//! election, and the repair, snap-repair and handoff planes each have theirs.
+//! election, and the repair and handoff planes each have theirs.
 //!
-//! # The corpus's scripted seam crash (#146)
-//!
-//! A corpus case runs with every BUGGIFY site dark, so a durability seam
-//! whose precondition only a choreographed case can build — the chunk
-//! repair completing on a node whose application is lost,
-//! `Seam::AfterChunkRestoreBeforeSync` — would never fire there either.
-//! [`ScriptedCrash`] is the targeted form of `crash_at`: one named seam,
-//! answered `true` exactly **once per run** (the once-flag lives on the
-//! per-seed `StateHandle`, so the rebooted incarnation does not crash again),
-//! no probability drawn. It is consulted before the swarm sites and
-//! independently of the chaos window, and its fired gate is the same audit
-//! `crashed` report every seam has. While the crash is still owed, every
-//! node also **withholds the whole-blob snapshot offer**
-//! (`skip_snapshot_offer`): a below-floor node with a lost application can
-//! heal two ways — the chunk repair plus the point restore that reaches the
-//! seam, or a peer's `InstallSnapshot` that never does — and which one wins
-//! is a race of the peers' beats against the repair plane. Left to timing,
-//! the seam was visited or not depending on when the node accepted its
-//! peers' connections (the persistent accept future of the node driver
-//! turned the case vacuous on its mask), so the race is scripted: no offer
-//! until the seam fired, then offers as usual, which is exactly the case's
-//! analytic outcome (the reboot after the crash heals through an offer).
 
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{StateHandle, TimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{
-    DriverHooks, HandoffContext, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Seam, Slot,
+    DriverHooks, HandoffContext, JournalId, Message, NodeId, Party, ProxyId, ReconfigurerPhase,
+    Seam, Slot,
 };
-
-const SCRIPTED_CRASH_KEY: &str = "paros-scripted-seam-crash";
-
-/// A corpus case's targeted seam crash: `seam` is crashed at the first time
-/// any node reaches it in the run, and never again. Cloned into every
-/// incarnation's hooks; the flag is shared through the state handle.
-#[derive(Clone)]
-pub(crate) struct ScriptedCrash {
-    seam: Seam,
-    /// `true` while the crash is still owed; `false` once it fired.
-    armed: Arc<Mutex<bool>>,
-}
-
-impl ScriptedCrash {
-    /// Arm `seam` for this run (idempotent across incarnations: the flag is
-    /// published once per seed and every later call finds it).
-    pub(crate) fn arm(state: &StateHandle, seam: Seam) -> Self {
-        Self {
-            seam,
-            armed: scripted_crash_flag(state),
-        }
-    }
-
-    /// Whether the scripted crash is still owed.
-    fn armed(&self) -> bool {
-        *self.armed.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Whether `seam` is the scripted one and still owed; consumes it.
-    fn fire(&self, seam: Seam) -> bool {
-        if seam != self.seam {
-            return false;
-        }
-        let mut armed = self.armed.lock().unwrap_or_else(PoisonError::into_inner);
-        std::mem::replace(&mut *armed, false)
-    }
-}
-
-fn scripted_crash_flag(state: &StateHandle) -> Arc<Mutex<bool>> {
-    crate::state::published(state, SCRIPTED_CRASH_KEY, || true)
-}
-
-/// Whether this run's scripted seam crash has fired — a corpus case's
-/// non-vacuity check (`false` when none was armed).
-pub(crate) fn scripted_crash_fired(state: &StateHandle) -> bool {
-    state
-        .get::<Arc<Mutex<bool>>>(SCRIPTED_CRASH_KEY)
-        .is_some_and(|flag| !*flag.lock().unwrap_or_else(PoisonError::into_inner))
-}
 
 /// The shape every inline-gated hook shares: one `buggify_with_prob!` draw
 /// behind the chaos window (`active`, so nothing fires in the recovery
@@ -163,9 +92,13 @@ pub(crate) struct BuggifyHooks<T> {
     /// write window. Part of the node's per-seed shape (`crate::shape`), so a
     /// restarted node keeps the bias its first boot drew.
     seam_crash_bias: f64,
-    /// A corpus case's one targeted seam crash (see the module doc); `None`
-    /// on the main campaign, where every seam is a swarm site.
-    scripted: Option<ScriptedCrash>,
+    /// A scripted corpus case's standing choice to withhold every GC
+    /// request (`ScriptedOptions::withhold_gc`); `false` on the main
+    /// campaign, where it draws nothing.
+    withhold_gc: bool,
+    /// The journal held on every node for the chaos window (#188), drawn
+    /// once per seed (`crate::shape::journals`); `None` on most seeds.
+    held_journal: Option<JournalId>,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
@@ -175,13 +108,22 @@ impl<T: TimeProvider> BuggifyHooks<T> {
             cutoff,
             enabled,
             seam_crash_bias,
-            scripted: None,
+            withhold_gc: false,
+            held_journal: None,
         }
     }
 
-    /// Script one seam crash into these hooks (a corpus case).
-    pub(crate) fn with_scripted_crash(mut self, scripted: ScriptedCrash) -> Self {
-        self.scripted = Some(scripted);
+    /// Hold `held` on this node for the chaos window
+    /// (`DriverHooks::hold_journal`, #188).
+    pub(crate) fn holding_journal(mut self, held: Option<JournalId>) -> Self {
+        self.held_journal = held;
+        self
+    }
+
+    /// Withhold every GC request these hooks' node would send (a scripted
+    /// corpus case; see `DriverHooks::withhold_gc_requests`).
+    pub(crate) fn withholding_gc(mut self) -> Self {
+        self.withhold_gc = true;
         self
     }
 
@@ -193,28 +135,11 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
     fn crash_at(&self, seam: Seam) -> bool {
-        // The corpus's targeted injection comes first and draws nothing: a
-        // scripted case replays as choreographed (module doc).
-        if self.scripted.as_ref().is_some_and(|s| s.fire(seam)) {
-            assert_reachable!("corpus: a scripted seam crash fires");
-            return true;
-        }
         let prob = 0.03 * self.seam_crash_bias;
         let fired = self.active()
             && match seam {
                 Seam::BeforeSync => buggify_with_prob!(prob),
                 Seam::AfterSyncBeforeSend => buggify_with_prob!(prob),
-                Seam::AfterApplyBeforeSync => buggify_with_prob!(prob),
-                // The chunk-repair pipeline's two durability points (the only
-                // durable writes outside the Ready seam machinery), each its
-                // own independently selectable location.
-                Seam::BeforeChunkSync => buggify_with_prob!(prob),
-                Seam::AfterChunkRestoreBeforeSync => buggify_with_prob!(prob),
-                // The boot replay's own durability point: consulted once per
-                // incarnation that had something to replay, so a generous
-                // rate still crashes only a handful of boots per run — and
-                // each one is a second boot from the same durable state.
-                Seam::AfterBootReplayBeforeSync => buggify_with_prob!(0.25),
                 // The matchmaker's two durability points, each its own
                 // location. A matchmaker drains a batch only on a round
                 // change — a handful per run — so the per-batch rate is an
@@ -253,6 +178,19 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // (`gc_resend_skipped`). A skipped beat stretches the window in which
         // a leader deposed before its quorum acks leaves the floor un-raised.
         self.active() && buggify_with_prob!(0.5)
+    }
+
+    fn withhold_gc_requests(&self) -> bool {
+        // Scripted, never drawn: a corpus choice, not a swarm site.
+        self.withhold_gc
+    }
+
+    fn hold_journal(&self, journal: JournalId) -> bool {
+        // Drawn once per seed (the plan's own BUGGIFY location and its
+        // reachable), never per call: a deterministic answer is safe to ask
+        // per inbound message. Only inside the chaos window, so the held
+        // journal recovers in the tail like any partition.
+        self.active() && self.held_journal == Some(journal)
     }
 
     fn skip_reconfigurer_resend(&self) -> bool {
@@ -329,22 +267,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // so — a fixed reordering the protocol could be tuned around rather
         // than the sporadic one it has to tolerate.
         fire_gate!(self, 0.01, "mailbox: a delivery batch is reversed")
-    }
-
-    fn skip_snapshot_offer(&self, _to: Party) -> bool {
-        // A corpus case with a scripted seam crash still owed: no whole-blob
-        // offer leaves any node until the seam fired, so the below-floor
-        // node heals through the repair plane that reaches it (module doc).
-        if self.scripted.as_ref().is_some_and(ScriptedCrash::armed) {
-            return true;
-        }
-        // Consulted only when an offer is about to go out. Skipping costs the
-        // requester one beat — it re-asks every tick, and any other custodian
-        // may answer — so the rate can be generous: the state worth reaching is
-        // "nobody served me this round", and a below-floor node needs a
-        // snapshot offer rarely enough that a shy rate would never build a
-        // streak of unserved beats.
-        fire_gate!(self, 0.25, "the driver skips a snapshot offer beat")
     }
 
     fn stretch_tick_interval(&self) -> bool {
@@ -461,22 +383,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         )
     }
 
-    fn skip_snap_advertisement(&self) -> bool {
-        // Consulted only when an advertisement is due; skipping loses one
-        // custody beat toward the leader's truncation-coupling tally.
-        fire_gate!(
-            self,
-            0.5,
-            "the driver skips a snapshot custody advertisement"
-        )
-    }
-
-    fn skip_chunk_pull(&self) -> bool {
-        // Consulted only when rotted chunks are pending; skipping delays the
-        // repair one beat and stretches the faulty window.
-        fire_gate!(self, 0.5, "the driver skips a chunk-repair pull beat")
-    }
-
     #[tracing::instrument(level = "trace", skip_all)]
     fn drop_outgoing(&self, _to: Party, msg: &Message) -> bool {
         if !self.active() {
@@ -487,16 +393,16 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // (#80) — one earlier slot's Accept vanishes while later slots land —
         // while losing a `Promise`/`Prepare` stretches elections open, and a
         // lost `Nack` keeps a below-floor candidate's campaign alive long
-        // enough for the answering snapshot to land mid-election (the
+        // enough for the answering trim point to land mid-election (the
         // truncated-quorum Nack otherwise steps the candidate down before the
-        // `CatchUpRequest`'s snapshot offer arrives — the #88 window).
+        // `CatchUpRequest`'s `TrimmedTo` arrives — the #88 window).
         match msg {
             Message::Accept { .. } => buggify_with_prob!(0.05),
             Message::Prepare { .. } | Message::Promise { .. } => buggify_with_prob!(0.10),
             Message::Nack { .. } => buggify_with_prob!(0.25),
             // A dropped `Commit` delays a follower's floor-raise (truncation
             // applies lazily at its Truncate slot), widening the mixed-floor
-            // window the #88 mid-election snapshot needs — and leaves the
+            // window the #88 mid-election trim jump needs — and leaves the
             // follower hole commit-replay catch-up must heal (#80's terrain).
             Message::Commit { .. } => buggify_with_prob!(0.05),
             // The lost *ack*: a slot durably accepted by a quorum whose
@@ -509,18 +415,12 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => buggify_with_prob!(0.02),
             // Repair traffic for a node that is already behind: a lost
             // response costs one beat of latency and re-derives on the next.
-            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+            Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
                 buggify_with_prob!(0.10)
             }
             // The pull direction of catch-up: a lost request starves the
             // lagging node one beat; the next tick re-asks.
             Message::CatchUpRequest { .. } => buggify_with_prob!(0.10),
-            // The snap-repair plane, one location per kind: a lost custody
-            // ack delays the leader's truncation-coupling tally; a lost chunk
-            // request/response stretches the faulty-chunk window one beat.
-            Message::SnapAck { .. } => buggify_with_prob!(0.10),
-            Message::SnapChunkRequest { .. } => buggify_with_prob!(0.10),
-            Message::SnapChunkResponse { .. } => buggify_with_prob!(0.10),
             // The whole handoff, lost in one message. The correctness claim is
             // that this costs *availability only*: the outgoing leader has
             // already stepped down, so the cluster simply has no leader until
@@ -546,7 +446,9 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 buggify_with_prob!(0.05)
             }
             Message::Commit { .. } => buggify_with_prob!(0.05),
-            Message::InstallSnapshot { .. } | Message::CatchUpResponse { .. } => {
+            // A duplicated trim point must be a no-op the second time (the
+            // jump refuses a point at or below its floor).
+            Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
                 buggify_with_prob!(0.10)
             }
             // A duplicated catch-up request must only cost a redundant reply.
@@ -555,13 +457,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // allocator rewind) and refused everywhere else — the structural
             // half of authority uniqueness, kept honest by firing it often.
             Message::Relinquish { .. } => buggify_with_prob!(0.25),
-            // The snap-repair plane must stay idempotent: the leader's custody
-            // tally is a set, and a re-delivered chunk response finds its
-            // chunks no longer pending. One location per kind keeps the two
-            // idempotency claims independently selectable.
-            Message::SnapAck { .. } => buggify_with_prob!(0.10),
-            Message::SnapChunkRequest { .. } => buggify_with_prob!(0.10),
-            Message::SnapChunkResponse { .. } => buggify_with_prob!(0.10),
             _ => false,
         }
     }
@@ -577,6 +472,9 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             paros::Reply::Propose => buggify_with_prob!(0.10),
             paros::Reply::ProposeDedup => buggify_with_prob!(0.10),
             paros::Reply::Read => buggify_with_prob!(0.10),
+            // A lost journal read (#185): the client re-asks, and a read
+            // parked at the end costs it its deadline first.
+            paros::Reply::LogRead => buggify_with_prob!(0.10),
             // A lost redirect costs the client its whole request deadline
             // before it retries blind, so the retarget policies meet a stale
             // hint under time pressure instead of a fresh one.
@@ -635,15 +533,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // the trait doc.
             _ => false,
         }
-    }
-
-    fn withhold_snap_chunk(&self, _to: NodeId) -> bool {
-        // Per chunk that would otherwise be served. Generous: a requester
-        // re-asks every tick and every custodian, so what this builds is the
-        // multi-beat, multi-custodian repair shape rather than a stall. Gated
-        // in the audit (`snap_chunk_withheld`), where the requester's later
-        // repair can be tied back to the silence.
-        self.active() && buggify_with_prob!(0.25)
     }
 
     fn phase2_column(&self, slot: Slot, cols: usize) -> Option<usize> {
