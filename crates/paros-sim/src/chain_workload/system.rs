@@ -76,22 +76,36 @@ pub(super) struct SystemOps {
 }
 
 impl SystemOps {
+    /// The operations of client `client_id` on `deployment`: `active` when
+    /// the run runs the system journals, `genesis` the journals it booted
+    /// with.
     pub(super) fn new(
+        deployment: &crate::roles::Deployment,
         active: bool,
-        pool: usize,
-        joiners: Vec<(NodeId, String)>,
         genesis: Vec<JournalId>,
-        spares: bool,
         client_id: u64,
         timeout: Duration,
     ) -> Self {
+        let pool = deployment.acceptors().len();
+        let matchmakers = !deployment.matchmakers().is_empty();
         Self {
             active,
-            seeds: crate::shape::seed_ranks(pool).len().max(1),
+            seeds: crate::shape::seed_ranks(pool, matchmakers).len().max(1),
             pool,
-            joiners,
+            joiners: deployment
+                .joiners()
+                .iter()
+                .enumerate()
+                .filter_map(|(rank, ip)| {
+                    paros::parse_addr(ip)
+                        .ok()
+                        .map(|addr| (crate::roles::joiner_node_id(rank), addr))
+                })
+                .collect(),
             genesis,
-            spares,
+            spares: matchmakers
+                && deployment.proxies().is_empty()
+                && deployment.replicas().is_empty(),
             client_id,
             next_seq: SYSTEM_SEQ_BASE,
             created: Vec::new(),

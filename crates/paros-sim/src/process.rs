@@ -1168,6 +1168,25 @@ impl JournalStores for SimStores<'_> {
         true
     }
 
+    /// A journal a storage fault quarantined whose store the world has
+    /// parked for good (a detected persistent corruption) will never open
+    /// again: the audit hears the node is down for it now, as it would from
+    /// a one-journal node's fail-stop exit, rather than at a re-open the run
+    /// may end before (a node that serves the system journals keeps running
+    /// with the journal down; witness 18183308543219257601).
+    fn quarantined(&mut self, journal: paros::JournalId) {
+        if let Some(seat) = self.seat(journal)
+            && seat
+                .world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .park_reason(self.ip)
+                == Some(ParkReason::Corruption)
+        {
+            stay_down(&seat.checker, Down::StorageParked(self.rank));
+        }
+    }
+
     fn delete(&mut self, journal: paros::JournalId) {
         if let Some(seat) = self.seats.iter_mut().find(|seat| seat.journal == journal) {
             seat.deleted = true;
@@ -1225,10 +1244,11 @@ fn system_plan(
     plan: &crate::shape::JournalPlan,
     self_id: NodeId,
 ) -> (SystemPlan, Vec<NodeId>) {
-    let seeds: Vec<NodeId> = crate::shape::seed_ranks(members.len())
-        .into_iter()
-        .map(NodeId)
-        .collect();
+    let seeds: Vec<NodeId> =
+        crate::shape::seed_ranks(members.len(), !deployment.matchmakers().is_empty())
+            .into_iter()
+            .map(NodeId)
+            .collect();
     let board = crate::audit::system::system_board(ctx.state());
     let spares = spare_template(ctx, deployment);
     crate::audit::system::lock(&board).arm(

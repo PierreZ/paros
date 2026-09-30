@@ -371,14 +371,45 @@ impl Retarget {
         }
     }
 
-    fn next(self, current: usize, hinted: Option<u64>, server_count: usize) -> usize {
-        let hint = hinted
-            .and_then(|id| usize::try_from(id).ok())
-            .filter(|node| *node < server_count);
+    fn next(self, current: usize, hinted: Option<u64>, routes: Routes) -> usize {
+        let hint = hinted.and_then(|id| routes.index(id));
         match self {
-            Self::FollowHint => hint.unwrap_or((current + 1) % server_count),
+            Self::FollowHint => hint.unwrap_or((current + 1) % routes.servers),
             Self::SameNode => current,
-            Self::NextNode => (current + 1) % server_count,
+            Self::NextNode => (current + 1) % routes.servers,
+        }
+    }
+}
+
+/// How the client reaches a node by its id (#189): the genesis pool at its
+/// rank, and a joiner — a node the registry admitted, which a
+/// reconfiguration may make a member and then a leader — after them, at
+/// `servers + rank`. Every draw the client makes stays over the genesis
+/// pool; only a leader a reply names can route to a joiner.
+#[derive(Clone, Copy, Debug)]
+struct Routes {
+    servers: usize,
+    joiners: usize,
+}
+
+impl Routes {
+    /// The client index of node `id`, if the client can reach it.
+    fn index(self, id: u64) -> Option<usize> {
+        let id = usize::try_from(id).ok()?;
+        if id < self.servers {
+            return Some(id);
+        }
+        let joiner_base = usize::try_from(crate::roles::joiner_node_id(0).0).ok()?;
+        id.checked_sub(joiner_base)
+            .filter(|rank| *rank < self.joiners)
+            .map(|rank| self.servers + rank)
+    }
+
+    /// The node id of client index `index` (the inverse of [`Routes::index`]).
+    fn id(self, index: usize) -> u64 {
+        match index.checked_sub(self.servers) {
+            Some(rank) => crate::roles::joiner_node_id(rank).0,
+            None => index as u64,
         }
     }
 }
@@ -394,10 +425,8 @@ struct LeaderHint {
 impl LeaderHint {
     /// Adopt the leader a reply named (`None`, or an id outside the pool,
     /// clears the hint); a change of leader remembers the previous one.
-    fn observe(&mut self, observed: Option<u64>, server_count: usize) {
-        let next = observed
-            .and_then(|id| usize::try_from(id).ok())
-            .filter(|node| *node < server_count);
+    fn observe(&mut self, observed: Option<u64>, routes: Routes) {
+        let next = observed.and_then(|id| routes.index(id));
         if let (Some(previous), Some(next)) = (self.current, next)
             && previous != next
         {
@@ -939,7 +968,7 @@ impl Workload for ChainWorkload {
                 Duration::from_millis(config.keep_alive_timeout_ms),
             ),
         )?;
-        let clients = runtime.clients(&servers)?;
+        let mut clients = runtime.clients(&servers)?;
         // The replica tier (#144): never proposed to, only probed — a replica
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
@@ -964,6 +993,14 @@ impl Workload for ChainWorkload {
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
         };
         let server_count = clients.len();
+        // The joiners (#189), reachable after the genesis pool: a
+        // reconfiguration may make one a member and then the leader, and a
+        // client that cannot reach its leader cannot append at all.
+        clients.extend(runtime.clients(deployment.joiners())?);
+        let routes = Routes {
+            servers: server_count,
+            joiners: deployment.joiners().len(),
+        };
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let mut next_seq = 0_u64;
         let mut hint = LeaderHint::default();
@@ -983,23 +1020,12 @@ impl Workload for ChainWorkload {
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
         let mut system_ops = system::SystemOps::new(
+            &deployment,
             crate::shape::system_journals(ctx.state(), true),
-            server_count,
-            deployment
-                .joiners()
-                .iter()
-                .enumerate()
-                .filter_map(|(rank, ip)| {
-                    paros::parse_addr(ip)
-                        .ok()
-                        .map(|addr| (crate::roles::joiner_node_id(rank), addr))
-                })
-                .collect(),
             self.plan
                 .as_ref()
                 .map(|plan| plan.ids.clone())
                 .unwrap_or_default(),
-            has_matchmakers && deployment.proxies().is_empty() && deployment.replicas().is_empty(),
             client_id,
             request_timeout,
         );
@@ -1075,14 +1101,14 @@ impl Workload for ChainWorkload {
                 let (seq, cmd_hash) = (submission.seq, submission.cmd_hash);
                 match result {
                     ProposalResult::Acked { leader, slot } => {
-                        hint.observe(leader, server_count);
+                        hint.observe(leader, routes);
                         max_acked_slot = max_acked_slot.max(Some(slot));
                         self.record_ack(client_id, &submission, slot, leader, now_ms());
                         self.adversarial.payload_classes[submission.payload_class] = true;
                         acked_commands.push(submission.acked(slot, hint.current.unwrap_or(target)));
                     }
                     ProposalResult::Rejected { leader } => {
-                        hint.observe(leader, server_count);
+                        hint.observe(leader, routes);
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                     }
                     ProposalResult::Ambiguous => {
@@ -1201,8 +1227,7 @@ impl Workload for ChainWorkload {
                             ProposalResult::Rejected { leader }
                                 if op == PROPOSE && time.now() < proposal_deadline =>
                             {
-                                attempt_target =
-                                    retarget.next(attempt_target, leader, server_count);
+                                attempt_target = retarget.next(attempt_target, leader, routes);
                                 time.sleep(Duration::from_millis(config.redirect_sleep_ms))
                                     .await
                                     .ok();
@@ -1219,7 +1244,7 @@ impl Workload for ChainWorkload {
                         let retry_target = retarget.next(
                             chosen_target,
                             hint.current.and_then(|node| u64::try_from(node).ok()),
-                            server_count,
+                            routes,
                         );
                         let reconciled = within(
                             ctx,
@@ -1238,7 +1263,7 @@ impl Workload for ChainWorkload {
 
                     match result {
                         ProposalResult::Acked { leader, slot } => {
-                            hint.observe(leader, server_count);
+                            hint.observe(leader, routes);
                             max_acked_slot = max_acked_slot.max(Some(slot));
                             self.record_ack(client_id, &submission, slot, leader, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
@@ -1258,7 +1283,7 @@ impl Workload for ChainWorkload {
                             }
                         }
                         ProposalResult::Rejected { leader } => {
-                            hint.observe(leader, server_count);
+                            hint.observe(leader, routes);
                             self.history.record_write_failed(seq);
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
@@ -1327,10 +1352,10 @@ impl Workload for ChainWorkload {
                                     );
                                     self.adversarial.duplicate_across_leader_change = true;
                                 }
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                             }
                             ProposalResult::Rejected { leader } => {
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                             }
                             ProposalResult::Ambiguous => {}
                         }
@@ -1405,14 +1430,14 @@ impl Workload for ChainWorkload {
                         }
 
                         if let Some((slot, leader, ack_target)) = committed {
-                            hint.observe(leader, server_count);
+                            hint.observe(leader, routes);
                             max_acked_slot = max_acked_slot.max(Some(slot));
                             self.record_ack(client_id, &submission, slot, leader, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             acked_commands
                                 .push(submission.acked(slot, hint.current.unwrap_or(ack_target)));
                         } else if rejected == targets.len() {
-                            hint.observe(redirect, server_count);
+                            hint.observe(redirect, routes);
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -1524,11 +1549,11 @@ impl Workload for ChainWorkload {
                             };
                             match result {
                                 CompactResult::Accepted { leader } => {
-                                    hint.observe(leader, server_count);
+                                    hint.observe(leader, routes);
                                     tracing::info!(up_to, "chain_compact_accepted");
                                 }
                                 CompactResult::Rejected { leader } => {
-                                    hint.observe(leader, server_count);
+                                    hint.observe(leader, routes);
                                 }
                                 CompactResult::Ambiguous => {}
                             }
@@ -1579,10 +1604,17 @@ impl Workload for ChainWorkload {
                     let mut attempt_target = if quorum {
                         let span = u64::try_from(server_count + replica_count).unwrap_or(1);
                         let drawn = usize::try_from((raw_target >> 32) % span).unwrap_or(0);
-                        if drawn >= server_count {
-                            assert_reachable!("chain: a quorum read is asked of a replica");
+                        match drawn.checked_sub(server_count) {
+                            // A replica sits past every node the client can
+                            // reach — the joiners included (#189) — so a
+                            // redirect to a joining leader is never read as
+                            // one.
+                            Some(replica) => {
+                                assert_reachable!("chain: a quorum read is asked of a replica");
+                                clients.len() + replica
+                            }
+                            None => drawn,
                         }
-                        drawn
                     } else {
                         hint.current.unwrap_or(target) % server_count
                     };
@@ -1593,7 +1625,7 @@ impl Workload for ChainWorkload {
                             break None;
                         }
                         attempts += 1;
-                        let client = match attempt_target.checked_sub(server_count) {
+                        let client = match attempt_target.checked_sub(clients.len()) {
                             Some(replica) => replica_clients[replica].clone(),
                             None => clients[attempt_target].clone(),
                         };
@@ -1631,12 +1663,11 @@ impl Workload for ChainWorkload {
                                 // the same deadline. An overdue quorum read
                                 // names no node to go to: any other serves.
                                 let leader = if quorum { None } else { ack.leader };
-                                attempt_target =
-                                    retarget.next(attempt_target, leader, server_count);
+                                attempt_target = retarget.next(attempt_target, leader, routes);
                             }
                             // Transport error: same policy, no hint.
                             None => {
-                                attempt_target = retarget.next(attempt_target, None, server_count);
+                                attempt_target = retarget.next(attempt_target, None, routes);
                             }
                         }
                         if time
@@ -1830,7 +1861,7 @@ impl Workload for ChainWorkload {
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
-                    let leader_id = hint.current.and_then(|l| u64::try_from(l).ok());
+                    let leader_id = hint.current.map(|l| routes.id(l));
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
@@ -2012,7 +2043,7 @@ impl Workload for ChainWorkload {
                                     { "shape" => name }
                                 );
                                 self.adversarial.reconfigure_started[observed] = true;
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                                 // A rare-but-valid operator act (#173):
                                 // reboot every member of the configuration
                                 // just installed. Each loses its belief in
@@ -2064,7 +2095,7 @@ impl Workload for ChainWorkload {
                                         "reconfiguration: a configuration that does not admit its quorum system is refused"
                                     );
                                 }
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                             }
                             ReconfigureResult::Ambiguous => {}
                         }
@@ -2492,7 +2523,7 @@ impl Workload for ChainWorkload {
                         acknowledged = true;
                         self.record_ack(client_id, &submission, slot, leader, now_ms());
                         if let Some(node) = leader {
-                            target = usize::try_from(node).unwrap_or(target) % server_count;
+                            target = routes.index(node).unwrap_or(target % server_count);
                         }
                         break;
                     }
@@ -2500,8 +2531,7 @@ impl Workload for ChainWorkload {
                         // A leader outside the genesis pool (#189: a joiner
                         // a reconfiguration pulled in) has no client here.
                         target = leader
-                            .and_then(|id| usize::try_from(id).ok())
-                            .filter(|node| *node < server_count)
+                            .and_then(|id| routes.index(id))
                             .unwrap_or((target + 1) % server_count);
                     }
                     ProposalResult::Ambiguous => target = (target + 1) % server_count,

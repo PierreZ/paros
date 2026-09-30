@@ -836,6 +836,9 @@ where
         )
         .await;
     }
+    for journal in journals.take_quarantined() {
+        stores.quarantined(journal);
+    }
     if journals.exhausted() && (!follows || journals.stranded()) {
         return journals.exit();
     }
@@ -1436,6 +1439,11 @@ where
                     }
                 }
                 ticks += 1;
+                // Tell the opener about every journal a storage fault took
+                // since the last beat: it may know the store is gone for good.
+                for journal in journals.take_quarantined() {
+                    stores.quarantined(journal);
+                }
                 // A quarantined journal whose time is up re-opens from its
                 // store — a restart of that journal alone.
                 let due = journals.due(ticks, tunables.quarantine_ticks);

@@ -58,6 +58,15 @@ pub trait JournalStores {
         false
     }
 
+    /// `journal` was just quarantined on this node: a storage fault ended its
+    /// incarnation, and the driver re-opens it after
+    /// [`DriverTunables::quarantine_ticks`]. An opener that already knows
+    /// the store will not open again (a disk gone for good) can say so now
+    /// rather than at the re-open. The default does nothing.
+    fn quarantined(&mut self, journal: JournalId) {
+        let _ = journal;
+    }
+
     /// `journal` was tombstoned (#189): its store will never be opened
     /// again. The default keeps it.
     fn delete(&mut self, journal: JournalId) {
@@ -161,6 +170,9 @@ pub(crate) struct Journals<S, A> {
     pub(crate) live: BTreeMap<JournalId, JournalRt<S, A>>,
     quarantined: BTreeMap<JournalId, u64>,
     down: BTreeSet<JournalId>,
+    /// Journals quarantined since the loop last told the opener
+    /// ([`JournalStores::quarantined`]).
+    newly_quarantined: Vec<JournalId>,
     /// The fault that ended the most recent incarnation, the node's exit
     /// when nothing is left.
     last_fault: Option<RunError>,
@@ -172,6 +184,7 @@ impl<S, A> Journals<S, A> {
             live: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             down: BTreeSet::new(),
+            newly_quarantined: Vec::new(),
             last_fault: None,
         }
     }
@@ -234,7 +247,13 @@ impl<S, A> Journals<S, A> {
     /// Put `journal` back in quarantine from tick `now` (its re-open failed).
     pub(crate) fn requarantine(&mut self, journal: JournalId, now: u64, fault: RunError) {
         self.quarantined.insert(journal, now);
+        self.newly_quarantined.push(journal);
         self.last_fault = Some(fault);
+    }
+
+    /// The journals quarantined since the last call, for the opener.
+    pub(crate) fn take_quarantined(&mut self) -> Vec<JournalId> {
+        std::mem::take(&mut self.newly_quarantined)
     }
 
     /// Whether the node has nothing left to serve this incarnation: no live
@@ -283,6 +302,7 @@ impl<S, A: Audit> Journals<S, A> {
                 }
                 tracing::warn!(node = self_id, journal = journal.0, "journal_quarantined");
                 self.quarantined.insert(journal, now);
+                self.newly_quarantined.push(journal);
                 self.last_fault = Some(RunError::Storage(error));
                 if self.live.is_empty() {
                     // Nothing left to serve this incarnation: the node

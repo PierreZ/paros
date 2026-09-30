@@ -11,7 +11,7 @@ use crate::storage::LogStorage;
 
 use super::config::{BootKind, BootRefusal, RunError};
 use super::events::command_hash;
-use super::ready::storage_fault_crash;
+use super::ready::{report_applied, storage_fault_crash};
 
 /// #147: judge the operator's claim against the store's format marker,
 /// before the core reads a byte. The marker is what makes "a wiped identity
@@ -135,4 +135,23 @@ pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, au
         &deployment,
         &records,
     );
+    // The recovered chosen prefix, re-reported as walked, in slot order: a
+    // chosen slot's record is its authoritative accepted record, and the
+    // prefix *is* this node's state (#186). A slot made durable and chosen
+    // just before a crash at `AfterSyncBeforeSend` was never reported walked
+    // by this node, and on a one-member journal no other node reports it
+    // either (#189: the system journals on one seed; witness
+    // 13093924963020097181) — a later dedup ack would then name a slot no
+    // report ever applied. A replay of a slot already reported is
+    // idempotent to every oracle.
+    if let Some(chosen) = node.hard_state().chosen_index {
+        let mut next = node.acceptor().first_slot();
+        for (slot, (_, command)) in node.acceptor().records().range(..=chosen) {
+            if *slot != next {
+                break;
+            }
+            report_applied(audit, self_id, *slot, command);
+            next = Slot(slot.0 + 1);
+        }
+    }
 }

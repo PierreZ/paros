@@ -535,13 +535,15 @@ pub(crate) fn journal_store(
 pub(crate) const SEED_COUNT: usize = 3;
 
 /// The seeds of a pool of `pool` nodes (#189): its [`SEED_COUNT`] lowest
-/// ranks. Never fewer than three where the pool allows (it always does,
-/// `PROCESS_POOL_RANGE` starts at three): a one-member system journal is
-/// the only journal whose chosen slot a single crash can leave unreported
-/// by every learner, and the system journals' plain beats among three
-/// nodes are the lightest load a journal adds.
-pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
-    (0..pool.min(SEED_COUNT) as u64).collect()
+/// ranks — or, on a seed with matchmakers, its lowest rank alone. A
+/// one-member plain journal sends nothing to anyone, and a matchmaker
+/// deployment's two-round-trip campaigns livelock under the load of two
+/// more journals' beats on every link (witness 17972338006788767545 on
+/// this branch: 3 nodes, 240 campaigns, no stable leader — the load
+/// [`journals`] already keeps off those seeds).
+pub(crate) fn seed_ranks(pool: usize, matchmakers: bool) -> Vec<u64> {
+    let seeds = if matchmakers { 1 } else { SEED_COUNT };
+    (0..pool.min(seeds) as u64).collect()
 }
 
 /// Whether the run runs the **system journals** (#189) — the directory and
