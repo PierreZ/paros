@@ -361,6 +361,11 @@ impl World {
                     show_ballot(*watermark)
                 )
             }
+            MatchStep::UnknownMember => format!(
+                "{} abandons its campaign: the matchmakers name a node it has never heard of. It \
+                 waits until the node registry tells it about that node, and campaigns again.",
+                who(id)
+            ),
             MatchStep::Refused(refusal) => format!(
                 "{} abandons its campaign: a matchmaker refused it, because {}. A refused \
                  registration does not become a leadership. The next campaign opens at a higher \

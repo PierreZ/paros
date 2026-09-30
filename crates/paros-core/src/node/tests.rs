@@ -375,6 +375,7 @@ mod invariants;
 mod matchmaking;
 mod membership_probe;
 mod phase2;
+mod pool;
 mod quorum_reads;
 mod reads;
 mod reconfigure;

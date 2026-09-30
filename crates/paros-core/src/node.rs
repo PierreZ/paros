@@ -247,6 +247,13 @@ pub struct ColocatedNode {
     /// no surviving configuration can ask this node for a Phase-1 promise,
     /// because every configuration it was ever a member of is forgotten.
     last_member_ballot: Ballot,
+    /// The **addressable pool** in force (#189): every node this one follows,
+    /// counts and answers — `Config::pool` at boot, grown at runtime by
+    /// [`ColocatedNode::extend_pool`] as the deployment's node registry
+    /// admits nodes. Grow-only, sorted and deduplicated, a superset of every
+    /// configuration this node has adopted. Volatile: a restart boots from
+    /// `Config::pool` again and the driver extends it anew.
+    pool: Vec<NodeId>,
     /// The **acceptor** component ([`crate::acceptor::Acceptor`]): the
     /// durable promise, the per-slot accepted log, the compaction floor and
     /// the CTRL tri-state's faulty entries. Rebuilt on boot from the durable
@@ -1166,6 +1173,50 @@ impl ColocatedNode {
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The addressable pool in force (#189): `Config::pool`, plus every node
+    /// [`ColocatedNode::extend_pool`] admitted since this incarnation booted.
+    #[must_use]
+    pub fn pool(&self) -> &[NodeId] {
+        &self.pool
+    }
+
+    /// Admit `nodes` to the addressable pool (#189): a node registered with
+    /// the deployment at runtime becomes one this node follows, counts and
+    /// answers — a configuration may name it, a reconfiguration may pull it
+    /// in. **Grow-only**: a node leaves no pool here (a retired node is kept
+    /// out by the caller, who stops talking to it; a configuration that
+    /// still names it must stay one this node can run). Pure hygiene: it
+    /// emits nothing. Refused — `false`, nothing moves — on a deployment
+    /// without matchmakers: plain Multi-Paxos never reconfigures, so a node
+    /// admitted to its pool could never be named by a configuration, and its
+    /// learner traffic stays exactly today's. Returns whether the pool grew.
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, nodes = nodes.len())))]
+    pub fn extend_pool(&mut self, nodes: &[NodeId]) -> bool {
+        if !self.config.has_matchmakers() {
+            return false;
+        }
+        let before = self.pool.len();
+        self.pool.extend_from_slice(nodes);
+        self.pool.sort_unstable();
+        self.pool.dedup();
+        let grew = self.pool.len() > before;
+        // Postconditions: the pool only grew, and still holds the boot pool.
+        assert!(self.pool.len() >= before, "the pool never shrinks");
+        assert!(
+            self.config
+                .pool()
+                .iter()
+                .all(|n| self.pool.binary_search(n).is_ok()),
+            "the pool always holds the boot pool"
+        );
+        self.assert_invariants();
+        grew
     }
 
     /// The acceptor configuration in force for the highest ballot this node

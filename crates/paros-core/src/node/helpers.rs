@@ -20,7 +20,7 @@ impl ColocatedNode {
     /// is never followed, counted, or replied to. Membership of a
     /// *configuration* is a separate, per-configuration question.
     pub(super) fn in_pool(&self, node: NodeId) -> bool {
-        self.config.pool().binary_search(&node).is_ok()
+        self.pool.binary_search(&node).is_ok()
     }
 
     // ---- the wire-configuration coin ----------------------------------------

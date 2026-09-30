@@ -179,6 +179,12 @@ pub enum MatchStep {
     /// One more matchmaker answered the open membership probe (#173), and
     /// the probe still waits for a quorum.
     ProbeAnswered,
+    /// The quorum's answers name a configuration with a node outside this
+    /// node's pool (#189: a node the deployment's registry admitted that this
+    /// node has not heard of yet): the campaign (or the membership probe) is
+    /// abandoned and this node is a follower again. The next one, once the
+    /// pool has caught up, completes — a liveness cost, never a safety one.
+    UnknownMember,
     /// A matchmaker quorum answered the membership probe and it closed: the
     /// node's belief is now heard — the effective configuration they named,
     /// or the bootstrap confirmed when they named none — and a node the
@@ -445,6 +451,12 @@ impl ColocatedNode {
                     "a completed matchmaking phase is closed"
                 );
             }
+            MatchStep::UnknownMember => {
+                assert!(
+                    self.matchmaking.is_none() && self.probe.is_none(),
+                    "a campaign or probe that met an unknown member is closed"
+                );
+            }
             MatchStep::Registered { .. }
             | MatchStep::Paged { .. }
             | MatchStep::Ignored
@@ -486,6 +498,25 @@ impl ColocatedNode {
         }
         let m = self.matchmaking.as_mut().expect("the phase is still open");
         let registered = m.registered();
+        // Wire hygiene at the matchmaking → Phase 1 boundary (#189): a
+        // configuration the histories name — the effective one or any prior
+        // one — must be one this node can run. One naming a node outside the
+        // pool (admitted by the registry, not yet by this node) abandons the
+        // campaign rather than acting on it.
+        let unknown = |c: &AcceptorConfig, pool: &[NodeId]| {
+            !c.members().iter().all(|n| pool.binary_search(n).is_ok())
+        };
+        if m.quorum_held(matchmakers)
+            && (m
+                .stale_belief()
+                .is_some_and(|(_, c)| unknown(&c, &self.pool))
+                || m.prior().iter().any(|c| unknown(c, &self.pool)))
+        {
+            self.matchmaking = None;
+            self.become_follower(None);
+            return MatchStep::UnknownMember;
+        }
+        let m = self.matchmaking.as_mut().expect("the phase is still open");
         if !m.quorum_held(matchmakers) {
             MatchStep::Registered {
                 remaining: m.remaining(matchmakers),
@@ -579,6 +610,16 @@ impl ColocatedNode {
         }
         let effective = probe.effective().cloned();
         self.probe = None;
+        // The probe's twin of the campaign's guard (#189): an effective
+        // configuration naming a node outside the pool is not adopted; the
+        // belief stays the bootstrap default and the next election timeout
+        // probes again, once the pool has caught up.
+        if effective
+            .as_ref()
+            .is_some_and(|(_, c)| !c.members().iter().all(|n| self.in_pool(*n)))
+        {
+            return MatchStep::UnknownMember;
+        }
         // A belief heard since the probe opened would have closed it
         // (`adopt_configuration`): what closes here is still the default.
         assert!(
