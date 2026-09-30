@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, assert_always, assert_reachable};
+use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
 use paros::system::{
     DIRECTORY, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, REGISTRY, Registry,
     SystemCommand, SystemEvent,
@@ -220,9 +220,26 @@ impl SystemOps {
         }
         let size = candidates.len().min(3);
         let start = usize::try_from(payload % candidates.len() as u64).unwrap_or(0);
-        let members: Vec<NodeId> = (0..size)
+        let mut members: Vec<NodeId> = (0..size)
             .map(|k| candidates[(start + k) % candidates.len()])
             .collect();
+        // The operator who places a journal on a node before registering
+        // it — a valid order, and the one that makes a joiner speak to
+        // nodes whose registry fold has not admitted it yet: its own
+        // location. The joiner takes one seat beside two genesis nodes, so
+        // the journal elects without it.
+        if self.active && !self.joiners.is_empty() && self.pool >= 2 && buggify_with_prob!(0.25) {
+            assert_reachable!(
+                "system: a client creates a journal naming a joiner not yet registered"
+            );
+            let joiner =
+                self.joiners[usize::try_from(class % self.joiners.len() as u64).unwrap_or(0)].0;
+            members = vec![
+                joiner,
+                NodeId(start as u64 % self.pool as u64),
+                NodeId((start as u64 + 1) % self.pool as u64),
+            ];
+        }
         let config = AcceptorConfig::new(members, QuorumSystem::Majority);
         let command = SystemCommand::CreateJournal {
             name,
