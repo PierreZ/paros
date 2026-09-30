@@ -257,16 +257,28 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         matchmaker_generation: last_generation,
         failed_campaigns,
     } = last;
+    // The election backoff's streak ends only when this node hears another
+    // node lead: a cluster with a leader other nodes follow has settled.
+    // Being the leader does not end it — a leadership deposed before any
+    // peer followed it is a duel, not a settlement.
+    if node.leader().is_some_and(|leader| leader.0 != self_id) {
+        *failed_campaigns = 0;
+    }
     if node.needs_election_timeout() {
-        // The election backoff: a clock that reset while this node is still
-        // a candidate with no leader known is a campaign that failed, and
-        // each consecutive one doubles the base (capped), so a round
-        // eventually outlasts the slowest promise it waits on. Knowing a
-        // leader, or being one, ends the streak.
-        if node.role() == NodeRole::Candidate && node.leader().is_none() {
+        // The election backoff: a clock that reset with no leader known —
+        // a campaign that failed, or a leadership a rival's `Prepare`
+        // deposed — is one more round in a streak, and each consecutive
+        // one doubles the base (capped), so a round eventually outlasts the
+        // slowest promise it waits on and the time a new leader's first
+        // beat takes to arrive. A deposed leader that only counted
+        // candidacies reset its streak on winning and re-campaigned one base
+        // timeout after its rival's `Prepare`, before the rival's first beat
+        // could land, and deposed it in turn: two matchmaker-deployment
+        // candidates traded leadership through 183 rounds and the whole
+        // quiet tail (witness seed 14889077543971178620 of the coverage
+        // sweep that landed #204).
+        if node.role() != NodeRole::Leader && node.leader().is_none() {
             *failed_campaigns = failed_campaigns.saturating_add(1);
-        } else {
-            *failed_campaigns = 0;
         }
         let doublings = failed_campaigns.saturating_sub(1).min(backoff_doublings);
         let base = election_base.saturating_mul(1_u64 << doublings.min(16));
