@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/paros.proto",
                 "proto/internal.proto",
                 "proto/matchmaker.proto",
+                "proto/system.proto",
             ],
             &["proto"],
         )?;

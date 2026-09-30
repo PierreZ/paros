@@ -154,7 +154,7 @@ pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem,
     }
 }
 
-pub(super) fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
+pub(crate) fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
     let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
         quorum_system_to_proto(config.quorum_system()).into_parts();
     common::AcceptorConfig {
@@ -173,7 +173,7 @@ pub(super) fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig
 /// the wire it is external input, so it is validated here first
 /// (`QuorumSystem::admits` over the deduplicated membership) and answered
 /// with an error, never a crash.
-pub(super) fn config_from_proto(
+pub(crate) fn config_from_proto(
     config: Option<common::AcceptorConfig>,
 ) -> Result<Option<AcceptorConfig>, &'static str> {
     let Some(config) = config else {

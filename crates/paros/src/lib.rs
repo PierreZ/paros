@@ -37,6 +37,7 @@ mod proxy;
 mod replica_tier;
 mod rpc;
 mod storage;
+pub mod system;
 
 pub use audit::{
     Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
@@ -60,7 +61,7 @@ pub use rpc::{
 /// generated protobuf bodies.
 pub mod wire {
     pub use crate::rpc::methods;
-    pub use crate::rpc::{common, internal, matchmaker, public};
+    pub use crate::rpc::{common, internal, matchmaker, public, system};
 }
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

@@ -36,6 +36,14 @@ pub mod matchmaker {
     include!(concat!(env!("OUT_DIR"), "/paros.matchmaker.v1.rs"));
 }
 
+/// The system journals' entries (#189), generated from
+/// `proto/system.proto`: one record per slot of journal 1 (the directory) or
+/// journal 2 (the node registry), read by `paros::system`.
+pub mod system {
+    #![allow(missing_docs, clippy::pedantic)]
+    include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));
+}
+
 mod client;
 mod codec;
 mod consensus;
@@ -65,6 +73,7 @@ pub use public::{
 };
 
 pub use codec::{WireQuorumSystem, quorum_system_from_proto, quorum_system_to_proto};
+pub(crate) use codec::{config_from_proto, config_to_proto};
 pub(crate) use consensus::{message_from_proto, message_to_proto};
 pub(crate) use matchmaker_codec::{
     garbage_collect_ack_from_wire, garbage_collect_from_wire, match_reply_from_wire,
