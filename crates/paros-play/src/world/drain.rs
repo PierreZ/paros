@@ -382,7 +382,11 @@ impl World {
                         .map(move |to| (to, message.clone()))
                 })
                 .collect(),
-            committed: ready.committed().to_vec(),
+            committed: ready
+                .committed()
+                .iter()
+                .map(|(slot, command, _)| (*slot, command.clone()))
+                .collect(),
             read_states: ready.read_states().to_vec(),
             recovery: ready.recovery_batch(),
             match_requests: ready.match_requests().to_vec(),

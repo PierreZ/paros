@@ -42,12 +42,15 @@ pub(crate) fn fold_head(node: &ColocatedNode) -> Option<Slot> {
 /// before it applied here gets no verdict — ambiguous, never false. Swept
 /// over the whole fold, not only the slots this batch walked, so a jump
 /// that chose slots without walking them still answers the calls parked
-/// there. The reply may be deliberately dropped at the reply seam
+/// there. A slot this batch walked is judged from the batch (`walked`):
+/// a `Truncate` folded later in the same walk may already have compacted
+/// it. The reply may be deliberately dropped at the reply seam
 /// ([`DriverHooks::drop_client_reply`]): the journal moved either way, and
 /// the client's retry is answered from the log.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn answer_applied_calls<H, A>(
     node: &ColocatedNode,
+    walked: &[(Slot, Command, Outcome)],
     waiters: &mut ClientWaiters,
     hooks: &H,
     audit: &A,
@@ -62,8 +65,17 @@ fn answer_applied_calls<H, A>(
         let Some(calls) = waiters.pending.remove(&slot) else {
             continue;
         };
-        let decided = node.replica().chosen_at(slot);
-        let outcome = node.replica().outcome_at(slot);
+        let batch = walked
+            .binary_search_by_key(&slot, |(at, _, _)| *at)
+            .ok()
+            .map(|i| &walked[i]);
+        let decided = batch
+            .map(|(_, command, _)| command)
+            .or_else(|| node.replica().chosen_at(slot));
+        let outcome = batch
+            .map(|(_, _, outcome)| outcome)
+            .filter(|outcome| **outcome != Outcome::Noop)
+            .or_else(|| node.replica().outcome_at(slot));
         for call in calls {
             match (decided, outcome) {
                 (Some(command), Some(outcome)) if *command == call.command() => {
@@ -166,7 +178,7 @@ where
                 .map(move |to| (to, msg.clone()))
         })
         .collect();
-    let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
+    let committed: Vec<(Slot, Command, Outcome)> = ready.committed().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     // The matchmaking requests ride the same persist-before-send edge as the
@@ -215,16 +227,11 @@ where
     //    contiguous order) — surface them and the journal state machine's
     //    verdicts to the oracles and answer every call waiting on a slot the
     //    fold now covers (a held reply fires only now that its slot applied).
-    for (slot, command) in &committed {
-        report_applied(
-            audit,
-            self_id,
-            *slot,
-            command,
-            node.replica().outcome_at(*slot),
-        );
+    for (slot, command, outcome) in &committed {
+        let outcome = (*outcome != Outcome::Noop).then_some(outcome);
+        report_applied(audit, self_id, *slot, command, outcome);
     }
-    answer_applied_calls(node, waiters, hooks, audit, self_id);
+    answer_applied_calls(node, &committed, waiters, hooks, audit, self_id);
 
     // 3b. Answer confirmed reads — after the learn step, so the fold this
     //     same batch carried is covered by what the read observes: the page

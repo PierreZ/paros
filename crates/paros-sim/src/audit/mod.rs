@@ -1620,6 +1620,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().quorum_lost = true;
     }
 
+    fn watermark_filled(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.watermark_filled,
+            "a leader fills its frontier to a read's vote watermark"
+        );
+    }
+
     fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {
         let mut st = self.state();
         // Staged, not live: this fires from the boot path *before* the boot's

@@ -769,7 +769,7 @@ impl ReplicaReady<'_> {
     /// contiguous slot order, after the writes are durable — the node's
     /// [`crate::Ready::committed`] contract.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command)] {
+    pub fn committed(&self) -> &[(Slot, Command, crate::Outcome)] {
         self.node.replica.committed()
     }
 

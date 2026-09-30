@@ -291,6 +291,7 @@ pub(super) struct AuditState {
     /// election-timeout window demoted itself. The n=2 regime plus attrition
     /// generates it reliably (killing the only peer starves the window).
     pub(super) quorum_lost: bool,
+    pub(super) watermark_filled: bool,
     /// A parked proposal reply was superseded by a different decided command
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.

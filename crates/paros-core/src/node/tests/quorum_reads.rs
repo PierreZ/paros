@@ -316,3 +316,54 @@ fn a_named_row_is_asked_instead_of_the_default() {
     nodes[4].quorum_read_in(3, Some(7)); // no row 7: back to 3 % 2 = row 1
     assert_eq!(nodes[4].quorum_reads().pending()[0].row(), Some(1));
 }
+
+/// A vote watermark past a settled leader's frontier — a stale vote its
+/// Phase-1 quorum never saw — is filled with `Noop`s by the leader, so a
+/// quorum read that met that acceptor is not left waiting on a slot nobody
+/// will ever propose (#204). A follower hearing the same watermark fills
+/// nothing: only the leader proposes.
+#[test]
+fn a_leader_fills_its_frontier_to_a_reported_vote_watermark() {
+    let mut nodes = cluster_with_three_chosen();
+    for reader in [1_usize, 0] {
+        nodes[reader].quorum_read(9);
+        let _ = drain(&mut nodes[reader]);
+        nodes[reader].step(Message::PreReadAck {
+            from: NodeId(2),
+            ctx: 9,
+            watermark: Some(Slot(5)),
+            config_since: None,
+        });
+    }
+    assert_eq!(nodes[1].watermark_fills(), 0, "a follower never proposes");
+    assert_eq!(nodes[0].watermark_fills(), 3, "slots 3, 4 and 5 are filled");
+    let q = drain(&mut nodes[0]);
+    let filled: Vec<Slot> = q
+        .iter()
+        .filter_map(|(_, m)| match m {
+            Message::Accept { slot, command, .. }
+                if *command == Command::Control(Control::Noop) =>
+            {
+                Some(*slot)
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(filled, vec![Slot(3), Slot(4), Slot(5)]);
+    deliver_all(&mut nodes, q);
+    for n in &nodes {
+        assert_eq!(n.hard_state().chosen_index, Some(Slot(5)));
+    }
+    // A watermark the frontier already covers fills nothing more.
+    nodes[0].quorum_read(10);
+    let _ = drain(&mut nodes[0]);
+    nodes[0].step(Message::PreReadAck {
+        from: NodeId(2),
+        ctx: 10,
+        watermark: Some(Slot(5)),
+        config_since: None,
+    });
+    assert_eq!(nodes[0].watermark_fills(), 3);
+}

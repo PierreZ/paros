@@ -171,7 +171,12 @@ impl Tier {
             );
             self.disks[r].apply(op);
         }
-        self.applied[r].extend(ready.committed().iter().cloned());
+        self.applied[r].extend(
+            ready
+                .committed()
+                .iter()
+                .map(|(slot, command, _)| (*slot, command.clone())),
+        );
         self.served[r].extend(ready.read_states().iter().copied());
         let out = ready
             .messages()

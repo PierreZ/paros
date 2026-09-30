@@ -44,7 +44,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    Ballot, Command, MustSync, NodeId, Party, QuorumSystem, ReadState, ReplicaNode, Slot, WriteOp,
+    Ballot, Command, MustSync, NodeId, Outcome, Party, QuorumSystem, ReadState, ReplicaNode, Slot,
+    WriteOp,
 };
 
 use crate::driver::log_reads::{JournalReads, refuse_journal, wait_ticks};
@@ -107,7 +108,7 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
             _ => None,
         })
         .collect();
-    let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
+    let committed: Vec<(Slot, Command, Outcome)> = ready.committed().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     ready.advance();
 
@@ -136,14 +137,9 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
         Seam::AfterSyncBeforeSend,
     )?;
     send_messages(out, hooks, audit, replica.config().journal, messages);
-    for (slot, command) in &committed {
-        report_applied(
-            audit,
-            self_id,
-            *slot,
-            command,
-            replica.replica().outcome_at(*slot),
-        );
+    for (slot, command, outcome) in &committed {
+        let outcome = (*outcome != Outcome::Noop).then_some(outcome);
+        report_applied(audit, self_id, *slot, command, outcome);
     }
     replica.advance_recovery();
     Ok(read_states)

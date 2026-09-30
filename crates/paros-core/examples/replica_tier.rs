@@ -168,7 +168,12 @@ impl Deployment {
     /// node each.
     fn drain_replica(&mut self, r: usize) -> Vec<(NodeId, Message)> {
         let ready = self.replicas[r].ready();
-        self.applied[r].extend(ready.committed().iter().cloned());
+        self.applied[r].extend(
+            ready
+                .committed()
+                .iter()
+                .map(|(slot, command, _)| (*slot, command.clone())),
+        );
         let out = ready
             .messages()
             .iter()

@@ -132,6 +132,7 @@ fn report_handoff<A: Audit>(
 pub(crate) struct Deltas {
     pub(crate) role: NodeRole,
     pub(crate) quorum_lost: u64,
+    pub(crate) watermark_fills: u64,
     pub(crate) repair: (u64, u64, u64, u64),
     pub(crate) handoff: HandoffCounters,
     pub(crate) membership: (u64, u64),
@@ -150,6 +151,7 @@ impl Deltas {
         Self {
             role: node.role(),
             quorum_lost: node.quorum_lost_step_downs(),
+            watermark_fills: node.watermark_fills(),
             repair: node.repair_counters(),
             handoff: node.handoff_counters(),
             membership: node.membership_counters(),
@@ -249,6 +251,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     let Deltas {
         role: last_role,
         quorum_lost: last_quorum_lost,
+        watermark_fills: last_watermark_fills,
         repair: last_repair,
         handoff: last_handoff,
         membership: last_membership,
@@ -346,6 +349,13 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         *last_quorum_lost = quorum_lost;
         audit.quorum_lost(NodeId(self_id), count);
         tracing::info!(node = self_id, count, "leader_quorum_lost");
+    }
+    let watermark_fills = node.watermark_fills();
+    if watermark_fills > *last_watermark_fills {
+        let count = watermark_fills - *last_watermark_fills;
+        *last_watermark_fills = watermark_fills;
+        audit.watermark_filled(NodeId(self_id), count);
+        tracing::info!(node = self_id, count, "leader_watermark_filled");
     }
     let role = node.role();
     if role == NodeRole::Leader && *last_role != NodeRole::Leader && !installed_now {

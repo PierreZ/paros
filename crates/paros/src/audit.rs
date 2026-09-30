@@ -469,6 +469,11 @@ pub trait Audit {
     /// of such step-downs in the batch (in practice 1).
     fn quorum_lost(&self, node: NodeId, count: u64) {}
 
+    /// This node, as a settled leader, filled `count` slots with a `Noop` up
+    /// to a vote watermark a pre-read reported past its allocator frontier
+    /// (#204, `ColocatedNode::watermark_fills`).
+    fn watermark_filled(&self, node: NodeId, count: u64) {}
+
     /// This node booted with recoverable **faulty entries** (Stage 8): the
     /// scan classified each record's value lost but its identity known, and
     /// the node reports them through the Promise tri-state instead of

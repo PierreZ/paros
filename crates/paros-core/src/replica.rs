@@ -121,9 +121,11 @@ pub struct Replica {
     /// A `Truncate` was folded since the last walk: the caller compacts to
     /// [`Replica::compaction_target`] after it.
     truncate_due: bool,
-    /// Newly applied `(slot, command)` pairs, in order, for the caller's
-    /// `Ready` batch.
-    committed: Vec<(Slot, Command)>,
+    /// Newly applied `(slot, command, verdict)` triples, in order, for the
+    /// caller's `Ready` batch. The verdict rides with the slot because a
+    /// `Truncate` folded later in the same walk may compact the slot — and
+    /// its [`Replica::outcome_at`] — before the caller reports it.
+    committed: Vec<(Slot, Command, Outcome)>,
 }
 
 impl Replica {
@@ -310,9 +312,10 @@ impl Replica {
         self.outcomes.get(&slot)
     }
 
-    /// Newly applied entries this batch, in order.
+    /// Newly applied entries this batch, in order, each with the verdict
+    /// the journal state machine gave it.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command)] {
+    pub fn committed(&self) -> &[(Slot, Command, Outcome)] {
         &self.committed
     }
 
@@ -526,8 +529,8 @@ impl Replica {
         }
     }
 
-    /// Fold one slot at the fold's head.
-    fn fold_one(&mut self, slot: Slot, command: &Command) {
+    /// Fold one slot at the fold's head, and return its verdict.
+    fn fold_one(&mut self, slot: Slot, command: &Command) -> Outcome {
         assert!(
             slot == self.folded,
             "the journal fold advances one slot at a time"
@@ -546,9 +549,10 @@ impl Replica {
             self.history.insert(slot, self.state);
         }
         if outcome != Outcome::Noop {
-            self.outcomes.insert(slot, outcome);
+            self.outcomes.insert(slot, outcome.clone());
         }
         self.folded = Slot(slot.0 + 1);
+        outcome
     }
 
     /// Resume the fold below the first unchosen slot, through every chosen
@@ -608,8 +612,8 @@ impl Replica {
                 );
                 self.chosen_index = Some(next);
                 writes.push(WriteOp::SetChosenIndex(next));
-                self.fold_one(next, &command);
-                self.committed.push((next, command));
+                let outcome = self.fold_one(next, &command);
+                self.committed.push((next, command, outcome));
                 next = Slot(next.0 + 1);
                 advanced += 1;
             }

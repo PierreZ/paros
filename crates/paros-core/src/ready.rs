@@ -79,7 +79,7 @@ impl<'a> Ready<'a> {
     /// driver acks the clients waiting on these slots and reports them; there
     /// is no application to hand them to (#186).
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command)] {
+    pub fn committed(&self) -> &[(Slot, Command, crate::Outcome)] {
         self.node.pending_committed()
     }
 

@@ -334,7 +334,12 @@ fn a_faulty_chosen_record_holds_the_walk_until_the_fold_heals() {
     assert!(n.acceptor().faulty().is_empty(), "the record healed");
     assert_eq!(n.replica().chosen_index(), Some(Slot(3)));
     assert_eq!(n.replica().folded(), Slot(4));
-    let (_, committed) = drain_with(&mut n, |r| r.committed().to_vec());
+    let (_, committed) = drain_with(&mut n, |r| {
+        r.committed()
+            .iter()
+            .map(|(slot, command, _)| (*slot, command.clone()))
+            .collect::<Vec<_>>()
+    });
     assert_eq!(
         committed,
         vec![(Slot(3), original)],

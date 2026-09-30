@@ -317,7 +317,12 @@ own**. The roles:
   `READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
   The driver half (#204): **every public `Read` is a quorum read**, on any node or replica —
   confirmed first, then served from the fold, and parked as a long-poll at the tail for its
-  `wait_ms` (`driver/log_reads.rs`); bound to no role. The read-index path
+  `wait_ms` (`driver/log_reads.rs`); bound to no role. A read waits for the highest slot
+  any acceptor of its quorum *voted*, so a stale vote past the leader's frontier — one its
+  Phase-1 quorum never saw — would stall every read that meets it on an idle log (claims
+  start with a read); a settled leader that hears such a watermark in a `PreReadAck`
+  therefore fills up to it with `Noop`s (`fill_to_watermark`, an ordinary proposal at the
+  frontier). The read-index path
   (`ColocatedNode::read_index`) stays in the core — the game teaches it — but no service call
   reaches it any more. `DriverHooks::read_row` (a BUGGIFY location, consulted on a
   grid node) names the row through `ColocatedNode::quorum_read_in`; `Audit::quorum_read_served`

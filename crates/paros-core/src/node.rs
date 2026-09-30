@@ -391,6 +391,9 @@ struct Counters {
     /// Undecided holes filled with a [`Control::Noop`] when this node won its
     /// *current* leadership (0 until it wins one, re-set at each election).
     election_gap_fills: u64,
+    /// Slots a settled leader filled with a [`Control::Noop`] up to a vote
+    /// watermark a pre-read reported past its frontier (monotone).
+    watermark_fills: u64,
 }
 
 impl ColocatedNode {
@@ -1315,6 +1318,15 @@ impl ColocatedNode {
         self.counters.election_gap_fills
     }
 
+    /// Monotone count of slots this node, as a settled leader, filled with a
+    /// [`Control::Noop`] because a pre-read reported a vote watermark at or
+    /// past its allocator frontier (`node/quorum_reads.rs`). The driver
+    /// reports the delta so a simulation can prove the path is reached.
+    #[must_use]
+    pub fn watermark_fills(&self) -> u64 {
+        self.counters.watermark_fills
+    }
+
     /// Monotone count of `CheckQuorum` step-downs (#95) this incarnation: the
     /// times this node, as Leader, spent a full election-timeout window without
     /// hearing an ack quorum and demoted itself. The driver reads the delta per
@@ -1374,7 +1386,7 @@ impl ColocatedNode {
         &self.pending_messages
     }
 
-    pub(crate) fn pending_committed(&self) -> &[(Slot, Command)] {
+    pub(crate) fn pending_committed(&self) -> &[(Slot, Command, crate::Outcome)] {
         self.replica.committed()
     }
 
