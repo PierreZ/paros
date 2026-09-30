@@ -231,6 +231,31 @@ pub(crate) fn message_route(m: &Message) -> Option<(Party, Ballot, Option<Slot>)
     }
 }
 
+/// Who sent `m`: the party every consensus message names as its origin
+/// (`from`, or `reply_to` for the kinds that ask for an answer). The
+/// system journals' pool filter (#189) reads it to refuse a node the
+/// registry has not admitted yet.
+pub(crate) fn message_sender(m: &Message) -> Option<Party> {
+    match m {
+        Message::Prepare { reply_to, .. } | Message::PreRead { reply_to, .. } => {
+            Some(Party::Node(*reply_to))
+        }
+        Message::Accept { reply_to, .. } => Some(*reply_to),
+        Message::Commit { from, .. } => Some(*from),
+        Message::Promise { from, .. }
+        | Message::Accepted { from, .. }
+        | Message::Nack { from, .. }
+        | Message::CatchUpRequest { from, .. }
+        | Message::CatchUpResponse { from, .. }
+        | Message::TrimmedTo { from, .. }
+        | Message::Relinquish { from, .. }
+        | Message::Heartbeat { from, .. }
+        | Message::PreReadAck { from, .. }
+        | Message::HeartbeatAck { from, .. } => Some(Party::Node(*from)),
+        _ => None,
+    }
+}
+
 /// A short, stable label for an encoded [`internal::ConsensusMessage`], for
 /// the mailbox-drop audit report (mirrors [`message_kind`], which needs the
 /// decoded domain [`Message`] the delivery task no longer has).

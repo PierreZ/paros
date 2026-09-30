@@ -47,6 +47,22 @@ pub trait JournalStores {
 
     /// The audit port `journal` reports to.
     fn audit(&self, journal: JournalId) -> Self::Audit;
+
+    /// Provision a store for `journal`, a journal the directory created
+    /// naming this node (#189), under `config`; `false` when this opener
+    /// cannot (the default: a static list). A later [`JournalStores::open`]
+    /// of `journal` opens it. Idempotent: a node that re-folds the directory
+    /// after a restart asks again for a journal it already holds.
+    fn create(&mut self, journal: JournalId, config: paros_core::Config) -> bool {
+        let _ = (journal, config);
+        false
+    }
+
+    /// `journal` was tombstoned (#189): its store will never be opened
+    /// again. The default keeps it.
+    fn delete(&mut self, journal: JournalId) {
+        let _ = journal;
+    }
 }
 
 /// The one-journal node [`crate::run_node`] runs: the store it was handed,
@@ -168,10 +184,24 @@ impl<S, A> Journals<S, A> {
             || self.down.contains(&journal)
     }
 
-    /// The node's first live journal (the target of a journal-less call and
-    /// of the single-journal planes: matchmaking, retirement).
+    /// The node's first live **user** journal (the target of a journal-less
+    /// call and of the single-journal planes: matchmaking, retirement). The
+    /// system journals (#189) sort first and serve no plane.
     pub(crate) fn first(&mut self) -> Option<(&JournalId, &mut JournalRt<S, A>)> {
-        self.live.iter_mut().next()
+        self.live.iter_mut().find(|(journal, _)| journal.is_user())
+    }
+
+    /// [`Journals::first`], read-only.
+    pub(crate) fn plane(&self) -> Option<(&JournalId, &JournalRt<S, A>)> {
+        self.live.iter().find(|(journal, _)| journal.is_user())
+    }
+
+    /// Whether the node has nothing left to serve **because of a fault**: no
+    /// live journal, and the last incarnation of one ended on a fault. A
+    /// node that follows the system journals (#189) runs on with no journal
+    /// at all — a joiner boots with none — and exits only on this.
+    pub(crate) fn stranded(&self) -> bool {
+        self.live.is_empty() && self.last_fault.is_some()
     }
 
     /// Mark `journal` down for good: its store refused to boot (`fault`,
