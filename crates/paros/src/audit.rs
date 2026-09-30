@@ -957,6 +957,14 @@ pub trait Audit {
     /// This matchmaker crashed at a durability `seam` inside one batch.
     fn matchmaker_crashed(&self, matchmaker: MatchmakerId, seam: Seam) {}
 
+    /// The matchmaker driver refused to boot this matchmaker (#183): the
+    /// operator's [`BootKind`](crate::BootKind) claim and the registry's
+    /// format marker disagree. The [`Audit::boot_refused`] twin, reported
+    /// at the instant of the decision, before the
+    /// [`RunError::Refused`](crate::RunError::Refused) exit; nothing was
+    /// written and no reply left.
+    fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {}
+
     /// The driver deliberately dropped one matchmaker reply after its write
     /// was durable ([`DriverHooks::drop_client_reply`](crate::DriverHooks::drop_client_reply) with
     /// [`Reply::Match`](crate::Reply::Match), [`Reply::GcAck`](crate::Reply::GcAck)

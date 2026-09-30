@@ -211,6 +211,9 @@ pub(super) struct MatchmakerAudit {
     /// invariant 1): generation 0 is the bootstrap set, each later one the
     /// value the successor decree chose.
     sets: BTreeMap<u64, Vec<u64>>,
+    /// Matchmakers the library refused to boot on a wiped registry (#183):
+    /// each stays down for the run, and a handover replaces it.
+    refused: BTreeSet<u64>,
     /// Per `(node, generation)`: the `Stopped` replies the reconfigurer
     /// folded, by matchmaker — the exact frozen registries its
     /// reconstruction is the union of. Snapshotted at the fold: a matchmaker
@@ -329,6 +332,7 @@ pub(super) struct MatchmakerAudit {
     matchmaker_departed: bool,
     matchmaker_refused_step: bool,
     matchmaker_lost: bool,
+    amnesia_refused: bool,
     storage_fault: bool,
     successor_republished: bool,
     reconstruction_checked: bool,
@@ -2351,6 +2355,26 @@ impl MatchmakerAudit {
         registry: &BTreeMap<Ballot, Registration>,
     ) {
         let members: Vec<u64> = set.members().iter().map(|m| m.0).collect();
+        // #183's outcome: a matchmaker the library refused (its registry
+        // wiped) sat in the generation this one succeeds, and the handover
+        // left it out — the replacement the refusal hands the cluster to.
+        let predecessor = set
+            .generation
+            .0
+            .checked_sub(1)
+            .and_then(|g| self.sets.get(&g));
+        if let Some(previous) = predecessor
+            && !self.refused.is_empty()
+        {
+            let replaced = self
+                .refused
+                .iter()
+                .any(|id| previous.contains(id) && !members.contains(id));
+            assert_sometimes!(
+                replaced,
+                "generation: a refused matchmaker is replaced by a handover"
+            );
+        }
         self.bind_set(set.generation.0, &members, "activated");
         let entry = self.registries.entry(matchmaker.0).or_default();
         // Invariant 4: the watermark never regresses across a generation.
@@ -2548,6 +2572,18 @@ impl MatchmakerAudit {
         reach_once!(
             self.storage_fault,
             "matchmaker: a registry fsync failure fail-stops the matchmaker"
+        );
+    }
+
+    /// The library refused to boot `matchmaker` (#183): its registry was
+    /// wiped and it carries no format marker. An amnesiac matchmaker that
+    /// booted would answer matchmaking with a history missing registrations
+    /// it once acknowledged; the refusal is what keeps it out.
+    pub(super) fn boot_refused(&mut self, matchmaker: u64) {
+        self.refused.insert(matchmaker);
+        reach_once!(
+            self.amnesia_refused,
+            "matchmaker: the library refuses to boot an amnesiac matchmaker"
         );
     }
 

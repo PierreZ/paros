@@ -76,8 +76,9 @@ pub(crate) struct NodeShape {
     /// anything). Ceiling 75: the world's dead-node budget bounds the damage
     /// whatever the rate, so the extreme is a valid, very forgetful disk.
     pub(crate) wipe_pct: u32,
-    /// Percent chance that a chaotic restart of this *matchmaker* finds its
-    /// registry unusable (#125). Same floor and ceiling, and the same
+    /// Percent chance that a chaotic restart of this *matchmaker* comes back
+    /// on a wiped registry (#125, #183), which the library then refuses to
+    /// boot. Same floor and ceiling, and the same
     /// argument: the matchmaker-loss budget (one per run, and only where the
     /// bootstrap set can spare it) bounds it.
     pub(crate) matchmaker_loss_pct: u32,
@@ -818,11 +819,11 @@ pub(crate) fn matchmaker_bootstrap_ranks(
 
 /// The smallest bootstrap matchmaker set that can lose one member and keep a
 /// quorum — and therefore the smallest set the world will ever take a
-/// matchmaker from ([`StorageWorld::park_matchmaker`]) and the ceiling of
+/// matchmaker from ([`StorageWorld::wipe_matchmaker`]) and the ceiling of
 /// [`matchmaker_floor`]. Not a tunable: it is what the matchmaker-loss budget
 /// is computed over.
 ///
-/// [`StorageWorld::park_matchmaker`]: crate::world::StorageWorld::park_matchmaker
+/// [`StorageWorld::wipe_matchmaker`]: crate::world::StorageWorld::wipe_matchmaker
 pub(crate) const MATCHMAKER_LOSS_FLOOR: usize = 3;
 
 /// The smallest matchmaker set a run may put in force (#125):

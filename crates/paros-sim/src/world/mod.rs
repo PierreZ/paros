@@ -369,8 +369,8 @@ pub(crate) struct StorageWorld {
     /// and their disks run fault-free (the replica's own write path is not
     /// what the budget protects).
     replicas: BTreeSet<String>,
-    /// Matchmakers whose durable state was lost for good (#125): the
-    /// registry stays down, and the replacement is a matchmaker-set
+    /// Matchmakers whose registry was wiped (#125, #183): the library
+    /// refuses to boot them again, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
     /// Matchmakers whose registry fsync has failed at least once this run.
@@ -456,7 +456,7 @@ impl StorageWorld {
         self.provisioning.remove(ip);
     }
 
-    /// Whether `ip`'s registry was lost for good.
+    /// Whether `ip`'s registry was wiped (lost for good).
     pub(crate) fn is_matchmaker_parked(&self, ip: &str) -> bool {
         self.parked_matchmakers.contains(ip)
     }
@@ -591,20 +591,25 @@ impl StorageWorld {
         true
     }
 
-    /// Lose matchmaker `ip`'s registry for good (#125). Permitted once per
-    /// run, and only where the deployment's bootstrap matchmaker set holds
+    /// Wipe matchmaker `ip`'s registry at a restart (#125, #183): every
+    /// record gone, the format marker with them, the matchmaker counted lost
+    /// for the budget and the composer. The park is accounting only: the
+    /// process boots the matchmaker on its empty disk as an existing member
+    /// and the library refuses it (#183); the replacement is a matchmaker-set
+    /// reconfiguration reconstructed from the surviving quorum. Permitted once
+    /// per run, and only where the deployment's bootstrap matchmaker set holds
     /// [`crate::shape::MATCHMAKER_LOSS_FLOOR`] members or more — the smallest
     /// set that keeps a quorum without the lost one, and the same constant
     /// [`crate::shape::matchmaker_floor`] refuses to shrink below on such a
     /// seed. Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
-    pub(crate) fn park_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
+    pub(crate) fn wipe_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
         if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
             return false;
         }
         self.matchmakers.remove(key);
         self.parked_matchmakers.insert(key.to_string());
-        tracing::info!(matchmaker = %key, "matchmaker_lost");
+        tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
     }
 

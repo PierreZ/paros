@@ -102,6 +102,8 @@ Entry points: `explore`, `run_chain_seed`, `chain_seed_digest`,
   its unformatted store (#147): the world keeps it parked for the budget and
   the composer only, and its provisioning ledger (`StorageWorld::provisioned`)
   is the operator's claim the process hands `run_node` as `BootKind`. Never
-  short-circuit a wiped boot in the process again.
+  short-circuit a wiped boot in the process again. The same holds for a
+  matchmaker (#183): its loss coin wipes the registry and the process boots it
+  as an existing member for `run_matchmaker` to refuse.
 - Spans are non-optional (process and workload lifecycles, the world's
   injections, the audit's gate checks).

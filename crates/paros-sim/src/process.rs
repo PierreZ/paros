@@ -147,7 +147,8 @@ enum Down {
     StorageParked(u64),
     /// A node the operator retired (#123).
     Retired(u64),
-    /// A matchmaker whose registry was lost for good (#125).
+    /// A matchmaker whose registry was wiped and whose boot the library
+    /// refused (#125, #183).
     MatchmakerLost(u64),
 }
 
@@ -981,26 +982,30 @@ async fn run_matchmaker_role(
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .park_matchmaker(my_ip, bootstrap.len())
+            .wipe_matchmaker(my_ip, bootstrap.len())
     {
-        // The registry's loss coin (#125): a restart that finds its durable
-        // state unusable. There is no in-place repair — the registry stays
-        // down for good and the surviving quorum reconstructs a successor
+        // The registry's wipe coin (#125, #183): a restart that comes back
+        // on an empty disk. What happens next is the **library's** call: the
+        // matchmaker boots below as an existing member on an empty store, and
+        // `run_matchmaker` refuses the amnesiac registry. There is no
+        // in-place repair — the surviving quorum reconstructs a successor
         // set without it. BUGGIFY pairing: the coin fired within the budget.
         assert_reachable!("matchmaker: a restarted matchmaker's registry is lost for good");
-        checker.note_matchmaker_lost();
-        tracing::info!(matchmaker = id.0, "matchmaker_lost_exit");
-        return Ok(());
+        tracing::info!(matchmaker = id.0, "matchmaker_wiped");
     }
     loop {
-        if world
+        // The operator's claim is the provisioning ledger (#183), kept
+        // outside the disks: a wipe erases the marker, never the memory of
+        // having provisioned the matchmaker.
+        let boot = if world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_matchmaker_parked(my_ip)
+            .provisioned(my_ip)
         {
-            stay_down(&checker, Down::MatchmakerLost(id.0));
-            return Ok(());
-        }
+            BootKind::ExistingMember
+        } else {
+            BootKind::FirstBoot
+        };
         let storage = DurableMatchmakerStorage::restore(
             Arc::downgrade(&world),
             my_ip.to_string(),
@@ -1010,6 +1015,7 @@ async fn run_matchmaker_role(
         match run_matchmaker(
             ctx.providers().clone(),
             storage,
+            boot,
             parse_addr(my_ip)?,
             config.clone(),
             shape.tunables,
@@ -1022,7 +1028,7 @@ async fn run_matchmaker_role(
             // A seam crash, or the registry's own fsync failure: both mean
             // this incarnation's un-synced batch is gone, so both rebuild
             // from the durable world, after the matchmaker's own
-            // restart-delay knob. A restart may then draw the loss coin and
+            // restart-delay knob. A restart may then draw the wipe coin and
             // hand the replacement to a matchmaker-set reconfiguration.
             // Its floor is structural: a matchmaker held down is a
             // matchmaking phase that waits, never a cluster that stalls.
@@ -1032,17 +1038,34 @@ async fn run_matchmaker_role(
                     "a seam-crashed matchmaker restarts after a buggified delay"
                 );
             }
-            // The matchmaker driver judges no boot claim (#147 is the
-            // node's marker; the registry has none yet), so it never
-            // refuses one.
-            Err(RunError::Refused(refusal)) => {
+            // The library refused the registry (#183). Amnesia is the wipe
+            // coin's outcome and the one the rule exists for: the matchmaker
+            // stays down for the run, replaced by a handover. The harness
+            // cross-checks the refusal against its own injection: only a
+            // wiped registry is ever amnesiac here.
+            Err(RunError::Refused(BootRefusal::Amnesia)) => {
+                let wiped = world
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_matchmaker_parked(my_ip);
+                assert_always!(
+                    wiped,
+                    "matchmaker: an amnesia refusal names a wiped registry",
+                    { "matchmaker" => id.0 }
+                );
+                stay_down(&checker, Down::MatchmakerLost(id.0));
+                return Ok(());
+            }
+            // A first boot on a formatted registry is a harness bug: the
+            // provisioning ledger and the disks disagree.
+            Err(RunError::Refused(BootRefusal::AlreadyFormatted)) => {
                 assert_always!(
                     false,
-                    "matchmaker: the matchmaker driver never refuses a boot",
-                    { "matchmaker" => id.0, "refusal" => format!("{refusal:?}") }
+                    "matchmaker: a first boot never meets a formatted registry",
+                    { "matchmaker" => id.0 }
                 );
                 return Err(SimulationError::InvalidState(format!(
-                    "matchmaker {} refused a boot: {refusal:?}",
+                    "matchmaker {} booted as first boot on a formatted registry",
                     id.0
                 )));
             }

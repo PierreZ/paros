@@ -32,7 +32,7 @@ use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
 use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::match_answer;
-use crate::driver::{DriverTunables, RunError};
+use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::storage::StorageError;
 
@@ -70,6 +70,58 @@ fn match_crash_if<H: DriverHooks, A: Audit>(
         return Err(RunError::SeamCrash(seam));
     }
     Ok(())
+}
+
+/// #183: judge the operator's claim against the registry's format marker,
+/// before the core reads a byte — the matchmaker twin of the node driver's
+/// check (#147). An empty-but-openable registry is indistinguishable from a
+/// first boot to [`Matchmaker::new`], and a matchmaker that rejoined on one
+/// would answer a matchmaking quorum as if it had never seen a
+/// registration it once acknowledged: a candidate whose quorum met it and
+/// one peer that also missed the record would skip the Phase 1 that record
+/// demands. So the refusal happens here, on the claim. A first boot formats
+/// the registry durably first — the marker lands no later than the first
+/// registration, the ordering the refusal relies on.
+///
+/// # Errors
+///
+/// [`RunError::Refused`] when the claim and the marker disagree (nothing was
+/// written); [`RunError::Storage`] when formatting the registry failed.
+#[tracing::instrument(level = "debug", skip_all, fields(matchmaker = id.0))]
+async fn check_format_marker<S: MatchmakerStorage, A: Audit>(
+    storage: &mut S,
+    boot: BootKind,
+    id: MatchmakerId,
+    audit: &A,
+) -> Result<(), RunError> {
+    let refusal = match (boot, storage.is_formatted()) {
+        (BootKind::ExistingMember, true) => return Ok(()),
+        (BootKind::FirstBoot, false) => {
+            storage
+                .format()
+                .await
+                .map_err(|e| storage_fault_crash(audit, id, e))?;
+            storage
+                .sync()
+                .await
+                .map_err(|e| storage_fault_crash(audit, id, e))?;
+            tracing::info!(matchmaker = id.0, "matchmaker_store_formatted");
+            return Ok(());
+        }
+        (BootKind::ExistingMember, false) => BootRefusal::Amnesia,
+        (BootKind::FirstBoot, true) => BootRefusal::AlreadyFormatted,
+    };
+    audit.matchmaker_boot_refused(id, refusal);
+    let label = match refusal {
+        BootRefusal::Amnesia => "amnesia",
+        BootRefusal::AlreadyFormatted => "already_formatted",
+    };
+    tracing::warn!(
+        matchmaker = id.0,
+        refusal = label,
+        "matchmaker_boot_refused"
+    );
+    Err(RunError::Refused(refusal))
 }
 
 /// One drained batch: the replies the caller may now send.
@@ -317,12 +369,21 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 /// [`Seam::MatchAfterSyncBeforeReply`]) and reply-drop locations
 /// ([`Reply::Match`], [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]).
 ///
+/// `boot` is the operator's claim about `storage` ([`BootKind`], #183), the
+/// node driver's rule applied to the registry: a first boot formats the
+/// store before the core reads it, an existing matchmaker whose store
+/// carries no format marker has lost its registry and is refused
+/// ([`BootRefusal::Amnesia`]) — it is *replaced* through a matchmaker-set
+/// reconfiguration (#125), never rejoined — and a first boot on a formatted
+/// store is refused too ([`BootRefusal::AlreadyFormatted`]).
+///
 /// # Errors
 ///
 /// The exit is typed exactly like [`run_node`](crate::run_node)'s:
 /// [`RunError::SeamCrash`] for a hook-injected crash at a durability seam (the
 /// caller re-runs against the surviving storage), [`RunError::Storage`] for a
-/// fail-stop storage fault, [`RunError::Infra`] for a genuine
+/// fail-stop storage fault, [`RunError::Refused`] when the boot claim and
+/// the registry's format marker disagree, [`RunError::Infra`] for a genuine
 /// provider/infrastructure failure.
 ///
 /// # Panics
@@ -336,6 +397,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 pub async fn run_matchmaker<P, S, H, A>(
     providers: P,
     mut storage: S,
+    boot: BootKind,
     local_addr: String,
     config: MatchmakerConfig,
     tunables: DriverTunables,
@@ -355,6 +417,7 @@ where
         .boot_scan()
         .await
         .map_err(|e| storage_fault_crash(audit, id, e))?;
+    check_format_marker(&mut storage, boot, id, audit).await?;
 
     let mut edge = RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables).await?;
     let mut inbox = MatchmakerInbox::serve(&edge)?;

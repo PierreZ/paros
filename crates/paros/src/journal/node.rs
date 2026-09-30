@@ -410,7 +410,7 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             journal
                 .save_meta(&bytes)
                 .await
-                .map_err(|e| meta_error(&e))?;
+                .map_err(|e| meta_error(&e, StorageRecord::Promise))?;
             self.meta_dirty = false;
         }
         let relaxed_only = must_sync == MustSync::Relaxed

@@ -872,8 +872,19 @@ member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's disk, wh
 world-backed stores do not live on); the storage world draws its own wipe coin at a chaotic restart on a matchmaker
 seed, under the same dead-node budget as a corruption park. A moonpool issue asks for the reboot
 kind to be exposed to a restarted process so a harness-owned disk can honor `CrashAndWipe`
-directly. The matchmaker's registry has no marker yet: the harness never wipes a matchmaker (a
-lost registry is a park, #125), so the parity is an open item, not a hole in a claim.
+directly. **The matchmaker's registry carries the same marker (#183)**: `MatchmakerStorage::
+is_formatted` / `format` (the in-memory, journal-backed and world-backed stores alike, covered by
+`matchmaker_storage_contract_suite`), and `run_matchmaker` takes a `BootKind` and refuses an
+existing matchmaker whose registry has none (`Audit::matchmaker_boot_refused`). An amnesiac
+matchmaker that rejoined would answer a matchmaking quorum as if it had never seen a registration
+it once acknowledged — a registration on `{A, B}`, `B` wiped, a later quorum `{B, C}` that misses
+it — which is exactly the history hole a cross-configuration Phase 1 exists to close; and it would
+forget its GC watermark and its generation too. The harness's matchmaker loss coin is therefore a
+**wipe**, not a park: the registry's disk goes, the provisioning ledger (shared with the nodes,
+keyed by IP) remembers the matchmaker, the process reboots it as an existing member, the library
+refuses it, and a matchmaker-set handover replaces it (the audit's `sometimes` "a refused
+matchmaker is replaced by a handover"). Removing the refusal is red on the audit's "a restart
+recovers every durable registration".
 
 **Cooperative leader handoff (`DPaxos`).** Leadership changes hands two ways. An
 *election* destroys a leader's authority and makes the successor rediscover the log

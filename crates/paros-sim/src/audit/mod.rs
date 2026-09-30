@@ -2126,6 +2126,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().matchmaker.crashed(seam);
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0, refusal = ?refusal))]
+    fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {
+        match refusal {
+            // #183: the library, not the harness, keeps a wiped registry out.
+            BootRefusal::Amnesia => self.state().matchmaker.boot_refused(matchmaker.0),
+            BootRefusal::AlreadyFormatted => {
+                assert_always!(
+                    false,
+                    "matchmaker: a first boot never meets a formatted registry",
+                    { "matchmaker" => matchmaker.0 }
+                );
+            }
+        }
+    }
+
     fn match_reply_dropped(&self, _matchmaker: MatchmakerId, reply: paros::Reply) {
         self.state().matchmaker.reply_dropped(reply);
     }
