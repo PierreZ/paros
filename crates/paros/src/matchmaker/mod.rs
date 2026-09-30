@@ -83,6 +83,13 @@ fn match_crash_if<H: DriverHooks, A: Audit>(
 /// the registry durably first — the marker lands no later than the first
 /// registration, the ordering the refusal relies on.
 ///
+/// Load-bearing, measured: with the `Amnesia` arm removed, a 3,000-seed
+/// `sim-paros-hunt main` went red on 4 seeds — "matchmaker: a restart
+/// recovers every durable registration" and "a recovered gc watermark never
+/// regresses" (a wiped matchmaker rebooted on an empty registry; witness
+/// 5299901180798451264 on that build, cited, not pinned) — and the same
+/// 3,000 seeds are green with it.
+///
 /// # Errors
 ///
 /// [`RunError::Refused`] when the claim and the marker disagree (nothing was
