@@ -1244,11 +1244,10 @@ fn system_plan(
     plan: &crate::shape::JournalPlan,
     self_id: NodeId,
 ) -> (SystemPlan, Vec<NodeId>) {
-    let seeds: Vec<NodeId> =
-        crate::shape::seed_ranks(members.len(), !deployment.matchmakers().is_empty())
-            .into_iter()
-            .map(NodeId)
-            .collect();
+    let seeds: Vec<NodeId> = crate::shape::seed_ranks(members.len())
+        .into_iter()
+        .map(NodeId)
+        .collect();
     let board = crate::audit::system::system_board(ctx.state());
     let spares = spare_template(ctx, deployment);
     crate::audit::system::lock(&board).arm(

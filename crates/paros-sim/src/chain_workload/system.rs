@@ -90,7 +90,7 @@ impl SystemOps {
         let matchmakers = !deployment.matchmakers().is_empty();
         Self {
             active,
-            seeds: crate::shape::seed_ranks(pool, matchmakers).len().max(1),
+            seeds: crate::shape::seed_ranks(pool).len().max(1),
             pool,
             joiners: deployment
                 .joiners()

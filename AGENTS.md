@@ -657,9 +657,10 @@ and completes once its pool catches up — the one path where registry lag reach
 `assert!`. A registered node joins every journal of `SystemPlan::spares` (the deployment's
 reconfigurable journal) **as a spare**, so a `Reconfigure` may name it and it takes part like
 any spare of the pool. In simulation the system journals run on half the seeds (`paros_sim::shape::system_journals`),
-seeds are the lowest `SEED_COUNT = 3` ranks — one rank on a matchmaker seed, whose two-round-trip
-campaigns livelock under two more journals' beats on every link — and system and created journals
-sit on fault-free world-backed seats outside the copy budget. The driver's boot report re-reports
+the seed is the lowest rank alone (`SEED_COUNT = 1`: two more journals' beats on every link of a
+small cluster livelocked both a matchmaker deployment and the two survivors of a plain 3-node pool,
+and a one-member journal sends nothing), and system and created journals sit on fault-free
+world-backed seats outside the copy budget. The driver's boot report re-reports
 the recovered chosen prefix as walked (`report_boot_state`): a one-member journal has no other
 learner to report a slot chosen just before a crash. A node that follows the system journals keeps
 running with a journal quarantined, so the opener hears every quarantine at once

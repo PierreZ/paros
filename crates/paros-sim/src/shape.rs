@@ -527,23 +527,23 @@ pub(crate) fn journal_store(
     }
 }
 
-/// How many genesis nodes host the system journals (#189) — the seeds, the
-/// lowest ranks of the pool. Three is the smallest static configuration that
-/// survives a seed's loss; a smaller pool hosts them on every node. Not a
-/// tunable: the system journals run on a static configuration of the seeds,
-/// and reconfiguring them is out of scope.
-pub(crate) const SEED_COUNT: usize = 3;
+/// How many genesis nodes host the system journals (#189) — the seeds,
+/// the lowest ranks of the pool: one. A one-member plain journal sends
+/// nothing to anyone, and the system journals' beats among three seeds are
+/// load a small cluster cannot always carry: two more journals on every link
+/// livelocked a matchmaker deployment's two-round-trip campaigns (witness
+/// 17972338006788767545 on this branch: 3 nodes, 240 campaigns) and, with
+/// one node parked, the two survivors of a plain 3-node pool (witness
+/// 16999966542771974935: 267 dueling rounds, nothing chosen) — the load
+/// [`journals`] already keeps off those seeds. Not a tunable: its extreme is
+/// a run that cannot win. The driver's `SystemPlan` takes any seed list; a
+/// one-member journal's only liveness cost is its one seed's downtime.
+pub(crate) const SEED_COUNT: usize = 1;
 
 /// The seeds of a pool of `pool` nodes (#189): its [`SEED_COUNT`] lowest
-/// ranks — or, on a seed with matchmakers, its lowest rank alone. A
-/// one-member plain journal sends nothing to anyone, and a matchmaker
-/// deployment's two-round-trip campaigns livelock under the load of two
-/// more journals' beats on every link (witness 17972338006788767545 on
-/// this branch: 3 nodes, 240 campaigns, no stable leader — the load
-/// [`journals`] already keeps off those seeds).
-pub(crate) fn seed_ranks(pool: usize, matchmakers: bool) -> Vec<u64> {
-    let seeds = if matchmakers { 1 } else { SEED_COUNT };
-    (0..pool.min(seeds) as u64).collect()
+/// ranks.
+pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
+    (0..pool.min(SEED_COUNT) as u64).collect()
 }
 
 /// Whether the run runs the **system journals** (#189) — the directory and
