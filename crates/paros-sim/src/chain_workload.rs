@@ -4,8 +4,8 @@
 //! `Read`, `Truncate` and `SetLeader`. Every client is an **owner** — it
 //! claims the journal with `SetLeader`, writes at the position its claim
 //! answered, and is fenced the moment another owner claims — or a
-//! **reader**, which only reads (client 0 is always an owner, so a run
-//! always writes). Every client folds the journal it reads into a
+//! **reader**, which only reads (each journal's first client is always an
+//! owner, so every journal is written). Every client folds the journal it reads into a
 //! `ChainState` (`fold.rs`).
 
 use std::collections::BTreeSet;
@@ -985,18 +985,17 @@ async fn claim(
             1,
             0,
         );
+        // A node outside this journal (a joiner, #189) refuses it as
+        // unknown: a node to skip, not an answer.
         if let Some(ack) = within(ctx, timeout, None, read).await
-            && (ack.served || ack.unknown_journal)
+            && ack.served
+            && !ack.unknown_journal
         {
             served = Some(ack);
             break;
         }
     }
-    let ack = served?;
-    if ack.unknown_journal {
-        return None;
-    }
-    let tail = state_of(ack.state);
+    let tail = state_of(served?.state);
     let ask = set_leader_once(clients, journal, target, tail.generation.0, me);
     Some(within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await)
 }
@@ -1132,9 +1131,13 @@ impl Workload for ChainWorkload {
         // client is, and its tailing cursor — a position (#204) — where its
         // tailing reads start, only ever moved forward.
         let mut fold = fold::Fold::new(journal);
-        // Owner or reader (#204): client 0 always writes, so a run always
-        // has a writer; any other client may be a reader for the whole run.
-        let reader = config.reader && client_id != 0;
+        // Owner or reader (#204): a journal's first client always writes, so
+        // every journal has a writer; any other client may be a reader for
+        // the whole run. Clients are dealt to journals round-robin, so the
+        // first `ids.len()` ids are each journal's first — a reader-only
+        // journal would have nothing for its tail to converge on.
+        let journal_count = self.plan.as_ref().map_or(1, |plan| plan.ids.len().max(1));
+        let reader = config.reader && usize::try_from(client_id).unwrap_or(0) >= journal_count;
         let mut writer = Writer::default();
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).

@@ -142,7 +142,7 @@ as `Created` or refused for a taken name, then one record written to the new jou
 without system journals (`chain_workload/system.rs`) — and `SET_LEADER=22` (read where the journal
 stands and `SetLeader` against its generation: the compare-and-swap that fences every other
 owner). Every client is an **owner** or a **reader** for the whole run (a `buggify_knob!`;
-client 0 is always an owner, so a run always has a writer): an owner claims before it writes and
+each journal's first client is always an owner, so every journal has a writer): an owner claims before it writes and
 re-claims when a verdict says it was superseded, a reader only reads. paros runs **no user
 application, one journal-control state machine per journal** (#186, #204): the client *is* the
 application. Every client reads the journal from its cursor — a position — and folds each
