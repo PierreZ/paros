@@ -13,7 +13,9 @@
 //! writes, checksums and rot are generic storage concerns already modelled on
 //! the node's records, the registry's crash seams live in the driver, and a
 //! matchmaker whose state is lost for good is *replaced* through a
-//! matchmaker-set reconfiguration (#125), never repaired in place. What the
+//! matchmaker-set reconfiguration (#125), never repaired in place. The disk
+//! carries the format marker (#183) like a node's: a wiped registry loses it,
+//! and the driver refuses to boot the matchmaker on the empty store. What the
 //! registry does draw is the **whole-batch fsync failure** of the node's own
 //! write path ([`StorageFaults::fsync_fail`], the same seed-drawn rate): the
 //! matchmaker driver's fail-stop arm and the replacement path that follows
@@ -40,12 +42,16 @@ use super::storage::StorageFaults;
 pub(super) struct MatchmakerDisk {
     pub(super) hard_state: MatchmakerHardState,
     pub(super) registry: BTreeMap<Ballot, Registration>,
+    /// The format marker (#183): written by the driver on the matchmaker's
+    /// first boot, never cleared — gone only with the whole disk (a wipe).
+    pub(super) formatted: bool,
 }
 
 impl MatchmakerDisk {
     /// Apply one flushed write, in batch order.
     fn apply(&mut self, op: Staged) {
         match op {
+            Staged::Format => self.formatted = true,
             Staged::Register(ballot, registration) => {
                 // Write-once, seen from the disk: a re-write of a registered
                 // ballot carries the same bytes (the core never re-registers,
@@ -88,6 +94,7 @@ impl MatchmakerDisk {
 
 /// One staged write, replayed in order at the fsync.
 enum Staged {
+    Format,
     Register(Ballot, Registration),
     Watermark(Ballot),
     Scalars(MatchmakerHardState),
@@ -100,6 +107,9 @@ pub(crate) struct DurableMatchmakerStorage<T> {
     /// reads the port once, at construction).
     boot_hard_state: MatchmakerHardState,
     boot_registry: BTreeMap<Ballot, Registration>,
+    /// The format marker as of this boot, raised by a staged `format` (the
+    /// driver reads it once, before the core, and formats at most once).
+    formatted: bool,
     world: Weak<Mutex<StorageWorld>>,
     /// This matchmaker's IP — its key into the world.
     key: String,
@@ -124,19 +134,23 @@ impl<T: TimeProvider> DurableMatchmakerStorage<T> {
         faults: StorageFaults<T>,
         bootstrap: usize,
     ) -> Self {
-        let (boot_hard_state, boot_registry) = world
+        let (boot_hard_state, boot_registry, formatted) = world
             .upgrade()
             .and_then(|strong| {
                 let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
-                guard
-                    .matchmakers
-                    .get(&key)
-                    .map(|disk| (disk.hard_state.clone(), disk.registry.clone()))
+                guard.matchmakers.get(&key).map(|disk| {
+                    (
+                        disk.hard_state.clone(),
+                        disk.registry.clone(),
+                        disk.formatted,
+                    )
+                })
             })
             .unwrap_or_default();
         Self {
             boot_hard_state,
             boot_registry,
+            formatted,
             world,
             key,
             staged: Vec::new(),
@@ -175,6 +189,16 @@ impl<T: TimeProvider> RegistryStorage for DurableMatchmakerStorage<T> {
 }
 
 impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
+    fn is_formatted(&self) -> bool {
+        self.formatted
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn format(&mut self) -> Result<(), StorageError> {
+        self.staged.push(Staged::Format);
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
@@ -237,11 +261,22 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
             }
         }
         let key = self.key.clone();
+        let formats = staged.iter().any(|op| matches!(op, Staged::Format));
         self.with_world(|w| {
+            // The operator's provisioning ledger (#147, #183) records the
+            // matchmaker exactly when its marker lands durably: a first boot
+            // whose format sync was lost is a first boot again.
+            if formats {
+                w.note_provisioned(&key);
+            }
             let disk = w.matchmakers.entry(key).or_default();
             for op in staged {
                 disk.apply(op);
             }
-        })
+        })?;
+        if formats {
+            self.formatted = true;
+        }
+        Ok(())
     }
 }

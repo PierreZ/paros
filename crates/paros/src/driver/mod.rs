@@ -51,11 +51,13 @@ mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;
+mod system;
 pub(crate) mod transport;
 
 pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub use events::{command_hash, message_kind, registration_history_hash};
 pub use journals::JournalStores;
+pub use system::SystemPlan;
 
 use std::collections::BTreeMap;
 
@@ -76,6 +78,7 @@ use crate::rpc::{
     TailPath, TrimAck, encode_records, well_known,
 };
 use crate::storage::LogStorage;
+use crate::system::{DirectoryEvent, RegistryEvent, SystemEvent};
 
 use edge::{NodeInbox, RpcEdge, edge_reporter};
 use events::message_route;
@@ -88,6 +91,7 @@ use matchmaking::{
 use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, served_prefix};
 use reply::maybe_duplicate;
 use report::{Deltas, handoff_context, maintain};
+use system::{Followed, SystemFollower, follow_local};
 use transport::{LaneOpener, Outbound, PeerQueues, peer_address};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
@@ -728,6 +732,7 @@ where
         matchmakers,
         proxies,
         replicas,
+        None,
         tunables,
         shutdown,
         hooks,
@@ -754,6 +759,15 @@ where
 /// or replicas (the matchmaker plane, the proxy leaders and the replica tier
 /// each serve one journal; journal-tagged proxies are #193).
 ///
+/// `system` opts the node into the **system journals** (#189,
+/// [`SystemPlan`]): it follows the directory and the node registry (from its
+/// own journals 1 and 2 on a seed, from a seed otherwise), starts a journal
+/// the directory creates naming it and stops one it tombstones, opens a lane
+/// to every node the registry admits, and refuses a peer message from a node
+/// the registry does not have in the pool. Such a node may serve no journal
+/// at all (a joiner boots with none) and exits only on a fault. `None` is
+/// the static deployment: a fixed list over a fixed pool.
+///
 /// # Errors
 ///
 /// As [`run_node`]; [`RunError::Infra`] when several journals are asked of a
@@ -771,6 +785,7 @@ pub async fn run_journals<P, J, H>(
     matchmakers: Vec<(MatchmakerId, String)>,
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
+    system: Option<SystemPlan>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -781,16 +796,29 @@ where
     H: DriverHooks,
 {
     let ids = stores.journals();
-    let Some(&first_id) = ids.first() else {
+    if ids.is_empty() && system.is_none() {
         return Err(RunError::Infra(SimulationError::InvalidState(
             "a node serves at least one journal".into(),
         )));
-    };
-    let multi = ids.len() > 1;
+    }
     // The node-level audit: what no single journal owns (the edge's
-    // rejections, a peer lane's delivery failures, a refused journal id)
-    // reports to the node's first journal.
-    let node_audit = stores.audit(first_id);
+    // rejections, a peer lane's delivery failures, a refused journal id, the
+    // system journals' folds) reports to the node's first user journal —
+    // the default one on a node that serves none yet.
+    let node_journal = ids
+        .iter()
+        .copied()
+        .find(|journal| journal.is_user())
+        .unwrap_or_default();
+    let node_audit = stores.audit(node_journal);
+    // A node exits once it has nothing left to serve — on a static
+    // deployment. A node that follows the system journals runs on with none
+    // (a joiner waits for the directory to name it) and exits only when a
+    // fault took the last one.
+    let follows = system.is_some();
+    // Whether the hold hook (#188) may be asked at all: a node that serves
+    // several journals, or may start more at runtime.
+    let multi = ids.len() > 1 || follows;
 
     // Stage 7 per journal, before the core reads a byte: the boot scan and
     // the format marker (#147). A journal that fails to boot is quarantined
@@ -808,25 +836,39 @@ where
         )
         .await;
     }
-    if journals.exhausted() {
+    for journal in journals.take_quarantined() {
+        stores.quarantined(journal);
+    }
+    if journals.exhausted() && (!follows || journals.stranded()) {
         return journals.exit();
     }
     // The matchmaker plane, the proxy leaders and the replica tier serve one
-    // journal each — the node's first — so every other journal must be a
-    // plain Multi-Paxos journal (#188; journal-tagged proxies are #193).
-    let planed = journals.live.iter().skip(1).any(|(_, rt)| {
-        let config = rt.node.config();
-        config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0
-    });
+    // journal each — the node's first user journal — so every other journal,
+    // the system journals included, must be a plain Multi-Paxos journal
+    // (#188; journal-tagged proxies are #193).
+    let plane = journals.plane().map(|(journal, _)| *journal);
+    let planed = journals
+        .live
+        .iter()
+        .filter(|(journal, _)| Some(**journal) != plane)
+        .any(|(_, rt)| {
+            let config = rt.node.config();
+            config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0
+        });
     if planed {
         return Err(RunError::Infra(SimulationError::InvalidState(
             "only a node's first journal may name matchmakers, proxies or replicas".into(),
         )));
     }
-    let self_id = journals
-        .first()
-        .map(|(_, rt)| rt.node.config().id.0)
-        .unwrap_or_default();
+    let self_id = match &system {
+        Some(plan) => plan.self_id.0,
+        None => journals
+            .live
+            .values()
+            .next()
+            .map(|rt| rt.node.config().id.0)
+            .unwrap_or_default(),
+    };
 
     // Every task spawned by this incarnation must stop when the loop exits,
     // including a durability-seam error that immediately starts a replacement
@@ -847,6 +889,29 @@ where
         edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
     )?;
+
+    // The system journals' follower (#189), and the inbox its remote reads
+    // answer on. Its sender stays alive with the follower, so the arm below
+    // simply never fires on a static deployment.
+    let fixed: Vec<NodeId> = members
+        .iter()
+        .chain(replicas.iter())
+        .map(|(id, _)| *id)
+        .collect();
+    let (mut follower, mut follow_answers, _follow_open) = if let Some(plan) = &system {
+        let (follower, inbox) = SystemFollower::new(
+            plan,
+            edge.handle(),
+            fixed,
+            &tunables,
+            incarnation_shutdown.clone(),
+        )?;
+        (Some(follower), inbox, None)
+    } else {
+        let (open, inbox) = mpsc::channel::<Followed>(1);
+        (None, inbox, Some(open))
+    };
+    let rpc_handle = edge.handle().clone();
 
     // The replicas (#144) get a node's lane, as any peer. One lane per peer,
     // carrying every journal (#188: one `Deliver` per peer, a fair lane per
@@ -923,12 +988,7 @@ where
     // after the ack had a beat to leave.
     let mut retiring: Option<JournalId> = None;
 
-    let out = Outbound {
-        peer_queues,
-        proxy_queues,
-        learners,
-        sender: me,
-    };
+    let out = Outbound::new(peer_queues, proxy_queues, learners, me);
     let shared = Shared {
         providers: &providers,
         links: &links,
@@ -962,7 +1022,7 @@ where
                 // commits (ack-on-commit); a non-leader redirects immediately.
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, journal, "append", self_id, &node_audit) {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "append", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::ProposeRedirect,
                             reply,
@@ -1028,7 +1088,7 @@ where
             Some((req, reply)) = rpc.check_tail.recv() => {
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, journal, "check_tail", self_id, &node_audit) {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "check_tail", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::ReadRedirect,
                             reply,
@@ -1096,7 +1156,7 @@ where
                 // there (the long-poll). No batch: nothing in the core moved.
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, journal, "read", self_id, &node_audit) {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::LogRead,
                             reply,
@@ -1124,6 +1184,18 @@ where
                 // the inbox, so nothing here answers it. A message for a
                 // journal this node does not run now (quarantined, down, or
                 // never served) is dropped: the peer's re-send repairs it.
+                // The registry is the pool (#189): a node the fold has not
+                // admitted yet is refused before the core sees its message.
+                if let Some(f) = &follower
+                    && let Some(from) = events::message_sender(&msg)
+                    && !f.admits(from)
+                {
+                    if let Party::Node(from) = from {
+                        node_audit.unpooled_message(NodeId(self_id), journal, from);
+                    }
+                    tracing::info!(node = self_id, journal = journal.0, from = %from, "unpooled_message_refused");
+                    continue;
+                }
                 let held = multi && hooks.hold_journal(journal);
                 let Some(rt) = journals.live.get_mut(&journal).filter(|_| !held) else {
                     tracing::info!(node = self_id, journal = journal.0, held, "journal_message_dropped");
@@ -1301,11 +1373,17 @@ where
             Some((req, reply)) = rpc.trim.recv() => {
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, journal, "trim", self_id, &node_audit) {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "trim", self_id, &node_audit) {
                         shared.with(&node_audit).answer(Reply::Compact, reply, TrimAck { unknown_journal: true, ..TrimAck::default() });
                     }
                     continue;
                 };
+                // The system journals are never trimmed (#189): every node
+                // rebuilds its folds from LSN 0.
+                if crate::system::is_system(journal) {
+                    shared.with(&node_audit).answer(Reply::Compact, reply, TrimAck::default());
+                    continue;
+                }
                 let ack = operator::trim(&mut rt.node, req.up_to, self_id);
                 rt.audit.compact_acked(NodeId(self_id), ack.accepted);
                 let outcome = shared.settle(rt).await;
@@ -1322,11 +1400,21 @@ where
                 let rt = if journal.is_set() {
                     journals.live.get(&journal)
                 } else {
-                    journals.live.values().next()
+                    journals.plane().map(|(_, rt)| rt)
                 };
                 if let Some(rt) = rt {
                     let _ = reply.send(operator::inspect(&rt.node));
                 }
+            }
+            Some(answer) = follow_answers.recv() => {
+                // A seed's answer to this node's follow read of a system
+                // journal (#189): fold it and apply what moved. The next read
+                // opens on the next tick.
+                let Some(f) = follower.as_mut() else { continue };
+                let journal = answer.journal();
+                let events = f.fold_remote(answer);
+                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                sys.apply(f, journal, events).await;
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is
@@ -1346,15 +1434,26 @@ where
                     }
                     tracing::info!(node = self_id, journal = journal.0, "retired");
                     journals.park(journal, None);
-                    if journals.exhausted() {
+                    if journals.exhausted() && (!follows || journals.stranded()) {
                         return journals.exit();
                     }
                 }
                 ticks += 1;
+                // Tell the opener about every journal a storage fault took
+                // since the last beat: it may know the store is gone for good.
+                for journal in journals.take_quarantined() {
+                    stores.quarantined(journal);
+                }
                 // A quarantined journal whose time is up re-opens from its
                 // store — a restart of that journal alone.
-                for journal in journals.due(ticks, tunables.quarantine_ticks) {
+                let due = journals.due(ticks, tunables.quarantine_ticks);
+                for &journal in &due {
                     open_journal(&providers, &mut stores, &mut journals, journal, ticks, &tunables, hooks).await;
+                }
+                // A re-opened journal booted from `Config::pool`: it admits
+                // the registry's pool again (#189).
+                if let Some(f) = follower.as_ref().filter(|_| !due.is_empty()) {
+                    admit_pool(&mut journals, f);
                 }
                 // Every live journal's beat, in id order.
                 let live: Vec<JournalId> = journals.live.keys().copied().collect();
@@ -1367,7 +1466,17 @@ where
                     let outcome = shared.beat(rt, &mut handover, ticks).await;
                     journals.fold(journal, outcome, ticks, self_id)?;
                 }
-                if journals.exhausted() {
+                // The system journals (#189): fold what this node's own
+                // journals 1 and 2 chose, apply it, and keep a follow read
+                // open against a seed for the ones it does not run.
+                if let Some(f) = follower.as_mut() {
+                    for (journal, events) in follow_local(f, &journals) {
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                        sys.apply(f, journal, events).await;
+                    }
+                    f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                }
+                if journals.exhausted() && (!follows || journals.stranded()) {
                     return journals.exit();
                 }
                 tracing::info!(tick = ticks, "node_tick");
@@ -1377,18 +1486,199 @@ where
     }
 }
 
+/// What applying the system journals' folds (#189) touches: the node's
+/// journals and their opener, the lanes, and the node-level audit.
+struct SystemCtx<'a, 'l, P: Providers, J: JournalStores, H: DriverHooks> {
+    stores: &'a mut J,
+    journals: &'a mut Journals<J::Store, J::Audit>,
+    now: u64,
+    tunables: &'a DriverTunables,
+    hooks: &'a H,
+    out: &'a Outbound,
+    lanes: &'a LaneOpener<'l, P, J::Audit>,
+    rpc: &'a moonpool_rpc::RpcHandle<P>,
+    audit: &'a J::Audit,
+}
+
+impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+    /// Apply what `journal`'s fold moved, in LSN order: start a created
+    /// journal naming this node, stop a tombstoned one, open a lane to an
+    /// admitted node, and stop every user journal on this node's own
+    /// retirement. Each event is reported first, once.
+    #[tracing::instrument(level = "debug", skip_all, fields(node = follower.self_id().0, journal = journal.0, events = events.len()))]
+    async fn apply(
+        &mut self,
+        follower: &SystemFollower<P>,
+        journal: JournalId,
+        events: Vec<(u64, SystemEvent)>,
+    ) {
+        let me = follower.self_id();
+        // Whether the pool moved or a journal opened: every live journal
+        // then admits the registry's pool (`ColocatedNode::extend_pool`,
+        // refused on a journal that cannot reconfigure).
+        let mut admit = false;
+        for (lsn, event) in events {
+            self.audit.system_folded(me, journal, lsn, &event);
+            tracing::info!(node = me.0, journal = journal.0, lsn, event = ?event, "system_folded");
+            match event {
+                SystemEvent::Directory(DirectoryEvent::Created { id, config, .. }) => {
+                    if !config.members().contains(&me)
+                        || follower.is_tombstoned(id)
+                        || self.journals.serves(id)
+                    {
+                        continue;
+                    }
+                    let journal_config = paros_core::Config {
+                        journal: id,
+                        id: me,
+                        peers: config.members().to_vec(),
+                        quorum_system: config.quorum_system(),
+                        ..paros_core::Config::default()
+                    };
+                    if !self.stores.create(id, journal_config) {
+                        continue;
+                    }
+                    open_journal(
+                        self.lanes.providers,
+                        self.stores,
+                        self.journals,
+                        id,
+                        self.now,
+                        self.tunables,
+                        self.hooks,
+                    )
+                    .await;
+                    if self.journals.live.contains_key(&id) {
+                        self.audit.journal_started(me, id);
+                        tracing::info!(node = me.0, journal = id.0, "journal_started");
+                        admit = true;
+                    }
+                }
+                SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
+                    if self.journals.serves(id) {
+                        self.journals.park(id, None);
+                        self.audit.journal_stopped(me, id);
+                        tracing::info!(node = me.0, journal = id.0, "journal_stopped");
+                    }
+                    self.stores.delete(id);
+                }
+                SystemEvent::Registry(RegistryEvent::Registered { id, .. }) if id == me => {
+                    self.join_spares(follower).await;
+                    admit = true;
+                }
+                SystemEvent::Registry(RegistryEvent::Registered { id, addr }) => {
+                    if !self.out.has_peer(id) {
+                        match peer_address(&addr) {
+                            Ok(addr) => {
+                                let client = well_known(self.rpc, addr);
+                                let regular = self.lanes.open(
+                                    "paros-peer-delivery",
+                                    client,
+                                    Party::Node(id),
+                                    self.tunables.peer_queue_capacity,
+                                );
+                                self.out.add_peer(id, PeerQueues { regular });
+                            }
+                            Err(error) => {
+                                tracing::warn!(node = me.0, admitted = id.0, %error, "registered_address_unusable");
+                            }
+                        }
+                    }
+                    self.audit.pool_admitted(me, id);
+                    tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
+                    admit = true;
+                }
+                SystemEvent::Registry(RegistryEvent::Retired { id }) if id == me => {
+                    let served: Vec<JournalId> = self
+                        .journals
+                        .live
+                        .keys()
+                        .copied()
+                        .filter(|journal| journal.is_user())
+                        .collect();
+                    for journal in served {
+                        self.journals.park(journal, None);
+                        self.audit.journal_stopped(me, journal);
+                        tracing::info!(node = me.0, journal = journal.0, "journal_stopped");
+                    }
+                }
+                _ => {}
+            }
+        }
+        if admit {
+            admit_pool(self.journals, follower);
+        }
+    }
+}
+
+impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+    /// This node is in the pool now (#189): it joins every journal a
+    /// reconfiguration may pull it into, as a spare — its own identity, the
+    /// pool the registry has admitted.
+    async fn join_spares(&mut self, follower: &SystemFollower<P>) {
+        let me = follower.self_id();
+        for template in follower.spares() {
+            let journal = template.journal;
+            if self.journals.serves(journal) {
+                continue;
+            }
+            let mut nodes = follower.pool();
+            nodes.push(me);
+            nodes.sort_unstable();
+            nodes.dedup();
+            let config = paros_core::Config {
+                id: me,
+                nodes,
+                ..template.clone()
+            };
+            if !self.stores.create(journal, config) {
+                continue;
+            }
+            open_journal(
+                self.lanes.providers,
+                self.stores,
+                self.journals,
+                journal,
+                self.now,
+                self.tunables,
+                self.hooks,
+            )
+            .await;
+            if self.journals.live.contains_key(&journal) {
+                self.audit.journal_started(me, journal);
+                tracing::info!(node = me.0, journal = journal.0, "spare_joined");
+            }
+        }
+    }
+}
+
+/// Every live journal admits the registry's pool (#189): a registered node
+/// becomes one it follows, counts and answers. Refused by the core on a
+/// journal that cannot reconfigure; retired nodes stay in (the pool is
+/// grow-only) and are kept out at the edge instead.
+fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &SystemFollower<P>) {
+    let pool = follower.pool();
+    for rt in journals.live.values_mut() {
+        rt.node.extend_pool(&pool);
+    }
+}
+
 /// Whether a call naming `journal` — not live on this node — is refused as
 /// unknown (`true`: answer `unknown_journal`, reported through the audit) or
 /// silently left unanswered (`false`: the node serves the journal but it is
 /// quarantined or down here, and the client's deadline retries elsewhere).
-fn refuse_unknown<S, A: Audit, N: Audit>(
+fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     journals: &Journals<S, A>,
+    follower: Option<&SystemFollower<P>>,
     journal: JournalId,
     call: &'static str,
     self_id: u64,
     audit: &N,
 ) -> bool {
-    if journal.is_set() && journals.serves(journal) {
+    // A journal the directory tombstoned (#189) is unknown from here on,
+    // whatever this node still holds of it.
+    let tombstoned = follower.is_some_and(|f| f.is_tombstoned(journal));
+    if journal.is_set() && journals.serves(journal) && !tombstoned {
         tracing::info!(
             node = self_id,
             journal = journal.0,

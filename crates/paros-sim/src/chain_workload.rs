@@ -22,6 +22,7 @@ use crate::client::{ClientRuntime, client_rpc_config};
 
 mod fold;
 mod rpc;
+mod system;
 
 use crate::{CHAOS_DURATION_MS, DigestSink};
 use rpc::{
@@ -87,7 +88,23 @@ const READ: u8 = 15;
 /// exactly the checks [`READ_INDEX`] and [`QUORUM_READ`] are, which pin the
 /// path.
 const CHECK_TAIL: u8 = 16;
-const OP_COUNT: u8 = 17;
+/// Create a journal through the **directory** (#189): a `CreateJournal` of a
+/// name drawn from a four-name alphabet over three members of the pool
+/// (genesis nodes and registered joiners), appended to journal 1 at a seed,
+/// then read back — `Created` with its id, or refused for a taken name — and
+/// one record appended to a journal it created. On a seed without system
+/// journals the append is still sent, and must be refused as unknown.
+const CREATE_JOURNAL: u8 = 17;
+/// Tombstone a journal this client created (#189): a `DeleteJournal`.
+const DELETE_JOURNAL: u8 = 18;
+/// Register a joiner in the **node registry** (#189): a `RegisterNode` of
+/// its id and address, appended to journal 2 at a seed.
+const REGISTER_NODE: u8 = 19;
+/// Drain a registered joiner (#189): a `DrainNode`.
+const DRAIN_NODE: u8 = 20;
+/// Retire a draining joiner from the pool for good (#189): a `RetireNode`.
+const RETIRE_NODE: u8 = 21;
+const OP_COUNT: u8 = 22;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -240,7 +257,9 @@ impl ChainConfig {
             read_max_bytes: buggify_knob!(4096_u64, 0_u64..257_u64),
             // PROPOSE, NON_LEADER, COMPACT, READ, PAUSE, DUP, DUAL, STORM, READ_IDX,
             // MATCHMAKE (retired), MATCH_GC (retired), RECONFIGURE,
-            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ, READ, CHECK_TAIL
+            // RECONFIGURE_MATCHMAKERS, RETIRE, QUORUM_READ, READ, CHECK_TAIL,
+            // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
+            // RETIRE_NODE
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -275,6 +294,16 @@ impl ChainConfig {
                 buggify_knob!(14_u64, 0_u64..41_u64),
                 // A tail on a drawn path costs what its path costs.
                 buggify_knob!(8_u64, 0_u64..41_u64),
+                // A create is two system appends' worth of reads and one
+                // append to the new journal; the ceiling is a client that
+                // mostly manages journals, the floor one that never does.
+                buggify_knob!(6_u64, 0_u64..41_u64),
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // Registering a joiner is one append; the joiners' own
+                // gates need it early and often.
+                buggify_knob!(6_u64, 0_u64..41_u64),
+                buggify_knob!(2_u64, 0_u64..21_u64),
+                buggify_knob!(2_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -342,14 +371,45 @@ impl Retarget {
         }
     }
 
-    fn next(self, current: usize, hinted: Option<u64>, server_count: usize) -> usize {
-        let hint = hinted
-            .and_then(|id| usize::try_from(id).ok())
-            .filter(|node| *node < server_count);
+    fn next(self, current: usize, hinted: Option<u64>, routes: Routes) -> usize {
+        let hint = hinted.and_then(|id| routes.index(id));
         match self {
-            Self::FollowHint => hint.unwrap_or((current + 1) % server_count),
+            Self::FollowHint => hint.unwrap_or((current + 1) % routes.servers),
             Self::SameNode => current,
-            Self::NextNode => (current + 1) % server_count,
+            Self::NextNode => (current + 1) % routes.servers,
+        }
+    }
+}
+
+/// How the client reaches a node by its id (#189): the genesis pool at its
+/// rank, and a joiner — a node the registry admitted, which a
+/// reconfiguration may make a member and then a leader — after them, at
+/// `servers + rank`. Every draw the client makes stays over the genesis
+/// pool; only a leader a reply names can route to a joiner.
+#[derive(Clone, Copy, Debug)]
+struct Routes {
+    servers: usize,
+    joiners: usize,
+}
+
+impl Routes {
+    /// The client index of node `id`, if the client can reach it.
+    fn index(self, id: u64) -> Option<usize> {
+        let id = usize::try_from(id).ok()?;
+        if id < self.servers {
+            return Some(id);
+        }
+        let joiner_base = usize::try_from(crate::roles::joiner_node_id(0).0).ok()?;
+        id.checked_sub(joiner_base)
+            .filter(|rank| *rank < self.joiners)
+            .map(|rank| self.servers + rank)
+    }
+
+    /// The node id of client index `index` (the inverse of [`Routes::index`]).
+    fn id(self, index: usize) -> u64 {
+        match index.checked_sub(self.servers) {
+            Some(rank) => crate::roles::joiner_node_id(rank).0,
+            None => index as u64,
         }
     }
 }
@@ -365,10 +425,8 @@ struct LeaderHint {
 impl LeaderHint {
     /// Adopt the leader a reply named (`None`, or an id outside the pool,
     /// clears the hint); a change of leader remembers the previous one.
-    fn observe(&mut self, observed: Option<u64>, server_count: usize) {
-        let next = observed
-            .and_then(|id| usize::try_from(id).ok())
-            .filter(|node| *node < server_count);
+    fn observe(&mut self, observed: Option<u64>, routes: Routes) {
+        let next = observed.and_then(|id| routes.index(id));
         if let (Some(previous), Some(next)) = (self.current, next)
             && previous != next
         {
@@ -628,6 +686,11 @@ const SETTLE: Duration = Duration::from_secs(1);
 struct Tail {
     registered: usize,
     done_proposing: usize,
+    /// The first moment every registered client was done proposing (#177).
+    /// The convergence budget is measured from here, not from a client's own
+    /// tail: a client whose program ended early would otherwise spend its
+    /// whole budget waiting on a sibling still in its operation program.
+    all_quiet_at: Option<Duration>,
     /// The journals some client saw converged (#188): the run ends only once
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
@@ -905,7 +968,7 @@ impl Workload for ChainWorkload {
                 Duration::from_millis(config.keep_alive_timeout_ms),
             ),
         )?;
-        let clients = runtime.clients(&servers)?;
+        let mut clients = runtime.clients(&servers)?;
         // The replica tier (#144): never proposed to, only probed — a replica
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
@@ -930,6 +993,14 @@ impl Workload for ChainWorkload {
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
         };
         let server_count = clients.len();
+        // The joiners (#189), reachable after the genesis pool: a
+        // reconfiguration may make one a member and then the leader, and a
+        // client that cannot reach its leader cannot append at all.
+        clients.extend(runtime.clients(deployment.joiners())?);
+        let routes = Routes {
+            servers: server_count,
+            joiners: deployment.joiners().len(),
+        };
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let mut next_seq = 0_u64;
         let mut hint = LeaderHint::default();
@@ -946,6 +1017,18 @@ impl Workload for ChainWorkload {
         // client is, and its tailing cursor (#185) — where its tailing reads
         // start, only ever moved forward by a page's `next_lsn`.
         let mut fold = fold::Fold::new(journal);
+        // The system-journal operations (#189), and whether the run runs
+        // the system journals at all (a seed that does not must refuse them).
+        let mut system_ops = system::SystemOps::new(
+            &deployment,
+            crate::shape::system_journals(ctx.state(), true),
+            self.plan
+                .as_ref()
+                .map(|plan| plan.ids.clone())
+                .unwrap_or_default(),
+            client_id,
+            request_timeout,
+        );
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let propose_once = |target: usize, seq: u64, payload: Vec<u8>, abandon: bool| {
@@ -1018,14 +1101,14 @@ impl Workload for ChainWorkload {
                 let (seq, cmd_hash) = (submission.seq, submission.cmd_hash);
                 match result {
                     ProposalResult::Acked { leader, slot } => {
-                        hint.observe(leader, server_count);
+                        hint.observe(leader, routes);
                         max_acked_slot = max_acked_slot.max(Some(slot));
                         self.record_ack(client_id, &submission, slot, leader, now_ms());
                         self.adversarial.payload_classes[submission.payload_class] = true;
                         acked_commands.push(submission.acked(slot, hint.current.unwrap_or(target)));
                     }
                     ProposalResult::Rejected { leader } => {
-                        hint.observe(leader, server_count);
+                        hint.observe(leader, routes);
                         tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                     }
                     ProposalResult::Ambiguous => {
@@ -1062,6 +1145,12 @@ impl Workload for ChainWorkload {
             let op = if journal != JournalId::default()
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
+                PAUSE
+            } else if has_matchmakers && op == CREATE_JOURNAL {
+                // A created journal is one more journal's beats on every
+                // link of its members: a matchmaker seed runs none (its
+                // two-round-trip campaigns livelocked once under extra load,
+                // `crate::shape::journals`).
                 PAUSE
             } else {
                 op
@@ -1138,8 +1227,7 @@ impl Workload for ChainWorkload {
                             ProposalResult::Rejected { leader }
                                 if op == PROPOSE && time.now() < proposal_deadline =>
                             {
-                                attempt_target =
-                                    retarget.next(attempt_target, leader, server_count);
+                                attempt_target = retarget.next(attempt_target, leader, routes);
                                 time.sleep(Duration::from_millis(config.redirect_sleep_ms))
                                     .await
                                     .ok();
@@ -1156,7 +1244,7 @@ impl Workload for ChainWorkload {
                         let retry_target = retarget.next(
                             chosen_target,
                             hint.current.and_then(|node| u64::try_from(node).ok()),
-                            server_count,
+                            routes,
                         );
                         let reconciled = within(
                             ctx,
@@ -1175,7 +1263,7 @@ impl Workload for ChainWorkload {
 
                     match result {
                         ProposalResult::Acked { leader, slot } => {
-                            hint.observe(leader, server_count);
+                            hint.observe(leader, routes);
                             max_acked_slot = max_acked_slot.max(Some(slot));
                             self.record_ack(client_id, &submission, slot, leader, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
@@ -1195,7 +1283,7 @@ impl Workload for ChainWorkload {
                             }
                         }
                         ProposalResult::Rejected { leader } => {
-                            hint.observe(leader, server_count);
+                            hint.observe(leader, routes);
                             self.history.record_write_failed(seq);
                             tracing::info!(cmd = %hash_text(cmd_hash), seq, "chain_command_rejected");
                         }
@@ -1264,10 +1352,10 @@ impl Workload for ChainWorkload {
                                     );
                                     self.adversarial.duplicate_across_leader_change = true;
                                 }
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                             }
                             ProposalResult::Rejected { leader } => {
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                             }
                             ProposalResult::Ambiguous => {}
                         }
@@ -1342,14 +1430,14 @@ impl Workload for ChainWorkload {
                         }
 
                         if let Some((slot, leader, ack_target)) = committed {
-                            hint.observe(leader, server_count);
+                            hint.observe(leader, routes);
                             max_acked_slot = max_acked_slot.max(Some(slot));
                             self.record_ack(client_id, &submission, slot, leader, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             acked_commands
                                 .push(submission.acked(slot, hint.current.unwrap_or(ack_target)));
                         } else if rejected == targets.len() {
-                            hint.observe(redirect, server_count);
+                            hint.observe(redirect, routes);
                             tracing::info!(
                                 cmd = %hash_text(cmd_hash),
                                 seq,
@@ -1461,11 +1549,11 @@ impl Workload for ChainWorkload {
                             };
                             match result {
                                 CompactResult::Accepted { leader } => {
-                                    hint.observe(leader, server_count);
+                                    hint.observe(leader, routes);
                                     tracing::info!(up_to, "chain_compact_accepted");
                                 }
                                 CompactResult::Rejected { leader } => {
-                                    hint.observe(leader, server_count);
+                                    hint.observe(leader, routes);
                                 }
                                 CompactResult::Ambiguous => {}
                             }
@@ -1516,10 +1604,17 @@ impl Workload for ChainWorkload {
                     let mut attempt_target = if quorum {
                         let span = u64::try_from(server_count + replica_count).unwrap_or(1);
                         let drawn = usize::try_from((raw_target >> 32) % span).unwrap_or(0);
-                        if drawn >= server_count {
-                            assert_reachable!("chain: a quorum read is asked of a replica");
+                        match drawn.checked_sub(server_count) {
+                            // A replica sits past every node the client can
+                            // reach — the joiners included (#189) — so a
+                            // redirect to a joining leader is never read as
+                            // one.
+                            Some(replica) => {
+                                assert_reachable!("chain: a quorum read is asked of a replica");
+                                clients.len() + replica
+                            }
+                            None => drawn,
                         }
-                        drawn
                     } else {
                         hint.current.unwrap_or(target) % server_count
                     };
@@ -1530,7 +1625,7 @@ impl Workload for ChainWorkload {
                             break None;
                         }
                         attempts += 1;
-                        let client = match attempt_target.checked_sub(server_count) {
+                        let client = match attempt_target.checked_sub(clients.len()) {
                             Some(replica) => replica_clients[replica].clone(),
                             None => clients[attempt_target].clone(),
                         };
@@ -1568,12 +1663,11 @@ impl Workload for ChainWorkload {
                                 // the same deadline. An overdue quorum read
                                 // names no node to go to: any other serves.
                                 let leader = if quorum { None } else { ack.leader };
-                                attempt_target =
-                                    retarget.next(attempt_target, leader, server_count);
+                                attempt_target = retarget.next(attempt_target, leader, routes);
                             }
                             // Transport error: same policy, no hint.
                             None => {
-                                attempt_target = retarget.next(attempt_target, None, server_count);
+                                attempt_target = retarget.next(attempt_target, None, routes);
                             }
                         }
                         if time
@@ -1767,14 +1861,21 @@ impl Workload for ChainWorkload {
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
-                    let leader_id = hint.current.and_then(|l| u64::try_from(l).ok());
+                    let leader_id = hint.current.map(|l| routes.id(l));
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
-                    let live = live_candidates(
+                    let mut live = live_candidates(
                         &servers,
                         &crate::world::parked_nodes(ctx.state(), journal),
                     );
+                    // The joiners the node registry admitted (#189): a
+                    // successor may pull one in. Read here, before the
+                    // composition and its ledger entry, which take no await
+                    // between them — a retirement reserved in the meantime
+                    // is re-checked at the ledger.
+                    let joinable = system_ops.joinable(ctx, &clients, raw_payload).await;
+                    live.extend(joinable.iter().copied());
                     // The adversarial draw (R5): compose from *every* rank
                     // instead, so the request may name an identity the run
                     // lost for good. A well-behaved operator would not, and
@@ -1942,7 +2043,7 @@ impl Workload for ChainWorkload {
                                     { "shape" => name }
                                 );
                                 self.adversarial.reconfigure_started[observed] = true;
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                                 // A rare-but-valid operator act (#173):
                                 // reboot every member of the configuration
                                 // just installed. Each loses its belief in
@@ -1994,7 +2095,7 @@ impl Workload for ChainWorkload {
                                         "reconfiguration: a configuration that does not admit its quorum system is refused"
                                     );
                                 }
-                                hint.observe(leader, server_count);
+                                hint.observe(leader, routes);
                             }
                             ReconfigureResult::Ambiguous => {}
                         }
@@ -2274,6 +2375,37 @@ impl Workload for ChainWorkload {
                         }
                     }
                 }
+                CREATE_JOURNAL => {
+                    system_ops
+                        .create(ctx, &clients, (raw_class, raw_payload))
+                        .await;
+                }
+                DELETE_JOURNAL => system_ops.delete(ctx, &clients, raw_payload).await,
+                REGISTER_NODE => {
+                    system_ops
+                        .registry_step(ctx, &clients, None, raw_payload)
+                        .await;
+                }
+                DRAIN_NODE => {
+                    system_ops
+                        .registry_step(
+                            ctx,
+                            &clients,
+                            Some(paros::system::NodeStanding::Registered),
+                            raw_payload,
+                        )
+                        .await;
+                }
+                RETIRE_NODE => {
+                    system_ops
+                        .registry_step(
+                            ctx,
+                            &clients,
+                            Some(paros::system::NodeStanding::Draining),
+                            raw_payload,
+                        )
+                        .await;
+                }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }
@@ -2391,13 +2523,15 @@ impl Workload for ChainWorkload {
                         acknowledged = true;
                         self.record_ack(client_id, &submission, slot, leader, now_ms());
                         if let Some(node) = leader {
-                            target = usize::try_from(node).unwrap_or(target) % server_count;
+                            target = routes.index(node).unwrap_or(target % server_count);
                         }
                         break;
                     }
                     ProposalResult::Rejected { leader } => {
+                        // A leader outside the genesis pool (#189: a joiner
+                        // a reconfiguration pulled in) has no client here.
                         target = leader
-                            .and_then(|id| usize::try_from(id).ok())
+                            .and_then(|id| routes.index(id))
                             .unwrap_or((target + 1) % server_count);
                     }
                     ProposalResult::Ambiguous => target = (target + 1) % server_count,
@@ -2411,9 +2545,28 @@ impl Workload for ChainWorkload {
             }
         }
         let tail = tail(ctx.state());
-        tail.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .done_proposing += 1;
+        {
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.done_proposing += 1;
+            if guard.done_proposing == guard.registered && guard.all_quiet_at.is_none() {
+                guard.all_quiet_at = Some(time.now());
+            }
+        }
+        // The convergence claim needs every client quiet, so its budget runs
+        // from the first moment every client is (#177), and never ends before
+        // this client's own recovery deadline. While a sibling is still in its
+        // operation program there is no deadline yet: every program is finite
+        // (its operations time out, its recovery batch has its own deadline).
+        // The threshold, `recovery_budget_ms`, is unchanged; only where it is
+        // measured from moved.
+        let budget = Duration::from_millis(config.recovery_budget_ms);
+        let convergence_deadline = || -> Option<Duration> {
+            tail.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .all_quiet_at
+                .map(|at| (at + budget).max(recovery_deadline))
+        };
+        let in_budget = || convergence_deadline().is_none_or(|deadline| time.now() < deadline);
 
         let mut converged = false;
         // The last probe, `(node, answer)` per live node in node order — the
@@ -2426,7 +2579,7 @@ impl Workload for ChainWorkload {
         // `(since, end)`: when the cluster was first seen converged at `end`,
         // reset whenever a probe disagrees.
         let mut stable: Option<(Duration, u64)> = None;
-        while time.now() < recovery_deadline && !shutdown.is_cancelled() {
+        while in_budget() && !shutdown.is_cancelled() {
             // A node terminally parked by a detected corruption (Stage 7's
             // detect ⇒ crash baseline) never answers again — the availability
             // cost the dead-node budget bounds. Convergence is demanded of
@@ -2517,7 +2670,7 @@ impl Workload for ChainWorkload {
                 .unwrap_or_else(PoisonError::into_inner)
                 .converged
                 .insert(journal);
-            while time.now() < recovery_deadline && !shutdown.is_cancelled() {
+            while in_budget() && !shutdown.is_cancelled() {
                 let all = appended_to.is_subset(
                     &tail
                         .lock()
@@ -2596,9 +2749,9 @@ impl Workload for ChainWorkload {
             // produce a red.
             let parked_now = crate::world::parked_nodes(ctx.state(), journal);
             eprintln!(
-                "chain convergence FAILED at t={}ms (deadline {}ms, pre_tail_count {}): per-node chosen ends = {:?}",
+                "chain convergence FAILED at t={}ms (deadline {:?}ms, pre_tail_count {}): per-node chosen ends = {:?}",
                 time.now().as_millis(),
-                recovery_deadline.as_millis(),
+                convergence_deadline().map(|deadline| deadline.as_millis()),
                 pre_tail_count,
                 last_probe,
             );

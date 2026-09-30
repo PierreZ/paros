@@ -39,6 +39,7 @@ mod client;
 pub(crate) mod journals;
 mod matchmaker;
 mod state;
+pub(crate) mod system;
 mod world;
 
 pub(crate) use client::ClientHistory;
@@ -74,6 +75,9 @@ pub(crate) struct NodeAudit<T> {
     /// The journal this port reports for and the run's cross-journal board
     /// (#188); `None` for a port outside the journal plane (a matchmaker).
     journal: Option<(JournalId, Arc<Mutex<journals::JournalBoard>>)>,
+    /// The run's system-journal board (#189), on a node that follows the
+    /// system journals.
+    system: Option<Arc<Mutex<system::SystemBoard>>>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -116,7 +120,19 @@ impl<T: TimeProvider> NodeAudit<T> {
             time,
             world,
             journal: None,
+            system: None,
         }
+    }
+
+    /// This port also reports the system journals' folds and their effects
+    /// to `board` (#189).
+    pub(crate) fn with_system(mut self, board: Arc<Mutex<system::SystemBoard>>) -> Self {
+        self.system = Some(board);
+        self
+    }
+
+    fn system_board(&self) -> Option<MutexGuard<'_, system::SystemBoard>> {
+        self.system.as_deref().map(system::lock)
     }
 
     /// This port reports for `journal` (#188): the non-interference oracles
@@ -657,6 +673,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _gap_fills: u64,
         config: &AcceptorConfig,
     ) {
+        if let Some(mut board) = self.system_board() {
+            let members: Vec<u64> = config.members().iter().map(|m| m.0).collect();
+            board.elected_under(&members);
+        }
         let now = self.now_ms();
         let mut st = self.state();
         // Matchmaking invariants 4 and 5 (#120): a leadership on a matchmaker
@@ -932,6 +952,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         applied: Option<Slot>,
         dedup: bool,
     ) {
+        // #189: a node acknowledges no append to a journal after folding its
+        // tombstone.
+        if let (Some(board), Some((journal, _))) = (self.system_board(), &self.journal) {
+            board.acked(node, *journal);
+        }
         let mut st = self.state();
         st.any_ack_checked = true;
         // Decision 1 of #144: the node asked acks, and the slot's reply
@@ -1059,6 +1084,49 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         assert_reachable!("journal: a call naming an unserved journal is refused");
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, journal = journal.0, lsn))]
+    fn system_folded(
+        &self,
+        node: NodeId,
+        journal: JournalId,
+        lsn: u64,
+        event: &paros::system::SystemEvent,
+    ) {
+        if let Some(mut board) = self.system_board() {
+            board.folded(node, journal, lsn, event);
+        }
+    }
+
+    fn journal_started(&self, node: NodeId, _journal: JournalId) {
+        if let Some(mut board) = self.system_board() {
+            board.started(node);
+        }
+    }
+
+    fn journal_stopped(&self, node: NodeId, journal: JournalId) {
+        assert_reachable!(
+            "system: a node stops a journal the directory tombstoned or its retirement ended"
+        );
+        // A joiner the registry retired leaves the default journal for good
+        // (#189): convergence excuses it, exactly like an operator
+        // retirement (#123).
+        if journal == JournalId::default() {
+            self.world.note_left_pool(node.0);
+        }
+    }
+
+    fn unpooled_message(&self, node: NodeId, _journal: JournalId, from: NodeId) {
+        if let Some(mut board) = self.system_board() {
+            board.refused(node, from);
+        }
+    }
+
+    fn pool_admitted(&self, node: NodeId, admitted: NodeId) {
+        if let Some(mut board) = self.system_board() {
+            board.admitted(node, admitted);
+        }
+    }
+
     fn quorum_read_served(
         &self,
         node: NodeId,
@@ -1122,8 +1190,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         let pool: BTreeSet<u64> = deployment.pool.iter().map(|n| n.0).collect();
         let known = st.pool.get_or_insert_with(|| pool.clone());
+        // A genesis node boots with the genesis pool; a joiner (#189) — a node
+        // outside it, admitted by the registry at runtime — boots with the
+        // genesis pool plus itself and whoever the registry had admitted.
+        let same = if known.contains(&node.0) {
+            *known == pool
+        } else {
+            known.is_subset(&pool) && pool.contains(&node.0)
+        };
         assert_always!(
-            *known == pool,
+            same,
             "every node derives the same node pool",
             { "node" => node.0, "pool" => pool.len() }
         );
@@ -2124,6 +2200,21 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn matchmaker_crashed(&self, _matchmaker: MatchmakerId, seam: Seam) {
         self.state().matchmaker.crashed(seam);
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0, refusal = ?refusal))]
+    fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {
+        match refusal {
+            // #183: the library, not the harness, keeps a wiped registry out.
+            BootRefusal::Amnesia => self.state().matchmaker.boot_refused(matchmaker.0),
+            BootRefusal::AlreadyFormatted => {
+                assert_always!(
+                    false,
+                    "matchmaker: a first boot never meets a formatted registry",
+                    { "matchmaker" => matchmaker.0 }
+                );
+            }
+        }
     }
 
     fn match_reply_dropped(&self, _matchmaker: MatchmakerId, reply: paros::Reply) {

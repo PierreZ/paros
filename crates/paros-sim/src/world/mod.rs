@@ -369,8 +369,8 @@ pub(crate) struct StorageWorld {
     /// and their disks run fault-free (the replica's own write path is not
     /// what the budget protects).
     replicas: BTreeSet<String>,
-    /// Matchmakers whose durable state was lost for good (#125): the
-    /// registry stays down, and the replacement is a matchmaker-set
+    /// Matchmakers whose registry was wiped (#125, #183): the library
+    /// refuses to boot them again, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
     /// Matchmakers whose registry fsync has failed at least once this run.
@@ -388,6 +388,9 @@ pub(crate) struct StorageWorld {
     requested: BTreeMap<u64, RequestedConfiguration>,
     /// The next request id the ledger hands out.
     next_request: u64,
+    /// Joiners an operator reserved for retirement through the node registry
+    /// (#189): no later reconfiguration names one.
+    retiring_joiners: BTreeSet<u64>,
     /// Unbudgeted mode (the scripted corpus): a targeted injection may take
     /// every copy of a record; each slot driven to zero readable copies is
     /// recorded in `unrecoverable`, the ground truth the corpus's analytic
@@ -456,7 +459,7 @@ impl StorageWorld {
         self.provisioning.remove(ip);
     }
 
-    /// Whether `ip`'s registry was lost for good.
+    /// Whether `ip`'s registry was wiped (lost for good).
     pub(crate) fn is_matchmaker_parked(&self, ip: &str) -> bool {
         self.parked_matchmakers.contains(ip)
     }
@@ -479,6 +482,33 @@ impl StorageWorld {
         self.park_as(key, node, ParkReason::Wiped);
         tracing::info!(node, "storage_wiped");
         true
+    }
+
+    /// Reserve joiner `node` for retirement through the node registry
+    /// (#189): refused when any reconfiguration an operator ever asked for
+    /// names it — it may be, or become, a member the protocol still needs —
+    /// the joiner's twin of [`StorageWorld::retire`]'s ledger check. Once
+    /// reserved, no composer names it again
+    /// ([`StorageWorld::is_retiring_joiner`]), so a retired joiner is never
+    /// asked to vote. Returns whether it is reserved.
+    pub(crate) fn reserve_joiner_retirement(&mut self, node: u64) -> bool {
+        if self.retiring_joiners.contains(&node) {
+            return true;
+        }
+        if self
+            .requested
+            .values()
+            .any(|entry| entry.members.contains(&node))
+        {
+            return false;
+        }
+        self.retiring_joiners.insert(node);
+        true
+    }
+
+    /// Whether joiner `node` is reserved for retirement (#189).
+    pub(crate) fn is_retiring_joiner(&self, node: u64) -> bool {
+        self.retiring_joiners.contains(&node)
     }
 
     /// Record that an operator is about to ask for the acceptor set
@@ -591,20 +621,25 @@ impl StorageWorld {
         true
     }
 
-    /// Lose matchmaker `ip`'s registry for good (#125). Permitted once per
-    /// run, and only where the deployment's bootstrap matchmaker set holds
+    /// Wipe matchmaker `ip`'s registry at a restart (#125, #183): every
+    /// record gone, the format marker with them, the matchmaker counted lost
+    /// for the budget and the composer. The park is accounting only: the
+    /// process boots the matchmaker on its empty disk as an existing member
+    /// and the library refuses it (#183); the replacement is a matchmaker-set
+    /// reconfiguration reconstructed from the surviving quorum. Permitted once
+    /// per run, and only where the deployment's bootstrap matchmaker set holds
     /// [`crate::shape::MATCHMAKER_LOSS_FLOOR`] members or more — the smallest
     /// set that keeps a quorum without the lost one, and the same constant
     /// [`crate::shape::matchmaker_floor`] refuses to shrink below on such a
     /// seed. Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
-    pub(crate) fn park_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
+    pub(crate) fn wipe_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
         if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
             return false;
         }
         self.matchmakers.remove(key);
         self.parked_matchmakers.insert(key.to_string());
-        tracing::info!(matchmaker = %key, "matchmaker_lost");
+        tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
     }
 

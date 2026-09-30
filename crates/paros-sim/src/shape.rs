@@ -76,8 +76,9 @@ pub(crate) struct NodeShape {
     /// anything). Ceiling 75: the world's dead-node budget bounds the damage
     /// whatever the rate, so the extreme is a valid, very forgetful disk.
     pub(crate) wipe_pct: u32,
-    /// Percent chance that a chaotic restart of this *matchmaker* finds its
-    /// registry unusable (#125). Same floor and ceiling, and the same
+    /// Percent chance that a chaotic restart of this *matchmaker* comes back
+    /// on a wiped registry (#125, #183), which the library then refuses to
+    /// boot. Same floor and ceiling, and the same
     /// argument: the matchmaker-loss budget (one per run, and only where the
     /// bootstrap set can spare it) bounds it.
     pub(crate) matchmaker_loss_pct: u32,
@@ -456,6 +457,9 @@ struct Registry {
     /// Run-level: whether the nodes run on the journal store, and its
     /// layout (see [`journal_store`]), fixed by the first caller.
     journal_store: Option<StoreDraw>,
+    /// Run-level: whether the run runs the system journals (see
+    /// [`system_journals`]), fixed by the first caller.
+    system: Option<bool>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -521,6 +525,47 @@ pub(crate) fn journal_store(
         StoreDraw::World => None,
         StoreDraw::Journal(layout) => Some(layout),
     }
+}
+
+/// How many genesis nodes host the system journals (#189) — the seeds,
+/// the lowest ranks of the pool: one. A one-member plain journal sends
+/// nothing to anyone, and the system journals' beats among three seeds are
+/// load a small cluster cannot always carry: two more journals on every link
+/// livelocked a matchmaker deployment's two-round-trip campaigns (witness
+/// 17972338006788767545 on this branch: 3 nodes, 240 campaigns) and, with
+/// one node parked, the two survivors of a plain 3-node pool (witness
+/// 16999966542771974935: 267 dueling rounds, nothing chosen) — the load
+/// [`journals`] already keeps off those seeds. Not a tunable: its extreme is
+/// a run that cannot win. The driver's `SystemPlan` takes any seed list; a
+/// one-member journal's only liveness cost is its one seed's downtime.
+pub(crate) const SEED_COUNT: usize = 1;
+
+/// The seeds of a pool of `pool` nodes (#189): its [`SEED_COUNT`] lowest
+/// ranks.
+pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
+    (0..pool.min(SEED_COUNT) as u64).collect()
+}
+
+/// Whether the run runs the **system journals** (#189) — the directory and
+/// the node registry on the seeds, every node following them, and the
+/// joiners joining the pool through the registry — drawn once per seed: a
+/// seeded coin on a perturbed seed. Deployment shape, like
+/// [`journal_store`]: half the seeds keep #188's static deployment. On a
+/// seed with matchmakers a joiner the registry admits joins the default
+/// journal as a spare a reconfiguration may pull in.
+#[tracing::instrument(level = "debug", skip(state), fields(perturb))]
+pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.system.get_or_insert_with(|| {
+        if !perturb || !moonpool_sim::sim_random_bool(0.5) {
+            return false;
+        }
+        // BUGGIFY pairing: a seed genuinely runs the system journals (a
+        // cause; the outcomes are the system board's gates).
+        assert_reachable!("system: a seed runs the system journals");
+        true
+    })
 }
 
 /// The run's store draw (see [`journal_store`]).
@@ -818,11 +863,11 @@ pub(crate) fn matchmaker_bootstrap_ranks(
 
 /// The smallest bootstrap matchmaker set that can lose one member and keep a
 /// quorum — and therefore the smallest set the world will ever take a
-/// matchmaker from ([`StorageWorld::park_matchmaker`]) and the ceiling of
+/// matchmaker from ([`StorageWorld::wipe_matchmaker`]) and the ceiling of
 /// [`matchmaker_floor`]. Not a tunable: it is what the matchmaker-loss budget
 /// is computed over.
 ///
-/// [`StorageWorld::park_matchmaker`]: crate::world::StorageWorld::park_matchmaker
+/// [`StorageWorld::wipe_matchmaker`]: crate::world::StorageWorld::wipe_matchmaker
 pub(crate) const MATCHMAKER_LOSS_FLOOR: usize = 3;
 
 /// The smallest matchmaker set a run may put in force (#125):

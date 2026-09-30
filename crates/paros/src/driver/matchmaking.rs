@@ -386,7 +386,9 @@ pub(crate) fn report_match_step<A: Audit>(
 ) {
     let (folded_watermark, folded_hash) = folded.unwrap_or_default();
     match step {
-        MatchStep::Ignored | MatchStep::ProbeAnswered => {}
+        // #189: an unknown member abandons the campaign until the registry
+        // catches up; nothing to report beyond the step itself.
+        MatchStep::Ignored | MatchStep::ProbeAnswered | MatchStep::UnknownMember => {}
         MatchStep::Registered { remaining } => {
             audit.match_registered_by(
                 NodeId(self_id),

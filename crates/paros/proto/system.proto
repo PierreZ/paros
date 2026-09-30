@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package paros.system.v1;
+
+import "common.proto";
+
+// The entries of the two system journals (#189). Each is one record of an
+// `Append`, and a system journal's slot holds exactly one: the slot is the
+// entry's identity. The core keeps them opaque like every user entry; only
+// `paros::system` reads them, and every node folds them the same way.
+//
+// Journal 1, the **directory**: `CreateJournal` and `DeleteJournal`. A created
+// journal's id is `128 + the slot of its CreateJournal entry`, so the log
+// order is the allocator and an id is never reused.
+//
+// Journal 2, the **node registry**: `RegisterNode`, `DrainNode`,
+// `RetireNode`. The node pool is the genesis pool plus every registered
+// node not yet retired.
+message SystemEntry {
+  oneof kind {
+    CreateJournal create_journal = 1;
+    DeleteJournal delete_journal = 2;
+    RegisterNode register_node = 3;
+    DrainNode drain_node = 4;
+    RetireNode retire_node = 5;
+  }
+}
+
+// Create a journal named `name` (opaque bytes) over `config`, its static
+// acceptor configuration. Of two creates with one name, the lower slot wins.
+message CreateJournal {
+  bytes name = 1;
+  paros.common.v1.AcceptorConfig config = 2;
+}
+
+// Delete journal `id`: a tombstone, never a reuse.
+message DeleteJournal {
+  uint64 id = 1;
+}
+
+// Add node `id`, reachable at `addr`, to the pool.
+message RegisterNode {
+  uint64 id = 1;
+  string addr = 2;
+  string failure_domain = 3;
+}
+
+// Stop placing new work on node `id` (it stays in the pool).
+message DrainNode {
+  uint64 id = 1;
+}
+
+// Remove a drained node `id` from the pool for good.
+message RetireNode {
+  uint64 id = 1;
+}

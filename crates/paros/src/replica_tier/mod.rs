@@ -535,12 +535,7 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
             Ok((node, PeerQueues { regular }))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
-    let out = Outbound {
-        peer_queues,
-        proxy_queues: BTreeMap::new(),
-        learners: Vec::new(),
-        sender: me,
-    };
+    let out = Outbound::new(peer_queues, BTreeMap::new(), Vec::new(), me);
     Ok(out)
 }
 

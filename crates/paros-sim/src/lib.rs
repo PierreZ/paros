@@ -49,7 +49,7 @@ use moonpool_sim::{
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
 use crate::process::{
-    MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess, ScriptedOptions,
+    JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess, ScriptedOptions,
 };
 use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
 
@@ -140,6 +140,13 @@ pub(crate) const PROXY_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=3;
 /// The count is protocol data every node's `Config` carries; which process
 /// answers to a `ReplicaId` is the deployment map's.
 pub(crate) const REPLICA_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
+/// Per-seed **joiner pool** draw (inclusive, #189): the joiner process group
+/// (`crate::roles::JOINER_GROUP`), nodes outside the genesis pool that the
+/// chain client registers, drains and retires through the node registry at
+/// runtime. Zero is a seed without joiners; a joiner on a seed without system
+/// journals idles. Two let one joiner race another's registration and a
+/// created journal name both.
+pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -275,6 +282,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         })
         .processes(PROXY_POOL_RANGE, || Box::new(ProxyProcess::chaotic()))
         .processes(REPLICA_POOL_RANGE, || Box::new(ReplicaProcess::chaotic()))
+        .processes(JOINER_POOL_RANGE, || Box::new(JoinerProcess::chaotic()))
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))

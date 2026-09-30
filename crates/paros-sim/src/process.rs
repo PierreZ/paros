@@ -44,7 +44,8 @@ use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
     AcceptorConfig, BootKind, BootRefusal, Config, JournalStorage, JournalStoreConfig,
     JournalStores, LogStorage, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId,
-    ReplicaId, RunError, parse_addr, run_journals, run_matchmaker, run_proxy, run_replica,
+    ReplicaId, RunError, SystemPlan, parse_addr, run_journals, run_matchmaker, run_proxy,
+    run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -147,7 +148,8 @@ enum Down {
     StorageParked(u64),
     /// A node the operator retired (#123).
     Retired(u64),
-    /// A matchmaker whose registry was lost for good (#125).
+    /// A matchmaker whose registry was wiped and whose boot the library
+    /// refused (#125, #183).
     MatchmakerLost(u64),
 }
 
@@ -296,6 +298,126 @@ pub(crate) struct ReplicaProcess {
 impl ReplicaProcess {
     pub(crate) fn chaotic() -> Self {
         Self { perturb: true }
+    }
+}
+
+/// A joiner in the simulation (#189): its own process group, a node outside
+/// the genesis pool. On a seed that runs the system journals it follows the
+/// directory and the registry from the seeds, is admitted to the pool when a
+/// client registers it, and serves every journal the directory creates
+/// naming it; on any other seed it idles.
+pub(crate) struct JoinerProcess {
+    /// Whether the driver hooks and the shape knobs are live.
+    perturb: bool,
+}
+
+impl JoinerProcess {
+    pub(crate) fn chaotic() -> Self {
+        Self { perturb: true }
+    }
+}
+
+#[async_trait]
+impl Process for JoinerProcess {
+    fn name(&self) -> &'static str {
+        crate::roles::JOINER_GROUP
+    }
+
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let perturb = self.perturb;
+        dispatch(
+            ctx,
+            "every joiner process is mapped to the joiner role",
+            "a joiner",
+            |role| match role {
+                Role::Joiner(id) => Some(id),
+                _ => None,
+            },
+            |deployment, id, my_ip| async move {
+                Box::pin(run_joiner(ctx, &deployment, id, &my_ip, perturb)).await
+            },
+        )
+        .await
+    }
+}
+
+/// A joiner (#189): `run_journals` with no journal of its own and the
+/// system plan, in the same seam-crash recovery loop as a node. Its disk is
+/// fault-free (every seat it gets is a created journal's), and it is not an
+/// attrition victim: a joiner's lifecycle is the registry's.
+#[tracing::instrument(level = "debug", skip_all, fields(node = id.0))]
+async fn run_joiner(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    id: NodeId,
+    my_ip: &str,
+    perturb: bool,
+) -> SimulationResult<()> {
+    let has_matchmakers = !deployment.matchmakers().is_empty();
+    if !crate::shape::system_journals(ctx.state(), perturb) {
+        // No system journals on this seed: nothing to join.
+        ctx.shutdown().cancelled().await;
+        return Ok(());
+    }
+    let members = ranked(deployment.acceptors(), NodeId)?;
+    // A joiner that joins the default journal as a spare campaigns through
+    // the matchmakers like any member of it.
+    let matchmakers = ranked(deployment.matchmakers(), MatchmakerId)?;
+    let plan = crate::shape::journals(ctx.state(), has_matchmakers, perturb);
+    let board = crate::audit::system::system_board(ctx.state());
+    let (system_plan, _) = system_plan(ctx, deployment, &members, &plan, id);
+    let RoleRig {
+        incarnation, hooks, ..
+    } = arm_role(ctx, my_ip, perturb);
+    let tunables = incarnation.shape.tunables;
+    let faults = quiet_faults(ctx);
+    let mut seats: Vec<Seat> = Vec::new();
+    loop {
+        let stores = SimStores {
+            ctx,
+            seats: &mut seats,
+            ip: my_ip,
+            rank: id.0,
+            faults: &faults,
+            journal_store: None,
+            system: Some(board.clone()),
+        };
+        match Box::pin(run_journals(
+            ctx.providers().clone(),
+            stores,
+            parse_addr(my_ip)?,
+            members.clone(),
+            matchmakers.clone(),
+            Vec::new(),
+            Vec::new(),
+            Some(system_plan.clone()),
+            tunables,
+            ctx.shutdown().clone(),
+            &hooks,
+        ))
+        .await
+        {
+            Err(RunError::SeamCrash(_) | RunError::Storage(_)) => {
+                restart_delay!(
+                    ctx,
+                    "a seam-crashed joiner restarts after a buggified delay"
+                );
+            }
+            Err(RunError::Refused(refusal)) => {
+                assert_always!(
+                    false,
+                    "system: a joiner's quiet store is never refused",
+                    { "node" => id.0, "refusal" => format!("{refusal:?}") }
+                );
+                return Err(SimulationError::InvalidState(format!(
+                    "joiner {} refused a boot: {refusal:?}",
+                    id.0
+                )));
+            }
+            Err(RunError::Infra(e)) => return Err(e),
+            Ok(()) => return Ok(()),
+        }
     }
 }
 
@@ -566,7 +688,7 @@ async fn run_acceptor(
     // matchmakers, proxies, replicas and bootstrap); every other journal is
     // plain Multi-Paxos over the whole pool — the matchmaker plane, the
     // proxy leaders and the replica tier each serve one journal.
-    let seats: Vec<Seat> = plan
+    let mut seats: Vec<Seat> = plan
         .ids
         .iter()
         .map(|&journal| {
@@ -608,9 +730,18 @@ async fn run_acceptor(
                 audit,
                 floor,
                 clean_copies,
+                quiet: false,
+                created: false,
+                deleted: false,
             }
         })
         .collect();
+    // The system journals (#189), on a seed that drew them: every node
+    // follows the directory and the registry, and the seeds — the lowest
+    // ranks — host them, a static configuration of plain Multi-Paxos on a
+    // fault-free disk.
+    let system = crate::shape::system_journals(ctx.state(), perturb)
+        .then(|| system_rig(ctx, deployment, &members, &plan, &mut seats, self_rank));
     let faults = storage_faults(ctx, perturb, shape.write_rates);
     let tunables = shape.tunables;
     if incarnation.is_restart() {
@@ -678,11 +809,13 @@ async fn run_acceptor(
             resolve_provisioning(ctx, &seats, my_ip, journal_store).await;
         }
         let stores = SimStores {
-            seats: &seats,
+            ctx,
+            seats: &mut seats,
             ip: my_ip,
             rank: self_rank.0,
             faults: &faults,
             journal_store: journal_store.map(|layout| (ctx.storage().clone(), layout)),
+            system: system.as_ref().map(|(_, board)| board.clone()),
         };
         // Boxed: the node loop's future is large (every arm's state lives
         // in it), and this incarnation loop awaits it on its own frame.
@@ -694,6 +827,7 @@ async fn run_acceptor(
             matchmakers.clone(),
             proxies.clone(),
             replicas.clone(),
+            system.as_ref().map(|(plan, _)| plan.clone()),
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -799,6 +933,56 @@ struct Seat {
     /// numbers its storage world was sized by).
     floor: usize,
     clean_copies: usize,
+    /// A system journal or a journal the directory created (#189): stored on
+    /// a fault-free world-backed disk, outside the copy budget — the storage
+    /// fault model is the genesis journals' business.
+    quiet: bool,
+    /// Created at runtime by the directory (#189): opened only when the
+    /// directory names it, never at boot.
+    created: bool,
+    /// The directory tombstoned it (#189): never opened again.
+    deleted: bool,
+}
+
+impl Seat {
+    /// A fault-free seat for a system journal or a created one (#189): its
+    /// own storage world (unbudgeted, nothing is injected into it) and its
+    /// own audit world and port, reporting to the system board too.
+    fn quiet(
+        ctx: &SimContext,
+        journal: paros::JournalId,
+        config: Config,
+        system: &Arc<Mutex<crate::audit::system::SystemBoard>>,
+    ) -> Self {
+        let world = storage_world_for(ctx.state(), journal);
+        // A journal of its own (a system or a created one) is outside every
+        // budget; a joiner's seat on a genesis journal (#189, a spare) shares
+        // that journal's world and leaves its budget as the genesis nodes
+        // sized it — a fault-free copy only ever adds to what it defends.
+        if journal != paros::JournalId::default() {
+            world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .set_unbudgeted();
+        }
+        let checker = audit_world_for(ctx.state(), journal);
+        let audit = NodeAudit::new(ctx.time().clone(), checker.clone())
+            .in_journal(journal, journal_board(ctx.state()))
+            .with_system(system.clone());
+        let members = config.peers.len();
+        Self {
+            journal,
+            config,
+            world,
+            checker,
+            audit,
+            floor: members,
+            clean_copies: members,
+            quiet: true,
+            created: false,
+            deleted: false,
+        }
+    }
 }
 
 /// The acceptor's journal stores (#188): each journal's world-backed disk,
@@ -807,13 +991,17 @@ struct Seat {
 /// A journal down for good on this node — retired, or parked by a detected
 /// corruption — is declined, and its audit is told it stays down.
 struct SimStores<'a> {
-    seats: &'a [Seat],
+    ctx: &'a SimContext,
+    seats: &'a mut Vec<Seat>,
     ip: &'a str,
     rank: u64,
     faults: &'a StorageFaults<SimTimeProvider>,
     /// The simulated disk and the journal layout, on a journal-store seed
     /// (#187).
     journal_store: Option<(SimStorageProvider, JournalStoreConfig)>,
+    /// The system board, on a seed that runs the system journals (#189):
+    /// the directory's created journals get seats here at runtime.
+    system: Option<Arc<Mutex<crate::audit::system::SystemBoard>>>,
 }
 
 /// The directory a journal's store lives in on a node's simulated disk
@@ -876,11 +1064,15 @@ impl JournalStores for SimStores<'_> {
     type Audit = NodeAudit<SimTimeProvider>;
 
     fn journals(&self) -> Vec<paros::JournalId> {
-        self.seats.iter().map(|seat| seat.journal).collect()
+        self.seats
+            .iter()
+            .filter(|seat| !seat.created)
+            .map(|seat| seat.journal)
+            .collect()
     }
 
     fn open(&mut self, journal: paros::JournalId) -> Option<(Self::Store, BootKind)> {
-        let seat = self.seat(journal)?;
+        let seat = self.seat(journal).filter(|seat| !seat.deleted)?;
         let (parked, boot) = {
             let guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
             (
@@ -907,6 +1099,19 @@ impl JournalStores for SimStores<'_> {
             }
             Some(ParkReason::Wiped) | None => {}
         }
+        if seat.quiet {
+            // A system or created journal (#189): the world store, and no
+            // fault is ever injected into it.
+            let storage = DurableStorage::restore(
+                seat.config.clone(),
+                Arc::downgrade(&seat.world),
+                self.ip.to_string(),
+                self.rank,
+                quiet_faults(self.ctx),
+                seat.checker.clone(),
+            );
+            return Some((NodeStore::World(storage), boot));
+        }
         if let Some((provider, layout)) = &self.journal_store {
             let journal = JournalStorage::new(
                 provider.clone(),
@@ -930,9 +1135,181 @@ impl JournalStores for SimStores<'_> {
     }
 
     fn audit(&self, journal: paros::JournalId) -> Self::Audit {
-        self.seat(journal)
-            .map_or_else(|| self.seats[0].audit.clone(), |seat| seat.audit.clone())
+        self.seat(journal).map_or_else(
+            || {
+                // A node that serves no seat for `journal` — a joiner's
+                // node-level port (#189): the default journal's world.
+                let audit = NodeAudit::new(
+                    self.ctx.time().clone(),
+                    audit_world_for(self.ctx.state(), journal),
+                );
+                match &self.system {
+                    Some(board) => audit.with_system(board.clone()),
+                    None => audit,
+                }
+            },
+            |seat| seat.audit.clone(),
+        )
     }
+
+    /// A journal the directory created naming this node (#189): a quiet seat
+    /// under `config`, kept across incarnations (a restart re-folds the
+    /// directory and asks again).
+    fn create(&mut self, journal: paros::JournalId, config: Config) -> bool {
+        let Some(board) = &self.system else {
+            return false;
+        };
+        if let Some(seat) = self.seats.iter().find(|seat| seat.journal == journal) {
+            return !seat.deleted;
+        }
+        let mut seat = Seat::quiet(self.ctx, journal, config, board);
+        seat.created = true;
+        self.seats.push(seat);
+        true
+    }
+
+    /// A journal a storage fault quarantined whose store the world has
+    /// parked for good (a detected persistent corruption) will never open
+    /// again: the audit hears the node is down for it now, as it would from
+    /// a one-journal node's fail-stop exit, rather than at a re-open the run
+    /// may end before (a node that serves the system journals keeps running
+    /// with the journal down; witness 18183308543219257601).
+    fn quarantined(&mut self, journal: paros::JournalId) {
+        if let Some(seat) = self.seat(journal)
+            && seat
+                .world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .park_reason(self.ip)
+                == Some(ParkReason::Corruption)
+        {
+            stay_down(&seat.checker, Down::StorageParked(self.rank));
+        }
+    }
+
+    fn delete(&mut self, journal: paros::JournalId) {
+        if let Some(seat) = self.seats.iter_mut().find(|seat| seat.journal == journal) {
+            seat.deleted = true;
+        }
+    }
+}
+
+/// The write-path fault layer of a quiet seat (#189): never active.
+fn quiet_faults(ctx: &SimContext) -> StorageFaults<SimTimeProvider> {
+    StorageFaults::new(
+        ctx.time().clone(),
+        Duration::ZERO,
+        false,
+        WritePathRates::default(),
+    )
+}
+
+/// Arm the system journals on a genesis node (#189): the board, the seats of
+/// journals 1 and 2 on a seed, every seat's port reporting to the board, and
+/// the plan the driver follows them by.
+fn system_rig(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    members: &[(NodeId, String)],
+    plan: &crate::shape::JournalPlan,
+    seats: &mut Vec<Seat>,
+    self_rank: NodeId,
+) -> (SystemPlan, Arc<Mutex<crate::audit::system::SystemBoard>>) {
+    let board = crate::audit::system::system_board(ctx.state());
+    let (system_plan, seeds) = system_plan(ctx, deployment, members, plan, self_rank);
+    for seat in seats.iter_mut() {
+        seat.audit = seat.audit.clone().with_system(board.clone());
+    }
+    if seeds.contains(&self_rank) {
+        for journal in [paros::system::DIRECTORY, paros::system::REGISTRY] {
+            let config = Config {
+                journal,
+                id: self_rank,
+                peers: seeds.clone(),
+                quorum_system: paros::QuorumSystem::Majority,
+                ..Config::default()
+            };
+            seats.push(Seat::quiet(ctx, journal, config, &board));
+        }
+    }
+    (system_plan, board)
+}
+
+/// The system plan every node of the run follows (#189), with the seeds'
+/// identities; arms the system board on the way.
+fn system_plan(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    members: &[(NodeId, String)],
+    plan: &crate::shape::JournalPlan,
+    self_id: NodeId,
+) -> (SystemPlan, Vec<NodeId>) {
+    let seeds: Vec<NodeId> = crate::shape::seed_ranks(members.len())
+        .into_iter()
+        .map(NodeId)
+        .collect();
+    let board = crate::audit::system::system_board(ctx.state());
+    let spares = spare_template(ctx, deployment);
+    crate::audit::system::lock(&board).arm(
+        plan.ids.iter().copied(),
+        members.iter().map(|(id, _)| id.0),
+        !deployment.joiners().is_empty(),
+        spares.is_some() && !deployment.joiners().is_empty(),
+    );
+    (
+        SystemPlan {
+            self_id,
+            seeds: members
+                .iter()
+                .filter(|(id, _)| seeds.contains(id))
+                .cloned()
+                .collect(),
+            genesis_pool: members.iter().map(|(id, _)| *id).collect(),
+            genesis_journals: plan.ids.clone(),
+            spares: spares.into_iter().collect(),
+        },
+        seeds,
+    )
+}
+
+/// The default journal's configuration a joiner joins as a spare once the
+/// registry admits it (#189) — the same run-level draws every genesis node
+/// built its own from (the bootstrap ranks, the matchmaker set, the quorum
+/// policy; each fixed by its first caller). Only where a reconfiguration can
+/// pull a joiner in and every process of the deployment can reach it: a
+/// seed with matchmakers, and neither proxy leaders nor replicas (their
+/// address books and pools are static; a joiner leading would reach
+/// neither).
+fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
+    if deployment.matchmakers().is_empty()
+        || !deployment.proxies().is_empty()
+        || !deployment.replicas().is_empty()
+    {
+        return None;
+    }
+    let pool_len = deployment.acceptors().len();
+    let bootstrap: Vec<NodeId> = crate::shape::bootstrap_ranks(ctx.state(), pool_len, true, true)
+        .into_iter()
+        .map(NodeId)
+        .collect();
+    let matchmaker_len = deployment.matchmakers().len();
+    let matchmakers: Vec<MatchmakerId> =
+        crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_len, true)
+            .into_iter()
+            .map(MatchmakerId)
+            .collect();
+    let policy = crate::shape::quorum_policy(ctx.state(), pool_len, true);
+    Some(Config {
+        journal: paros::JournalId::default(),
+        id: NodeId(0),
+        quorum_system: policy.system(bootstrap.len()),
+        peers: bootstrap,
+        nodes: (0..pool_len as u64).map(NodeId).collect(),
+        matchmakers,
+        matchmaker_pool: (0..matchmaker_len as u64).map(MatchmakerId).collect(),
+        proxy_count: 0,
+        replica_count: 0,
+    })
 }
 
 /// A matchmaker: the provider-generic registry driver inside the same
@@ -981,26 +1358,30 @@ async fn run_matchmaker_role(
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .park_matchmaker(my_ip, bootstrap.len())
+            .wipe_matchmaker(my_ip, bootstrap.len())
     {
-        // The registry's loss coin (#125): a restart that finds its durable
-        // state unusable. There is no in-place repair — the registry stays
-        // down for good and the surviving quorum reconstructs a successor
+        // The registry's wipe coin (#125, #183): a restart that comes back
+        // on an empty disk. What happens next is the **library's** call: the
+        // matchmaker boots below as an existing member on an empty store, and
+        // `run_matchmaker` refuses the amnesiac registry. There is no
+        // in-place repair — the surviving quorum reconstructs a successor
         // set without it. BUGGIFY pairing: the coin fired within the budget.
         assert_reachable!("matchmaker: a restarted matchmaker's registry is lost for good");
-        checker.note_matchmaker_lost();
-        tracing::info!(matchmaker = id.0, "matchmaker_lost_exit");
-        return Ok(());
+        tracing::info!(matchmaker = id.0, "matchmaker_wiped");
     }
     loop {
-        if world
+        // The operator's claim is the provisioning ledger (#183), kept
+        // outside the disks: a wipe erases the marker, never the memory of
+        // having provisioned the matchmaker.
+        let boot = if world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_matchmaker_parked(my_ip)
+            .provisioned(my_ip)
         {
-            stay_down(&checker, Down::MatchmakerLost(id.0));
-            return Ok(());
-        }
+            BootKind::ExistingMember
+        } else {
+            BootKind::FirstBoot
+        };
         let storage = DurableMatchmakerStorage::restore(
             Arc::downgrade(&world),
             my_ip.to_string(),
@@ -1010,6 +1391,7 @@ async fn run_matchmaker_role(
         match run_matchmaker(
             ctx.providers().clone(),
             storage,
+            boot,
             parse_addr(my_ip)?,
             config.clone(),
             shape.tunables,
@@ -1022,7 +1404,7 @@ async fn run_matchmaker_role(
             // A seam crash, or the registry's own fsync failure: both mean
             // this incarnation's un-synced batch is gone, so both rebuild
             // from the durable world, after the matchmaker's own
-            // restart-delay knob. A restart may then draw the loss coin and
+            // restart-delay knob. A restart may then draw the wipe coin and
             // hand the replacement to a matchmaker-set reconfiguration.
             // Its floor is structural: a matchmaker held down is a
             // matchmaking phase that waits, never a cluster that stalls.
@@ -1032,17 +1414,34 @@ async fn run_matchmaker_role(
                     "a seam-crashed matchmaker restarts after a buggified delay"
                 );
             }
-            // The matchmaker driver judges no boot claim (#147 is the
-            // node's marker; the registry has none yet), so it never
-            // refuses one.
-            Err(RunError::Refused(refusal)) => {
+            // The library refused the registry (#183). Amnesia is the wipe
+            // coin's outcome and the one the rule exists for: the matchmaker
+            // stays down for the run, replaced by a handover. The harness
+            // cross-checks the refusal against its own injection: only a
+            // wiped registry is ever amnesiac here.
+            Err(RunError::Refused(BootRefusal::Amnesia)) => {
+                let wiped = world
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_matchmaker_parked(my_ip);
+                assert_always!(
+                    wiped,
+                    "matchmaker: an amnesia refusal names a wiped registry",
+                    { "matchmaker" => id.0 }
+                );
+                stay_down(&checker, Down::MatchmakerLost(id.0));
+                return Ok(());
+            }
+            // A first boot on a formatted registry is a harness bug: the
+            // provisioning ledger and the disks disagree.
+            Err(RunError::Refused(BootRefusal::AlreadyFormatted)) => {
                 assert_always!(
                     false,
-                    "matchmaker: the matchmaker driver never refuses a boot",
-                    { "matchmaker" => id.0, "refusal" => format!("{refusal:?}") }
+                    "matchmaker: a first boot never meets a formatted registry",
+                    { "matchmaker" => id.0 }
                 );
                 return Err(SimulationError::InvalidState(format!(
-                    "matchmaker {} refused a boot: {refusal:?}",
+                    "matchmaker {} booted as first boot on a formatted registry",
                     id.0
                 )));
             }

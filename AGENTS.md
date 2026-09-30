@@ -47,6 +47,9 @@ plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that walk t
 `ReplicaId(rank)` in IP order and `NodeId(1000 + rank)` on the wire — the count is every node's
 `Config::replica_count`, zero the plain deployment; each on a fault-free disk outside the copy
 budget, and each judged by the same final convergence claim as a node)
+plus zero to two `JoinerProcess`es (#189; `paros-joiner`, nodes outside the genesis pool,
+`NodeId(100 + rank)`, that follow the system journals from the seeds and join the pool through
+the node registry; they idle on a seed without system journals and are no attrition victim)
 under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
 three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
 three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
@@ -120,7 +123,12 @@ arrives — every entry the audit's decided value at its slot, the page in `[fro
 order, the client's own acked appends inside the page present, the cursor monotone, a trim
 answer only below its point) and `CHECK_TAIL=16` (#185: the journal `CheckTail` on a drawn
 path — read-index or quorum — judged exactly as `READ_INDEX` and `QUORUM_READ`, which pin
-the path). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
+the path), and the system-journal operations of #189 — `CREATE_JOURNAL=17` (a name from a
+four-name alphabet over three members of the pool, read back as `Created` or refused for a
+taken name, then one record appended to the new journal), `DELETE_JOURNAL=18`,
+`REGISTER_NODE=19`, `DRAIN_NODE=20` and `RETIRE_NODE=21`, each one `Append` to journal 1 or 2
+at a seed, sent on every seed and refused as `unknown_journal` on one without system journals
+(`chain_workload/system.rs`). The client speaks the journal API: `PROPOSE` is an `Append` of one record,
 `COMPACT` a `Trim`, `READ_INDEX` and `QUORUM_READ` a `CheckTail`.
 paros runs no application (#186): the client *is* the application. Every client reads the
 journal from its cursor and folds each user entry, in LSN order, into `ChainState { applied_count,
@@ -618,6 +626,59 @@ committing while a sibling is **held** on every node for the chaos window
 (`DriverHooks::hold_journal`, a per-seed BUGGIFY location), and a node keeps serving its other
 journals while one is quarantined.
 
+**System journals (#189).** A service creates and deletes journals, and adds and retires
+nodes, while it runs; both lists are journals of their own. Journal **1** is the directory
+(`CreateJournal { name, config }`, `DeleteJournal { id }`) and journal **2** the node registry
+(`RegisterNode { id, addr, failure_domain }`, `DrainNode`, `RetireNode`), one entry per slot
+(`proto/system.proto`), read by one pure fold (`paros::system::{Directory, Registry}`) that every
+node and every client reading back runs in LSN order. A created journal's id is `128 + the
+LSN of its CreateJournal`: the log order is the allocator, an id is never reused (a delete is a
+tombstone), a name race is decided by the lower slot, and a slot whose id lands on a genesis
+journal folds to `Reserved`. The pool is the genesis pool plus every registered node not yet
+retired. It is opt-in configuration data: `run_journals` takes a `SystemPlan` (the **seeds**
+that host journals 1 and 2 — a static configuration of plain Multi-Paxos — and the genesis pool
+and journals), and `None` is #188's static deployment. A seed folds its own chosen prefix each
+tick; every other node keeps one long-polling `Read` per system journal open against a seed —
+the public `Read` is how a seed serves a node outside the pool, so no peer message from outside
+the pool is ever needed. The driver applies the folds: a created journal naming the node starts
+(`JournalStores::create`, then the ordinary open), a tombstoned one stops for good and is
+refused as unknown, a registered node gets a peer lane at its address (`Outbound`'s lanes grow
+at runtime), a peer message from a node the registry fold does not have in the pool is refused
+before the core sees it (a liveness cost until the fold catches up, never safety), and the
+node's own retirement stops its user journals. System journals are never trimmed and serve no
+plane (the matchmaker, proxy and replica planes serve the first *user* journal). **The core's
+pool is runtime state** (`ColocatedNode::pool`, `extend_pool`): `Config::pool` at boot, grown —
+never shrunk — as the driver admits the registry's nodes, and refused on a deployment without
+matchmakers (plain Multi-Paxos never reconfigures, so its pool stays its membership and its
+learner traffic exactly today's). A retired node leaves no core pool; the driver keeps it out at
+the edge. A candidate whose matchmakers name a configuration with a node its pool has not
+admitted abandons the campaign or the probe (`MatchStep::UnknownMember`) instead of acting on it,
+and completes once its pool catches up — the one path where registry lag reached a hard
+`assert!`. A registered node joins every journal of `SystemPlan::spares` (the deployment's
+reconfigurable journal) **as a spare**, so a `Reconfigure` may name it and it takes part like
+any spare of the pool. In simulation the system journals run on half the seeds (`paros_sim::shape::system_journals`),
+the seed is the lowest rank alone (`SEED_COUNT = 1`: two more journals' beats on every link of a
+small cluster livelocked both a matchmaker deployment and the two survivors of a plain 3-node pool,
+and a one-member journal sends nothing), and system and created journals sit on fault-free
+world-backed seats outside the copy budget. The driver's boot report re-reports
+the recovered chosen prefix as walked (`report_boot_state`): a one-member journal has no other
+learner to report a slot chosen just before a crash. A node that follows the system journals keeps
+running with a journal quarantined, so the opener hears every quarantine at once
+(`JournalStores::quarantined`) and the harness reports a store parked for good right then, not at
+a re-open the run may end before. A joiner joins the default journal
+as a spare only on a seed with matchmakers and neither proxies nor replicas (their pools and
+address books are static), the chain client's composer then draws successors from the genesis pool
+plus the joiners the registry has registered, and the operators coordinate a joiner's retirement
+through the storage world's ledger (`StorageWorld::reserve_joiner_retirement`: never a joiner any
+reconfiguration named, and a reserved one is never named); matchmaker seeds create no journals. Their
+meaning is judged on the **system board** (`paros_sim::audit::system`): every node folds each
+system journal to the same event at every LSN, a created journal's id is `128 + its LSN` and
+never reused, and no node acknowledges an append to a journal after folding its tombstone; its
+gates are a name race decided by slot order, a joiner that learned the system journals before
+any pool had it, and a joiner's message refused by a node that had not folded its registration
+and accepted once it had, and — where joiners can join — a node registered at runtime joining a
+journal's configuration through `Reconfigure`.
+
 **Storage direction.** The seam stays the high-level `LogStorage` / `MatchmakerStorage`
 traits (the durable writes, truncate / trimmed-to semantics, the boot scan, the format
 marker); what sits behind it changed. paros's **durable, production-generic stores are built on
@@ -872,8 +933,19 @@ member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's disk, wh
 world-backed stores do not live on); the storage world draws its own wipe coin at a chaotic restart on a matchmaker
 seed, under the same dead-node budget as a corruption park. A moonpool issue asks for the reboot
 kind to be exposed to a restarted process so a harness-owned disk can honor `CrashAndWipe`
-directly. The matchmaker's registry has no marker yet: the harness never wipes a matchmaker (a
-lost registry is a park, #125), so the parity is an open item, not a hole in a claim.
+directly. **The matchmaker's registry carries the same marker (#183)**: `MatchmakerStorage::
+is_formatted` / `format` (the in-memory, journal-backed and world-backed stores alike, covered by
+`matchmaker_storage_contract_suite`), and `run_matchmaker` takes a `BootKind` and refuses an
+existing matchmaker whose registry has none (`Audit::matchmaker_boot_refused`). An amnesiac
+matchmaker that rejoined would answer a matchmaking quorum as if it had never seen a registration
+it once acknowledged — a registration on `{A, B}`, `B` wiped, a later quorum `{B, C}` that misses
+it — which is exactly the history hole a cross-configuration Phase 1 exists to close; and it would
+forget its GC watermark and its generation too. The harness's matchmaker loss coin is therefore a
+**wipe**, not a park: the registry's disk goes, the provisioning ledger (shared with the nodes,
+keyed by IP) remembers the matchmaker, the process reboots it as an existing member, the library
+refuses it, and a matchmaker-set handover replaces it (the audit's `sometimes` "a refused
+matchmaker is replaced by a handover"). Removing the refusal is red on the audit's "a restart
+recovers every durable registration".
 
 **Cooperative leader handoff (`DPaxos`).** Leadership changes hands two ways. An
 *election* destroys a leader's authority and makes the successor rediscover the log

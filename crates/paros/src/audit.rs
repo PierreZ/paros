@@ -170,6 +170,35 @@ pub trait Audit {
     /// (`0`, or any other id than its own, #185). `call` names the RPC.
     fn journal_refused(&self, node: NodeId, journal: JournalId, call: &'static str) {}
 
+    /// This node folded the system-journal entry at `lsn` of `journal` (#189:
+    /// the directory or the node registry) into `event` — reported once per
+    /// slot, in LSN order, at the instant the fold moves.
+    fn system_folded(
+        &self,
+        node: NodeId,
+        journal: JournalId,
+        lsn: u64,
+        event: &crate::system::SystemEvent,
+    ) {
+    }
+
+    /// This node started serving `journal`, a journal the directory created
+    /// naming it (#189).
+    fn journal_started(&self, node: NodeId, journal: JournalId) {}
+
+    /// This node stopped serving `journal` for good (#189): its tombstone was
+    /// folded, or this node's own retirement was.
+    fn journal_stopped(&self, node: NodeId, journal: JournalId) {}
+
+    /// This node refused a peer message for `journal` from `from`, a node its
+    /// registry fold does not have in the pool yet (#189). A liveness cost
+    /// until the fold catches up, never a safety one.
+    fn unpooled_message(&self, node: NodeId, journal: JournalId, from: NodeId) {}
+
+    /// This node's registry fold admitted `admitted` to the pool (#189): its
+    /// messages are accepted from now on.
+    fn pool_admitted(&self, node: NodeId, admitted: NodeId) {}
+
     /// This node applied the chosen command at `slot` (hashed to `vhash`),
     /// advancing its contiguous applied prefix.
     /// `identity` is the `(client, seq)` dedup key for a user command (`None`
@@ -956,6 +985,14 @@ pub trait Audit {
 
     /// This matchmaker crashed at a durability `seam` inside one batch.
     fn matchmaker_crashed(&self, matchmaker: MatchmakerId, seam: Seam) {}
+
+    /// The matchmaker driver refused to boot this matchmaker (#183): the
+    /// operator's [`BootKind`](crate::BootKind) claim and the registry's
+    /// format marker disagree. The [`Audit::boot_refused`] twin, reported
+    /// at the instant of the decision, before the
+    /// [`RunError::Refused`](crate::RunError::Refused) exit; nothing was
+    /// written and no reply left.
+    fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {}
 
     /// The driver deliberately dropped one matchmaker reply after its write
     /// was durable ([`DriverHooks::drop_client_reply`](crate::DriverHooks::drop_client_reply) with

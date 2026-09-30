@@ -245,7 +245,11 @@ impl PeerMailbox {
 /// [`run_proxy`](crate::run_proxy), which sends through exactly this handle.
 /// Bundled so `drain_ready` takes one handle.
 pub(crate) struct Outbound {
-    pub(crate) peer_queues: BTreeMap<NodeId, PeerQueues>,
+    /// Every peer's lanes, by node. Behind a lock only so a lane can be added
+    /// while the loop holds the handle shared (#189: a node the registry
+    /// admits at runtime); the loop is the only writer and never holds it
+    /// across an await.
+    peer_queues: Mutex<BTreeMap<NodeId, PeerQueues>>,
     /// The proxy leaders' mailboxes: a node delegates through them.
     pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
     /// The deployment's replicas (#144): learners that are not in the node
@@ -260,6 +264,38 @@ pub(crate) struct Outbound {
 }
 
 impl Outbound {
+    /// A handle over `peer_queues`, sending as `sender`.
+    pub(crate) fn new(
+        peer_queues: BTreeMap<NodeId, PeerQueues>,
+        proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
+        learners: Vec<NodeId>,
+        sender: Party,
+    ) -> Self {
+        Self {
+            peer_queues: Mutex::new(peer_queues),
+            proxy_queues,
+            learners,
+            sender,
+        }
+    }
+
+    /// Whether a lane to `node` exists.
+    pub(crate) fn has_peer(&self, node: NodeId) -> bool {
+        self.peers().contains_key(&node)
+    }
+
+    /// Add a lane to `node` (#189: a node the registry admitted at runtime).
+    /// A node already reachable keeps its lane.
+    pub(crate) fn add_peer(&self, node: NodeId, queues: PeerQueues) {
+        self.peers().entry(node).or_insert(queues);
+    }
+
+    fn peers(&self) -> std::sync::MutexGuard<'_, BTreeMap<NodeId, PeerQueues>> {
+        self.peer_queues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Resolve `audience` as this handle sends it: the core's own resolution
     /// against the node `pool` ([`Audience::resolve`] for a node, which never
     /// addresses itself; [`Audience::resolve_from_proxy`] for a proxy, which
@@ -307,10 +343,10 @@ impl Outbound {
 
     /// The mailbox `to`'s copy of `msg` goes into, if the deployment map
     /// names `to` at all.
-    fn mailbox_for(&self, to: Party) -> Option<&PeerMailbox> {
+    fn mailbox_for(&self, to: Party) -> Option<PeerMailbox> {
         match to {
-            Party::Node(node) => self.peer_queues.get(&node).map(|queues| &queues.regular),
-            Party::Proxy(proxy) => self.proxy_queues.get(&proxy),
+            Party::Node(node) => self.peers().get(&node).map(|queues| queues.regular.clone()),
+            Party::Proxy(proxy) => self.proxy_queues.get(&proxy).cloned(),
         }
     }
 

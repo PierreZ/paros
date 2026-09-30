@@ -37,6 +37,7 @@ mod proxy;
 mod replica_tier;
 mod rpc;
 mod storage;
+pub mod system;
 
 pub use audit::{
     Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
@@ -46,8 +47,8 @@ pub use corruption::{
     CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
 };
 pub use driver::{
-    BootKind, BootRefusal, DriverTunables, JournalStores, RunError, command_hash, message_kind,
-    parse_addr, registration_history_hash, run_journals, run_node,
+    BootKind, BootRefusal, DriverTunables, JournalStores, RunError, SystemPlan, command_hash,
+    message_kind, parse_addr, registration_history_hash, run_journals, run_node,
 };
 pub use rpc::{
     Append, AppendAck, CheckTail, CheckTailAck, EdgeRejection, InspectReply, InspectRequest,
@@ -60,7 +61,7 @@ pub use rpc::{
 /// generated protobuf bodies.
 pub mod wire {
     pub use crate::rpc::methods;
-    pub use crate::rpc::{common, internal, matchmaker, public};
+    pub use crate::rpc::{common, internal, matchmaker, public, system};
 }
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

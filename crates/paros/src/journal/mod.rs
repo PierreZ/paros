@@ -29,6 +29,7 @@
 //! | trim-point jump (point, sessions; #186) | `TrimmedTo` entry | — |
 //! | matchmaker registration | `Register` entry | `(ballot.round, ballot.node)` |
 //! | matchmaker scalars (generation, freeze, decree, watermark) | `Scalars` entry, the whole image | — |
+//! | matchmaker format marker (#183) | journal **metadata** | — |
 //!
 //! Every entry's epoch is its record kind, so the far identifier alone says
 //! what a damaged entry *was*; the journal itself tracks append batches and
@@ -196,9 +197,9 @@ fn append_error(error: &JournalError) -> StorageError {
 
 /// What a failed metadata write means: the journal keeps at least one copy
 /// intact, holding the old value or the new one.
-fn meta_error(_error: &JournalError) -> StorageError {
+fn meta_error(_error: &JournalError, record: StorageRecord) -> StorageError {
     StorageError::Io {
-        record: StorageRecord::Promise,
+        record,
         outcome: WriteOutcome::Unknown,
     }
 }

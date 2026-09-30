@@ -340,12 +340,7 @@ where
             Ok((node, PeerQueues { regular }))
         })
         .collect::<SimulationResult<BTreeMap<_, _>>>()?;
-    let out = Outbound {
-        peer_queues,
-        proxy_queues: BTreeMap::new(),
-        learners,
-        sender: me,
-    };
+    let out = Outbound::new(peer_queues, BTreeMap::new(), learners, me);
 
     let time = providers.time().clone();
     // An absolute tick deadline, for the reason `run_node` gives at its own

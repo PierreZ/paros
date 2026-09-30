@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use super::frame::{Framed, Kind, Scanned, encode, epoch, tag, words};
 use super::plan::plan;
-use super::{GENESIS, JournalStoreConfig, append_error, open_error};
+use super::{GENESIS, JournalStoreConfig, append_error, meta_error, open_error};
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::matchmaker::MatchmakerStorage;
 use crate::storage::{StorageError, StorageRecord};
@@ -82,6 +82,44 @@ impl Framed for MatchRecord {
             MatchRecord::Register { ballot, .. } => ballot_tag(*ballot),
             _ => tag([0; 3]),
         }
+    }
+}
+
+/// What the journal's two-copy metadata holds for a matchmaker: the format
+/// marker (#183), the one fact whose loss no replay can recover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct MatchMeta {
+    /// Set once by `format`, never cleared.
+    formatted: bool,
+}
+
+/// Version byte in front of the metadata's encoding.
+const MATCH_META_VERSION: u8 = 1;
+
+impl MatchMeta {
+    fn encode(self) -> Vec<u8> {
+        let mut bytes = vec![MATCH_META_VERSION];
+        bytes.extend(postcard::to_stdvec(&self).expect("in-memory encoding of the metadata"));
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let (&version, body) = bytes.split_first()?;
+        (version == MATCH_META_VERSION)
+            .then(|| postcard::from_bytes(body).ok())
+            .flatten()
+    }
+
+    /// What the journal's metadata says: nothing saved yet is an
+    /// unformatted store; bytes that do not decode are a crash verdict.
+    fn read(bytes: Option<&[u8]>) -> Result<Self, StorageError> {
+        bytes.map_or(Ok(Self::default()), |bytes| {
+            Self::decode(bytes).ok_or(StorageError::Corruption {
+                record: StorageRecord::MatchmakerScalars,
+                fault: IntegrityFault::Misdirected,
+                verdict: CorruptionVerdict::Corrupted,
+            })
+        })
     }
 }
 
@@ -151,6 +189,8 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     dir: String,
     store: JournalStoreConfig,
     journal: Option<Journal<P>>,
+    meta: MatchMeta,
+    meta_dirty: bool,
     image: MatchImage,
     staged: Vec<MatchRecord>,
 }
@@ -181,6 +221,8 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             dir: dir.into(),
             store,
             journal: None,
+            meta: MatchMeta::default(),
+            meta_dirty: false,
             image: MatchImage::default(),
             staged: Vec::new(),
         }
@@ -213,6 +255,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         if recovery.torn_tail {
             tracing::info!(dir = %self.dir, "journal_torn_tail_discarded");
         }
+        let meta = MatchMeta::read(journal.meta())?;
         let entries = journal
             .read_range(journal.start_index()..journal.next_index())
             .await
@@ -300,6 +343,8 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         }
         self.image = image;
         self.staged.clear();
+        self.meta = meta;
+        self.meta_dirty = false;
         self.journal = Some(journal);
         Ok(())
     }
@@ -361,6 +406,18 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         self.load().await
     }
 
+    fn is_formatted(&self) -> bool {
+        self.meta.formatted
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
+    async fn format(&mut self) -> Result<(), StorageError> {
+        self.opened().await?;
+        self.meta.formatted = true;
+        self.meta_dirty = true;
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
@@ -418,6 +475,17 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(dir = %self.dir))]
     async fn sync(&mut self) -> Result<(), StorageError> {
         self.opened().await?;
+        // The metadata first, then the log: the marker is durable before any
+        // record the formatted store takes.
+        if self.meta_dirty {
+            let bytes = self.meta.encode();
+            let journal = self.journal.as_mut().expect("opened");
+            journal
+                .save_meta(&bytes)
+                .await
+                .map_err(|e| meta_error(&e, StorageRecord::MatchmakerScalars))?;
+            self.meta_dirty = false;
+        }
         if !self.staged.is_empty() {
             let records = std::mem::take(&mut self.staged);
             self.append(&records).await?;

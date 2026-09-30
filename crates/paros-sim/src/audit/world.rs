@@ -247,6 +247,15 @@ impl AuditWorld {
         self.lock().retired.insert(node);
     }
 
+    /// A joiner left the pool through the node registry (#189) and stopped
+    /// its journals for good: convergence excuses it. Not a GC retirement —
+    /// no floor named it, and none needed to: the operators never retire a
+    /// joiner a reconfiguration named.
+    #[tracing::instrument(level = "debug", skip(self), fields(node))]
+    pub(crate) fn note_left_pool(&self, node: u64) {
+        self.lock().left_pool.insert(node);
+    }
+
     /// A matchmaker's registry was lost for good (#125).
     #[tracing::instrument(level = "debug", skip(self))]
     pub(crate) fn note_matchmaker_lost(&self) {
@@ -483,6 +492,7 @@ impl AuditWorld {
             if st.storage_dead.contains(&node)
                 || st.wiped.contains(&node)
                 || st.retired.contains(&node)
+                || st.left_pool.contains(&node)
             {
                 continue;
             }
@@ -537,6 +547,7 @@ pub(crate) fn check_run(
     audit.check_gates();
     crate::world::check_storage_gates(state, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();
+    super::system::lock(&super::system::system_board(state)).check_gates();
     let acked_max = audit.lock().lin.acked_max();
     audit.check_final_convergence(acked_max);
     audit.digest()

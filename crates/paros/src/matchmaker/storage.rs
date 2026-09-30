@@ -73,6 +73,31 @@ pub trait MatchmakerStorage: RegistryStorage {
         async { Ok(()) }
     }
 
+    /// Whether this store carries the **format marker** (#183, the
+    /// matchmaker twin of [`LogStorage::is_formatted`](crate::LogStorage::is_formatted)):
+    /// the durable proof that the matchmaker this registry belongs to has
+    /// been provisioned — written once by
+    /// [`format`](MatchmakerStorage::format) on its first boot, before any
+    /// registry state, and never removed. The driver judges the operator's
+    /// [`BootKind`](crate::BootKind) claim against it: an existing
+    /// matchmaker whose store has no marker has lost its disk — every
+    /// registration, the GC watermark and the generation scalars with it —
+    /// and is refused rather than rejoined, because an empty registry
+    /// answering a matchmaking quorum would hand a candidate a history that
+    /// omits a configuration it once registered. Synchronous, answered from
+    /// what the boot scan loaded.
+    fn is_formatted(&self) -> bool;
+
+    /// Write the format marker (#183). Staged like every other write and
+    /// durable at the next [`sync`](MatchmakerStorage::sync); the driver
+    /// syncs it alone, on a first boot, before the core reads the store, so
+    /// the marker is on disk no later than the first registration. Nothing
+    /// but this method writes it, and nothing removes it.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn format(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send;
+
     /// Persist `registration` under `ballot` as one record. Append-only: the
     /// core only ever registers strictly above the highest ballot it holds,
     /// so this is never an overwrite.
@@ -133,6 +158,9 @@ pub trait MatchmakerStorage: RegistryStorage {
 pub struct MemMatchmakerStorage {
     hard_state: MatchmakerHardState,
     registry: BTreeMap<Ballot, Registration>,
+    /// The format marker (#183): set by [`MatchmakerStorage::format`], never
+    /// cleared.
+    formatted: bool,
 }
 
 impl MemMatchmakerStorage {
@@ -158,6 +186,16 @@ impl RegistryStorage for MemMatchmakerStorage {
 }
 
 impl MatchmakerStorage for MemMatchmakerStorage {
+    fn is_formatted(&self) -> bool {
+        self.formatted
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn format(&mut self) -> Result<(), StorageError> {
+        self.formatted = true;
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
@@ -293,6 +331,38 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
             );
         }
     };
+
+    // The format marker (#183): absent on a fresh store, present once
+    // `format` is flushed and reopened, and written by nothing else — a
+    // store that took registry writes without ever being formatted stays
+    // unformatted (the wiped-disk shape the driver refuses).
+    let s = fresh().await;
+    assert!(!s.is_formatted(), "a fresh store carries no format marker");
+    let mut s = fresh().await;
+    s.register(suite_ballot(1), &suite_belief(3))
+        .await
+        .expect("register before format");
+    s.sync().await.expect("sync register");
+    let s = reopen(s).await;
+    assert!(
+        !s.is_formatted(),
+        "registry writes never format a store on their own"
+    );
+    let mut s = fresh().await;
+    s.format().await.expect("format");
+    s.sync().await.expect("sync format");
+    let mut s = reopen(s).await;
+    assert!(s.is_formatted(), "the format marker survives a reopen");
+    s.register(suite_ballot(2), &suite_belief(3))
+        .await
+        .expect("register after format");
+    s.set_gc_watermark(suite_ballot(2))
+        .await
+        .expect("raise after format");
+    s.sync().await.expect("sync after format");
+    let s = reopen(s).await;
+    assert!(s.is_formatted(), "the format marker is never removed");
+    consistent(&s);
 
     // A fresh store is empty, and registrations round-trip through a sync as
     // individually readable records.

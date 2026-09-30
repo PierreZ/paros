@@ -211,7 +211,7 @@ where
     let with_learners = node.config().replica_count > 0;
     // The deployment map an `Audience` is resolved against, read before the
     // batch takes the node's borrow.
-    let pool: Vec<NodeId> = node.config().pool().to_vec();
+    let pool: Vec<NodeId> = node.pool().to_vec();
     // Copy the batch out of the borrow guard, advance to release the gate, then
     // perform I/O — persist → send → apply. Advancing before the I/O is the
     // documented async pattern; persist-before-send still holds because the
