@@ -264,15 +264,15 @@ stay as they are.
 ## 8. Milestones
 
 Milestones are labels (`milestone:M7` and up); `milestone:M6` stays the epic's umbrella. The
-toy is the end of M9. Issue numbers are filled in as the issues are created.
+toy is the end of M9. The epic is #184, the backlog pointer #69, the verification track #24.
 
 | Milestone | Name | Content |
 |---|---|---|
-| M7 | Journal API | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
-| M8 | parosd deployable | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision`, the uniform binary with class and capacity, Compose, the `paros` CLI, a tracing subscriber, exit codes; the API-independent parts start in parallel with M7 |
-| M9 | Tenants and control plane | the admin tenant over the system journals, the tenant and journal creation API, the machine registry with class and capacity, the per-tenant coordinator via `SetLeader`, placement as fenced writes, the front door with JWT `Authz`, per-tenant matchmaker sets, `paros status` |
-| M10 | Roles per tenant | journal-tagged proxies and replicas, batchers and unbatchers, tenant modes applied by the reconciler, the benchmark, then scale work |
-| M11 | Zones | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
+| M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
+| M8 | parosd deployable (#206 to #209, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision`, the uniform binary with class and capacity, Compose, the `paros` CLI, a tracing subscriber, exit codes; the API-independent parts start in parallel with M7 |
+| M9 | Tenants and control plane (#192, #211, #190, #210, #212, #191, #213) | the admin tenant over the system journals, the tenant and journal creation API, the machine registry with class and capacity, the per-tenant coordinator via `SetLeader`, placement as fenced writes, the front door with JWT `Authz`, per-tenant matchmaker sets, `paros status` |
+| M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers, tenant modes applied by the reconciler, the benchmark, then scale work |
+| M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 
 Verification is not a milestone: every milestone carries its own share of section 6.
 
