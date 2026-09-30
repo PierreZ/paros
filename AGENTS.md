@@ -2,6 +2,14 @@
 
 Learning project: implementing the Paxos consensus algorithm in Rust. WIP, not for production.
 
+**The end goal is `docs/architecture.md`.** This file describes what paros is today and the
+doctrine every change follows; that document describes what paros is becoming: a multi-tenant
+journal service, `parosd`, with a four-call data plane (`Write`, `Read`, `Truncate`,
+`SetLeader`), an admin tenant that stores the control plane in its own journals, uniform
+machines with a class, per-tenant coordinators and matchmaker sets, a front door with JWT
+authorization, and the milestones that get there. Read it before planning any work; where the
+two disagree, this file is the present and that one is the direction.
+
 ## Build & test
 
 Dev shell is a Nix flake — enter `nix develop` (or rely on direnv) before running commands.
