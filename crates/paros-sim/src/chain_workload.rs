@@ -925,10 +925,19 @@ impl ChainWorkload {
     }
 
     /// Record a write seen written at `[seq, seq + count)` in the history and
-    /// the trace.
-    fn record_written(&mut self, submission: &Submission, seq: u64, count: u64, now_ms: u64) {
+    /// the trace; `duplicate` when the journal answered it from the log
+    /// (#204), which the history judges differently (`record_write_ack`).
+    fn record_written(
+        &mut self,
+        submission: &Submission,
+        seq: u64,
+        count: u64,
+        duplicate: bool,
+        now_ms: u64,
+    ) {
         let last = (seq + count).checked_sub(1);
-        self.history.record_write_ack(submission.op, last, now_ms);
+        self.history
+            .record_write_ack(submission.op, last, duplicate, now_ms);
         tracing::info!(
             cmd = %hash_text(submission.cmd_hash),
             op = submission.op,
@@ -1240,10 +1249,14 @@ impl Workload for ChainWorkload {
             let mut next = writer.next_seq;
             for ((submission, target), result) in primer.into_iter().zip(results) {
                 match result {
-                    WriteResult::Written { seq, count, .. } => {
+                    WriteResult::Written {
+                        seq,
+                        count,
+                        duplicate,
+                    } => {
                         hint.observe(u64::try_from(target).ok(), routes);
                         next = next.max(seq + count);
-                        self.record_written(&submission, seq, count, now_ms());
+                        self.record_written(&submission, seq, count, duplicate, now_ms());
                         self.adversarial.payload_classes[submission.payload_class] = true;
                         written.push(submission.written(seq, count, target));
                     }
@@ -1420,9 +1433,13 @@ impl Workload for ChainWorkload {
                         result
                     };
                     match result {
-                        WriteResult::Written { seq, count, .. } => {
+                        WriteResult::Written {
+                            seq,
+                            count,
+                            duplicate,
+                        } => {
                             writer.next_seq = writer.next_seq.max(seq + count);
-                            self.record_written(&submission, seq, count, now_ms());
+                            self.record_written(&submission, seq, count, duplicate, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             written.push(submission.written(
                                 seq,
@@ -1597,12 +1614,16 @@ impl Workload for ChainWorkload {
                             )
                         });
                         let results = join_all(attempts).await;
-                        let mut committed: Option<(u64, u64, usize)> = None;
+                        let mut committed: Option<(u64, u64, usize, bool)> = None;
                         let mut refused: Option<JournalState> = None;
                         for (attempt_target, result) in targets.into_iter().zip(results) {
                             match result {
-                                WriteResult::Written { seq, count, .. } => {
-                                    if let Some((original, _, _)) = committed {
+                                WriteResult::Written {
+                                    seq,
+                                    count,
+                                    duplicate,
+                                } => {
+                                    if let Some((original, _, _, _)) = committed {
                                         assert_always!(
                                             seq == original,
                                             "chain: dual-submit committed slots agree",
@@ -1613,7 +1634,7 @@ impl Workload for ChainWorkload {
                                             }
                                         );
                                     } else {
-                                        committed = Some((seq, count, attempt_target));
+                                        committed = Some((seq, count, attempt_target, duplicate));
                                     }
                                 }
                                 WriteResult::Refused { state }
@@ -1624,9 +1645,9 @@ impl Workload for ChainWorkload {
                                 WriteResult::Ambiguous => {}
                             }
                         }
-                        if let Some((seq, count, ack_target)) = committed {
+                        if let Some((seq, count, ack_target, duplicate)) = committed {
                             writer.next_seq = writer.next_seq.max(seq + count);
-                            self.record_written(&submission, seq, count, now_ms());
+                            self.record_written(&submission, seq, count, duplicate, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             written.push(submission.written(seq, count, ack_target));
                         } else {
@@ -2596,11 +2617,15 @@ impl Workload for ChainWorkload {
                 )
                 .await;
                 match result {
-                    WriteResult::Written { seq, count, .. } => {
+                    WriteResult::Written {
+                        seq,
+                        count,
+                        duplicate,
+                    } => {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
                         writer.next_seq = writer.next_seq.max(seq + count);
-                        self.record_written(&submission, seq, count, now_ms());
+                        self.record_written(&submission, seq, count, duplicate, now_ms());
                         written.push(submission.written(seq, count, target));
                         break;
                     }
