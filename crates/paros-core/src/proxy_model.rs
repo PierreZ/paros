@@ -53,7 +53,7 @@ use crate::proxy_leader::ProxyLeader;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, NodeId, Slot, Value, command_fingerprint,
+    Ballot, ClientId, Command, Generation, NodeId, Seq, Slot, Value, command_fingerprint,
 };
 use crate::write::{AcceptorWrite, WriteOp};
 
@@ -697,7 +697,16 @@ impl World {
         let value = Value(seq.to_le_bytes().to_vec());
         let trace = self.trace;
         let node = self.site(leader).live.as_mut().expect("a leader is live");
-        let result = node.propose_in(ClientId(1), ClientSeq(seq), value, column, delegation);
+        let result = node.propose_in(
+            crate::types::Entry {
+                generation: Generation(0),
+                owner: ClientId(1),
+                seq: Seq(seq),
+                records: vec![value],
+            },
+            column,
+            delegation,
+        );
         if trace {
             eprintln!(
                 "  propose seq={seq} at node {} ({delegation:?}, column {column:?}) -> {result:?}",

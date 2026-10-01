@@ -667,7 +667,9 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
 mod tests {
     use super::*;
     use crate::membership::QuorumSystem;
-    use crate::types::{ClientId, ClientSeq, Command, Entry, NodeId, Value, command_fingerprint};
+    use crate::types::{
+        ClientId, Command, Entry, Generation, NodeId, Seq, Value, command_fingerprint,
+    };
 
     fn ballot(round: u64, node: u64) -> Ballot {
         Ballot {
@@ -677,10 +679,11 @@ mod tests {
     }
 
     fn cmd(seq: u64) -> Command {
-        Command::User(Entry {
-            client: ClientId(1),
-            seq: ClientSeq(seq),
-            value: Value(seq.to_le_bytes().to_vec()),
+        Command::Write(Entry {
+            generation: Generation(0),
+            owner: ClientId(1),
+            seq: Seq(seq),
+            records: vec![Value(seq.to_le_bytes().to_vec())],
         })
     }
 

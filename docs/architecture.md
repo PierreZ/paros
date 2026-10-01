@@ -50,8 +50,9 @@ A `Write` is accepted iff its `(generation, owner)` is the journal's current one
 `seq == next_seq`. Otherwise it is refused in place, and the refusal names the current
 generation and `next_seq` so the owner can continue or learn it was superseded.
 
-Retries are answered from the log itself: a `Write` with `seq < next_seq` whose batch hash
-matches the records at `seq` is an idempotent ack; a different hash is refused. A retry whose
+Retries are answered from the log itself: a `Write` with `seq < next_seq` identical to the write
+accepted at `seq` — the same generation, owner and batch — is an idempotent ack; anything else is
+refused. A retry whose
 `seq < first_seq` is answered `Truncated`, and the owner treats it as ambiguous and reads the
 tail. The log is the deduplication table: there is no per-client session ledger and nothing to
 expire.

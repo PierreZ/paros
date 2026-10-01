@@ -94,13 +94,12 @@
 //! 6. **The handoff's decided tail and the successor's read fence**
 //!    (`node/handoff.rs`) name chosen slots and a covered chosen index; a
 //!    bare acceptor can lead, so it must be able to describe its tail.
-//! 7. **The at-most-once ledger** (`Replica::seal`, the `sessions` of a
-//!    `TrimmedTo`): a truncation seals the `(client, seq) -> slot` facts it
-//!    drops and a trim-point jump hands them on. The ledger is derived by the
-//!    walk, never by an application, and it is what makes a journal read
-//!    skip a #94 duplicate identically on every node. So does the fast path
-//!    in `propose` that answers an identity already chosen at its first
-//!    slot: it reads the ledger.
+//! 7. **The journal fold** (#204, `Replica::truncate`, the `state` of a
+//!    `TrimmedTo`): the journal state machine is judged at apply by the
+//!    walk, on every node and every replica alike; a truncation seals the
+//!    state the slots it drops folded to and a trim-point jump hands it on.
+//!    It is derived by the walk, never by an application, and it is what
+//!    makes a read by position and a write's outcome identical everywhere.
 //!
 //! **What #144 shed and #186 deleted:** the application's input (the walk's
 //! output, which survives only as the driver's report and the acks), the
@@ -114,6 +113,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ReadState;
+use crate::journal_state::JournalState;
 use crate::membership::{AcceptorConfig, ReplicaId};
 use crate::message::{Audience, Message};
 use crate::node::READ_TTL_TICKS;
@@ -121,7 +121,7 @@ use crate::quorum_read::QuorumReads;
 use crate::replica::Replica;
 use crate::state::Config;
 use crate::storage::Storage;
-use crate::types::{Ballot, Command, NodeId, SessionEntry, Slot};
+use crate::types::{Ballot, Command, NodeId, Seq, Slot};
 use crate::write::WriteOp;
 
 /// Monotone counters this incarnation, for the driver's audit report and
@@ -233,7 +233,7 @@ impl ReplicaNode {
                 "every retained slot below a replica's chosen prefix has a durable record"
             );
         }
-        let replica = Replica::from_boot(chosen_index, storage.sealed_sessions(), &below);
+        let replica = Replica::from_boot(chosen_index, floor, storage.sealed_state(), &below);
         let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
         let mut node = Self {
             config,
@@ -284,9 +284,7 @@ impl ReplicaNode {
                     self.learn(slot, ballot, &command);
                 }
             }
-            Message::TrimmedTo {
-                point, sessions, ..
-            } => self.trim_to(point, sessions),
+            Message::TrimmedTo { point, state, .. } => self.trim_to(point, state),
             Message::Heartbeat {
                 from,
                 ballot,
@@ -524,12 +522,8 @@ impl ReplicaNode {
     /// the walk.
     fn advance(&mut self) {
         // Every faulty record here sits inside the chosen prefix (the boot
-        // keeps only those): a hole in the at-most-once ledger, so the walk
-        // holds until it heals, exactly as a node's does.
-        if !self.faulty.is_empty() {
-            self.replica.hold();
-            return;
-        }
+        // keeps only those): a hole in the journal fold, so the replica holds
+        // the walk until it heals, exactly as a node's does.
         // The coupling a node asserts per applied slot — "the authoritative
         // record carries the applied command" — holds here by construction:
         // the record is `WriteOp::Learned` from the very command `learn`
@@ -541,22 +535,21 @@ impl ReplicaNode {
         }
     }
 
-    /// Execute a decided `Truncate { up_to }` on this replica's log, as a
-    /// node's `compact` does: clamped to the chosen prefix, sealing the
-    /// ledger records it drops.
+    /// Execute a decided truncation on this replica's log, as a node's
+    /// `compact` does: clamped to what the journal fold lets go, sealing the
+    /// state the dropped slots folded to.
     fn compact(&mut self, up_to: Slot) {
-        let Some(ci) = self.replica.chosen_index() else {
+        let Some(target) = self.replica.compaction_target() else {
             return;
         };
-        let highest_drop = up_to.min(ci);
+        let highest_drop = up_to.min(target);
         let first = Slot(highest_drop.0 + 1).max(self.floor);
         if first <= self.floor {
             return;
         }
-        let sealed: Vec<SessionEntry> = self.replica.seal(self.floor, first);
+        let sealed = self.replica.truncate(first);
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
-        self.replica.truncate(first);
         self.floor = first;
         self.faulty = self.faulty.split_off(&first);
         assert!(
@@ -568,20 +561,20 @@ impl ReplicaNode {
     /// Jump below a peer's trim point (#186): the node's
     /// `on_trimmed_to`, for a replica — drop what lies below `point`, move
     /// the chosen index to at least `point - 1`, raise the floor to `point`,
-    /// adopt the ledger for the dropped prefix. A replica holds no promise,
-    /// so there is nothing else to leave alone.
-    fn trim_to(&mut self, point: Slot, mut sessions: Vec<SessionEntry>) {
+    /// take the journal state the peer's log folded to below it. A replica
+    /// holds no promise, so there is nothing else to leave alone.
+    fn trim_to(&mut self, point: Slot, state: JournalState) {
         if point <= self.floor {
             return;
         }
-        // The point is the validation line for the ledger it carries.
-        sessions.retain(|(_, _, slot)| *slot < point);
         let old_chosen_index = self.replica.chosen_index();
-        self.replica.trim_to(point, &sessions);
+        let sealed = self.replica.trim_to(point, state);
         self.floor = point;
         self.faulty = self.faulty.split_off(&point);
-        self.pending_writes
-            .push(WriteOp::TrimmedTo { point, sessions });
+        self.pending_writes.push(WriteOp::TrimmedTo {
+            point,
+            state: sealed,
+        });
         self.counters.trim_jumps += 1;
         assert!(
             self.replica.chosen_index() >= old_chosen_index,
@@ -649,7 +642,7 @@ impl ReplicaNode {
         &self.config
     }
 
-    /// The replica role: the chosen prefix, the ledger, the chosen gap.
+    /// The replica role: the chosen prefix, the journal fold, the chosen gap.
     #[must_use]
     pub fn replica(&self) -> &Replica {
         &self.replica
@@ -668,12 +661,11 @@ impl ReplicaNode {
         self.floor
     }
 
-    /// A **journal read** (#185) from this replica's chosen prefix, against
-    /// its own floor — read replicas serve `Read` so read load leaves the
-    /// acceptors. A pure read.
+    /// A **journal read** (#204) from this replica's journal fold — read
+    /// replicas serve `Read` so read load leaves the acceptors. A pure read.
     #[must_use]
-    pub fn read_log(&self, from: Slot, max_bytes: usize) -> crate::LogRead {
-        self.replica.read(from, self.floor, max_bytes)
+    pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::LogRead {
+        self.replica.read(from, limit, max_bytes)
     }
 
     /// The node whose beat this replica heard last, if any.
@@ -777,7 +769,7 @@ impl ReplicaReady<'_> {
     /// contiguous slot order, after the writes are durable — the node's
     /// [`crate::Ready::committed`] contract.
     #[must_use]
-    pub fn committed(&self) -> &[(Slot, Command)] {
+    pub fn committed(&self) -> &[(Slot, Command, crate::Outcome)] {
         self.node.replica.committed()
     }
 

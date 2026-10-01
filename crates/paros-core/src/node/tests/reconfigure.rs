@@ -77,7 +77,7 @@ fn reconfiguration_is_refused_where_it_cannot_run() {
 fn a_reconfiguration_moves_the_leadership_to_a_fresh_ballot_and_configuration() {
     let (mut nodes, mut mms) = deployed_cluster();
     let old_ballot = nodes[0].ballot();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
@@ -93,7 +93,7 @@ fn a_reconfiguration_moves_the_leadership_to_a_fresh_ballot_and_configuration() 
     assert!(nodes[0].matchmaking_pending());
     // Command issuance stalls: the stall window of #122.
     assert!(matches!(
-        nodes[0].propose(ClientId(1), ClientSeq(2), val(2)),
+        nodes[0].propose(entry(1, 2, 2)),
         ProposeResult::NotLeader(None)
     ));
     let requests = drain_match_requests(&mut nodes[0]);
@@ -121,7 +121,7 @@ fn a_reconfiguration_moves_the_leadership_to_a_fresh_ballot_and_configuration() 
     assert_eq!(nodes[0].acceptors_since(), b);
     // Phase 2 under C_new: the accept reaches every new member, including
     // the joining nodes, which vote from the first round.
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(2), val(2));
+    let _ = nodes[0].propose(entry(1, 2, 2));
     let q = drain(&mut nodes[0]);
     assert_eq!(
         accept_targets(&q),
@@ -160,7 +160,7 @@ fn a_leader_removed_by_its_own_reconfiguration_resigns_once_settled() {
     deliver_all(&mut nodes, q);
     assert!(nodes[0].is_leader());
     assert!(!nodes[0].is_acceptor());
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(1, 1, 1));
     let q = drain(&mut nodes[0]);
     assert_eq!(accept_targets(&q), vec![NodeId(1), NodeId(2), NodeId(3)]);
     // The removed leader recorded the round in its own log — the allocator

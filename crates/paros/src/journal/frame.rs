@@ -29,16 +29,16 @@ pub(crate) enum Kind {
     Faulty = 2,
     /// The chosen index.
     ChosenIndex = 3,
-    /// A truncation: the floor and the sealed ledger it drops.
+    /// A truncation: the floor and the journal state it seals.
     Truncate = 4,
     // 5, 6 and 7 were the snapshot install, the decided snapshot point and
     // its chunks, deleted with the application (#186). Retired, never
     // reused: a store that still holds one reads it as a kind it never
     // wrote.
-    /// Part of a checkpoint's sealed ledger.
+    /// A checkpoint's sealed journal state.
     Sealed = 8,
     /// A jump below a peer's trim point (#186): the point and the peer's
-    /// sealed ledger.
+    /// sealed journal state.
     TrimmedTo = 9,
     /// A matchmaker registration.
     Register = 16,

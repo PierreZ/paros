@@ -20,10 +20,10 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, GcAck, GcStep, Handoff, JournalId, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, Message, NodeId, Party, PendingBootstrap,
-    ProxyId, ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep,
-    Registration, RegistrationKind, Slot,
+    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalId, JournalState, LogRead,
+    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
+    NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply, ReconfigureRequest,
+    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq, Slot, Value,
 };
 
 use crate::driver::BootRefusal;
@@ -76,37 +76,57 @@ pub struct Deployment {
     pub replica_count: usize,
 }
 
-/// How a journal `Read` (#185) was answered, as reported by
+/// How a journal `Read` (#204) was answered, as reported by
 /// [`Audit::log_read_served`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogReadAnswer {
-    /// Served on arrival.
+    /// Served as soon as its quorum read confirmed.
     Immediate,
-    /// Parked at the end (the long-poll) and woken by a newly chosen slot
-    /// (or by a trim that overtook it).
+    /// Confirmed at the tail, then woken by a newly folded write (or by a
+    /// truncation that overtook it).
     Woke,
-    /// Parked at the end and answered empty when its wait ran out.
+    /// Confirmed at the tail and answered empty when its wait ran out.
     Expired,
 }
 
-/// One journal `Read` answer (#185), as it leaves a node or a replica.
+/// One journal `Read` answer (#204), as it leaves a node or a replica. A
+/// borrowed view of the page (see [`HistoryPage`] for why never a copy).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LogReadReport {
-    /// Where the read started.
-    pub from: Slot,
-    /// Set when the read started below the trim point: the first readable
-    /// slot. Nothing else was answered.
-    pub trimmed_to: Option<Slot>,
-    /// Where the next read starts.
-    pub next: Slot,
-    /// One past the serving node's contiguous chosen prefix.
-    pub committed_end: Slot,
-    /// How many entries the page carried.
-    pub entries: u64,
-    /// How many holes it stepped over.
-    pub skipped: u64,
+pub struct LogReadReport<'a> {
+    /// Where the read started (its `from_seq`).
+    pub from: Seq,
+    /// Set when the read started below `first_seq`: no records were
+    /// answered, only the state.
+    pub truncated: bool,
+    /// The records, dense from `from`.
+    pub records: &'a [Value],
+    /// The journal state the page was served from.
+    pub state: JournalState,
     /// How it was answered.
     pub answer: LogReadAnswer,
+}
+
+impl<'a> LogReadReport<'a> {
+    /// The report of the core page `read` answering a read from `from`.
+    #[must_use]
+    pub fn of(read: &'a LogRead, from: Seq, answer: LogReadAnswer) -> Self {
+        match read {
+            LogRead::Truncated(state) => Self {
+                from,
+                truncated: true,
+                records: &[],
+                state: *state,
+                answer,
+            },
+            LogRead::Page(page) => Self {
+                from,
+                truncated: false,
+                records: &page.records,
+                state: page.state,
+                answer,
+            },
+        }
+    }
 }
 
 /// One `MatchB` page as it leaves a matchmaker: where it starts, the
@@ -161,23 +181,23 @@ pub trait Audit {
     /// slots. Its promise did not move.
     fn trimmed_to(&self, node: NodeId, point: Slot) {}
 
-    /// This node (or replica) answered a journal `Read` (#185) — reported
+    /// This node (or replica) answered a journal `Read` (#204) — reported
     /// once, as the answer is handed to the reply seam (a reply the seam
     /// then drops was still served).
-    fn log_read_served(&self, node: NodeId, report: &LogReadReport) {}
+    fn log_read_served(&self, node: NodeId, report: &LogReadReport<'_>) {}
 
     /// This node refused a client call naming a journal it does not serve
     /// (`0`, or any other id than its own, #185). `call` names the RPC.
     fn journal_refused(&self, node: NodeId, journal: JournalId, call: &'static str) {}
 
-    /// This node folded the system-journal entry at `lsn` of `journal` (#189:
-    /// the directory or the node registry) into `event` — reported once per
-    /// slot, in LSN order, at the instant the fold moves.
+    /// This node folded the system-journal record at position `seq` of
+    /// `journal` (#189: the directory or the node registry) into `event` —
+    /// reported once per position, in order, at the instant the fold moves.
     fn system_folded(
         &self,
         node: NodeId,
         journal: JournalId,
-        lsn: u64,
+        seq: u64,
         event: &crate::system::SystemEvent,
     ) {
     }
@@ -199,12 +219,20 @@ pub trait Audit {
     /// messages are accepted from now on.
     fn pool_admitted(&self, node: NodeId, admitted: NodeId) {}
 
-    /// This node applied the chosen command at `slot` (hashed to `vhash`),
-    /// advancing its contiguous applied prefix.
-    /// `identity` is the `(client, seq)` dedup key for a user command (`None`
-    /// for a control command): the at-most-once oracle keys on it, because two
-    /// distinct requests can legitimately share payload bytes.
-    fn applied(&self, node: NodeId, slot: Slot, vhash: u64, identity: Option<(u64, u64)>) {}
+    /// This node applied the chosen `command` at `slot` (hashed to `vhash`),
+    /// advancing its contiguous applied prefix, and the journal state
+    /// machine judged it `outcome` (#204; `None` for a `Noop`). The journal
+    /// oracles key on it: one outcome per slot on every node, dense
+    /// positions, one owner per generation.
+    fn applied(
+        &self,
+        node: NodeId,
+        slot: Slot,
+        vhash: u64,
+        command: &Command,
+        outcome: Option<&Outcome>,
+    ) {
+    }
 
     /// This node handed `msg` to the transport, addressed to `to`. Reports the
     /// core's outbound decision even when the network later drops it.
@@ -301,32 +329,21 @@ pub trait Audit {
     /// it. Reported once per tick for as long as the gap lasts.
     fn chosen_gap(&self, node: NodeId, hole: Slot, above: Slot) {}
 
-    /// This node answered a client proposal with a *committed* ack naming
-    /// `slot`; `applied` is the node's own applied prefix at that instant.
-    /// `dedup` marks the fast-path ack of a retry whose request was already
-    /// chosen (`ProposeResult::Chosen`), as opposed to the ack-on-commit path.
-    #[allow(clippy::fn_params_excessive_bools)]
-    fn client_acked(
-        &self,
-        node: NodeId,
-        client: u64,
-        seq: u64,
-        slot: Slot,
-        applied: Option<Slot>,
-        dedup: bool,
-    ) {
-    }
+    /// This node answered a client call — a `Write`, a `SetLeader` or a
+    /// `Truncate` (#204) — whose `command` it proposed at `slot`, with the
+    /// verdict the journal state machine gave there (`outcome`), once the
+    /// slot applied. A call whose slot decided another command, or was
+    /// trimmed before it applied here, is [`Audit::waiter_superseded`]
+    /// instead: it gets no verdict.
+    fn answered(&self, node: NodeId, slot: Slot, command: &Command, outcome: &Outcome) {}
 
-    /// This node answered a client read with a confirmed watermark (`None` is
-    /// the empty applied prefix, which is not slot 0).
-    fn read_confirmed(&self, node: NodeId, index: Option<Slot>) {}
-
-    /// This node served a **quorum read** (#143): its row answered whole at
+    /// This node served a **quorum read** (#143) — the confirmation every
+    /// journal `Read` waits on (#204): its row answered whole at
     /// `watermark` (the maximum vote watermark, `None` when nobody in the
-    /// row had voted), and the client was answered with `served`, this
-    /// node's chosen index at serve time — at or past the watermark.
-    /// `opened` is this node's chosen index when the read opened (what an
-    /// unconfirmed local read would have answered), `row` the grid row the
+    /// row had voted), and the page was served from `served`, the last slot
+    /// of this node's journal fold at serve time — at or past the watermark.
+    /// `opened` is the same when the read opened (what an unconfirmed local
+    /// read would have answered), `row` the grid row the
     /// read asked (`None`: the whole configuration, under a majority or a
     /// flexible split), and `leader` whether this node led when it served.
     fn quorum_read_served(
@@ -440,10 +457,11 @@ pub trait Audit {
     /// "campaign against a truncated acceptor" interleaving.
     fn prepare_below_floor(&self, node: NodeId, from_slot: Slot, floor: Slot) {}
 
-    /// This node dropped a parked proposal reply because its slot decided a
+    /// This node dropped a parked call's verdict because its slot decided a
     /// *different* command (a stale leader's admission superseded by the
-    /// majority's decision); the client was answered with a retry redirect
-    /// instead of a false commit.
+    /// majority's decision), or was trimmed below this node's floor before
+    /// it applied here; the client was answered with no verdict — an
+    /// ambiguous outcome — instead of a false one.
     fn waiter_superseded(&self, node: NodeId, slot: Slot) {}
 
     /// This node, as Leader, spent a full election-timeout window without an
@@ -451,11 +469,10 @@ pub trait Audit {
     /// of such step-downs in the batch (in practice 1).
     fn quorum_lost(&self, node: NodeId, count: u64) {}
 
-    /// This node's apply seam suppressed `count` chosen slots whose
-    /// `(client, seq)` identity had already applied at a lower slot — the #94
-    /// double-apply, executed as a no-op instead. Reported once per batch with
-    /// the number of suppressions the batch performed.
-    fn duplicate_suppressed(&self, node: NodeId, count: u64) {}
+    /// This node, as a settled leader, filled `count` slots with a `Noop` up
+    /// to a vote watermark a pre-read reported past its allocator frontier
+    /// (#204, `ColocatedNode::watermark_fills`).
+    fn watermark_filled(&self, node: NodeId, count: u64) {}
 
     /// This node booted with recoverable **faulty entries** (Stage 8): the
     /// scan classified each record's value lost but its identity known, and
@@ -478,16 +495,10 @@ pub trait Audit {
     ) {
     }
 
-    /// This node answered a client `Compact` request; `accepted` is the honest
-    /// outcome the ack carried (`true` only when the `Truncate` control
-    /// proposal was actually admitted — a redirect, a coupling refusal, or a
-    /// failed proposal all report `false`).
-    fn compact_acked(&self, node: NodeId, accepted: bool) {}
-
-    /// This node answered a parked read with a retry redirect instead of a
-    /// confirmation: `early` when the `expire_parked_read_early` hook fired
-    /// before the read's confirmation deadline, otherwise the deadline itself
-    /// ran out.
+    /// This node answered a journal `Read` `served: false` because its
+    /// quorum read did not confirm: `early` when the
+    /// `expire_parked_read_early` hook fired before the read's confirmation
+    /// deadline, otherwise the deadline itself ran out.
     fn read_expired(&self, node: NodeId, early: bool) {}
 
     /// `from` (a node, or a proxy leader) dropped one outbound message at a
@@ -586,11 +597,10 @@ pub trait Audit {
     /// of its open rounds ([`DriverHooks::skip_proxy_resend`](crate::DriverHooks)).
     fn proxy_resend_skipped(&self, proxy: ProxyId) {}
 
-    /// This node lost its leadership with client replies still parked:
-    /// `writes` proposals whose slot may yet commit under the successor (their
-    /// clients time out, on purpose) and `reads` that were answered with a
-    /// redirect on the spot.
-    fn waiters_cleared(&self, node: NodeId, writes: u64, reads: u64) {}
+    /// This node lost its leadership with `calls` journal calls still
+    /// parked, whose slots may yet decide under the successor: their clients
+    /// time out, on purpose (an ambiguous outcome).
+    fn waiters_cleared(&self, node: NodeId, calls: u64) {}
 
     /// The RPC edge of `at` (a node, a proxy leader or a replica) refused an inbound
     /// request before it reached the loop — a peer message that decoded from

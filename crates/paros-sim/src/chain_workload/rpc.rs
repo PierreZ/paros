@@ -2,54 +2,108 @@
 //! loop at a leader) per call, judged into a terminal outcome. No function
 //! here draws randomness; every choice a retry makes is read off the reply.
 //!
-//! The four `*_once` calls clone what they need **when called** and return
-//! the request's future, exactly as the closures they replaced did, so the
-//! run's call sequence — and the `select!`s each one races — is unchanged.
+//! The `*_once` calls clone what they need **when called** and return the
+//! request's future, so the run's call sequence — and the `select!`s each
+//! one races — is fixed by the caller alone.
 
 use std::future::Future;
 use std::time::Duration;
 
 use moonpool_rpc::RpcError;
-use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always};
+use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always, assert_reachable};
 use paros::{
-    Append, AppendAck, InspectReply, JournalId, QuorumSystem, Reconfigure, ReconfigureMatchmakers,
-    Trim, quorum_system_to_proto,
+    Entry, InspectReply, JournalId, JournalState, QuorumSystem, Read, ReadAck, Reconfigure,
+    ReconfigureMatchmakers, SetLeader, Truncate, Write, WriteAck, journal_state_from_proto,
+    quorum_system_to_proto, wire::public::WriteOutcome,
 };
 
 use super::ChainConfig;
 use crate::client::SimClient;
 
-pub(super) enum ProposalResult {
-    Acked { leader: Option<u64>, slot: u64 },
-    Rejected { leader: Option<u64> },
+/// The terminal outcome of one `Write` attempt (#204).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WriteResult {
+    /// The journal holds the batch at `[seq, seq + count)`: accepted now,
+    /// or (`duplicate`) acked from the log as the retry of a write accepted
+    /// there earlier.
+    Written {
+        seq: u64,
+        count: u64,
+        duplicate: bool,
+    },
+    /// Refused in place: a stale or foreign writer, a position that is not
+    /// the next one, or a retry whose bytes differ. `state` names the
+    /// current writer and the next position.
+    Refused { state: JournalState },
+    /// The position is below `first_seq`: whether it was written is
+    /// unknowable, and `state` says where the journal stands.
+    Truncated { state: JournalState },
+    /// No verdict: redirected (with a hint) or not answered.
+    Redirect { leader: Option<u64> },
+    /// No answer in time.
     Ambiguous,
 }
 
-impl ProposalResult {
-    /// Judge one `Append` RPC's answer: a transport error is ambiguous, a
-    /// reply is committed or a redirect.
-    fn from_response(response: Result<AppendAck, RpcError>, seq: u64) -> Self {
+/// A journal state off the wire, judged well-formed.
+pub(super) fn state_of(state: Option<paros::wire::common::JournalState>) -> JournalState {
+    let decoded = journal_state_from_proto(state);
+    assert_always!(
+        decoded.is_ok(),
+        "chain: a node answers a well-formed journal state"
+    );
+    decoded.unwrap_or_default()
+}
+
+impl WriteResult {
+    /// Judge one `Write` RPC's answer: a transport error is ambiguous, a
+    /// reply is a verdict or a redirect. On a journal `created` at runtime
+    /// an unknown answer is no verdict: a member that has not folded the
+    /// create yet does not serve it.
+    fn from_response(response: Result<WriteAck, RpcError>, created: bool) -> Self {
         let Some(ack) = response.ok() else {
             return Self::Ambiguous;
         };
-        assert_always!(ack.seq == seq, "chain: proposal ack echoes request");
+        if created && ack.unknown_journal {
+            assert_reachable!("system: a member that has not folded a create refuses its journal");
+            return Self::Redirect { leader: None };
+        }
         assert_always!(
             !ack.unknown_journal,
             "chain: a node serves the journal the client names"
         );
-        if ack.committed {
-            Self::Acked {
-                leader: ack.leader,
-                slot: ack.first_lsn.unwrap_or_default(),
-            }
-        } else {
-            Self::Rejected { leader: ack.leader }
+        match ack.outcome() {
+            WriteOutcome::Accepted | WriteOutcome::Duplicate => Self::Written {
+                seq: ack.seq,
+                count: ack.count,
+                duplicate: ack.outcome() == WriteOutcome::Duplicate,
+            },
+            WriteOutcome::Refused => Self::Refused {
+                state: state_of(ack.state),
+            },
+            WriteOutcome::Truncated => Self::Truncated {
+                state: state_of(ack.state),
+            },
+            WriteOutcome::None => Self::Redirect { leader: ack.leader },
         }
     }
 }
 
-pub(super) enum CompactResult {
-    Accepted { leader: Option<u64> },
+/// The terminal outcome of one `SetLeader` attempt (#204).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SetLeaderResult {
+    /// The compare-and-swap won: `state` is the new generation.
+    Won { state: JournalState },
+    /// It lost: `state` names the current writer.
+    Lost { state: JournalState },
+    /// No verdict.
+    Redirect { leader: Option<u64> },
+    /// No answer in time.
+    Ambiguous,
+}
+
+/// The terminal outcome of one truncation operation.
+pub(super) enum TruncateResult {
+    Applied { state: JournalState },
     Rejected { leader: Option<u64> },
     Ambiguous,
 }
@@ -102,83 +156,137 @@ pub(super) async fn inspect(
     within(ctx, timeout, None, probe).await
 }
 
-/// One `Append` of `payload` (a single record) to `journal` as
-/// `(client_id, seq)` to `target`. With
-/// `abandon` the client stops listening after 10 ms and records the
-/// observation as ambiguous.
-pub(super) fn propose_once(
+/// One `Write` of `entry` to `journal` at `target`. With `abandon` the
+/// client stops listening after 10 ms and records the observation as
+/// ambiguous. `created` says the journal was created at runtime (#189),
+/// so a member may not serve it yet.
+pub(super) fn write_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
-    (journal, client_id): (JournalId, u64),
+    journal: JournalId,
     target: usize,
-    seq: u64,
-    payload: Vec<u8>,
+    entry: &Entry,
     abandon: bool,
-) -> impl Future<Output = ProposalResult> + use<> {
+    created: bool,
+) -> impl Future<Output = WriteResult> + use<> {
     let client = clients[target].clone();
     let time = time.clone();
+    let request = Write {
+        journal: journal.0,
+        generation: entry.generation.0,
+        owner: entry.owner.0,
+        seq: entry.seq.0,
+        records: entry.records.iter().map(|r| r.0.clone()).collect(),
+    };
     async move {
-        let request = Append {
-            journal: journal.0,
-            client: client_id,
-            seq,
-            records: vec![payload],
-        };
-        let call = client.append(&request);
+        let call = client.write(&request);
         if abandon {
             moonpool_sim::select! {
-                response = call => ProposalResult::from_response(response, seq),
-                _ = time.sleep(Duration::from_millis(10)) => ProposalResult::Ambiguous,
+                response = call => WriteResult::from_response(response, created),
+                _ = time.sleep(Duration::from_millis(10)) => WriteResult::Ambiguous,
             }
         } else {
-            ProposalResult::from_response(call.await, seq)
+            WriteResult::from_response(call.await, created)
         }
     }
 }
 
-/// One compaction request up to `up_to`, starting at `target` and following
+/// One `SetLeader(expected, owner)` asked of `target`; `created` as for
+/// [`write_once`].
+pub(super) fn set_leader_once(
+    clients: &[SimClient],
+    journal: JournalId,
+    target: usize,
+    expected: u64,
+    owner: u64,
+    created: bool,
+) -> impl Future<Output = SetLeaderResult> + use<> {
+    let client = clients[target].clone();
+    let request = SetLeader {
+        journal: journal.0,
+        expected,
+        owner,
+    };
+    async move {
+        let Ok(ack) = client.set_leader(&request).await else {
+            return SetLeaderResult::Ambiguous;
+        };
+        if created && ack.unknown_journal {
+            assert_reachable!("system: a member that has not folded a create refuses its journal");
+            return SetLeaderResult::Redirect { leader: None };
+        }
+        assert_always!(
+            !ack.unknown_journal,
+            "chain: a node serves the journal the client names"
+        );
+        match (ack.decided, ack.won) {
+            (true, true) => SetLeaderResult::Won {
+                state: state_of(ack.state),
+            },
+            (true, false) => SetLeaderResult::Lost {
+                state: state_of(ack.state),
+            },
+            _ => SetLeaderResult::Redirect { leader: ack.leader },
+        }
+    }
+}
+
+/// One journal `Read` of `journal` from `from`, asked of `client`.
+pub(super) fn read_once(
+    client: &SimClient,
+    journal: u64,
+    from: u64,
+    limit: u64,
+    wait_ms: u64,
+) -> impl Future<Output = Option<ReadAck>> + use<> {
+    let client = client.clone();
+    let request = Read {
+        journal,
+        from_seq: from,
+        limit,
+        wait_ms,
+    };
+    async move { client.read(&request).await.ok() }
+}
+
+/// One truncation below `up_to`, starting at `target` and following
 /// redirects for at most `config.compact_attempts` asks.
-pub(super) fn compact_once(
+pub(super) fn truncate_once(
     clients: &[SimClient],
     time: &SimTimeProvider,
     journal: JournalId,
     config: &ChainConfig,
     target: usize,
     up_to: u64,
-) -> impl Future<Output = CompactResult> + use<> {
+) -> impl Future<Output = TruncateResult> + use<> {
     let clients = clients.to_vec();
     let time = time.clone();
     let config = *config;
     async move {
-        let mut client = clients[target].clone();
-        // A few beat-spaced asks, following the leader hint: a trim is
-        // proposed by the leader alone (#186), so a redirect or a lost
-        // answer is all a retry can meet.
-        let mut attempt_target = target;
+        let mut attempt_target = target % clients.len();
         for _attempt in 0..config.compact_attempts {
-            let request = Trim {
+            let client = clients[attempt_target].clone();
+            let request = Truncate {
                 journal: journal.0,
                 up_to,
             };
             let outcome = moonpool_sim::select! {
-                response = client.trim(&request) => match response {
-                    Ok(ack) => {
-                        if ack.accepted {
-                            CompactResult::Accepted { leader: ack.leader }
-                        } else {
-                            CompactResult::Rejected { leader: ack.leader }
-                        }
-                    }
-                    Err(_) => CompactResult::Ambiguous,
+                response = client.truncate(&request) => match response {
+                    Ok(ack) if ack.decided => TruncateResult::Applied { state: state_of(ack.state) },
+                    Ok(ack) => TruncateResult::Rejected { leader: ack.leader },
+                    Err(_) => TruncateResult::Ambiguous,
                 },
-                _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => CompactResult::Ambiguous,
+                _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => TruncateResult::Ambiguous,
             };
             match outcome {
-                CompactResult::Rejected { leader: Some(next) }
-                    if usize::try_from(next).is_ok_and(|next| next == attempt_target) =>
+                // A redirect to another node: follow it. The same node, or
+                // none named: a beat later, at the next node.
+                TruncateResult::Rejected { leader: Some(next) }
+                    if usize::try_from(next).is_ok_and(|next| next != attempt_target) =>
                 {
-                    // Same leader, not yet coupled: give the marker a
-                    // beat to decide and the custody acks to land.
+                    attempt_target = usize::try_from(next).unwrap_or(0) % clients.len();
+                }
+                TruncateResult::Rejected { .. } => {
                     if time
                         .sleep(Duration::from_millis(config.compact_beat_ms))
                         .await
@@ -186,18 +294,12 @@ pub(super) fn compact_once(
                     {
                         return outcome;
                     }
-                }
-                CompactResult::Rejected { leader: Some(next) } => {
-                    let Ok(next) = usize::try_from(next) else {
-                        return outcome;
-                    };
-                    attempt_target = next;
-                    client = clients[attempt_target % clients.len()].clone();
+                    attempt_target = (attempt_target + 1) % clients.len();
                 }
                 terminal => return terminal,
             }
         }
-        CompactResult::Ambiguous
+        TruncateResult::Ambiguous
     }
 }
 

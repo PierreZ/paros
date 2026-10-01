@@ -5,10 +5,10 @@
 //! it broke instead of surfacing as a rare seed.
 
 use super::{
-    ClientId, ClientSeq, ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
-    LeadershipOrigin, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot,
-    TestStorage, ballot, campaign, chosen_at, cluster, cluster_with_three_chosen, deliver_all,
-    deliver_filtered, drain, make_leader, node, ucmd, val,
+    ColocatedNode, Command, Control, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS, LeadershipOrigin,
+    Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party, ProposeResult, Slot, TestStorage, ballot,
+    campaign, chosen_at, cluster, cluster_with_three_chosen, deliver_all, deliver_filtered, drain,
+    entry, make_leader, node, ucmd, val,
 };
 use crate::proposer::RecoveryPolicy;
 use std::collections::BTreeSet;
@@ -83,7 +83,7 @@ fn a_successor_streams_fresh_proposals_under_the_inherited_ballot() {
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
-    let ProposeResult::Accepted(slot) = nodes[1].propose(ClientId(9), ClientSeq(1), val(77)) else {
+    let ProposeResult::Accepted(slot) = nodes[1].propose(entry(9, 1, 77)) else {
         panic!("the successor admits proposals");
     };
     let q = drain(&mut nodes[1]);
@@ -103,7 +103,7 @@ fn the_predecessor_redirects_clients_to_its_successor() {
     let mut nodes = cluster_with_three_chosen();
     nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
     assert_eq!(
-        nodes[0].propose(ClientId(1), ClientSeq(9), val(1)),
+        nodes[0].propose(entry(1, 9, 1)),
         ProposeResult::NotLeader(Some(NodeId(1))),
         "the boundary is the relinquish call: no proposal is admitted after it"
     );
@@ -111,7 +111,7 @@ fn the_predecessor_redirects_clients_to_its_successor() {
     deliver_all(&mut nodes, q);
     // And a follower that accepts under the inherited ballot names the node
     // actually exercising it, not the ballot's original owner.
-    let _ = nodes[1].propose(ClientId(1), ClientSeq(9), val(1));
+    let _ = nodes[1].propose(entry(1, 9, 1));
     let q = drain(&mut nodes[1]);
     deliver_all(&mut nodes, q);
     assert_eq!(nodes[2].leader(), Some(NodeId(1)));
@@ -127,8 +127,7 @@ fn an_accepted_but_unchosen_slot_survives_the_handoff() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     // Open a round and let *nobody* answer: the slot is in flight, unchosen.
-    let ProposeResult::Accepted(stranded) = nodes[0].propose(ClientId(1), ClientSeq(1), val(42))
-    else {
+    let ProposeResult::Accepted(stranded) = nodes[0].propose(entry(1, 1, 42)) else {
         panic!("leader admits the proposal");
     };
     let q = drain(&mut nodes[0]);
@@ -196,7 +195,7 @@ fn a_relinquished_authority_is_never_exercised_again_by_its_owner() {
         "an authority is relinquished at most once"
     );
     assert!(matches!(
-        nodes[0].propose(ClientId(1), ClientSeq(50), val(1)),
+        nodes[0].propose(entry(1, 50, 1)),
         ProposeResult::NotLeader(_)
     ));
     assert!(matches!(
@@ -257,7 +256,7 @@ fn a_second_node_cannot_install_a_relinquish_addressed_elsewhere() {
     nodes[1].step(msg.clone());
     assert!(nodes[1].is_leader());
     let frontier = nodes[1].proposer().next_slot();
-    let _ = nodes[1].propose(ClientId(3), ClientSeq(1), val(5));
+    let _ = nodes[1].propose(entry(3, 1, 5));
     nodes[1].step(msg);
     assert_eq!(nodes[1].handoff_counters().installed, 1, "installed once");
     assert!(
@@ -288,7 +287,7 @@ fn a_stale_relinquish_is_refused_once_the_cluster_has_moved_on() {
 fn a_malformed_tail_is_refused_whole() {
     let mut nodes = cluster_with_three_chosen();
     // Strand one slot so the tail is non-empty and tamperable.
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(7), val(7));
+    let _ = nodes[0].propose(entry(1, 7, 7));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, m| !matches!(m, Message::Accept { .. }));
     nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
@@ -341,7 +340,7 @@ fn a_successor_that_crashes_after_installing_leaves_an_ordinary_election_behind(
     assert!(nodes.iter().all(|n| !n.is_leader()));
     make_leader(&mut nodes, 2);
     assert!(nodes[2].ballot() > authority);
-    let ProposeResult::Accepted(slot) = nodes[2].propose(ClientId(6), ClientSeq(1), val(6)) else {
+    let ProposeResult::Accepted(slot) = nodes[2].propose(entry(6, 1, 6)) else {
         panic!("the elected leader admits proposals");
     };
     let q = drain(&mut nodes[2]);
@@ -431,7 +430,7 @@ fn a_leader_trailing_its_own_frontier_past_the_bound_is_refused() {
     make_leader(&mut nodes, 0);
     // Open more in-flight rounds than one payload may carry, answering none.
     for seq in 1..=(HANDOFF_BATCH as u64 + 1) {
-        let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(1));
+        let _ = nodes[0].propose(entry(1, seq, 1));
         let q = drain(&mut nodes[0]);
         deliver_filtered(&mut nodes, q, |_, m| !matches!(m, Message::Accept { .. }));
     }
@@ -484,7 +483,7 @@ fn a_dropped_relinquish_costs_availability_and_an_election_heals_it() {
         nodes[2].is_leader(),
         "ordinary Phase 1 recovers the cluster"
     );
-    let ProposeResult::Accepted(slot) = nodes[2].propose(ClientId(4), ClientSeq(1), val(88)) else {
+    let ProposeResult::Accepted(slot) = nodes[2].propose(entry(4, 1, 88)) else {
         panic!("the elected leader admits proposals");
     };
     let q = drain(&mut nodes[2]);
@@ -498,7 +497,7 @@ fn an_uncovered_inherited_fence_resigns_back_to_an_ordinary_election() {
     // Hand over a tail the successor cannot complete: one in-flight slot whose
     // `Accept` never reaches a quorum, so the successor's chosen prefix stays
     // below the inherited fence forever.
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(9), val(9));
+    let _ = nodes[0].propose(entry(1, 9, 9));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, m| !matches!(m, Message::Accept { .. }));
     nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
@@ -561,10 +560,10 @@ fn a_handoff_never_no_op_fills_a_slot_nobody_described() {
 fn the_transferred_tail_names_every_slot_below_the_frontier() {
     let mut nodes = cluster_with_three_chosen();
     // Two chosen-but-unapplied-elsewhere slots and one in-flight round.
-    let _ = nodes[0].propose(ClientId(2), ClientSeq(1), val(1));
+    let _ = nodes[0].propose(entry(2, 1, 1));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
-    let _ = nodes[0].propose(ClientId(2), ClientSeq(2), val(2));
+    let _ = nodes[0].propose(entry(2, 2, 2));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, m| !matches!(m, Message::Accept { .. }));
 
@@ -595,7 +594,7 @@ fn the_transferred_tail_names_every_slot_below_the_frontier() {
         "no transferred decision outranks the transferred authority"
     );
     assert!(
-        pending.values().all(|c| matches!(c, Command::User(_))),
+        pending.values().all(|c| matches!(c, Command::Write(_))),
         "the open round carries its client command verbatim"
     );
 }

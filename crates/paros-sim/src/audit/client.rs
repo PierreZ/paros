@@ -33,19 +33,27 @@ impl OpSpan {
 /// the workload — the client is the only party that knows its own program order
 /// — and merged into the shared [`LinHistory`] at `check()` time.
 ///
-/// Everything is keyed by `seq`, so a retry, a duplicate re-proposal, or an
-/// ambiguous attempt that is later reconciled records one issue and at most
-/// one terminal outcome per identity: the first ack wins, and an ack retires
-/// an earlier failure of the same seq.
+/// Everything is keyed by the client's own operation number, so a retry, a
+/// duplicate re-send, or an ambiguous attempt that is later reconciled records
+/// one issue and at most one terminal outcome per operation: the first ack
+/// wins, and an ack retires an earlier failure of the same operation.
+///
+/// Since #204 the register is the journal's **positions**: a write acked
+/// written pins at the last position its batch occupies, and a read at the
+/// last position its page's state covered (`next_seq - 1`). Positions are
+/// dense and assigned in log order, so the disclosed-order checks below read
+/// them exactly as they read slots before.
 #[derive(Default)]
 pub(crate) struct ClientHistory {
     pub(super) client: u64,
     /// First issue time per write seq.
     pub(super) write_inv: BTreeMap<u64, u64>,
-    /// First committed ack per write seq: `(time, slot)`.
+    /// First written ack per write op: `(time, last position)`.
     pub(super) write_resp: BTreeMap<u64, (u64, Option<u64>)>,
     /// Write seqs that ended without a committed ack (so far).
     pub(super) write_failed: BTreeSet<u64>,
+    /// Write seqs whose first ack was a `Duplicate` (#204).
+    pub(super) write_dup: BTreeSet<u64>,
     pub(super) read_inv: BTreeMap<u64, u64>,
     /// First committed ack per read seq: `(time, watermark)`.
     pub(super) read_resp: BTreeMap<u64, (u64, Option<u64>)>,
@@ -62,7 +70,23 @@ impl ClientHistory {
         self.write_inv.entry(seq).or_insert(now_ms);
     }
 
-    pub(crate) fn record_write_ack(&mut self, seq: u64, slot: Option<u64>, now_ms: u64) {
+    /// Record operation `seq` acked at `slot`; `duplicate` when the journal
+    /// answered it from the log (#204). A duplicate moved nothing: the write
+    /// it matched may be another operation's with the same bytes (two empty
+    /// records at one position under one generation are one write), placed
+    /// before this operation was even invoked. It still pins a position a
+    /// later read must cover, but it takes no position of its own, so the
+    /// write-order checks leave it out (`LinHistory::writes`).
+    pub(crate) fn record_write_ack(
+        &mut self,
+        seq: u64,
+        slot: Option<u64>,
+        duplicate: bool,
+        now_ms: u64,
+    ) {
+        if !self.write_resp.contains_key(&seq) && duplicate {
+            self.write_dup.insert(seq);
+        }
         self.write_resp.entry(seq).or_insert((now_ms, slot));
         self.write_failed.remove(&seq);
     }
@@ -100,10 +124,11 @@ impl ClientHistory {
 /// A watermark is `Option<u64>`: an absent `read_index` is the *empty* applied
 /// prefix, and `None < Some(0)` is exactly the watermark order.
 ///
-/// The register under check is the **applied log prefix**: an acked write is a
-/// state transition at its committed `slot`, and a committed read observes the
-/// watermark. Failed / timed-out operations enter no constraint — a timed-out
-/// write may still commit later, so it is deliberately unconstrained.
+/// The register under check is the **journal's positions** (#204): an acked
+/// write is a state transition at the last position its batch took, and a
+/// committed read observes the last position its state covered. Failed /
+/// timed-out operations enter no constraint — a timed-out write may still
+/// commit later, so it is deliberately unconstrained.
 ///
 /// Its bools are independent per-run coverage flags (see [`AuditState`](crate::audit::state::AuditState)).
 #[derive(Default)]
@@ -111,11 +136,17 @@ impl ClientHistory {
 pub(super) struct LinHistory {
     /// Acked writes with a known slot (program order within one client).
     pub(super) write_slot: BTreeMap<(u64, u64), u64>,
+    /// The acked writes whose first ack was a `Duplicate` (#204): they took
+    /// no new position, so the checks that place a write above an earlier
+    /// read (L3, C3) leave them out.
+    pub(super) write_dup: BTreeSet<(u64, u64)>,
     /// Committed reads and their observed watermark.
     pub(super) read_wm: BTreeMap<(u64, u64), Option<u64>>,
     /// Committed writes as real-time spans with their slot (`None` for a
-    /// defensive slotless ack, which still forbids the empty prefix later).
-    pub(super) writes: Vec<(OpSpan, Option<u64>)>,
+    /// defensive slotless ack, which still forbids the empty prefix later),
+    /// and whether the ack was a `Duplicate` (#204: it took no position of
+    /// its own, so L1 and L3 leave it out; L2 still holds it).
+    pub(super) writes: Vec<(OpSpan, Option<u64>, bool)>,
     /// Committed reads as real-time spans with their watermark.
     pub(super) reads: Vec<(OpSpan, Option<u64>)>,
     pub(super) issued: usize,
@@ -129,11 +160,6 @@ pub(super) struct LinHistory {
 }
 
 impl LinHistory {
-    /// The highest slot any client was told was committed.
-    pub(super) fn acked_max(&self) -> Option<u64> {
-        self.write_slot.values().copied().max()
-    }
-
     /// Fold one client's record in. Called once per client, from its `check()`.
     pub(super) fn merge(&mut self, h: &ClientHistory) {
         let c = h.client;
@@ -147,9 +173,13 @@ impl LinHistory {
         for (&seq, &(resp, slot)) in &h.write_resp {
             if let Some(s) = slot {
                 self.write_slot.insert((c, seq), s);
+                if h.write_dup.contains(&seq) {
+                    self.write_dup.insert((c, seq));
+                }
             }
             if let Some(&inv) = h.write_inv.get(&seq) {
-                self.writes.push((OpSpan { inv, resp }, slot));
+                self.writes
+                    .push((OpSpan { inv, resp }, slot, h.write_dup.contains(&seq)));
             }
         }
         for (&seq, &(resp, wm)) in &h.read_resp {
@@ -167,7 +197,7 @@ impl LinHistory {
         let concurrent_read_write = self.reads.iter().any(|&(r, _)| {
             self.writes
                 .iter()
-                .any(|&(w, _)| !w.before(r) && !r.before(w))
+                .any(|&(w, _, _)| !w.before(r) && !r.before(w))
         });
         assert_sometimes!(
             concurrent_read_write,
@@ -209,18 +239,20 @@ pub(super) fn check_disclosed_order(h: &LinHistory) {
         return;
     }
     // L1 — the log order of two committed writes agrees with their real-time
-    // order.
-    for (i, &(w1, s1)) in h.writes.iter().enumerate() {
-        for &(w2, s2) in &h.writes[i + 1..] {
+    // order. A `Duplicate` (#204) took no new position: its position was
+    // filled before it completed, so it still bounds every write after it,
+    // but it is never the later write of a pair.
+    for (i, &(w1, s1, dup1)) in h.writes.iter().enumerate() {
+        for &(w2, s2, dup2) in &h.writes[i + 1..] {
             let (Some(s1), Some(s2)) = (s1, s2) else {
                 continue;
             };
-            if w1.before(w2) {
+            if w1.before(w2) && !dup2 {
                 assert_always!(
                     s1 < s2,
                     "two real-time-ordered committed writes land in log order"
                 );
-            } else if w2.before(w1) {
+            } else if w2.before(w1) && !dup1 {
                 assert_always!(
                     s2 < s1,
                     "two real-time-ordered committed writes land in log order"
@@ -230,9 +262,11 @@ pub(super) fn check_disclosed_order(h: &LinHistory) {
     }
     // L2 — a committed read observes every write that completed before it
     // began (a slotless committed ack still forbids the empty prefix). L3 — a
-    // write invoked after a committed read lands above that read's watermark.
+    // write invoked after a committed read lands above that read's watermark
+    // — unless it is a `Duplicate`, which lands where the log already held
+    // it (#204).
     for &(r, wm) in &h.reads {
-        for &(w, slot) in &h.writes {
+        for &(w, slot, dup) in &h.writes {
             if w.before(r) {
                 let observed = match slot {
                     Some(s) => wm >= Some(s),
@@ -243,6 +277,7 @@ pub(super) fn check_disclosed_order(h: &LinHistory) {
                     "a committed read observes every write completed before it began"
                 );
             } else if r.before(w)
+                && !dup
                 && let Some(s) = slot
             {
                 assert_always!(
@@ -306,7 +341,8 @@ pub(super) fn check_sequential_client(client: u64, h: &LinHistory) {
     // C3 — a write issued after a committed read must land above that read's
     // watermark (a slot at or below it would place the write inside the prefix
     // the read already observed). Guards against an inflated / speculative
-    // watermark.
+    // watermark. A `Duplicate` (#204) lands where the log already held it, so
+    // it is left out, as in L3.
     let mut max_read_wm: Option<u64> = None;
     let mut reads = h.read_wm.range(span.clone()).peekable();
     for (&(_, wj), &slot) in h.write_slot.range(span) {
@@ -317,7 +353,9 @@ pub(super) fn check_sequential_client(client: u64, h: &LinHistory) {
             max_read_wm = max_read_wm.max(wm);
             reads.next();
         }
-        if let Some(i) = max_read_wm {
+        if let Some(i) = max_read_wm
+            && !h.write_dup.contains(&(client, wj))
+        {
             assert_always!(
                 slot > i,
                 "a write issued after a committed read lands above its watermark"

@@ -73,8 +73,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, HardState, Message, NodeId,
-    QuorumSystem, ReadState, Slot, Storage, Value,
+    Ballot, ClientId, ColocatedNode, Command, Config, Entry, Generation, HardState, Message,
+    NodeId, QuorumSystem, ReadState, Seq, Slot, Storage, Value,
 };
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
@@ -125,7 +125,7 @@ fn command(text: &str, seq: u64) -> Value {
 
 fn show(command: &Command) -> String {
     match command {
-        Command::User(entry) => format!("{:?}", String::from_utf8_lossy(&entry.value.0)),
+        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
         Command::Control(control) => format!("{control:?}"),
     }
 }
@@ -268,9 +268,12 @@ fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
     cluster.drain(leader);
     cluster.deliver_all();
     for (seq, text) in [(1, "alpha"), (2, "bravo"), (3, "charlie")] {
-        let _ = cluster
-            .node(leader)
-            .propose(ClientId(7), ClientSeq(seq), command(text, seq));
+        let _ = cluster.node(leader).propose(Entry {
+            generation: Generation(0),
+            owner: ClientId(7),
+            seq: Seq(seq),
+            records: vec![command(text, seq)],
+        });
         cluster.drain(leader);
         cluster.deliver_all();
     }
@@ -289,9 +292,12 @@ fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
 fn half_a_column(cluster: &mut Cluster, leader: NodeId) {
     // ---- 2. a fourth command, half-way through its column -------------------
     println!("\n-- 2. node 5 proposes \"delta\" for slot 3 → column 0 = {{0, 3}}");
-    let _ = cluster
-        .node(leader)
-        .propose(ClientId(7), ClientSeq(4), command("delta", 4));
+    let _ = cluster.node(leader).propose(Entry {
+        generation: Generation(0),
+        owner: ClientId(7),
+        seq: Seq(4),
+        records: vec![command("delta", 4)],
+    });
     cluster.drain(leader);
     // Node 3's copy of the Accept lands; node 0's stays in flight.
     cluster.deliver(|to, m| !(to == NodeId(0) && matches!(m, Message::Accept { .. })));

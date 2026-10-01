@@ -4,7 +4,7 @@
 //! The client is the only party that knows its own program order, so this is
 //! recorded client-side and judged client-side.
 
-use paros_core::{ClientId, ClientSeq, NodeId, Slot};
+use paros_core::{ClientId, Entry, NodeId, Slot};
 
 use crate::narration::prefix_at as at;
 use crate::world::World;
@@ -12,7 +12,11 @@ use crate::world::World;
 /// One client's writes.
 #[derive(Clone, Debug)]
 pub(super) struct Proposal {
-    pub(super) seq: ClientSeq,
+    /// The client's own number for the write (1, 2, ...): what a retry
+    /// names.
+    pub(super) seq: u64,
+    /// The exact write it sent — a retry sends these bytes again.
+    pub(super) entry: Entry,
     pub(super) value: String,
     pub(super) node: NodeId,
     pub(super) slot: Option<Slot>,
@@ -73,6 +77,9 @@ pub struct HistoryOp {
 pub(super) struct Client {
     pub(super) id: ClientId,
     pub(super) next_seq: u64,
+    /// The journal position its next write asks for (#204): one past its
+    /// last admitted write.
+    pub(super) next_position: u64,
     pub(super) proposals: Vec<Proposal>,
     pub(super) reads: Vec<PendingRead>,
 }

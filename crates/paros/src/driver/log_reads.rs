@@ -1,92 +1,98 @@
-//! Journal reads (#185): the `Read` answer, and the **long-poll** of a read
-//! that starts at or past the serving process's end.
+//! Journal reads (#204): the `Read` answer, the leaderless confirmation it
+//! waits on, and the **long-poll** of a read that starts at the tail.
 //!
-//! The core serves a page from its chosen prefix ([`paros_core::LogRead`],
-//! a pure read); the driver owns the wait. A read with nothing to return
-//! yet is parked here, keyed by nothing but its arrival order, and is
-//! re-served after every batch (the chosen prefix only grows inside one) —
-//! answered the moment a slot at or above its start is chosen, or a trim
-//! overtakes it — and answered empty once its wait (`read_poll_ticks`) runs
-//! out. Every driver that serves `Read` (the node's and the replica's) holds
-//! one of these; the read itself is a closure over its core, so the wait
-//! never knows which role is serving.
+//! A `Read` is served through the leaderless read of Compartmentalized
+//! Paxos §3.4 (paros's quorum read, #143): the serving process — a node or a
+//! replica — opens a quorum read in its core, which asks a Phase-1 quorum of
+//! the acceptors for their vote watermarks, and the read is parked here,
+//! keyed by the core's `ctx` token, until the core surfaces it confirmed
+//! ([`paros_core::ReadState`]) — the row answered whole and this process's
+//! journal fold covers the maximum. Only then is the page served, from the
+//! fold ([`paros_core::LogRead`], a pure read): every write acknowledged
+//! before the read opened is in it. No read goes through the leader, and no
+//! read-index round is ever asked.
+//!
+//! A confirmed read with nothing to return yet — it starts at or past the
+//! journal's `next_seq` — waits here for as long as the client asked
+//! (`wait_ms`, capped by `read_poll_ticks`), re-served after every batch (the
+//! fold only grows inside one), and is answered empty when its wait runs
+//! out. A read whose confirmation does not arrive within `read_retry_ticks`
+//! is answered `served: false`: the client retries, here or elsewhere.
+//!
+//! Every driver that serves `Read` (the node's and the replica's) holds one
+//! of these; the page itself is a closure over its core, so the wait never
+//! knows which role is serving.
 
-use paros_core::{JournalId, LogRead, NodeId, Slot};
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use paros_core::{JournalId, LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::hooks::{DriverHooks, Reply};
-use crate::rpc::{LogEntry, Read, ReadAck, ReplySender, decode_records};
+use crate::rpc::{Read, ReadAck, ReplySender, journal_state_to_proto};
 
 use super::reply::answer;
 
-/// One parked journal read.
-struct ParkedLogRead {
-    from: Slot,
-    max_bytes: usize,
+/// The records one page carries when the client names no limit.
+pub(crate) const READ_PAGE_RECORDS: usize = 256;
+
+/// The byte budget of one page: far below the frame limit. A page that can
+/// hold a record always holds one, whatever its size.
+pub(crate) const READ_PAGE_BYTES: usize = 64 * 1024;
+
+/// One journal read, from its arrival to its answer.
+struct PendingRead {
+    from: Seq,
+    limit: usize,
+    /// The ticks the client lets the read wait at the tail.
+    wait_ticks: u64,
+    /// The driver tick it arrived at (its confirmation deadline), then the
+    /// tick it started waiting at the tail.
     parked_at: u64,
+    /// The grid row its quorum read asked (`None`: the whole configuration).
+    row: Option<usize>,
+    /// The serving process's fold head when the read opened: what an
+    /// unconfirmed local read would have served.
+    opened: Option<Slot>,
     reply: ReplySender<ReadAck>,
 }
 
-/// The journal reads a driver is holding open, oldest first.
+/// The journal reads a driver is holding open.
 #[derive(Default)]
-pub(crate) struct LogReads {
-    parked: Vec<ParkedLogRead>,
+pub(crate) struct JournalReads {
+    /// Reads waiting on their quorum read, by the core's `ctx`.
+    confirming: BTreeMap<u64, PendingRead>,
+    /// Confirmed reads waiting at the tail, oldest first.
+    parked: Vec<PendingRead>,
+    next_ctx: u64,
+    /// The driver tick of the last upkeep ([`JournalReads::expire`]): the
+    /// clock every deadline here is counted on.
+    now: u64,
 }
 
-/// Whether `read` is an empty page at (or past) the end — the one answer a
+/// Whether `read` is an empty page at (or past) the tail — the one answer a
 /// long-poll waits out rather than sends.
-fn at_end(read: &LogRead, from: Slot) -> bool {
+fn at_end(read: &LogRead) -> bool {
     matches!(read, LogRead::Page(page)
-        if page.entries.is_empty() && page.next == from && from >= page.committed_end)
+        if page.records.is_empty() && page.from >= page.state.next_seq)
 }
 
 /// The wire answer for a core read page.
 fn read_ack(read: &LogRead) -> ReadAck {
     match read {
-        LogRead::Trimmed { trim_point } => ReadAck {
-            next_lsn: trim_point.0,
-            trimmed_to: Some(trim_point.0),
+        LogRead::Truncated(state) => ReadAck {
+            served: true,
+            truncated: true,
+            state: Some(journal_state_to_proto(*state)),
             ..ReadAck::default()
         },
         LogRead::Page(page) => ReadAck {
-            entries: page
-                .entries
-                .iter()
-                .map(|(slot, entry)| LogEntry {
-                    lsn: slot.0,
-                    client: entry.client.0,
-                    seq: entry.seq.0,
-                    records: decode_records(&entry.value.0),
-                })
-                .collect(),
-            next_lsn: page.next.0,
-            committed_end: page.committed_end.0,
-            trimmed_to: None,
-            unknown_journal: false,
-        },
-    }
-}
-
-/// The audit's view of one answer.
-fn report(read: &LogRead, from: Slot, answer: LogReadAnswer) -> LogReadReport {
-    match read {
-        LogRead::Trimmed { trim_point } => LogReadReport {
-            from,
-            trimmed_to: Some(*trim_point),
-            next: *trim_point,
-            committed_end: *trim_point,
-            entries: 0,
-            skipped: 0,
-            answer,
-        },
-        LogRead::Page(page) => LogReadReport {
-            from,
-            trimmed_to: None,
-            next: page.next,
-            committed_end: page.committed_end,
-            entries: page.entries.len() as u64,
-            skipped: page.skipped,
-            answer,
+            served: true,
+            from_seq: page.from.0,
+            records: page.records.iter().map(|r| r.0.clone()).collect(),
+            state: Some(journal_state_to_proto(page.state)),
+            ..ReadAck::default()
         },
     }
 }
@@ -94,23 +100,21 @@ fn report(read: &LogRead, from: Slot, answer: LogReadAnswer) -> LogReadReport {
 /// Hand one read's answer to the reply seam, reporting it first.
 fn send<H: DriverHooks, A: Audit>(
     read: &LogRead,
-    from: Slot,
+    from: Seq,
     how: LogReadAnswer,
     reply: ReplySender<ReadAck>,
     node: NodeId,
     hooks: &H,
     audit: &A,
 ) {
-    let served = report(read, from, how);
-    audit.log_read_served(node, &served);
+    let report = LogReadReport::of(read, from, how);
+    audit.log_read_served(node, &report);
     tracing::info!(
         node = node.0,
         from = from.0,
-        next = served.next.0,
-        committed_end = served.committed_end.0,
-        entries = served.entries,
-        skipped = served.skipped,
-        trimmed = served.trimmed_to.is_some(),
+        records = report.records.len(),
+        next_seq = report.state.next_seq.0,
+        truncated = report.truncated,
         answer = ?how,
         "log_read_served"
     );
@@ -136,58 +140,101 @@ pub(crate) fn refuse_journal<A: Audit>(
     true
 }
 
-impl LogReads {
-    /// Serve `req` through `read` (the serving core's page), or park it when
-    /// it starts at or past the end. A request for another journal is
-    /// refused.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serve<H: DriverHooks, A: Audit>(
+/// How many ticks `wait_ms` is at `tick`, capped at `cap`.
+pub(crate) fn wait_ticks(wait_ms: u64, tick: Duration, cap: u64) -> u64 {
+    let tick_ms = u64::try_from(tick.as_millis()).unwrap_or(u64::MAX).max(1);
+    wait_ms.div_ceil(tick_ms).min(cap)
+}
+
+impl JournalReads {
+    /// The `ctx` the next read's quorum read opens with.
+    pub(crate) fn next_ctx(&self) -> u64 {
+        self.next_ctx
+    }
+
+    /// Park `req` on the quorum read the caller just opened at
+    /// [`JournalReads::next_ctx`] (asking `row`, with the fold head at
+    /// `opened`), until the core confirms it.
+    pub(crate) fn park(
         &mut self,
-        read: impl Fn(Slot, usize) -> LogRead,
-        journal: JournalId,
         req: &Read,
         reply: ReplySender<ReadAck>,
-        ticks: u64,
+        wait_ticks: u64,
+        row: Option<usize>,
+        opened: Option<Slot>,
+    ) {
+        let ctx = self.next_ctx;
+        self.next_ctx += 1;
+        let limit = match usize::try_from(req.limit).unwrap_or(usize::MAX) {
+            0 => READ_PAGE_RECORDS,
+            limit => limit.min(READ_PAGE_RECORDS),
+        };
+        self.confirming.insert(
+            ctx,
+            PendingRead {
+                from: Seq(req.from_seq),
+                limit,
+                wait_ticks,
+                parked_at: self.now,
+                row,
+                opened,
+                reply,
+            },
+        );
+    }
+
+    /// Serve every read the core confirmed in this batch (`served`): report
+    /// the quorum read, then answer the page — or, at the tail with time
+    /// left, start the long-poll. `fold` is the serving process's fold head
+    /// now and `leader` whether it leads.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn confirmed<H: DriverHooks, A: Audit>(
+        &mut self,
+        served: &[ReadState],
+        read: impl Fn(Seq, usize, usize) -> LogRead,
+        fold: Option<Slot>,
+        leader: bool,
         node: NodeId,
         hooks: &H,
         audit: &A,
     ) {
-        if refuse_journal(journal, req.journal, "read", node, audit) {
-            let refused = ReadAck {
-                unknown_journal: true,
-                ..ReadAck::default()
+        for state in served {
+            let Some(mut pending) = self.confirming.remove(&state.ctx) else {
+                continue;
             };
-            answer(hooks, audit, node, Reply::LogRead, reply, refused);
-            return;
-        }
-        let from = Slot(req.from_lsn);
-        let max_bytes = usize::try_from(req.max_bytes).unwrap_or(usize::MAX);
-        let page = read(from, max_bytes);
-        if at_end(&page, from) {
-            self.parked.push(ParkedLogRead {
-                from,
-                max_bytes,
-                parked_at: ticks,
-                reply,
-            });
-        } else {
-            send(
-                &page,
-                from,
-                LogReadAnswer::Immediate,
-                reply,
-                node,
-                hooks,
-                audit,
+            audit.quorum_read_served(node, pending.row, state.index, fold, pending.opened, leader);
+            tracing::info!(
+                node = node.0,
+                ctx = state.ctx,
+                watermark = state
+                    .index
+                    .map_or(-1, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
+                leader,
+                "quorum_read_served"
             );
+            let page = read(pending.from, pending.limit, READ_PAGE_BYTES);
+            if at_end(&page) && pending.wait_ticks > 0 {
+                pending.parked_at = self.now;
+                self.parked.push(pending);
+            } else {
+                send(
+                    &page,
+                    pending.from,
+                    LogReadAnswer::Immediate,
+                    pending.reply,
+                    node,
+                    hooks,
+                    audit,
+                );
+            }
         }
     }
 
-    /// Re-serve every parked read after a batch: a read the prefix (or a
-    /// trim) moved past is answered; the rest keep waiting.
+    /// Re-serve every read waiting at the tail after a batch: a read the
+    /// fold (or a truncation) moved past is answered; the rest keep waiting.
     pub(crate) fn wake<H: DriverHooks, A: Audit>(
         &mut self,
-        read: impl Fn(Slot, usize) -> LogRead,
+        read: impl Fn(Seq, usize, usize) -> LogRead,
         node: NodeId,
         hooks: &H,
         audit: &A,
@@ -197,8 +244,8 @@ impl LogReads {
         }
         let mut still = Vec::with_capacity(self.parked.len());
         for parked in std::mem::take(&mut self.parked) {
-            let page = read(parked.from, parked.max_bytes);
-            if at_end(&page, parked.from) {
+            let page = read(parked.from, parked.limit, READ_PAGE_BYTES);
+            if at_end(&page) {
                 still.push(parked);
             } else {
                 send(
@@ -215,26 +262,52 @@ impl LogReads {
         self.parked = still;
     }
 
-    /// Answer every read whose wait ran out (`poll_ticks` ticks parked) with
-    /// the empty page at the end: the client re-asks.
+    /// Per-tick upkeep: a read whose confirmation is overdue
+    /// (`retry_ticks`, or every one of them when `expire_all` — the
+    /// driver's early-expiry hook) is answered `served: false`, and a read
+    /// whose wait at the tail ran out is answered with the empty page.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn expire<H: DriverHooks, A: Audit>(
         &mut self,
-        read: impl Fn(Slot, usize) -> LogRead,
+        read: impl Fn(Seq, usize, usize) -> LogRead,
         ticks: u64,
-        poll_ticks: u64,
+        retry_ticks: u64,
+        expire_all: bool,
         node: NodeId,
         hooks: &H,
         audit: &A,
     ) {
+        self.now = ticks;
+        let overdue: Vec<(u64, bool)> = self
+            .confirming
+            .iter()
+            .filter_map(|(ctx, pending)| {
+                let by_deadline = ticks.saturating_sub(pending.parked_at) > retry_ticks;
+                (expire_all || by_deadline).then_some((*ctx, !by_deadline))
+            })
+            .collect();
+        for (ctx, early) in overdue {
+            if let Some(pending) = self.confirming.remove(&ctx) {
+                audit.read_expired(node, early);
+                answer(
+                    hooks,
+                    audit,
+                    node,
+                    Reply::ReadUnserved,
+                    pending.reply,
+                    ReadAck::default(),
+                );
+            }
+        }
         if self.parked.is_empty() {
             return;
         }
         let (overdue, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.parked)
             .into_iter()
-            .partition(|parked| ticks.saturating_sub(parked.parked_at) >= poll_ticks);
+            .partition(|parked| ticks.saturating_sub(parked.parked_at) >= parked.wait_ticks);
         self.parked = still;
         for parked in overdue {
-            let page = read(parked.from, parked.max_bytes);
+            let page = read(parked.from, parked.limit, READ_PAGE_BYTES);
             send(
                 &page,
                 parked.from,
@@ -245,5 +318,10 @@ impl LogReads {
                 audit,
             );
         }
+    }
+
+    /// Whether any read is still waiting on its confirmation.
+    pub(crate) fn has_confirming(&self) -> bool {
+        !self.confirming.is_empty()
     }
 }

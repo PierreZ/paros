@@ -11,8 +11,7 @@
 
 use paros_core::proposer::Proposer;
 use paros_core::{
-    AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Message, NodeId, QuorumSystem, Slot,
-    WriteOp,
+    AcceptorWrite, Ballot, Command, Entry, Message, NodeId, QuorumSystem, Slot, WriteOp,
 };
 
 use crate::prompt::{Prompt, PromptKind, RepairCase};
@@ -276,12 +275,7 @@ impl World {
         if !self.policy.manual.contains(&PromptKind::TrimPoint) {
             return None;
         }
-        let Message::TrimmedTo {
-            from,
-            point,
-            sessions,
-        } = message
-        else {
+        let Message::TrimmedTo { from, point, state } = message else {
             return None;
         };
         let node = self.nodes[index].as_ref()?;
@@ -294,25 +288,26 @@ impl World {
         let mut acceptor = node.acceptor().clone();
         let mut replica = node.replica().clone();
         let mut writes: Vec<WriteOp> = Vec::new();
-        replica.trim_to(*point, sessions);
-        acceptor.trim_to(*point, sessions.clone(), &mut writes);
+        let sealed = replica.trim_to(*point, *state);
+        acceptor.trim_to(*point, sealed, &mut writes);
         let id = self.take_prompt_id();
         Some(Prompt::trim_point(
             id, to, *from, *point, old_floor, &acceptor, &replica,
         ))
     }
 
-    /// The question a client's retry raises at the leader: which of the three
-    /// honest answers is this one?
+    /// The question a client's retry raises at the leader: what does the
+    /// journal answer this write with, as far as this node has folded it?
     ///
-    /// Judged on a clone of the replica, through the two ledgers the core
-    /// itself consults — and in the order it consults them.
+    /// Judged on a clone of the replica, through the journal state machine
+    /// the fold itself runs (`JournalState::apply`, #204), over the write
+    /// the replica holds at the retried position.
     pub(super) fn ack_write_prompt(
         &mut self,
         to: NodeId,
         index: usize,
-        client: ClientId,
-        seq: ClientSeq,
+        entry: &Entry,
+        seq: u64,
     ) -> Option<Prompt> {
         if !self.policy.manual.contains(&PromptKind::AckWrite) {
             return None;
@@ -322,18 +317,18 @@ impl World {
             return None;
         }
         let clone = node.replica().clone();
-        let applied_at = clone.applied_at(client, seq);
-        let inflight_at = clone.inflight_at(client, seq);
-        let chosen_index = clone.chosen_index();
+        let before = clone.journal();
+        let mut state = before;
+        let outcome = state.apply(&Command::Write(entry.clone()), |at| clone.accepted_at(at));
         let id = self.take_prompt_id();
         Some(Prompt::ack_write(
             id,
             to,
-            client.0,
-            seq.0,
-            applied_at,
-            inflight_at,
-            chosen_index,
+            entry,
+            seq,
+            &outcome,
+            before,
+            clone.chosen_index(),
         ))
     }
 
@@ -521,7 +516,7 @@ impl World {
         clone.learn(slot, command);
         let mut writes: Vec<WriteOp> = Vec::new();
         clone.advance(|_, _| true, &mut writes);
-        let applies_now = clone.committed().iter().any(|(at, _)| *at == slot);
+        let applies_now = clone.committed().iter().any(|(at, _, _)| *at == slot);
         let id = self.take_prompt_id();
         Some(Prompt::replica_apply(
             id,

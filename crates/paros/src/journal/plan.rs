@@ -36,7 +36,7 @@ pub(crate) struct Plan {
     /// Fold from this position.
     pub start: usize,
     /// The bracket the fold must trust although it is damaged: damage in
-    /// its header or sealed ledger is a crash verdict.
+    /// its header or sealed journal state is a crash verdict.
     pub strict: Option<Range<usize>>,
     /// Brackets after `start` the fold skips: copies of what it already
     /// read.

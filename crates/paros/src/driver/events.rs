@@ -53,8 +53,8 @@ pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
     h
 }
 
-/// The value hash for a decided [`Command`], for observability. A client entry
-/// hashes its opaque value bytes; a control command hashes a stable, distinct
+/// The value hash for a decided [`Command`], for observability. A client write
+/// hashes its writer, position and records; a control command hashes a stable, distinct
 /// encoding of its metadata, so every node agrees on the per-slot hash the audit
 /// compares (a control command decided for a slot is the same on all nodes).
 ///
@@ -64,7 +64,17 @@ pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
 #[must_use]
 pub fn command_hash(command: &Command) -> u64 {
     match command {
-        Command::User(entry) => value_hash(&entry.value.0),
+        Command::Write(entry) => {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&entry.generation.0.to_le_bytes());
+            bytes.extend_from_slice(&entry.owner.0.to_le_bytes());
+            bytes.extend_from_slice(&entry.seq.0.to_le_bytes());
+            for record in &entry.records {
+                bytes.extend_from_slice(&(record.0.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(&record.0);
+            }
+            value_hash(&bytes)
+        }
         Command::Control(Control::Truncate { up_to }) => {
             let mut bytes = vec![0xff_u8];
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
@@ -74,6 +84,12 @@ pub fn command_hash(command: &Command) -> u64 {
         // are nine bytes and start `0xff`), and every node hashes the same no-op to
         // the same digest, so per-slot prefix agreement stays checkable.
         Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
+        Command::Control(Control::SetLeader { expected, owner }) => {
+            let mut bytes = vec![0xfd_u8];
+            bytes.extend_from_slice(&expected.0.to_le_bytes());
+            bytes.extend_from_slice(&owner.0.to_le_bytes());
+            value_hash(&bytes)
+        }
     }
 }
 

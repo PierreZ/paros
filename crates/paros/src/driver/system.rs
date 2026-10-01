@@ -24,7 +24,7 @@
 //! - this node's own retirement stops every user journal it serves.
 //!
 //! The follow is volatile: every incarnation folds both journals again from
-//! LSN 0 (system journals are never trimmed), so a restart re-derives exactly
+//! position 0 (system journals are never trimmed), so a restart re-derives exactly
 //! what it knew. The remote reads run on detached tasks that consult no hook
 //! and draw no randomness; which seed a read goes to is chosen on the loop,
 //! round-robin, and the answer comes back through an inbox.
@@ -36,21 +36,21 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, LogPage, LogRead, NodeId, Party, Slot};
+use paros_core::{JournalId, LogPage, LogRead, NodeId, Party, Seq};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::rpc::{NodeClient, Read, ReadAck, decode_records};
+use crate::rpc::{NodeClient, Read, ReadAck};
 use crate::system::{DIRECTORY, Directory, DirectoryEvent, REGISTRY, Registry, SystemEvent};
 
 use super::config::DriverTunables;
 use super::journals::Journals;
 use super::transport::peer_address;
 
-/// The page budget of one follow read: large enough that a system journal's
-/// history arrives in a few pages, small enough to stay far below the frame
-/// limit.
-const FOLLOW_READ_BYTES: u64 = 64 * 1024;
+/// The records one follow read asks for: enough that a system journal's
+/// history arrives in a few pages (the server's byte budget keeps the page
+/// far below the frame limit).
+const FOLLOW_READ_RECORDS: u64 = 256;
 
 /// What a deployment that runs **system journals** (#189) tells a node's
 /// driver. `None` is the static deployment of #188: no directory, no
@@ -189,18 +189,14 @@ impl<P: Providers> SystemFollower<P> {
         self.tombstones.contains(&journal)
     }
 
-    /// Fold one page of `journal` read from this node's own chosen prefix.
+    /// Fold one page of `journal` read from this node's own journal fold.
     pub(crate) fn fold_local(
         &mut self,
         journal: JournalId,
         page: &LogPage,
     ) -> Vec<(u64, SystemEvent)> {
-        let entries: Vec<(u64, Vec<Vec<u8>>)> = page
-            .entries
-            .iter()
-            .map(|(slot, entry)| (slot.0, decode_records(&entry.value.0)))
-            .collect();
-        self.fold(journal, entries, page.next.0)
+        let records: Vec<Vec<u8>> = page.records.iter().map(|r| r.0.clone()).collect();
+        self.fold(journal, page.from.0, records)
     }
 
     /// Where the next read of `journal` starts.
@@ -212,42 +208,38 @@ impl<P: Providers> SystemFollower<P> {
     pub(crate) fn fold_remote(&mut self, followed: Followed) -> Vec<(u64, SystemEvent)> {
         let Followed { journal, reply } = followed;
         self.outstanding.remove(&journal);
-        if reply.unknown_journal || reply.trimmed_to.is_some() {
+        if reply.unknown_journal || !reply.served || reply.truncated {
             return Vec::new();
         }
-        let entries = reply
-            .entries
-            .into_iter()
-            .map(|entry| (entry.lsn, entry.records))
-            .collect();
-        self.fold(journal, entries, reply.next_lsn)
+        self.fold(journal, reply.from_seq, reply.records)
     }
 
-    /// Fold `entries` of `journal` (a contiguous page: every slot between
-    /// them is a hole) and move its cursor to `next`. An entry the fold has
-    /// already seen is skipped: pages may overlap.
+    /// Fold `records` of `journal` (dense from position `from`) and move its
+    /// cursor past them. A record the fold has already seen is skipped:
+    /// pages may overlap.
     fn fold(
         &mut self,
         journal: JournalId,
-        entries: Vec<(u64, Vec<Vec<u8>>)>,
-        next: u64,
+        from: u64,
+        records: Vec<Vec<u8>>,
     ) -> Vec<(u64, SystemEvent)> {
         let mut events = Vec::new();
-        for (lsn, records) in entries {
+        let next = from + records.len() as u64;
+        for (seq, record) in (from..).zip(records) {
             let event = match journal {
-                DIRECTORY if lsn >= self.directory.next_lsn() => {
-                    let event = self.directory.fold(lsn, &records);
+                DIRECTORY if seq >= self.directory.next_seq() => {
+                    let event = self.directory.fold(seq, &record);
                     if let DirectoryEvent::Deleted { id } = &event {
                         self.tombstones.insert(*id);
                     }
                     SystemEvent::Directory(event)
                 }
-                REGISTRY if lsn >= self.registry.next_lsn() => {
-                    SystemEvent::Registry(self.registry.fold(lsn, &records))
+                REGISTRY if seq >= self.registry.next_seq() => {
+                    SystemEvent::Registry(self.registry.fold(seq, &record))
                 }
                 _ => continue,
             };
-            events.push((lsn, event));
+            events.push((seq, event));
         }
         let cursor = self.cursors.entry(journal).or_default();
         *cursor = (*cursor).max(next);
@@ -267,8 +259,9 @@ impl<P: Providers> SystemFollower<P> {
             self.outstanding.insert(journal);
             let request = Read {
                 journal: journal.0,
-                from_lsn: self.cursor(journal),
-                max_bytes: FOLLOW_READ_BYTES,
+                from_seq: self.cursor(journal),
+                limit: FOLLOW_READ_RECORDS,
+                wait_ms: 0,
             };
             let sink = self.replies.clone();
             let time = providers.time().clone();
@@ -310,13 +303,15 @@ impl Followed {
     }
 }
 
-/// Fold every system journal this node runs from its own chosen prefix,
-/// page by page, to the end: `(journal, events)` for each that moved.
+/// Fold every system journal this node runs from its own journal fold,
+/// page by page, to the end: `(journal, events)` for each that moved. A
+/// local read needs no confirmation: it is this node's own fold, and the
+/// driver only acts on what it folded.
 pub(crate) fn follow_local<P: Providers, S, A>(
     follower: &mut SystemFollower<P>,
     journals: &Journals<S, A>,
 ) -> Vec<(JournalId, Vec<(u64, SystemEvent)>)> {
-    let page_bytes = usize::try_from(FOLLOW_READ_BYTES).unwrap_or(usize::MAX);
+    let page_records = usize::try_from(FOLLOW_READ_RECORDS).unwrap_or(usize::MAX);
     let mut moved = Vec::new();
     for journal in [DIRECTORY, REGISTRY] {
         let Some(rt) = journals.live.get(&journal) else {
@@ -325,8 +320,11 @@ pub(crate) fn follow_local<P: Providers, S, A>(
         let mut events = Vec::new();
         loop {
             let from = follower.cursor(journal);
-            match rt.node.read_log(Slot(from), page_bytes) {
-                LogRead::Page(page) if page.next.0 > from => {
+            match rt
+                .node
+                .read_log(Seq(from), page_records, super::log_reads::READ_PAGE_BYTES)
+            {
+                LogRead::Page(page) if page.next().0 > from => {
                     events.extend(follower.fold_local(journal, &page));
                 }
                 _ => break,

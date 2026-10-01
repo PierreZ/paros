@@ -7,18 +7,19 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Ballot, ClientId, ClientSeq, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH,
-    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Slot, TestStorage,
+    Ballot, ClientId, ColocatedNode, Command, Control, Entry, Generation, LEADER_RECOVERY_BATCH,
+    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, TestStorage,
     Value, campaign, command_fingerprint, drain_with, terminal_promise,
 };
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
 
 fn command(slot: u64) -> Command {
-    Command::User(Entry {
-        client: ClientId(7),
-        seq: ClientSeq(slot),
-        value: Value(slot.to_le_bytes().to_vec()),
+    Command::Write(Entry {
+        generation: Generation(0),
+        owner: ClientId(7),
+        seq: Seq(slot),
+        records: vec![Value(slot.to_le_bytes().to_vec())],
     })
 }
 
@@ -245,15 +246,19 @@ fn accepted_fingerprints_include_identity() {
         BTreeMap::new(),
     ));
     let _ = take_ready(&mut proposer);
-    let ProposeResult::Accepted(slot) =
-        proposer.propose(ClientId(9), ClientSeq(1), Value(vec![1, 2, 3]))
-    else {
+    let ProposeResult::Accepted(slot) = proposer.propose(Entry {
+        generation: Generation(0),
+        owner: ClientId(9),
+        seq: Seq(1),
+        records: vec![Value(vec![1, 2, 3])],
+    }) else {
         panic!("leader rejected the proposal");
     };
-    let admitted = Command::User(Entry {
-        client: ClientId(9),
-        seq: ClientSeq(1),
-        value: Value(vec![1, 2, 3]),
+    let admitted = Command::Write(Entry {
+        generation: Generation(0),
+        owner: ClientId(9),
+        seq: Seq(1),
+        records: vec![Value(vec![1, 2, 3])],
     });
     let admitted_hash = command_fingerprint(&admitted);
     assert_ne!(

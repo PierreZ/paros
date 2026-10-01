@@ -20,9 +20,12 @@ doctrine; this file is the map.
   emits the `Commit`, relays a `Nack`, re-fans-out on its beat, evicts a round nobody answers
   on the driver's retention budget (`expire_stale`), and works for the highest ballot it was
   handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
-  `node.replica().chosen_gap()`; `read` serves one journal page, #185 — `LogRead`, holes
-  skipped, trimmed below the floor — through `ColocatedNode::read_log` and
-  `ReplicaNode::read_log`) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
+  `node.replica().chosen_gap()`; the journal fold — `journal()`, `outcome_at`, `accepted_at`,
+  `fold_hole` — and `read`, one journal page by position, #204 — `LogRead`, `Truncated` below
+  `first_seq` — through `ColocatedNode::read_log` and `ReplicaNode::read_log`) ·
+  `journal_state.rs` `JournalState` + `Outcome` (#204: the one journal-control state machine,
+  `(owner, generation, next_seq, first_seq)`, whose pure `apply` judges every `Write`,
+  `SetLeader` and `Truncate` at apply; the replica's fold is its only caller in the node) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
   deployment**, #144: a `Replica` over a durable chosen log with no `Acceptor` — steps `Commit`,
   `CatchUpResponse`, `TrimmedTo`, `Heartbeat`, `PreReadAck`; sends `CatchUpRequest`
   and, for the quorum reads it serves from its own state (§3.4), `PreRead`; writes

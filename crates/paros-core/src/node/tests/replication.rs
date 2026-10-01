@@ -16,7 +16,7 @@ fn follower_resets_election_clock_on_leader_traffic() {
         NodeRole::Follower,
         "two ticks is under the timeout"
     );
-    let r = nodes[0].propose(ClientId(1), ClientSeq(1), val(9));
+    let r = nodes[0].propose(entry(1, 1, 9));
     assert!(matches!(r, ProposeResult::Accepted(_)));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
@@ -88,7 +88,7 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
     let promise_before = nodes[0].hard_state().max_promised_ballot;
     let ballot_before = nodes[0].ballot();
 
-    nodes[0].propose(ClientId(9), ClientSeq(1), val(90));
+    nodes[0].propose(entry(9, 1, 90));
     let _ = drain(&mut nodes[0]);
     let _ = nodes[0].read_index(1);
     let _ = drain(&mut nodes[0]);
@@ -164,12 +164,12 @@ fn a_round_the_driver_never_re_sends_stalls_until_one_call_heals_it() {
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy.
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    nodes[0].propose(entry(1, 1, 10));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
     // Slot 1: every `Accept` is lost, so the round is pending on the leader alone.
-    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    nodes[0].propose(entry(1, 2, 20));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, msg| {
         !matches!(msg, Message::Accept { .. })
@@ -226,12 +226,12 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy.
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    nodes[0].propose(entry(1, 1, 10));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
     // Slot 1: its `Accept`s are lost and the driver never re-sends it.
-    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    nodes[0].propose(entry(1, 2, 20));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |_, msg| {
         !matches!(msg, Message::Accept { .. })
@@ -239,7 +239,7 @@ fn a_step_down_makes_a_never_re_sent_hole_permanent_until_the_noop_fill() {
 
     // Slot 2: reaches node 1, so the {0,1} quorum decides it — an *undecided* slot
     // now sits below a *decided* one.
-    nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    nodes[0].propose(entry(1, 3, 30));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, msg| {
         !(matches!(msg, Message::Accept { .. }) && to == NodeId(2))

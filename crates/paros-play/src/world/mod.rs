@@ -314,8 +314,13 @@ impl World {
     ///
     /// If `disks` is empty, or two disks name the same node.
     #[must_use]
-    pub fn from_disks(disks: Vec<Disk>, clients: &[u64], election_timeout: u64) -> Self {
+    pub fn from_disks(mut disks: Vec<Disk>, clients: &[u64], election_timeout: u64) -> Self {
         assert!(!disks.is_empty(), "a world has at least one node");
+        if let Some(writer) = clients.first() {
+            for disk in &mut disks {
+                disk.provision_owner(ClientId(*writer));
+            }
+        }
         let pool: Vec<NodeId> = disks.iter().map(|d| d.config().id).collect();
         let mut sorted = pool.clone();
         sorted.sort_unstable();
@@ -345,6 +350,7 @@ impl World {
                 .map(|id| Client {
                     id: ClientId(*id),
                     next_seq: 1,
+                    next_position: 0,
                     proposals: Vec::new(),
                     reads: Vec::new(),
                 })
@@ -596,10 +602,14 @@ impl World {
                 let Some(index) = self.pool.iter().position(|id| *id == proposal.node) else {
                     continue;
                 };
-                if let Some(node) = self.nodes[index].as_ref()
-                    && let Some(at) = node.replica().applied_at(client.id, proposal.seq)
+                // A write is answered when its slot folds, with the verdict
+                // the journal gave it there (#204) — and only if the slot
+                // decided this write, not a fill.
+                let command = Command::Write(proposal.entry.clone());
+                if let (Some(node), Some(at)) = (self.nodes[index].as_ref(), proposal.slot)
+                    && node.replica().outcome_at(at).is_some()
+                    && node.replica().chosen_at(at) == Some(&command)
                 {
-                    proposal.slot = Some(at);
                     proposal.acked = true;
                     proposal.acked_at = Some(stamp);
                     stamp += 1;

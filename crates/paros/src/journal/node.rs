@@ -2,7 +2,7 @@
 
 use moonpool_core::StorageProvider;
 use moonpool_journal::{Journal, Record, Recovery};
-use paros_core::{Ballot, Command, Config, HardState, MustSync, SessionEntry, Slot, Storage};
+use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
 use serde::{Deserialize, Serialize};
 
 use super::frame::{Framed, Scanned, encode, epoch};
@@ -324,12 +324,8 @@ impl<P: StorageProvider> Storage for JournalStorage<P> {
             .unwrap_or(Slot(0))
     }
 
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
-        self.image
-            .sealed
-            .iter()
-            .map(|(&(client, seq), &slot)| (client, seq, slot))
-            .collect()
+    fn sealed_state(&self) -> JournalState {
+        self.image.sealed
     }
 
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
@@ -425,27 +421,17 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, first = first.0, sealed = sealed.len()))]
-    async fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
+    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, first = first.0))]
+    async fn truncate(&mut self, first: Slot, sealed: JournalState) -> Result<(), StorageError> {
         self.opened().await?;
-        self.stage(NodeRecord::Truncate {
-            first,
-            sealed: sealed.to_vec(),
-        });
+        self.stage(NodeRecord::Truncate { first, sealed });
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, point = point.0))]
-    async fn trimmed_to(
-        &mut self,
-        point: Slot,
-        sessions: &[SessionEntry],
-    ) -> Result<(), StorageError> {
+    async fn trimmed_to(&mut self, point: Slot, state: JournalState) -> Result<(), StorageError> {
         self.opened().await?;
-        self.stage(NodeRecord::TrimmedTo {
-            point,
-            sessions: sessions.to_vec(),
-        });
+        self.stage(NodeRecord::TrimmedTo { point, state });
         Ok(())
     }
 }

@@ -56,16 +56,30 @@ impl Default for JournalId {
     }
 }
 
-/// Opaque client-supplied identity, used to dedupe requests for at-most-once
-/// execution.
+/// The identity of a journal **client**: a writer that may own a journal
+/// (#204, the `owner` of a [`Entry`] and of a [`Control::SetLeader`]) or a
+/// reader. Opaque to paros; the journal state machine only compares it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClientId(pub u64);
 
-/// Per-client monotonically increasing request sequence number.
+/// A journal's **writer generation** (#204): which client may write, bumped
+/// by one at every successful [`Control::SetLeader`]. `0` is the journal's
+/// birth, owned by nobody. Invisible to Paxos — the ballot says which
+/// *machine* runs a journal's leader, the generation which *client* may
+/// write, and the two never meet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ClientSeq(pub u64);
+pub struct Generation(pub u64);
+
+/// A **position** in a journal (#204): the dense index of an accepted
+/// record, assigned at apply. A batch of `n` records accepted at `seq`
+/// occupies `[seq, seq + n)`, in one Paxos slot; a refused write, a `Noop`,
+/// a control command and a generation change consume a slot and no `Seq`,
+/// so a reader never sees a hole. Slots stay internal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Seq(pub u64);
 
 /// An opaque value proposed into / chosen for a slot. The core never interprets
 /// the bytes; the application owns their meaning.
@@ -73,51 +87,66 @@ pub struct ClientSeq(pub u64);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Value(pub Vec<u8>);
 
-/// One at-most-once session-ledger record: the client request `(client, seq)`
-/// was applied at `slot` (the *first* — lowest — slot it entered the applied
-/// prefix at). The ledger is paros-owned metadata: it is **sealed** durably when
-/// truncation drops the log records it was derived from, and it travels in
-/// [`crate::Message::TrimmedTo`], so every node — and
-/// every restart — reproduces the identical duplicate-suppression decision at
-/// the apply seam (see `ColocatedNode::advance_chosen_index`'s doc).
-pub type SessionEntry = (ClientId, ClientSeq, Slot);
-
-/// A log entry: the [`Value`] chosen for a slot, tagged with the client request
-/// that produced it. Carrying `(client, seq)` in the entry is what lets the core
-/// deduplicate client retries for at-most-once execution, even for an in-flight
-/// command a recovering leader inherits during Phase 1.
+/// A journal **`Write`** as it is decided into one slot (#204): the batch
+/// `records`, to be accepted at position `seq` iff `(generation, owner)` is
+/// the journal's current writer and `seq` its next position — judged at
+/// apply, in slot order, by the journal state machine
+/// ([`crate::journal_state::JournalState::apply`]), never at propose time.
+/// The records are opaque bytes the core counts and slices (a read may start
+/// inside a batch) but never interprets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry {
-    /// The client that issued the command.
-    pub client: ClientId,
-    /// The client's per-request sequence number.
-    pub seq: ClientSeq,
-    /// The opaque command payload chosen for the slot.
-    pub value: Value,
+    /// The writer generation the client wrote under.
+    pub generation: Generation,
+    /// The client that wrote it.
+    pub owner: ClientId,
+    /// The position the batch's first record asks for.
+    pub seq: Seq,
+    /// The records, in order. Accepted or refused whole.
+    pub records: Vec<Value>,
 }
 
-/// A paros-interpreted **control command**: cluster metadata decided into a log
-/// slot by ordinary consensus, rather than an opaque client value.
+impl Entry {
+    /// How many positions the batch occupies once accepted.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.records.len() as u64
+    }
+}
+
+/// A paros-interpreted **control command**: journal metadata decided into a
+/// log slot by ordinary consensus, rather than a client's records.
 ///
-/// Unlike a [`Command::User`] payload (whose bytes the core never interprets), a
-/// control command *is* interpreted — by the replica/apply path only, when the
-/// slot it occupies enters the contiguous chosen prefix. The acceptor/consensus
-/// paths (`Prepare`/`Accept`/`Promise`/catch-up) treat a whole [`Command`]
-/// opaquely, exactly as Compartmentalized Paxos treats a `Noop`, so promoting
-/// truncation to a decided fact does not leak into the vote machinery.
+/// A control command *is* interpreted — by the replica/apply path only, when
+/// the slot it occupies enters the contiguous chosen prefix. The
+/// acceptor/consensus paths (`Prepare`/`Accept`/`Promise`/catch-up) treat a
+/// whole [`Command`] opaquely, exactly as Compartmentalized Paxos treats a
+/// `Noop`, so deciding journal metadata does not leak into the vote
+/// machinery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Control {
-    /// Truncate the log: every node drops its retained prefix up to `up_to`
-    /// (clamped to its own chosen index) when its contiguous walk reaches this
-    /// slot. The
-    /// leader-decided, cluster-wide analogue of a local
-    /// [`crate::ColocatedNode::compact`] call, forwarded by normal replication +
-    /// catch-up.
+    /// Truncate the journal (#204, `Truncate(up_to_seq)`): drop every record
+    /// below `up_to`. Monotone, clamped to the journal's next position. Every
+    /// node applies it when its contiguous walk reaches this slot, and drops
+    /// the log slots whose records all lie below the new first position —
+    /// forwarded by normal replication + catch-up.
     Truncate {
-        /// The last slot the journal's client permits dropping (inclusive).
-        up_to: Slot,
+        /// The first position the client still needs (every record below it
+        /// may go).
+        up_to: Seq,
+    },
+    /// Change the journal's writer (#204, `SetLeader(expected_gen,
+    /// new_owner)`): a pure compare-and-swap, judged at apply — it succeeds
+    /// iff `expected` is the current generation, and then the journal's
+    /// generation becomes `expected + 1` and its owner `owner`. No lease and
+    /// no clock.
+    SetLeader {
+        /// The generation the caller believes current.
+        expected: Generation,
+        /// The client that should own the journal from the next generation.
+        owner: ClientId,
     },
     /// A **no-op**: decides the slot without doing anything at apply time.
     ///
@@ -132,13 +161,13 @@ pub enum Control {
     /// the slot is genuinely free.
     ///
     /// It is an entry like any other — persisted, replicated, truncatable — and
-    /// carries no `(client, seq)`, so it takes part in no dedup. Applying it
-    /// advances the applied prefix and nothing else.
+    /// consumes a slot and no position. Applying it advances the applied prefix
+    /// and nothing else.
     Noop,
 }
 
-/// What a single log slot decides: either an opaque client [`Entry`] or a
-/// paros-interpreted [`Control`] command.
+/// What a single log slot decides: a client's [`Entry`] (a journal `Write`)
+/// or a paros-interpreted [`Control`] command.
 ///
 /// This is the per-slot value the whole protocol carries (in `Accept`,
 /// `Promise`, `Commit`, catch-up, and the durable accepted log). Only the
@@ -147,8 +176,8 @@ pub enum Control {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Command {
-    /// An opaque client command (the core never interprets its bytes).
-    User(Entry),
+    /// A client's `Write` (the core never interprets its records).
+    Write(Entry),
     /// A paros-interpreted control command (interpreted only at apply time).
     Control(Control),
 }
@@ -177,24 +206,35 @@ impl Fingerprint for Command {
 /// A stable fingerprint of the complete consensus value identity.
 ///
 /// Unlike application-level value hashes, this includes the command variant,
-/// client identity, sequence number, payload length, and control metadata. It
+/// the writer's generation and identity, the position, every record's length
+/// and bytes, and control metadata. It
 /// is carried by [`crate::Message::Accepted`] so a leader never credits an ack
 /// for a different command at the same `(slot, ballot)`.
 #[must_use]
 pub fn command_fingerprint(command: &Command) -> u64 {
     match command {
-        Command::User(entry) => {
+        Command::Write(entry) => {
             let hash = fnv1a(FNV_OFFSET, &[0]);
-            let hash = fnv1a(hash, &entry.client.0.to_le_bytes());
-            let hash = fnv1a(hash, &entry.seq.0.to_le_bytes());
-            let hash = fnv1a(hash, &(entry.value.0.len() as u64).to_le_bytes());
-            fnv1a(hash, &entry.value.0)
+            let hash = fnv1a(hash, &entry.generation.0.to_le_bytes());
+            let hash = fnv1a(hash, &entry.owner.0.to_le_bytes());
+            let mut hash = fnv1a(hash, &entry.seq.0.to_le_bytes());
+            hash = fnv1a(hash, &entry.count().to_le_bytes());
+            for record in &entry.records {
+                hash = fnv1a(hash, &(record.0.len() as u64).to_le_bytes());
+                hash = fnv1a(hash, &record.0);
+            }
+            hash
         }
         Command::Control(Control::Truncate { up_to }) => {
             let hash = fnv1a(FNV_OFFSET, &[1]);
             fnv1a(hash, &up_to.0.to_le_bytes())
         }
         Command::Control(Control::Noop) => fnv1a(FNV_OFFSET, &[2]),
+        Command::Control(Control::SetLeader { expected, owner }) => {
+            let hash = fnv1a(FNV_OFFSET, &[3]);
+            let hash = fnv1a(hash, &expected.0.to_le_bytes());
+            fnv1a(hash, &owner.0.to_le_bytes())
+        }
     }
 }
 
@@ -213,11 +253,11 @@ pub(crate) fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
 }
 
 impl Command {
-    /// The client [`Entry`] if this is a [`Command::User`], else `None`.
+    /// The client [`Entry`] if this is a [`Command::Write`], else `None`.
     #[must_use]
-    pub fn user(&self) -> Option<&Entry> {
+    pub fn write(&self) -> Option<&Entry> {
         match self {
-            Command::User(entry) => Some(entry),
+            Command::Write(entry) => Some(entry),
             Command::Control(_) => None,
         }
     }

@@ -36,7 +36,6 @@ mod state;
 mod world;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
-
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 

@@ -19,7 +19,7 @@ use std::sync::{Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, SimTimeProvider, assert_reachable};
 use paros::{
-    Ballot, Command, Config, HardState, JournalStorage, LogStorage, MustSync, SessionEntry, Slot,
+    Ballot, Command, Config, HardState, JournalState, JournalStorage, LogStorage, MustSync, Slot,
     Storage, StorageError,
 };
 
@@ -105,10 +105,10 @@ impl Storage for NodeStore {
         }
     }
 
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
+    fn sealed_state(&self) -> JournalState {
         match self {
-            Self::World(s) => s.sealed_sessions(),
-            Self::Journal(s) => s.inner.sealed_sessions(),
+            Self::World(s) => s.sealed_state(),
+            Self::Journal(s) => s.inner.sealed_state(),
         }
     }
 
@@ -218,7 +218,7 @@ impl LogStorage for NodeStore {
         }
     }
 
-    async fn truncate(&mut self, first: Slot, sealed: &[SessionEntry]) -> Result<(), StorageError> {
+    async fn truncate(&mut self, first: Slot, sealed: JournalState) -> Result<(), StorageError> {
         match self {
             Self::World(s) => s.truncate(first, sealed).await,
             Self::Journal(s) => {
@@ -228,15 +228,11 @@ impl LogStorage for NodeStore {
         }
     }
 
-    async fn trimmed_to(
-        &mut self,
-        point: Slot,
-        sessions: &[SessionEntry],
-    ) -> Result<(), StorageError> {
+    async fn trimmed_to(&mut self, point: Slot, state: JournalState) -> Result<(), StorageError> {
         match self {
-            Self::World(s) => s.trimmed_to(point, sessions).await,
+            Self::World(s) => s.trimmed_to(point, state).await,
             Self::Journal(s) => {
-                let result = s.inner.trimmed_to(point, sessions).await;
+                let result = s.inner.trimmed_to(point, state).await;
                 s.ledger(result)
             }
         }

@@ -1,7 +1,8 @@
 //! The read-only [`Storage`] port the core depends on.
 
+use crate::journal_state::JournalState;
 use crate::state::{Config, HardState};
-use crate::types::{Ballot, Command, SessionEntry, Slot};
+use crate::types::{Ballot, Command, Slot};
 
 /// A read-only recovery/serving port. The **application** implements it and owns
 /// *all* writes; the core only ever *reads back* state the application has
@@ -34,15 +35,15 @@ pub trait Storage {
     /// The last slot present in storage.
     fn last_slot(&self) -> Slot;
 
-    /// The **sealed** at-most-once session ledger: every `(client, seq) -> slot`
-    /// record persisted when truncation (or a trim-point jump) dropped the log
-    /// records it was derived from. Read once at construction and merged under
-    /// the walk-derived ledger, so a restart after truncation reproduces the
-    /// same duplicate-suppression decisions as a node that never restarted
-    /// (#94). Defaults to empty: a storage that has never truncated has nothing
-    /// sealed.
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
-        Vec::new()
+    /// The **sealed** journal state (#204): what the slots below
+    /// [`Storage::first_slot`] folded to, persisted when truncation (or a
+    /// trim-point jump) dropped them. Read once at construction: the journal
+    /// fold starts from it at the floor and replays the retained log, so a
+    /// restart after truncation reaches the state of a node that never
+    /// restarted. Defaults to the journal's birth: a storage that has never
+    /// truncated has nothing sealed.
+    fn sealed_state(&self) -> JournalState {
+        JournalState::default()
     }
 
     /// The **recoverable faulty entries** the boot scan classified (Stage 8,

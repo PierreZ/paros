@@ -46,3 +46,13 @@ message AcceptorConfig {
   uint64 rows = 5;
   uint64 cols = 6;
 }
+
+// A journal's control state (#204): who may write under which generation,
+// and where its dense positions stand. `owner` is absent until the first
+// `SetLeader` (generation zero is owned by nobody).
+message JournalState {
+  optional uint64 owner = 1;
+  uint64 generation = 2;
+  uint64 next_seq = 3;
+  uint64 first_seq = 4;
+}

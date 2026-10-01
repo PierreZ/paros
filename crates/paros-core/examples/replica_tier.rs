@@ -49,8 +49,8 @@
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
 use paros_core::{
-    Audience, Ballot, ClientId, ClientSeq, ColocatedNode, Command, Config, HardState, LogRead,
-    Message, NodeId, ReplicaId, ReplicaNode, Slot, Storage, Value,
+    Audience, Ballot, ClientId, ColocatedNode, Command, Config, Control, Entry, Generation,
+    HardState, LogRead, Message, NodeId, ReplicaId, ReplicaNode, Seq, Slot, Storage, Value,
 };
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
@@ -168,7 +168,12 @@ impl Deployment {
     /// node each.
     fn drain_replica(&mut self, r: usize) -> Vec<(NodeId, Message)> {
         let ready = self.replicas[r].ready();
-        self.applied[r].extend(ready.committed().iter().cloned());
+        self.applied[r].extend(
+            ready
+                .committed()
+                .iter()
+                .map(|(slot, command, _)| (*slot, command.clone())),
+        );
         let out = ready
             .messages()
             .iter()
@@ -232,11 +237,21 @@ fn main() {
         !(to == NodeId(11) && matches!(m, Message::Commit { slot: Slot(2), .. }))
     };
     for seq in 1..=6_u64 {
-        let _ = d.acceptors[0].propose(
-            ClientId(7),
-            ClientSeq(seq),
-            Value(format!("cmd-{seq}").into_bytes()),
-        );
+        // The first command claims the journal for client 7 (generation 1);
+        // the next five are its writes, at positions 0..=4.
+        let _ = if seq == 1 {
+            d.acceptors[0].propose_control(Control::SetLeader {
+                expected: Generation(0),
+                owner: ClientId(7),
+            })
+        } else {
+            d.acceptors[0].propose(Entry {
+                generation: Generation(1),
+                owner: ClientId(7),
+                seq: Seq(seq - 2),
+                records: vec![Value(format!("cmd-{seq}").into_bytes())],
+            })
+        };
         d.verbose = seq == 3;
         if d.verbose {
             println!("   the third command, message by message:");
@@ -279,18 +294,20 @@ fn main() {
     println!("   replica 11: learned slots {:?}", d.applied_slots(1));
     assert_eq!(d.applied_slots(1), vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(d.applied[0], d.applied[1], "one order on every replica");
-    // A journal read served by replica 11: the whole log, from its own
-    // chosen prefix — the acceptors are not asked.
-    let LogRead::Page(page) = d.replicas[1].read_log(Slot(0), usize::MAX) else {
+    // A journal read served by replica 11: the whole journal, by position,
+    // from its own fold — the acceptors are not asked. The claim took a slot
+    // and no position.
+    let LogRead::Page(page) = d.replicas[1].read_log(Seq(0), usize::MAX, usize::MAX) else {
         panic!("nothing is trimmed");
     };
     println!(
-        "   a journal read on replica 11: {} entries, next LSN {}",
-        page.entries.len(),
-        page.next.0
+        "   a journal read on replica 11: {} records, next position {}, generation {}",
+        page.records.len(),
+        page.next().0,
+        page.state.generation.0
     );
-    assert_eq!(page.entries.len(), 6);
-    assert_eq!(page.next, Slot(6));
+    assert_eq!(page.records.len(), 5);
+    assert_eq!(page.next(), Seq(5));
     // The one message a replica ignored: the candidate's proactive
     // `CatchUpRequest` to every learner — a replica serves no peer.
     assert_eq!(d.replicas[0].counters().ignored, 1);

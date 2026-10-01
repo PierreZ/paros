@@ -20,7 +20,7 @@ fn follower_missing_only_slot_zero_catches_up_on_an_idle_beat() {
     // Slot 0 — the *only* slot this cluster ever decides. Node 2 receives the
     // `Accept` but not the `Commit`, so it accepted the value without ever
     // learning it was chosen: an empty contiguous prefix (`chosen_index: None`).
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    nodes[0].propose(entry(1, 1, 10));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, m| {
         !(to == NodeId(2) && matches!(m, Message::Commit { .. }))
@@ -66,7 +66,7 @@ fn a_leader_that_lost_its_chosen_index_is_pushed_the_first_slot_back() {
     // the leader kept advertising an empty prefix that no follower could correct.
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    nodes[0].propose(entry(1, 1, 10));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
@@ -100,14 +100,14 @@ fn follower_fills_a_hole_via_commit_replay_catch_up() {
     make_leader(&mut nodes, 0);
 
     // Slot 0: healthy — every node learns it.
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
+    nodes[0].propose(entry(1, 1, 10));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
     // Slot 1: drop *every* message addressed to node 2. Node 0 still decides with
     // the {0,1} quorum, so slot 1 is chosen — but node 2 misses both the `Accept`
     // and the `Commit`, opening a permanent hole.
-    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
+    nodes[0].propose(entry(1, 2, 20));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
     assert_eq!(
@@ -123,7 +123,7 @@ fn follower_fills_a_hole_via_commit_replay_catch_up() {
 
     // Slot 2: healthy again — node 2 receives it, but its *contiguous* prefix is
     // stuck behind the slot-1 hole.
-    nodes[0].propose(ClientId(1), ClientSeq(3), val(30));
+    nodes[0].propose(entry(1, 3, 30));
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
     assert_eq!(
@@ -187,49 +187,66 @@ fn compact_clamps_to_chosen_index_and_prunes_both_maps() {
 #[test]
 fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
     // Leader-driven, Paxos-decided truncation: the leader decides a
-    // `Truncate` control command into the log; every node truncates lazily when it
-    // applies that slot (the fused-node analogue of a cluster-wide floor).
-    let mut nodes = cluster_with_three_chosen();
+    // `Truncate` control command into the log; every node truncates lazily
+    // when it applies that slot (the fused-node analogue of a cluster-wide
+    // floor), dropping every slot whose records all lie below the new first
+    // position (#204).
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let _ = nodes[0].propose_control(Control::SetLeader {
+        expected: Generation(0),
+        owner: ClientId(1),
+    });
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    // Slots 1..=3 hold positions 0..=2.
+    for seq in 0..3u64 {
+        let _ = nodes[0].propose(Entry {
+            generation: Generation(1),
+            owner: ClientId(1),
+            seq: Seq(seq),
+            records: vec![val(u8::try_from(seq).expect("small"))],
+        });
+        let q = drain(&mut nodes[0]);
+        deliver_all(&mut nodes, q);
+    }
     for n in &nodes {
         assert_eq!(n.acceptor().first_slot(), Slot(0), "no truncation yet");
-        assert_eq!(n.hard_state().chosen_index, Some(Slot(2)));
+        assert_eq!(n.hard_state().chosen_index, Some(Slot(3)));
     }
 
-    // The leader admits the truncate as a control command at the next slot (3).
-    let r = nodes[0].propose_control(Control::Truncate { up_to: Slot(1) });
+    // The leader admits the truncate as a control command at the next slot (4).
+    let r = nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
     assert!(
-        matches!(r, ProposeResult::Accepted(Slot(3))),
+        matches!(r, ProposeResult::Accepted(Slot(4))),
         "control command takes the next free slot"
     );
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
 
-    // Once every node applied slot 3, it lazily compacted up to the decided
-    // watermark (slot 1): the floor rose to 2 everywhere, and the control slot
-    // itself is chosen.
+    // Once every node applied slot 4, it lazily compacted below the slot
+    // holding position 2 (slot 3): the floor rose to 3 everywhere, and the
+    // control slot itself is chosen.
     for (i, n) in nodes.iter().enumerate() {
         assert_eq!(
             n.acceptor().first_slot(),
-            Slot(2),
+            Slot(3),
             "node {i} truncated to the decided floor"
         );
         assert_eq!(
             n.hard_state().chosen_index,
-            Some(Slot(3)),
+            Some(Slot(4)),
             "node {i} chose the control slot"
         );
         assert!(
-            !n.acceptor().records().contains_key(&Slot(0)),
-            "node {i} dropped slot 0"
+            !n.acceptor().records().contains_key(&Slot(2)),
+            "node {i} dropped slot 2"
         );
         assert!(
-            !n.acceptor().records().contains_key(&Slot(1)),
-            "node {i} dropped slot 1"
+            n.acceptor().records().contains_key(&Slot(3)),
+            "node {i} keeps slot 3"
         );
-        assert!(
-            n.acceptor().records().contains_key(&Slot(2)),
-            "node {i} keeps slot 2"
-        );
+        assert_eq!(n.replica().journal().first_seq, Seq(2));
     }
 }
 
@@ -383,7 +400,12 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(6),
-        sessions: vec![(ClientId(7), ClientSeq(1), Slot(3))],
+        state: crate::JournalState {
+            owner: Some(ClientId(7)),
+            generation: Generation(1),
+            next_seq: Seq(4),
+            first_seq: Seq(2),
+        },
     });
     assert_eq!(
         n.hard_state().chosen_index,
@@ -397,9 +419,9 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
         "a trim-point jump never moves the promise"
     );
     assert_eq!(
-        n.replica().applied_at(ClientId(7), ClientSeq(1)),
-        Some(Slot(3)),
-        "the ledger below the point is adopted"
+        n.replica().journal().next_seq,
+        Seq(4),
+        "the journal state below the point is adopted"
     );
 
     let r = n.ready();
@@ -420,7 +442,7 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(4),
-        sessions: vec![],
+        state: crate::JournalState::default(),
     });
     assert_eq!(n.hard_state().chosen_index, Some(Slot(5)));
     assert_eq!(n.acceptor().first_slot(), Slot(6));
@@ -452,7 +474,7 @@ fn a_trim_point_jump_advances_over_an_out_of_order_chosen_slot() {
     x.step(Message::TrimmedTo {
         from: NodeId(2),
         point: Slot(10),
-        sessions: vec![],
+        state: crate::JournalState::default(),
     });
     let _ = drain(&mut x);
 

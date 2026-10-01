@@ -7,158 +7,88 @@ use std::collections::BTreeMap;
 
 use paros_core::{
     AcceptorWrite, Ballot, ColocatedNode, Command, GcRequest, MatchRequest, MatchmakerId, Message,
-    NodeId, NodeRole, Party, ReadState, Slot, WriteOp,
+    NodeId, NodeRole, Outcome, Party, ReadState, Slot, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
-use crate::hooks::{DriverHooks, Reply, Seam};
-use crate::rpc::{AppendAck, CheckTailAck, ReplySender};
+use crate::hooks::{DriverHooks, Seam};
 use crate::storage::{LogStorage, StorageError};
 
+use super::calls::Call;
 use super::config::RunError;
 use super::events::command_hash;
-use super::reply::answer;
 use super::transport::{Outbound, send_messages};
 
-/// The client replies this node is holding open: proposals wait on their
-/// slot's commit (ack-on-commit), reads wait on their confirmation — a
-/// read-index round or a quorum read — keyed by the core's `ctx` token (one
-/// counter for both tallies, so a token names one read whichever served it).
+/// The client replies this node is holding open: the journal calls that
+/// wait on their slot's verdict (#204), and the journal reads that wait on
+/// their quorum read or at the tail.
 #[derive(Default)]
 pub(crate) struct ClientWaiters {
-    /// `(client id, client seq, the held reply)` per slot.
-    pub(crate) pending: BTreeMap<Slot, Vec<(u64, u64, ReplySender<AppendAck>)>>,
-    pub(crate) pending_reads: BTreeMap<u64, ParkedRead>,
-    /// Journal reads long-polling at the end (#185).
-    pub(crate) log_reads: super::log_reads::LogReads,
+    /// The calls proposed at each slot, answered once it applies.
+    pub(crate) pending: BTreeMap<Slot, Vec<Call>>,
+    /// Journal reads (#204).
+    pub(crate) reads: super::log_reads::JournalReads,
 }
 
-/// Which of the two read tallies a parked read waits on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReadPath {
-    /// The leader's read-index round (`ColocatedNode::read_index`): bound to
-    /// the leadership that opened it, redirected when it ends.
-    Index,
-    /// A leaderless quorum read (`ColocatedNode::quorum_read_in`, #143):
-    /// bound to no role, so a leadership change never touches it.
-    Quorum {
-        /// The grid row the read asked (`None`: the whole configuration).
-        row: Option<usize>,
-        /// This node's chosen index when the read opened — what a local,
-        /// unconfirmed read would have served.
-        opened: Option<Slot>,
-    },
+/// The last slot of the node's journal fold — what a read is served from.
+pub(crate) fn fold_head(node: &ColocatedNode) -> Option<Slot> {
+    node.replica().folded().0.checked_sub(1).map(Slot)
 }
 
-/// One held client read.
-pub(crate) struct ParkedRead {
-    /// The client's seq, echoed in the answer.
-    pub(crate) seq: u64,
-    /// The driver tick the read was parked at (its confirmation deadline).
-    pub(crate) parked_at: u64,
-    /// The tally it waits on.
-    pub(crate) path: ReadPath,
-    /// The held reply.
-    pub(crate) reply: ReplySender<CheckTailAck>,
-}
-
-/// The prefix this node's acks and reads are answered from: its contiguous
-/// chosen prefix. paros runs no application (#186), so the journal a client
-/// reads *is* the chosen log.
-pub(crate) fn served_prefix(node: &ColocatedNode) -> Option<Slot> {
-    node.replica().chosen_index()
-}
-
-/// The acks a batch can answer: every parked proposal whose slot is inside
-/// the contiguous chosen prefix, paired with the command chosen there (a #94
-/// duplicate as the `Noop` the walk treats it as, a slot no longer retained
-/// — trimmed, or jumped over below a peer's trim point — as a `Noop` too;
-/// neither matches a waiter, so the client retries through the dedup path).
-/// The ack path then judges the identity. Swept over the whole prefix, not
-/// only the slots this batch walked, so a jump that chose slots without
-/// walking them still answers the proposals parked there.
-fn chosen_waiters(node: &ColocatedNode, waiters: &ClientWaiters) -> Vec<(Slot, Command)> {
-    let Some(ci) = node.replica().chosen_index() else {
-        return Vec::new();
-    };
-    waiters
-        .pending
-        .range(..=ci)
-        .map(|(slot, _)| {
-            let chosen = node
-                .replica()
-                .chosen_at(*slot)
-                .filter(|_| !node.replica().duplicate_slots().contains(slot))
-                .cloned()
-                .unwrap_or(Command::Control(paros_core::Control::Noop));
-            (*slot, chosen)
-        })
-        .collect()
-}
-
-/// Ack-on-commit: only now can a client learn success — the chosen index is
-/// durable. Controls have no proposal waiter. The reply may be deliberately dropped at the reply seam
-/// ([`DriverHooks::drop_client_reply`]): the server state has advanced either
-/// way, and the client's retry takes the `(client, seq)` dedup path.
-#[tracing::instrument(level = "trace", skip_all, fields(node = self_id, committed = committed.len()))]
-fn ack_committed_waiters<H, A>(
-    applied: Option<Slot>,
+/// Answer the calls parked on every slot the journal fold now covers
+/// (#204): a call whose slot decided its own command gets the verdict the
+/// journal state machine gave there; one whose slot decided another command
+/// (a stale leader's admission, superseded) or was dropped below the floor
+/// before it applied here gets no verdict — ambiguous, never false. Swept
+/// over the whole fold, not only the slots this batch walked, so a jump
+/// that chose slots without walking them still answers the calls parked
+/// there. A slot this batch walked is judged from the batch (`walked`):
+/// a `Truncate` folded later in the same walk may already have compacted
+/// it. The reply may be deliberately dropped at the reply seam
+/// ([`DriverHooks::drop_client_reply`]): the journal moved either way, and
+/// the client's retry is answered from the log.
+#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
+fn answer_applied_calls<H, A>(
+    node: &ColocatedNode,
+    walked: &[(Slot, Command, Outcome)],
     waiters: &mut ClientWaiters,
     hooks: &H,
     audit: &A,
     self_id: u64,
-    committed: &[(Slot, Command)],
 ) where
     H: DriverHooks,
     A: Audit,
 {
-    for (slot, command) in committed {
-        let Some(replies) = waiters.pending.remove(slot) else {
+    let folded = node.replica().folded();
+    let slots: Vec<Slot> = waiters.pending.range(..folded).map(|(s, _)| *s).collect();
+    for slot in slots {
+        let Some(calls) = waiters.pending.remove(&slot) else {
             continue;
         };
-        // The slot's decided identity. A reply may only claim `committed: true`
-        // if the slot decided *this waiter's* command: a stale leader can park
-        // a proposal on a slot the majority then decides differently (it
-        // learns the decision by `Commit`/catch-up while still believing
-        // itself leader — nothing in `on_commit` demotes it), and acking by
-        // slot number alone then told a client its write was committed while
-        // no node ever applied it (network-axis seed 12491191414293127136).
-        // A control command — including a #94 duplicate suppressed to a Noop —
-        // matches no waiter.
-        let decided = command.user().map(|e| (e.client.0, e.seq.0));
-        for (client, seq, waiter) in replies {
-            if decided != Some((client, seq)) {
-                // Not this proposal's commit: its fate is unknown here (the
-                // core's dedup tables track it if it is still in flight
-                // anywhere). Answer a retry-now redirect instead of holding
-                // the reply to the client's deadline; the retry goes through
-                // the honest `(client, seq)` dedup path.
-                audit.waiter_superseded(NodeId(self_id), *slot);
-                tracing::info!(node = self_id, slot = slot.0, "propose_waiter_superseded");
-                let _ = waiter.send(AppendAck {
-                    seq,
-                    leader: Some(self_id),
-                    committed: false,
-                    first_lsn: None,
-                    unknown_journal: false,
-                });
-                continue;
+        let batch = walked
+            .binary_search_by_key(&slot, |(at, _, _)| *at)
+            .ok()
+            .map(|i| &walked[i]);
+        let decided = batch
+            .map(|(_, command, _)| command)
+            .or_else(|| node.replica().chosen_at(slot));
+        let outcome = batch
+            .map(|(_, _, outcome)| outcome)
+            .filter(|outcome| **outcome != Outcome::Noop)
+            .or_else(|| node.replica().outcome_at(slot));
+        for call in calls {
+            match (decided, outcome) {
+                (Some(command), Some(outcome)) if *command == call.command() => {
+                    audit.answered(NodeId(self_id), slot, command, outcome);
+                    tracing::info!(node = self_id, slot = slot.0, ?outcome, "call_answered");
+                    call.answer(outcome, self_id, hooks, audit);
+                }
+                _ => {
+                    audit.waiter_superseded(NodeId(self_id), slot);
+                    tracing::info!(node = self_id, slot = slot.0, "call_superseded");
+                    call.no_verdict(Some(self_id), hooks, audit, self_id);
+                }
             }
-            audit.client_acked(NodeId(self_id), client, seq, *slot, applied, false);
-            answer(
-                hooks,
-                audit,
-                NodeId(self_id),
-                Reply::Propose,
-                waiter,
-                AppendAck {
-                    seq,
-                    leader: Some(self_id),
-                    committed: true,
-                    first_lsn: Some(slot.0),
-                    unknown_journal: false,
-                },
-            );
         }
     }
 }
@@ -248,7 +178,7 @@ where
                 .map(move |to| (to, msg.clone()))
         })
         .collect();
-    let committed: Vec<(Slot, Command)> = ready.committed().to_vec();
+    let committed: Vec<(Slot, Command, Outcome)> = ready.committed().to_vec();
     let read_states: Vec<ReadState> = ready.read_states().to_vec();
     let recovery_batch = ready.recovery_batch();
     // The matchmaking requests ride the same persist-before-send edge as the
@@ -294,21 +224,29 @@ where
     send_messages(out, hooks, audit, journal, messages);
 
     // 3. Learn the entries the chosen prefix walked over (already durable, in
-    //    contiguous order) — surface them to the oracles and ack any clients
-    //    waiting on a slot the prefix now covers (ack-on-commit: a held reply
-    //    fires only now that its slot is chosen).
-    for (slot, command) in &committed {
-        report_applied(audit, self_id, *slot, command);
+    //    contiguous order) — surface them and the journal state machine's
+    //    verdicts to the oracles and answer every call waiting on a slot the
+    //    fold now covers (a held reply fires only now that its slot applied).
+    for (slot, command, outcome) in &committed {
+        let outcome = (*outcome != Outcome::Noop).then_some(outcome);
+        report_applied(audit, self_id, *slot, command, outcome);
     }
-    let applied = served_prefix(node);
-    let decided = chosen_waiters(node, waiters);
-    ack_committed_waiters(applied, waiters, hooks, audit, self_id, &decided);
+    answer_applied_calls(node, &committed, waiters, hooks, audit, self_id);
 
-    // 3b. Answer confirmed reads — after the learn step, so the prefix this
-    //     same batch carried is covered by what the read observes. The ack
-    //     reports the *serve-time* chosen index (at or past the confirmed read
-    //     index): that is the local state actually served.
-    answer_confirmed_reads(node, waiters, &read_states, hooks, audit, self_id);
+    // 3b. Answer confirmed reads — after the learn step, so the fold this
+    //     same batch carried is covered by what the read observes: the page
+    //     is served from the *serve-time* fold, at or past the confirmed
+    //     watermark.
+    let leader = node.role() == NodeRole::Leader;
+    waiters.reads.confirmed(
+        &read_states,
+        |from, limit, bytes| node.read_log(from, limit, bytes),
+        fold_head(node),
+        leader,
+        NodeId(self_id),
+        hooks,
+        audit,
+    );
 
     // The previous recovery page is now fully durable, sent, and applied. Only
     // at this boundary may the core materialize the next bounded Ready page;
@@ -323,86 +261,18 @@ where
     })
 }
 
-/// Answer the reads this batch confirmed: a parked read-index or quorum read
-/// whose `ctx` came back in `Ready::read_states`, answered with the
-/// serve-time chosen index (at or past the confirmed read index — the local
-/// state actually served).
-fn answer_confirmed_reads<H: DriverHooks, A: Audit>(
-    node: &ColocatedNode,
-    waiters: &mut ClientWaiters,
-    read_states: &[ReadState],
-    hooks: &H,
-    audit: &A,
-    self_id: u64,
-) {
-    for state in read_states {
-        if let Some(parked) = waiters.pending_reads.remove(&state.ctx) {
-            let read_index = node.hard_state().chosen_index;
-            // The leader hint: a read-index answer comes from the leader
-            // itself; a quorum read's server may be anyone, so it names the
-            // leader it believes in.
-            let leader = match parked.path {
-                ReadPath::Index => Some(self_id),
-                ReadPath::Quorum { .. } => node.leader().map(|n| n.0),
-            };
-            match parked.path {
-                ReadPath::Index => audit.read_confirmed(NodeId(self_id), read_index),
-                ReadPath::Quorum { row, opened } => {
-                    let is_leader = node.role() == NodeRole::Leader;
-                    audit.quorum_read_served(
-                        NodeId(self_id),
-                        row,
-                        state.index,
-                        read_index,
-                        opened,
-                        is_leader,
-                    );
-                    tracing::info!(
-                        node = self_id,
-                        ctx = state.ctx,
-                        watermark = state
-                            .index
-                            .map_or(-1, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
-                        is_leader,
-                        "quorum_read_served"
-                    );
-                }
-            }
-            answer(
-                hooks,
-                audit,
-                NodeId(self_id),
-                Reply::Read,
-                parked.reply,
-                CheckTailAck {
-                    seq: parked.seq,
-                    leader,
-                    committed: true,
-                    committed_end: Some(committed_end(read_index)),
-                    unknown_journal: false,
-                },
-            );
-        }
-    }
-}
-
-/// The exclusive end of a chosen prefix whose last slot is `index` — what
-/// a `CheckTail` answers (#185): every LSN below it is chosen.
-pub(crate) fn committed_end(index: Option<Slot>) -> u64 {
-    index.map_or(0, |slot| slot.0 + 1)
-}
-
 /// Report one slot the contiguous walk moved over — "applied" names the walk,
 /// there is no application behind it (#186): the audit's apply callback, then
 /// the `value_chosen` and `log_applied` traces.
-pub(crate) fn report_applied<A: Audit>(audit: &A, self_id: u64, slot: Slot, command: &Command) {
+pub(crate) fn report_applied<A: Audit>(
+    audit: &A,
+    self_id: u64,
+    slot: Slot,
+    command: &Command,
+    outcome: Option<&Outcome>,
+) {
     let vhash = command_hash(command);
-    audit.applied(
-        NodeId(self_id),
-        slot,
-        vhash,
-        command.user().map(|e| (e.client.0, e.seq.0)),
-    );
+    audit.applied(NodeId(self_id), slot, vhash, command, outcome);
     tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
     tracing::info!(
         node = self_id,
@@ -457,8 +327,8 @@ pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
                     .await
             }
             WriteOp::SetChosenIndex(slot) => storage.set_chosen_index(*slot).await,
-            WriteOp::Truncate { first, sealed } => storage.truncate(*first, sealed).await,
-            WriteOp::TrimmedTo { point, sessions } => storage.trimmed_to(*point, sessions).await,
+            WriteOp::Truncate { first, sealed } => storage.truncate(*first, *sealed).await,
+            WriteOp::TrimmedTo { point, state } => storage.trimmed_to(*point, *state).await,
         };
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }

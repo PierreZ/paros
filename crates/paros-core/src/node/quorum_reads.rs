@@ -18,9 +18,10 @@
 //! [`Ready::read_states`]: crate::Ready::read_states
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
-use super::{ColocatedNode, Message, NodeId, Slot};
+use super::{ColocatedNode, Message, NodeId, NodeRole, Slot};
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
+use crate::{Command, Control, Delegation, ProposeResult};
 
 impl ColocatedNode {
     /// **Leaderless read** entry point, on any node (#143, Compartmentalized
@@ -149,6 +150,7 @@ impl ColocatedNode {
         if !self.in_pool(from) {
             return;
         }
+        self.fill_to_watermark(watermark);
         let Some(read) = self.quorum_reads.get(ctx) else {
             return;
         };
@@ -159,5 +161,49 @@ impl ColocatedNode {
             PreReadFold::Ignored | PreReadFold::Superseded => {}
             PreReadFold::Counted => self.serve_quorum_reads(),
         }
+    }
+
+    /// Leader: an acceptor voted at `watermark`, at or past this leader's
+    /// allocator frontier — a vote from an earlier ballot its Phase-1 quorum
+    /// did not include. Every quorum read that meets that acceptor waits for
+    /// the slot to be chosen (#204: every `Read` is a quorum read), and on an
+    /// idle log nothing else ever proposes there: the clients' claims start
+    /// with a read, so reads and writes would wait on each other forever.
+    /// A settled leader therefore proposes a [`Control::Noop`] into every
+    /// slot up to the watermark. That is an ordinary proposal at the
+    /// frontier — exactly what [`ColocatedNode::propose_control`] opens, and
+    /// safe for the same reason: the Phase 1 this ballot completed covered
+    /// every slot past the frontier and reported nothing chosen there. An
+    /// unsettled leader leaves it to its recovery; the read retries.
+    ///
+    /// Red→green: hunt seed 9253735150370401629 (acceptors 1 and 4 held
+    /// votes at slots 4–7 outside the leader's promise quorum; no read that
+    /// asked either of them was ever served, no claim was ever sent, and the
+    /// run ended with four slots chosen).
+    ///
+    /// [`Control::Noop`]: crate::Control::Noop
+    fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
+        let Some(watermark) = watermark else {
+            return;
+        };
+        if self.role != NodeRole::Leader
+            || !self.leadership_settled()
+            || watermark < self.proposer.next_slot()
+        {
+            return;
+        }
+        while self.proposer.next_slot() <= watermark {
+            let filled =
+                self.open_proposal(None, Delegation::Auto, Command::Control(Control::Noop));
+            assert!(
+                matches!(filled, ProposeResult::Accepted(_)),
+                "a leader's fill opens a proposal"
+            );
+            self.counters.watermark_fills += 1;
+        }
+        assert!(
+            self.proposer.next_slot() > watermark,
+            "a watermark fill leaves the frontier past the watermark"
+        );
     }
 }

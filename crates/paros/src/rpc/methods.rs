@@ -7,7 +7,7 @@
 //! [`SchemaVersion`], which a server refuses before decoding.
 //!
 //! - `0x5041_0001..` — the public journal (`proto/paros.proto`), served by
-//!   a node; `Read` and `CheckTail` also by a replica.
+//!   a node; `Read` also by a replica.
 //! - `0x5041_0101..` — cluster-internal (`proto/internal.proto`), served by a
 //!   node; `Deliver` also by a proxy leader and a replica, `Inspect` also by
 //!   a replica.
@@ -50,26 +50,29 @@ macro_rules! well_known_method {
 }
 
 // 0x5041_0001..=0x5041_0004 were `Propose`, the read-index `Read`,
-// `QuorumRead` and `Compact`, superseded by the journal calls below (#185).
-// Retired, never reused.
+// `QuorumRead` and `Compact`, superseded by the journal calls of #185;
+// 0x5041_0007..=0x5041_000A were those calls — `Append`, the LSN `Read`,
+// `CheckTail` and `Trim` — superseded by the four calls of #204. Retired,
+// never reused.
 well_known_method!(
-    /// Append records to a journal; answered once they commit, or
-    /// redirected (#185).
-    AppendRpc, 0x5041_0007, public::Append => public::AppendAck, "paros.Append"
+    /// Append a batch at a position under a writer generation (#204);
+    /// answered with the verdict the journal state machine gave at apply,
+    /// or redirected.
+    WriteRpc, 0x5041_000B, public::Write => public::WriteAck, "paros.Write"
 );
 well_known_method!(
-    /// Read a journal's chosen entries from an LSN up (#185); served by any
-    /// node or replica, long-polling above the end.
-    LogReadRpc, 0x5041_0008, public::Read => public::ReadAck, "paros.Read"
+    /// Read a journal's records from a position up (#204); served by any
+    /// node or replica through the leaderless read, long-polling at the
+    /// tail.
+    ReadRpc, 0x5041_000C, public::Read => public::ReadAck, "paros.Read"
 );
 well_known_method!(
-    /// A linearizable tail (#185): read-index on the leader, or a quorum
-    /// read (#143) on any node or replica.
-    CheckTailRpc, 0x5041_0009, public::CheckTail => public::CheckTailAck, "paros.CheckTail"
+    /// Drop every record below a position (#204), decided by consensus.
+    TruncateRpc, 0x5041_000D, public::Truncate => public::TruncateAck, "paros.Truncate"
 );
 well_known_method!(
-    /// Ask the leader to trim the journal (#185, formerly `Compact`).
-    TrimRpc, 0x5041_000A, public::Trim => public::TrimAck, "paros.Trim"
+    /// Compare-and-swap a journal's writer (#204).
+    SetLeaderRpc, 0x5041_000E, public::SetLeader => public::SetLeaderAck, "paros.SetLeader"
 );
 well_known_method!(
     /// Ask the leader to reconfigure the acceptor set.

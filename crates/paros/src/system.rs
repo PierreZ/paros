@@ -5,10 +5,10 @@
 //! every node learns them by reading them.
 //!
 //! This module is the one reading of their entries: the typed
-//! [`SystemCommand`] a client appends (one record per slot, framed by
+//! [`SystemCommand`] a client writes (one record per position, framed by
 //! [`SystemCommand::encode`]), and the two pure folds — [`Directory`] and
 //! [`Registry`] — that every node, and every client reading back its own
-//! request, runs over the chosen entries in LSN order. A fold is a function
+//! request, runs over the chosen entries in position order. A fold is a function
 //! of the log alone, so every reader that has folded a prefix agrees on it.
 //!
 //! **This is not an application** (#186): paros still decides nothing about
@@ -16,20 +16,21 @@
 //! plane, like the matchmaker registry; the core keeps their entries as
 //! opaque as any other, and only this module and the driver read them.
 //!
-//! - **Directory.** A created journal's id is `128 + the LSN of its
-//!   CreateJournal entry` ([`JournalId::FIRST_USER`] plus the slot): the log
-//!   order is the allocator, so there is no counter and no race, and an id
-//!   is never reused (every slot is used once; a deleted journal leaves a
-//!   tombstone). Of two creates with one name the lower LSN wins; the other
+//! - **Directory.** A created journal's id is `128 + the position of its
+//!   CreateJournal record` ([`JournalId::FIRST_USER`] plus the position,
+//!   #204): the log order is the allocator, so there is no counter and no
+//!   race, and an id is never reused (every position is used once; a deleted
+//!   journal leaves a tombstone). Of two creates with one name the lower
+//!   position wins; the other
 //!   folds to [`DirectoryRefusal::NameTaken`], which its creator reads back.
-//!   A slot whose id lands on a journal the deployment was booted with (its
+//!   A position whose id lands on a journal the deployment was booted with (its
 //!   *genesis* journals) folds to [`DirectoryRefusal::Reserved`]. Names are
 //!   opaque bytes.
 //! - **Registry.** The node pool is the genesis pool plus every registered
 //!   node not yet retired ([`Registry::pool`]). A node is registered once
 //!   (an id is never reused, a retired one included), drained, then retired.
 //!
-//! Every malformed entry — a slot that is not exactly one decodable record,
+//! Every malformed entry — a record that does not decode,
 //! a configuration that does not admit its quorum system, a registry entry
 //! in the directory — folds to a refusal, never a panic: the entries are
 //! external input.
@@ -91,7 +92,7 @@ pub enum SystemCommand {
 }
 
 impl SystemCommand {
-    /// The record a client appends: exactly one per slot.
+    /// The record a client writes: exactly one per position.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         use wire::system_entry::Kind;
@@ -151,14 +152,6 @@ impl SystemCommand {
             },
         })
     }
-
-    /// Read a slot's records: a system slot holds exactly one entry.
-    fn from_slot(records: &[Vec<u8>]) -> Option<Self> {
-        match records {
-            [record] => Self::decode(record).ok(),
-            _ => None,
-        }
-    }
 }
 
 /// A journal the directory created.
@@ -168,16 +161,16 @@ pub struct CreatedJournal {
     pub name: Vec<u8>,
     /// Its static acceptor configuration.
     pub config: AcceptorConfig,
-    /// The LSN of the `DeleteJournal` that tombstoned it, if any.
+    /// The position of the `DeleteJournal` that tombstoned it, if any.
     pub deleted_at: Option<u64>,
 }
 
-/// What one directory slot folded to.
+/// What one directory record folded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryEvent {
     /// A journal was created with this id.
     Created {
-        /// `128 + the slot`.
+        /// `128 + the position`.
         id: JournalId,
         /// Its name.
         name: Vec<u8>,
@@ -198,12 +191,12 @@ pub enum DirectoryEvent {
 pub enum DirectoryRefusal {
     /// Not exactly one decodable directory entry.
     Malformed,
-    /// The id this slot allocates is a genesis journal's.
+    /// The id this position allocates is a genesis journal's.
     Reserved {
-        /// The id the slot would have allocated.
+        /// The id the position would have allocated.
         id: JournalId,
     },
-    /// A live journal already holds the name: the lower slot won.
+    /// A live journal already holds the name: the lower position won.
     NameTaken {
         /// The journal that holds it.
         winner: JournalId,
@@ -224,7 +217,7 @@ pub struct Directory {
     journals: BTreeMap<JournalId, CreatedJournal>,
     /// Live names, to the journal holding each.
     names: BTreeMap<Vec<u8>, JournalId>,
-    next_lsn: u64,
+    next_seq: u64,
 }
 
 impl Directory {
@@ -237,25 +230,28 @@ impl Directory {
         }
     }
 
-    /// The next LSN this fold expects (one past the last folded slot).
+    /// The next position this fold expects (one past the last folded one).
     #[must_use]
-    pub fn next_lsn(&self) -> u64 {
-        self.next_lsn
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
     }
 
-    /// Fold the entry at `lsn` (a chosen user slot of journal 1, in LSN
-    /// order; holes are simply skipped) whose records are `records`.
+    /// Fold the record at position `seq` of journal 1 (in position order;
+    /// a gap is simply skipped).
     ///
     /// # Panics
     ///
-    /// If `lsn` is below a slot already folded: a fold is fed in log order,
+    /// If `seq` is below a position already folded: a fold is fed in log order,
     /// once (a programmer error of the caller, never an operating one).
-    pub fn fold(&mut self, lsn: u64, records: &[Vec<u8>]) -> DirectoryEvent {
-        assert!(lsn >= self.next_lsn, "the directory folds in LSN order");
-        self.next_lsn = lsn + 1;
-        match SystemCommand::from_slot(records) {
+    pub fn fold(&mut self, seq: u64, record: &[u8]) -> DirectoryEvent {
+        assert!(
+            seq >= self.next_seq,
+            "the directory folds in position order"
+        );
+        self.next_seq = seq + 1;
+        match SystemCommand::decode(record).ok() {
             Some(SystemCommand::CreateJournal { name, config }) => {
-                let Some(id) = JournalId::FIRST_USER.0.checked_add(lsn).map(JournalId) else {
+                let Some(id) = JournalId::FIRST_USER.0.checked_add(seq).map(JournalId) else {
                     return DirectoryEvent::Refused(DirectoryRefusal::Malformed);
                 };
                 if self.genesis.contains(&id) {
@@ -266,7 +262,7 @@ impl Directory {
                 }
                 assert!(
                     !self.journals.contains_key(&id),
-                    "a slot allocates an id no earlier slot did"
+                    "a position allocates an id no earlier position did"
                 );
                 self.names.insert(name.clone(), id);
                 self.journals.insert(
@@ -287,7 +283,7 @@ impl Directory {
                 else {
                     return DirectoryEvent::Refused(DirectoryRefusal::UnknownJournal { id });
                 };
-                created.deleted_at = Some(lsn);
+                created.deleted_at = Some(seq);
                 self.names.remove(&created.name);
                 DirectoryEvent::Deleted { id }
             }
@@ -337,7 +333,7 @@ pub struct RegisteredNode {
     pub standing: NodeStanding,
 }
 
-/// What one registry slot folded to.
+/// What one registry record folded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegistryEvent {
     /// A node joined the pool.
@@ -390,7 +386,7 @@ pub enum RegistryRefusal {
 pub struct Registry {
     genesis: BTreeSet<NodeId>,
     nodes: BTreeMap<NodeId, RegisteredNode>,
-    next_lsn: u64,
+    next_seq: u64,
 }
 
 impl Registry {
@@ -403,22 +399,21 @@ impl Registry {
         }
     }
 
-    /// The next LSN this fold expects.
+    /// The next position this fold expects.
     #[must_use]
-    pub fn next_lsn(&self) -> u64 {
-        self.next_lsn
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
     }
 
-    /// Fold the entry at `lsn` (a chosen user slot of journal 2, in LSN
-    /// order).
+    /// Fold the record at position `seq` of journal 2 (in position order).
     ///
     /// # Panics
     ///
-    /// If `lsn` is below a slot already folded (see [`Directory::fold`]).
-    pub fn fold(&mut self, lsn: u64, records: &[Vec<u8>]) -> RegistryEvent {
-        assert!(lsn >= self.next_lsn, "the registry folds in LSN order");
-        self.next_lsn = lsn + 1;
-        match SystemCommand::from_slot(records) {
+    /// If `seq` is below a position already folded (see [`Directory::fold`]).
+    pub fn fold(&mut self, seq: u64, record: &[u8]) -> RegistryEvent {
+        assert!(seq >= self.next_seq, "the registry folds in position order");
+        self.next_seq = seq + 1;
+        match SystemCommand::decode(record).ok() {
             Some(SystemCommand::RegisterNode {
                 id,
                 addr,
@@ -492,13 +487,13 @@ impl Registry {
     }
 }
 
-/// What one system-journal slot folded to — the directory's or the
+/// What one system-journal record folded to — the directory's or the
 /// registry's event — as the driver reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemEvent {
-    /// A directory slot.
+    /// A directory record.
     Directory(DirectoryEvent),
-    /// A registry slot.
+    /// A registry record.
     Registry(RegistryEvent),
 }
 
@@ -514,18 +509,16 @@ mod tests {
         )
     }
 
-    fn create(name: &[u8], members: &[u64]) -> Vec<Vec<u8>> {
-        vec![
-            SystemCommand::CreateJournal {
-                name: name.to_vec(),
-                config: config(members),
-            }
-            .encode(),
-        ]
+    fn create(name: &[u8], members: &[u64]) -> Vec<u8> {
+        SystemCommand::CreateJournal {
+            name: name.to_vec(),
+            config: config(members),
+        }
+        .encode()
     }
 
-    fn one(command: &SystemCommand) -> Vec<Vec<u8>> {
-        vec![command.encode()]
+    fn one(command: &SystemCommand) -> Vec<u8> {
+        command.encode()
     }
 
     #[test]
@@ -551,14 +544,14 @@ mod tests {
     }
 
     #[test]
-    fn a_created_journal_is_named_by_its_slot_and_never_reused() {
+    fn a_created_journal_is_named_by_its_position_and_never_reused() {
         let mut dir = Directory::new([JournalId(128)]);
-        // Slot 0 would allocate 128, a genesis journal.
+        // Position 0 would allocate 128, a genesis journal.
         assert_eq!(
             dir.fold(0, &create(b"a", &[0, 1, 2])),
             DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: JournalId(128) })
         );
-        // Slot 3 (holes at 1 and 2 are skipped) allocates 131.
+        // Position 3 (1 and 2 are skipped) allocates 131.
         assert!(matches!(
             dir.fold(3, &create(b"a", &[0, 1, 2])),
             DirectoryEvent::Created {
@@ -594,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_race_is_decided_by_slot_order() {
+    fn a_name_race_is_decided_by_position_order() {
         let mut dir = Directory::new([]);
         assert!(matches!(
             dir.fold(0, &create(b"x", &[0])),
@@ -612,14 +605,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_slots_change_nothing() {
+    fn malformed_records_change_nothing() {
         let mut dir = Directory::new([]);
         assert_eq!(
-            dir.fold(0, &[]),
+            dir.fold(0, b""),
             DirectoryEvent::Refused(DirectoryRefusal::Malformed)
         );
         assert_eq!(
-            dir.fold(1, &[b"junk".to_vec()]),
+            dir.fold(1, b"junk"),
             DirectoryEvent::Refused(DirectoryRefusal::Malformed)
         );
         assert_eq!(
@@ -644,7 +637,7 @@ mod tests {
         }
         .encode_to_vec();
         assert_eq!(
-            dir.fold(3, &[bad]),
+            dir.fold(3, &bad),
             DirectoryEvent::Refused(DirectoryRefusal::Malformed)
         );
         assert_eq!(dir.journals().count(), 0);

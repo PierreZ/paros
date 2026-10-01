@@ -108,8 +108,6 @@ pub(crate) struct JournalRt<S, A> {
     pub(crate) audit: A,
     pub(crate) waiters: ClientWaiters,
     pub(crate) last: Deltas,
-    /// The read-index / quorum-read ctx counter.
-    pub(crate) next_read_ctx: u64,
     /// Ticks since the open matchmaking request was last (re-)sent.
     pub(crate) match_resend: Cadence,
     /// Ticks since the open GC request was last (re-)sent.
@@ -158,7 +156,6 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A:
         audit,
         waiters: ClientWaiters::default(),
         last,
-        next_read_ctx: 0,
         match_resend: Cadence::default(),
         gc_resend: Cadence::default(),
     })

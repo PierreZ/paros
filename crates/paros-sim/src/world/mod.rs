@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
 use paros::{
-    Ballot, ClientId, ClientSeq, Command, HardState, IntegrityFault, MetadataFault, Slot,
-    StorageRecord, WitnessStatus,
+    Ballot, Command, HardState, IntegrityFault, MetadataFault, Slot, StorageRecord, WitnessStatus,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -106,9 +105,9 @@ pub(super) struct NodeDisk {
     accepted: BTreeMap<Slot, (Ballot, Command)>,
     /// The first slot still retained. Everything below it has been truncated.
     first_slot: Slot,
-    /// Sealed at-most-once ledger records for truncated slots (#94): read back
-    /// on boot so a restart suppresses re-chosen identities like every peer.
-    sealed: BTreeMap<(ClientId, ClientSeq), Slot>,
+    /// The journal state sealed at the floor (#204): read back on boot so a
+    /// restart folds the retained log from it like every peer.
+    sealed: paros::JournalState,
     /// Health of the accepted-entry records; a slot absent from this map is
     /// clean and witnessed.
     entry_health: BTreeMap<Slot, SlotHealth>,

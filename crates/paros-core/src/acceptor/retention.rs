@@ -13,20 +13,21 @@
 //! beside the same private `drop_prefix`.
 
 use super::Acceptor;
-use crate::types::{SessionEntry, Slot};
+use crate::journal_state::JournalState;
+use crate::types::Slot;
 use crate::write::WriteOp;
 
 impl<V: Clone + PartialEq> Acceptor<V> {
     /// Drop every record and faulty entry below `first`, raise the floor to
     /// it, and emit the durable [`WriteOp::Truncate`] carrying `sealed` (the
-    /// at-most-once ledger records whose slots the drop removes). A decided
+    /// journal state the dropped slots folded to, #204). A decided
     /// truncation: the caller has already established that the prefix is
     /// chosen and applied.
     ///
     /// # Panics
     ///
     /// If `first` is below the floor held.
-    pub fn truncate(&mut self, first: Slot, sealed: Vec<SessionEntry>, writes: &mut Vec<WriteOp>) {
+    pub fn truncate(&mut self, first: Slot, sealed: JournalState, writes: &mut Vec<WriteOp>) {
         self.drop_prefix(first);
         writes.push(WriteOp::Truncate { first, sealed });
     }
@@ -41,9 +42,9 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// # Panics
     ///
     /// If `point` is below the floor held.
-    pub fn trim_to(&mut self, point: Slot, sessions: Vec<SessionEntry>, writes: &mut Vec<WriteOp>) {
+    pub fn trim_to(&mut self, point: Slot, state: JournalState, writes: &mut Vec<WriteOp>) {
         self.drop_prefix(point);
-        writes.push(WriteOp::TrimmedTo { point, sessions });
+        writes.push(WriteOp::TrimmedTo { point, state });
     }
 
     /// Drop every record and faulty entry below `first` and raise the floor

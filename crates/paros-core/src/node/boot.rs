@@ -17,9 +17,9 @@ use crate::quorum_read::QuorumReads;
 
 impl ColocatedNode {
     /// Construct from a read-only [`Storage`] by reading durable state back in.
-    /// Bootstrap and restart share this path. The volatile dedup tables
-    /// (`applied_seq`, `inflight`) and the `chosen` map are rebuilt from the
-    /// durable `accepted` log and `chosen_index`.
+    /// Bootstrap and restart share this path. The `chosen` map and the
+    /// journal fold are rebuilt from the durable `accepted` log, the
+    /// `chosen_index` and the sealed journal state at the floor.
     ///
     /// # Panics
     ///
@@ -43,7 +43,8 @@ impl ColocatedNode {
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
         let replica = Replica::from_boot(
             hard_state.chosen_index,
-            storage.sealed_sessions(),
+            first_slot,
+            storage.sealed_state(),
             &accepted,
         );
 

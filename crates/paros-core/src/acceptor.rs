@@ -464,7 +464,8 @@ impl<V: Clone + PartialEq> Acceptor<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ClientId, ClientSeq, Command, Entry, NodeId, Value};
+    use crate::journal_state::JournalState;
+    use crate::types::{ClientId, Command, Entry, Generation, NodeId, Seq, Value};
     use crate::write::WriteOp;
 
     fn ballot(round: u64) -> Ballot {
@@ -475,10 +476,11 @@ mod tests {
     }
 
     fn command(byte: u8) -> Command {
-        Command::User(Entry {
-            client: ClientId(1),
-            seq: ClientSeq(u64::from(byte)),
-            value: Value(vec![byte]),
+        Command::Write(Entry {
+            generation: Generation(0),
+            owner: ClientId(1),
+            seq: Seq(u64::from(byte)),
+            records: vec![Value(vec![byte])],
         })
     }
 
@@ -516,12 +518,12 @@ mod tests {
         acceptor.record_accepted(Slot(1), ballot(1), command(1), &mut writes);
         assert_eq!(acceptor.vote_watermark(), Some(Slot(3)));
         // Truncating past every record: the floor stands in for the votes.
-        acceptor.truncate(Slot(4), Vec::new(), &mut writes);
+        acceptor.truncate(Slot(4), JournalState::default(), &mut writes);
         assert!(acceptor.records().is_empty());
         assert_eq!(acceptor.vote_watermark(), Some(Slot(3)));
         // Truncating to a floor above the old watermark raises it: every
         // slot below the floor was chosen, hence voted.
-        acceptor.truncate(Slot(6), Vec::new(), &mut writes);
+        acceptor.truncate(Slot(6), JournalState::default(), &mut writes);
         assert_eq!(acceptor.vote_watermark(), Some(Slot(5)));
         // A faulty entry — identity known, value lost — was voted too.
         let mut faulty = BTreeMap::new();
@@ -541,13 +543,13 @@ mod tests {
         acceptor.set_promise(ballot(1), &mut writes);
         acceptor.record_accepted(Slot(0), ballot(1), command(0), &mut writes);
         acceptor.record_accepted(Slot(1), ballot(1), command(1), &mut writes);
-        acceptor.truncate(Slot(1), Vec::new(), &mut writes);
+        acceptor.truncate(Slot(1), JournalState::default(), &mut writes);
         assert_eq!(acceptor.first_slot(), Slot(1));
         assert!(
             matches!(writes.last(), Some(WriteOp::Truncate { first, .. }) if *first == Slot(1)),
             "the truncation is durable"
         );
-        acceptor.trim_to(Slot(5), Vec::new(), &mut writes);
+        acceptor.trim_to(Slot(5), JournalState::default(), &mut writes);
         assert_eq!(acceptor.first_slot(), Slot(5));
         assert!(acceptor.records().is_empty(), "the dropped prefix is gone");
         assert_eq!(

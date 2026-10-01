@@ -150,7 +150,13 @@ pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, au
             if *slot != next {
                 break;
             }
-            report_applied(audit, self_id, *slot, command);
+            report_applied(
+                audit,
+                self_id,
+                *slot,
+                command,
+                node.replica().outcome_at(*slot),
+            );
             next = Slot(slot.0 + 1);
         }
     }

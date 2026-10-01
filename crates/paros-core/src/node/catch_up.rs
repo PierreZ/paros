@@ -1,4 +1,5 @@
-use super::{BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, SessionEntry, Slot};
+use super::{BTreeMap, Ballot, ColocatedNode, Command, Message, NodeId, Slot};
+use crate::journal_state::JournalState;
 
 /// Maximum number of decided slots one [`Message::CatchUpResponse`] carries. A
 /// lagging peer that needs more re-requests on the next heartbeat, so a large
@@ -27,23 +28,18 @@ impl ColocatedNode {
         };
         // Below our floor the decided entries have been trimmed away, so no
         // contiguous `CatchUpResponse` can replay them. Tell the peer where
-        // the retained log starts (#186): it jumps to our trim point, seals
-        // the ledger of the slots it will never walk, and asks again from
-        // there. No bytes (paros runs no application) and no ballot (the
+        // the retained log starts (#186): it jumps to our trim point, takes
+        // the journal state our log folded to below it (#204), and asks again
+        // from there. No bytes (paros runs no application) and no ballot (the
         // peer's promise does not move, #180).
         let point = self.acceptor.first_slot();
         if from_slot < point {
-            let sessions: Vec<SessionEntry> = self
-                .session_ledger()
-                .into_iter()
-                .filter(|(_, _, slot)| *slot < point)
-                .collect();
             self.send(
                 to,
                 Message::TrimmedTo {
                     from: me,
                     point,
-                    sessions,
+                    state: self.replica.journal_base(),
                 },
             );
             return;
@@ -104,7 +100,8 @@ impl ColocatedNode {
     /// this node asked for, so everything below `point` is chosen and gone
     /// cluster-wide. Drop what this node still holds below it, move the
     /// chosen index to at least `point - 1`, raise the floor to `point`,
-    /// adopt the ledger for the dropped prefix, and let the walk and the
+    /// take the journal state the peer's log folded to below it (#204) when
+    /// this node's own fold has not reached the point, and let the walk and the
     /// next catch-up continue from there. A point at or below our floor
     /// teaches nothing and is ignored.
     ///
@@ -112,26 +109,16 @@ impl ColocatedNode {
     /// a ballot. A node that jumps keeps the promise it made, and a
     /// candidate campaigning here still collects promises by Phase 1.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, point = point.0)))]
-    pub(super) fn on_trimmed_to(&mut self, point: Slot, mut sessions: Vec<SessionEntry>) {
+    pub(super) fn on_trimmed_to(&mut self, point: Slot, state: JournalState) {
         if point <= self.acceptor.first_slot() {
             return;
         }
-        // Wire hygiene: the point is the validation line for the ledger it
-        // carries. A session record naming a slot at or above `point` claims
-        // a chosen fact the jump does not cover; merged, it would let
-        // `propose`'s dedup fast path ack a slot this node never chose. Drop
-        // such records before they reach the ledger or the durable jump.
-        sessions.retain(|(_, _, slot)| *slot < point);
-        assert!(
-            sessions.iter().all(|(_, _, slot)| *slot < point),
-            "a merged session record stays below the trim point"
-        );
         let promised = self.acceptor.promised();
         let old_floor = self.acceptor.first_slot();
         let old_chosen_index = self.replica.chosen_index();
-        self.replica.trim_to(point, &sessions);
+        let sealed = self.replica.trim_to(point, state);
         self.acceptor
-            .trim_to(point, sessions, &mut self.pending_writes);
+            .trim_to(point, sealed, &mut self.pending_writes);
         // A probe blocked below the point is resolved by the jump as well.
         self.proposer.probe_retain_from(point);
         self.proposer.retain_rounds_from(point);

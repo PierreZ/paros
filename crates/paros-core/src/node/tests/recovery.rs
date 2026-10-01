@@ -85,7 +85,7 @@ fn accept_repairs_a_faulty_slot_in_place() {
     // Rot an *unchosen* accepted slot: reboot a follower that accepted slot 3
     // but never learned it chosen.
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
+    let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     // Deliver the Accept to node 1 but drop its ack and the commit, so node 1
     // holds an accepted-but-unchosen record at slot 3.
@@ -124,7 +124,7 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
     // Node 1 holds a faulty record at slot 3 (accepted from a deposed leader,
     // never chosen anywhere); nodes 0 and 2 have nothing at slot 3.
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
+    let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     let mut storage = TestStorage::from_node(&nodes[1]);
@@ -158,7 +158,7 @@ fn full_none_quorum_noop_fills_over_an_excluded_faulty_reporter() {
 #[test]
 fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
+    let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     // Only node 1 accepts slot 3; the round never completes.
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
@@ -203,7 +203,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
 #[test]
 fn recovery_timeout_steps_the_leader_down() {
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose(ClientId(1), ClientSeq(4), val(40));
+    let _ = nodes[0].propose(entry(1, 4, 40));
     let q = drain(&mut nodes[0]);
     deliver_filtered(&mut nodes, q, |to, m| keep_slot3_undecided(to, m, true));
     let mut s0 = TestStorage::from_node(&nodes[0]);
@@ -233,24 +233,23 @@ fn recovery_timeout_steps_the_leader_down() {
     assert!(!nodes[0].is_leader(), "the blocked leader resigned");
 }
 
-/// A faulty record inside the *chosen* prefix is a hole in the servable
-/// log — a journal read stops at it rather than skip it (#185) — and heals
-/// through ordinary commit-replay catch-up, pulled from the first faulty slot
-/// on the tick.
+/// A faulty record inside the *chosen* prefix is a hole in the journal
+/// fold — the fold stops at it rather than judge anything past it (#204) —
+/// and heals through ordinary commit-replay catch-up, pulled from the first
+/// faulty slot on the tick.
 #[test]
 fn faulty_chosen_slot_heals_via_catchup() {
-    use crate::LogRead;
-
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
     let mut n = ColocatedNode::new(&storage);
-    // A read over the rotted slot ends at it: the slot is chosen, its value
-    // is not here, and skipping it would tell the reader it is a hole.
-    match n.read_log(Slot(0), usize::MAX) {
-        LogRead::Page(page) => assert_eq!(page.next, Slot(1), "the page ends at the rotted slot"),
-        LogRead::Trimmed { .. } => panic!("nothing is trimmed"),
-    }
+    // The fold stops at the rotted slot: it is chosen, its value is not
+    // here, and folding past it would judge slot 2 against the wrong state.
+    assert_eq!(n.replica().fold_hole(), Some(Slot(1)));
+    assert!(
+        !n.replica().covers(Some(Slot(1))),
+        "a read waits on the hole"
+    );
 
     // The tick pull asks peers for the decided range from the faulty slot.
     n.set_election_timeout(NO_CHECK_QUORUM);
@@ -286,20 +285,18 @@ fn faulty_chosen_slot_heals_via_catchup() {
         n.acceptor().faulty().is_empty(),
         "the faulty record was healed"
     );
-    match n.read_log(Slot(0), usize::MAX) {
-        LogRead::Page(page) => assert_eq!(page.next, Slot(3), "the read runs to the end"),
-        LogRead::Trimmed { .. } => panic!("nothing is trimmed"),
-    }
+    assert_eq!(n.replica().fold_hole(), None, "the fold runs to the end");
+    assert_eq!(n.replica().folded(), Slot(3));
+    assert_eq!(n.replica().journal(), nodes[0].replica().journal());
 }
 
-/// A faulty record inside the chosen prefix is also a hole in the #94
-/// at-most-once ledger: the identity it decided is unknown here until it
-/// heals. The walk holds meanwhile — walking a later duplicate of that
-/// identity would run it as its first application (a user entry here, a
-/// `Noop` everywhere else) — and resumes, suppressing the duplicate, once
-/// the record heals.
+/// A faulty record inside the chosen prefix is a hole in the journal fold:
+/// what it decided is unknown here until it heals, so every later slot's
+/// outcome is too. The walk holds meanwhile — judging a later write against
+/// a state that misses the hole would answer it differently here than
+/// everywhere else — and resumes once the record heals.
 #[test]
-fn a_faulty_chosen_record_holds_the_walk_until_the_ledger_heals() {
+fn a_faulty_chosen_record_holds_the_walk_until_the_fold_heals() {
     let nodes = cluster_with_three_chosen();
     let mut storage = TestStorage::from_node(&nodes[1]);
     storage.rot(Slot(1));
@@ -314,12 +311,8 @@ fn a_faulty_chosen_record_holds_the_walk_until_the_ledger_heals() {
             .expect("chosen")
     };
     let (ballot, original) = record(1);
-    assert!(
-        matches!(&original, Command::User(e) if e.client == ClientId(1) && e.seq == ClientSeq(2)),
-        "slot 1 decided (client 1, seq 2)"
-    );
 
-    // Slot 3 is chosen with a #94 duplicate of slot 1's identity.
+    // Slot 3 is chosen above the hole.
     n.step(Message::CatchUpResponse {
         from: NodeId(0),
         entries: BTreeMap::from([(Slot(3), (ballot, original.clone()))]),
@@ -328,32 +321,29 @@ fn a_faulty_chosen_record_holds_the_walk_until_the_ledger_heals() {
     assert_eq!(
         n.replica().chosen_index(),
         Some(Slot(2)),
-        "the walk holds while the ledger has a hole"
+        "the walk holds while the fold has a hole"
     );
     let (_, committed) = drain_with(&mut n, |r| r.committed().to_vec());
     assert!(committed.is_empty(), "nothing walked past the hole");
 
-    // The record heals: the walk resumes and suppresses the duplicate.
+    // The record heals: the fold and then the walk resume.
     n.step(Message::CatchUpResponse {
         from: NodeId(0),
         entries: BTreeMap::from([(Slot(1), record(1))]),
     });
     assert!(n.acceptor().faulty().is_empty(), "the record healed");
     assert_eq!(n.replica().chosen_index(), Some(Slot(3)));
-    assert!(
-        n.replica().duplicate_slots().contains(&Slot(3)),
-        "slot 3 runs as the duplicate it is"
-    );
-    assert_eq!(
-        n.replica().applied_at(ClientId(1), ClientSeq(2)),
-        Some(Slot(1)),
-        "the identity applied at its first slot"
-    );
-    let (_, committed) = drain_with(&mut n, |r| r.committed().to_vec());
+    assert_eq!(n.replica().folded(), Slot(4));
+    let (_, committed) = drain_with(&mut n, |r| {
+        r.committed()
+            .iter()
+            .map(|(slot, command, _)| (*slot, command.clone()))
+            .collect::<Vec<_>>()
+    });
     assert_eq!(
         committed,
-        vec![(Slot(3), Command::Control(Control::Noop))],
-        "the walk hands the duplicate on as a no-op"
+        vec![(Slot(3), original)],
+        "the walk hands slot 3 on once the fold reaches it"
     );
 }
 
@@ -397,7 +387,7 @@ fn a_trim_point_jump_drops_a_faulty_record_below_it() {
     n.step(Message::TrimmedTo {
         from: NodeId(0),
         point: Slot(2),
-        sessions: Vec::new(),
+        state: crate::JournalState::default(),
     });
     assert!(
         n.acceptor().faulty().is_empty(),

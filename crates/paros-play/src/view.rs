@@ -52,9 +52,17 @@ pub fn show_command(command: &Command) -> String {
 #[must_use]
 pub fn value_text(command: &Command) -> String {
     match command {
-        Command::User(entry) => String::from_utf8_lossy(&entry.value.0).into_owned(),
+        Command::Write(entry) => entry
+            .records
+            .iter()
+            .map(|record| String::from_utf8_lossy(&record.0).into_owned())
+            .collect::<Vec<_>>()
+            .join(", "),
         Command::Control(Control::Noop) => "Noop".to_string(),
-        Command::Control(Control::Truncate { up_to }) => format!("Truncate up to {}", up_to.0),
+        Command::Control(Control::Truncate { up_to }) => format!("Truncate before {}", up_to.0),
+        Command::Control(Control::SetLeader { expected, owner }) => {
+            format!("SetLeader {} after generation {}", owner.0, expected.0)
+        }
     }
 }
 
@@ -64,9 +72,10 @@ pub fn value_text(command: &Command) -> String {
 #[must_use]
 pub fn control_kind(command: &Command) -> Option<String> {
     match command {
-        Command::User(_) => None,
+        Command::Write(_) => None,
         Command::Control(Control::Noop) => Some("noop".to_string()),
         Command::Control(Control::Truncate { .. }) => Some("truncate".to_string()),
+        Command::Control(Control::SetLeader { .. }) => Some("set_leader".to_string()),
     }
 }
 

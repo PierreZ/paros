@@ -96,12 +96,39 @@ pub(super) fn applied(world: &WorldKind, node: u64) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The records node `node` has applied that its journal **accepted** (#204):
+/// a write whose slot folded to `Outcome::Accepted`. A retry folds as a
+/// duplicate and a superseded write as a refusal, so neither is here.
+pub(super) fn accepted(world: &WorldKind, node: u64) -> Vec<String> {
+    let Some(log) = world.log() else {
+        return Vec::new();
+    };
+    let (Some(disk), Some(replica)) = (
+        log.disk(NodeId(node)),
+        log.node(NodeId(node))
+            .map(paros_core::ColocatedNode::replica),
+    ) else {
+        return Vec::new();
+    };
+    disk.applied()
+        .iter()
+        .filter(|(slot, _)| {
+            matches!(
+                replica.outcome_at(*slot),
+                Some(paros_core::Outcome::Accepted { .. })
+            )
+        })
+        .map(|(_, command)| show_command(command))
+        .collect()
+}
+
 /// The text inside a client command, for a goal that has to name a value.
 pub(super) fn text(command: &Command) -> String {
-    command
-        .user()
-        .map(|entry| String::from_utf8_lossy(&entry.value.0).into_owned())
-        .unwrap_or_default()
+    if command.write().is_some() {
+        crate::view::value_text(command)
+    } else {
+        String::new()
+    }
 }
 
 /// The value the single-decree world holds, if it holds one.

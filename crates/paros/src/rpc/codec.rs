@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Party, ProxyId,
-    QuorumSystem, Slot, Value,
+    AcceptorConfig, Ballot, ClientId, Command, Control, Entry, Generation, JournalState, NodeId,
+    Party, ProxyId, QuorumSystem, Seq, Value,
 };
 
 use super::{InspectReply, Reconfigure, common, internal};
@@ -195,10 +195,11 @@ pub(crate) fn config_from_proto(
 
 pub(super) fn command_to_proto(command: &Command) -> internal::Command {
     let kind = match command {
-        Command::User(entry) => internal::command::Kind::User(internal::UserEntry {
-            client: entry.client.0,
+        Command::Write(entry) => internal::command::Kind::Write(internal::WriteEntry {
+            generation: entry.generation.0,
+            owner: entry.owner.0,
             seq: entry.seq.0,
-            value: entry.value.0.clone(),
+            records: entry.records.iter().map(|r| r.0.clone()).collect(),
         }),
         Command::Control(control) => {
             let kind = match control {
@@ -206,6 +207,12 @@ pub(super) fn command_to_proto(command: &Command) -> internal::Command {
                     internal::control_command::Kind::Truncate(internal::Truncate { up_to: up_to.0 })
                 }
                 Control::Noop => internal::control_command::Kind::Noop(internal::Noop {}),
+                Control::SetLeader { expected, owner } => {
+                    internal::control_command::Kind::SetLeader(internal::SetLeader {
+                        expected: expected.0,
+                        owner: owner.0,
+                    })
+                }
             };
             internal::command::Kind::Control(internal::ControlCommand { kind: Some(kind) })
         }
@@ -221,21 +228,65 @@ pub(super) fn command_from_proto(
         .kind
         .ok_or("missing command kind")?
     {
-        internal::command::Kind::User(entry) => Ok(Command::User(Entry {
-            client: ClientId(entry.client),
-            seq: ClientSeq(entry.seq),
-            value: Value(entry.value),
+        internal::command::Kind::Write(entry) => Ok(Command::Write(Entry {
+            generation: Generation(entry.generation),
+            owner: ClientId(entry.owner),
+            seq: Seq(entry.seq),
+            records: entry.records.into_iter().map(Value).collect(),
         })),
         internal::command::Kind::Control(control) => {
             let control = match control.kind.ok_or("missing control command kind")? {
                 internal::control_command::Kind::Truncate(truncate) => Control::Truncate {
-                    up_to: Slot(truncate.up_to),
+                    up_to: Seq(truncate.up_to),
                 },
                 internal::control_command::Kind::Noop(_) => Control::Noop,
+                internal::control_command::Kind::SetLeader(set) => Control::SetLeader {
+                    expected: Generation(set.expected),
+                    owner: ClientId(set.owner),
+                },
             };
             Ok(Command::Control(control))
         }
     }
+}
+
+/// The wire form of a journal's control state (#204), shared by the
+/// consensus wire (a `TrimmedTo`'s sealed state) and the client API (every
+/// verdict names the state it was judged against).
+#[must_use]
+pub fn journal_state_to_proto(state: JournalState) -> common::JournalState {
+    common::JournalState {
+        owner: state.owner.map(|o| o.0),
+        generation: state.generation.0,
+        next_seq: state.next_seq.0,
+        first_seq: state.first_seq.0,
+    }
+}
+
+/// Decode a journal state off the wire. A missing one is the journal's
+/// birth; an ill-formed one (an owner without a generation, a first
+/// position past the next) is refused.
+///
+/// # Errors
+///
+/// A state that breaks its own ordering.
+pub fn journal_state_from_proto(
+    state: Option<common::JournalState>,
+) -> Result<JournalState, &'static str> {
+    let Some(state) = state else {
+        return Ok(JournalState::default());
+    };
+    let decoded = JournalState {
+        owner: state.owner.map(ClientId),
+        generation: Generation(state.generation),
+        next_seq: Seq(state.next_seq),
+        first_seq: Seq(state.first_seq),
+    };
+    if decoded.first_seq > decoded.next_seq || decoded.owner.is_some() != (decoded.generation.0 > 0)
+    {
+        return Err("ill-formed journal state");
+    }
+    Ok(decoded)
 }
 
 /// Collect decoded `(key, value)` entries into a map, refusing the first

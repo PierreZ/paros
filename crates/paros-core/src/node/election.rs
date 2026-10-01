@@ -322,7 +322,6 @@ impl ColocatedNode {
             // the same one that fills an election's undescribed slot — spends
             // a `Control::Noop` on it.
             let command = decision.command.unwrap_or(Command::Control(Control::Noop));
-            self.replica.track_command(slot, &command);
             // A repair decision is Phase-1-shaped work: never proxied.
             self.start_accept_round(slot, command, Delegation::Colocated);
         }
@@ -566,7 +565,6 @@ impl ColocatedNode {
                 self.counters.election_gap_fills =
                     self.counters.election_gap_fills.saturating_add(1);
             }
-            self.replica.track_command(slot, &command);
             self.start_accept_round(slot, command, delegation);
             started += 1;
         }

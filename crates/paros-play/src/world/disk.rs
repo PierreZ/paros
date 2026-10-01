@@ -44,7 +44,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorWrite, Ballot, ClientId, ClientSeq, Command, Config, HardState, SessionEntry, Slot,
+    AcceptorWrite, Ballot, ClientId, Command, Config, Generation, HardState, JournalState, Slot,
     Storage, WriteOp,
 };
 
@@ -55,7 +55,9 @@ pub struct Disk {
     hard_state: HardState,
     records: BTreeMap<Slot, (Ballot, Command)>,
     first_slot: Slot,
-    sealed: BTreeMap<(ClientId, ClientSeq), Slot>,
+    /// The journal state sealed at the floor (#204): what the replica folds
+    /// the retained log from.
+    sealed: JournalState,
     applied: Vec<(Slot, Command)>,
     /// The **faulty** records: value lost, identity — the slot and the ballot
     /// it was accepted at — intact. Reported through
@@ -79,7 +81,7 @@ impl Disk {
             hard_state: HardState::default(),
             records: BTreeMap::new(),
             first_slot: Slot(0),
-            sealed: BTreeMap::new(),
+            sealed: JournalState::default(),
             applied: Vec::new(),
             faulty: BTreeMap::new(),
             formatted: true,
@@ -169,7 +171,7 @@ impl Disk {
         self.hard_state = HardState::default();
         self.records.clear();
         self.faulty.clear();
-        self.sealed.clear();
+        self.sealed = JournalState::default();
         self.applied.clear();
         self.first_slot = Slot(0);
         self.formatted = false;
@@ -218,13 +220,13 @@ impl Disk {
                 self.hard_state.chosen_index = Some(*slot);
             }
             WriteOp::Truncate { first, sealed } => {
-                self.seal(sealed);
+                self.seal(*first, *sealed);
                 self.first_slot = self.first_slot.max(*first);
                 self.records.retain(|slot, _| *slot >= self.first_slot);
                 self.faulty.retain(|slot, _| *slot >= self.first_slot);
             }
-            WriteOp::TrimmedTo { point, sessions } => {
-                self.seal(sessions);
+            WriteOp::TrimmedTo { point, state } => {
+                self.seal(*point, *state);
                 let boundary = Slot(point.0.saturating_sub(1));
                 if self.hard_state.chosen_index.is_none_or(|ci| ci < boundary) {
                     self.hard_state.chosen_index = Some(boundary);
@@ -247,9 +249,25 @@ impl Disk {
         self.applied.iter().any(|(s, _)| *s == slot)
     }
 
-    fn seal(&mut self, sealed: &[SessionEntry]) {
-        for &(client, seq, slot) in sealed {
-            self.sealed.entry((client, seq)).or_insert(slot);
+    /// The state sealed at `floor` lands with it, never with a lower one.
+    fn seal(&mut self, floor: Slot, sealed: JournalState) {
+        if floor >= self.first_slot {
+            self.sealed = sealed;
+        }
+    }
+
+    /// Provision the journal to `owner` at generation 1, as if a
+    /// `SetLeader` had been decided and trimmed before the level starts.
+    /// The game teaches Paxos, not the claim (#204): a level's client is the
+    /// journal's writer from its first move. Only a disk that has sealed
+    /// nothing yet is provisioned.
+    pub fn provision_owner(&mut self, owner: ClientId) {
+        if self.sealed == JournalState::default() && self.first_slot == Slot(0) {
+            self.sealed = JournalState {
+                owner: Some(owner),
+                generation: Generation(1),
+                ..JournalState::default()
+            };
         }
     }
 }
@@ -278,11 +296,8 @@ impl Storage for Disk {
             .unwrap_or(Slot(0))
     }
 
-    fn sealed_sessions(&self) -> Vec<SessionEntry> {
+    fn sealed_state(&self) -> JournalState {
         self.sealed
-            .iter()
-            .map(|(&(client, seq), &slot)| (client, seq, slot))
-            .collect()
     }
 
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {

@@ -18,7 +18,8 @@ use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, Slot, Value, command_fingerprint,
+    Ballot, ClientId, Command, Control, Entry, Generation, NodeId, Seq, Slot, Value,
+    command_fingerprint,
 };
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart
@@ -30,6 +31,8 @@ struct TestStorage {
     first_slot: Slot,
     /// Recoverable faulty entries the simulated boot scan classified (Stage 8).
     faulty: Vec<(Slot, Ballot)>,
+    /// The journal state sealed at the floor (#204).
+    sealed: crate::JournalState,
 }
 
 impl TestStorage {
@@ -49,6 +52,7 @@ impl TestStorage {
             },
             first_slot: Slot(0),
             faulty: Vec::new(),
+            sealed: crate::JournalState::default(),
         }
     }
 
@@ -62,6 +66,7 @@ impl TestStorage {
             config: n.config().clone(),
             first_slot: n.acceptor().first_slot(),
             faulty: Vec::new(),
+            sealed: n.replica().journal_base(),
         }
     }
 
@@ -91,6 +96,9 @@ impl Storage for TestStorage {
     }
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.faulty.clone()
+    }
+    fn sealed_state(&self) -> crate::JournalState {
+        self.sealed
     }
 }
 
@@ -197,17 +205,22 @@ fn val(b: u8) -> Value {
     Value(vec![b])
 }
 
+/// A one-record `Write` by `client` at position `seq` under generation zero:
+/// the per-slot value most consensus tests carry. Nobody owns a journal at
+/// generation zero, so the journal state machine refuses it at apply — which
+/// is all a test of the consensus layer needs.
 fn entry(client: u64, seq: u64, b: u8) -> Entry {
     Entry {
-        client: ClientId(client),
-        seq: ClientSeq(seq),
-        value: val(b),
+        generation: Generation(0),
+        owner: ClientId(client),
+        seq: Seq(seq),
+        records: vec![val(b)],
     }
 }
 
 /// A client [`Command`] wrapping [`entry`], the common per-slot value in tests.
 fn ucmd(client: u64, seq: u64, b: u8) -> Command {
-    Command::User(entry(client, seq, b))
+    Command::Write(entry(client, seq, b))
 }
 
 fn ballot(round: u64, node: u64) -> Ballot {
@@ -269,8 +282,8 @@ fn chosen_at(n: &ColocatedNode, slot: u64) -> Option<Value> {
     n.replica
         .chosen()
         .get(&Slot(slot))
-        .and_then(Command::user)
-        .map(|e| e.value.clone())
+        .and_then(Command::write)
+        .map(|e| e.records[0].clone())
 }
 
 /// Deliver `queue` to addressed recipients, dropping any `(to, msg)` for which
@@ -325,7 +338,7 @@ fn cluster_with_three_chosen() -> [ColocatedNode; 3] {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
-        let _ = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
+        let _ = nodes[0].propose(entry(1, seq, b));
         let q = drain(&mut nodes[0]);
         deliver_all(&mut nodes, q);
     }

@@ -465,24 +465,27 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         if !self.active() {
             return false;
         }
-        // Dropped *after* the server committed/applied: the client's retry
-        // must take the `(client, seq)` dedup path, the at-most-once edge the
-        // truncated-dedup-window hazard lives on. One location per reply kind.
+        // Dropped *after* the journal judged the call: the client's retry
+        // must be answered from the log (#204: a retried write is a
+        // `Duplicate`), the edge a lost verdict lives on. One location per
+        // reply kind.
         match reply {
-            paros::Reply::Propose => buggify_with_prob!(0.10),
-            paros::Reply::ProposeDedup => buggify_with_prob!(0.10),
-            paros::Reply::Read => buggify_with_prob!(0.10),
-            // A lost journal read (#185): the client re-asks, and a read
-            // parked at the end costs it its deadline first.
+            paros::Reply::Write => buggify_with_prob!(0.10),
+            // A lost claim: the owner does not know it won, and its next
+            // write names its old generation — refused, naming itself as
+            // the writer, which it adopts.
+            paros::Reply::SetLeader => buggify_with_prob!(0.10),
+            // A lost journal read: the client re-asks, and a read waiting at
+            // the tail costs it its deadline first.
             paros::Reply::LogRead => buggify_with_prob!(0.10),
             // A lost redirect costs the client its whole request deadline
             // before it retries blind, so the retarget policies meet a stale
             // hint under time pressure instead of a fresh one.
-            paros::Reply::ProposeRedirect => buggify_with_prob!(0.10),
-            paros::Reply::ReadRedirect => buggify_with_prob!(0.10),
-            // A lost compaction ack is the one ambiguity the compaction
-            // client's re-ask loop must absorb without double-seeding.
-            paros::Reply::Compact => buggify_with_prob!(0.10),
+            paros::Reply::Redirect => buggify_with_prob!(0.10),
+            paros::Reply::ReadUnserved => buggify_with_prob!(0.10),
+            // A lost truncation ack is the one ambiguity the truncation
+            // client's re-ask loop must absorb.
+            paros::Reply::Truncate => buggify_with_prob!(0.10),
             // A lost matchmaker reply after the registration is durable: the
             // requester's retry is the same request again, the idempotent
             // re-answer path. Gated in the audit (`match_reply_dropped`).

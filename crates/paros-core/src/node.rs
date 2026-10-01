@@ -40,10 +40,7 @@ use crate::ready::Ready;
 use crate::replica::Replica;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{
-    Ballot, ClientId, ClientSeq, Command, Control, Entry, NodeId, SessionEntry, Slot, Value,
-    command_fingerprint,
-};
+use crate::types::{Ballot, Command, Control, Entry, NodeId, Seq, Slot, command_fingerprint};
 use crate::write::WriteOp;
 
 /// Maximum accepted records carried by one [`Message::Promise`] page — the
@@ -74,31 +71,16 @@ pub enum NodeRole {
 }
 
 /// The outcome of [`ColocatedNode::propose`], telling the driver how to answer the
-/// client. The driver acks on commit: it holds the reply for `Accepted`/
-/// `Duplicate` until that slot commits, redirects on `NotLeader`, and acks
-/// immediately on `Chosen`.
+/// client: redirect on `NotLeader`, or hold the reply for `Accepted` until the
+/// slot is applied and answer from its [`crate::Outcome`] (#204) — a proposal
+/// is never judged here, only at apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProposeResult {
     /// This node is not the leader; the client should retry the hinted node
     /// (`None` if leadership is currently unknown).
     NotLeader(Option<NodeId>),
-    /// Newly admitted at this slot; ack when the slot commits.
+    /// Admitted at this slot; answer from the slot's outcome once applied.
     Accepted(Slot),
-    /// A retry already in flight at this slot; ack when the slot commits.
-    Duplicate(Slot),
-    /// Already **applied** (inside this node's contiguous chosen prefix); the
-    /// driver acks immediately (idempotent), reporting this slot.
-    ///
-    /// The slot is the one this client's *highest applied* command landed at —
-    /// this command's own slot for the ordinary retry (a sequential client
-    /// cannot be past the seq it is still retrying), and a slot at or above it
-    /// otherwise. Either way it is inside the applied prefix, which is exactly
-    /// what the immediate ack claims: the write is in the register the project
-    /// defines. An ack naming a slot the node has not applied would be a
-    /// linearizability violation, so this carries a slot rather than nothing —
-    /// it makes the fast path checkable by the simulation's oracles instead of
-    /// exempt from them.
-    Chosen(Slot),
 }
 
 /// The outcome of [`ColocatedNode::read_index`], telling the driver how to answer the
@@ -409,6 +391,9 @@ struct Counters {
     /// Undecided holes filled with a [`Control::Noop`] when this node won its
     /// *current* leadership (0 until it wins one, re-set at each election).
     election_gap_fills: u64,
+    /// Slots a settled leader filled with a [`Control::Noop`] up to a vote
+    /// watermark a pre-read reported past its frontier (monotone).
+    watermark_fills: u64,
 }
 
 impl ColocatedNode {
@@ -466,9 +451,7 @@ impl ColocatedNode {
             } => self.on_commit(ballot, slot, &command),
             Message::CatchUpRequest { from, from_slot } => self.on_catchup_request(from, from_slot),
             Message::CatchUpResponse { entries, .. } => self.on_catchup_response(entries),
-            Message::TrimmedTo {
-                point, sessions, ..
-            } => self.on_trimmed_to(point, sessions),
+            Message::TrimmedTo { point, state, .. } => self.on_trimmed_to(point, state),
             Message::Relinquish {
                 from,
                 to,
@@ -512,17 +495,21 @@ impl ColocatedNode {
         self.assert_invariants();
     }
 
-    /// Client entry point: try to get `value` chosen, deduplicated by
-    /// `(client, seq)`. Only the leader admits proposals; a non-leader returns
-    /// [`ProposeResult::NotLeader`] with a redirect hint.
+    /// Client entry point (#204, `Write`): get `entry` decided into the next
+    /// slot. Only the leader admits it; a non-leader returns
+    /// [`ProposeResult::NotLeader`] with a redirect hint. Nothing about the
+    /// write is judged here — not its writer, not its position, not whether
+    /// it retries an earlier one: every rule is the journal state machine's,
+    /// at apply, in slot order ([`crate::journal_state`]). A retry takes a
+    /// fresh slot and is answered from the log itself.
     ///
     /// # Panics
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0)))]
-    pub fn propose(&mut self, client: ClientId, seq: ClientSeq, value: Value) -> ProposeResult {
-        self.propose_in(client, seq, value, None, Delegation::Auto)
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, owner = entry.owner.0, seq = entry.seq.0)))]
+    pub fn propose(&mut self, entry: Entry) -> ProposeResult {
+        self.propose_in(entry, None, Delegation::Auto)
     }
 
     /// [`ColocatedNode::propose`] with the driver naming the **column** the
@@ -561,72 +548,35 @@ impl ColocatedNode {
     /// overrides from [`ColocatedNode::acceptors`] and
     /// [`ColocatedNode::config`], so this is a programmer error, never an
     /// operating condition. Also if an internal invariant is broken.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, client = client.0, seq = seq.0, column = ?column, delegation = ?delegation)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, owner = entry.owner.0, seq = entry.seq.0, column = ?column, delegation = ?delegation)))]
     pub fn propose_in(
         &mut self,
-        client: ClientId,
-        seq: ClientSeq,
-        value: Value,
+        entry: Entry,
         column: Option<usize>,
         delegation: Delegation,
     ) -> ProposeResult {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        // The applied ledger outranks the in-flight table: once an identity has
-        // applied, the honest answer is `Chosen` at its first slot, even while a
-        // #94 duplicate of it sits chosen-but-unapplied at a later slot (that
-        // slot will suppress to a no-op at apply, so a reply parked on it would
-        // hang to the client's deadline).
-        if let Some(at) = self.replica.applied_at(client, seq) {
-            // What an immediate ack claims, restated at the reply: the slot is
-            // inside this node's applied prefix (the ledger is written only by
-            // the contiguous walk, the boot rebuild, and sealed records below
-            // the floor), and if its record is still retained, it is this very
-            // identity's command — never a `Noop` or another client's write.
-            assert!(
-                at < self.first_unchosen(),
-                "an immediate Chosen names a slot inside the applied prefix"
-            );
-            assert!(
-                match self.replica.chosen_at(at) {
-                    None => true,
-                    Some(Command::User(applied)) => applied.client == client && applied.seq == seq,
-                    Some(Command::Control(_)) => false,
-                },
-                "the applied ledger points at the identity's own chosen command"
-            );
-            return ProposeResult::Chosen(at);
-        }
-        if let Some(slot) = self.replica.inflight_at(client, seq) {
-            return ProposeResult::Duplicate(slot);
-        }
-        self.open_proposal(column, delegation, |replica, slot| {
-            replica.track_inflight(client, seq, slot);
-            Command::User(Entry { client, seq, value })
-        })
+        self.open_proposal(column, delegation, Command::Write(entry))
     }
 
     /// The tail every proposal entry point shares: allocate the next slot,
-    /// build the command for it with `command` (handed the replica so a
-    /// client entry is tracked in flight *before* its round can decide —
-    /// on a singleton the round decides and applies inside the call), open
-    /// its Phase-2 round in `column` (the configuration's own for the slot
-    /// when `None`) under `delegation` narrowed to a settled leadership, and
-    /// answer `Accepted`. The caller has already checked the role and, for
-    /// a client entry, the deduplication ledgers.
+    /// open `command`'s Phase-2 round in `column` (the configuration's own
+    /// for the slot when `None`) under `delegation` narrowed to a settled
+    /// leadership, and answer `Accepted`. The caller has already checked the
+    /// role.
     fn open_proposal(
         &mut self,
         column: Option<usize>,
         delegation: Delegation,
-        command: impl FnOnce(&mut Replica, Slot) -> Command,
+        command: Command,
     ) -> ProposeResult {
         assert!(
             self.role == NodeRole::Leader,
             "only a leader opens a proposal"
         );
         let slot = self.proposer.allocate();
-        let command = command(&mut self.replica, slot);
         let column = column.or_else(|| self.acceptors.column_of(slot));
         let delegation = self.settled_delegation(delegation);
         self.start_accept_round_in(slot, command, column, delegation);
@@ -649,12 +599,12 @@ impl ColocatedNode {
     /// next log slot by ordinary Paxos. Only the leader admits it; a non-leader
     /// returns [`ProposeResult::NotLeader`] with a redirect hint.
     ///
-    /// A control command carries no `(client, seq)` and so is never deduplicated;
-    /// each proposal takes a fresh slot. It is a normal Phase-2 round from the
+    /// Each proposal takes a fresh slot. It is a normal Phase-2 round from the
     /// acceptors' point of view (they store it opaquely, exactly like a client
-    /// entry). Its *effect* — for [`Control::Truncate`], dropping the log prefix —
-    /// is applied lazily by every node when the slot enters its contiguous chosen
-    /// prefix (see `ColocatedNode::advance_chosen_index`).
+    /// write). Its *effect* — a [`Control::SetLeader`]'s compare-and-swap, a
+    /// [`Control::Truncate`]'s new first position and the log prefix it drops —
+    /// is judged and applied by every node when the slot enters its contiguous
+    /// chosen prefix (see `ColocatedNode::advance_chosen_index`).
     ///
     /// # Panics
     ///
@@ -684,7 +634,7 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return ProposeResult::NotLeader(self.leader);
         }
-        self.open_proposal(None, delegation, |_, _| Command::Control(control))
+        self.open_proposal(None, delegation, Command::Control(control))
     }
 
     /// Leader entry point for a **linearizable read**: capture the current
@@ -751,28 +701,23 @@ impl ColocatedNode {
         ReadIndexResult::Pending
     }
 
-    /// Decided log compaction (a journal `Trim`, #185): drop every retained slot at or below
-    /// `up_to`, raising the truncation floor. Returns the new floor (the first
-    /// slot still retained).
+    /// Decided log compaction (a journal `Truncate`, #204): drop every
+    /// retained slot at or below `up_to`, raising the truncation floor.
+    /// Returns the new floor (the first slot still retained).
     ///
-    /// `up_to` is the last slot the client permits dropping (inclusive); the
+    /// `up_to` is the last slot the caller permits dropping (inclusive); the
     /// floor stored in the log is the first slot *retained*. The request is
-    /// clamped to the contiguous chosen prefix (`up_to.min(chosen_index)`): a slot
-    /// that is not yet chosen is never dropped, so nothing undecided is lost.
-    /// Clamping makes the call safe to over-request ("drop as much as you may, up
-    /// to N") and idempotent (a floor never moves backward). With nothing chosen,
-    /// or when the floor would not rise, it is a no-op that emits no
-    /// [`WriteOp::Truncate`].
+    /// clamped to what the journal fold lets go
+    /// ([`Replica::compaction_target`]: every slot below the one holding the
+    /// journal's first retained record, never an undecided or unfolded one),
+    /// which makes the call safe to over-request and idempotent (a floor never
+    /// moves backward). When the floor would not rise it is a no-op that emits
+    /// no [`WriteOp::Truncate`].
     ///
-    /// Truncation does **not** shrink the at-most-once dedup window: the ledger
-    /// records whose slots this call drops are *sealed* — emitted on the
-    /// [`WriteOp::Truncate`] for durable persistence and read back through
-    /// [`Storage::sealed_sessions`] on the next boot — so a restart recognizes a
-    /// truncated `(client, seq)` exactly like a node that never restarted, and
-    /// the #94 duplicate-suppression decision stays cluster-consistent. (The
-    /// sealed ledger grows with distinct client identities for the lifetime of
-    /// the cluster; bounding it needs a client-session expiry policy, which is
-    /// out of scope here.)
+    /// The journal state the dropped slots folded to is **sealed** on the
+    /// [`WriteOp::Truncate`] and read back through [`Storage::sealed_state`]
+    /// on the next boot, so a restart folds the retained log from the same
+    /// state a node that never restarted holds.
     ///
     /// # Panics
     ///
@@ -781,26 +726,21 @@ impl ColocatedNode {
     /// clamped inside the chosen prefix.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, up_to = up_to.0)))]
     pub fn compact(&mut self, up_to: Slot) -> Slot {
-        let Some(ci) = self.replica.chosen_index() else {
+        let Some(target) = self.replica.compaction_target() else {
             return self.acceptor.first_slot();
         };
-        let highest_drop = up_to.min(ci);
+        let highest_drop = up_to.min(target);
         let old_floor = self.acceptor.first_slot();
         let first = Slot(highest_drop.0 + 1).max(old_floor);
         if first <= old_floor {
             return old_floor;
         }
-        // Seal from the *ledger*, not from the dropped `chosen` range (see
-        // `Replica::seal`). Only the delta is sealed — records below the old
-        // floor were sealed by the truncation (or trim-point jump) that dropped
-        // them.
-        let sealed: Vec<SessionEntry> = self.replica.seal(old_floor, first);
         // A faulty entry below the floor is dropped with the prefix: only
         // chosen slots are dropped, and a trim is decided, so no peer will
         // ever need this node's copy of a slot below it.
+        let sealed = self.replica.truncate(first);
         self.acceptor
             .truncate(first, sealed, &mut self.pending_writes);
-        self.replica.truncate(first);
         self.proposer.retain_rounds_from(first);
         // Postconditions: the floor strictly rose (the no-op path returned
         // above) and stayed clamped inside the chosen prefix.
@@ -941,14 +881,19 @@ impl ColocatedNode {
                 self.send_prepare(unanswered, ballot, from_slot, config);
             }
         }
-        if let Some(first_faulty) = self
+        let hole = self
             .acceptor
             .first_faulty()
             .filter(|slot| *slot < self.first_unchosen())
-        {
+            .into_iter()
+            .chain(self.replica.fold_hole())
+            .min();
+        if let Some(first_faulty) = hole {
             // A faulty **chosen** record leaves a hole in the servable log
-            // (catch-up replay and a journal read both stop at it — per-slot
-            // attribution). Pull the decided range from peers so the record
+            // (catch-up replay stops at it — per-slot attribution — and the
+            // journal fold stops at it, holding the walk; the fold's hole
+            // outlives the faulty mark when an election's re-proposal repaired
+            // the record without this node learning it chosen). Pull the decided range from peers so the record
             // itself heals; a peer that has it chosen serves it, one that
             // trimmed past it answers `TrimmedTo`, and this node's own next
             // election covers it either way (the campaign range starts at the
@@ -1309,13 +1254,11 @@ impl ColocatedNode {
         &self.replica
     }
 
-    /// A **journal read** (#185) from this node's chosen prefix, against
-    /// its compaction floor: [`Replica::read`] with the floor this node
-    /// retains. A pure read — nothing in the node moves.
+    /// A **journal read** (#204) from this node's journal fold:
+    /// [`Replica::read`]. A pure read — nothing in the node moves.
     #[must_use]
-    pub fn read_log(&self, from: Slot, max_bytes: usize) -> crate::LogRead {
-        self.replica
-            .read(from, self.acceptor.first_slot(), max_bytes)
+    pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::LogRead {
+        self.replica.read(from, limit, max_bytes)
     }
 
     /// The node's **proposer** role: the open Phase 1, the CTRL repair
@@ -1375,18 +1318,13 @@ impl ColocatedNode {
         self.counters.election_gap_fills
     }
 
-    /// The full at-most-once session ledger: every `(client, seq) -> slot`
-    /// record in this node's applied prefix, flattened. Its prefix below the
-    /// trim point travels in each [`Message::TrimmedTo`] this node serves, so
-    /// a peer that jumped makes the same #94 duplicate-suppression decisions
-    /// as everyone else.
+    /// Monotone count of slots this node, as a settled leader, filled with a
+    /// [`Control::Noop`] because a pre-read reported a vote watermark at or
+    /// past its allocator frontier (`node/quorum_reads.rs`). The driver
+    /// reports the delta so a simulation can prove the path is reached.
     #[must_use]
-    pub fn session_ledger(&self) -> Vec<SessionEntry> {
-        self.replica
-            .session_ledger()
-            .iter()
-            .flat_map(|(client, seqs)| seqs.iter().map(|(&seq, &slot)| (*client, seq, slot)))
-            .collect()
+    pub fn watermark_fills(&self) -> u64 {
+        self.counters.watermark_fills
     }
 
     /// Monotone count of `CheckQuorum` step-downs (#95) this incarnation: the
@@ -1448,7 +1386,7 @@ impl ColocatedNode {
         &self.pending_messages
     }
 
-    pub(crate) fn pending_committed(&self) -> &[(Slot, Command)] {
+    pub(crate) fn pending_committed(&self) -> &[(Slot, Command, crate::Outcome)] {
         self.replica.committed()
     }
 

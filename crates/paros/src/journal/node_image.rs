@@ -13,7 +13,7 @@
 //! | `ChosenIndex` | forgotten | the commit index is relaxed by contract: re-derivable after a crash |
 //! | `Truncate` | forgotten | compaction is lazy and local; the records it would drop are still earlier in the log, so the store is the one it was before the truncation |
 //! | `TrimmedTo` | forgotten, and every later chosen index with it | the node is back below the floor with the log it had, and is told the trim point again; a later chosen index could claim slots the forgotten jump covered |
-//! | `Begin`, `Sealed` (strict) | **crash** | the checkpoint the fold must trust has lost its floor or its ledger, and the history it summarised is gone |
+//! | `Begin`, `Sealed` (strict) | **crash** | the checkpoint the fold must trust has lost its floor or its sealed state, and the history it summarised is gone |
 //!
 //! A damaged record inside a checkpoint the fold does *not* have to trust
 //! never reaches this table: the plan skips that copy and reads the
@@ -22,15 +22,12 @@
 use std::collections::BTreeMap;
 
 use moonpool_journal::{EntryId, Tag};
-use paros_core::{Ballot, ClientId, ClientSeq, Command, SessionEntry, Slot};
+use paros_core::{Ballot, Command, JournalState, Slot};
 use serde::{Deserialize, Serialize};
 
 use super::frame::{Framed, Kind, slot_identity, slot_tag, tag};
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::storage::{StorageError, StorageRecord};
-
-/// How many sealed-ledger records one checkpoint entry carries.
-const SEALED_PER_ENTRY: usize = 512;
 
 /// One durable write of the node store, as one journal entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,19 +43,14 @@ pub(crate) enum NodeRecord {
     Faulty { slot: Slot, ballot: Ballot },
     /// The chosen index.
     ChosenIndex(Slot),
-    /// Raise the floor to `first`, sealing the ledger it drops.
-    Truncate {
-        first: Slot,
-        sealed: Vec<SessionEntry>,
-    },
+    /// Raise the floor to `first`, sealing the journal state the dropped
+    /// slots folded to (#204).
+    Truncate { first: Slot, sealed: JournalState },
     /// A jump below a peer's trim point (#186): the floor to `point`, the
-    /// chosen index to at least `point - 1`, the ledger sealed.
-    TrimmedTo {
-        point: Slot,
-        sessions: Vec<SessionEntry>,
-    },
-    /// Part of a checkpoint's sealed ledger.
-    Sealed(Vec<SessionEntry>),
+    /// chosen index to at least `point - 1`, the journal state sealed.
+    TrimmedTo { point: Slot, state: JournalState },
+    /// A checkpoint's sealed journal state.
+    Sealed(JournalState),
     /// A checkpoint opens: the floor and the chosen index, then the image.
     Begin {
         first: Slot,
@@ -101,16 +93,19 @@ pub(crate) struct NodeImage {
     pub accepted: BTreeMap<Slot, (Ballot, Command)>,
     /// Slots whose value is lost and whose identity is not (CTRL).
     pub faulty: BTreeMap<Slot, Ballot>,
-    pub sealed: BTreeMap<(ClientId, ClientSeq), Slot>,
+    /// The journal state sealed at the floor.
+    pub sealed: JournalState,
     /// Replay only: a damaged trim-point jump was forgotten, so no later
     /// chosen index is believed until an intact jump or checkpoint speaks.
     chosen_frozen: bool,
 }
 
 impl NodeImage {
-    fn seal(&mut self, sealed: &[SessionEntry]) {
-        for &(client, seq, slot) in sealed {
-            self.sealed.entry((client, seq)).or_insert(slot);
+    /// Seal `state` with a floor raised to `first`: a floor that does not
+    /// rise keeps the state sealed with the higher one.
+    fn seal(&mut self, first: Slot, state: JournalState) {
+        if first >= self.first {
+            self.sealed = state;
         }
     }
 
@@ -142,19 +137,19 @@ impl NodeImage {
                 }
             }
             NodeRecord::Truncate { first, sealed } => {
-                self.seal(sealed);
+                self.seal(*first, *sealed);
                 self.raise_floor(*first);
             }
-            NodeRecord::TrimmedTo { point, sessions } => {
+            NodeRecord::TrimmedTo { point, state } => {
                 self.chosen_frozen = false;
-                self.seal(sessions);
+                self.seal(*point, *state);
                 let boundary = Slot(point.0.saturating_sub(1));
                 if self.chosen_index.is_none_or(|ci| ci < boundary) {
                     self.chosen_index = Some(boundary);
                 }
                 self.raise_floor(*point);
             }
-            NodeRecord::Sealed(sealed) => self.seal(sealed),
+            NodeRecord::Sealed(sealed) => self.sealed = *sealed,
             NodeRecord::Begin {
                 first,
                 chosen_index,
@@ -174,7 +169,7 @@ impl NodeImage {
     ///
     /// # Errors
     ///
-    /// The crash verdict for a damaged checkpoint header or sealed ledger in
+    /// The crash verdict for a damaged checkpoint header or sealed journal state in
     /// strict mode, and for an entry of a kind this store never writes.
     pub(crate) fn apply_damaged(
         &mut self,
@@ -205,7 +200,7 @@ impl NodeImage {
             Some(Kind::Begin | Kind::Sealed) if strict => {
                 return Err(crash(StorageRecord::Truncation));
             }
-            // A damaged header or ledger of a checkpoint the plan did not
+            // A damaged header or sealed state of a checkpoint the plan did not
             // make the fold trust is skipped with its bracket; reaching here
             // would be a plan bug, and is treated as the rot it looks like.
             Some(Kind::Begin | Kind::Sealed) => return Err(crash(StorageRecord::Truncation)),
@@ -236,16 +231,7 @@ impl NodeImage {
             first: self.first,
             chosen_index: self.chosen_index,
         }];
-        let sealed: Vec<SessionEntry> = self
-            .sealed
-            .iter()
-            .map(|(&(client, seq), &slot)| (client, seq, slot))
-            .collect();
-        records.extend(
-            sealed
-                .chunks(SEALED_PER_ENTRY)
-                .map(|part| NodeRecord::Sealed(part.to_vec())),
-        );
+        records.push(NodeRecord::Sealed(self.sealed));
         records.extend(self.accepted.iter().map(|(slot, (ballot, command))| {
             NodeRecord::Accepted {
                 slot: *slot,
@@ -264,7 +250,7 @@ impl NodeImage {
 
 #[cfg(test)]
 mod tests {
-    use paros_core::{Entry, NodeId, Value};
+    use paros_core::{ClientId, Entry, Generation, NodeId, Seq, Value};
 
     use super::*;
 
@@ -276,10 +262,11 @@ mod tests {
     }
 
     fn user(byte: u8) -> Command {
-        Command::User(Entry {
-            client: ClientId(1),
-            seq: ClientSeq(u64::from(byte)),
-            value: Value(vec![byte]),
+        Command::Write(Entry {
+            generation: Generation(1),
+            owner: ClientId(1),
+            seq: Seq(u64::from(byte)),
+            records: vec![Value(vec![byte])],
         })
     }
 
@@ -296,7 +283,12 @@ mod tests {
         image.apply(&NodeRecord::ChosenIndex(Slot(4)));
         image.apply(&NodeRecord::Truncate {
             first: Slot(2),
-            sealed: vec![(ClientId(1), ClientSeq(0), Slot(0))],
+            sealed: JournalState {
+                owner: Some(ClientId(1)),
+                generation: Generation(1),
+                next_seq: Seq(2),
+                first_seq: Seq(1),
+            },
         });
         image.apply(&NodeRecord::Faulty {
             slot: Slot(5),

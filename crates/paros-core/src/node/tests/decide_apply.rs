@@ -7,7 +7,7 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
     make_leader(&mut nodes, 0);
 
     for (seq, b) in [(1u64, 10u8), (2, 20), (3, 30)] {
-        let r = nodes[0].propose(ClientId(1), ClientSeq(seq), val(b));
+        let r = nodes[0].propose(entry(1, seq, b));
         assert!(
             matches!(r, ProposeResult::Accepted(_)),
             "leader admits proposal"
@@ -29,228 +29,15 @@ fn leader_streams_multiple_slots_and_all_nodes_agree() {
 }
 
 #[test]
-fn a_slot_filled_with_a_noop_frees_its_inflight_client_request() {
-    // The dedup half of #54. `ColocatedNode::new` rebuilds `inflight` from every
-    // accepted-but-unchosen entry, so the restarted old leader boots holding
-    // `(client 1, seq 2) -> slot 1`. When slot 1 decides as a `Noop`, that mapping
-    // must go: keeping it would answer the client's retry with `Duplicate(slot 1)`,
-    // a reply parked on a slot whose commit never acks a proposer (the driver skips
-    // waiters for control commands), so it would hang forever. Cleared by slot, the
-    // retry takes a fresh slot and commits.
-    let mut storage = TestStorage::new(0, &[0, 1, 2]);
-    storage.hard_state.chosen_index = Some(Slot(0));
-    storage.hard_state.max_promised_ballot = ballot(1, 0);
-    storage
-        .accepted
-        .insert(Slot(0), (ballot(1, 0), ucmd(1, 1, 10)));
-    storage
-        .accepted
-        .insert(Slot(1), (ballot(1, 0), ucmd(1, 2, 20)));
-    let mut n = ColocatedNode::new(&storage);
-    assert_eq!(
-        n.replica.inflight_at(ClientId(1), ClientSeq(2)),
-        Some(Slot(1)),
-        "the boot rebuilt the in-flight mapping from the unchosen accepted entry"
-    );
-
-    // The cluster decided a no-op at slot 1 under a later ballot; we learn it.
-    n.step(Message::Commit {
-        from: Party::Node(NodeId(1)),
-        ballot: ballot(2, 1),
-        slot: Slot(1),
-        command: Command::Control(Control::Noop),
-    });
-    assert_eq!(
-        n.replica.inflight_at(ClientId(1), ClientSeq(2)),
-        None,
-        "the decision frees the slot's in-flight client request, whatever was decided"
-    );
-
-    // As leader, the client's retry is admitted at a fresh slot rather than being
-    // parked on the no-op's slot forever.
-    let mut nodes = [n, node(1, &[0, 1, 2]), node(2, &[0, 1, 2])];
-    make_leader(&mut nodes, 0);
-    assert_eq!(
-        nodes[0].propose(ClientId(1), ClientSeq(2), val(20)),
-        ProposeResult::Accepted(Slot(2)),
-        "the retry is re-proposed at a fresh slot, not deduped onto the no-op's"
-    );
-}
-
-#[test]
 fn non_leader_propose_redirects() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     // node 1 learned the leader via the election traffic.
-    let r = nodes[1].propose(ClientId(1), ClientSeq(1), val(7));
+    let r = nodes[1].propose(entry(1, 1, 7));
     assert_eq!(r, ProposeResult::NotLeader(Some(NodeId(0))));
     assert!(
         drain(&mut nodes[1]).is_empty(),
         "a follower proposes nothing"
-    );
-}
-
-#[test]
-fn dedup_returns_duplicate_for_inflight_and_chosen_for_applied() {
-    let mut nodes = cluster::<3>();
-    make_leader(&mut nodes, 0);
-
-    let r1 = nodes[0].propose(ClientId(7), ClientSeq(1), val(1));
-    let ProposeResult::Accepted(slot) = r1 else {
-        panic!("expected Accepted, got {r1:?}");
-    };
-    // A retry while still in flight maps to the same slot (no new allocation).
-    let r2 = nodes[0].propose(ClientId(7), ClientSeq(1), val(1));
-    assert_eq!(
-        r2,
-        ProposeResult::Duplicate(slot),
-        "retry dedups to the same slot"
-    );
-
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-
-    // Once chosen+applied, a retry is reported as already chosen (idempotent).
-    let r3 = nodes[0].propose(ClientId(7), ClientSeq(1), val(1));
-    assert_eq!(
-        r3,
-        ProposeResult::Chosen(slot),
-        "the idempotent ack names the slot the command applied at"
-    );
-    // And no second slot was ever allocated for it.
-    assert_eq!(
-        nodes[0].proposer().next_slot(),
-        Slot(1),
-        "exactly one slot consumed"
-    );
-}
-
-#[test]
-fn a_slot_chosen_above_a_hole_is_deduped_in_flight_not_acked_as_applied() {
-    // Pins #55 on the `try_decide` call site: the leader streams slots
-    // concurrently, so a later slot's accept quorum routinely completes while an
-    // earlier slot is still open. Until the earlier slot fills, the later one is
-    // *chosen* but not *applied*, and `propose` must not answer the client's
-    // retry with `Chosen` — that is an immediate `committed: true` for a write
-    // outside the applied prefix, which a read at the same node would not see.
-    let mut nodes = cluster::<3>();
-    make_leader(&mut nodes, 0);
-
-    // Slot 0 is proposed but its round never leaves the leader (the batch is
-    // dropped on the floor), so nothing is chosen there.
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(1), val(10)),
-        ProposeResult::Accepted(Slot(0))
-    );
-    drop(drain(&mut nodes[0]));
-
-    // Slot 1 goes out and is chosen — above the hole at slot 0.
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
-        ProposeResult::Accepted(Slot(1))
-    );
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    assert_eq!(chosen_at(&nodes[0], 1), Some(val(20)), "slot 1 is chosen");
-    assert_eq!(
-        nodes[0].hard_state().chosen_index,
-        None,
-        "but nothing is applied: the prefix is still stuck below the slot-0 hole"
-    );
-
-    // The retry lands in exactly that window. It must dedup onto the slot the
-    // command is already chosen at, so the driver parks the reply there and acks
-    // it when the slot applies — not report it applied, and not (the worse
-    // failure) miss both tables and allocate a second slot for it.
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
-        ProposeResult::Duplicate(Slot(1)),
-        "chosen-but-unapplied dedups to its slot, it is not acked as applied"
-    );
-    assert_eq!(
-        nodes[0].proposer().next_slot(),
-        Slot(2),
-        "and no second slot was allocated for a command already chosen"
-    );
-
-    // Fill the hole: the leader's beat re-sends the still-pending slot-0
-    // `Accept`, slot 0 is chosen, and the walk applies slots 0 and 1 together.
-    nodes[0].tick();
-    nodes[0].resend_pending();
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    assert_eq!(
-        nodes[0].hard_state().chosen_index,
-        Some(Slot(1)),
-        "the prefix caught up over both slots"
-    );
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(2), val(20)),
-        ProposeResult::Chosen(Slot(1)),
-        "only now is the retry answered as applied, naming the slot it applied at"
-    );
-}
-
-#[test]
-fn a_commit_above_the_hole_holds_the_entry_in_flight_until_it_applies() {
-    // The same #55 property on the `on_commit` call site, where the slot is
-    // whatever the network delivers: a follower learning a decided slot above
-    // its own hole records it as *in flight at that slot*, never as applied. The
-    // hand-off to `applied_seq` happens in the contiguous walk, so the two
-    // tables are checked on both sides of it.
-    let mut nodes = cluster::<3>();
-    make_leader(&mut nodes, 0);
-
-    nodes[0].propose(ClientId(1), ClientSeq(1), val(10));
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-
-    // Slot 1: node 2 misses both the `Accept` and the `Commit` — a hole.
-    nodes[0].propose(ClientId(1), ClientSeq(2), val(20));
-    let q = drain(&mut nodes[0]);
-    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
-
-    // Slot 2 reaches node 2 normally, so it is chosen there, above the hole.
-    nodes[0].propose(ClientId(7), ClientSeq(5), val(30));
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-
-    assert_eq!(
-        nodes[2].hard_state().chosen_index,
-        Some(Slot(0)),
-        "node 2's applied prefix stalls at the hole"
-    );
-    assert_eq!(
-        nodes[2].replica.session_ledger().get(&ClientId(7)),
-        None,
-        "a slot chosen above the hole is not applied, so it is not in `applied_seq`"
-    );
-    assert_eq!(
-        nodes[2].replica.inflight_at(ClientId(7), ClientSeq(5)),
-        Some(Slot(2)),
-        "it is in flight at its chosen slot instead — node 2 never proposed it, so \
-         only `mark_chosen` could have put it there"
-    );
-
-    // Commit-replay catch-up fills the hole; the walk applies slots 1 and 2 and
-    // hands the entry from one table to the other.
-    nodes[0].tick();
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    assert_eq!(nodes[2].hard_state().chosen_index, Some(Slot(2)));
-    assert_eq!(
-        nodes[2]
-            .replica
-            .session_ledger()
-            .get(&ClientId(7))
-            .and_then(|m| m.get(&ClientSeq(5))),
-        Some(&Slot(2)),
-        "applied now, naming the slot it applied at"
-    );
-    assert_eq!(
-        nodes[2].replica.inflight_at(ClientId(7), ClientSeq(5)),
-        None,
-        "and no longer in flight"
     );
 }
 
@@ -299,7 +86,7 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
     n.step(terminal_promise(NodeId(1), camp, BTreeMap::new()));
     let _ = drain(&mut n);
 
-    let ProposeResult::Accepted(slot) = n.propose(ClientId(4), ClientSeq(5), val(6)) else {
+    let ProposeResult::Accepted(slot) = n.propose(entry(4, 5, 6)) else {
         panic!("leader must admit the proposal");
     };
     let expected = command_fingerprint(n.proposer.rounds()[&slot].command());
@@ -345,25 +132,21 @@ fn restart_rebuilds_state_from_hard_state() {
         "next_slot is past the highest accepted slot"
     );
     assert_eq!(n.role(), NodeRole::Follower);
-    // Dedup: applied seqs for the chosen prefix; slot 2 still in flight.
-    assert_eq!(
-        n.replica
-            .session_ledger()
-            .get(&ClientId(1))
-            .and_then(|m| m.get(&ClientSeq(2))),
-        Some(&Slot(1))
-    );
-    assert_eq!(
-        n.replica.inflight_at(ClientId(1), ClientSeq(3)),
-        Some(Slot(2))
-    );
+    // The journal fold: slot 0 and 1 are folded (refused writes, since
+    // nobody owns the journal), slot 2 is not.
+    assert_eq!(n.replica().folded(), Slot(2));
+    assert!(matches!(
+        n.replica().outcome_at(Slot(1)),
+        Some(crate::Outcome::Refused(_))
+    ));
+    assert_eq!(n.replica().outcome_at(Slot(2)), None);
 }
 
 #[test]
 fn propose_control_is_leader_only() {
     let mut nodes = cluster_with_three_chosen();
     // A follower refuses to admit a control command and redirects to the leader.
-    let r = nodes[1].propose_control(Control::Truncate { up_to: Slot(1) });
+    let r = nodes[1].propose_control(Control::Truncate { up_to: Seq(1) });
     assert!(
         matches!(r, ProposeResult::NotLeader(Some(NodeId(0)))),
         "a non-leader redirects the truncate to the leader"
@@ -395,42 +178,6 @@ fn commit_below_floor_is_not_relearned() {
     assert!(
         !n.acceptor().records().contains_key(&Slot(1)),
         "a below-floor commit records nothing below the floor"
-    );
-}
-
-/// The dedup ledger acks `Chosen` only for a seq that **actually executed** —
-/// never inferred from "a later seq applied". A client's seqs do not execute in
-/// order: an early seq can die without entering the log (a `NotLeader` window,
-/// a round lost and paved over by the gap fill) while a later seq applies, and
-/// the old `seq <= applied` shortcut then acked the dead command as committed,
-/// at another command's slot (network-axis seeds 2791878389799639169 /
-/// 8872503201755490526). The honest miss falls through and executes the retry
-/// for real.
-#[test]
-fn a_retry_of_a_never_executed_seq_is_not_acked_as_chosen() {
-    let mut nodes = Vec::from(cluster::<3>());
-    make_leader(&mut nodes, 0);
-
-    // Seq 4 executes (seqs 0..=3 never reached this cluster: they died in a
-    // NotLeader window elsewhere).
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(4), val(0x44)),
-        ProposeResult::Accepted(Slot(0))
-    );
-    let q = drain(&mut nodes[0]);
-    deliver_all(&mut nodes, q);
-    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
-
-    // An exact-seq retry is honestly deduplicated to its real slot…
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(4), val(0x44)),
-        ProposeResult::Chosen(Slot(0))
-    );
-    // …but a never-executed earlier seq is NOT lied about: it executes now.
-    assert_eq!(
-        nodes[0].propose(ClientId(7), ClientSeq(2), val(0x22)),
-        ProposeResult::Accepted(Slot(1)),
-        "a dead seq below the latest applied one is re-proposed, never falsely acked"
     );
 }
 
@@ -503,13 +250,7 @@ fn a_driver_named_column_is_the_round_s_column() {
     // Slot 0 would go to column 0 = {0, 3}; the driver names column 2 =
     // {2, 5}, of which the leader is not a member.
     assert!(matches!(
-        nodes[0].propose_in(
-            ClientId(1),
-            ClientSeq(1),
-            val(10),
-            Some(2),
-            Delegation::Auto
-        ),
+        nodes[0].propose_in(entry(1, 1, 10), Some(2), Delegation::Auto),
         ProposeResult::Accepted(Slot(0))
     ));
     let first = drain(&mut nodes[0]);
@@ -542,7 +283,7 @@ fn a_driver_named_column_is_the_round_s_column() {
     }
     // `None` is exactly `propose`: slot 1 -> column 1 = {1, 4}.
     assert!(matches!(
-        nodes[0].propose_in(ClientId(1), ClientSeq(2), val(20), None, Delegation::Auto),
+        nodes[0].propose_in(entry(1, 2, 20), None, Delegation::Auto),
         ProposeResult::Accepted(Slot(1))
     ));
     assert_eq!(
@@ -556,26 +297,14 @@ fn a_driver_named_column_is_the_round_s_column() {
 fn a_column_the_grid_does_not_have_is_a_programmer_error() {
     let mut nodes: Vec<ColocatedNode> = (0..6).map(grid_node).collect();
     make_leader(&mut nodes, 0);
-    let _ = nodes[0].propose_in(
-        ClientId(1),
-        ClientSeq(1),
-        val(10),
-        Some(3),
-        Delegation::Auto,
-    );
+    let _ = nodes[0].propose_in(entry(1, 1, 10), Some(3), Delegation::Auto);
 }
 
 #[test]
 #[should_panic(expected = "an accept round's column is a column of the active configuration")]
 fn a_column_under_a_majority_is_a_programmer_error() {
     let mut nodes = cluster_with_three_chosen();
-    let _ = nodes[0].propose_in(
-        ClientId(1),
-        ClientSeq(9),
-        val(10),
-        Some(0),
-        Delegation::Auto,
-    );
+    let _ = nodes[0].propose_in(entry(1, 9, 10), Some(0), Delegation::Auto);
 }
 
 /// The mechanism behind #141's column addressing, pinned at the node: a
@@ -591,7 +320,7 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
     // Slot 0 -> column 0 = {0, 3}. The leader sits in it: its own vote is
     // cast, and the only other addressee is node 3.
     assert!(matches!(
-        nodes[0].propose(ClientId(1), ClientSeq(1), val(10)),
+        nodes[0].propose(entry(1, 1, 10)),
         ProposeResult::Accepted(_)
     ));
     let first = drain(&mut nodes[0]);
@@ -640,7 +369,7 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
     // durable by construction (`record_own_round`), so a reboot rederives
     // the frontier this proposal moved.
     assert!(matches!(
-        nodes[0].propose(ClientId(1), ClientSeq(2), val(20)),
+        nodes[0].propose(entry(1, 2, 20)),
         ProposeResult::Accepted(_)
     ));
     let second = drain(&mut nodes[0]);
@@ -674,4 +403,110 @@ fn a_grid_round_is_addressed_and_judged_by_its_column() {
     for n in &nodes {
         assert_eq!(chosen_at(n, 1), Some(val(20)));
     }
+}
+
+/// Run the leader's pending work to quiescence over a reliable network.
+fn settle(nodes: &mut [ColocatedNode]) {
+    let q = drain(&mut nodes[0]);
+    deliver_all(nodes, q);
+}
+
+/// A `Write` by `owner` under `generation` at `seq`.
+fn write(generation: u64, owner: u64, seq: u64, b: u8) -> Entry {
+    Entry {
+        generation: Generation(generation),
+        owner: ClientId(owner),
+        seq: Seq(seq),
+        records: vec![val(b)],
+    }
+}
+
+/// The journal state machine (#204) is judged at apply, on every node alike:
+/// a `SetLeader` claims the journal, the owner's writes take dense
+/// positions, a retry is answered from the log, and a superseded owner is
+/// refused in place — every outcome the same on every node.
+#[test]
+fn a_write_is_judged_at_apply_on_every_node() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let ProposeResult::Accepted(claim) = nodes[0].propose_control(Control::SetLeader {
+        expected: Generation(0),
+        owner: ClientId(7),
+    }) else {
+        panic!("the leader admits a SetLeader");
+    };
+    settle(&mut nodes);
+    let mut slots = Vec::new();
+    for e in [
+        write(1, 7, 0, 1),
+        write(1, 7, 1, 2),
+        write(1, 7, 0, 1), // a retry of position 0
+        write(1, 7, 0, 9), // position 0 with other bytes
+        write(1, 8, 2, 3), // a foreign writer
+    ] {
+        let ProposeResult::Accepted(slot) = nodes[0].propose(e) else {
+            panic!("the leader admits a write");
+        };
+        slots.push(slot);
+        settle(&mut nodes);
+    }
+    for n in &nodes {
+        assert!(matches!(
+            n.replica().outcome_at(claim),
+            Some(crate::Outcome::Leader(s)) if s.generation == Generation(1)
+        ));
+        assert_eq!(
+            n.replica().outcome_at(slots[0]),
+            Some(&crate::Outcome::Accepted {
+                seq: Seq(0),
+                count: 1
+            })
+        );
+        assert_eq!(
+            n.replica().outcome_at(slots[2]),
+            Some(&crate::Outcome::Duplicate {
+                seq: Seq(0),
+                count: 1
+            })
+        );
+        assert!(matches!(
+            n.replica().outcome_at(slots[3]),
+            Some(crate::Outcome::Refused(_))
+        ));
+        assert!(matches!(
+            n.replica().outcome_at(slots[4]),
+            Some(crate::Outcome::Refused(_))
+        ));
+        assert_eq!(n.replica().journal().next_seq, Seq(2));
+    }
+}
+
+/// A decided `Truncate` keeps the slot holding the journal's first retained
+/// record, seals the state the dropped slots folded to, and a restart from
+/// the store folds the retained log back to the same state.
+#[test]
+fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let _ = nodes[0].propose_control(Control::SetLeader {
+        expected: Generation(0),
+        owner: ClientId(7),
+    });
+    settle(&mut nodes);
+    for seq in 0..3 {
+        let _ = nodes[0].propose(write(1, 7, seq, 10 + u8::try_from(seq).expect("small")));
+        settle(&mut nodes);
+    }
+    let _ = nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
+    settle(&mut nodes);
+    // Slot 0 is the claim, slots 1..=3 hold positions 0..=2: position 2's
+    // slot (3) is the first retained one.
+    for n in &nodes {
+        assert_eq!(n.acceptor().first_slot(), Slot(3));
+        assert_eq!(n.replica().journal().first_seq, Seq(2));
+        assert_eq!(n.replica().journal_base().next_seq, Seq(2));
+    }
+    let storage = TestStorage::from_node(&nodes[1]);
+    let rebooted = ColocatedNode::new(&storage);
+    assert_eq!(rebooted.replica().journal(), nodes[1].replica().journal());
 }

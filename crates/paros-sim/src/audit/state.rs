@@ -223,20 +223,25 @@ pub(super) struct AuditState {
     // --- application state (the Chain-of-Blocks register) --------------------
     /// User command hashes the workload registered before proposing.
     pub(super) submitted: BTreeSet<u64>,
-    /// Every `(client, seq)` a client appended to this world's journal
+    /// The hash of every write a client sent to this world's journal
     /// (#188, `AuditWorld::note_appended`).
-    pub(super) appended: BTreeSet<(u64, u64)>,
+    pub(super) appended: BTreeSet<u64>,
     /// This run has no client (see `AuditWorld::client_free`).
     pub(super) client_free: bool,
-    /// The client fold (#186): per client, the last LSN it folded (its
+    /// The client fold (#186): per client, the last position it folded (its
     /// contiguity frontier).
     pub(super) fold_lsn: BTreeMap<u64, u64>,
-    /// Per LSN: the command hash every client's fold must meet there.
+    /// Per position: the record hash every client's fold must meet there.
     pub(super) fold_command: BTreeMap<u64, u64>,
-    /// Per LSN: the state every client's fold must reach after it.
+    /// Per position: the state every client's fold must reach after it.
     pub(super) fold_state: BTreeMap<u64, u64>,
-    /// Two clients' folds were checked against each other at one LSN.
+    /// Two clients' folds were checked against each other at one position.
     pub(super) fold_agreed: bool,
+    /// The journal state machine's oracles (#204).
+    pub(super) journal: super::journal_model::JournalModel,
+    /// The highest slot any node answered a call's verdict at (#204) — the
+    /// slot every live node must reach by the end of the tail.
+    pub(super) answered_max: Option<u64>,
 
     // --- cooperative leader handoff -----------------------------------------
     /// `(ballot round, ballot node)` → who is exercising that logical authority
@@ -259,7 +264,7 @@ pub(super) struct AuditState {
     pub(super) leader_rounds: BTreeSet<u64>,
     pub(super) first_leader_round: Option<u64>,
     pub(super) leader_change_ms: Option<u64>,
-    /// A committed client ack landed after leadership first changed hands.
+    /// A write was answered written after leadership first changed hands.
     pub(super) ack_after_leader_change: bool,
     /// A node crashed at any durability seam.
     pub(super) crashed_any: bool,
@@ -282,22 +287,11 @@ pub(super) struct AuditState {
     /// A node below the floor jumped to a peer's trim point (#186).
     pub(super) trim_jumped: bool,
     pub(super) caught_up: bool,
-    /// At-most-once ledger for the oracle: each applied user command's
-    /// `(client, seq)` and the single log index it applied at. A second apply
-    /// of the same identity at a *different* index is the double-apply the
-    /// core review flagged (mandatory P2c re-proposal of a stale suffix after
-    /// a healed partition) — every node applies it, so per-index agreement is
-    /// blind to it by construction.
-    pub(super) applied_identity: BTreeMap<(u64, u64), u64>,
-    /// The #94 suppression fired: a re-chosen `(client, seq)` executed as a
-    /// no-op. Reachable-only (no `sometimes` counterpart): the interleaving
-    /// needs a partition-shaped seed and would starve saturation as a per-run
-    /// gate, but when a seed does reach it, the sweep records it.
-    pub(super) duplicate_suppressed: bool,
     /// `CheckQuorum` fired (#95): a leader without an ack quorum for a full
     /// election-timeout window demoted itself. The n=2 regime plus attrition
     /// generates it reliably (killing the only peer starves the window).
     pub(super) quorum_lost: bool,
+    pub(super) watermark_filled: bool,
     /// A parked proposal reply was superseded by a different decided command
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.
@@ -397,8 +391,8 @@ pub(super) struct AuditState {
     /// failure mode a handoff deliberately accepts).
     pub(super) dropped_relinquish: bool,
     pub(super) duplicated_relinquish: bool,
+    /// A `Truncate` was answered applied (#204).
     pub(super) compact_ack_accepted: bool,
-    pub(super) compact_ack_refused: bool,
     pub(super) mailbox_dropped: bool,
     pub(super) shortest_timeout: bool,
     /// The election backoff doubled a timeout base (reach-once).
@@ -462,7 +456,6 @@ pub(super) struct AuditState {
     pub(super) decided_off_column: bool,
     pub(super) elected_grid: bool,
     pub(super) elected_across_grid: bool,
-    pub(super) read_confirmed_on_column: bool,
 
     // --- quorum reads (#143) -----------------------------------------------
     /// A quorum read served by a node that did not lead, one whose row's
@@ -513,10 +506,9 @@ pub(super) struct AuditState {
     pub(super) acked_by_other: BTreeMap<u64, u64>,
     /// A quorum read was served by a replica (§3.4, #144).
     pub(super) quorum_read_on_replica: bool,
-    /// Journal-read outcomes (#185): a page stepped over a hole, a
-    /// long-poll was woken by a newly chosen entry, a read was served by a
-    /// replica, a read below the trim point was refused.
-    pub(super) journal_read_skipped_hole: bool,
+    /// Journal-read outcomes (#204): a long-poll was woken by a newly
+    /// folded write, a read was served by a replica, a read below
+    /// `first_seq` was refused.
     pub(super) journal_read_woke: bool,
     pub(super) journal_read_on_replica: bool,
     pub(super) journal_read_trimmed: bool,
@@ -740,10 +732,6 @@ impl AuditState {
             "grid: an election is covered by a row across a reconfiguration"
         );
         assert_sometimes!(
-            self.read_confirmed_on_column,
-            "grid: a read-index round is confirmed by a column"
-        );
-        assert_sometimes!(
             self.quorum_read_on_row,
             "grid: a quorum read is served by a row of a grid"
         );
@@ -863,15 +851,11 @@ impl AuditState {
         self.check_journal_read_gates();
     }
 
-    /// The journal-read outcomes (#185): the four shapes a `Read` answer
-    /// takes that a correct client must handle — a hole it never sees, a
-    /// long-poll that returns the moment an append is chosen, a read replica
-    /// serving it, and the trim point refusing it.
+    /// The journal-read outcomes (#204): the three shapes a `Read` answer
+    /// takes that a correct client must handle — a long-poll that returns
+    /// the moment a write is folded, a read replica serving it, and
+    /// `first_seq` refusing it.
     fn check_journal_read_gates(&self) {
-        assert_sometimes!(
-            self.journal_read_skipped_hole,
-            "journal read: a read skips a hole"
-        );
         assert_sometimes!(
             self.journal_read_woke,
             "journal read: a long-poll wakes on a new append"
@@ -894,7 +878,7 @@ impl AuditState {
     pub(super) fn check_driver_hook_gates(&self) {
         assert_sometimes!(
             self.dedup_after_dropped_reply,
-            "a committed proposal ack is lost and the retry takes the dedup path"
+            "journal: a write's verdict is lost and its retry is acked from the log"
         );
         self.check_handoff_gates();
     }
@@ -1453,18 +1437,17 @@ impl AuditState {
             h.acked + h.failed <= h.issued,
             "no proposal is acked/failed before it is issued"
         );
-        // A committed ack is a promise the command is in the applied log: the
-        // audit folded exactly that identity at exactly that slot.
-        for (&(client, seq), &slot) in &h.write_slot {
-            let applied_at = self.applied_identity.get(&(client, seq)).copied();
+        // A write acknowledged written is in the journal: its last position
+        // lies below the next position the nodes' verdicts reached.
+        for (&(client, op), &position) in &h.write_slot {
             assert_always!(
-                applied_at == Some(slot),
+                position < self.journal.next_seq(),
                 "chain: every acknowledged command was applied",
                 {
                     "client" => client,
-                    "seq" => seq,
-                    "acked_slot" => slot,
-                    "applied_at" => crate::signed_watermark(applied_at)
+                    "op" => op,
+                    "position" => position,
+                    "next_seq" => self.journal.next_seq()
                 }
             );
         }

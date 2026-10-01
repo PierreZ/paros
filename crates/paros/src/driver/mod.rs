@@ -10,8 +10,9 @@
 //! feeds the core via `step`/`tick`, and drains every [`paros_core::Ready`] in
 //! persist → send → learn → advance order (durable-before-send). It also draws
 //! the randomized election timeout from the provider RNG (the core stays
-//! dependency-free) and holds each client reply until its slot commits
-//! (ack-on-commit), redirecting non-leader proposals.
+//! dependency-free) and holds each journal call's reply until its slot
+//! applies (#204: answered with the journal state machine's verdict),
+//! redirecting non-leader proposals.
 //!
 //! The submodules, one concern each:
 //!
@@ -23,7 +24,9 @@
 //!   field a trace carries.
 //! - [`transport`] — the bounded, lossy, keep-newest per-peer mailboxes, the
 //!   `Outbound` send handle, and the detached peer-delivery task.
-//! - [`log_reads`] — the journal `Read` answer and its long-poll (#185).
+//! - [`calls`] — the journal calls held until their slot applies (#204).
+//! - [`log_reads`] — the journal `Read`: its quorum read and its long-poll
+//!   (#204).
 //! - [`ready`] — the `Ready` handshake's durability pipeline and the held
 //!   client replies it answers.
 //! - [`reply`] — the one client-reply seam (the drop and duplicate hooks,
@@ -40,6 +43,7 @@
 //! and the per-arm steps that loop shares (`NodeLoop`).
 
 pub(crate) mod boot;
+mod calls;
 mod config;
 pub(crate) mod edge;
 pub(crate) mod events;
@@ -63,10 +67,10 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
-    ClientId, ClientSeq, ColocatedNode, Delegation, GcAck, JournalId, MatchRefusal, MatchReply,
-    MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet, Message, NodeId, NodeRole, Party,
-    ProposeResult, ProxyId, QuorumSystem, ReadIndexResult, ReconfigureReply, ReconfigureRequest,
-    ReconfigurerStep, Value,
+    ClientId, ColocatedNode, Control, Delegation, Entry, GcAck, Generation, JournalId,
+    MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet,
+    Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerStep, Seq, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -74,12 +78,13 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
 use crate::rpc::{
-    AppendAck, CheckTailAck, MatchmakerClient, ReadAck, ReconfigureMatchmakersAck, ReplySender,
-    TailPath, TrimAck, encode_records, well_known,
+    MatchmakerClient, ReadAck, ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck,
+    WriteAck, well_known,
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, RegistryEvent, SystemEvent};
 
+use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
 use events::message_route;
 use handover::HandoverDriver;
@@ -88,7 +93,7 @@ use matchmaking::{
     MatchmakerLinks, folded_answer, report_match_step, send_outbox, send_reconfigure_requests,
     surface_matchmaking,
 };
-use ready::{ClientWaiters, ParkedRead, ReadPath, drain_ready, served_prefix};
+use ready::{ClientWaiters, drain_ready, fold_head};
 use reply::maybe_duplicate;
 use report::{Deltas, handoff_context, maintain};
 use system::{Followed, SystemFollower, follow_local};
@@ -148,10 +153,10 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             self.hooks,
             self.audit,
         );
-        // The chosen prefix only grows inside a batch: a journal read
-        // long-polling at the end is re-served here (#185).
-        waiters.log_reads.wake(
-            |from, max| node.read_log(from, max),
+        // The journal fold only grows inside a batch: a journal read
+        // long-polling at the tail is re-served here (#204).
+        waiters.reads.wake(
+            |from, limit, bytes| node.read_log(from, limit, bytes),
             NodeId(self.self_id),
             self.hooks,
             self.audit,
@@ -382,43 +387,6 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             node.step_down();
         }
     }
-
-    /// Expire parked reads whose confirmation is overdue (lost acks, a
-    /// minority-partitioned leader that never steps down): answer a retry
-    /// redirect while the client still has deadline left. A late core
-    /// confirmation finds the ctx gone and is ignored. The early-expiry hook
-    /// (consulted only while reads are parked) takes the same exit before the
-    /// deadline.
-    fn expire_parked_reads(&self, waiters: &mut ClientWaiters, ticks: u64) {
-        let expire_all = !waiters.pending_reads.is_empty() && self.hooks.expire_parked_read_early();
-        // `(ctx, early)`: `early` marks a read the hook expired while its
-        // deadline still had ticks left — the audit keeps the two exits apart.
-        let overdue: Vec<(u64, bool)> = waiters
-            .pending_reads
-            .iter()
-            .filter_map(|(ctx, parked)| {
-                let by_deadline =
-                    ticks.saturating_sub(parked.parked_at) > self.tunables.read_retry_ticks;
-                (expire_all || by_deadline).then_some((*ctx, !by_deadline))
-            })
-            .collect();
-        for (ctx, early) in overdue {
-            if let Some(parked) = waiters.pending_reads.remove(&ctx) {
-                self.audit.read_expired(NodeId(self.self_id), early);
-                self.answer(
-                    Reply::ReadRedirect,
-                    parked.reply,
-                    CheckTailAck {
-                        seq: parked.seq,
-                        leader: Some(self.self_id),
-                        committed: false,
-                        committed_end: None,
-                        unknown_journal: false,
-                    },
-                );
-            }
-        }
-    }
 }
 
 /// What every journal's steps share on this node: the handles a
@@ -547,11 +515,17 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
             lp.pace_handover(node, handover);
         }
         lp.offer_handoff(node);
-        lp.expire_parked_reads(waiters, ticks);
-        waiters.log_reads.expire(
-            |from, max| node.read_log(from, max),
+        // Expire the reads whose quorum read is overdue (a row that never
+        // answered whole, a fold that has not reached the watermark) and
+        // answer the long-polls whose wait ran out. The early-expiry hook,
+        // consulted only while a read waits on its confirmation, takes the
+        // first exit before the deadline.
+        let expire_all = waiters.reads.has_confirming() && hooks.expire_parked_read_early();
+        waiters.reads.expire(
+            |from, limit, bytes| node.read_log(from, limit, bytes),
             ticks,
-            tunables.read_poll_ticks,
+            tunables.read_retry_ticks,
+            expire_all,
             NodeId(self_id),
             hooks,
             &*audit,
@@ -617,6 +591,25 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
     match hooks.proxy_for(node.proposer().next_slot(), count) {
         Some(proxy) if proxy.is_in(count) => Delegation::To(proxy),
         _ => Delegation::Auto,
+    }
+}
+
+/// Park `call` on the slot its proposal took (`result`), to be answered
+/// when that slot applies, or redirect it at once when this node does not
+/// lead.
+fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
+    rt: &mut JournalRt<S, A>,
+    result: ProposeResult,
+    call: Call,
+    shared: &Shared<'_, P, H>,
+) {
+    match result {
+        // A lost redirect is a legal outcome: the client's deadline turns it
+        // into a retry elsewhere.
+        ProposeResult::NotLeader(hint) => {
+            call.no_verdict(hint.map(|n| n.0), shared.hooks, &rt.audit, shared.self_id);
+        }
+        ProposeResult::Accepted(slot) => rt.waiters.pending.entry(slot).or_default().push(call),
     }
 }
 
@@ -1014,33 +1007,34 @@ where
         moonpool_core::select! {
             // The runtime's future is persistent across passes: see `RpcEdge`.
             error = edge.run() => return Err(error.into()),
-            Some((req, reply)) = rpc.append.recv() => {
-                // A journal append (#185) → the named journal's leader,
-                // deduplicated by (client, seq). The records are framed into
-                // the slot's one opaque value (all of them land in one slot,
-                // whose number is the LSN). The reply is held until the slot
-                // commits (ack-on-commit); a non-leader redirects immediately.
+            Some((req, reply)) = rpc.write.recv() => {
+                // A journal `Write` (#204) → the named journal's leader. The
+                // leader proposes it into the next slot without judging it:
+                // the writer, the position and a retry are all the journal
+                // state machine's, at apply. The reply is held until the
+                // slot applies and answered with that verdict; a non-leader
+                // redirects immediately.
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, follower.as_ref(), journal, "append", self_id, &node_audit) {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
-                            Reply::ProposeRedirect,
+                            Reply::Redirect,
                             reply,
-                            AppendAck { seq: req.seq, unknown_journal: true, ..AppendAck::default() },
+                            WriteAck { unknown_journal: true, ..WriteAck::default() },
                         );
                     }
                     continue;
                 };
-                let seq = req.seq;
-                let client = req.client;
+                let entry = Entry {
+                    generation: Generation(req.generation),
+                    owner: ClientId(req.owner),
+                    seq: Seq(req.seq),
+                    records: req.records.into_iter().map(Value).collect(),
+                };
                 // The column override (#141): consulted only where it can
                 // have an effect — this node leads and its configuration is
                 // a grid — and from the loop, never a task. The core's
-                // `slot % cols` stands under `NoHooks`. The gate is
-                // deliberately coarse: a proposal the core answers from its
-                // dedup ledger opens no round and spends the draw for
-                // nothing, and knowing that ahead would mean asking the
-                // core twice.
+                // `slot % cols` stands under `NoHooks`.
                 let column = match rt.node.acceptors().quorum_system() {
                     QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => hooks
                         .phase2_column(rt.node.proposer().next_slot(), cols)
@@ -1053,107 +1047,74 @@ where
                 // hand it to; `Delegation::Auto` — the core's `slot %
                 // proxy_count` — stands under `NoHooks`.
                 let delegation = delegation_choice(&rt.node, hooks);
-                match rt.node.propose_in(ClientId(req.client), ClientSeq(req.seq), Value(encode_records(&req.records)), column, delegation) {
-                    ProposeResult::NotLeader(hint) => {
-                        // A lost redirect is a legal outcome: the client's
-                        // deadline turns it into a retry elsewhere.
-                        shared.with(&rt.audit).answer(
-                            Reply::ProposeRedirect,
-                            reply,
-                            AppendAck { seq, leader: hint.map(|n| n.0), committed: false, first_lsn: None, unknown_journal: false },
-                        );
-                    }
-                    ProposeResult::Accepted(slot) | ProposeResult::Duplicate(slot) => {
-                        rt.waiters.pending.entry(slot).or_default().push((client, seq, reply));
-                    }
-                    ProposeResult::Chosen(slot) => {
-                        // Already inside this node's applied prefix before this
-                        // call, so the ack fires immediately — and it *names* the
-                        // slot, exactly like the ack-on-commit path. A committed
-                        // ack that named nothing was unfalsifiable: the client was
-                        // told "applied" with no way for an oracle to check the
-                        // claim against the applied prefix.
-                        rt.audit.client_acked(NodeId(self_id), client, seq, slot, served_prefix(&rt.node), true);
-                        tracing::info!(node = self_id, slot = slot.0, "propose_dedup_ack");
-                        shared.with(&rt.audit).answer(
-                            Reply::ProposeDedup,
-                            reply,
-                            AppendAck { seq, leader: Some(self_id), committed: true, first_lsn: Some(slot.0), unknown_journal: false },
-                        );
-                    }
-                }
+                let result = rt.node.propose_in(entry.clone(), column, delegation);
+                park_call(rt, result, Call::Write { entry, reply }, &shared);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
-            Some((req, reply)) = rpc.check_tail.recv() => {
+            Some((req, reply)) = rpc.set_leader.recv() => {
+                // A journal `SetLeader` (#204): a compare-and-swap decided
+                // into the log and judged at apply, like a `Write`.
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, follower.as_ref(), journal, "check_tail", self_id, &node_audit) {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
-                            Reply::ReadRedirect,
+                            Reply::Redirect,
                             reply,
-                            CheckTailAck { seq: req.seq, unknown_journal: true, ..CheckTailAck::default() },
+                            SetLeaderAck { unknown_journal: true, ..SetLeaderAck::default() },
                         );
                     }
                     continue;
                 };
-                let seq = req.seq;
-                let ctx = rt.next_read_ctx;
-                if req.path() == TailPath::Leader {
-                    // A linearizable tail via read-index: the leader captures
-                    // its chosen watermark, confirms it is still leader with a
-                    // heartbeat-ack quorum round (no log write), and the reply
-                    // is parked until the confirmed `ReadState` surfaces — a
-                    // deposed or freshly elected leader can no longer serve a
-                    // stale watermark. A non-leader redirects immediately.
-                    match rt.node.read_index(ctx) {
-                        ReadIndexResult::NotLeader(hint) => {
-                            shared.with(&rt.audit).answer(
-                                Reply::ReadRedirect,
-                                reply,
-                                CheckTailAck { seq, leader: hint.map(|n| n.0), ..CheckTailAck::default() },
-                            );
-                        }
-                        ReadIndexResult::Pending => {
-                            let parked = ParkedRead { seq, parked_at: ticks, path: ReadPath::Index, reply };
-                            rt.waiters.pending_reads.insert(ctx, parked);
-                            rt.next_read_ctx += 1;
-                        }
+                let expected = Generation(req.expected);
+                let owner = ClientId(req.owner);
+                let delegation = delegation_choice(&rt.node, hooks);
+                let result = rt
+                    .node
+                    .propose_control_in(Control::SetLeader { expected, owner }, delegation);
+                park_call(rt, result, Call::SetLeader { expected, owner, reply }, &shared);
+                let outcome = shared.settle(rt).await;
+                journals.fold(journal, outcome, ticks, self_id)?;
+            }
+            Some((req, reply)) = rpc.truncate.recv() => {
+                // A journal `Truncate` (#204): decided into the log, judged
+                // at apply (monotone, clamped to `next_seq`), and every node
+                // drops the slots whose records all lie below the new
+                // `first_seq` when its walk reaches it.
+                let journal = JournalId(req.journal);
+                let Some(rt) = journals.live.get_mut(&journal) else {
+                    if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
+                        shared.with(&node_audit).answer(
+                            Reply::Redirect,
+                            reply,
+                            TruncateAck { unknown_journal: true, ..TruncateAck::default() },
+                        );
                     }
-                } else {
-                    // A leaderless tail (#143, Paxos Quorum Reads), on any
-                    // node: the core asks a Phase-1 quorum — a row of a grid,
-                    // the whole configuration otherwise — for their vote
-                    // watermarks, and the confirmed `ReadState` surfaces once
-                    // this node's chosen prefix covers the maximum; the reply
-                    // is parked exactly like a read-index one, on the same ctx
-                    // counter, and times out the same way. Never a redirect:
-                    // no role is asked for.
-                    //
-                    // The row override (the Phase-1 twin of `phase2_column`)
-                    // is asked only where it can have an effect: under a grid.
-                    // The core's `ctx % rows` stands under `NoHooks`.
-                    let row = match rt.node.acceptors().quorum_system() {
-                        QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
-                        _ => None,
-                    };
-                    let opened = rt.node.hard_state().chosen_index;
-                    // The row the core will ask, resolved exactly as it
-                    // resolves it, for the audit's report of what served it.
-                    let row = rt.node.acceptors().read_row(ctx, row);
-                    rt.node.quorum_read_in(ctx, row);
-                    let path = ReadPath::Quorum { row, opened };
-                    let parked = ParkedRead { seq, parked_at: ticks, path, reply };
-                    rt.waiters.pending_reads.insert(ctx, parked);
-                    rt.next_read_ctx += 1;
+                    continue;
+                };
+                // The system journals are never truncated (#189): every
+                // node rebuilds its folds from position 0.
+                if crate::system::is_system(journal) {
+                    shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
+                    continue;
                 }
+                let up_to = Seq(req.up_to);
+                let delegation = delegation_choice(&rt.node, hooks);
+                let result = rt
+                    .node
+                    .propose_control_in(Control::Truncate { up_to }, delegation);
+                park_call(rt, result, Call::Truncate { up_to, reply }, &shared);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.log_read.recv() => {
-                // A journal read (#185): a pure read of the chosen prefix,
-                // answered now or parked at the end until a slot is chosen
-                // there (the long-poll). No batch: nothing in the core moved.
+                // A journal `Read` (#204), served through the leaderless
+                // read (#143, Paxos Quorum Reads) on any node: the core asks
+                // a Phase-1 quorum — a row of a grid, the whole
+                // configuration otherwise — for their vote watermarks, and
+                // the read is served from this node's journal fold once it
+                // covers the maximum. Never a redirect: no role is asked
+                // for, and no read-index round exists.
                 let journal = JournalId(req.journal);
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
@@ -1165,17 +1126,23 @@ where
                     }
                     continue;
                 };
-                let JournalRt { node, waiters, audit, .. } = rt;
-                waiters.log_reads.serve(
-                    |from, max| node.read_log(from, max),
-                    node.config().journal,
-                    &req,
-                    reply,
-                    ticks,
-                    NodeId(self_id),
-                    hooks,
-                    audit,
-                );
+                let ctx = rt.waiters.reads.next_ctx();
+                // The row override (the Phase-1 twin of `phase2_column`) is
+                // asked only where it can have an effect: under a grid. The
+                // core's `ctx % rows` stands under `NoHooks`.
+                let row = match rt.node.acceptors().quorum_system() {
+                    QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
+                    _ => None,
+                };
+                // The row the core will ask, resolved exactly as it resolves
+                // it, for the audit's report of what served it.
+                let row = rt.node.acceptors().read_row(ctx, row);
+                let opened = fold_head(&rt.node);
+                let wait = log_reads::wait_ticks(req.wait_ms, tunables.tick_interval, tunables.read_poll_ticks);
+                rt.node.quorum_read_in(ctx, row);
+                rt.waiters.reads.park(&req, reply, wait, row, opened);
+                let outcome = shared.settle(rt).await;
+                journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((journal, msg)) = rpc.deliver.recv() => {
                 // A peer Paxos message → its journal's single input router.
@@ -1370,28 +1337,6 @@ where
                 shared.with(&node_audit).answer(Reply::Reconfigure, reply, ack);
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
-            Some((req, reply)) = rpc.trim.recv() => {
-                let journal = JournalId(req.journal);
-                let Some(rt) = journals.live.get_mut(&journal) else {
-                    if refuse_unknown(&journals, follower.as_ref(), journal, "trim", self_id, &node_audit) {
-                        shared.with(&node_audit).answer(Reply::Compact, reply, TrimAck { unknown_journal: true, ..TrimAck::default() });
-                    }
-                    continue;
-                };
-                // The system journals are never trimmed (#189): every node
-                // rebuilds its folds from LSN 0.
-                if crate::system::is_system(journal) {
-                    shared.with(&node_audit).answer(Reply::Compact, reply, TrimAck::default());
-                    continue;
-                }
-                let ack = operator::trim(&mut rt.node, req.up_to, self_id);
-                rt.audit.compact_acked(NodeId(self_id), ack.accepted);
-                let outcome = shared.settle(rt).await;
-                // A lost trim ack is ambiguous to the client, which re-asks;
-                // the `Truncate` it may have proposed stands.
-                shared.with(&node_audit).answer(Reply::Compact, reply, ack);
-                journals.fold(journal, outcome, ticks, self_id)?;
-            }
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it
                 // produces no `Ready` batch. `0` names the node's first
@@ -1501,7 +1446,7 @@ struct SystemCtx<'a, 'l, P: Providers, J: JournalStores, H: DriverHooks> {
 }
 
 impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
-    /// Apply what `journal`'s fold moved, in LSN order: start a created
+    /// Apply what `journal`'s fold moved, in position order: start a created
     /// journal naming this node, stop a tombstoned one, open a lane to an
     /// admitted node, and stop every user journal on this node's own
     /// retirement. Each event is reported first, once.
@@ -1517,9 +1462,9 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         // then admits the registry's pool (`ColocatedNode::extend_pool`,
         // refused on a journal that cannot reconfigure).
         let mut admit = false;
-        for (lsn, event) in events {
-            self.audit.system_folded(me, journal, lsn, &event);
-            tracing::info!(node = me.0, journal = journal.0, lsn, event = ?event, "system_folded");
+        for (seq, event) in events {
+            self.audit.system_folded(me, journal, seq, &event);
+            tracing::info!(node = me.0, journal = journal.0, seq, event = ?event, "system_folded");
             match event {
                 SystemEvent::Directory(DirectoryEvent::Created { id, config, .. }) => {
                     if !config.members().contains(&me)
