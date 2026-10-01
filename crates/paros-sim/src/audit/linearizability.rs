@@ -160,6 +160,11 @@ impl<'a> Model<'a> {
         }
     }
 
+    /// Whether the step `undo` was taken for moved nothing.
+    fn unchanged(&self, undo: Undo) -> bool {
+        self.scalars == undo.scalars && self.writes.len() == undo.writes
+    }
+
     fn undo(&mut self, undo: Undo) {
         self.scalars = undo.scalars;
         self.writes.truncate(undo.writes);
@@ -448,7 +453,16 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
     let mut remaining = keep.iter().filter(|i| attempts[**i].seen.is_some()).count();
     let mut linearized: u128 = 0;
     let mut cache: BTreeSet<u128> = BTreeSet::new();
-    let mut stack: Vec<(usize, Undo)> = Vec::new();
+    // Each frame: the attempt, its undo, and whether it was **forced** — an
+    // answered attempt that moved nothing (a read, a refusal, a lost claim,
+    // a duplicate, a truncation below the floor). Such a step legal now is
+    // never delayed: any linearization placing it later can place it here
+    // instead (nobody observes it, and as a candidate it already follows
+    // every attempt real time puts before it). So a dead end above a forced
+    // frame pops it without trying the orders that delay it. Without this,
+    // every subset of a long window of such answers was a separate state
+    // (hunt seed 2160548334956635398: 524k memo entries for 160 attempts).
+    let mut stack: Vec<(usize, Undo, bool)> = Vec::new();
     let mut deepest: Option<(usize, usize)> = None;
     let mut steps = 0_u64;
     let mut node = timeline.first();
@@ -475,21 +489,11 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
             if deepest.is_none_or(|(depth, _)| stack.len() >= depth) {
                 deepest = Some((stack.len(), i));
             }
-            let Some((j, undo)) = stack.pop() else {
-                return verdict(false, false, steps, deepest.map(|(d, a)| (a, d)));
-            };
-            model.undo(undo);
-            linearized ^= zobrist(j);
-            if timeline.unlift(j) {
-                remaining += 1;
-            }
-            node = timeline.next[timeline.call_node[j]];
-            continue;
-        }
-        if let Some(undo) = model.step(i) {
+        } else if let Some(undo) = model.step(i) {
+            let forced = attempts[i].seen.is_some() && model.unchanged(undo);
             let key = linearized ^ zobrist(i) ^ model.hash();
             if cache.insert(key) {
-                stack.push((i, undo));
+                stack.push((i, undo, forced));
                 linearized ^= zobrist(i);
                 if timeline.lift(i) {
                     remaining -= 1;
@@ -498,8 +502,31 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
                 continue;
             }
             model.undo(undo);
+            // A forced step into a configuration already explored: that
+            // configuration failed, and so does this one.
+            if !forced {
+                node = timeline.next[node];
+                continue;
+            }
+        } else {
+            node = timeline.next[node];
+            continue;
         }
-        node = timeline.next[node];
+        // A dead end: undo back to the last step that had alternatives.
+        loop {
+            let Some((j, undo, forced)) = stack.pop() else {
+                return verdict(false, false, steps, deepest.map(|(d, a)| (a, d)));
+            };
+            model.undo(undo);
+            linearized ^= zobrist(j);
+            if timeline.unlift(j) {
+                remaining += 1;
+            }
+            if !forced {
+                node = timeline.next[timeline.call_node[j]];
+                break;
+            }
+        }
     }
 }
 
@@ -839,5 +866,48 @@ mod tests {
         // representative of the 49 others.
         assert_eq!(kept.len(), 4);
         assert!(linearizable(&history));
+    }
+
+    /// Answers that move nothing are never delayed: a window of many
+    /// concurrent reads around one write is decided in a handful of steps,
+    /// not one state per subset of the reads.
+    #[test]
+    fn a_window_of_unchanging_answers_is_not_a_subset_explosion() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                Call::SetLeader {
+                    expected: 0,
+                    owner: 0,
+                },
+                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+            ),
+            at(
+                0,
+                2,
+                write(1, 0, 0, &[7]),
+                Some((1_000, written(0, 1, false))),
+            ),
+        ];
+        for k in 0..40 {
+            let page = if k % 2 == 0 { vec![] } else { vec![7] };
+            let next = page.len() as u64;
+            history.push(at(
+                1 + k % 3,
+                3 + k,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    900 + k,
+                    Seen::Page {
+                        records: page,
+                        state: state(Some(0), 1, next, 0),
+                    },
+                )),
+            ));
+        }
+        let verdict = check(&history, 1_000_000);
+        assert!(verdict.linearizable);
+        assert!(verdict.steps < 20_000, "steps: {}", verdict.steps);
     }
 }

@@ -195,7 +195,7 @@ impl LinHistory {
 }
 
 /// The search's step budget. The histories a campaign produces take tens of
-/// thousands of steps at most (65k the worst of 500 seeds); the budget only
+/// thousands of steps at most (105k the worst of 500 seeds); the budget only
 /// bounds a pathological one — the memo grows with the steps, so it bounds
 /// memory too — and running out of it is reported, never mistaken for a
 /// verdict.
