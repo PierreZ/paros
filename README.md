@@ -35,6 +35,7 @@ acceptors ever choose different values.
 | [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: std-only, wasm-safe, zero deps with `default-features = false` (only `tracing` spans on by default) |
 | [`paros`](crates/paros) | the provider-generic node driver, default storage, and RPC contract |
 | [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: the workload, the fault world, the audit |
+| [`parosd`](crates/parosd) | the server and a minimal client over Tokio: every role on a real network and a real filesystem ([run it on a laptop](crates/parosd/README.md)) |
 
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.

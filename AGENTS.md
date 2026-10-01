@@ -383,9 +383,9 @@ The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `Colocat
 `paros::run_matchmaker`, `paros::run_proxy` and `paros::run_replica` are the same shape for
 the three other roles.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: LogStorage`), so the *same*
-code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
-(`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
-`Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
+code runs in production (`TokioProviders`, linked only by the `parosd` crate, #206) and deterministic
+simulation (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a
+moonpool `Process`; `parosd` adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
 
 **Plain Multi-Paxos is first-class and permanent; everything beyond it is opt-in.** Multi-Paxos
@@ -1097,7 +1097,7 @@ driver hooks and the sim/workload layers (per the turbulence doctrine above — 
 ## Layout
 
 Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
-Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
+Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner, and `paros` ← `parosd`.
 `paros-core` is dependency-free with `default-features = false` (its only deps, `serde` and
 `tracing`, are optional and observation-only); everything ultimately points into it.
 
@@ -1119,13 +1119,20 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   (`run_node` over `P: Providers`, `S: LogStorage`), the default in-memory `MemStorage`, the
   node RPC contract (the journal API of #204: `Write`, `Read`, `Truncate`, `SetLeader`, every
   call naming a `JournalId`), and the matchmaker's driver + storage seam
-  (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
-  + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
+  (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
   transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and
   `moonpool-journal` (the durable stores of `paros::journal`, `JournalStorage` /
   `JournalMatchmakerStorage`: a log of write operations folded at boot, see *Storage
   direction*). The faulty fake the campaign runs on is still the harness's world-backed store
   (`crates/paros-sim/src/world/storage.rs`).
+- `crates/parosd/` — the server (`publish = false`, #206): the **only** crate that links
+  moonpool's `TokioProviders`, so the library stays wasm-safe. The `parosd` binary runs one role
+  per process (`node` → `run_journals`, `matchmaker`, `proxy`, `replica`) from a topology given
+  as flags or `PAROS_*` variables, on `DirStores` (the production `JournalStores`: one
+  `JournalStorage` directory per journal over Tokio's filesystem), with `SIGTERM` to the
+  shutdown token and an exit code per `RunError` variant; `paros` is a minimal client
+  (`set-leader`, `write`, `read`, `inspect`). Its README is the laptop walkthrough; the full CLI,
+  provisioning and durable configuration are #196, #208 and #207.
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
   deployment/role map, the fault world, the one client workload, the audit, and the scripted
   corpus. Depends on `paros` + `moonpool-sim`.

@@ -49,7 +49,7 @@ Check, in this order:
 8. **Files and docs.** A module that now holds two concerns and was not
    split; a superseded axis, flag or gate not deleted; a doctrine change not
    reflected in the crate's `AGENTS.md`, the book, or a design note under
-   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (six, across two manifests).
+   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (nine, across three manifests: paros, paros-sim, parosd).
 9. **Evidence.** A protocol fix whose commit message lacks the invariant and
    the red→green result; a claim the simulation was not made to reproduce.
 

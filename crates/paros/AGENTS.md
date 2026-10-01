@@ -108,7 +108,10 @@ the driver, never in a sim-only path.
   strictly when it is not) · `node_image.rs` the node's records, the one
   fold live writes and boot replay share, and the per-kind corruption table
   · `tests.rs` both contract suites, targeted damage and a crash loop under
-  two fault models, all on `SimStorageProvider`. The promise and the format
+  two fault models, all on `SimStorageProvider` (the suites, the writer and
+  the judge generic over the provider) · `tokio_fs.rs` the suites and a
+  process-crash loop again on a real filesystem over `TokioStorageProvider`
+  (#206; test-only: `moonpool-core`'s `tokio-fs` is a dev-dependency feature). The promise and the format
   marker live in the journal's two-copy metadata, flushed before the log.
 
 ## Rules local to this crate
@@ -129,8 +132,10 @@ the driver, never in a sim-only path.
   journal records), `moonpool-core` (git pin, `default-features = false`,
   `select`), `moonpool-rpc` (same pin, `default-features = false`, `prost`),
   `moonpool-journal` (same pin), prost, postcard, crc32c. The pin rev is
-  repeated in `crates/paros-sim/Cargo.toml` and in the `moonpool-sim`
-  dev-dependency here; advance every line together.
+  repeated in `crates/paros-sim/Cargo.toml`, `crates/parosd/Cargo.toml` and
+  in the `moonpool-sim` / `moonpool-core` dev-dependencies here; advance
+  every line together. No production provider in `[dependencies]`: Tokio's
+  providers are `parosd`'s.
 - Every paros call is one at-most-once attempt (`try_get_reply`): never
   `get_reply`, whose reconnect retransmission may execute a request twice
   behind the protocol's back.

@@ -5,7 +5,9 @@
 //! The stores are provider-generic, so these run them over
 //! `SimStorageProvider` — the disk the harness ships — stepped by hand
 //! beside a current-thread runtime, exactly as `moonpool-journal`'s own
-//! tests do.
+//! tests do. The suites, the crash loop's writer and its judge are generic
+//! over the provider: `tokio_fs` runs them again on a real filesystem
+//! (#206).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -22,9 +24,6 @@ use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 use crate::corruption::CorruptionVerdict;
 use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::storage::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
-
-type Node = JournalStorage<SimStorageProvider>;
-type Registry = JournalMatchmakerStorage<SimStorageProvider>;
 
 fn ip() -> IpAddr {
     "10.0.0.1".parse().expect("valid IP")
@@ -59,7 +58,7 @@ where
     handle.await.expect("task panicked")
 }
 
-fn config() -> Config {
+pub(super) fn config() -> Config {
     Config {
         id: NodeId(0),
         peers: vec![NodeId(0)],
@@ -69,30 +68,33 @@ fn config() -> Config {
 
 /// A small layout with a short checkpoint cadence, so the suites cross
 /// segment rollovers, checkpoints and prefix drops.
-fn small(checkpoint_after: u64) -> JournalStoreConfig {
+pub(super) fn small(checkpoint_after: u64) -> JournalStoreConfig {
     JournalStoreConfig {
         checkpoint_after,
         ..JournalStoreConfig::small()
     }
 }
 
-async fn open_node(
-    provider: SimStorageProvider,
+pub(super) async fn open_node<P: StorageProvider>(
+    provider: P,
     dir: &str,
     store: JournalStoreConfig,
-) -> Result<Node, StorageError> {
+) -> Result<JournalStorage<P>, StorageError> {
     let mut node = JournalStorage::new(provider, dir, config(), store);
     node.boot_scan().await?;
     Ok(node)
 }
 
-async fn open_registry(provider: SimStorageProvider, dir: &str) -> Result<Registry, StorageError> {
+pub(super) async fn open_registry<P: StorageProvider>(
+    provider: P,
+    dir: &str,
+) -> Result<JournalMatchmakerStorage<P>, StorageError> {
     let mut registry = JournalMatchmakerStorage::new(provider, dir, small(16));
     registry.boot_scan().await?;
     Ok(registry)
 }
 
-fn ballot(round: u64) -> Ballot {
+pub(super) fn ballot(round: u64) -> Ballot {
     Ballot {
         round,
         node: NodeId(3),
@@ -100,7 +102,7 @@ fn ballot(round: u64) -> Ballot {
 }
 
 /// A command whose bytes are `byte` repeated, easy to find on disk.
-fn user(seq: u64, byte: u8) -> Command {
+pub(super) fn user(seq: u64, byte: u8) -> Command {
     Command::Write(Entry {
         generation: Generation(0),
         owner: ClientId(7),
@@ -109,35 +111,66 @@ fn user(seq: u64, byte: u8) -> Command {
     })
 }
 
+/// The node store's contract suite over `provider`, every store in its own
+/// directory under `root` (a path prefix: empty, or ending in `/`).
+pub(super) async fn node_suite<P: StorageProvider>(
+    provider: P,
+    root: String,
+    checkpoint_after: u64,
+) {
+    let mut instance = 0_u64;
+    let fresh_provider = provider.clone();
+    let fresh_root = root.clone();
+    let fresh = move || {
+        instance += 1;
+        let provider = fresh_provider.clone();
+        let dir = format!("{fresh_root}node-{instance}");
+        async move {
+            open_node(provider, &dir, small(checkpoint_after))
+                .await
+                .expect("a fresh store opens")
+        }
+    };
+    let reopen = move |old: JournalStorage<P>| {
+        let provider = provider.clone();
+        let dir = old.dir().to_string();
+        drop(old);
+        async move {
+            open_node(provider, &dir, small(checkpoint_after))
+                .await
+                .expect("a clean store reopens")
+        }
+    };
+    Box::pin(storage_contract_suite(fresh, reopen)).await;
+}
+
+/// The matchmaker registry's contract suite over `provider`, as
+/// [`node_suite`].
+pub(super) async fn registry_suite<P: StorageProvider>(provider: P, root: String) {
+    let mut instance = 0_u64;
+    let fresh_provider = provider.clone();
+    let fresh = move || {
+        instance += 1;
+        let provider = fresh_provider.clone();
+        let dir = format!("{root}mm-{instance}");
+        async move { open_registry(provider, &dir).await.expect("opens") }
+    };
+    let reopen = move |old: JournalMatchmakerStorage<P>| {
+        let provider = provider.clone();
+        let dir = old.dir().to_string();
+        drop(old);
+        async move { open_registry(provider, &dir).await.expect("reopens") }
+    };
+    Box::pin(matchmaker_storage_contract_suite(fresh, reopen)).await;
+}
+
 #[test]
 fn journal_storage_passes_the_contract_suite() {
     for checkpoint_after in [1, 4, 1_000] {
         runtime().block_on(async {
             let mut sim = sim(1);
-            run(&mut sim, move |provider| async move {
-                let mut instance = 0_u64;
-                let fresh_provider = provider.clone();
-                let fresh = move || {
-                    instance += 1;
-                    let provider = fresh_provider.clone();
-                    let dir = format!("node-{instance}");
-                    async move {
-                        open_node(provider, &dir, small(checkpoint_after))
-                            .await
-                            .expect("a fresh store opens")
-                    }
-                };
-                let reopen = move |old: Node| {
-                    let provider = provider.clone();
-                    let dir = old.dir().to_string();
-                    drop(old);
-                    async move {
-                        open_node(provider, &dir, small(checkpoint_after))
-                            .await
-                            .expect("a clean store reopens")
-                    }
-                };
-                Box::pin(storage_contract_suite(fresh, reopen)).await;
+            run(&mut sim, move |provider| {
+                node_suite(provider, String::new(), checkpoint_after)
             })
             .await;
         });
@@ -148,24 +181,7 @@ fn journal_storage_passes_the_contract_suite() {
 fn journal_matchmaker_storage_passes_the_contract_suite() {
     runtime().block_on(async {
         let mut sim = sim(2);
-        run(&mut sim, |provider| async move {
-            let mut instance = 0_u64;
-            let fresh_provider = provider.clone();
-            let fresh = move || {
-                instance += 1;
-                let provider = fresh_provider.clone();
-                let dir = format!("mm-{instance}");
-                async move { open_registry(provider, &dir).await.expect("opens") }
-            };
-            let reopen = move |old: Registry| {
-                let provider = provider.clone();
-                let dir = old.dir().to_string();
-                drop(old);
-                async move { open_registry(provider, &dir).await.expect("reopens") }
-            };
-            Box::pin(matchmaker_storage_contract_suite(fresh, reopen)).await;
-        })
-        .await;
+        run(&mut sim, |provider| registry_suite(provider, String::new())).await;
     });
 }
 
@@ -411,24 +427,24 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
 // ---- the crash loop ---------------------------------------------------------
 
 /// A tiny deterministic generator for the loop's own choices.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
 
-    fn below(&mut self, bound: u64) -> u64 {
+    pub(super) fn below(&mut self, bound: u64) -> u64 {
         self.next() % bound
     }
 }
 
 /// Which crash physics a seed runs under (`moonpool-journal`'s two).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Model {
+pub(super) enum Model {
     /// Sector-atomic crashes: nothing acknowledged may be lost or damaged.
     Paper,
     /// Moonpool's full physics: a synced sector being rewritten can be
@@ -459,7 +475,7 @@ fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
 /// returned; `written` every `(ballot, command)` ever handed to a slot,
 /// acknowledged or not; `pending` the slots written since the last sync.
 #[derive(Clone, Default)]
-struct Ledger {
+pub(super) struct Ledger {
     promise: Ballot,
     first: Slot,
     accepted: BTreeMap<Slot, (Ballot, Command)>,
@@ -468,9 +484,9 @@ struct Ledger {
     max_promise: Ballot,
 }
 
-type Shared = std::sync::Arc<std::sync::Mutex<Ledger>>;
+pub(super) type Shared = std::sync::Arc<std::sync::Mutex<Ledger>>;
 
-fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
+pub(super) fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
     let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse().ok());
     if let Some(seed) = env("PAROS_JOURNAL_CRASH_SEED") {
         return seed..=seed;
@@ -480,16 +496,16 @@ fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
 
 /// Tallies across seeds, to show the crashes landed where they matter.
 #[derive(Debug, Default)]
-struct Tally {
-    boots: usize,
+pub(super) struct Tally {
+    pub(super) boots: usize,
     /// Faulty entries reported (torn in-flight writes under the paper's
     /// model, rot too under the harsh one).
-    faulty: usize,
+    pub(super) faulty: usize,
     /// Boots whose log no longer began at genesis: a checkpoint dropped a
     /// prefix and the fold started from it.
-    past_genesis: usize,
+    pub(super) past_genesis: usize,
     /// Harsh-model boots refused with a crash verdict.
-    refused: usize,
+    pub(super) refused: usize,
 }
 
 #[test]
@@ -543,7 +559,12 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
             tally.past_genesis += usize::from(past_genesis);
             let ops = 1 + rng.below(30);
             let plan: Vec<u64> = (0..ops).map(|_| rng.next()).collect();
-            let handle = tokio::spawn(write(sim.storage_provider(ip()), plan, ledger.clone()));
+            let handle = tokio::spawn(write(
+                sim.storage_provider(ip()),
+                "wal".to_string(),
+                plan,
+                ledger.clone(),
+            ));
             for _ in 0..rng.below(600) {
                 if handle.is_finished() {
                     break;
@@ -563,8 +584,8 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
 /// Judge a reboot and reset the ledger to what it found: the faulty entries
 /// it reported and whether it folded past genesis. `None` ends the seed (a
 /// harsh-model refusal).
-fn judge(
-    node: Result<Node, StorageError>,
+pub(super) fn judge<P: StorageProvider>(
+    node: Result<JournalStorage<P>, StorageError>,
     ledger: &Shared,
     model: Model,
     at: &str,
@@ -651,12 +672,13 @@ fn judge(
 
 /// The writer: each step raises the promise, accepts at a slot, truncates or
 /// jumps below a trim point, and syncs.
-async fn write(
-    provider: SimStorageProvider,
+pub(super) async fn write<P: StorageProvider>(
+    provider: P,
+    dir: String,
     plan: Vec<u64>,
     ledger: Shared,
 ) -> Result<(), StorageError> {
-    let mut node = open_node(provider, "wal", small(24)).await?;
+    let mut node = open_node(provider, &dir, small(24)).await?;
     let mut promise = node.initial_state().0.max_promised_ballot;
     for step in plan {
         let first = node.first_slot();

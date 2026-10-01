@@ -7,8 +7,9 @@
 //! [`run_node`] is written once over moonpool's `P: Providers` abstraction, so
 //! the *same* code runs in production (`TokioProviders`) and deterministic
 //! simulation (`SimProviders`); the deterministic-simulation harness lives in
-//! `paros-sim` and adapts a moonpool `Process` to [`run_node`]. The client API
-//! and a `parosd` binary land here too, once the protocol stabilizes.
+//! `paros-sim` and adapts a moonpool `Process` to [`run_node`]. The library
+//! links no production provider: the `parosd` crate runs every driver over
+//! `TokioProviders` (#206).
 //!
 //! [`run_matchmaker`] is the same shape for the **matchmaker** role (the
 //! per-ballot configuration registry of Matchmaker Paxos), driven over

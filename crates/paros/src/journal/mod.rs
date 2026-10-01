@@ -74,6 +74,8 @@ mod plan;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tokio_fs;
 
 use moonpool_core::DirectIo;
 use moonpool_journal::{AmbiguousTail, Geometry, JournalConfig, JournalError};

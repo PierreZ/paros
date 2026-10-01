@@ -1,0 +1,39 @@
+[package]
+name = "parosd"
+description = "The paros server binary: every role's driver over moonpool's Tokio providers, the journal stores on a real filesystem, and a minimal client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+autobins = false
+
+[[bin]]
+name = "parosd"
+path = "src/main.rs"
+
+[[bin]]
+name = "paros"
+path = "src/bin/paros.rs"
+
+[dependencies]
+paros = { path = "../paros", version = "0.2.0" }
+# The production providers (#206): the one place in the workspace that links
+# `TokioProviders`. The `paros` library itself stays free of them (and
+# wasm-safe). Same pin as every other moonpool line; advance them together.
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c", features = ["tokio-providers", "select"] }
+# The client binary's RPC runtime (the nodes run theirs inside the driver).
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c", default-features = false, features = ["prost"] }
+
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

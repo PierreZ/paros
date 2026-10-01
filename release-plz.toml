@@ -49,6 +49,11 @@ release = false
 publish = false
 
 [[package]]
+name = "parosd"
+release = false
+publish = false
+
+[[package]]
 name = "xtask"
 release = false
 publish = false
