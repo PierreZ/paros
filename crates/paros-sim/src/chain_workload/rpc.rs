@@ -179,6 +179,10 @@ pub(super) enum SetLeaderResult {
     Won { state: JournalState },
     /// It lost: `state` names the current writer.
     Lost { state: JournalState },
+    /// Not asked: the read the claim starts with already names this client
+    /// the owner — an earlier claim of its own won and its answer was lost
+    /// — so it adopts `state` instead of claiming against itself.
+    Owned { state: JournalState },
     /// No verdict.
     Redirect { leader: Option<u64> },
     /// No answer in time.

@@ -204,7 +204,9 @@ impl SystemOps {
                     SetLeaderResult::Won { state } => {
                         claim = Some((state.generation.0, state.next_seq.0));
                     }
-                    SetLeaderResult::Lost { .. } | SetLeaderResult::Ambiguous => {}
+                    SetLeaderResult::Lost { .. }
+                    | SetLeaderResult::Owned { .. }
+                    | SetLeaderResult::Ambiguous => {}
                     SetLeaderResult::Redirect { leader } => {
                         target = leader
                             .and_then(|l| targets.iter().position(|t| *t as u64 == l))

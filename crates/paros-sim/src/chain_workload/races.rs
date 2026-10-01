@@ -50,18 +50,31 @@ impl ChainWorkload {
         let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
         let read_timeout = Duration::from_millis(config.read_timeout_ms);
-        let sends = join_all(burst.iter().map(|(submission, target)| {
-            let attempt = rpc::write_once(
-                clients,
-                log,
-                &time,
-                journal,
-                *target,
-                &submission.entry,
-                false,
-                false,
-            );
-            within(ctx, timeout, WriteResult::Ambiguous, attempt)
+        // A raced burst is spread over the claim's span (`burst_spacing_ms`),
+        // so the claim lands inside it rather than behind every write.
+        let spacing = if race.is_some() {
+            Duration::from_millis(config.burst_spacing_ms)
+        } else {
+            Duration::ZERO
+        };
+        let sends = join_all(burst.iter().zip(0_u32..).map(|((submission, target), k)| {
+            let time = time.clone();
+            async move {
+                if !spacing.is_zero() {
+                    time.sleep(spacing * k).await.ok();
+                }
+                let attempt = rpc::write_once(
+                    clients,
+                    log,
+                    &time,
+                    journal,
+                    *target,
+                    &submission.entry,
+                    false,
+                    false,
+                );
+                within(ctx, timeout, WriteResult::Ambiguous, attempt).await
+            }
         }));
         let claimed = async {
             let (delay, via) = race?;
@@ -73,7 +86,7 @@ impl ChainWorkload {
                 log,
                 journal,
                 via % clients.len(),
-                me,
+                (me, true),
                 (read_timeout, timeout),
             )
             .await
@@ -120,7 +133,9 @@ impl ChainWorkload {
                 writer.next_seq = writer.next_seq.max(next);
                 self.adversarial.burst_fenced |= landed && fenced;
             }
-            Some(SetLeaderResult::Lost { state }) => writer.learn(me, &state),
+            Some(SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state }) => {
+                writer.learn(me, &state);
+            }
             Some(SetLeaderResult::Redirect { leader }) => hint.observe(leader, routes),
             Some(SetLeaderResult::Ambiguous) | None => {}
         }
@@ -174,7 +189,7 @@ impl ChainWorkload {
             log,
             journal,
             target,
-            me,
+            (me, true),
             (read_timeout, timeout),
         )
         .await
@@ -185,6 +200,13 @@ impl ChainWorkload {
             }
             // Another owner's claim overtook this one: the ownership
             // changed all the same.
+            // Already the owner: an earlier claim of its own won. The
+            // ownership changed only if that claim minted a generation past
+            // the one this write was built under.
+            Some(SetLeaderResult::Owned { state }) => {
+                writer.learn(me, &state);
+                state.generation.0 > submission.entry.generation.0
+            }
             Some(SetLeaderResult::Lost { state }) => {
                 writer.learn(me, &state);
                 true

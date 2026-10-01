@@ -250,6 +250,13 @@ struct ChainConfig {
     /// own claim races it. Floor 0: the claim leaves with the burst, and the
     /// slot order alone says which writes it fences.
     burst_claim_delay_ms: u64,
+    /// Race 1 of #205: the gap between a raced burst's writes leaving. A
+    /// claim is a read and a decided `SetLeader`, several round trips; a
+    /// burst sent all at once is proposed within one, so the claim landed
+    /// after every write of it (one fenced burst in 19,925 runs). Spread
+    /// over the claim's own span, the claim lands inside it. Floor 0: all
+    /// at once, the burst the primer sends when nothing races it.
+    burst_spacing_ms: u64,
     /// Race 2 of #205: the timeout of a write whose ack is meant to be late
     /// — shorter than any round trip, so the owner gives up on a write that
     /// may still land, re-claims, and retries it across the ownership
@@ -305,6 +312,7 @@ impl ChainConfig {
             read_limit: buggify_knob!(64_u64, 1_u64..257_u64),
             read_wait_ms: buggify_knob!(0_u64, 0_u64..401_u64),
             burst_claim_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
+            burst_spacing_ms: buggify_knob!(60_u64, 0_u64..121_u64),
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
@@ -1011,7 +1019,7 @@ async fn claim(
     log: &CallLog,
     journal: JournalId,
     target: usize,
-    me: u64,
+    (me, fresh): (u64, bool),
     (read_timeout, timeout): (Duration, Duration),
 ) -> Option<SetLeaderResult> {
     let mut served = None;
@@ -1035,6 +1043,16 @@ async fn claim(
         }
     }
     let tail = state_of(served?.state);
+    // A claim against its own generation would supersede this client's own
+    // ownership: with a request timeout under the claim's answer, every
+    // claim won and every answer was lost, and the client re-claimed
+    // forever, one generation a claim (witness seed 3544251723324122292,
+    // #205: generations 1–58 all its own, no write in 60 s).
+    // `fresh` is the deliberate exception: an owner minting a new generation
+    // of its own (the races of #205, an owner restarting).
+    if !fresh && tail.owner == Some(ClientId(me)) {
+        return Some(SetLeaderResult::Owned { state: tail });
+    }
     let ask = set_leader_once(clients, log, journal, target, tail.generation.0, me, false);
     Some(within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await)
 }
@@ -1241,7 +1259,7 @@ impl Workload for ChainWorkload {
                 &log,
                 journal,
                 first,
-                client_id,
+                (client_id, false),
                 (read_timeout, request_timeout),
             )
             .await
@@ -1251,7 +1269,9 @@ impl Workload for ChainWorkload {
                         writer.won(&state);
                         hint.observe(u64::try_from(first).ok(), routes);
                     }
-                    SetLeaderResult::Lost { state } => writer.learn(client_id, &state),
+                    SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state } => {
+                        writer.learn(client_id, &state);
+                    }
                     SetLeaderResult::Redirect { leader } => hint.observe(leader, routes),
                     SetLeaderResult::Ambiguous => {}
                 }
@@ -1581,7 +1601,7 @@ impl Workload for ChainWorkload {
                         &log,
                         journal,
                         via,
-                        client_id,
+                        (client_id, false),
                         (read_timeout, request_timeout),
                     )
                     .await
@@ -1595,7 +1615,9 @@ impl Workload for ChainWorkload {
                                 "chain_claim_won"
                             );
                         }
-                        Some(SetLeaderResult::Lost { state }) => {
+                        Some(
+                            SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state },
+                        ) => {
                             writer.learn(client_id, &state);
                             tracing::info!(generation = state.generation.0, "chain_claim_lost");
                         }
@@ -2844,13 +2866,15 @@ impl Workload for ChainWorkload {
                         &log,
                         journal,
                         target,
-                        client_id,
+                        (client_id, false),
                         (read_timeout, request_timeout),
                     )
                     .await
                     {
                         Some(SetLeaderResult::Won { state }) => writer.won(&state),
-                        Some(SetLeaderResult::Lost { state }) => writer.learn(client_id, &state),
+                        Some(
+                            SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state },
+                        ) => writer.learn(client_id, &state),
                         Some(SetLeaderResult::Redirect { leader }) => {
                             target = leader
                                 .and_then(|id| routes.index(id))
