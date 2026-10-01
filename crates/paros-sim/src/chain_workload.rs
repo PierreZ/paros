@@ -158,9 +158,16 @@ struct ChainConfig {
     command_bytes: usize,
     /// Large payload size. Ceiling 16 KiB, still far under the batch cap.
     large_command_bytes: usize,
-    /// Per-request client deadline. Floor 350 ms sits *below* the election
-    /// timeout, so every leader change turns into an ambiguous outcome and the
-    /// retry/dedup surface saturates; that is a valid client, not a stall.
+    /// Per-request client deadline. Floor 1 s: a write is answered once its
+    /// slot is decided and applied, ~500 ms on a slow deployment (a proxy,
+    /// a slow tick), and a retry is answered from the log only once its own
+    /// slot is, so a deadline under that answer abandons every write and
+    /// every retry of it — no write acked for a whole tail (witness seed
+    /// 4408998525606429529, #205's 10k hunt: a 376 ms deadline against
+    /// ~480 ms answers). The old 350 ms floor sat below the election timeout
+    /// to make leader changes ambiguous; that ambiguity now has its own
+    /// generators — `abandon_pct`, and race 2's `ack_race_timeout_ms`, under
+    /// any ack by design.
     request_timeout_ms: u64,
     /// Idle between ops in a `PAUSE` step. Floor 1 ms.
     pause_ms: u64,
@@ -287,7 +294,7 @@ impl ChainConfig {
             reader: buggify_knob!(0_u64, 0_u64..2_u64) == 1,
             command_bytes: buggify_knob!(64_usize, 1_usize..257_usize),
             large_command_bytes: buggify_knob!(4096_usize, 512_usize..16_385_usize),
-            request_timeout_ms: buggify_knob!(1500_u64, 350_u64..3001_u64),
+            request_timeout_ms: buggify_knob!(1500_u64, 1000_u64..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
             compaction: buggify_knob!(1_u64, 0_u64..1_u64) == 1,

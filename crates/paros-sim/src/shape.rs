@@ -154,7 +154,7 @@ impl NodeShape {
         // a knob's clothes, not a configuration. The tick itself may go fast
         // (a 10 ms tick is 25 heartbeats per round trip); the tick-counted
         // timeouts are then raised to keep their wall-clock floor. The ranges
-        // still cross the client's knobbed deadline (350 ms..3 s) in both
+        // still cross the client's knobbed deadline (1 s..3 s) in both
         // directions: a node slower than the client's patience is a valid,
         // ambiguous outcome, never a wrong one.
         // A read's confirmation window is the one exception to a single
