@@ -70,7 +70,9 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   oracles (#188) · `audit/system.rs` the system board (#189: fold agreement, id
   allocation, tombstones, the joiner gates) · `audit/state.rs`
   `AuditState` (per-transition protocol safety) · `audit/client.rs`
-  `ClientHistory` (linearizability, sequential-client consistency) ·
+  `ClientHistory` (the client's attempts and operations, merged per journal) ·
+  `audit/linearizability.rs` the journal model and the Wing & Gong search over
+  every attempt (#205) ·
   `audit/matchmaker.rs` `MatchmakerAudit`.
 - `corpus.rs` the scripted workloads: `E1MaskWorkload`, `BareQuorumWorkload`,
   `DepartedStragglerWorkload`.

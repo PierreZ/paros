@@ -54,11 +54,14 @@ its number as a no-op (that is why 9 and 10 exist), and a new operation takes
 3. Gate the draw with `reach_once!` (a cause), and gate the outcome it is meant
    to reach with an `assert_sometimes!` in the audit or the history (an
    outcome). A perturbation never gets a `sometimes`.
-4. Record **every** observation in `ClientHistory` (`audit/client.rs`): an
-   ack, a refusal, a redirect, and a timeout or a deliberately abandoned
-   observation as `Ambiguous`, never assumed aborted. A retry preserves
-   `(client, seq, bytes)` so the server's at-most-once ledger can deduplicate;
-   changing any of the three makes it a new command.
+4. Send every call to the client's journal through the `rpc.rs` `*_once`
+   functions: the `CallLog` there logs each attempt for the linearizability
+   search (#205) — its answer, or nothing for a timeout, a redirect or a
+   deliberately abandoned observation, which the search treats as unknown,
+   never aborted. Record the operation in `ClientHistory` (`audit/client.rs`)
+   too, for the counts and gates. A retry is the same write — generation,
+   owner, position and bytes — so the log answers it as a `Duplicate`;
+   changing any of them makes it a new write.
 5. Tunables the operation introduces (attempts, beats, sleeps) are
    `buggify_knob!` fields in `ChainConfig` with a documented floor; a constant
    buried in the operation is invisible to the swarm.
@@ -74,8 +77,8 @@ its number as a no-op (that is why 9 and 10 exist), and a new operation takes
 
 It never reads the trace, never inspects node internals except through the
 `Inspect` RPC, never pins a seed, never trims past the fence, and never decides safety on
-its own: linearizability and sequential-client consistency are checked in
-`ClientHistory` at `check()`, protocol safety in the audit. Keep the
+its own: linearizability is the search over every attempt at `check()`
+(`audit/linearizability.rs`), protocol safety in the audit. Keep the
 assertion messages stable; they are slots.
 
 Then run the sweep and confirm the new gates fire (`/sim-sweep`).

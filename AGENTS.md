@@ -77,8 +77,9 @@ default, or on a matchmaker seed a subset of at least `MIN_BOOTSTRAP` nodes that
 as *spares* a `Reconfigure` pulls in. A seed whose matchmaker group drew zero members — no
 matchmakers, every node an acceptor — is the plain Multi-Paxos deployment and the shape of every
 existing axis (the corpus registers no matchmaker group and never draws). Every run is judged by
-the same two things: the client's own history (`ClientHistory`, linearizability and
-sequential-client consistency) and the shared `AuditWorld` (protocol safety, the clients'
+the same two things: the client's own history (`ClientHistory`: every attempt at the
+four calls, logged at the RPC seam and searched for a linearization against the
+journal's sequential model, #205) and the shared `AuditWorld` (protocol safety, the clients'
 folds of the journal, the storage gates, the matchmaker registry, the leader-side matchmaking and
 reconfiguration oracles, and one convergence claim at the end of the recovery tail). There is no
 third workload, no per-scenario process type, and no check that reads a trace.
@@ -141,7 +142,13 @@ as `Created` or refused for a taken name, then one record written to the new jou
 `Write` to journal 1 or 2 at a seed, sent on every seed and refused as `unknown_journal` on one
 without system journals (`chain_workload/system.rs`) — and `SET_LEADER=22` (read where the journal
 stands and `SetLeader` against its generation: the compare-and-swap that fences every other
-owner). Every client is an **owner** or a **reader** for the whole run (a `buggify_knob!`;
+owner). The three races of `docs/architecture.md` §6 are each a BUGGIFY location (#205): an
+owner's own claim racing its pipelined burst (the primer, or a mid-run burst of `WRITE`), a
+`WRITE` whose timeout is shorter than its ack (`ack_race_timeout_ms`) so its retry crosses the
+owner's re-claim, and a `READ` from a lagging cursor racing the client's own truncation, resumed
+at the floor its refusal names. Every client folds to the tail at the chaos cutoff and an owner
+truncates after its recovery batch, and one owner may hold a replica down across that
+truncation: the trim-point jumps a recovering node or replica takes. Every client is an **owner** or a **reader** for the whole run (a `buggify_knob!`;
 each journal's first client is always an owner, so every journal has a writer): an owner claims before it writes and
 re-claims when a verdict says it was superseded, a reader only reads. paros runs **no user
 application, one journal-control state machine per journal** (#186, #204): the client *is* the

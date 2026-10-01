@@ -26,7 +26,7 @@ Work in this order and report where you stopped if you cannot finish:
    (or `explore-main` for nearby timelines). Confirm it is RED on this build.
 2. Take the **first** `assertion_violations` entry and its detail map. Find
    the oracle in `crates/paros-sim/src/audit/` (or `chain.rs`, or the
-   workload's `ClientHistory`), then the `Audit` callback that fed it in
+   workload's `ClientHistory` and the linearizability search, `audit/linearizability.rs`), then the `Audit` callback that fed it in
    `crates/paros/src/audit.rs`, then the driver site that reports it.
 3. Walk back through the roles in `paros-core`: which of `Acceptor`,
    `Proposer`, `Replica`, `Matchmaking`, `Matchmaker` decided, what

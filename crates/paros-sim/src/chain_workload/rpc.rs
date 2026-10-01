@@ -7,6 +7,7 @@
 //! one races — is fixed by the caller alone.
 
 use std::future::Future;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_rpc::RpcError;
@@ -18,7 +19,72 @@ use paros::{
 };
 
 use super::ChainConfig;
+use crate::audit::{Attempt, Call, Seen};
+use crate::chain::user_command_hash;
 use crate::client::SimClient;
+
+/// One client's journal calls as the linearizability checker reads them
+/// (#205): every attempt at its own journal, recorded **here, at the RPC
+/// seam**, so no call site can forget one. An attempt is logged when its
+/// request is built and answered when a verdict comes back; one whose
+/// future is dropped (a timeout, an abandoned observation, the shutdown)
+/// or that comes back without a verdict stays unknown. Calls naming any
+/// other journal (the system journals, a created one, a stray id) are not
+/// this history's and are not logged.
+#[derive(Clone)]
+pub(crate) struct CallLog {
+    journal: u64,
+    client: u64,
+    time: SimTimeProvider,
+    attempts: Arc<Mutex<Vec<Attempt>>>,
+}
+
+impl CallLog {
+    pub(crate) fn new(journal: JournalId, client: u64, time: SimTimeProvider) -> Self {
+        Self {
+            journal: journal.0,
+            client,
+            time,
+            attempts: Arc::default(),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        u64::try_from(self.time.now().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Log an attempt at `call` on `journal`, invoked now; its index, or
+    /// `None` when `journal` is not this log's.
+    fn invoke(&self, journal: u64, call: Call) -> Option<usize> {
+        if journal != self.journal {
+            return None;
+        }
+        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+        attempts.push(Attempt {
+            client: self.client,
+            inv: self.now(),
+            call,
+            seen: None,
+        });
+        Some(attempts.len() - 1)
+    }
+
+    /// Attempt `id` was told `seen`, now.
+    fn answer(&self, id: Option<usize>, seen: Option<Seen>) {
+        let (Some(id), Some(seen)) = (id, seen) else {
+            return;
+        };
+        let now = self.now();
+        let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+        let attempt = &mut attempts[id];
+        attempt.seen = Some((now.max(attempt.inv), seen));
+    }
+
+    /// Every attempt so far, handed to the history at `check()`.
+    pub(crate) fn take(&self) -> Vec<Attempt> {
+        std::mem::take(&mut *self.attempts.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
 
 /// The terminal outcome of one `Write` attempt (#204).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +121,24 @@ pub(super) fn state_of(state: Option<paros::wire::common::JournalState>) -> Jour
 }
 
 impl WriteResult {
+    /// The verdict the checker reads off this result; `None` for no verdict.
+    fn seen(&self) -> Option<Seen> {
+        match self {
+            Self::Written {
+                seq,
+                count,
+                duplicate,
+            } => Some(Seen::Written {
+                seq: *seq,
+                count: *count,
+                duplicate: *duplicate,
+            }),
+            Self::Refused { state } => Some(Seen::Refused(*state)),
+            Self::Truncated { state } => Some(Seen::WriteTruncated(*state)),
+            Self::Redirect { .. } | Self::Ambiguous => None,
+        }
+    }
+
     /// Judge one `Write` RPC's answer: a transport error is ambiguous, a
     /// reply is a verdict or a redirect. On a journal `created` at runtime
     /// an unknown answer is no verdict: a member that has not folded the
@@ -160,8 +244,10 @@ pub(super) async fn inspect(
 /// client stops listening after 10 ms and records the observation as
 /// ambiguous. `created` says the journal was created at runtime (#189),
 /// so a member may not serve it yet.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn write_once(
     clients: &[SimClient],
+    log: &CallLog,
     time: &SimTimeProvider,
     journal: JournalId,
     target: usize,
@@ -178,16 +264,32 @@ pub(super) fn write_once(
         seq: entry.seq.0,
         records: entry.records.iter().map(|r| r.0.clone()).collect(),
     };
+    let log = log.clone();
+    let id = log.invoke(
+        journal.0,
+        Call::Write {
+            generation: entry.generation.0,
+            owner: entry.owner.0,
+            seq: entry.seq.0,
+            records: entry
+                .records
+                .iter()
+                .map(|r| user_command_hash(&r.0))
+                .collect(),
+        },
+    );
     async move {
         let call = client.write(&request);
-        if abandon {
+        let result = if abandon {
             moonpool_sim::select! {
                 response = call => WriteResult::from_response(response, created),
                 _ = time.sleep(Duration::from_millis(10)) => WriteResult::Ambiguous,
             }
         } else {
             WriteResult::from_response(call.await, created)
-        }
+        };
+        log.answer(id, result.seen());
+        result
     }
 }
 
@@ -195,6 +297,7 @@ pub(super) fn write_once(
 /// [`write_once`].
 pub(super) fn set_leader_once(
     clients: &[SimClient],
+    log: &CallLog,
     journal: JournalId,
     target: usize,
     expected: u64,
@@ -207,6 +310,8 @@ pub(super) fn set_leader_once(
         expected,
         owner,
     };
+    let log = log.clone();
+    let id = log.invoke(journal.0, Call::SetLeader { expected, owner });
     async move {
         let Ok(ack) = client.set_leader(&request).await else {
             return SetLeaderResult::Ambiguous;
@@ -219,7 +324,7 @@ pub(super) fn set_leader_once(
             !ack.unknown_journal,
             "chain: a node serves the journal the client names"
         );
-        match (ack.decided, ack.won) {
+        let result = match (ack.decided, ack.won) {
             (true, true) => SetLeaderResult::Won {
                 state: state_of(ack.state),
             },
@@ -227,13 +332,23 @@ pub(super) fn set_leader_once(
                 state: state_of(ack.state),
             },
             _ => SetLeaderResult::Redirect { leader: ack.leader },
-        }
+        };
+        log.answer(
+            id,
+            match &result {
+                SetLeaderResult::Won { state } => Some(Seen::Won(*state)),
+                SetLeaderResult::Lost { state } => Some(Seen::Lost(*state)),
+                _ => None,
+            },
+        );
+        result
     }
 }
 
 /// One journal `Read` of `journal` from `from`, asked of `client`.
 pub(super) fn read_once(
     client: &SimClient,
+    log: &CallLog,
     journal: u64,
     from: u64,
     limit: u64,
@@ -246,13 +361,37 @@ pub(super) fn read_once(
         limit,
         wait_ms,
     };
-    async move { client.read(&request).await.ok() }
+    let log = log.clone();
+    let id = log.invoke(journal, Call::Read { from, limit });
+    async move {
+        let ack = client.read(&request).await.ok();
+        log.answer(id, ack.as_ref().and_then(read_seen));
+        ack
+    }
+}
+
+/// The verdict the checker reads off a read's answer: a page or a
+/// truncation, when it was served from this journal.
+fn read_seen(ack: &ReadAck) -> Option<Seen> {
+    if !ack.served || ack.unknown_journal {
+        return None;
+    }
+    let state = journal_state_from_proto(ack.state).ok()?;
+    Some(if ack.truncated {
+        Seen::ReadTruncated(state)
+    } else {
+        Seen::Page {
+            records: ack.records.iter().map(|r| user_command_hash(r)).collect(),
+            state,
+        }
+    })
 }
 
 /// One truncation below `up_to`, starting at `target` and following
 /// redirects for at most `config.compact_attempts` asks.
 pub(super) fn truncate_once(
     clients: &[SimClient],
+    log: &CallLog,
     time: &SimTimeProvider,
     journal: JournalId,
     config: &ChainConfig,
@@ -262,6 +401,7 @@ pub(super) fn truncate_once(
     let clients = clients.to_vec();
     let time = time.clone();
     let config = *config;
+    let log = log.clone();
     async move {
         let mut attempt_target = target % clients.len();
         for _attempt in 0..config.compact_attempts {
@@ -270,6 +410,7 @@ pub(super) fn truncate_once(
                 journal: journal.0,
                 up_to,
             };
+            let id = log.invoke(journal.0, Call::Truncate { up_to });
             let outcome = moonpool_sim::select! {
                 response = client.truncate(&request) => match response {
                     Ok(ack) if ack.decided => TruncateResult::Applied { state: state_of(ack.state) },
@@ -278,6 +419,9 @@ pub(super) fn truncate_once(
                 },
                 _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => TruncateResult::Ambiguous,
             };
+            if let TruncateResult::Applied { state } = &outcome {
+                log.answer(id, Some(Seen::Trimmed(*state)));
+            }
             match outcome {
                 // A redirect to another node: follow it. The same node, or
                 // none named: a beat later, at the next node.

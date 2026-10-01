@@ -122,9 +122,18 @@ impl NodeShape {
         // accepts + commits need — which is a permanent partition in
         // disguise, and 7/500 seeds wedged without ever converging
         // (witness seed 4877033065878342564: an n=2 cluster that never
-        // chose a single slot in 67 s). Eight-to-32 still shrinks frames
-        // 2-8x against the default 64 without making the run unwinnable.
-        let delivery_batch = buggify_knob!(defaults.delivery_batch, 8_usize..33_usize);
+        // chose a single slot in 67 s). The rate is **per journal**, and a
+        // link carries every journal its two ends serve — the genesis ones
+        // and every one a client created at runtime (#189) — so a floor of
+        // eight, sized for one journal, left a link carrying three with a
+        // backlog that never drained: each message waited ~7 round trips
+        // behind the others' beats, and under a `q1 = n` split every quorum
+        // read waited on that link and expired, so no claim ever wrote
+        // (witness seed 9499531859745476743, #205's hunt: 56 messages queued
+        // node 2 → 0 for the whole 130 s tail; 1–3 at a floor of 24).
+        // Twenty-four to 32 still shrinks frames 2-2.7x against the
+        // default 64.
+        let delivery_batch = buggify_knob!(defaults.delivery_batch, 24_usize..33_usize);
         if peer_queue_capacity != defaults.peer_queue_capacity {
             // BUGGIFY pairing: the capacity extreme genuinely runs.
             assert_reachable!("a node runs with an extreme peer-queue capacity");
