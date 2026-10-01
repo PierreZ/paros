@@ -634,30 +634,84 @@ struct Primed {
 /// at their expected slots, then replicated and applied everywhere within
 /// `PRIME_BUDGET`. `case` names the workload in the error a failed priming
 /// returns (its always-assertion has already recorded the violation).
+///
+/// `None` is a **vacuous** run: the cluster decided a slot between the
+/// primed commands — an election raced the priming, and the successor's
+/// recovery filled a slot a deposed leader had opened with a `Noop` (#204:
+/// the client's retry then took a later slot). The analytic model needs the
+/// commands at slots `0..count`, so such a run proves nothing either way.
+/// Witness: corpus seed 17965722134612820192 (claim, write, `Noop`, write).
 #[tracing::instrument(level = "debug", skip_all, fields(count))]
-async fn primed_cluster(ctx: &SimContext, count: u64, case: &str) -> SimulationResult<Primed> {
+async fn primed_cluster(
+    ctx: &SimContext,
+    count: u64,
+    case: &str,
+) -> SimulationResult<Option<Primed>> {
     let servers = corpus_servers(ctx)?;
     let clients = CorpusClients::connect(ctx, &servers)?;
     let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
     let commands = prime_prefix(ctx, &clients, client_id, count, None, 0).await?;
     let states = expected_marks(&commands);
-    let slots: BTreeSet<u64> = (0..count).collect();
     let deadline = ctx.time().now() + PRIME_BUDGET;
-    let replicated = wait_replicated(ctx, &servers, &slots, commands.len(), deadline).await;
+    let settled = wait_settled(ctx, &servers, count, deadline).await;
     assert_always!(
-        replicated,
+        settled.is_some(),
         "corpus: priming replicates and applies the full prefix everywhere"
     );
-    if !replicated {
+    let Some(chosen) = settled else {
         return Err(invalid(format!("{case} priming did not replicate")));
+    };
+    if chosen + 1 != count {
+        tracing::info!(chosen, count, "corpus_priming_interleaved");
+        assert_reachable!("corpus: an election interleaves a slot into the priming");
+        return Ok(None);
     }
-    Ok(Primed {
+    Ok(Some(Primed {
         servers,
         clients,
         client_id,
         commands,
         states,
-    })
+    }))
+}
+
+/// Wait until every server agrees on one durable chosen index at or past
+/// `count - 1`, with every slot up to it clean, and return it — or `None` at
+/// the deadline.
+async fn wait_settled(
+    ctx: &SimContext,
+    servers: &[String],
+    count: u64,
+    deadline: Duration,
+) -> Option<u64> {
+    let time = ctx.time();
+    loop {
+        if ctx.shutdown().is_cancelled() {
+            return None;
+        }
+        let probes: Vec<_> = servers
+            .iter()
+            .map(|ip| corpus_disk_probe(ctx.state(), ip))
+            .collect();
+        let chosen = probes
+            .first()
+            .and_then(|probe| probe.as_ref()?.chosen_index)
+            .filter(|chosen| *chosen + 1 >= count);
+        if let Some(chosen) = chosen {
+            let slots: BTreeSet<u64> = (0..=chosen).collect();
+            if probes.iter().all(|probe| {
+                probe.as_ref().is_some_and(|probe| {
+                    probe.chosen_index == Some(chosen) && slots.is_subset(&probe.clean_slots)
+                })
+            }) {
+                return Some(chosen);
+            }
+        }
+        if time.now() >= deadline {
+            return None;
+        }
+        time.sleep(POLL_INTERVAL).await.ok();
+    }
 }
 
 // --- the E1 mask workload -----------------------------------------------------
@@ -698,13 +752,16 @@ impl Workload for E1MaskWorkload {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // Phase 1: prime and fully replicate the decided prefix.
-        let Primed {
+        let Some(Primed {
             servers,
             clients,
             commands,
             states: expected,
             ..
-        } = primed_cluster(ctx, CORPUS_SLOTS, "corpus").await?;
+        }) = primed_cluster(ctx, CORPUS_SLOTS, "corpus").await?
+        else {
+            return Ok(());
+        };
         let time = ctx.time().clone();
         let full = expected[commands.len()];
         let content = full_chain(&commands);
@@ -894,13 +951,16 @@ impl Workload for BareQuorumWorkload {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // Phase 1: two fully replicated slots.
-        let Primed {
+        let Some(Primed {
             servers,
             clients,
             client_id,
             mut commands,
             states,
-        } = primed_cluster(ctx, 2, "bare-quorum").await?;
+        }) = primed_cluster(ctx, 2, "bare-quorum").await?
+        else {
+            return Ok(());
+        };
         let time = ctx.time().clone();
         let absent = CORPUS_NODES - 1;
         let expected2 = states[2];
