@@ -49,6 +49,7 @@ impl ChainWorkload {
         let journal = self.journal;
         let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
+        let read_timeout = Duration::from_millis(config.read_timeout_ms);
         let sends = join_all(burst.iter().map(|(submission, target)| {
             let attempt = rpc::write_once(
                 clients,
@@ -66,7 +67,16 @@ impl ChainWorkload {
             let (delay, via) = race?;
             assert_reachable!("chain: a claim races an owner's pipelined burst");
             time.sleep(delay).await.ok()?;
-            claim(ctx, clients, log, journal, via % clients.len(), me, timeout).await
+            claim(
+                ctx,
+                clients,
+                log,
+                journal,
+                via % clients.len(),
+                me,
+                (read_timeout, timeout),
+            )
+            .await
         };
         let (results, claimed) = futures::join!(sends, claimed);
         let mut next = writer.next_seq;
@@ -139,6 +149,7 @@ impl ChainWorkload {
         let journal = self.journal;
         let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
+        let read_timeout = Duration::from_millis(config.read_timeout_ms);
         let send = |target: usize| {
             rpc::write_once(
                 clients,
@@ -157,7 +168,17 @@ impl ChainWorkload {
             return first;
         }
         assert_reachable!("chain: a write's timeout is shorter than its ack");
-        let moved = match claim(ctx, clients, log, journal, target, me, timeout).await {
+        let moved = match claim(
+            ctx,
+            clients,
+            log,
+            journal,
+            target,
+            me,
+            (read_timeout, timeout),
+        )
+        .await
+        {
             Some(SetLeaderResult::Won { state }) => {
                 writer.won(&state);
                 true

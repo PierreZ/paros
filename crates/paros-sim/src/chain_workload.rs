@@ -230,6 +230,16 @@ struct ChainConfig {
     /// How long a connection may stay silent after a ping. Floor 250 ms: a
     /// timeout under the round trip fails a healthy connection on every ping.
     keep_alive_timeout_ms: u64,
+    /// The deadline of every journal read this client makes — a fold's
+    /// page, a `READ`, the read a claim starts with. Its own knob, apart
+    /// from `request_timeout_ms`: a read is a quorum read the node confirms
+    /// over its peers' answers (5–10 driver ticks under load), so a deadline
+    /// under that window abandons every read before its answer comes back,
+    /// and since every claim starts with a read (#204) an owner could never
+    /// claim again (witness seed 14892420475698485454, #205's 10k hunt: a
+    /// 358 ms request timeout, every read of a 130 s tail abandoned). Floor
+    /// 1 s: twice the driver's default confirmation window.
+    read_timeout_ms: u64,
     /// The records a journal `READ` asks a page for. Floor 1: a reader that
     /// walks the journal one record per call — slower, never stuck.
     read_limit: u64,
@@ -291,6 +301,7 @@ impl ChainConfig {
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
+            read_timeout_ms: buggify_knob!(2000_u64, 1000_u64..4001_u64),
             read_limit: buggify_knob!(64_u64, 1_u64..257_u64),
             read_wait_ms: buggify_knob!(0_u64, 0_u64..401_u64),
             burst_claim_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
@@ -1001,7 +1012,7 @@ async fn claim(
     journal: JournalId,
     target: usize,
     me: u64,
-    timeout: Duration,
+    (read_timeout, timeout): (Duration, Duration),
 ) -> Option<SetLeaderResult> {
     let mut served = None;
     for offset in 0..clients.len() {
@@ -1015,7 +1026,7 @@ async fn claim(
         );
         // A node outside this journal (a joiner, #189) refuses it as
         // unknown: a node to skip, not an answer.
-        if let Some(ack) = within(ctx, timeout, None, read).await
+        if let Some(ack) = within(ctx, read_timeout, None, read).await
             && ack.served
             && !ack.unknown_journal
         {
@@ -1148,6 +1159,7 @@ impl Workload for ChainWorkload {
             joiners: deployment.joiners().len(),
         };
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
+        let read_timeout = Duration::from_millis(config.read_timeout_ms);
         let mut next_op = 0_u64;
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
@@ -1230,7 +1242,7 @@ impl Workload for ChainWorkload {
                 journal,
                 first,
                 client_id,
-                request_timeout,
+                (read_timeout, request_timeout),
             )
             .await
             {
@@ -1570,7 +1582,7 @@ impl Workload for ChainWorkload {
                         journal,
                         via,
                         client_id,
-                        request_timeout,
+                        (read_timeout, request_timeout),
                     )
                     .await
                     {
@@ -1752,7 +1764,7 @@ impl Workload for ChainWorkload {
                             target,
                             client_id,
                             config.read_limit,
-                            request_timeout,
+                            read_timeout,
                         )
                         .await;
                         // Everything this client has read is what it may
@@ -1900,7 +1912,7 @@ impl Workload for ChainWorkload {
                     // One read, retried at the next server while its
                     // quorum read goes unserved, inside one deadline.
                     let deadline =
-                        time.now() + request_timeout + Duration::from_millis(config.read_wait_ms);
+                        time.now() + read_timeout + Duration::from_millis(config.read_wait_ms);
                     let mut attempts = 0_u64;
                     let read = async {
                         loop {
@@ -1981,7 +1993,7 @@ impl Workload for ChainWorkload {
                             let client = readers[(drawn + k) % span.max(1)].clone();
                             let call =
                                 read_once(&client, &log, journal.0, floor, config.read_limit, 0);
-                            match within(ctx, request_timeout, None, call).await {
+                            match within(ctx, read_timeout, None, call).await {
                                 Some(ack) if ack.served && !ack.unknown_journal => {
                                     if ack.truncated {
                                         floor = state_of(ack.state).first_seq.0;
@@ -2008,7 +2020,7 @@ impl Workload for ChainWorkload {
                         drawn,
                         client_id,
                         config.read_limit,
-                        request_timeout,
+                        read_timeout,
                     )
                     .await;
                     tracing::info!(
@@ -2751,7 +2763,7 @@ impl Workload for ChainWorkload {
             usize::try_from(client_id).unwrap_or(0) % readers.len().max(1),
             client_id,
             config.read_limit,
-            request_timeout,
+            read_timeout,
         )
         .await;
         // A replica held down across the tail (#205), its own location: an
@@ -2805,7 +2817,7 @@ impl Workload for ChainWorkload {
                         journal,
                         target,
                         client_id,
-                        request_timeout,
+                        (read_timeout, request_timeout),
                     )
                     .await
                     {
@@ -2890,7 +2902,7 @@ impl Workload for ChainWorkload {
                 target,
                 client_id,
                 config.read_limit,
-                request_timeout,
+                read_timeout,
             )
             .await;
             truncate_traced(target, writer.next_seq.max(fold.cursor())).await;
@@ -3050,7 +3062,7 @@ impl Workload for ChainWorkload {
                 node,
                 client_id,
                 config.read_limit,
-                request_timeout,
+                read_timeout,
             )
             .await;
             tracing::info!(

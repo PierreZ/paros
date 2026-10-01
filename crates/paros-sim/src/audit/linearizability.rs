@@ -504,18 +504,64 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
 }
 
 /// The attempts the search judges, by index: every answered one, and every
-/// unknown write, claim and truncation not dominated by an identical unknown
-/// attempt invoked no later. An unanswered read changes nothing.
+/// unknown write, claim and truncation not dominated by another unknown
+/// attempt. An unanswered read changes nothing and is dropped.
+///
+/// Two domination rules, both keeping the earlier-invoked attempt (it can
+/// stand wherever the later one could):
+///
+/// - **Identical calls.** Two unknown attempts asking the same thing are the
+///   same step.
+/// - **Unobserved bytes.** Two unknown writes with the same
+///   `(generation, owner, seq, count)` change the scalars identically, and
+///   differ only in bytes. When no answered attempt can tell those bytes
+///   apart — no page shows one of their records, and no answered write is
+///   the same call (whose verdict, duplicate or refused, would depend on
+///   them) — accepting one or the other is observed by nobody, so one
+///   representative per group stands for all. Without this, an owner's
+///   recovery loop (a fresh write per try at one position, hundreds over a
+///   long tail) made every unknown write a branch at the one state where
+///   they could all land (hunt seed 651057785248754081: 382 at one
+///   position, past a 5M-step budget).
 fn judged(attempts: &[Attempt]) -> Vec<usize> {
+    let mut seen_records: BTreeSet<u64> = BTreeSet::new();
+    let mut answered_writes: BTreeSet<&Call> = BTreeSet::new();
+    for attempt in attempts {
+        match (&attempt.call, &attempt.seen) {
+            (_, Some((_, Seen::Page { records, .. }))) => seen_records.extend(records),
+            (call @ Call::Write { .. }, Some(_)) => {
+                answered_writes.insert(call);
+            }
+            _ => {}
+        }
+    }
     let mut order: Vec<usize> = (0..attempts.len()).collect();
     order.sort_by_key(|&i| (attempts[i].inv, i));
     let mut unknown: BTreeSet<&Call> = BTreeSet::new();
+    let mut unobserved: BTreeSet<(u64, u64, u64, usize)> = BTreeSet::new();
     let mut keep: Vec<usize> = order
         .into_iter()
         .filter(|&i| {
             let attempt = &attempts[i];
-            attempt.seen.is_some()
-                || (!matches!(attempt.call, Call::Read { .. }) && unknown.insert(&attempt.call))
+            if attempt.seen.is_some() {
+                return true;
+            }
+            match &attempt.call {
+                Call::Read { .. } => false,
+                call @ Call::Write {
+                    generation,
+                    owner,
+                    seq,
+                    records,
+                } => {
+                    let observed = answered_writes.contains(call)
+                        || records.iter().any(|r| seen_records.contains(r));
+                    unknown.insert(call)
+                        && (observed
+                            || unobserved.insert((*generation, *owner, *seq, records.len())))
+                }
+                call => unknown.insert(call),
+            }
         })
         .collect();
     keep.sort_unstable();
@@ -540,7 +586,7 @@ fn mix128(x: u128) -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attempt, Call, Seen, check};
+    use super::{Attempt, Call, Seen, check, judged};
     use paros::{ClientId, Generation, JournalState, Seq};
 
     fn state(owner: Option<u64>, generation: u64, next: u64, first: u64) -> JournalState {
@@ -758,5 +804,40 @@ mod tests {
             ),
         ];
         assert!(!linearizable(&history));
+    }
+
+    /// Unknown writes at one position with unobserved bytes collapse to one
+    /// representative; one whose record a page shows stays its own branch.
+    #[test]
+    fn unobserved_unknown_writes_at_one_position_collapse() {
+        let mut history = vec![at(
+            0,
+            0,
+            Call::SetLeader {
+                expected: 0,
+                owner: 0,
+            },
+            Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+        )];
+        for k in 0..50 {
+            history.push(at(0, 2 + k, write(1, 0, 0, &[100 + k]), None));
+        }
+        history.push(at(
+            1,
+            90,
+            Call::Read { from: 0, limit: 0 },
+            Some((
+                91,
+                Seen::Page {
+                    records: vec![130],
+                    state: state(Some(0), 1, 1, 0),
+                },
+            )),
+        ));
+        let kept = judged(&history);
+        // The claim, the read, the observed write (bytes 130) and one
+        // representative of the 49 others.
+        assert_eq!(kept.len(), 4);
+        assert!(linearizable(&history));
     }
 }
