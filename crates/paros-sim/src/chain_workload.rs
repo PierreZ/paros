@@ -1128,6 +1128,9 @@ impl Workload for ChainWorkload {
         };
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let mut next_op = 0_u64;
+        // A joiner this client just registered: the next step grows a
+        // configuration onto it (the `REGISTER_NODE` arm).
+        let mut reconfigure_next = false;
         let mut hint = LeaderHint::default();
         let mut successful_after_ambiguity = false;
         let mut written = Vec::<WrittenCommand>::new();
@@ -1302,7 +1305,13 @@ impl Workload for ChainWorkload {
             let raw_payload = ctx.random().random::<u64>();
             let raw_pause = ctx.random().random::<u64>();
             let raw_policy = ctx.random().random::<u64>();
-            let op = Self::choose_operation(&config, &operations, raw_op);
+            let after_register = std::mem::take(&mut reconfigure_next);
+            let op = if after_register {
+                assert_reachable!("system: a client reconfigures right after registering a joiner");
+                RECONFIGURE
+            } else {
+                Self::choose_operation(&config, &operations, raw_op)
+            };
             // The matchmaker plane — an acceptor or matchmaker
             // reconfiguration, a retirement — belongs to the default journal
             // (#188): a client of another journal pauses instead.
@@ -2027,8 +2036,37 @@ impl Workload for ChainWorkload {
                             })
                         })
                     };
+                    // A registered joiner (#189) is one spare among the
+                    // pool's, and growing onto it is the rare step the
+                    // system board's "joins a journal's configuration
+                    // through Reconfigure" gate waits on: on a coin of the
+                    // step's policy draw, a step with one joinable draws the
+                    // new member from the joiners alone (the members in
+                    // force stay candidates), falling back to the whole
+                    // live pool when no shape holds — always on the step
+                    // right after a registration. A composition policy,
+                    // like the shape draw — a per-seed BUGGIFY activation
+                    // left the CI sweep's 1,024 seeds short of the gate.
+                    let prefer_joiner =
+                        !joinable.is_empty() && (after_register || (raw_policy >> 11) % 2 == 0);
+                    let joiner_first: Vec<u64> = live
+                        .iter()
+                        .copied()
+                        .filter(|n| {
+                            joinable.contains(n)
+                                || members.as_deref().is_some_and(|m| m.contains(n))
+                        })
+                        .collect();
                     let composed = if adversarial_members {
                         compose_from(&all_ranks).or_else(|| compose_from(&live))
+                    } else if prefer_joiner {
+                        let onto_joiner = compose_from(&joiner_first);
+                        if onto_joiner.is_some() {
+                            assert_reachable!(
+                                "reconfiguration: the composer draws a successor's new member from the registered joiners"
+                            );
+                        }
+                        onto_joiner.or_else(|| compose_from(&live))
                     } else {
                         compose_from(&live)
                     };
@@ -2439,12 +2477,17 @@ impl Workload for ChainWorkload {
                 }
                 DELETE_JOURNAL => system_ops.delete(ctx, &clients, raw_payload).await,
                 REGISTER_NODE => {
-                    system_ops
+                    // An operator who registers a node usually adds it next
+                    // (#189): the client's next step grows a configuration
+                    // onto the joiner it just registered.
+                    reconfigure_next = system_ops
                         .registry_step(ctx, &clients, None, raw_payload)
-                        .await;
+                        .await
+                        && journal == JournalId::default()
+                        && operations.contains(&RECONFIGURE);
                 }
                 DRAIN_NODE => {
-                    system_ops
+                    let _ = system_ops
                         .registry_step(
                             ctx,
                             &clients,
@@ -2454,7 +2497,7 @@ impl Workload for ChainWorkload {
                         .await;
                 }
                 RETIRE_NODE => {
-                    system_ops
+                    let _ = system_ops
                         .registry_step(
                             ctx,
                             &clients,

@@ -423,16 +423,17 @@ impl SystemOps {
 
     /// `REGISTER_NODE` / `DRAIN_NODE` / `RETIRE_NODE`: one registry entry for
     /// a joiner the draw names; a drain or a retirement only for a joiner the
-    /// registry has in the standing it needs (one read back first).
+    /// registry has in the standing it needs (one read back first). Returns
+    /// whether it registered a joiner a reconfiguration may now name.
     pub(super) async fn registry_step(
         &mut self,
         ctx: &SimContext,
         clients: &[SimClient],
         standing: Option<NodeStanding>,
         draw: u64,
-    ) {
+    ) -> bool {
         if self.joiners.is_empty() {
-            return;
+            return false;
         }
         let command = match standing {
             None => {
@@ -482,7 +483,7 @@ impl SystemOps {
                         assert_reachable!(
                             "system: a retirement of a joiner a reconfiguration named is withheld"
                         );
-                        return;
+                        return false;
                     }
                     SystemCommand::RetireNode { id }
                 }
@@ -492,6 +493,7 @@ impl SystemOps {
             match command {
                 SystemCommand::RegisterNode { .. } => {
                     assert_reachable!("system: a client registers a joiner");
+                    return self.active && self.spares;
                 }
                 SystemCommand::DrainNode { .. } => {
                     assert_reachable!("system: a client drains a joiner");
@@ -499,5 +501,6 @@ impl SystemOps {
                 _ => assert_reachable!("system: a client retires a joiner"),
             }
         }
+        false
     }
 }
