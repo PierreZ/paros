@@ -2796,9 +2796,37 @@ impl Workload for ChainWorkload {
         let mut recovery_acked = 0_u64;
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
         let mut target = hint.current.unwrap_or(first) % server_count;
-        for _ in 0..config.recovery_proposals {
+        for k in 0..config.recovery_proposals {
             if reader {
                 break;
+            }
+            // The tail truncation, before the batch's last write: an owner
+            // that wrote its batch drops everything every client has folded
+            // (the fence's clamp; it folds its own batch first, since the
+            // fence holds a truncation below its own cursor too). Before the
+            // last write, never after it: the chosen prefix is contiguous,
+            // so that write's ack means the truncation's slot was decided
+            // too. Issued last, an attempt that lingered past its answer (a
+            // delegated round taken back beats later) was decided after
+            // every client had judged the run converged, one slot past a
+            // node the run then ended on (witness seed 11017340697535666646,
+            // #205's 10k hunt: decided 2.8 s after its call gave up).
+            if k + 1 == config.recovery_proposals
+                && recovery_acked > 0
+                && config.compaction
+                && !shutdown.is_cancelled()
+            {
+                fold.read_to_tail(
+                    ctx,
+                    &audit,
+                    &readers,
+                    target,
+                    client_id,
+                    config.read_limit,
+                    read_timeout,
+                )
+                .await;
+                truncate_traced(target, writer.next_seq.max(fold.cursor())).await;
             }
             let raw = ctx.random().random::<u64>();
             let mut acknowledged = false;
@@ -2889,23 +2917,6 @@ impl Workload for ChainWorkload {
             if !acknowledged {
                 break;
             }
-        }
-        // The tail truncation: an owner that wrote its recovery batch drops
-        // everything every client has folded (the fence's clamp).
-        // It folds its own batch first: the fence holds a truncation below
-        // its own cursor too.
-        if recovery_acked > 0 && config.compaction && !shutdown.is_cancelled() {
-            fold.read_to_tail(
-                ctx,
-                &audit,
-                &readers,
-                target,
-                client_id,
-                config.read_limit,
-                read_timeout,
-            )
-            .await;
-            truncate_traced(target, writer.next_seq.max(fold.cursor())).await;
         }
         if let Some(ip) = &held_replica {
             crate::lifecycle::restart(ctx, ip).await;
