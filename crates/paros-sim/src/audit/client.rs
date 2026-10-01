@@ -194,16 +194,19 @@ impl LinHistory {
     }
 }
 
-/// The search's step budget. The histories a campaign produces take a few
-/// hundred thousand steps at most; the budget only bounds a pathological
-/// one, and running out of it is reported, never mistaken for a verdict.
-const LIN_SEARCH_BUDGET: u64 = 50_000_000;
+/// The search's step budget. The histories a campaign produces take tens of
+/// thousands of steps at most (65k the worst of 500 seeds); the budget only
+/// bounds a pathological one — the memo grows with the steps, so it bounds
+/// memory too — and running out of it is reported, never mistaken for a
+/// verdict.
+const LIN_SEARCH_BUDGET: u64 = 5_000_000;
 
 /// The full checker (#205): the merged attempts of every client of one
 /// journal, searched for a linearization against the journal's sequential
 /// model ([`linearizability`](super::linearizability)). Run once, when the
 /// last client of the journal merged: a sub-history of some clients is not a
 /// history (a read shows records another client wrote).
+#[tracing::instrument(level = "debug", skip_all)]
 pub(super) fn check_linearizable(h: &LinHistory) {
     let verdict = super::linearizability::check(&h.attempts, LIN_SEARCH_BUDGET);
     assert_always!(

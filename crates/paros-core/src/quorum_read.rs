@@ -62,7 +62,7 @@
 //! bookkeeping over the same `Read` — a client that remembers the highest
 //! index it has written or read and asks a replica for at least that — and
 //! involve no acceptor at all. They are workload-only, judged by the client
-//! history's sequential-client consistency, and are not built in the core.
+//! history's linearizability search (#205), and are not built in the core.
 
 use std::collections::{BTreeMap, BTreeSet};
 

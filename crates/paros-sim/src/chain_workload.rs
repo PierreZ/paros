@@ -29,6 +29,7 @@ use crate::chain::{hash_text, trace_truncate, user_command_hash};
 use crate::client::{ClientRuntime, SimClient, client_rpc_config};
 
 mod fold;
+mod races;
 mod rpc;
 mod system;
 
@@ -367,15 +368,6 @@ impl ChainConfig {
     fn weight(&self, operation: u8) -> u64 {
         self.weights[usize::from(operation)]
     }
-}
-
-/// Spread one draw into another (`splitmix64`): the entries of a burst drawn
-/// from one step's draws.
-fn splitmix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 /// Pick an index of `weights` from one draw, weighted. An all-zero draw (or a
@@ -810,6 +802,9 @@ struct AdversarialCoverage {
     /// from the log, or refused as superseded.
     retry_acked_across_claim: bool,
     retry_superseded: bool,
+    /// Race 1 (#205): a claim landed inside an owner's burst — writes ahead
+    /// of it written, the rest fenced by the generation it minted.
+    burst_fenced: bool,
     /// Race 3 (#205): a read raced past by a truncation was refused, and the
     /// reader resumed at the floor the refusal named.
     reader_resumed: bool,
@@ -969,189 +964,6 @@ impl ChainWorkload {
         );
     }
 
-    /// Send `burst` — writes at consecutive positions, each to its target —
-    /// pipelined (#204: `Write` is pipelineable), and fold the verdicts into
-    /// the writer. Overlapping Phase-2 rounds make the optional re-send and a
-    /// later election gap observable without fabricating a message; a write
-    /// that reaches the leader out of order is refused and names where the
-    /// journal stood.
-    ///
-    /// With `race` (a delay and a node to ask), **race 1 of #205**: this
-    /// owner claims the journal again while its burst is in flight. The
-    /// writes whose slots the claim lands behind are fenced — refused,
-    /// naming the generation the claim minted — and the ones ahead of it
-    /// are written; which is which is the slot order's alone, and the
-    /// linearizability check judges both halves.
-    #[allow(clippy::too_many_arguments)]
-    async fn burst(
-        &mut self,
-        ctx: &SimContext,
-        clients: &[SimClient],
-        log: &CallLog,
-        config: &ChainConfig,
-        burst: Vec<(Submission, usize)>,
-        race: Option<(Duration, usize)>,
-        routes: Routes,
-        (writer, hint, written): (&mut Writer, &mut LeaderHint, &mut Vec<WrittenCommand>),
-    ) {
-        let time = ctx.time().clone();
-        let journal = self.journal;
-        let me = self.client_id;
-        let timeout = Duration::from_millis(config.request_timeout_ms);
-        let sends = join_all(burst.iter().map(|(submission, target)| {
-            let attempt = rpc::write_once(
-                clients,
-                log,
-                &time,
-                journal,
-                *target,
-                &submission.entry,
-                false,
-                false,
-            );
-            within(ctx, timeout, WriteResult::Ambiguous, attempt)
-        }));
-        let claimed = async {
-            let (delay, via) = race?;
-            assert_reachable!("chain: a claim races an owner's pipelined burst");
-            time.sleep(delay).await.ok()?;
-            claim(ctx, clients, log, journal, via % clients.len(), me, timeout).await
-        };
-        let (results, claimed) = futures::join!(sends, claimed);
-        let mut next = writer.next_seq;
-        let (mut landed, mut fenced) = (false, false);
-        for ((submission, target), result) in burst.into_iter().zip(results) {
-            match result {
-                WriteResult::Written { seq, count, .. } => {
-                    hint.observe(u64::try_from(target).ok(), routes);
-                    next = next.max(seq + count);
-                    landed = true;
-                    let now = u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX);
-                    self.record_written(&submission, seq, count, now);
-                    self.adversarial.payload_classes[submission.payload_class] = true;
-                    written.push(submission.written(seq, count, target));
-                }
-                WriteResult::Refused { state } | WriteResult::Truncated { state } => {
-                    self.history.record_write_failed(submission.op);
-                    fenced |= state.generation.0 > submission.entry.generation.0;
-                    if state.owner == Some(ClientId(me)) {
-                        next = next.max(state.next_seq.0);
-                    } else {
-                        writer.learn(me, &state);
-                    }
-                    tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_command_rejected");
-                }
-                WriteResult::Redirect { leader } => {
-                    hint.observe(leader, routes);
-                    self.history.record_write_failed(submission.op);
-                }
-                WriteResult::Ambiguous => {
-                    self.history.record_write_failed(submission.op);
-                    tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
-                }
-            }
-        }
-        writer.next_seq = next;
-        match claimed {
-            Some(SetLeaderResult::Won { state }) => {
-                writer.won(&state);
-                // A fenced write names a state at or past the claim's.
-                writer.next_seq = writer.next_seq.max(next);
-                if landed && fenced {
-                    assert_reachable!("journal: a claim fences the rest of an owner's burst");
-                }
-            }
-            Some(SetLeaderResult::Lost { state }) => writer.learn(me, &state),
-            Some(SetLeaderResult::Redirect { leader }) => hint.observe(leader, routes),
-            Some(SetLeaderResult::Ambiguous) | None => {}
-        }
-    }
-
-    /// **Race 2 of #205**: `submission`'s first attempt times out before its
-    /// ack can come back (`ack_race_timeout_ms`), so the write may still
-    /// land; the owner, not knowing, claims the journal again, and only then
-    /// retries the same write — under the generation it was built with. The
-    /// retry crosses the ownership change its own claim made: answered from
-    /// the log when the first attempt landed ahead of the claim, refused as
-    /// superseded when it did not.
-    #[allow(clippy::too_many_arguments)]
-    async fn ack_race(
-        &mut self,
-        ctx: &SimContext,
-        clients: &[SimClient],
-        log: &CallLog,
-        config: &ChainConfig,
-        submission: &Submission,
-        target: usize,
-        routes: Routes,
-        (writer, hint): (&mut Writer, &mut LeaderHint),
-    ) -> WriteResult {
-        assert_reachable!("chain: a write's timeout is shorter than its ack");
-        let time = ctx.time().clone();
-        let journal = self.journal;
-        let me = self.client_id;
-        let timeout = Duration::from_millis(config.request_timeout_ms);
-        let send = |target: usize| {
-            rpc::write_once(
-                clients,
-                log,
-                &time,
-                journal,
-                target,
-                &submission.entry,
-                false,
-                false,
-            )
-        };
-        let short = Duration::from_millis(config.ack_race_timeout_ms);
-        let first = within(ctx, short, WriteResult::Ambiguous, send(target)).await;
-        if !matches!(first, WriteResult::Ambiguous) {
-            return first;
-        }
-        let moved = match claim(ctx, clients, log, journal, target, me, timeout).await {
-            Some(SetLeaderResult::Won { state }) => {
-                writer.won(&state);
-                true
-            }
-            // Another owner's claim overtook this one: the ownership
-            // changed all the same.
-            Some(SetLeaderResult::Lost { state }) => {
-                writer.learn(me, &state);
-                true
-            }
-            Some(SetLeaderResult::Redirect { leader }) => {
-                hint.observe(leader, routes);
-                false
-            }
-            Some(SetLeaderResult::Ambiguous) | None => false,
-        };
-        let retry = within(
-            ctx,
-            timeout,
-            WriteResult::Ambiguous,
-            send(hint.current.unwrap_or(target)),
-        )
-        .await;
-        if moved {
-            match &retry {
-                WriteResult::Written { duplicate, .. } => {
-                    assert_always!(
-                        *duplicate,
-                        "journal: a write retried across an ownership change is never accepted anew"
-                    );
-                    self.adversarial.retry_acked_across_claim = true;
-                }
-                WriteResult::Refused { state }
-                    if state.generation.0 > submission.entry.generation.0 =>
-                {
-                    self.adversarial.retry_superseded = true;
-                }
-                _ => {}
-            }
-        }
-        retry
-    }
-
     fn payload(class: u64, ordinary: usize, large: usize, mut seed: u64) -> Vec<u8> {
         let len = match class % 4 {
             0 => 0,
@@ -1213,16 +1025,7 @@ async fn claim(
     }
     let tail = state_of(served?.state);
     let ask = set_leader_once(clients, log, journal, target, tail.generation.0, me, false);
-    let result = within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await;
-    // A claim whose read was overtaken by another claim loses (#205): two
-    // owners starting together, or a claim racing a burst's own.
-    if let SetLeaderResult::Won { .. } | SetLeaderResult::Lost { .. } = &result {
-        assert_sometimes!(
-            matches!(result, SetLeaderResult::Lost { .. }),
-            "journal: a SetLeader loses its compare-and-swap"
-        );
-    }
-    Some(result)
+    Some(within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await)
 }
 
 #[async_trait]
@@ -1567,7 +1370,7 @@ impl Workload for ChainWorkload {
                         let mut ahead = writer;
                         let mut burst = Vec::with_capacity(config.pipeline_depth);
                         for k in 0..config.pipeline_depth as u64 {
-                            let spread = splitmix(raw_payload ^ k);
+                            let spread = crate::chain::splitmix(raw_payload ^ k);
                             let submission = self.submit(
                                 &audit,
                                 &config,
@@ -1581,6 +1384,7 @@ impl Workload for ChainWorkload {
                             burst.push((submission, via));
                         }
                         let race = buggify_with_prob!(0.5).then(|| {
+                            assert_reachable!("chain: a claim races a mid-run burst");
                             let delay = raw_pause % (config.burst_claim_delay_ms + 1);
                             (Duration::from_millis(delay), via)
                         });
@@ -2055,7 +1859,6 @@ impl Workload for ChainWorkload {
                     let racing = buggify_with_prob!(0.15);
                     let tailing = !racing && raw_class % 4 < 2;
                     let from = if racing {
-                        assert_reachable!("chain: a truncation races a reader's cursor");
                         raw_payload % (fold.cursor() + 1)
                     } else {
                         match raw_class % 4 {
@@ -2123,6 +1926,7 @@ impl Workload for ChainWorkload {
                     };
                     let truncation = async {
                         if racing && !reader && config.compaction {
+                            assert_reachable!("chain: a truncation races a reader's cursor");
                             truncate_traced(hint.current.unwrap_or(target), race_up_to).await;
                         }
                     };
@@ -2848,6 +2652,10 @@ impl Workload for ChainWorkload {
             "journal: a retry across an ownership change is acked from the log"
         );
         assert_sometimes!(
+            self.adversarial.burst_fenced,
+            "journal: a claim fences the rest of an owner's burst"
+        );
+        assert_sometimes!(
             self.adversarial.reader_resumed,
             "journal: a reader hits Truncated and resumes above the floor"
         );
@@ -2953,14 +2761,11 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == JournalId::default() && !reader)
+        let held_replica = (journal == JournalId::default() && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))
-            .map(|replicas| {
-                let rank = usize::try_from(client_id).unwrap_or(0) % replicas.len();
-                replicas[rank].clone()
-            });
+            .map(|replicas| replicas[0].clone());
         if let Some(ip) = &held_replica {
             assert_reachable!("chain: a replica is held down across the tail truncation");
             crate::lifecycle::crash(ctx, ip).await;

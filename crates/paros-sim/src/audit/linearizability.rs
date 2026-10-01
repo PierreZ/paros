@@ -40,6 +40,8 @@ use std::collections::BTreeSet;
 
 use paros::JournalState;
 
+use crate::chain::splitmix;
+
 /// The records a page carries when the client names no limit, and the cap
 /// on any limit (`paros::driver`'s `READ_PAGE_RECORDS`): a page is never
 /// longer, whatever the limit asked.
@@ -534,13 +536,6 @@ fn mix128(x: u128) -> u128 {
     let lo = splitmix(low);
     let hi = splitmix(high ^ lo.rotate_left(29));
     (u128::from(hi) << 64) | u128::from(lo)
-}
-
-fn splitmix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 #[cfg(test)]

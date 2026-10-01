@@ -247,7 +247,7 @@ Simulation is the investment. Every milestone lands with its share of:
   a journal outside its prefix.
 - A real linearizability checker in the workload's `check()`, over the four-call history with
   `Ambiguous` outcomes, against the sequential model of a journal (an owner, a generation, a
-  dense log, a floor). It replaces the per-operation rules of today's `ClientHistory`.
+  dense log, a floor). It replaced the per-operation rules of `ClientHistory` (#205).
 - The three races made likely rather than lucky, each a knob or a hook with its own BUGGIFY
   location and its reachable: a `SetLeader` drawn in the middle of a pipelined burst, a client
   timeout shorter than the ack so a retry crosses an ownership change, a `Truncate` racing a
