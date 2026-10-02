@@ -15,6 +15,16 @@ are all the library's. The split follows etcd's (`etcd`, `etcdctl`,
 
 ## A deployment on a laptop
 
+> **Interim shape (M8).** One role per subcommand, a static address book
+> typed on every command line, and provisioning per role are scaffolding.
+> The end goal (`docs/architecture.md`, §3.2) is one uniform `parosd` per
+> machine with a class (#196), roles assigned by placement (#212), and no
+> address book: one rendezvous name and the machine registry (#216), with
+> provisioning per machine from the initial seeds (#213). What stays is the
+> boot rule (a start never formats; only provisioning does), the
+> provisioning record, created journals as first boots until their store
+> has booted, and the driver tunables with their `PAROS_*` overrides.
+
 Every process is handed the same deployment: each role's `ID=HOST:PORT`. The
 acceptor pool is the bootstrap membership under a majority.
 
@@ -44,7 +54,8 @@ deployment names `--proxy 0=…`. `--journal` (repeatable, default `128`) lists
 the journals the pool serves; the first is the one the matchmakers, proxies
 and replicas serve, every other one is plain Multi-Paxos over the pool.
 
-Every address is `HOST:PORT` with an explicit port; the host is an IP or a
+Until the rendezvous name of #216 replaces the address book, every address
+is `HOST:PORT` with an explicit port; the host is an IP or a
 name — a Compose service name, say. A process resolves the deployment's names
 **once, at startup**, asking again for up to 30 seconds while a peer's name
 does not resolve yet, and exits 1 if one never does. A peer that comes back at
@@ -155,6 +166,8 @@ truncation gap) go to stderr.
 ```
 
 ## Provisioning
+
+Per role today; per machine once `parosd` is uniform (#196, #213).
 
 `parosd provision <role>` takes the arguments the role's start takes. It
 formats every store the identity keeps — a node's one per journal, a

@@ -40,6 +40,11 @@ and stores are the library's, the same code the simulation runs. User-facing doc
 
 ## Local rules
 
+- **Interim shape (M8)**: per-role subcommands, per-role `provision`, and a static address book
+  resolved once at startup are scaffolding for #196 (uniform binary, `PAROS_*` env config, Compose),
+  #216 (rendezvous name + registry, no address book) and #213 (seeds). Do not build on them as
+  final; the boot rule, the provisioning record, `JournalStores::opened` and the tunables stay.
+
 - `parosctl` holds **no client policy**: redirects, retries, claims, ambiguity and reader resume
   are `paros::client`'s; a command only parses, calls the library, prints and maps an exit code.
 - The boot claim is data (#208): every start is `BootKind::ExistingMember`; only `parosd
