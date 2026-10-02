@@ -9,21 +9,25 @@
 //!   replica/                  a replica's chosen log
 //! ```
 //!
-//! The boot claim is the operator's, as data (#147): the genesis journals
-//! take the [`BootKind`] the process was started with. A journal the
-//! directory creates (#189) is a first boot the first time it is created
-//! here and an existing member after that; until `parosd provision` and its
-//! provisioning record land (#208), "created here before" is read off the
-//! journal's directory, which the opener makes before the store's first
-//! open.
+//! Every ordinary start is an existing member's (#208): the stores were
+//! formatted by `parosd provision`, never by a start. A journal the
+//! directory creates (#189) is the one store a running node formats: it is
+//! a first boot until its store has booted once, then the provisioning
+//! record ([`Record`]) names it and every later open is an existing
+//! member's. A node killed between that format and the record is resolved
+//! at its next start by reading the disk ([`DirStores::load`]), the
+//! simulation's rule.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use moonpool_core::TokioStorageProvider;
 use paros::{
-    BootKind, Config, JournalId, JournalStorage, JournalStoreConfig, JournalStores, NoAudit,
+    BootKind, Config, JournalId, JournalStorage, JournalStoreConfig, JournalStores, LogStorage,
+    NoAudit,
 };
+
+use crate::record::Record;
 
 /// The directory of `journal`'s store under `data_dir`.
 #[must_use]
@@ -56,31 +60,88 @@ pub struct DirStores {
     layout: JournalStoreConfig,
     /// The genesis journals and their configurations, in id order.
     genesis: BTreeMap<JournalId, Config>,
-    /// The operator's claim for the genesis journals.
-    boot: BootKind,
-    /// Journals the directory created naming this node (#189), with the
-    /// claim their next open takes.
-    created: BTreeMap<JournalId, (Config, BootKind)>,
+    /// The provisioning record: the journals whose stores are formatted.
+    record: Record,
+    /// Journals the directory created naming this node (#189), with their
+    /// configuration.
+    created: BTreeMap<JournalId, Config>,
 }
 
 impl DirStores {
-    /// The stores of a node serving `genesis` under `data_dir`, booted as
-    /// `boot` claims.
-    #[must_use]
-    pub fn new(
+    /// The stores of node `id` serving `genesis` under `data_dir`, every
+    /// one an existing member. A created journal's store formatted before
+    /// the record could name it (a kill in between) is found on the disk
+    /// and recorded now.
+    ///
+    /// # Errors
+    ///
+    /// The record or the journals directory cannot be read or written.
+    pub async fn load(
+        id: u64,
         data_dir: PathBuf,
         layout: JournalStoreConfig,
         genesis: BTreeMap<JournalId, Config>,
-        boot: BootKind,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let read = Record::read(&data_dir).map_err(|e| format!("provisioning record: {e}"))?;
+        if read.is_none() {
+            tracing::warn!(data_dir = %data_dir.display(), "parosd_unprovisioned");
+        }
+        let mut stores = Self {
             provider: TokioStorageProvider::new(),
+            record: read.unwrap_or_else(|| Record {
+                role: "node".into(),
+                id,
+                journals: BTreeSet::new(),
+            }),
             data_dir,
             layout,
             genesis,
-            boot,
             created: BTreeMap::new(),
+        };
+        stores.record.check("node", id)?;
+        stores.resolve_created().await?;
+        Ok(stores)
+    }
+
+    /// Record every created journal whose store carries its format marker
+    /// but which the record does not name yet.
+    async fn resolve_created(&mut self) -> Result<(), String> {
+        let journals = self.data_dir.join("journals");
+        let entries = match std::fs::read_dir(&journals) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("{}: {error}", journals.display())),
+        };
+        let mut found = Vec::new();
+        for entry in entries.flatten() {
+            let Some(journal) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+                continue;
+            };
+            let journal = JournalId(journal);
+            if !self.genesis.contains_key(&journal) && !self.record.journals.contains(&journal) {
+                found.push(journal);
+            }
         }
+        found.sort_unstable();
+        let mut resolved = false;
+        for journal in found {
+            let probe = Config {
+                journal,
+                ..Config::default()
+            };
+            let mut store = self.store(journal, probe);
+            if store.boot_scan().await.is_ok() && store.is_formatted() {
+                tracing::info!(journal = journal.0, "created_journal_resolved");
+                self.record.journals.insert(journal);
+                resolved = true;
+            }
+        }
+        if resolved {
+            self.record
+                .write(&self.data_dir)
+                .map_err(|e| format!("provisioning record: {e}"))?;
+        }
+        Ok(())
     }
 
     fn store(&self, journal: JournalId, config: Config) -> JournalStorage<TokioStorageProvider> {
@@ -90,6 +151,15 @@ impl DirStores {
             config,
             self.layout,
         )
+    }
+
+    /// The claim a created journal's store opens with.
+    fn created_claim(&self, journal: JournalId) -> BootKind {
+        if self.record.journals.contains(&journal) {
+            BootKind::ExistingMember
+        } else {
+            BootKind::FirstBoot
+        }
     }
 }
 
@@ -103,13 +173,29 @@ impl JournalStores for DirStores {
 
     fn open(&mut self, journal: JournalId) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal) {
-            return Some((self.store(journal, config.clone()), self.boot));
+            return Some((
+                self.store(journal, config.clone()),
+                BootKind::ExistingMember,
+            ));
         }
-        let (config, boot) = self.created.get_mut(&journal)?;
-        let opened = (config.clone(), *boot);
-        // Every later open of a created journal is a restart of it.
-        *boot = BootKind::ExistingMember;
-        Some((self.store(journal, opened.0), opened.1))
+        let config = self.created.get(&journal)?.clone();
+        let claim = self.created_claim(journal);
+        Some((self.store(journal, config), claim))
+    }
+
+    fn opened(&mut self, journal: JournalId) {
+        if !self.created.contains_key(&journal) || !self.record.journals.insert(journal) {
+            return;
+        }
+        // The store is formatted durably: from here on it is an existing
+        // member's. A failed write is resolved from the disk at the next
+        // start.
+        match self.record.write(&self.data_dir) {
+            Ok(()) => tracing::info!(journal = journal.0, "journal_provisioned"),
+            Err(error) => {
+                tracing::error!(journal = journal.0, %error, "provisioning_record_failed");
+            }
+        }
     }
 
     fn audit(&self, _journal: JournalId) -> NoAudit {
@@ -122,17 +208,13 @@ impl JournalStores for DirStores {
         }
         if !self.created.contains_key(&journal) {
             let dir = journal_dir(&self.data_dir, journal);
-            let boot = if dir.exists() {
-                BootKind::ExistingMember
-            } else {
-                BootKind::FirstBoot
-            };
             if let Err(error) = std::fs::create_dir_all(&dir) {
                 tracing::error!(journal = journal.0, %error, "journal_create_failed");
                 return false;
             }
+            let boot = self.created_claim(journal);
             tracing::info!(journal = journal.0, ?boot, "journal_created");
-            self.created.insert(journal, (config, boot));
+            self.created.insert(journal, config);
         }
         true
     }
@@ -146,5 +228,77 @@ impl JournalStores for DirStores {
         // again, and reclaiming its space is an operator's act.
         self.created.remove(&journal);
         tracing::info!(journal = journal.0, "journal_deleted");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(journal: JournalId) -> Config {
+        Config {
+            journal,
+            ..Config::default()
+        }
+    }
+
+    async fn load(dir: &Path) -> DirStores {
+        DirStores::load(
+            0,
+            dir.to_path_buf(),
+            JournalStoreConfig::small(),
+            BTreeMap::new(),
+        )
+        .await
+        .expect("load")
+    }
+
+    #[tokio::test]
+    async fn a_created_journal_is_a_first_boot_until_its_store_has_booted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = JournalId(300);
+        let mut stores = load(dir.path()).await;
+        assert!(stores.create(journal, config(journal)));
+        let (_, boot) = stores.open(journal).expect("open");
+        assert_eq!(boot, BootKind::FirstBoot);
+        // A re-open before the store booted (a quarantined format) is still
+        // a first boot; once it booted, an existing member's, across a
+        // restart too.
+        let (_, boot) = stores.open(journal).expect("open");
+        assert_eq!(boot, BootKind::FirstBoot);
+        stores.opened(journal);
+        let (_, boot) = stores.open(journal).expect("open");
+        assert_eq!(boot, BootKind::ExistingMember);
+        let mut restarted = load(dir.path()).await;
+        assert!(restarted.create(journal, config(journal)));
+        let (_, boot) = restarted.open(journal).expect("open");
+        assert_eq!(boot, BootKind::ExistingMember);
+    }
+
+    #[tokio::test]
+    async fn a_format_the_record_missed_is_found_on_the_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = JournalId(300);
+        let mut stores = load(dir.path()).await;
+        assert!(stores.create(journal, config(journal)));
+        let (mut store, _) = stores.open(journal).expect("open");
+        // The store is formatted, and the node dies before the record.
+        assert_eq!(
+            paros::provision_store(&mut store).await.expect("format"),
+            paros::Provisioned::Formatted
+        );
+        drop((store, stores));
+        let mut restarted = load(dir.path()).await;
+        assert!(restarted.create(journal, config(journal)));
+        let (_, boot) = restarted.open(journal).expect("open");
+        assert_eq!(boot, BootKind::ExistingMember);
+        // A created journal whose store never got its marker is a first
+        // boot again.
+        let other = JournalId(301);
+        std::fs::create_dir_all(journal_dir(dir.path(), other)).expect("mkdir");
+        let mut restarted = load(dir.path()).await;
+        assert!(restarted.create(other, config(other)));
+        let (_, boot) = restarted.open(other).expect("open");
+        assert_eq!(boot, BootKind::FirstBoot);
     }
 }

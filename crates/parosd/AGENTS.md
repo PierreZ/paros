@@ -7,19 +7,21 @@ and stores are the library's, the same code the simulation runs. User-facing doc
 
 ## Map
 
-- `src/main.rs` → `parosd node|matchmaker|replica|proxy` → args, tracing subscriber, runtime, `SIGTERM`/`SIGINT` → shutdown token, exit codes.
+- `src/main.rs` → `parosd node|matchmaker|replica|proxy`, `parosd provision node|matchmaker|replica` → args, tracing subscriber, runtime, `SIGTERM`/`SIGINT` → shutdown token, exit codes.
 - `src/deployment.rs` → `Deployment`, `Entry` → the address books (`--node`, `--matchmaker`, `--proxy`, `--replica`, `--journal`) and the derived core `Config`.
-- `src/stores.rs` → `DirStores` (`JournalStores`) → `<data-dir>/journals/<id>/`, `matchmaker/`, `replica/`.
+- `src/stores.rs` → `DirStores` (`JournalStores`) → `<data-dir>/journals/<id>/`, `matchmaker/`, `replica/`; a created journal is a first boot until `opened`, resolved from the disk at `load`.
+- `src/record.rs` → `Record` → `<data-dir>/provisioned`: role, id, provisioned journals; rewritten atomically (#208).
 - `src/bin/parosctl/main.rs` → `parosctl` → global options, `Client::connect`, exit codes.
 - `src/bin/parosctl/commands.rs` → one fn per command: `write`, `read`, `tail`, `truncate`, `set-leader`, `inspect`, `reconfigure`, `retire`.
 - `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`); diagnostics to stderr.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch reopens with every acked write.
-- `tests/deploy.rs` → one node, one matchmaker, one replica on a laptop, driven by `parosctl --json`: write, read back, restart, refusals, `SIGTERM`.
+- `tests/deploy.rs` → one node, one matchmaker, one replica on a laptop, provisioned, driven by `parosctl --json`: write, read back, restart, refusals (amnesia, a second provision, an edited config, another identity's dir), `SIGTERM`.
 
 ## Entry points
 
-- `parosd <role> --id N --data-dir DIR [--first-boot] [--layout default|small] <deployment>`;
-  `parosd proxy` takes no data dir and no boot claim. `PAROS_DATA_DIR` sets `--data-dir`.
+- `parosd provision <role> --id N --data-dir DIR [--layout default|small] <deployment>`, once
+  per identity; then `parosd <role>` with the same arguments. `parosd proxy` takes no data dir
+  and is never provisioned. `PAROS_DATA_DIR` sets `--data-dir`.
 - `parosctl [--servers ID=HOST:PORT,…] [--json] [--timeout-ms N] <command>`; servers also from
   `PAROSCTL_SERVERS`, the writer's owner id from `PAROSCTL_OWNER` (default 1).
 - `RUST_LOG` filters both (`parosd` default `warn,parosd=info`, `parosctl` default `error`).
@@ -36,9 +38,11 @@ and stores are the library's, the same code the simulation runs. User-facing doc
 
 - `parosctl` holds **no client policy**: redirects, retries, claims, ambiguity and reader resume
   are `paros::client`'s; a command only parses, calls the library, prints and maps an exit code.
-- The boot claim is data: `--first-boot` → `BootKind::FirstBoot`, otherwise `ExistingMember`;
-  the library refuses amnesia, a re-format and an edited `Config`. `parosd provision` (#208)
-  will replace the flag; until then a created journal's "first boot" is read off its directory.
+- The boot claim is data (#208): every start is `BootKind::ExistingMember`; only `parosd
+  provision` formats (through `paros::provision_store`), and only a created journal's first
+  open is `FirstBoot`. The record, never a directory's existence, says what was provisioned;
+  an interrupted provision or a created journal's lost record is resolved by reading the disk.
+  The library refuses amnesia, a re-format and an edited `Config`.
 - The deployment is derived identically by every process, never typed twice: the derived
   `Config` is recorded at `format` and an edit is refused (#207).
 

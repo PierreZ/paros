@@ -10,8 +10,9 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 ## Map
 
 - `driver/mod.rs` → `run_node`, `run_journals`, `RunError`, `BootKind` → the node loop; one journal or a static list (#188).
-- `driver/journals.rs` → `JournalStores`, `SingleStore` → per-journal runtime and quarantine (`quarantine_ticks`).
+- `driver/journals.rs` → `JournalStores` (`opened`: a store passed its boot, #208), `SingleStore` → per-journal runtime and quarantine (`quarantine_ticks`).
 - `driver/system.rs` → `SystemPlan` → system-journal follower; applies directory/registry folds (#189).
+- `provision.rs` → `provision_store`, `provision_matchmaker_store`, `Provisioned` → format a store ahead of its first start; an interrupted run resumes from the disk (#208).
 - `driver/{boot,ready,report}.rs` → format-marker check, the `Ready` I/O side in persist-before-send order, boot report.
 - `driver/transport.rs` → `PeerMailbox`, `LaneOpener`, `peer_address` → keep-newest lanes per journal, round-robin.
 - `driver/{matchmaking,handover,operator,events}.rs` → matchmaker wire, set handover, Reconfigure/Retire/Inspect, events.
@@ -46,7 +47,8 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 
 ## Public surface
 
-`run_node`, `run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`; `paros::client`;
+`run_node`, `run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`; `provision_store`,
+`provision_matchmaker_store`; `paros::client`;
 `paros::system`; `paros::journal`; `paros::wire::{methods, common, public, internal,
 matchmaker, system}`; the RPC request/ack types (`lib.rs`).
 

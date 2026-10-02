@@ -21,10 +21,15 @@ acceptor pool is the bootstrap membership under a majority.
 ```sh
 D="--node 0=127.0.0.1:4500 --matchmaker 0=127.0.0.1:4600 --replica 1000=127.0.0.1:4700"
 
-# First boot: --first-boot formats every store, exactly once per identity.
-parosd matchmaker --id 0    --data-dir mm --first-boot $D &
-parosd node       --id 0    --data-dir n0 --first-boot $D &
-parosd replica    --id 1000 --data-dir r0 --first-boot $D &
+# Provision every identity once: format its stores, record it, exit.
+parosd provision matchmaker --id 0    --data-dir mm $D
+parosd provision node       --id 0    --data-dir n0 $D
+parosd provision replica    --id 1000 --data-dir r0 $D
+
+# Start them: every start, the first included, is an existing member's.
+parosd matchmaker --id 0    --data-dir mm $D &
+parosd node       --id 0    --data-dir n0 $D &
+parosd replica    --id 1000 --data-dir r0 $D &
 
 # Write two records to journal 128 — claimed on the way — and read them back
 # (from the replica too).
@@ -33,9 +38,8 @@ parosctl write 128 hello world --owner 7
 parosctl read 128
 ```
 
-Every later start drops `--first-boot`: the stores must carry their format
-marker, and the configuration they were formatted under must be the one handed
-in. `parosd proxy --id 0 $D` runs a proxy leader (stateless) when the
+A start never formats: the stores must carry their format marker, and the
+configuration they were formatted under must be the one handed in. `parosd proxy --id 0 $D` runs a proxy leader (stateless) when the
 deployment names `--proxy 0=…`. `--journal` (repeatable, default `128`) lists
 the journals the pool serves; the first is the one the matchmakers, proxies
 and replicas serve, every other one is plain Multi-Paxos over the pool.
@@ -52,10 +56,11 @@ and replicas serve, every other one is plain Multi-Paxos over the pool.
 
 A refusal is one of three:
 
-- **amnesia** — the store carries no format marker: the disk was lost. A lost
-  identity never rejoins (its promises went with the disk); replace it by
-  reconfiguration.
-- **already formatted** — `--first-boot` on a formatted store.
+- **amnesia** — the store carries no format marker: the disk was lost, or the
+  identity was never provisioned. A lost identity never rejoins (its promises
+  went with the disk); replace it by reconfiguration.
+- **already formatted** — `parosd provision` on a data directory that carries a
+  provisioning record.
 - **another configuration** (#207) — the store was formatted under another
   deployment (another bootstrap membership, quorum system, matchmaker set or
   count). Restore the deployment it was provisioned with; membership changes
@@ -96,7 +101,30 @@ truncation gap) go to stderr.
 <data-dir>/journals/<id>/   one moonpool-journal per journal a node serves
 <data-dir>/matchmaker/      a matchmaker's registry
 <data-dir>/replica/         a replica's chosen log
+<data-dir>/provisioned      the provisioning record
 ```
 
-`parosd provision` and a provisioning record outside the stores are #208;
-until then the operator's `--first-boot` is the claim.
+## Provisioning
+
+`parosd provision <role>` takes the arguments the role's start takes. It
+formats every store the identity keeps — a node's one per journal, a
+matchmaker's registry, a replica's log — syncs each, and only then writes the
+**provisioning record**, `<data-dir>/provisioned` (the role, the id and the
+journals provisioned), atomically. It is never part of a start:
+
+- **provision twice** — refused as *already formatted* (exit 78): the record is
+  there.
+- **an interrupted provision** (killed before the record) — run it again: a
+  store already formatted under the same deployment is left as it is, the rest
+  are formatted, and the record lands. A store formatted under another
+  deployment is refused.
+- **a wiped volume** — the record and the stores went together, and the next
+  start is refused as *amnesia*. Provisioning it again would bring a new,
+  empty identity under the old id: replace it by reconfiguration instead.
+- **another identity's directory** — a start whose role or id is not the
+  record's exits 2.
+
+A journal the directory creates on a running node is formatted by the node
+itself on its first open and added to the record once its store has booted; a
+node killed in between finds the formatted store on its next start and records
+it then.

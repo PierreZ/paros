@@ -34,6 +34,7 @@ mod driver;
 mod hooks;
 pub mod journal;
 mod matchmaker;
+mod provision;
 mod proxy;
 mod replica_tier;
 mod rpc;
@@ -69,6 +70,7 @@ pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, Jo
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,
 };
+pub use provision::{Provisioned, provision_matchmaker_store, provision_store};
 pub use proxy::{ProxyConfig, run_proxy};
 pub use replica_tier::run_replica;
 pub use storage::{
