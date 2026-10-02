@@ -148,14 +148,6 @@ impl NodeShape {
         // Twenty-four to 32 still shrinks frames 2-2.7x against the
         // default 64.
         let delivery_batch = buggify_knob!(defaults.delivery_batch, 24_usize..33_usize);
-        if peer_queue_capacity != defaults.peer_queue_capacity {
-            // BUGGIFY pairing: the capacity extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme peer-queue capacity");
-        }
-        if delivery_batch != defaults.delivery_batch {
-            // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme delivery batch");
-        }
         // Every duration that races the network has the same structural
         // floor, `ROUND_TRIP_FLOOR_MS`: moonpool's default cross-datacenter
         // link is 20-80 ms one way, so a Phase-1 round trip plus one delivery
@@ -282,29 +274,40 @@ impl NodeShape {
         // (a 100 ms tick, a ten-tick election base, two-second reads), so
         // this is a point of the swept space, not a new extreme, and it
         // clears the round-trip floor above in wall-clock terms.
-        let tunables = if buggify_knob!(0_u8, 1_u8..2_u8) == 1 {
+        // The per-field pairings below judge `drawn`, and only when it is
+        // what runs: under the production profile no drawn extreme does.
+        let production = buggify_knob!(0_u8, 1_u8..2_u8) == 1;
+        let tunables = if production {
             assert_reachable!("a node runs the production driver tunables");
             DriverTunables::production()
         } else {
             drawn
         };
-        if drawn.election_backoff_doublings != 3 {
+        if !production && peer_queue_capacity != defaults.peer_queue_capacity {
+            // BUGGIFY pairing: the capacity extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme peer-queue capacity");
+        }
+        if !production && delivery_batch != defaults.delivery_batch {
+            // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme delivery batch");
+        }
+        if !production && drawn.election_backoff_doublings != 3 {
             // BUGGIFY pairing: the election backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme election backoff ceiling");
         }
-        if drawn.gc_resend_ticks != 5 {
+        if !production && drawn.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme GC re-send cadence");
         }
-        if drawn.reconfigurer_resend_ticks != 5 {
+        if !production && drawn.reconfigurer_resend_ticks != 5 {
             // BUGGIFY pairing: the handover cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover re-send cadence");
         }
-        if drawn.reconfigure_timeout_elections != 4 {
+        if !production && drawn.reconfigure_timeout_elections != 4 {
             // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover stall budget");
         }
-        if drawn.reconfigure_backoff_max_ticks != 10 {
+        if !production && drawn.reconfigure_backoff_max_ticks != 10 {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme decree backoff ceiling");
         }

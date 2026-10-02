@@ -17,6 +17,12 @@
 //! member's. A node killed between that format and the record is resolved
 //! at its next start by reading the disk ([`DirStores::load`]), the
 //! simulation's rule.
+//!
+//! This record logic is `parosd`'s alone and runs outside the simulation
+//! (whose opener keeps its own provisioning ledger and the default no-op
+//! [`JournalStores::opened`]); its unit tests below are its evidence. Its
+//! write is a small synchronous `fsync` on the node loop, once per created
+//! journal.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
