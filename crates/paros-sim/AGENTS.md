@@ -56,7 +56,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `journals` → `JournalPlan`: 1–3 journals (one on a matchmaker seed), one held for the chaos
   window (`hold_journal`). `journal_store` → `JournalStorage` on half the plain seeds, no
   injected corruption. `system_journals` → journals 1 and 2 on half the seeds, on `SEED_COUNT`
-  (1) seed ranks. `NodeShape::draw` → `DriverTunables`, seam bias, wipe/loss %, `config_edit_pct`.
+  (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
 

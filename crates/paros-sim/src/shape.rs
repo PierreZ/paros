@@ -183,7 +183,7 @@ impl NodeShape {
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
-        let tunables = DriverTunables {
+        let drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
@@ -276,23 +276,35 @@ impl NodeShape {
             // leaderless cluster's re-election.
             election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
         };
-        if tunables.election_backoff_doublings != 3 {
+        // The production profile `parosd` ships (#209), whole: every field
+        // at once, which the per-field locations above would draw together
+        // only by chance. Each of its values lies inside its knob's range
+        // (a 100 ms tick, a ten-tick election base, two-second reads), so
+        // this is a point of the swept space, not a new extreme, and it
+        // clears the round-trip floor above in wall-clock terms.
+        let tunables = if buggify_knob!(0_u8, 1_u8..2_u8) == 1 {
+            assert_reachable!("a node runs the production driver tunables");
+            DriverTunables::production()
+        } else {
+            drawn
+        };
+        if drawn.election_backoff_doublings != 3 {
             // BUGGIFY pairing: the election backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme election backoff ceiling");
         }
-        if tunables.gc_resend_ticks != 5 {
+        if drawn.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme GC re-send cadence");
         }
-        if tunables.reconfigurer_resend_ticks != 5 {
+        if drawn.reconfigurer_resend_ticks != 5 {
             // BUGGIFY pairing: the handover cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover re-send cadence");
         }
-        if tunables.reconfigure_timeout_elections != 4 {
+        if drawn.reconfigure_timeout_elections != 4 {
             // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover stall budget");
         }
-        if tunables.reconfigure_backoff_max_ticks != 10 {
+        if drawn.reconfigure_backoff_max_ticks != 10 {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme decree backoff ceiling");
         }

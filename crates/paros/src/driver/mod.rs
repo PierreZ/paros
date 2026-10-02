@@ -57,11 +57,13 @@ pub(crate) mod reply;
 mod report;
 mod system;
 pub(crate) mod transport;
+mod tunables;
 
 pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub use events::{command_hash, message_kind, registration_history_hash};
 pub use journals::JournalStores;
 pub use system::SystemPlan;
+pub use tunables::BelowFloor;
 
 use std::collections::BTreeMap;
 

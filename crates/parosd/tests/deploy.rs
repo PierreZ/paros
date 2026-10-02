@@ -8,7 +8,9 @@
 //! configuration (#207), a lost disk, a second provisioning (#208), each
 //! with its exit code and its reason. Every identity is provisioned by
 //! `parosd provision` before its first start, and an interrupted
-//! provisioning resumes from the disk.
+//! provisioning resumes from the disk. The node and the replica are named
+//! by hostname (#209), resolved once at startup by `parosd` and `parosctl`
+//! alike, and an override of a driver tunable below its floor is refused.
 
 use std::net::TcpListener;
 use std::path::Path;
@@ -42,9 +44,11 @@ struct Cluster {
 impl Cluster {
     fn new() -> Self {
         Self {
-            node: format!("127.0.0.1:{}", free_port()),
+            // Hostnames for two of the three (#209): resolved once at
+            // startup, by the servers and by `parosctl`.
+            node: format!("localhost:{}", free_port()),
             matchmaker: format!("127.0.0.1:{}", free_port()),
-            replica: format!("127.0.0.1:{}", free_port()),
+            replica: format!("localhost:{}", free_port()),
             root: tempfile::tempdir().expect("tempdir"),
         }
     }
@@ -287,6 +291,11 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     assert_eq!(gaps[0]["to"], 1, "{gaps:?}");
     stop(children);
 
+    refuses_what_it_must(&cluster);
+}
+
+/// The refusals an operator meets, on a provisioned cluster that is down.
+fn refuses_what_it_must(cluster: &Cluster) {
     // #207: an edited deployment — a second node added to the bootstrap
     // membership in the configuration — is refused, and says why.
     let edited = vec!["--node".to_string(), "1=127.0.0.1:1".to_string()];
@@ -298,6 +307,20 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     let (code, stderr) = cluster.refused("matchmaker", &edited);
     assert_eq!(code, EXIT_REFUSED, "{stderr}");
     assert!(stderr.contains("another configuration"), "{stderr}");
+
+    // A driver tunable overridden below its floor stops the start (#209).
+    let (code, stderr) = status(
+        &cluster
+            .server("node", 0, &[])
+            .env("PAROS_ELECTION_TIMEOUT_BASE", "1")
+            .output()
+            .expect("run parosd"),
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("PAROS_ELECTION_TIMEOUT_BASE=1 is below its floor 2"),
+        "{stderr}"
+    );
 
     // A second provisioning is refused (#208).
     for role in ROLES {

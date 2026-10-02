@@ -24,17 +24,20 @@
 
 mod deployment;
 mod record;
+mod resolve;
 mod stores;
+mod tunables;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use moonpool_core::TokioProviders;
 use paros::{
-    BootKind, BootRefusal, DriverTunables, JournalId, JournalMatchmakerStorage, JournalStorage,
-    JournalStoreConfig, MatchmakerId, NoAudit, NoHooks, NodeId, Provisioned, ProxyId, RunError,
+    BootKind, BootRefusal, JournalId, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
+    MatchmakerId, NoAudit, NoHooks, NodeId, Provisioned, ProxyId, RunError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -143,14 +146,36 @@ const EXIT_RESTART: u8 = 75;
 /// `EX_CONFIG`: the boot was refused; an operator must act.
 const EXIT_REFUSED: u8 = 78;
 
+/// How long a start waits for the deployment's names to resolve (#209): a
+/// Compose service's peers may still be starting.
+const RESOLVE_PATIENCE: Duration = Duration::from_secs(30);
+/// How often an unresolved name is asked again.
+const RESOLVE_RETRY: Duration = Duration::from_millis(500);
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
+    // Names are resolved once, here, before any driver runs (#209).
+    // Provisioning binds nothing and resolves nothing: it runs before the
+    // peers it names exist.
+    let deployment = match &mut cli.command {
+        Command::Node(args) | Command::Matchmaker(args) | Command::Replica(args) => {
+            Some(&mut args.deployment)
+        }
+        Command::Proxy(args) => Some(&mut args.deployment),
+        Command::Provision(_) => None,
+    };
+    if let Some(deployment) = deployment
+        && let Err(error) = deployment.resolve(RESOLVE_PATIENCE, RESOLVE_RETRY)
+    {
+        eprintln!("parosd: {error}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -279,7 +304,7 @@ async fn run_node(args: ServerArgs) -> Result<Result<(), RunError>, String> {
         d.proxy_book(),
         d.replica_book(),
         None,
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
     )
@@ -304,7 +329,7 @@ async fn run_matchmaker(args: ServerArgs) -> Result<Result<(), RunError>, String
         BootKind::ExistingMember,
         addr,
         d.matchmaker_config(MatchmakerId(args.id)),
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
         &NoAudit,
@@ -331,7 +356,7 @@ async fn run_replica(args: ServerArgs) -> Result<Result<(), RunError>, String> {
         addr,
         d.node_book(),
         BootKind::ExistingMember,
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
         &NoAudit,
@@ -350,7 +375,7 @@ async fn run_proxy(args: ProxyArgs) -> Result<Result<(), RunError>, String> {
         d.proxy_config(ProxyId(args.id)),
         d.node_book(),
         d.replica_book(),
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
         &NoAudit,

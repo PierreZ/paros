@@ -39,8 +39,10 @@ const PEER_INBOX_CAPACITY: usize = 1024;
 
 /// Per-node driver tunables — **born workload-buggified config** (AGENTS.md
 /// prong 2): plain data the harness layer randomizes per seed, FDB knob style,
-/// while production takes [`DriverTunables::default()`] and is bit-identical
-/// to the constants above. Every field documents its floor: a capacity must be
+/// around [`DriverTunables::default()`], the simulation's baseline built from
+/// the constants above. A real deployment runs
+/// [`DriverTunables::production()`] (#209), and an operator's override is
+/// judged by [`DriverTunables::check_floors`]. Every field documents its floor: a capacity must be
 /// at least 1 (a zero-capacity mpsc channel panics at construction), a
 /// duration at least non-zero, and the election base at least
 /// `2 * HEARTBEAT_TICKS` so a live leader always beats before a follower's
@@ -283,7 +285,9 @@ const PROXY_ROUND_RESENDS: u64 = PROXY_TAKE_BACK_RESENDS * 2;
 const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 
 /// Parse an IP (which may lack a port) into a socket-address string, defaulting to
-/// port 4500 (the moonpool sim convention; production supplies a full address).
+/// port 4500 (the moonpool sim convention). The simulation's parser: it takes
+/// literal addresses only, and `parosd` resolves its hostnames itself, once,
+/// at startup (#209), before any driver sees an address.
 ///
 /// # Errors
 ///

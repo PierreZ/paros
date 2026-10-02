@@ -44,6 +44,56 @@ deployment names `--proxy 0=…`. `--journal` (repeatable, default `128`) lists
 the journals the pool serves; the first is the one the matchmakers, proxies
 and replicas serve, every other one is plain Multi-Paxos over the pool.
 
+Every address is `HOST:PORT` with an explicit port; the host is an IP or a
+name — a Compose service name, say. A process resolves the deployment's names
+**once, at startup**, asking again for up to 30 seconds while a peer's name
+does not resolve yet, and exits 1 if one never does. A peer that comes back at
+another address is reached again after a restart of the processes that name
+it. `parosctl --servers` takes names too.
+
+## Driver tunables
+
+`parosd` runs `DriverTunables::production()`: a 100 ms tick, a one-second
+election base (a follower's timeout is drawn from 1–2 s), and the network
+timeouts sized for a link across zones. The values are **reasoned, not
+measured** — the benchmark that will tune them is M10's — and each lies inside
+the range the simulation draws for its knob; the simulation also runs the
+whole profile at once.
+
+Each field has an environment override named after it, `_MS` for a duration:
+
+| variable | production | floor |
+|---|---|---|
+| `PAROS_TICK_INTERVAL_MS` | 100 | 1 |
+| `PAROS_ELECTION_TIMEOUT_BASE` (ticks) | 10 | 2 |
+| `PAROS_ELECTION_BACKOFF_DOUBLINGS` | 3 | 2 |
+| `PAROS_KEEP_ALIVE_INTERVAL_MS` | 5000 | 1 |
+| `PAROS_KEEP_ALIVE_TIMEOUT_MS` | 3000 | 1 |
+| `PAROS_CONNECTION_TIMEOUT_MS` | 3000 | 1 |
+| `PAROS_DELIVERY_TIMEOUT_MS` | 2000 | 1 |
+| `PAROS_READ_RETRY_TICKS` | 20 | 1 |
+| `PAROS_READ_POLL_TICKS` | 10 | 0 |
+| `PAROS_QUARANTINE_TICKS` | 80 | 1 |
+| `PAROS_CLIENT_INBOX_CAPACITY` | 256 | 1 |
+| `PAROS_PEER_INBOX_CAPACITY` | 1024 | 1 |
+| `PAROS_PEER_QUEUE_CAPACITY` | 4096 | 1 |
+| `PAROS_DELIVERY_BATCH` | 64 | 24 |
+| `PAROS_MATCH_RESEND_TICKS` | 10 | 1 |
+| `PAROS_GC_RESEND_TICKS` | 10 | 1 |
+| `PAROS_RECONFIGURER_RESEND_TICKS` | 10 | 1 |
+| `PAROS_RECONFIGURE_TIMEOUT_ELECTIONS` | 4 | 1 |
+| `PAROS_RECONFIGURE_BACKOFF_MAX_TICKS` | 20 | 1 |
+| `PAROS_PROXY_TAKE_BACK_RESENDS` | 20 | 1 |
+| `PAROS_PROXY_ROUND_RESENDS` | 40 | 1 |
+
+An override below its floor, or one that does not parse, stops the process
+before it binds (exit 2). The floors are the ones no network makes valid; the
+wall-clock ones are the operator's to keep: the election base, in time
+(`TICK_INTERVAL_MS × ELECTION_TIMEOUT_BASE`), must outlast a Phase-1 round
+trip — a promise is an `fsync` on every acceptor — and the read retry must
+outlast a heartbeat round trip. Every field's contract is documented on
+`paros::DriverTunables`.
+
 ## Exit codes
 
 | code | meaning | what to do |
@@ -51,8 +101,8 @@ and replicas serve, every other one is plain Multi-Paxos over the pool.
 | 0 | stopped on `SIGTERM` / `SIGINT` | nothing |
 | 75 | a storage fault crashed the process | restart it: the next boot recovers from the disk |
 | 78 | the boot was refused | do **not** restart; the message says why |
-| 1 | infrastructure (bind, address) | fix the environment |
-| 2 | an inconsistent deployment on the command line | fix the arguments |
+| 1 | infrastructure (bind, a name that never resolved) | fix the environment |
+| 2 | an inconsistent deployment or a tunable below its floor | fix the arguments |
 
 A refusal is one of three:
 

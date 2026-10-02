@@ -9,9 +9,16 @@
 //! the length of those books. The derived [`Config`] is a safety input — it
 //! is recorded in every store at `format` and an edited one is refused at
 //! the next boot (#207) — so it is derived, never typed in twice.
+//!
+//! An address is `HOST:PORT`, a literal or a name (#209). The names are
+//! resolved once, at startup ([`Deployment::resolve`]), and the drivers
+//! only ever see socket addresses; the derived [`Config`] carries ids, never
+//! addresses, so a peer that comes back at another address is the same
+//! member.
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use clap::Args;
 use paros::{
@@ -24,7 +31,8 @@ use paros::{
 pub struct Entry {
     /// The role's numeric identity.
     pub id: u64,
-    /// Where it listens.
+    /// Where it listens: `HOST:PORT` as given, then the socket address it
+    /// resolved to ([`Deployment::resolve`]).
     pub addr: String,
 }
 
@@ -39,9 +47,12 @@ impl FromStr for Entry {
             .trim()
             .parse()
             .map_err(|e| format!("bad id in {s:?}: {e}"))?;
-        let addr =
-            paros::parse_addr(addr.trim()).map_err(|e| format!("bad address in {s:?}: {e}"))?;
-        Ok(Self { id, addr })
+        let addr = addr.trim();
+        crate::resolve::check_shape(addr).map_err(|e| format!("bad address in {s:?}: {e}"))?;
+        Ok(Self {
+            id,
+            addr: addr.to_string(),
+        })
     }
 }
 
@@ -116,6 +127,42 @@ impl Deployment {
             if !seen.insert(journal) {
                 return Err(format!("journal {journal} listed twice"));
             }
+        }
+        Ok(())
+    }
+
+    /// Resolve every address of the deployment to a socket address, once,
+    /// at startup. A name that does not resolve yet (a Compose service
+    /// whose container is still starting) is asked again every
+    /// `retry` until `patience` runs out.
+    ///
+    /// # Errors
+    ///
+    /// The first name that never resolved within `patience`.
+    pub fn resolve(&mut self, patience: Duration, retry: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + patience;
+        for entry in self
+            .nodes
+            .iter_mut()
+            .chain(&mut self.matchmakers)
+            .chain(&mut self.proxies)
+            .chain(&mut self.replicas)
+        {
+            let addr = loop {
+                match crate::resolve::resolve(&entry.addr) {
+                    Ok(addr) => break addr,
+                    Err(error) if Instant::now() >= deadline => return Err(error),
+                    Err(error) => {
+                        tracing::info!(%error, "parosd_resolve_retry");
+                        std::thread::sleep(retry);
+                    }
+                }
+            };
+            let resolved = addr.to_string();
+            if resolved != entry.addr {
+                tracing::info!(id = entry.id, host = %entry.addr, %addr, "parosd_resolved");
+            }
+            entry.addr = resolved;
         }
         Ok(())
     }

@@ -8,8 +8,10 @@ and stores are the library's, the same code the simulation runs. User-facing doc
 ## Map
 
 - `src/main.rs` → `parosd node|matchmaker|replica|proxy`, `parosd provision node|matchmaker|replica` → args, tracing subscriber, runtime, `SIGTERM`/`SIGINT` → shutdown token, exit codes.
-- `src/deployment.rs` → `Deployment`, `Entry` → the address books (`--node`, `--matchmaker`, `--proxy`, `--replica`, `--journal`) and the derived core `Config`.
+- `src/deployment.rs` → `Deployment`, `Entry` → the address books (`--node`, `--matchmaker`, `--proxy`, `--replica`, `--journal`), `resolve` (retried for `RESOLVE_PATIENCE` while a Compose peer starts), and the derived core `Config`.
 - `src/stores.rs` → `DirStores` (`JournalStores`) → `<data-dir>/journals/<id>/`, `matchmaker/`, `replica/`; a created journal is a first boot until `opened`, resolved from the disk at `load`.
+- `src/resolve.rs` → `check_shape`, `resolve` → `HOST:PORT` (port required), names resolved once at startup; shared with `parosctl` by `#[path]` (#209).
+- `src/tunables.rs` → `from_env` → `DriverTunables::production()` plus a `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209).
 - `src/record.rs` → `Record` → `<data-dir>/provisioned`: role, id, provisioned journals; rewritten atomically (#208).
 - `src/bin/parosctl/main.rs` → `parosctl` → global options, `Client::connect`, exit codes.
 - `src/bin/parosctl/commands.rs` → one fn per command: `write`, `read`, `tail`, `truncate`, `set-leader`, `inspect`, `reconfigure`, `retire`.
@@ -24,6 +26,8 @@ and stores are the library's, the same code the simulation runs. User-facing doc
   and is never provisioned. `PAROS_DATA_DIR` sets `--data-dir`.
 - `parosctl [--servers ID=HOST:PORT,…] [--json] [--timeout-ms N] <command>`; servers also from
   `PAROSCTL_SERVERS`, the writer's owner id from `PAROSCTL_OWNER` (default 1).
+- Driver tunables: `DriverTunables::production()`, overridden per field by `PAROS_<FIELD>`
+  (`_MS` for a duration), e.g. `PAROS_TICK_INTERVAL_MS`, `PAROS_ELECTION_TIMEOUT_BASE`.
 - `RUST_LOG` filters both (`parosd` default `warn,parosd=info`, `parosctl` default `error`).
 
 ## Exit codes
@@ -43,6 +47,8 @@ and stores are the library's, the same code the simulation runs. User-facing doc
   open is `FirstBoot`. The record, never a directory's existence, says what was provisioned;
   an interrupted provision or a created journal's lost record is resolved by reading the disk.
   The library refuses amnesia, a re-format and an edited `Config`.
+- Names are resolved in this crate's configuration layer, never in a driver: the library and
+  the simulation see socket addresses only. A start resolves; `provision` does not.
 - The deployment is derived identically by every process, never typed twice: the derived
   `Config` is recorded at `format` and an edit is refused (#207).
 
