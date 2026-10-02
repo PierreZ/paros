@@ -1,25 +1,46 @@
 # paros-sim-runner
 
-`publish = false`. Two binaries over `paros_sim`'s entry points; no environment
-variables, no flags beyond the positional arguments below.
+Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobins = false`).
+Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. No
+environment variables, no flags beyond the positional arguments below.
 
-- `sim-paros-chain` (`src/main.rs`) — the CI gate and the only binary
-  registered with `cargo xtask sim`. Optional positional: the exploration
-  iteration cap (default `COVERAGE_ITERATIONS`). Runs `explore`, prints
-  saturated-vs-cap, exploration stats and recipes, the guidance watermarks
-  and the gates that never fired; exits 1 on any assertion violation, failed
-  run, coverage violation or convergence timeout. Then `run_corpus_axes`:
-  `corpus_hunt(CORPUS_CI_ITERATIONS)` through `gate_corpus` with the same
-  exit rule.
-- `sim-paros-hunt` (`src/hunt.rs`) — raw volume, coverage-blind.
-  `sim-paros-hunt [axis] [iterations]` with axes `main` (default), `canary`,
-  `corpus`; iterations default to 2000 (the normal evidence
-  budget; 10,000 only for a substantial change). Replays take a seed or mask
-  as the second argument: `replay-main`, `replay-canary`, `explore-main`,
-  `replay-corpus`, `replay-corpus-mask`, `replay-bare-quorum`,
-  `replay-departed`; they print GREEN/RED and exit 1 on red.
+## Map
 
-Adding a corpus family means adding its `replay-*` arm here and, if CI must
-sweep it, a `gate_corpus` call in `main.rs`. Verbosity is
-`init_sim_tracing` in the binary, not `RUST_LOG` (the flake exports it, but
-moonpool's sim subscriber is floored at INFO).
+- `src/main.rs` → `sim-paros-chain` → the CI gate; the only binary `cargo xtask sim` registers.
+- `src/hunt.rs` → `sim-paros-hunt` → raw seed volume and single-seed replays, coverage-blind.
+- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_never_fired` → shared parsing and printing.
+
+## Entry points
+
+- `sim-paros-chain [iterations]` (default `COVERAGE_ITERATIONS`): runs `explore`, prints
+  saturated-vs-cap, saturation signal, exploration stats and bug recipes, guidance watermarks
+  and the gates that never fired; then `corpus_hunt(CORPUS_CI_ITERATIONS)` through
+  `gate_corpus`. Exits 1 on any assertion violation, failed run, coverage violation or
+  convergence timeout.
+- `sim-paros-hunt [main|canary|corpus] [iterations]` (default 2000, the normal evidence budget;
+  root *Simulation rules*): prints seed counts, assertion slots used and dropped, and gates
+  that never fired; exits 1 on a violation, 2 on an unknown axis. Coverage never decides it.
+- `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
+  (`EXPLORATION_TIMELINES_PER_SEED` timelines), `replay-corpus`, `replay-corpus-mask` (the
+  argument is the mask, taken `% 512`), `replay-bare-quorum`, `replay-departed`: prints GREEN or
+  RED with the violations, exits 1 on red (`replay_for`, `hunt.rs:34`).
+
+## Local rules
+
+- A new corpus family adds its `replay-*` arm to `replay_for` and, if CI must sweep it, a
+  `gate_corpus` call in `main.rs`.
+- Verbosity: neither binary installs a tracing subscriber or reads `RUST_LOG`; the only capture
+  is moonpool's sim layer at `SimulationBuilder::trace_level` (default `INFO`), which `paros-sim`
+  never raises. Read violations and their detail maps from the printed report.
+- Seeds printed here are evidence for a commit message, never constants to keep (root
+  *Simulation rules*).
+
+## Tests & gates
+
+- `cargo xtask sim run paros-chain` (= `run-all`; CI `sim` job) builds `sim-paros-chain` under
+  sancov and runs it.
+- Hunts: `cargo run --release -p paros-sim-runner --bin sim-paros-hunt -- main 2000`.
+
+## Deps
+
+- `paros-sim` only (`Cargo.toml:21`); binaries declared at `Cargo.toml:12-18`.

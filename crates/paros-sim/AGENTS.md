@@ -1,125 +1,130 @@
 # paros-sim
 
-The DST harness on top of `paros`: the moonpool `Process` adapters, the
-deployment/role map, the fault world, the client workload, the audit and the
-scripted corpus. Correctness lives here (audit + workload `check()`), never in
-a trace scan. Every constant that shapes a campaign is a `pub const` in
-`lib.rs`, not an environment variable.
+The DST harness on top of `paros`: moonpool `Process` adapters, the deployment/role map, the
+fault world, the one client workload, the audit and the scripted corpus. Stack: `paros-core` ←
+`paros` ← **`paros-sim`** ← `paros-sim-runner`. Correctness lives here (audit + workload
+`check()`), never in a trace scan. Doctrine: root *Simulation rules*, *Turbulence layers*,
+*Audit, correctness, assertions, spans*.
 
 ## Map
 
-- `roles.rs` the per-seed **deployment/role map** read off moonpool process
-  groups: `ACCEPTOR_GROUP = "paros-node"`, `MATCHMAKER_GROUP = "paros-matchmaker"`,
-  `PROXY_GROUP = "paros-proxy"` (#142), `REPLICA_GROUP = "paros-replica"` (#144; a
-  replica speaks as `replica_node_id(rank)` = `NodeId(1000 + rank)`, outside every pool),
-  `JOINER_GROUP = "paros-joiner"` (#189; a joiner joins as `joiner_node_id(rank)` =
-  `NodeId(100 + rank)`, outside the genesis pool until the registry admits it),
-  `Deployment`, `Role`.
-- `shape.rs` `NodeShape::draw`: the per-logical-node knobs
-  (`DriverTunables`, seam crash bias, wipe/loss percentages,
-  `bootstrap_ranks`, `matchmaker_bootstrap_ranks`, the proxy take-back budget
-  `proxy_take_back_resends` and the proxy's retention budget `proxy_round_resends`,
-  the run's `QuorumPolicy`
-  through `quorum_policy` — majority, a flexible split (#140) or an acceptor
-  grid drawn from `grid_layouts` (#141, floor `rows >= 2`, `cols >= 2`)), drawn once
-  per node per seed and reused across restarts; the run's `JournalPlan` (`journals`,
-  #188: one to three journals, the held one) and the quarantine re-open knob;
-  `system_journals` (#189: the seeded coin for the directory and the registry) and
-  `SEED_COUNT` / `seed_ranks` (the ranks that host them); `MIN_BOOTSTRAP`, `config_floor`,
-  `ROUND_TRIP_FLOOR_MS`.
-- `process.rs` `NodeProcess::{chaotic, scripted_with}` (`ScriptedOptions`: a
-  fixed bootstrap subset, the GC requests withheld; an acceptor runs
-  `paros::run_journals` over `SimStores`, one `Seat` per journal — its config, its
-  storage world, its audit world and port), `MatchmakerProcess`, `ProxyProcess` (runs
-  `paros::run_proxy`; nothing durable, a kill reboots it empty), `ReplicaProcess` (runs
-  `paros::run_replica` in a seam-crash recovery loop over its own **fault-free** disk,
-  registered with `StorageWorld::note_replica` so the copy budget never counts it — a
-  replica's record is never a copy an acceptor quorum needs), `IdleProcess`,
-  `JoinerProcess` (#189: `run_journals` with no journal of its own and the `SystemPlan`,
-  over `SimStores` whose created seats appear at runtime; quiet seats — system and created
-  journals — sit on fault-free world stores outside the copy budget), `ContractSuiteWorkload` ·
-  `lifecycle.rs` `ScriptedLifecycle` (the corpus's
-  `FaultInjector`, registered on the main campaign too for the chain client's one lifecycle
-  act — rebooting every member of a configuration it installed, #173; it drains for the whole
-  run) · `hooks.rs` `BuggifyHooks<T>`: all `DriverHooks` methods,
-  one `buggify_with_prob!` location each, the module-doc table of *enabled /
-  consulted / fired / recovered* per hook.
-- `client.rs` `ClientRuntime` (a workload's client-only moonpool-rpc
-  runtime, driven on its own task and stopped when the handle drops; one
-  `paros::NodeClient` per server, which the corpus builds on, and
-  `ChainClient`, the library's `paros::client::Client` the chain workload drives every call
-  through, #221) · `state.rs` `published` (the
-  get-or-publish of every per-iteration singleton on the `StateHandle`).
-- `chain.rs` `ChainState` (the Chain-of-Blocks fold a journal client
-  computes, #186) · `chain_workload.rs` `ChainWorkload` + `ChainConfig`
-  (every field a `buggify_knob!`; the operation-id table `WRITE=0 …
-  SET_LEADER=22`, `OP_COUNT`, the weight table, the reconfiguration shape
-  rings) · `chain_workload/system.rs` the system-journal operations (#189,
-  `CREATE_JOURNAL=17 … RETIRE_NODE=21`) and their read-back · `chain_workload/rpc.rs` the
-  seam onto `paros::client`: `CallLog` (the history, as the library's `CallObserver`), the
-  per-answer oracles, and the one-attempt calls the races and misbehaviours make ·
-  `chain_workload/races.rs` races 1 and 2 of #205 · `chain_workload/fold.rs` the client's `Fold` of the journal and
-  the run's trim fence (every trim clamped below every folding client's
-  cursor).
-- `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,
-  parked identities, the replica disks kept outside the copy count) · `world/storage.rs` `DurableStorage` (`LogStorage` +
-  write-path fault sites) · `world/node_store.rs` `NodeStore` (#187: an acceptor's
-  store, the world's or the library's `JournalStorage` over `SimStorageProvider` on the
-  seeds `shape::journal_store` draws; `LedgeredJournal` keeps the provisioning ledger in
-  two steps and counts the disk's I/O faults for the one-crash-per-fault correlation) ·
-  `world/rot.rs` boot-rot BUGGIFY sites, one per
-  fault family · `world/matchmaker.rs` `DurableMatchmakerStorage`.
-- `audit/mod.rs` `AuditWorld` (one per journal, `audit_world_for`; `world/`'s
-  `storage_world_for` likewise, keyed by `state::journal_key`), `check_run`,
-  `reach_once!` · `audit/journals.rs` the journal board and the non-interference
-  oracles (#188) · `audit/system.rs` the system board (#189: fold agreement, id
-  allocation, tombstones, the joiner gates) · `audit/state.rs`
-  `AuditState` (per-transition protocol safety) · `audit/client.rs`
-  `ClientHistory` (the client's attempts and operations, merged per journal) ·
-  `audit/linearizability.rs` the journal model and the Wing & Gong search over
-  every attempt (#205) ·
-  `audit/matchmaker.rs` `MatchmakerAudit`.
-- `corpus.rs` the scripted workloads: `E1MaskWorkload`, `BareQuorumWorkload`,
-  `DepartedStragglerWorkload`.
+- `lib.rs` → builders (`chain_builder`, `scripted_builder`), `chaos_surfaces()`, the campaign constants, the entry points.
+- `roles.rs` → `Deployment`, `Role`, group names, `joiner_node_id`, `replica_node_id` → the per-seed role map.
+- `shape.rs` → `NodeShape`, `QuorumPolicy`, `JournalPlan` → every per-seed and per-node draw (below).
+- `process.rs` → `NodeProcess::{chaotic, scripted_with}`, `MatchmakerProcess`, `ProxyProcess`, `ReplicaProcess`, `JoinerProcess`, `IdleProcess`, `ContractSuiteWorkload` → one `Seat` per journal over `SimStores`.
+- `lifecycle.rs` → `ScriptedLifecycle` → the `fault_factory` injector (corpus kills; the chain client's successor reboot, #173).
+- `hooks.rs` → `BuggifyHooks<T>` → every `DriverHooks` method, one `buggify_with_prob!` each; module table of enabled/consulted/fired/recovered.
+- `client.rs` → `ClientRuntime`, `ChainClient = paros::client::Client<SimProviders>` → a workload's client-only RPC runtime.
+- `state.rs` → `published`, `journal_key` → get-or-publish of per-iteration singletons on the `StateHandle`.
+- `chain.rs` → `ChainState` → the Chain-of-Blocks fold a journal client computes (#186).
+- `chain_workload.rs` → `ChainWorkload`, `ChainConfig` → the op alphabet, weights, reconfiguration shape rings.
+- `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
+- `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
+- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21 and their read-back.
+- `world/mod.rs` → `StorageWorld`, `storage_world_for` → fake disk, copy budget, parked ids, provisioning ledger, reconfiguration ledger.
+- `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
+- `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
+- `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
+- `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
+- `audit/client.rs` → `ClientHistory` · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
+- `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, generation chain, monotone `first_seq`).
+- `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
+- `corpus.rs` → `E1MaskWorkload`, `BareQuorumWorkload`, `DepartedStragglerWorkload`.
 
-## Campaign constants (`lib.rs`)
+## Harness shape
 
-`PROCESS_POOL_RANGE = 3..=6`, `MATCHMAKER_POOL_RANGE = 0..=5` (zero means the
-plain Multi-Paxos deployment), `PROXY_POOL_RANGE = 0..=3` (zero means every
-Phase 2 colocated), `REPLICA_POOL_RANGE = 0..=2`, `JOINER_POOL_RANGE = 0..=2` (#189), `CLIENT_COUNT_RANGE = 1..4`, `PLATEAU_SEEDS = 8`,
-`CHAOS_DURATION_MS = 4_000`, `SMOKE_ITERATIONS = 50`, `COVERAGE_ITERATIONS = 1024`,
-`CORPUS_CI_ITERATIONS = 64`,
-`EXPLORATION_TIMELINES_PER_SEED = 8`. `chaos_surfaces()` is `Network(Swarm)`,
-attrition scoped per group with `AttritionVictims::group`, and `BuggifyKnobs`;
-`BitFlip` is masked off. Exploration runs in-process (`workers: 0`). Oracle
-thresholds and `*_ITERATIONS` are never buggified.
+- **Main campaign**: process groups `paros-node` (acceptors, 3–6), `paros-matchmaker` (0–5),
+  `paros-proxy` (0–3, `ProxyId(rank)`), `paros-replica` (0–2, `NodeId(1000 + rank)`, fault-free
+  disk outside the copy budget), `paros-joiner` (0–2, `NodeId(100 + rank)`, idle without system
+  journals). Attrition per group (`AttritionVictims::group`); joiners are no victim. 1–3
+  `ChainWorkload` clients. Zero matchmakers = the plain Multi-Paxos deployment.
+- **Bootstrap**: `bootstrap_ranks` — the whole pool, or on a matchmaker seed a subset of at least
+  `MIN_BOOTSTRAP` leaving *spares* a `Reconfigure` pulls in.
+- **Corpus**: a scripted three-node cluster (`scripted_builder`, `NodeProcess::scripted_with`),
+  every fault targeted through `ScriptedLifecycle`, an analytic outcome per mask; plus the one
+  four-node, one-matchmaker `DepartedStragglerWorkload` (CTRL Case 3 across a reconfiguration).
 
-Entry points: `explore`, `run_chain_seed`, `chain_seed_digest`,
-`chain_seed_canary`, `chain_canary_hunt`, `chain_smoke`, `explore_chain_seed`,
-`run_storage_contract_suite`, and the corpus family (`corpus_canonical_masks`,
-`run_corpus_mask`, `corpus_hunt`, `run_bare_quorum_case`,
-`run_departed_straggler_case`, ...).
+## Per-seed draws (`shape.rs`)
 
-## Rules local to this crate
+- `quorum_policy` → `Majority`, `Flexible { q2 }` (`q2` knob clamped `1..=n/2`, `q1 = n - q2 + 1`),
+  or `Grid { rows, cols }` from `grid_layouts` (floor `rows >= 2`, `cols >= 2`: `2×2`, `2×3`,
+  `3×2`). `QuorumPolicy::system(n)` applies it per configuration size; a size no layout tiles
+  runs a majority. The composer may switch a successor to majority, never the reverse.
+- `config_floor` → `MIN_BOOTSTRAP` on a matchmaker seed, the whole pool otherwise.
+  `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
+  `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
+- `journals` → `JournalPlan`: 1–3 journals (one on a matchmaker seed), one held for the chaos
+  window (`hold_journal`). `journal_store` → `JournalStorage` on half the plain seeds, no
+  injected corruption. `system_journals` → journals 1 and 2 on half the seeds, on `SEED_COUNT`
+  (1) seed ranks. `NodeShape::draw` → `DriverTunables`, seam bias, wipe/loss %, `config_edit_pct`.
 
-- moonpool macros only (`assert_always!` with a detail map, `assert_sometimes!`
-  for outcomes, `reach_once!` for causes); never plain `assert!`; never reword
-  a message; 512 slots and 256 buckets per campaign process; no slot, ballot,
-  id, seed or hash as an identity.
-- No seed constants, seed lists or seed-replay tests. `tests/sim.rs` is the
-  smoke (a single seed converging, the storage contract, a same-seed digest
-  replay, the canary pair, `chain_smoke(SMOKE_ITERATIONS)`); `tests/corpus.rs`
-  walks the canonical mask tables with non-vacuous floors. Neither replays a
-  witness; a seed there is either an arbitrary display seed or the input to a
-  scripted case.
-- Hooks are consulted from the node loop only; decisions a spawned task needs
-  are carried to it.
-- A wiped identity (lost promise) stays down because the **library** refuses
-  its unformatted store (#147): the world keeps it parked for the budget and
-  the composer only, and its provisioning ledger (`StorageWorld::provisioned`)
-  is the operator's claim the process hands `run_node` as `BootKind`. Never
-  short-circuit a wiped boot in the process again. The same holds for a
-  matchmaker (#183): its loss coin wipes the registry and the process boots it
-  as an existing member for `run_matchmaker` to refuse.
-- Spans are non-optional (process and workload lifecycles, the world's
-  injections, the audit's gate checks).
+## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
+
+`WRITE=0` (owner writes at its believed next position; a superseded writer's stale write must be
+refused) · `WRITE_TO_NON_LEADER=1` · `TRUNCATE=2` (clamped by the trim fence) · `READ_STATE=3`
+(fold to tail) · `PAUSE=4` · `DUP_WRITE=5` (must fold `Duplicate`) · `DUAL_SUBMIT=6` (one
+position per verdict) · `TRUNCATE_STORM=7` · `READ_INDEX=8` retired · `MATCHMAKE=9`,
+`MATCH_GC=10` retired · `RECONFIGURE=11` (compose from the live pool; refused on a plain seed)
+· `RECONFIGURE_MATCHMAKERS=12` · `RETIRE=13` · `QUORUM_READ=14` retired · `READ=15` (judged as
+it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=18`,
+`REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to journal 1 or 2; refused
+`unknown_journal` without system journals) · `SET_LEADER=22` (CAS on the generation) ·
+`OP_COUNT=23`. Retired ids are no-ops that keep their slot in the alphabet.
+
+- Each client is an **owner** or a **reader** for the run (knob; each journal's first client
+  owns). Owners claim before writing and re-claim when superseded.
+- Every client folds its journal into `ChainState` and reports each step
+  (`AuditWorld::fold_applied`); truncations are clamped below the lowest folding cursor.
+- Races (#205, each a BUGGIFY location): a claim racing its own burst, a write with
+  `ack_race_timeout_ms` below its ack retried across a re-claim, a `READ` from a lagging cursor
+  racing the client's truncation.
+- **Every call goes through `paros::client`**; misbehaviours (`Writer::stale_entry`,
+  `write_attempt`, `DUAL_SUBMIT`, `DUP_WRITE`) are explicit calls. Timeouts are `Ambiguous`; a
+  retry is the identical write. `ChainConfig::tunables` maps knobs onto `ClientTunables`
+  (`write_redirect_limit` → `redirect_limit`, `resolve_attempts` → `retry_budget`, …).
+
+## Boards
+
+- **Journal board** (`audit/journals.rs`): every slot of journal `j` applies only an identity
+  appended to `j`; a quarantined journal sends nothing; a sibling keeps committing while one is
+  held; a node keeps serving the rest while one is quarantined.
+- **System board** (`audit/system.rs`): every node folds each system journal alike per LSN; a
+  created id is `128 + LSN`, never reused; no append acked after its tombstone; gates for name
+  races, joiners learning before admission, refused-then-accepted joiner messages.
+
+## Entry points (`lib.rs:309-578`)
+
+`explore`, `run_chain_seed`, `chain_seed_digest`, `chain_seed_canary`, `chain_canary_hunt`,
+`chain_smoke`, `explore_chain_seed`, `run_storage_contract_suite`, `corpus_canonical_masks`,
+`run_corpus_mask`, `corpus_mask_case`, `corpus_hunt`, `run_corpus_seed`, `run_bare_quorum_case`,
+`run_departed_straggler_case`, `departed_straggler_case`.
+
+## Local rules
+
+- moonpool macros only; never plain `assert!`; never reword a message. Budget: 2048 slots
+  (moonpool `MAX_ASSERTION_SLOTS`), 256 buckets; no slot, ballot, id, seed or hash as identity.
+- No seed constants, seed lists or seed-replay tests (root *Simulation rules*).
+- Hooks are consulted from the node loop only; a decision a spawned task needs is carried.
+- A wiped identity stays down because the **library** refuses it (#147, #183): the world parks
+  it for the budget and composer only, and `StorageWorld::provisioned` is the `BootKind` claim.
+- Operators coordinate through `StorageWorld::retire` / `reserve_joiner_retirement`. Spans are non-optional.
+
+## Tests & gates
+
+- `cargo nextest run -p paros-sim`: `tests/sim.rs` (single seed converges, storage contract,
+  same-seed digest replay, canary pair, `chain_smoke(SMOKE_ITERATIONS)`); `tests/corpus.rs`
+  (canonical masks in quarters with non-vacuous floors, bare quorum, departed straggler).
+  Saturation is `cargo xtask sim run paros-chain`; hunts are `sim-paros-hunt`.
+
+## Constants (`lib.rs`, `shape.rs`)
+
+`pub(crate)`: `PROCESS_POOL_RANGE = 3..=6` (`lib.rs:105`), `MATCHMAKER_POOL_RANGE = 0..=5`
+(`:119`), `PROXY_POOL_RANGE = 0..=3` (`:131`), `REPLICA_POOL_RANGE = 0..=2` (`:141`),
+`JOINER_POOL_RANGE = 0..=2` (`:148`), `CLIENT_COUNT_RANGE = 1..4` (`:154`), `PLATEAU_SEEDS = 8`
+(`:161`), `CHAOS_DURATION_MS = 4_000` (`:197`); `pub`: `SMOKE_ITERATIONS = 50` (`:165`),
+`COVERAGE_ITERATIONS = 1024` (`:168`), `CORPUS_CI_ITERATIONS = 64` (`:170`),
+`EXPLORATION_TIMELINES_PER_SEED = 8` (`:172`). `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`),
+`SEED_COUNT = 1` (`:574`), `MIN_BOOTSTRAP = 3` (`:753`). `chaos_surfaces()` = `Network(Swarm)` +
+four per-group attritions + `BuggifyKnobs`; `BitFlip` masked; `prob_wipe = 0`.
+Deps: `paros`, `moonpool-sim` (`exploration`, `Cargo.toml:20`), `moonpool-rpc` (`:29`) — pin
+shared with `paros` and `parosd`.

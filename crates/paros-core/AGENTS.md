@@ -1,106 +1,88 @@
 # paros-core
 
-The sans-IO Paxos roles and `ColocatedNode`, the node that wires them.
-Dependency-free with `--no-default-features`, wasm-safe, never buggified: it is
-perturbed only through its public API. The root `AGENTS.md` holds the
-doctrine; this file is the map.
+The sans-IO Paxos roles and `ColocatedNode`, the node that wires them: `step`/`tick` in, one
+`Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack (`paros-core` ←
+`paros` ← `paros-sim` ← runner; `paros` ← `parosd`; `paros-play` drives it directly). Never
+buggified: perturbed only through its public API. Doctrine lives in the root `AGENTS.md`.
 
 ## Map
 
-- `acceptor.rs` `Acceptor` + `acceptor/retention.rs` (the two floor-moving ops, `truncate` and
-  `trim_to`, the trim-point jump of #186: a module, not a role, because the role that moves the floor emits the write) ·
-  `proposer.rs` + `proposer/{election,probe,rounds,recovery,authority}.rs`
-  `Proposer` (its Phase-2 tally is the standalone `proposer::Rounds` it embeds and delegates
-  to — the one tally a proxy leader runs without the rest of the role, #142; a round's
-  `Custody` is `Colocated` or `Delegated` to a `ProxyId`; its standing authority — the read
-  fence, the read-index rounds, the `CheckQuorum` window — is the standalone
-  `proposer::Authority` it embeds the same way) · `proxy_leader.rs` `ProxyLeader` +
-  `ProxyReady` (the **second deployment**, #142: a `Rounds` plus routing on a process that is
-  neither an acceptor nor a replica; it fans a delegated `Accept` out, folds the `Accepted`s,
-  emits the `Commit`, relays a `Nack`, re-fans-out on its beat, evicts a round nobody answers
-  on the driver's retention budget (`expire_stale`), and works for the highest ballot it was
-  handed) · `replica.rs` `Replica` (owns `chosen_gap()`; reach it as
-  `node.replica().chosen_gap()`; the journal fold — `journal()`, `outcome_at`, `accepted_at`,
-  `fold_hole` — and `read`, one journal page by position, #204 — `LogRead`, `Truncated` below
-  `first_seq` — through `ColocatedNode::read_log` and `ReplicaNode::read_log`) ·
-  `journal_state.rs` `JournalState` + `Outcome` (#204: the one journal-control state machine,
-  `(owner, generation, next_seq, first_seq)`, whose pure `apply` judges every `Write`,
-  `SetLeader` and `Truncate` at apply; the replica's fold is its only caller in the node) · `replica_node.rs` `ReplicaNode` + `ReplicaReady` (the **third
-  deployment**, #144: a `Replica` over a durable chosen log with no `Acceptor` — steps `Commit`,
-  `CatchUpResponse`, `TrimmedTo`, `Heartbeat`, `PreReadAck`; sends `CatchUpRequest`
-  and, for the quorum reads it serves from its own state (§3.4), `PreRead`; writes
-  `WriteOp::Learned`, never an acceptor op; never in the pool; its module doc holds the
-  coupling analysis — why an acceptor keeps a chosen prefix) ·
-  `membership.rs` `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem` (the one quorum boundary; `Majority`, `Flexible { q1, q2 }` and
-  `Grid { rows, cols }`, whose column addressing — `column_of`, `phase2_addressees`,
-  `is_phase2_addressee`, `has_phase2_quorum_in` — is the one place a column is chosen, and
-  whose row addressing — `row_of`, `phase1_addressees`, `is_phase1_addressee`,
-  `has_phase1_quorum_in` — the one place a read row is) · `quorum_read.rs` `QuorumRead` /
-  `QuorumReads` (the leaderless read tally, #143: a row's vote watermarks, the maximum, the
-  replica's `covers`; wired on any node by `node/quorum_reads.rs`) · `matchmaking.rs`
-  `Matchmaking` (the candidate's phase) and `MembershipProbe` (#173: a node whose belief is only
-  the bootstrap default asks a matchmaker quorum for the effective configuration before its first
-  campaign or skip, registering nothing; wired in `node/matchmaking.rs`) · `retained.rs` `RetainedWindow`.
-- `matchmaker.rs` `Matchmaker` + `matchmaker/{reconfigurer,decree,generation,
-  handover_model,storage,message,state,write}.rs`: the registry, the handover
-  and the single decree over the shared roles at slot zero; `MemRegistry` is
-  the reference in-memory registry.
-- `node.rs` `ColocatedNode` (`step`/`tick`/`ready`/`advance`, the client entry
-  points with their `Delegation`, the driver-policy surface such as `resend_pending`,
-  `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`) + `node/*.rs` named
-  by **concern** (`election`, `replication`, `authority` — `CheckQuorum` — `phase2` — open, fan out or delegate, fold,
-  decide, take back — `learn` — a chosen value reaching the record and the prefix —
-  `handoff`, `gc`, `matchmaking`, `reconfigure`, `reads` — the read-index wiring and the back
-  half both read tallies share: `READ_TTL_TICKS`, `serve_reads`, `tick_reads`, the one seam
-  into `Ready::read_states` — `quorum_reads`,
-  `catch_up` — the commit-replay answer and the trim-point jump, #186 — `boot`, `acceptor`, `helpers`, `invariants`). Wiring only; no
-  protocol tally lives here.
-- `message.rs` `Message` + `Audience` + `Party` (a node or a proxy: the reply party of an
-  `Accept`, the sender of a `Commit`) · `ready.rs` `Ready<'a>` (the borrow
-  guard that makes a second `ready()` before `advance()` a compile error) ·
-  `state.rs` `HardState` (two scalars, `#[non_exhaustive]`) and `Config` (`proxy_count` and
-  `replica_count`, zero on the plain deployment) · `storage.rs` the read-only `Storage` recovery port ·
-  `types.rs` · `write.rs` `WriteOp`.
-- `proxy_model.rs` the proxy model checker and `model_support.rs` the seeded RNG and lossy
-  mailbox both model checkers share (test-only).
+- `lib.rs` → the re-export list (roles, `ColocatedNode`, messages, `PreReadFold`, `LogPage`/`LogRead`, `WriteOp`).
+- `acceptor.rs` → `Acceptor` → the durable promise, accepted records, compaction floor, CTRL faulty set; emits its own writes.
+- `acceptor/retention.rs` → `Acceptor::truncate` / `trim_to` → the two floor-moving ops (a concern, not a role).
+- `proposer.rs` → `Proposer` → the leader-side tallies; embeds the next five.
+- `proposer/election.rs` → Phase 1 → per-configuration completion, the P2c merge.
+- `proposer/probe.rs` → the CTRL repair probe (Stage 8) for slots a won election could not decide.
+- `proposer/recovery.rs` → `RecoveryPolicy::{Phase1Backed, Inherited}` → the bounded recovery a fresh leadership drains.
+- `proposer/rounds.rs` → `proposer::Rounds`, `Custody` → the one Phase-2 tally (#142); a proxy runs it alone.
+- `proposer/authority.rs` → `proposer::Authority` → the read fence, read-index rounds, `CheckQuorum` window.
+- `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor.
+- `replica.rs` → `Replica`, `LogRead`, `LogPage` → chosen prefix, apply walk, journal fold (`journal`, `outcome_at`, `accepted_at`, `fold_hole`, `chosen_gap`, `covers`).
+- `journal_state.rs` → `JournalState`, `Outcome` → the journal-control state machine; pure `apply` judges `Write`/`SetLeader`/`Truncate` (#204).
+- `proxy_leader.rs` → `ProxyLeader`, `ProxyReady` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, `expire_stale`.
+- `replica_node.rs` → `ReplicaNode`, `ReplicaReady`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis.
+- `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
+- `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold` → the leaderless read tally (#143).
+- `membership.rs` → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing.
+- `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the boot probe (#173).
+- `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).
+- `matchmaker/{generation,reconfigurer,decree}.rs` → the generation machine, `MatchmakerReconfigurer`, the successor decree over the shared roles at slot zero.
+- `matchmaker/{message,state,storage,write}.rs` → wire contract, durable state, `RegistryStorage` + `MemRegistry` (the reference registry), `MatchmakerWriteOp` + `MatchmakerReady`.
+- `matchmaker/handover_model.rs` → the handover model checker (test-only).
+- `proxy_model.rs` → the proxy-leader model checker (test-only); `model_support.rs` → seeded RNG + lossy mailbox both share.
+- `retained.rs` → `RetainedWindow` → a map with a floor under it.
+- `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`, `quorum_read`).
+- `node/{election,phase2,learn,replication,catch_up}.rs` → campaign, Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump.
+- `node/{authority,reads,quorum_reads}.rs` → `CheckQuorum`; read-index + the shared `serve_reads`/`tick_reads`; `PreRead` wiring.
+- `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration.
+- `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
+- `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
+- `message.rs` → `Message`, `Audience`, `Party` · `ready.rs` → `Ready<'a>` (second `ready()` before `advance()` is a compile error).
+- `state.rs` → `HardState` (two scalars, `#[non_exhaustive]`), `Config` (`proxy_count`, `replica_count`, `reply_owner`).
+- `storage.rs` → `Storage` (read-only recovery port) · `write.rs` → `WriteOp`, `AcceptorWrite`, `MustSync` · `types.rs` → `Ballot`, `Slot`, `Command`, `JournalId`, ….
 
-## Rules local to this crate
+## Public surface
 
-- `ColocatedNode::assert_invariants` is `pub(super)` (`node/invariants.rs`):
-  called at boot and at the exit of every public mutating entry point, never
-  from outside the crate. A new entry point calls it.
-- Hard `assert!` everywhere, no `debug_assert!`; every public function that
-  can panic has a `# Panics` section (pedantic enforces it).
-- `AcceptorConfig::new` / `MatchmakerSet::new` are the only constructors.
-- `ColocatedNode::adopt_configuration` is the one way the configuration in force moves:
-  it binds the ballot and records the membership in one call.
-- The observability counters are one struct (`Counters` in `node.rs`) behind the public
-  accessors; a new one is a field there, never a loose `u64` on the node.
-- Spans are `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`;
-  `serde` adds derives; both features are observation-only.
-- The two model checkers — the handover's (`matchmaker/handover_model.rs`) and the
-  proxy leader's (`proxy_model.rs`) — run under nextest; `HANDOVER_MODEL_SEEDS`,
+`ColocatedNode::{new, step, tick, ready, advance, propose, propose_in, propose_control,
+read_log, quorum_read, reconfigure, may_retire, …}`, `ReplicaNode`, `ProxyLeader`,
+`Matchmaker`, `MatchmakerReconfigurer`, and the bare roles (`acceptor`, `proposer`, `replica`,
+`matchmaking`, `membership`, `quorum_read`, `retained`, `journal_state` are `pub mod`).
+Examples: `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid,
+quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teaches.
+
+## Local rules
+
+- `ColocatedNode::assert_invariants` (`node/invariants.rs`, `pub(super)`) runs at boot and at
+  the exit of every public mutating entry point; a new entry point calls it.
+- Hard `assert!` only, never `debug_assert!`; every public fn that can panic has `# Panics`
+  (clippy pedantic enforces it).
+- `AcceptorConfig::new` / `MatchmakerSet::new` are the only constructors (deserialisation included).
+- No tally compares a count against a threshold: every quorum question goes through `membership.rs`.
+- `ColocatedNode::adopt_configuration` (`node/helpers.rs`) is the one way the configuration in force moves.
+- A new observability counter is a field of `Counters` (`node.rs`), never a loose `u64`.
+- `record_own_round` (`node/phase2.rs`): a leader records every round it opens whenever its
+  promise allows, so the allocator frontier is durable by construction; never skip it.
+- No application and no snapshot (#186): a below-floor node jumps to a peer's trim point
+  (`Message::TrimmedTo`, `WriteOp::TrimmedTo`) and never moves its promise.
+- Spans are `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`; `serde` and `tracing`
+  are observation-only (root *Tracing spans*, *Where each kind of turbulence lives*).
+
+## Tests & gates
+
+- `cargo nextest run -p paros-core` — unit tests and both model checkers.
+- Model-checker env vars (the only ones this crate reads): `HANDOVER_MODEL_SEEDS`,
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
-  `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` are the only environment variables the
-  workspace reads.
-- **No application, no snapshot (#186).** The replica's walk is the learner line every node
-  runs the same (`Ready::committed` is the walk stream the driver reports and acks from); a
-  below-floor node jumps to a peer's trim point (`Message::TrimmedTo`, `WriteOp::TrimmedTo`,
-  `Replica::trim_to` + `Acceptor::trim_to`) and never moves its promise. Do not reintroduce a
-  per-node application or a snapshot path here — a journal client folds what it reads.
-- **The allocator frontier is durable by construction**: a leader records every round it
-  opens in its own log whenever its promise allows, colocated or delegated, in its column or
-  not (`node/phase2.rs`, `record_own_round`), so a reboot rederives the frontier and the
-  handoff's replay guard holds. Never skip the record to save a write.
+  `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`model_support.rs:10`, `env_or`).
+- `cargo run -p paros-core --example <name>` for each of the eight examples (CI `examples` job).
+- `cargo check --target wasm32-unknown-unknown -p paros-core` with and without
+  `--no-default-features`; `cargo check -p paros-core --features serde` (CI `portability`).
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps` (CI `clippy` job).
+- A protocol change is proven by the sweep (`cargo xtask sim run paros-chain`), not here.
 
-## Tests and gates
+## Deps & constants
 
-Unit tests are inline: `node/tests.rs` + `node/tests/*.rs` (one file per
-concern), plus the role, matchmaker, reconfigurer, decree and model-checker
-modules. `examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid,quorum_read,proxy_leader,replica_tier}.rs`
-run in CI.
-Gates: `cargo check --target wasm32-unknown-unknown -p paros-core` (with and
-without default features), `cargo check -p paros-core --features serde`,
-`RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`. A protocol
-change is proven by the sweep (`cargo xtask sim run paros-chain`), not here.
-`CHANGELOG.md` is release-plz's (`version_group = "paros"`).
+- Features (`Cargo.toml:18-30`): `default = ["tracing"]`; deps `serde` (`Cargo.toml:33`) and
+  `tracing` (`Cargo.toml:34`), both optional. Zero deps with `--no-default-features`.
+- Exported constants (`lib.rs`): `HANDOFF_BATCH`, `HANDOFF_FENCE_ELECTIONS`, `HEARTBEAT_TICKS`,
+  `LEADER_RECOVERY_BATCH`, `PROMISE_BATCH`, `REPAIR_TIMEOUT_ELECTIONS`, `REGISTRY_PAGE`.
+- `CHANGELOG.md` is release-plz's (`version_group = "paros"`); never edit it by hand.
