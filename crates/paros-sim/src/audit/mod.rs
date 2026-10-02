@@ -1135,6 +1135,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.quorum_read_on_row |= row.is_some();
         // §3.4's own shape (#144): the read answered from a replica's state.
         st.quorum_read_on_replica |= st.replicas.contains(&node.0);
+        // The same on a matchmaker deployment, where the configuration a
+        // read is bound to moves with every registration: a replica must
+        // follow it from the beats to have its reads confirmed at all.
+        st.quorum_read_on_replica_with_matchmakers |=
+            st.replicas.contains(&node.0) && st.matchmaker.has_matchmakers();
     }
 
     #[tracing::instrument(level = "trace", skip_all)]

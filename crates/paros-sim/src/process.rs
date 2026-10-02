@@ -1643,6 +1643,42 @@ async fn run_proxy_role(
     })
 }
 
+/// A replica's configuration: the bootstrap membership it learns from,
+/// outside the pool, and the matchmakers too, as `parosd` hands them
+/// (#206): on a matchmaker deployment a replica follows the configuration
+/// the beats carry, and a quorum read it serves is bound to the one the
+/// acceptors it asks are in. Without them it stays bound to the bootstrap,
+/// and every acceptor that registered a campaign answers from a later
+/// configuration — a one-node deployment's replica never served a read.
+fn replica_config(
+    ctx: &SimContext,
+    deployment: &Deployment,
+    members: &[(NodeId, String)],
+    id: NodeId,
+    perturb: bool,
+) -> Config {
+    let has_matchmakers = !deployment.matchmakers().is_empty();
+    let bootstrap = bootstrap_config(ctx, members.len(), has_matchmakers, perturb);
+    let matchmaker_pool: Vec<MatchmakerId> = (0..deployment.matchmakers().len() as u64)
+        .map(MatchmakerId)
+        .collect();
+    let matchmakers: Vec<MatchmakerId> =
+        crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_pool.len(), perturb)
+            .into_iter()
+            .map(MatchmakerId)
+            .collect();
+    Config {
+        id,
+        peers: bootstrap.members().to_vec(),
+        quorum_system: bootstrap.quorum_system(),
+        nodes: members.iter().map(|(node, _)| *node).collect(),
+        matchmakers,
+        matchmaker_pool,
+        replica_count: deployment.replica_count(),
+        ..Config::default()
+    }
+}
+
 /// A replica (#144): the provider-generic replica driver inside the same
 /// crash/recovery loop as a node — a seam crash unwinds `run_replica`, the
 /// volatile `ReplicaNode` is dropped, and the next incarnation rebuilds it
@@ -1660,17 +1696,8 @@ async fn run_replica_role(
     perturb: bool,
 ) -> SimulationResult<()> {
     let members = ranked(deployment.acceptors(), NodeId)?;
-    let has_matchmakers = !deployment.matchmakers().is_empty();
-    let bootstrap = bootstrap_config(ctx, members.len(), has_matchmakers, perturb);
     let id = replica_node_id(rank);
-    let config = Config {
-        id,
-        peers: bootstrap.members().to_vec(),
-        quorum_system: bootstrap.quorum_system(),
-        nodes: members.iter().map(|(node, _)| *node).collect(),
-        replica_count: deployment.replica_count(),
-        ..Config::default()
-    };
+    let config = replica_config(ctx, deployment, &members, id, perturb);
     let RoleRig {
         incarnation,
         hooks,
