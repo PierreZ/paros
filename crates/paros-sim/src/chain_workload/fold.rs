@@ -14,15 +14,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use moonpool_sim::{SimContext, StateHandle, assert_always};
-use paros::{JournalId, ReadAck};
+use paros::JournalId;
+use paros::client::ReadOutcome;
 
-use super::rpc::{CallLog, read_once, state_of, within};
 use crate::audit::AuditWorld;
 use crate::chain::{ChainState, user_command_hash};
-use crate::client::SimClient;
+use crate::client::ChainClient;
 
 const FENCE_KEY: &str = "paros-chain-trim-fence";
 
@@ -89,14 +88,11 @@ pub(super) struct Fold {
     /// overtake the cursor and the fold stops (`detached`).
     fenced: bool,
     detached: bool,
-    /// Where this client's reads are logged for the linearizability check.
-    log: CallLog,
 }
 
 impl Fold {
-    pub(super) fn new(journal: JournalId, log: CallLog) -> Self {
+    pub(super) fn new(journal: JournalId) -> Self {
         Self {
-            log,
             journal,
             state: ChainState::default(),
             cursor: 0,
@@ -122,35 +118,39 @@ impl Fold {
         release(state, self.journal, client);
     }
 
-    /// Fold one page read from `from` (already judged). A page from anywhere
-    /// but the cursor folds nothing; a truncated answer at the cursor ends
-    /// the fold — which a fenced client never meets.
+    /// Fold one answer to a read from `from` (already judged). A page from
+    /// anywhere but the cursor folds nothing; a truncated answer at the
+    /// cursor ends the fold — which a fenced client never meets.
     pub(super) fn absorb(
         &mut self,
         audit: &AuditWorld,
         state: &StateHandle,
         client: u64,
         from: u64,
-        ack: &ReadAck,
+        answer: &ReadOutcome,
     ) {
-        if from != self.cursor || ack.unknown_journal || !ack.served {
+        if from != self.cursor {
             return;
         }
-        if ack.truncated {
-            assert_always!(
-                !self.fenced,
-                "chain: a client's fold is never trimmed out from under it",
-                {
-                    "client" => client,
-                    "cursor" => self.cursor,
-                    "trim" => state_of(ack.state).first_seq.0
-                }
-            );
-            self.detached = true;
-            return;
-        }
+        let records = match answer {
+            ReadOutcome::Page { records, .. } => records,
+            ReadOutcome::Truncated { state: trimmed } => {
+                assert_always!(
+                    !self.fenced,
+                    "chain: a client's fold is never trimmed out from under it",
+                    {
+                        "client" => client,
+                        "cursor" => self.cursor,
+                        "trim" => trimmed.first_seq.0
+                    }
+                );
+                self.detached = true;
+                return;
+            }
+            _ => return,
+        };
         if !self.detached {
-            for (position, record) in (from..).zip(&ack.records) {
+            for (position, record) in (from..).zip(records) {
                 self.state = self.state.fold(position, record);
                 audit.fold_applied(
                     client,
@@ -160,7 +160,7 @@ impl Fold {
                 );
             }
         }
-        let next = from + ack.records.len() as u64;
+        let next = from + records.len() as u64;
         assert_always!(
             next >= self.cursor,
             "chain: a client's journal-read cursor never moves backwards",
@@ -185,62 +185,49 @@ impl Fold {
     /// Every page is a quorum read (#204), which a server answers unserved
     /// when its row does not confirm in time — an honest unavailability, not
     /// a refusal — so a page that goes unserved or unanswered is asked of
-    /// the next server in `vias`, starting at `first`, one attempt per
-    /// server. A fold that gave up at the first such page would leave its
-    /// cursor, and so every truncation the fence clamps to it, behind.
-    #[allow(clippy::too_many_arguments)]
+    /// the next server of `readers` (the library's [`ChainClient::read_any`],
+    /// one attempt per server), starting at `first`. A fold that gave up at
+    /// the first such page would leave its cursor, and so every truncation
+    /// the fence clamps to it, behind.
     pub(super) async fn read_to_tail(
         &mut self,
         ctx: &SimContext,
         audit: &AuditWorld,
-        vias: &[SimClient],
+        readers: &ChainClient,
         first: usize,
         client: u64,
         limit: u64,
-        timeout: Duration,
     ) -> bool {
         let mut via = first;
         for _ in 0..FOLD_PAGES {
-            if self.detached || vias.is_empty() {
+            if self.detached || ctx.shutdown().is_cancelled() {
                 return false;
             }
             let from = self.cursor;
-            let mut served = None;
-            for _ in 0..vias.len() {
-                let call = read_once(
-                    &vias[via % vias.len()],
-                    &self.log,
-                    self.journal.0,
-                    from,
-                    limit,
-                    0,
-                );
-                match within(ctx, timeout, None, call).await {
-                    Some(ack) if ack.served || ack.unknown_journal => {
-                        served = Some(ack);
-                        break;
-                    }
-                    _ => via += 1,
-                }
+            let request = paros::Read {
+                journal: self.journal.0,
+                from_seq: from,
+                limit,
+                wait_ms: 0,
+            };
+            let report = readers.read_any(&request, via).await;
+            via = report.server;
+            let answer = report.outcome;
+            if !answer.is_served() {
+                return false;
             }
-            let Some(ack) = served else {
+            super::judge_read(audit, from, &answer, &[]);
+            self.absorb(audit, ctx.state(), client, from, &answer);
+            let ReadOutcome::Page { records, state, .. } = answer else {
                 return false;
             };
-            if ack.unknown_journal {
-                return false;
-            }
-            super::judge_read(audit, from, &ack, &[]);
-            self.absorb(audit, ctx.state(), client, from, &ack);
-            if ack.truncated {
-                return false;
-            }
-            let next = from + ack.records.len() as u64;
-            if next >= state_of(ack.state).next_seq.0 {
+            let next = from + records.len() as u64;
+            if next >= state.next_seq.0 {
                 return true;
             }
             // A page that moved nothing ends this fold; the next one
             // retries.
-            if ack.records.is_empty() {
+            if records.is_empty() {
                 return false;
             }
         }

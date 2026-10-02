@@ -1,6 +1,6 @@
 ---
 name: meta-issue-upkeep
-description: Update paros's rolling backlog pointer, GitHub issue #69 "meta: up next" (label up-next), after a pull request merges that closes or materially advances a tracked issue - move landed work into "Recently landed", promote from "On deck" into "Next 3", re-rank, never exceed three in "Next 3", never close the issue. Use in the same session as any merge that touches a tracked issue, or when asked what is next / to refresh the backlog.
+description: Update paros's rolling backlog pointer, GitHub issue 69 (titled meta - up next, label up-next), after a pull request merges that closes or materially advances a tracked issue - move landed work into "Recently landed", promote from "On deck" into "Next 3", re-rank, never exceed three in "Next 3", never close the issue. Use in the same session as any merge that touches a tracked issue, or when asked what is next / to refresh the backlog.
 argument-hint: [merged PR number]
 ---
 
@@ -33,3 +33,18 @@ one place. Keeping it current is part of landing a PR, not a follow-up.
   moves the gated issue up; a design note alone does not.
 - If a merged PR advanced an issue without closing it, leave the issue in its
   section and append the PR to its line.
+
+## After a merge: the checklist
+
+#69 is one of four places a merge can leave stale. In the same session:
+
+1. **#69**, as above.
+2. **`docs/architecture.md` §8 (Milestones)**: if the merge finished, split
+   or moved a milestone, update its row (the `milestone:M<n>` label and the
+   issue numbers it carries).
+3. **`AGENTS.md`**: the root file if a rule, a gate or the workflow changed;
+   the crate's own map (`crates/<crate>/AGENTS.md`) if a module, a role, an
+   operation id, a knob family or a file it names moved or was renamed.
+4. **The book**: if the merge changed a protocol rule, a message, a call of
+   the journal API, a read or recovery path or a game level, update the
+   chapter that explains it (`/update-the-book`).

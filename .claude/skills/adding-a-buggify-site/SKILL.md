@@ -52,8 +52,9 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   extreme is a valid configuration: a peer queue that cannot hold one tick of
   traffic, or a one-message delivery batch, is a permanent partition wearing a
   knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`).
-- Never buggify an oracle threshold (`DEPOSED_TICK_SLACK`, `PLATEAU_SEEDS`,
-  `CHAOS_DURATION_MS`, `SETTLE`, `WAIT_SETTLE`, `FLOOR_GRACE`) or a schedule
+- Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
+  `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_DURATION_MS` in `lib.rs`,
+  `SETTLE` in `chain_workload.rs`, `WAIT_SETTLE` in `corpus.rs`) or a schedule
   ceiling (`*_ITERATIONS`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.
 - A new production tunable is **born** as a `DriverTunables` field with a

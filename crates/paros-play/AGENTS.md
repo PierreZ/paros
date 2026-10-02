@@ -1,215 +1,89 @@
 # paros-play
 
-The interactive Paxos game's engine: `paros-core` driven **by hand**, plus the levels,
-prompts and views the browser reads. `publish = false`; `cdylib` for the wasm bundle,
-`rlib` for the native tests. The TypeScript app lives beside it in `web/play/`.
+The interactive Paxos game's engine: `paros-core` driven **by hand** (a driver with a player
+where the network and the clock would be), plus the levels, prompts and views the browser reads.
+`publish = false`; `cdylib` for the wasm bundle, `rlib` for native tests. Depends on
+`paros-core` only (beside the main stack, not on `paros`). The TypeScript app is `web/play/`.
+Spec: `docs/analysis/play/game-plan.md` — read it before adding a level or a verb.
 
-Spec: `docs/analysis/play/game-plan.md`. Read it before adding a level or a verb.
+## The rule
 
-## The rule everything else follows from
+**The core is never modified, forked, or given a wrong answer.** When a level makes a role
+manual, the engine computes the core's own answer on a **clone** of the role (`Acceptor`,
+`Proposer`, `Replica`, `Matchmaker`, `Matchmaking` are `Clone`) and advances the world only
+when the player matches it. A wrong answer is a mistake and an explanation, never a state.
+A judge that restates a rule is a bug; the constant-answer prompts (`PersistOrder`,
+`CommitOverwrite`, `WipedRejoin`) say why in their doc comments. The engine validates before it
+calls the core (a core `assert!` in wasm is an abort): every player-reachable refusal is an
+`ActionError`, and a contradiction is surfaced, never swallowed (`DecreeWorld::violation`).
 
-**The core is never modified, never forked, and never given a wrong answer.** This crate
-is a *driver* — the same shape as `crates/paros/src/driver`, with a player where the
-network and the clock would be. When a level makes a role manual, the engine computes
-`paros-core`'s own answer on a **clone of the role** (`Acceptor`, `Proposer` and
-`Replica` are all `Clone`; `ColocatedNode` hands them out read-only) and only advances
-the world when the player matches it. A wrong answer costs a mistake and an explanation;
-it is never a state the world enters. There is no toy acceptor anywhere.
+## Map
 
-Two corollaries that bite in review:
+- `src/lib.rs` → `Game`, `WasmGame` → level, world, automation flags, the action log that is the undo stack.
+- `src/action.rs` → `Action`, `ActionKind`, `ActionError` → every player verb and the one error type.
+- `src/world/decree/mod.rs` → `DecreeWorld` → Act I: bare `Proposer` + `Acceptor` at slot 0; phase *reach* is the network.
+- `src/world/decree/render.rs` → the Act I view (acceptor and proposer share one `NodeView`).
+- `src/world/mod.rs` → `World`, `Party`, `Envelope`, `InFlight`, `WorldPolicy` → Act II on: constructors, `observe`, `settle`.
+- `src/world/verbs.rs` → wire, clock, client, handoff and prompt-answer verbs (`propose(.., column)`, `relinquish`).
+- `src/world/history.rs` → the client's record and linearizability judge; `World::proposed_values`.
+- `src/world/lifecycle.rs` → crash, the two seams, restart, wipe (boot refused, narrated), corrupt.
+- `src/world/reads.rs` → read-index and `World::quorum_read`, both via `ReadState`.
+- `src/world/disk.rs` → `Disk` → the game's `Storage` impl, the trim-point jump, and the `applied` log.
+- `src/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held; `plan_recovery`.
+- `src/world/prompts.rs` → which delivery raises which prompt, and the clone it is judged on.
+- `src/world/render.rs` → the log world's view; a crashed node renders from its disk.
+- `src/world/matchmakers/{mod,process,verbs,delivery,prompts,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
+- `src/prompt/{mod,acceptor,proposer,replica,reads,storage,matchmaker}.rs` → `PromptKind`, `Choice`, `Prompt`, `Verdict`, `ALL_PROMPTS`; constructors by role.
+- `src/auto.rs` → `AutomationFlag`, `ALL_FLAGS` → automation as reward, and the delivery pump.
+- `src/narration.rs` → narration derived from the transition.
+- `src/level/mod.rs` → `Level`, `levels()`, `level(id)` · `src/level/common.rs` → shared worlds and shorthands.
+- `src/level/script.rs` → `Script` → records a reference solution by driving a real `Game`.
+- `src/level/act{1,2,3,4}.rs` → 6 + 7 + 6 + 10 = 29 levels.
+- `src/view.rs` → `GameView` and friends → the one contract the browser reads.
+- `tests/bindings.rs` → writes `web/play/src/generated/` from the `ts_rs::TS` derives.
+- `tests/levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.
+- `tests/narration.rs` → a line appears exactly when its transition happened, with its numbers, reproducibly.
+- `tests/world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, each prompt kind.
 
-- **A judge that restates a rule is a bug.** `expected` comes from a clone — `prepare`,
-  `admit`, `close_phase1`, `recovery_next`, `confirm_reads`, `Replica::advance`,
-  `Acceptor::trim_to` / `Replica::trim_to`, `JournalState::apply` over the replica's fold (a
-  retry is judged by the log, #204). The one deliberate exception is a prompt
-  whose answer is a *constant* because the core has no other state to be in
-  (`PersistOrder`, `CommitOverwrite`); each says so in its doc comment and says why.
-- **The engine validates before it calls the core.** The core asserts, and an assert in
-  wasm is an abort with no stack, so every player-reachable refusal is an `ActionError`.
-  A branch that would hand the core a contradiction is refused *and surfaced* — never
-  silently swallowed (see `DecreeWorld::violation`).
+The `applied` log in `world/disk.rs` is the **game's own** application stand-in, kept to teach
+"chosen is not applied": paros itself runs no application (#186).
 
-## The map
+## Adding a level
 
-- `src/lib.rs` — `Game`: the level, the world, the automation flags, and the action log
-  that is also the undo stack. `undo` replays; the engine draws no randomness and reads
-  no clock, so it is bit-exact. The `#[wasm_bindgen] WasmGame` surface is here too.
-- `src/action.rs` — every player verb and the one error type. `ActionKind` is the
-  payload-free family a level's `allowed_actions` lists.
-- `src/world/` — **two worlds**, one wire renderer. One file per concern: the types and
-  the constructors, then the verbs, the client's history, the machine's lifecycle, the
-  reads, the drain, the prompts and the view, each in its own.
-  - `world/decree/` — Act I: bare `Proposer` + `Acceptor` over slot 0, with the phase
-    **reach** sets as the only network. No `ColocatedNode`, no disk, no clock.
-  - `world/mod.rs` — Act II onward: `World` itself — `Party`, `Envelope`, `InFlight`,
-    `WorldPolicy`, the constructors, `observe` (the narration diff) and `settle` (the
-    bookkeeping that is nobody else's business).
-  - `world/verbs.rs` — every player verb: the wire (deliver, drop, duplicate), the
-    clock (tick, the election timeout), the client (propose, retry, compact), the
-    operator's hand-off, and the answer to an open prompt. An accessor lives beside the
-    verb that fills it. Act IV's verbs are here too: a proposal may name a grid
-    **column** (`World::propose(.., column)` → `propose_in`, validated against
-    `AcceptorConfig` before the core is called), and `World::relinquish` moves a
-    leadership (`World::handoff_refusal` gives the reason a refusal has, and the goals
-    read the same function).
-  - `world/history.rs` — the client's own record: what it asked, when, and the
-    linearizability judge. `World::proposed_values` is where a goal reads a value back
-    from, so no goal compares an applied log against a literal.
-  - `world/lifecycle.rs` — crash, the two durability seams, restart, wipe, corrupt, and
-    the boot an erased disk earns. `Disk::wipe` erases a disk while keeping the
-    operator's record that the identity was provisioned, which is what lets
-    `World::restart` refuse the boot; that refusal is `Ok` and narrated, never an
-    `Err`, because undo and replay rebuild the world from the action log.
-    `Disk::corrupt` rots one record into the tri-state `Storage::faulty_entries`
-    reports at the next boot.
-  - `world/reads.rs` — the read-index round and the leaderless `World::quorum_read`,
-    both served through the same `ReadState`.
-  - `world/disk.rs` — the `Storage` impl plus the applied log, and the
-    `WriteOp::TrimmedTo` jump a node below the floor makes to a peer's trim point (no
-    bytes, no ballot: the promise does not move).
-  - `world/drain.rs` — **the drain contract**, and the only place a `Ready` is held.
-  - `world/prompts.rs` — which delivery raises which question, and the clone it is
-    judged on.
-  - The quorum system is level data (`Config::quorum_system`, `DecreeWorld::with_system`),
-    and so is the handover stall timeout (`World::with_reconfigure_timeout`): both are
-    deployment or driver policy, never a constant in a state machine.
-  - `world/matchmakers/` — **the matchmaker plane**, Act IV part two, split the same
-    way: `process.rs` (a `MatchmakerProcess` is `examples/matchmaker.rs`'s node — a
-    `Matchmaker` role, a `MatchmakerConfig`, and a `MemRegistry` disk it reboots from,
-    driven **step → persist → reply → advance**, every batch acknowledged),
-    `verbs.rs` (`reconfigure`, `retire`, `reconfigure_matchmakers`, the three re-sends,
-    the two matchmaker crash verbs), `delivery.rs` (the wire, and the two decisions the
-    **driver** owns rather than an ack: closing a freeze and abandoning a stalled
-    handover, both on a beat), `render.rs` and `prompts.rs`. One
-    `MatchmakerReconfigurer` per node — it is a *driver* object, as in
-    `paros::driver::handover`.
-  - **A retirement needs evidence, and the number is not the evidence.**
-    `ColocatedNode::may_retire` asks two questions of the watermark it is handed (above the
-    node's membership fence, equal to the ballot its belief is bound to), so an
-    operator who typed that one ballot would pass them. `World::retire` therefore
-    refuses any watermark that no live node reports as a floor of its own
-    (`World::reports_gc_floor`), which is the contract the core documents: the operator
-    reads that number off a leader whose garbage collection reached a matchmaker
-    quorum, and off nothing else.
-  - The wire is one queue of `InFlight { from: Party, to: Party, envelope: Envelope }`.
-    A `Party` is a node **or** a matchmaker: the two identity spaces are distinct, so
-    nothing may compare a node id with a matchmaker id, and a duplicate is re-addressed
-    inside its own tier. `Envelope::Node` carries the node protocol; the six other
-    variants are the matchmaker plane's, and a matchmaker is never stepped with a
-    `Message`.
-- `src/prompt/` — the questions, the choices, the judge, and one authored explanation
-  per **wrong** choice (nothing is explained when nothing broke). `mod.rs` holds
-  `PromptKind`, `Choice`, `Prompt`, `Verdict` and `confirmation`; the constructors sit
-  with the role they are judged on — `acceptor.rs`, `proposer.rs`, `replica.rs`,
-  `reads.rs`, `storage.rs`, `matchmaker.rs`.
-- `src/auto.rs` — automation as reward: one flag per decision, and the deterministic
-  pump the delivery flags enable.
-- `src/narration.rs` — what the game says just happened, **derived from the transition**.
-- `src/level/` — the level DSL and one module per act. `act4.rs` holds all ten Act IV
-  levels: part one's four, then the four matchmaker levels of part two
-  (`act4/matchmaking`, `act4/reconfigure`, `act4/garbage-collection`,
-  `act4/matchmaker-generations`), then the two the plan numbers 28 and 29, which stay
-  last in `levels()`.
-- `src/view.rs` — the one contract the browser reads.
+1. Write the `Level` in `src/level/actN.rs` (stable string id `actN/slug`, never an index;
+   briefing is two or three paragraphs of Paxos, mechanism first; core symbols only in
+   `symbols`; `field_guide` is a bare book filename; `unlocks` only flags it pins manual).
+2. Record its `reference` with `level::script::Script` — choose messages by what they are and
+   answer prompts with the core's answer; never hand-count message ids.
+3. Append it to that act's `levels()` in play order (Act IV's order is pinned in
+   `tests/levels.rs::act_four_registers_its_ten_levels_in_play_order`).
+4. A new prompt: compute the answer on a clone at raise time, author an explanation per wrong
+   choice, add it to `prompt::ALL_PROMPTS` and its flag to `auto::ALL_FLAGS`.
+5. A new view field: change `src/view.rs`, rerun the bindings test, commit `web/play/src/generated/`.
+6. `cargo nextest run -p paros-play`; then the web gates below.
 
-## The drain contract
+## Local rules
 
-After **any** call into a node, exactly once, in this order (it is
-`paros::driver::ready`'s order, and `crates/paros-core/examples/quorum_read.rs`'s):
+- No randomness, no clock, no `HashMap`/`HashSet`: the action log plus the flag set is the whole
+  state, and `undo` replays it bit-exactly.
+- Narration is derived from accessor diffs and sent messages, never scripted.
+- View conventions: a ballot is `round.node`; a value is plain text; enums cross as enums; node
+  and matchmaker ids are different spaces (`MessageView::from_party` / `to_party`).
+- `# Panics` on anything that asserts; `#[must_use]` on accessors (pedantic).
 
-1. `ready()`, copy every bucket out, `advance()`. The guard is never held across a disk
-   write, a prompt, or a player action.
-2. Persist the writes — **`Truncate` held back**.
-3. Send: one wire entry per `Audience::resolve`d addressee.
-4. Apply `committed` to the application log, then flush the held-back truncates. A
-   durable floor must never outrun the durable application state covering the slots it
-   drops; the `AfterSyncBeforeSend` seam makes the same split for the same reason, and
-   drops the truncates with the half of the batch that was lost.
-5. Answer the `read_states`.
-6. `advance_recovery()`, and drain again until the node is quiet.
+## Tests & gates (CI `play` job, `.github/workflows/rust.yml`)
 
-Two prompts can hold a whole batch back (`PersistOrder`, `LeaderRecovery`). Their
-narration is **deferred** until the answer, so the caption never prints above the
-question it answers.
+Prefix each with `nix develop --command` (on the web, see root *Environment & Nix*):
 
-**The `LeaderRecovery` oracle is read off the core *before* the call that pumps the
-page** (`World::plan_recovery`): a page after the first through a clone's
-`recovery_next`, the first page through `close_phase1` on a clone of the campaign. A
-`Noop` on the wire is a gap fill *or* a predecessor's gap fill that a Promise reported,
-and only the recovery knows which — deriving it from the command told the player "the
-quorum reported nothing" about a slot the quorum had explicitly described.
+- `cargo nextest run -p paros-play`
+- `cargo test -p paros-play --test bindings` then `git diff --exit-code -- web/play/src/generated`
+- `cargo check --target wasm32-unknown-unknown -p paros-play`
+- `scripts/build-play.sh --wasm-only` (wasm-bindgen output into `web/play/src/wasm/`, gitignored)
+- `bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
+- Full deploy build: `scripts/build-play.sh` after `mdbook build` (stages into `book/output/play/`).
 
-## Prompts are judged on role clones
+## Deps & pins (`Cargo.toml`)
 
-Every `Prompt::*` constructor documents which core call answers it. When adding one:
-compute the answer on a clone at **raise** time (the world is frozen while a prompt is
-open, so raise time is answer time), give every wrong choice an authored explanation
-naming the violation it would cause with this prompt's own numbers, and add the
-`PromptKind` to `prompt::ALL_PROMPTS` and its governing `AutomationFlag` to
-`auto::ALL_FLAGS`.
-
-The Act IV four: `GridColumn` (judged by `AcceptorConfig::column_of`),
-`QuorumReadServe` (a `QuorumReads` clone folded with the arriving `PreReadAck`
-and served with the replica's own `covers`), `RepairVerdict` (a `Proposer` clone
-through `fold_probe_promise` then `resolve_probe`; its three answers are the CTRL
-cases) and `WipedRejoin` — the third prompt whose answer is a **constant**,
-because a store with no promise on it has no role to clone, and the library
-refuses such a boot rather than branching on it.
-
-Part two's four: `Phase1Complete` (a `Proposer` clone folded with the arriving
-`Promise`, then `phase1_won` — the completion predicate is per configuration, never
-over the union), `MayRetire` (`ColocatedNode::may_retire` on the target itself; it
-takes `&self` and the evidence the operator shows is checked before it),
-`GenerationFence` (a `Matchmaker` clone stepped with the very request, and its own
-reply read back) and `StaleConfiguration` (a clone of the node's own `Matchmaking`
-role, `ColocatedNode::matchmaking_role`, folded with the very reply — the node's three
-guards, another node's answer, a matchmaker outside the believed set and another
-generation, are checked first so the clone never counts an answer the node ignores).
-
-## Narration is derived, never scripted
-
-`World::observe` diffs the node's own role accessors across a call and reads the
-messages its batches sent. A sentence is emitted only when the corresponding accessor
-actually moved or the corresponding message actually left. **Never write a line the diff
-cannot support** — "it is behind the commit index it heard" was wrong for a node that
-had heard nothing. Narration changes no state and draws no randomness.
-
-## Levels and the reference DSL
-
-A `Level` is data plus four function pointers: `setup`, `goal`, `hint`, `reference`. Ids
-are stable strings (`act3/read-index`), never indices — the frontend's progress store
-keys on them. A briefing is two or three paragraphs of **Paxos**, mechanism first; a
-`paros-core` symbol appears only in `symbols` and the field-guide link, never in the
-player-facing prose. `field_guide` is a **bare book filename**; the frontend prefixes
-`../`. A level's `unlocks` must be flags it actually pinned manual.
-
-References are **recorded, not written**: `level/script.rs` drives a real `Game`,
-choosing messages by what they *are* (a `Prepare`, a slot-1 `Accept`) and answering
-every prompt with the answer the core itself gives. A reference cannot drift when the
-engine queues one more message, and cannot teach the wrong answer.
-
-## The view contract
-
-`src/view.rs` is the only thing JS reads. Every type derives `Serialize` + `ts_rs::TS`;
-`cargo test -p paros-play --test bindings` writes `web/play/src/generated/`, which is
-**committed** and diffed in CI. Conventions: a ballot is `round.node`; **a value is
-plain text everywhere** — `show_command` and `value_text` agree, and neither prints
-Rust's `Debug` quoting, because the frontend's monospace face is what marks a value —
-beside `control_kind`; enums cross the boundary as enums, never as free-form strings.
-A node id and a matchmaker id are different spaces, so `MessageView` says which tier
-each end belongs to (`from_party` / `to_party`).
-
-## The gate
-
-```
-cargo fmt
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run -p paros-play
-cargo test -p paros-play --test bindings      # regenerates web/play/src/generated/
-cargo check --target wasm32-unknown-unknown -p paros-play
-RUSTDOCFLAGS="-D warnings" cargo doc -p paros-play --no-deps
-```
-
-Clippy pedantic is on: `# Panics` on anything that asserts, `#[must_use]` on the
-accessors, no `HashMap`/`HashSet`. No randomness and no clock, ever — the action log
-plus the flag set is the whole state, and `undo` depends on that being true.
+`paros-core` with `default-features = false`, `serde` (`:17`); `serde`, `serde_json`, `ts-rs`
+`serde-compat` (`:20-24`); wasm-only `wasm-bindgen = "=0.2.117"` (`:29`, must equal the flake's
+`wasm-bindgen-cli`, bumped together) and `console_error_panic_hook` (`:30`).

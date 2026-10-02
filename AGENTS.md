@@ -1,1238 +1,344 @@
 # paros
 
-Learning project: implementing the Paxos consensus algorithm in Rust. WIP, not for production.
+Learning project: the Paxos consensus algorithm in Rust. WIP, not for production.
 
-**The end goal is `docs/architecture.md`.** This file describes what paros is today and the
-doctrine every change follows; that document describes what paros is becoming: a multi-tenant
-journal service, `parosd`, with a four-call data plane (`Write`, `Read`, `Truncate`,
-`SetLeader`), an admin tenant that stores the control plane in its own journals, uniform
-machines with a class, per-tenant coordinators and matchmaker sets, a front door with JWT
-authorization, and the milestones that get there. Read it before planning any work; where the
-two disagree, this file is the present and that one is the direction.
+**The end goal is `docs/architecture.md`**: a multi-tenant journal service, `parosd`, with a
+four-call data plane (`Write`, `Read`, `Truncate`, `SetLeader`) and the milestones that get there.
+Read it before planning any work. Where the two disagree, this file is the present (what paros is
+and the doctrine every change follows) and that one is the direction. Each section below ends
+with where the depth lives; every crate has its own `AGENTS.md` map.
 
-## Build & test
+## Build, test, gates
 
-Dev shell is a Nix flake — enter `nix develop` (or rely on direnv) before running commands.
-(On Claude Code on the web the flake can't be built — its inputs are egress-blocked; use
-`nix shell nixpkgs#rustup -c cargo …` instead. See *Always use Nix-provided software* below.)
+These are the commands CI runs (`.github/workflows/rust.yml`), always through Nix (next section):
 
 - `cargo build`
 - `cargo nextest run` (fall back to `cargo test`)
-- `cargo fmt` + `cargo clippy -- -D warnings` before committing
+- `cargo fmt` (CI: `cargo fmt --all -- --check`)
+- `cargo clippy --all-targets -- -D warnings`
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`
+- wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-core`, the same with
+  `--no-default-features`, and `cargo check --target wasm32-unknown-unknown -p paros`
+- `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
+  `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
+  campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
 
-Rust 2024 edition, toolchain pinned in `rust-toolchain.toml` (incl. the `wasm32-unknown-unknown`
-target). Clippy pedantic is on (`[workspace.lints]` in `Cargo.toml`).
+CI also runs the `paros-core` examples and the `paros-play` web build. Rust 2024 edition,
+toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
+(`[workspace.lints]`). The full local gate is the `validate` skill.
 
-**Meta issue upkeep.** Issue #69 (`meta: up next`, label `up-next`) is the rolling backlog
-pointer — always exactly the next 3 issues, edited in place, never closed. Whenever a PR merges
-that closes or materially advances a tracked issue, update #69 in the same session: move closed
-work into "Recently landed" (one line: PR number, what it proved/fixed), promote
-the next item from "On deck" into "Next 3" with a one-line why, and re-rank if the merge changed
-the picture (e.g. a feeder bug closed, an oracle went from armed to proven). Keep the issue's own
-maintenance contract: never more than 3 in "Next 3".
-
-- `cargo check --target wasm32-unknown-unknown -p paros-core` — portability gate; `paros-core`
-  must stay buildable for wasm (CI enforces it).
-- `cargo xtask sim …` — sancov-instrumented simulation runner (`scripts/sancov-rustc.sh` is the
-  `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered main
-  campaign is `cargo xtask sim run paros-chain`.
-
-**Sim sweep vs. sim smoke — where each lives.** The heavy, coverage-guided sweep (the one that
-must *saturate* `AssertionCoverage`/`CodeCoverage`) always runs via `cargo xtask sim` so the
-sancov code-coverage instrumentation guides seed selection; that runner (`paros-sim-runner`) exits
-non-zero on any safety violation, so it is the real CI gate. The `cargo nextest` sim tests are only
-a fast **smoke** (`SMOKE_ITERATIONS`, a few dozen random seeds through the safety oracles); they do
-**not** assert coverage saturation. So: to prove a new red→green
-oracle result saturates, run `cargo xtask sim`; the nextest suite just keeps the safety oracles
-green quickly. Do not put a multi-thousand-iteration `explore()` back into a nextest test.
-
-**The shape of the harness.** Two axes, one workload, one check. The *main campaign* is a
-three-to-six process pool of `NodeProcess::chaotic()`, each serving one to three journals
-(#188, on a seed without matchmakers: the default journal is the seed's deployment, every other
-a plain journal over the whole pool), plus zero to five `MatchmakerProcess`es plus zero to three `ProxyProcess`es (#142; `paros-proxy`, the proxy leaders, `ProxyId(rank)` in
-IP order — the count is every node's `Config::proxy_count`, zero the plain deployment)
-plus zero to two `ReplicaProcess`es (#144; `paros-replica`, learners that walk the chosen prefix and never vote,
-`ReplicaId(rank)` in IP order and `NodeId(1000 + rank)` on the wire — the count is every node's
-`Config::replica_count`, zero the plain deployment; each on a fault-free disk outside the copy
-budget, and each judged by the same final convergence claim as a node)
-plus zero to two `JoinerProcess`es (#189; `paros-joiner`, nodes outside the genesis pool,
-`NodeId(100 + rank)`, that follow the system journals from the seeds and join the pool through
-the node registry; they idle on a seed without system journals and are no attrition victim)
-under every moonpool fault plus the driver hooks and the disk's fault coins, driven by one to
-three `ChainWorkload` clients whose every tunable is a `buggify_knob!`; the *corpus* is a scripted
-three-node cluster with every fault a targeted injection (`NodeProcess::scripted()`, kills and
-restarts through moonpool's `fault_factory`) and an analytically known outcome per mask — plus
-the one four-node, one-matchmaker case that needs a spare and a prior configuration
-(`DepartedStragglerWorkload`, CTRL Case 3 across a reconfiguration boundary). Which
-process plays which role is the **deployment/role map** (`paros_sim::roles`), read off moonpool's
-**process groups** (moonpool #197: one `.processes()` registration per role, each with its own
-per-seed count and IP range — `paros-node` is the acceptor pool, `paros-matchmaker` the
-matchmakers, `paros-proxy` the proxy leaders, `paros-replica` the replicas — and attrition
-scoped per group with
-`AttritionVictims::group`), so every process
-and every client derives the same map without coordination. Membership is never "every process
-in the topology": the pool is the map's acceptor list, and the **bootstrap configuration** is
-protocol data drawn once per seed (`paros_sim::shape::bootstrap_ranks`) — the whole pool by
-default, or on a matchmaker seed a subset of at least `MIN_BOOTSTRAP` nodes that leaves the rest
-as *spares* a `Reconfigure` pulls in. A seed whose matchmaker group drew zero members — no
-matchmakers, every node an acceptor — is the plain Multi-Paxos deployment and the shape of every
-existing axis (the corpus registers no matchmaker group and never draws). Every run is judged by
-the same two things: the client's own history (`ClientHistory`: every attempt at the
-four calls, logged at the RPC seam and searched for a linearization against the
-journal's sequential model, #205) and the shared `AuditWorld` (protocol safety, the clients'
-folds of the journal, the storage gates, the matchmaker registry, the leader-side matchmaking and
-reconfiguration oracles, and one convergence claim at the end of the recovery tail). There is no
-third workload, no per-scenario process type, and no check that reads a trace.
-
-**Pinned seeds are not a regression mechanism.** A seed does not name a scenario, it names a
-*draw schedule*, and every randomness draw the tree gains or loses — a new BUGGIFY location's
-per-seed activation, a probability that was tuned, a mailbox that evicts a different message —
-shifts every seed's interleaving. A seed therefore reproduces only the build it was found on, and
-a "stays red" or "stays green" replay silently stops testing what it was written for the moment
-anything moves (PR #126 re-hunted one witness four times inside a single branch). So: **do not add
-seed constants, seed lists, or seed-replay tests.** A witness may be cited in a comment or a commit
-message as the red→green evidence it was, never pinned as a live artifact. What replaces it is
-volume plus reach: the coverage-guided sweep, the raw hunt, and — where a rare-but-valid state
-needs to be *likely* rather than lucky — a new BUGGIFY location. A test may still hard-code a seed
-when the seed is not a witness: a determinism replay (the same seed twice), a scripted corpus case
-whose seed *is* its input (an E1 mask), or an arbitrary display seed.
-
-**Raw hunt budget.** For `sim-paros-hunt`, 2,000–3,000 ordinary seeds is the normal evidence
-target. Raise that to 10,000 only when a substantial protocol, harness, or fault-model change is
-introduced. Do not run larger hunts unless the user explicitly requests one; coverage-guided
-saturation still belongs to `cargo xtask sim` and is not replaced by raw seed volume. A hunt's
-deliverable is a *failing* seed and the diagnosis it leads to — replay it while you fix, cite it in
-the commit, and let it go; it is evidence, not an artifact to keep. The `canary` axis
-(`sim-paros-hunt canary [iterations]`) is the same campaign under moonpool's
-`check_determinism`: every seed runs twice and the replay must reproduce the first run's draw
-fingerprints, all of them — a `HashMap` iterated in its randomized order, a static that survives
-a run, a wall-clock read, anything paros or the harness keeps outside the seed — and a failure
-names the first diverging draw. The nextest smoke runs two seeds under it; run a few hundred
-after any change to the harness's randomness, the driver hooks, or the process lifecycle.
-
-**Chain campaign.** `paros-chain` drives a factory-created Chain-of-Blocks workload with stable
-operation IDs, speaking the journal API of #204 (`Write`, `Read`, `Truncate`, `SetLeader`):
-`WRITE=0` (a `Write` by an owner at the position it believes next — or, from a writer another
-owner superseded, under its old generation, which the journal must refuse; `PROPOSE` before
-#204), `WRITE_TO_NON_LEADER=1` (the redirect path), `TRUNCATE=2` (a `Truncate`, clamped by the
-fold fence; `COMPACT` before), `READ_STATE=3`, `PAUSE=4`, `DUP_WRITE=5` (a write this client saw
-written re-sent byte for byte: it must fold as a `Duplicate`, never be accepted again or
-refused), `DUAL_SUBMIT=6` (one write to two nodes at once: every verdict names one position),
-`TRUNCATE_STORM=7`, `READ_INDEX=8` (**retired** no-op: the read-index read path went with
-#204), `MATCHMAKE=9` and `MATCH_GC=10` (**retired** no-ops: the client-side matchmaking
-stand-ins of #119, superseded by the leader's own phase — the ids stay reserved so the alphabet
-never shifts), `RECONFIGURE=11` (read the acceptor set in force, compose a new one — grow onto a
-spare, shrink, replace, remove the leader, rotate the whole set — and ask the leader; on a seed
-without matchmakers the request is still sent and must be refused; the composer draws from the
-*live* pool and moves a dead identity out first), `RECONFIGURE_MATCHMAKERS=12` (read the
-matchmaker set a node believes authoritative, compose a successor — grow, shrink, replace,
-rotate through the matchmaker pool — and ask any node to drive the generation handover; refused
-on a plain seed), `RETIRE=13` (ask the leader which acceptors its effective GC floor released,
-park one in the storage world for good, and tell it to shut down), `QUORUM_READ=14` (**retired**
-no-op: every `Read` is a quorum read now), `READ=15` (the journal `Read(from_seq, limit,
-wait_ms)`, asked of a node or a replica drawn at random, from the client's tailing cursor, its
-own last written position, the journal's start or far past the tail; judged as it arrives —
-every record the one the audit knows accepted at its position, the client's own written records
-inside the page present, the state it was served from covering every write the client saw
-written, the cursor monotone, a truncated answer only below `first_seq`), `CHECK_TAIL=16`
-(**retired** no-op with `CheckTail`), the system-journal operations of #189 —
-`CREATE_JOURNAL=17` (a name from a four-name alphabet over three members of the pool, read back
-as `Created` or refused for a taken name, then one record written to the new journal),
-`DELETE_JOURNAL=18`, `REGISTER_NODE=19`, `DRAIN_NODE=20` and `RETIRE_NODE=21`, each one claimed
-`Write` to journal 1 or 2 at a seed, sent on every seed and refused as `unknown_journal` on one
-without system journals (`chain_workload/system.rs`) — and `SET_LEADER=22` (read where the journal
-stands and `SetLeader` against its generation: the compare-and-swap that fences every other
-owner). The three races of `docs/architecture.md` §6 are each a BUGGIFY location (#205): an
-owner's own claim racing its pipelined burst (the primer, or a mid-run burst of `WRITE`), a
-`WRITE` whose timeout is shorter than its ack (`ack_race_timeout_ms`) so its retry crosses the
-owner's re-claim, and a `READ` from a lagging cursor racing the client's own truncation, resumed
-at the floor its refusal names. Every client folds to the tail at the chaos cutoff and an owner
-truncates after its recovery batch, and one owner may hold a replica down across that
-truncation: the trim-point jumps a recovering node or replica takes. Every client is an **owner** or a **reader** for the whole run (a `buggify_knob!`;
-each journal's first client is always an owner, so every journal has a writer): an owner claims before it writes and
-re-claims when a verdict says it was superseded, a reader only reads. paros runs **no user
-application, one journal-control state machine per journal** (#186, #204): the client *is* the
-application. Every client reads the journal from its cursor — a position — and folds each
-record, in position order, into `ChainState { applied_count, chain_hash }`
-(`chain_workload/fold.rs`; a `Noop`, a control command, a refused or duplicate write hold no
-position and never reach a reader), and reports each step to the audit
-(`AuditWorld::fold_applied`), which asserts one record and one state per position across
-clients, a client's fold in increasing position order, and record validity (the message
-strings are the old application check's; keep them stable). The audit's journal model
-(`audit/journal_model.rs`) holds the section-6 invariants of `docs/architecture.md` at every
-apply and at the end of the run: every node folds every slot to the same verdict, positions are
-dense in slot order, generations chain one by one, `first_seq` never moves back, and a verdict a
-node answered is the one it folded. A fold needs every record from the start, so the clients
-share a **trim fence**: every truncation is clamped below the lowest cursor of the clients still
-folding, and a client that leaves (done writing) may be overtaken and stops folding.
-`READ_STATE` is a fold to the tail through a node or replica drawn at random. Client timeouts
-and deliberately abandoned observations are `Ambiguous`, never assumed aborted; a retry is the
-same write — generation, owner, position and bytes — sent again, and the log answers it.
-Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
-recipes replay from a fresh builder. The shared assertion tables allow at most 512 sites and 256
-`sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
-
-**Moonpool questions.** For any question about moonpool's APIs or behavior, consult the
-LLM-oriented docs at <https://pierrez.github.io/moonpool/llms.html> before digging through its
-source.
-
-**Upstream Moonpool improvements.** When paros work exposes a limitation that is properly reusable
-Moonpool infrastructure—not a paros protocol or harness bug—open a focused issue in
-`PierreZ/moonpool` instead of silently accepting or locally reimplementing it. Include the concrete
-downstream evidence, the smallest requested API/behavior, deterministic replay constraints, and
-testable acceptance criteria; then link the issue from the relevant paros plan and PR. Keep safe
-paros-side defense in depth while the issue is pending, and advance the Moonpool pin once the
-upstream fix lands and its compatibility gates pass.
-
-## Architecture
-
-Sans-IO core driven by moonpool (etcd-raft's `RawNode`/`Node` split: `ColocatedNode` in,
-`paros::run_node` out). `paros-core` is a pure
-synchronous state machine — `step`/`tick` in, one `Ready` out, `advance()` handshake; no I/O, clock,
-RNG, or deps. The `ready()`/`advance()` handshake is type-enforced: `ready(&mut self) -> Ready<'_>`
-holds the node's unique borrow, so a second `ready()` before `advance()` is a *compile* error.
-Persist-before-send durability ordering is documented on `Ready`/`HardState`. Contract reference:
-`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`.
-
-**The core is composable: one file per role, `ColocatedNode` is wiring.** `paros-core` is not one
-state machine but a small set of Paxos *roles*, each its own module and type, and `ColocatedNode` is
-the one deployment that colocates them on a node — it holds the role transitions, the timers,
-the message construction and the persist-before-send batch, and **no protocol tally of its
-own**. The roles:
-
-- `acceptor.rs` — `Acceptor`: the durable promise, the accepted record log, the compaction
-  floor and the CTRL faulty set; it decides `prepare`/`admit` and emits the write ops.
-- `proposer.rs` — `Proposer`: the Phase-1 election (per-configuration completion, the P2c
-  merge), the CTRL repair probe, the Phase-2 rounds and their decision, the bounded recovery a
-  fresh leadership drains. The Phase-2 rounds are a **standalone tally** it embeds and delegates
-  to (`proposer::Rounds`, `proposer/rounds.rs`, #142 rung 0): the one tally another deployment
-  runs *without* the rest of the role — Compartmentalized Paxos's proxy leader is a `Rounds` plus
-  routing — so there is never a second Phase-2 kernel, exactly as the decree reuses `Proposer` +
-  `Acceptor` at slot zero. A round's `Custody` says who folds it: the leader (`Colocated`), or a
-  proxy it was `Delegated` to, in which case the leader keeps the round — for the allocator, the
-  handoff tiling and the re-send — but no vote. Its policies are **explicit types, never flags**
-  (`RecoveryPolicy::{Phase1Backed, Inherited}` says what an undescribed slot means; a
-  `gap_fill: bool` would not).
-- `proxy_leader.rs` — `ProxyLeader` (#142, Compartmentalized Paxos §3.1): the **second
-  deployment**, a `Rounds` plus routing on a process that is neither an acceptor nor a replica.
-  It receives the leader's delegated `Accept { reply_to: Party::Proxy(me), leader, .. }`, fans
-  exactly that message out to the column (`Accept.leader` still names the leader an acceptor
-  adopts — the reason `leader` and `reply_to` are two fields), folds the `Accepted`s, emits
-  `Commit { from: Party::Proxy(me), .. }` to the learners, relays a `Nack` to the leader that
-  delegated the round, and re-fans-out its open rounds on the driver's beat (`resend_pending`).
-  Ephemeral: no `HardState`, no `WriteOp`, a crash reboots it empty. It works for the highest
-  ballot it was handed (a lower delegation is ignored, a higher one closes every older round),
-  and it contributes nothing to the decision — a chosen value is still what a Phase-2 quorum
-  durably accepted at one ballot. The leader's side: a proxy count is deployment data
-  (`Config::proxy_count`, zero is the plain deployment, message for message), a slot's proxy is
-  `ProxyId(slot % proxy_count)` unless the driver names one (`Delegation` at `propose_in` /
-  `propose_control_in`), only a *settled* leadership delegates and never its election recovery
-  or gap fills, a handoff successor re-delegates what it inherited with `leader = self`, and a
-  round re-delegated `take_back_delegated(after)` times without a decision is **taken back**
-  and run colocated (driver policy, `DriverTunables::proxy_take_back_resends`, a knob born
-  buggified) — liveness under a dead proxy is the leader's and the fallback is always today's
-  colocated Phase 2. The driver half (#142 part B): `paros::run_proxy` is the third
-  provider-generic driver — the node contract's Phase-2 subset over the same lossy per-peer
-  mailboxes, no storage seam and no crash seam, a beat that re-fans-out
-  (`DriverHooks::skip_proxy_resend`) — and `run_node` takes the deployment map's proxies beside
-  its peers, resolves `Audience::Proxy` through them, and asks two hooks before a proposal opens
-  (`DriverHooks::skip_delegation`, then `DriverHooks::proxy_for`, each its own BUGGIFY location,
-  consulted only on a leader of a deployment with proxies). A proxy's retention is
-  **bounded** (`ProxyLeader::expire_stale`, `DriverTunables::proxy_round_resends`, a knob born
-  buggified, floor 1): a round re-fanned-out the budget's worth of beats without an answer is
-  evicted, because one class of round is never answered — a slot every acceptor compacted past
-  is ignored without `Accepted` or `Nack`, so a delegation delayed past the leader's take-back
-  and the cluster's truncation would otherwise be re-fanned-out forever. An eviction is not a
-  decision (nothing emitted, nothing remembered as done; a later delegation reopens the round)
-  and the leader's take-back stays the liveness. Every send names a `Party` sender and
-  destination, and the audit hears every node-to-proxy message (`sent_to_proxy`: a leader's
-  delegation *and* an acceptor's `Accepted` / `Nack` reply to a delegated round, on which the
-  persist-before-send check runs exactly as on a reply to a leader) and a proxy's fan-out,
-  `Commit`, relayed `Nack` and eviction (`proxy_sent`, `proxy_fanned_out`, `proxy_decided`,
-  `proxy_nack_relayed`, `proxy_round_expired`) apart from a node's sends; the sim audit judges
-  every proxy `Commit` against the durable accepts it folded from the acceptors
-  (`observe_proxy_decision`) — below the cluster-wide floor against the decided vhash the
-  pruning kept (`decided_below_floor`), never the applied command, which a re-chosen identity
-  turns into a `Noop` — and its `sometimes` gates are a slot decided through a proxy and a
-  leader taking a round back (the proxy's own paths — a reboot, a re-fan-out, an eviction, an
-  ignored delegation, a relayed `Nack` — are reported, not gated: the model checker proves
-  them and the 512-slot budget is spent on outcomes; `sim-paros-hunt` prints the slots a
-  campaign uses). Proven by the sans-IO model
-  checker `proxy_model.rs` (real `ColocatedNode`s and `ProxyLeader`s under drops, duplicates,
-  reorders, proxy crashes, node reboots from disk, handoffs and re-elections: at most one value
-  per slot, every proxy `Commit` backed by a durable Phase-2 quorum at one ballot, and the
-  take-back liveness claim with proxies dead for the tail); a proxy that commits one `Accepted`
-  short is red on its first seed. **What the model found (seed 756 of its first 2,000):** a
-  delegated round left no record at the leader, so a handoff successor that crashed rebooted
-  with its allocator rewound and re-installed a *duplicated* `Relinquish` — two commands at one
-  `(slot, ballot)`; a grid leader proposing outside its own column had the same hole. Hence
-  the rule **the allocator frontier is durable by construction**: a leader records every round
-  it opens in its own log whenever its promise allows, whichever column it went to
-  (`record_own_round`; a record outside the column is the stray copy the grid already admits, a
-  vote that does not count).
-- `replica.rs` — `Replica`: the chosen prefix, the contiguous apply walk, and the **journal
-  fold** — every walked slot judged by the journal state machine below, the state at the floor
-  (sealed with a truncation, carried by a trim-point jump) and the positions index a `Read` pages
-  from. A slot whose value this node does not hold stops the fold (`fold_hole`) until catch-up
-  brings it back. It consumes "slot chosen, value" and nothing else — and answers one question
-  about it, `covers(index)`, for the quorum reads below.
-- `journal_state.rs` — `JournalState { owner, generation, next_seq, first_seq }` and its pure
-  `apply` (#204): **one journal-control state machine per journal**, the only thing paros
-  interprets in a log. Every `Write`, `SetLeader` and `Truncate` is judged at apply, in slot
-  order, on every node alike — a write is accepted only from the owner of the generation in
-  force at the next position (dense positions, a batch in one slot); a write below `next_seq`
-  is a `Duplicate` exactly when the log holds the same write there (the log *is* the
-  at-most-once table — there is no session ledger), otherwise refused with the state that says
-  why, and below `first_seq` truncated; a `SetLeader` is a pure compare-and-swap on the
-  generation; a `Truncate` raises `first_seq`, never past `next_seq`. Nothing is judged at
-  propose time: a leader proposes any write and the driver answers the call with the verdict
-  its slot folded to (`paros::driver::calls`).
-- `replica_node.rs` — `ReplicaNode` (#144, Compartmentalized Paxos §3.3): the **third
-  deployment**, a `Replica` over a durable chosen log on a process that is not an acceptor. It
-  steps `Commit`, `CatchUpResponse`, `TrimmedTo` and `Heartbeat` (the watermark and the
-  leader hint and the configuration, never the ballot) and the `PreReadAck`s of the quorum
-  reads it serves from its own applied state (§3.4, `quorum_read_in`), sends `CatchUpRequest`
-  and `PreRead`, persists `WriteOp::Learned` —
-  the accepted record's durable shape, never a vote, and a distinct op so no audit folds it
-  into a quorum — plus `SetChosenIndex`, `Truncate` and `TrimmedTo`, and never an
-  acceptor op. It is never in `Config::peers` or the pool (asserted at boot), answers no
-  `Prepare` or `Accept`, and acks no beat. The module doc holds the **coupling analysis** — why an acceptor
-  keeps a chosen index and a chosen prefix (the authoritative record, the floor inside the
-  prefix, the CTRL probe and recovery skipping chosen slots, the GC fence, catch-up served
-  from the prefix, the handoff tail, the sealed ledger) and what only reflects the
-  colocation. `Config::replica_count` (zero is the plain deployment) and
-  `Config::reply_owner(slot) = ReplicaId(slot % replica_count)` name the replica that owns a
-  slot's reply; nothing routes on it yet — the node a client asked still acks, and the harness
-  gates that an acked slot's owner applied it (#144,
-  decision 1).
-- `quorum_read.rs` — `QuorumRead` / `QuorumReads` (#143, Compartmentalized Paxos §3.4, *Paxos
-  Quorum Reads*): the **leaderless read** tally. A reader asks a Phase-1 quorum — a row of a
-  grid (`AcceptorConfig::row_of`, `ctx % rows`, addressed through `phase1_addressees` and
-  judged by `has_phase1_quorum_in`), the whole membership under a majority or a flexible
-  split — for their vote watermarks (`Acceptor::vote_watermark`: the highest slot voted,
-  monotone across records and truncations), takes the maximum, and surfaces the read through
-  the same `Ready::read_states` once the replica covers it. `ColocatedNode::quorum_read(ctx)`
-  wires it on **any** node — leader, follower, spare — and no path in it touches a beat, an
-  ack or a read-index round: the read-index path is untouched and a plain deployment's
-  `Heartbeat` / `HeartbeatAck` are byte-for-byte what they were. **No clock anywhere**: the
-  paper's read leases (§9) are exactly what this rung refuses. The argument is single-
-  configuration (a row meets every column of *its* grid), so a read is bound to the
-  configuration it was opened against, a node abandons its open reads when it learns a newer
-  one, and a `PreReadAck` carries the answerer's configuration ballot so a row that knows a
-  successor abandons the read; the residual — a grid row wholly unaware of a completed
-  successor — is what the client-history linearizability oracle judges (the chain campaign's
-  `READ`). §3.6's sequential and eventual reads are client-side bookkeeping, workload-only.
-  The driver half (#204): **every public `Read` is a quorum read**, on any node or replica —
-  confirmed first, then served from the fold, and parked as a long-poll at the tail for its
-  `wait_ms` (`driver/log_reads.rs`); bound to no role. A read waits for the highest slot
-  any acceptor of its quorum *voted*, so a stale vote past the leader's frontier — one its
-  Phase-1 quorum never saw — would stall every read that meets it on an idle log (claims
-  start with a read); a settled leader that hears such a watermark in a `PreReadAck`
-  therefore fills up to it with `Noop`s (`fill_to_watermark`, an ordinary proposal at the
-  frontier). The read-index path
-  (`ColocatedNode::read_index`) stays in the core — the game teaches it — but no service call
-  reaches it any more. `DriverHooks::read_row` (a BUGGIFY location, consulted on a
-  grid node) names the row through `ColocatedNode::quorum_read_in`; `Audit::quorum_read_served`
-  reports each answer.
-- `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, and `QuorumSystem`, the **one boundary
-  every quorum question crosses**: the proposer's tallies, the read rounds, `CheckQuorum`, the
-  GC fence, the matchmaker-side tallies and the decree kernel all ask
-  `AcceptorConfig::has_phase1_quorum` / `has_phase2_quorum` (or `MatchmakerSet::has_quorum`),
-  which ask `QuorumSystem`, and **no tally compares a count against a threshold on its own** —
-  a `quorum_size` survives only where a caller reports how many acks are still missing.
-  The predicates are **phase-split** because Paxos safety needs every Phase-1 quorum to
-  intersect every Phase-2 quorum (`QuorumSystem::cross_intersects`, `q1 + q2 > n`), not each
-  phase's quorums to intersect each other; under `Majority` the two coincide. Which phase a
-  site is tagged with is a claim: Phase 1 wherever a tally concludes what an *earlier* ballot
-  could have chosen (`Election::covered`, the CTRL R2/R3 rule), Phase 2 wherever it claims no
-  *later* ballot decided behind it (a decision, the GC fence, a read's confirmation,
-  `CheckQuorum`). Addressing goes through the same boundary
-  (`QuorumSystem::phase2_addressees`), so flexible, grid and compartmentalized quorums are new
-  variants there — never a rewrite of a tally or of a fan-out. The grid (`QuorumSystem::Grid {
-  rows, cols }`, #141) is the first system that is not a cardinality: a Phase-1 quorum is any
-  full row and a Phase-2 quorum any full column, answered by set membership, and every slot's
-  `Accept` is addressed to **one column** — `slot % cols` (`QuorumSystem::column_of`), a pure
-  function of the slot so a handoff successor and a restarted leader's re-send derive the same
-  column without carrying it; the `Round` records it, `Audience::AcceptorsOf` carries it to the
-  driver, and the decision is judged by that column alone (`has_phase2_quorum_in`) — an acceptor
-  outside it that accepted a stray copy is a member whose vote does not count. The standing
-  claims (`CheckQuorum`, a read's confirmation, the GC fence) ask the column-less predicate and
-  any full column satisfies them. `AcceptorConfig`'s fields are
-  private and `new` is its only constructor (deserialisation included): the membership is
-  binary-searched, so an unsorted one would silently miscount rather than fail.
-- `matchmaking.rs` — `Matchmaking`: the candidate's matchmaking phase — the registration tally
-  over a matchmaker set, the union of the histories above the maximum watermark (`H_b`), the
-  effective configuration and the stale-belief signal. It reads no wire and knows no role; the
-  node's `node/matchmaking.rs` is the wiring that feeds it and acts on its answers.
-- `matchmaker.rs` — `Matchmaker`: the registry and its generations; `matchmaker/reconfigurer.rs`
-  orchestrates the generation handover and *decides* it with a decree — a matchmaker is not an
-  acceptor and never becomes one. `MemRegistry` is the reference in-memory registry every test,
-  the handover model and the examples reboot a matchmaker from.
-
-The rule that shapes every boundary: **a component must not acquire knowledge merely because
-the current deployment happens to colocate it.** The proposer builds no message and knows no
-role; the acceptor never reads the chosen prefix; the replica never sees a ballot tally; the
-caller hands each one the data it needs (the acceptor's own records when a Phase 1 opens, a
-"is this slot chosen" predicate when a probe closes). What that bought, in order: the single
-decree is the same `Proposer` + `Acceptor` over a one-slot log (`matchmaker/decree.rs`; there
-is no second Paxos kernel in the crate); flexible quorums are deployment data
-(`QuorumSystem::Flexible { q1, q2 }`, #140 — one variant, one well-formedness arm, zero tally
-changes); the acceptor grid is deployment data too (`QuorumSystem::Grid { rows, cols }`, #141
-— set-membership predicates and column addressing, still zero tally lines); the proxy leader is
-the first second deployment (`proxy_leader.rs`, #142 — the embedded `Rounds` on another
-process, a count in `Config`, zero tally lines; its driver `paros::run_proxy` and its process
-group `paros-proxy` are the harness's third role); the replica tier is the third
-(`replica_node.rs`, #144 — the `Replica` on a process with no `Acceptor`, a count in `Config`;
-its driver `paros::run_replica` and its process group `paros-replica` are the harness's fourth
-role).
-
-The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `ColocatedNode` and does all I/O;
-`paros::run_matchmaker`, `paros::run_proxy` and `paros::run_replica` are the same shape for
-the three other roles.
-It is written **once, generic over moonpool's `P: Providers`** (and `S: LogStorage`), so the *same*
-code runs in production (`TokioProviders`, the `parosd` binary) and deterministic simulation
-(`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
-`Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
-protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
-
-**Plain Multi-Paxos is first-class and permanent; everything beyond it is opt-in.** Multi-Paxos
-without matchmakers — a fixed membership read once from `Storage::initial_state()`, no matchmaker
-processes, no matchmaking phase, no registry — is a **permanent** configuration of `paros-core`
-and the `paros` driver, not a transitional state the Matchmaker milestone (#22) grows out of.
-Anyone must be able to take the core and the driver and run exactly today's protocol with exactly
-today's guarantees. The rules, which every later session reads before touching `on_check_leader`,
-`Election`, `HardState`, or the harness role map:
-
-- The static-membership case is the **`None` arm of the same state machine** — never a cargo
-  feature and never conditional compilation (`paros-core`'s only features, `serde` and `tracing`,
-  are observation-only and stay that way).
-- No matchmaker message, no `HardState` field, and no extra round trip may enter the
-  fixed-membership path. A cluster deployed without matchmakers exchanges the same messages and
-  persists the same scalars it does today. The matchmaker is its own state machine
-  (`paros_core::Matchmaker`), its own wire contract, and its own driver (`paros::run_matchmaker`);
-  `ColocatedNode` never steps a matchmaker message.
-- A reconfiguration request on a cluster without matchmakers is **refused** (`accepted: false`),
-  never quietly honored.
-- Removing every matchmaker feature must leave the plain program's behaviour unchanged — the same
-  test the turbulence doctrine below applies to BUGGIFY.
-- Since M6 every peer and client message is framed by a `JournalId` (`>= 1`). A plain deployment
-  is one user journal (plus the system journals once they exist). Inside that frame it exchanges
-  today's messages and persists today's scalars; no matchmaker message, no `HardState` field and
-  no extra round trip enters it. Byte identity with pre-M6 builds is not kept.
-
-The general rule this instantiates: **flexible quorums, matchmaker reconfiguration, and
-compartmentalized Paxos are opt-in features** of paros. The default is plain Multi-Paxos; each
-feature is enabled explicitly, as configuration data (a deployment that names matchmakers, a
-`QuorumSystem` other than `Majority`), never implied by the presence of its code. In simulation
-that configuration is **workload-buggified per seed** (prong 2 below, `buggify_knob!` style): the
-harness's deployment/role map (`paros_sim::roles`) draws per seed whether the cluster runs with
-matchmakers or without, exactly as it draws cluster size and client count, so **one campaign
-exercises both modes**, the liveness and safety oracles hold in both, and the library is *proven*
-to support both rather than assumed to. The "matchmakers off" seeds are the plain Multi-Paxos runs
-of today and must keep behaving identically; the "matchmakers on" seeds add the registry, the
-matchmaking phase and the cross-configuration Phase 1 on top. Every later feature in the list gets
-the same treatment when it lands.
-
-**Matchmaking and reconfiguration doctrine (M4.2–M4.4).** On a deployment that names
-matchmakers, every campaign is *matchmaking, then Phase 1*: the candidate registers `(b, C_b)`
-with the matchmakers (`Ready::match_requests`, `ColocatedNode::on_match_reply`) and sends no `Prepare`
-until a matchmaker quorum answered; the replies' histories are unioned above the **maximum**
-watermark into `H_b`; a refusal abandons the campaign (the next one opens above the refuser's
-highest round); a campaign whose matchmakers are slow is re-asked on every election timeout,
-never abandoned by the clock. **The ledger distinguishes a belief from a fact.** Every
-registration carries a `kind: RegistrationKind` (`paros_core::Registration`): an ordinary campaign
-registers the configuration the candidate *believes* in force (learned from a leader's
-`Prepare`, `Heartbeat` or `Relinquish`), a `ColocatedNode::reconfigure` campaign registers an
-operator's explicit change. The **effective configuration** is the highest-ballot
-reconfiguration registration a matchmaker quorum holds: an ordinary campaign whose histories
-name one other than what it registered abandons, adopts it, and re-campaigns
-(`MatchStep::StaleConfiguration`), so a node that missed a completed reconfiguration can never be
-elected under the superseded configuration; a reconfiguration campaign is exempt (it *is* the
-next one). Beliefs never trigger the abort — "adopt the newest *registration*" flip-flopped two
-candidates between their abandoned beliefs forever — and reconfiguration requests are monotone
-by ballot and never manufactured by a campaign, so adopting the highest cannot. A
-reconfiguration is guaranteed to be honored once its matchmaking completed at a quorum
-(intersection hands the record to every later campaign); before that it may be lost like any
-proposal that never reached a quorum. GC (#123) never retires the highest reconfiguration
-registration. Phase 1
-then fans out to `H_b ∪ C_b` and completes only with a promise quorum of **every** configuration
-in `H_b` — never `quorum(union)`, the negative case the core tests pin — while Phase 2 addresses
-`C_b` alone. A **reconfiguration is a round change** (`ColocatedNode::reconfigure`, the `Reconfigure`
-RPC): a configuration is bound to a ballot and never edited, so the leader moves to a fresh ballot
-registered with `C_new`, stalls command issuance for one matchmaking round trip plus one Phase 1
-(the accepted trade — `FrankenPaxos`'s zero-stall overlap is deliberately not implemented), and
-resigns afterwards if the change removed it. A joining node promises the new ballot before Phase 2
-reaches it and heals as a replica; a removed node keeps answering Phase 1 for the ballots it took
-part in ("removed" is not "shut down"; acceptor guards are pool-based, never configuration-based).
-**A node campaigns only as a member of what it believes, a belief is volatile, and a node only
-ever registers a belief it heard.** Every incarnation boots believing the bootstrap configuration
-(`BeliefSource::Bootstrap`), so before its first campaign — or its first skip — it runs a
-**membership probe** (#173, `MembershipProbe`, `MatchPurpose::Probe`): it asks a matchmaker quorum
-for the effective configuration, registering nothing, adopts the answer (the bootstrap, confirmed,
-when there was no reconfiguration), and campaigns at once if that names it. Acting on the default
-wedged both ways: a rotation whose every new member rebooted left each member believing itself
-outside and nobody campaigning; and a member that campaigned on the default *registered* it before
-`StaleConfiguration` corrected it — a record every later `H_b` must cover, naming bootstrap members
-the floor may long since have released and the operator retired (a `q1 = 5` split over a five-node
-bootstrap with one member retired asked every later campaign for a promise nobody could give).
-The cost is one matchmaker round trip before an incarnation's first campaign. The chain client's
-reboot of every member of a configuration it just installed (`ScriptedLifecycle` on the main
-campaign) is the BUGGIFY location that makes both wedges likely.
-The harness treats membership as protocol data, with one floor under every configuration a run
-puts in force: `paros_sim::shape::config_floor` — `MIN_BOOTSTRAP` on a matchmaker deployment (the
-bootstrap never draws below it and no reconfiguration shrinks below it, whatever the pool), the
-whole pool on a plain one. That floor, not the bootstrap size, is what the storage world's copy
-budget is computed over: a budget keeping the clean copies the run's quorum-system policy demands
-of the smallest configuration keeps them for every larger configuration too. **The quorum system
-is protocol data drawn the same way (#140):** `paros_sim::shape::quorum_policy` draws once per
-seed — the majority by default, or a flexible split with one `buggify_knob!` for `q2` (extreme
-`1..=n/2`, floor `q2 >= 1`; `q1 = n - q2 + 1` derived per configuration so `q1 + q2 > n` always)
-— and every configuration a run puts in force, the bootstrap and every successor the composer
-asks for, runs the policy at its own size; on a flexible seed the composer may compose a
-majority successor (never the reverse, which the budget was not sized for), so the
-cross-configuration Phase 1 asks two systems their own predicates. The copy budget keeps a clean
-**Phase-1** quorum — the larger of the two under the drawn split — so the tolerated loss per
-record is `n - q1 = q2 - 1` there and `⌊(n-1)/2⌋` under a majority (`QuorumPolicy::clean_copies`
-derives it; nothing in the harness re-derives a threshold from a count). The draw is a
-`reachable`; the outcomes — an election completed under a flexible split, a slot decided by
-fewer accepts than a majority — are the audit's `sometimes` gates. **The grid is drawn the
-same way (#141):** on a pool whose size tiles a grid, a second `buggify_knob!` location picks
-one of `paros_sim::shape::grid_layouts` — floor `rows >= 2` and `cols >= 2` (a `1 × n` or
-`n × 1` grid is a permanent partition under attrition) — so with `PROCESS_POOL_RANGE = 3..=6`
-that is `2 × 2`, `2 × 3` or `3 × 2`; a configuration of a size no layout tiles runs a majority
-(`QuorumPolicy::system`), which is how a grid seed's successors are grid-shaped or switch
-system, and the composer's majority coin applies to a grid seed as it does to a flexible one
-(never the reverse). The copy budget is the floor minus the *smallest* loss any size in
-`floor..=pool` tolerates (`QuorumPolicy::clean_copies(floor, pool)`), because a grid's
-`⌊(min(rows, cols) - 1)/2⌋` — zero for every grid the pool admits: one dead acceptor freezes
-its column — is not monotone in `n` the way a majority's or a split's is; a grid seed
-therefore injects no lost leg and parks nobody. The rare-but-valid decision the driver owns
-is *which column* a proposal's Phase 2 goes to: `DriverHooks::phase2_column` (its own BUGGIFY
-location, consulted on the node loop only on a grid leader, handed to the core through
-`ColocatedNode::propose_in`; always safe, every column is a Phase-2 quorum), paired with a
-`reachable` that it fired and a `reachable` that a slot was decided on a column other than its
-own. The grid outcomes are the audit's `sometimes` gates: a slot decided on a column, an
-election covered by a row, one covered by a row across a reconfiguration, a reconfiguration
-between a grid and a majority. Module docs: `crates/paros-core/src/matchmaking.rs` (the role), `crates/paros-core/src/node/matchmaking.rs` (the wiring), `crates/paros-core/src/node/reconfigure.rs`.
-
-**Garbage collection doctrine (M4.5, #123).** A configuration may be forgotten only when no
-future leader can need its Phase-1 quorum to learn a value its Phase-2 quorum may have chosen.
-paros does not implement the paper's Scenario 3 — a replica tier (#144) makes it *available*, and
-paros still counts only acceptors, since every acceptor keeps the chosen prefix; what it
-has is stronger for the purpose — a node that learns a slot chosen records it as its authoritative
-accepted record before its chosen index advances, and a truncated member refuses a `Prepare`
-below its floor — so the condition is: the leadership is settled (no leader recovery, CTRL probe
-open) and **a Phase-2 quorum of `C_b` reports a chosen index at or past the
-election fence** (`HeartbeatAck.chosen`, populated only on a matchmaker deployment). The leader
-then asks the current generation's matchmakers to raise the watermark to its own ballot
-(`GcRequest`, re-sent each beat, `DriverHooks::skip_gc_resend`); each matchmaker raises it
-**durably before acking** and refuses campaigns below it; the floor is **effective only once a
-matchmaker quorum acked** (`GcStep::Effective`), and only then does the leader name the
-**retirable** acceptors — `members(H_b) \ C_b` — through `Inspect.retirable`. The compaction floor
-(per node: "these slots are gone here, jump to the trim point") and the GC watermark (per
-matchmaker: "these configurations are never returned again") never need each other to move.
-Retirement is an operator act: "removed is not shut down" until GC says nobody will ask again,
-and the `Retire` RPC **carries the evidence**. The operator reads the effective watermark from a
-leader's `Inspect` beside the retirable list and sends it in `RetireRequest.gc_watermark`; the
-node honors the request (`ColocatedNode::may_retire`) only when it has matchmakers, is neither a member
-of the configuration it believes in force nor the leader, *and* that watermark sits strictly above
-`last_member_ballot` — the highest ballot a configuration naming this node was bound to. The first
-three are beliefs and the third one is volatile (a reboot regresses `acceptors` to the bootstrap
-configuration), so without the fourth "the cluster is done with me" would be the operator's
-assumption rather than a protocol fact; the refusal leg is `"not_collected"`. The fence is
-itself read off what the node *heard*, so a fifth leg makes the belief fresh (#165): the
-configuration the node believes in force must be bound to exactly the watermark
-(`acceptors_since == w`), so "not a member" is a fact about `C_w` itself. An older belief may
-not know that `C_w` names the node; a newer one may drop a node that `C_w`, which the floor did
-not collect, still names. A member of `C_w` that never heard it, or that rebooted to its
-bootstrap belief, otherwise passes every other leg; it now refuses as `"stale"` until a beat at
-the leader's ballot reaches it (beats reach the whole pool), and an operator holding an old
-watermark re-reads `Inspect`. The residual, documented on `may_retire`: a node whose own promise
-is above the leader's ballot does not follow its beats and stays `stale` until a later
-leadership reaches it — a retirement lost, never safety. The Retire contract has an **operator's
-half** the node cannot check (#198): the floor proves the configurations below it forgotten, not
-that no configuration registered above it names the node, so an operator retires only a node no
-reconfiguration it asked for above the floor names. The harness's clients are several operators
-and coordinate through the storage world's reconfiguration ledger (`StorageWorld::retire` withholds
-the retirement); two clients racing a re-add against a retirement installed a 3×2 grid with a
-member dead for good, whose column never decided again. The composer likewise asks a grid
-successor for a live Phase-2 quorum in **every** column, not one. The wrong rule (installed ⇒ deletable — DPaxos's rule, as *Matchmaker Paxos*'s Appendix D states it) and
-its red→green evidence are recorded in the commit that landed the GC. Module doc:
-`crates/paros-core/src/node/gc.rs`; design note:
-`docs/analysis/consensus/matchmaker-gc-and-generations.md`.
-
-**Matchmaker-set generations (M4.7, #125).** The matchmaker set is itself a chosen value:
-`MatchmakerSet { generation, members }`, and every matchmaking message (`MatchRequest`,
-`MatchReply`, `GcRequest`, `GcAck`, every `ReconfigureRequest`) is **fenced by generation** — a
-matchmaker answers only its active generation and refuses everything else with what it knows
-(`Stopped { successor }`, `Generation { current }`, `Inactive`), never serves it. The handover is
-the explicit sans-IO `MatchmakerReconfigurer` (`crates/paros-core/src/matchmaker/reconfigurer.rs`),
-driven by the provider-generic node driver: **stop** (a quorum of `M_g` freezes durably; a frozen
-matchmaker registers nothing for `g` ever again but stays alive to vote and to point late
-proposers at its successor) → **reconstruct** (max watermark, union above it) → **bootstrap**
-(every proposed member holds it durably, pending) → **decide** (single-decree Paxos over `M_g`
-— **the shared roles over a one-slot log**, not a second kernel: `matchmaker/decree.rs` drives
-`Proposer<MatchmakerId, Vec<MatchmakerId>>` at slot zero against each matchmaker's own
-`Acceptor<Vec<MatchmakerId>>`, whose two scalars are its durable `DecreeRecord`. The one
-deliberate divergence stays outside the role: a `Nack` preempts the decree and the
-reconfigurer reopens strictly above the promise that refused it, where the log side discards
-the promise and falls back to an election) → **publish** (`Chosen`: `M_g` records the chain link,
-`M_{g+1}` activates its pending bootstrap). Invariant 1 — at most one set is authoritative per
-generation — rests on the decree (the loser adopts the winner's vote); reconstruction
-completeness is asserted in the audit. **Matchmaker quorums are majorities only**
-(`MatchmakerSet::has_quorum`; the decree builds a `QuorumSystem::Majority` over the set it
-replaces and cannot be given any other quorum): the paper's flexible matchmaker
-quorums are deliberately unsupported, and the handover's safety argument is made under the
-majority model alone. The handover is proven by a sans-IO **model checker**
-(`crates/paros-core/src/matchmaker/handover_model.rs`, run by `cargo nextest`; hundreds of
-seeded schedules by default, thousands with `HANDOVER_MODEL_SEEDS`; `HANDOVER_MODEL_STEPS` sets the
-chaos steps per schedule and `HANDOVER_MODEL_TRACE` prints a schedule as it runs): concurrent reconfigurers
-and finishers over the real `Matchmaker` and `MatchmakerReconfigurer` with every message
-dropped, duplicated or reordered, every matchmaker crashed at each durability seam and rebooted
-from its disk, every reconfigurer killed or abandoned at any step and every node rebooted to its
-bootstrap belief — asserting after each step that at most one set is authoritative per
-generation, that a chosen set is what a majority of `M_g` durably voted at one ballot, and that
-every activated registry carries the complete reconstruction — and, since the interaction
-verification (`docs/analysis/consensus/matchmaker-interaction-verification.md`), that every
-node's real `Matchmaking` tally closes complete and with the effective configuration, that a
-reply moving nothing is `Ignored` and `Ignored` moves nothing, that the freeze closes only on
-the driver's beat, that a publication needs a durable successor majority and a re-sent
-`Chosen` is idempotent, and that every reply is backed by the disk that answered it (claims
-4–9, each with the mutation that makes it red); then that the pool converges and
-that a node with no belief rediscovers the top generation from the bootstrap set. It bites:
-publishing the bootstrapped proposal without the decree is red on its first seed, and it found
-that a rebooted node's reconfigurer **reused the decree rounds of its earlier incarnation** (the
-reconfigurer is volatile; seed 103 put two values at one ballot) — hence the rule that the
-`Stopped` reply carries the matchmaker's decree promise and **the decree opens strictly above
-the maximum over the stop quorum** (every promise quorum of an earlier decree at that node
-intersects it). Liveness rules: a frozen generation with no successor is a
-cluster that can elect nobody, so **any node that meets `Stopped { successor: None }` finishes
-the handover** (`MatchmakerReconfigurer::finish`, proposing the members that answered the
-freeze — the only liveness it can vouch for); and a phase that makes no progress is
-**abandoned by the driver** after `DriverTunables::reconfigure_timeout_elections` election
-timeouts (the core only reports the stall, `MatchmakerReconfigurer::stalled_for`; the budget is
-driver policy and, per prong 2, a workload-buggified tunable rather than a constant — neither
-inside the state machine nor hard-coded in the driver; the reconfigurer holds no durable state,
-so the freeze, the bootstrap and the votes stay), so a dead proposed member never holds a
-`busy` refusal for the rest of a run. The three matchmaker-plane cadences the driver owns —
-`match_resend_ticks`, `gc_resend_ticks`, `reconfigurer_resend_ticks` — and the preempted
-decree's backoff ceiling (`reconfigure_backoff_max_ticks`) are each their own knob with their
-own floor, so a seed can be extreme in one and ordinary in the next. **A successor set must admit its quorum
-system** (`MatchmakerSet::is_well_formed`), and it does so by construction: like
-`AcceptorConfig`, `MatchmakerSet` has a private membership and `new` — which normalizes and
-asserts well-formedness once — is its only constructor, deserialisation and the wire included,
-so no `start`, `Bootstrap` or `Chosen` can name a malformed set and none of them checks for one
-(the old `Malformed` refusals were unreachable and are gone); a `finish` proposes the members
-that answered the freeze — a quorum of the old set, never fewer. A plain deployment holds no
-`MatchmakerSet` at all (`ColocatedNode::matchmaker_set` is `None`), never an empty one. A
-re-sent `Chosen` is **idempotent at a member that already activated** the successor: it answers
-`Learned` again, so a lost ack is recovered by the re-send instead of aborting the publication
-as *superseded*. **`Chosen` is a learner notification, not an
-acceptor decision**: a matchmaker records or activates the successor it is told without
-re-deriving the decree, on the protocol precondition that only a reconfigurer holding the
-Phase-2 quorum (or a node relaying such a publication) emits it. Replacement is also how a matchmaker with unusable
-state recovers — there is deliberately no matchmaker-specific in-place repair.
-
-**Journals doctrine (M6, #185–#188).** paros is a journal service: one process serves a
-**static list of journals** (`paros::run_journals` over a `JournalStores`; `run_node` is the
-one-journal case), and the rule is **share processes, disks and connections, never protocol
-state**. Each journal is its own namespace — its own `ColocatedNode` (`Config::journal`, read
-for assertions and tracing only), its own ballots, its own log and its own store — so every
-existing proof holds per journal and the one new property is **non-interference**. Ids: `0` is
-unset and refused at the edge, `1..=127` are reserved for system journals, user journals start
-at `JournalId::FIRST_USER` (128, the default). The id rides **the `Deliver` envelope, per
-message** (`ConsensusMessage.journal`) — never folded into a command fingerprint, which would
-protect only `Accepted`'s vhash while `Prepare`, `Promise`, `Commit`, `Heartbeat` and catch-up
-crossed journals — and the driver demuxes on it before the core sees a byte; a message for a
-journal the node does not run now is dropped (the sender's re-send repairs it). Every client
-call names its journal: an unknown id is answered `unknown_journal`, a journal the node serves
-but has quarantined is left unanswered. One `Deliver` per peer carries every journal, and the
-peer mailbox gives **each journal its own keep-newest lane, drained round-robin**, so a busy
-journal only ever evicts its own messages. The **matchmaker plane, the proxy leaders and the
-replica tier serve one journal each — the node's first** (asserted at boot): every other
-journal is plain Multi-Paxos over the whole pool (journal-tagged proxies are #193), a
-retirement retires the first journal and the node keeps serving the rest.
-**A storage fault quarantines its journal, not the process** (#188's decision): the damage is
-scoped to one store, so the journal's runtime is dropped — it sends and answers nothing — while
-the node serves its other journals, and after `DriverTunables::quarantine_ticks` (born
-buggified) the driver re-opens it from its store as a restart of that journal alone; a store
-that will not open (parked, retired) keeps it down for good. A node whose every journal is
-quarantined at once has nothing left and exits with the fault — for one journal exactly the
-pre-M6 fail-stop crash, so the one-journal campaign is unchanged. A seam crash is the process
-dying, for every journal. The copy budget is therefore **per journal**. In simulation the plan
-is drawn once per seed (`paros_sim::shape::journals`, a `buggify_knob!` for the count, floor 1;
-one journal on a seed with matchmakers, whose two-round-trip campaigns livelocked under a
-tripled load — witness in the doc comment) and every journal gets **its own `AuditWorld` and `StorageWorld`** (`audit_world_for`,
-`storage_world_for`, keyed by `state::journal_key`): safety, the clients' folds, convergence,
-the storage gates and the budget are keyed by journal without any oracle knowing, and no
-message gains an interpolated id. Clients are spread over the journals round-robin; the
-matchmaker-plane operations stay on the default journal. What no single world sees lives on
-the shared **journal board** (`paros_sim::audit::journals`): every slot of journal `j` applies
-only an identity appended to `j`, a quarantined journal sends nothing, a journal keeps
-committing while a sibling is **held** on every node for the chaos window
-(`DriverHooks::hold_journal`, a per-seed BUGGIFY location), and a node keeps serving its other
-journals while one is quarantined.
-
-**System journals (#189).** A service creates and deletes journals, and adds and retires
-nodes, while it runs; both lists are journals of their own. Journal **1** is the directory
-(`CreateJournal { name, config }`, `DeleteJournal { id }`) and journal **2** the node registry
-(`RegisterNode { id, addr, failure_domain }`, `DrainNode`, `RetireNode`), one entry per slot
-(`proto/system.proto`), read by one pure fold (`paros::system::{Directory, Registry}`) that every
-node and every client reading back runs in LSN order. A created journal's id is `128 + the
-LSN of its CreateJournal`: the log order is the allocator, an id is never reused (a delete is a
-tombstone), a name race is decided by the lower slot, and a slot whose id lands on a genesis
-journal folds to `Reserved`. The pool is the genesis pool plus every registered node not yet
-retired. It is opt-in configuration data: `run_journals` takes a `SystemPlan` (the **seeds**
-that host journals 1 and 2 — a static configuration of plain Multi-Paxos — and the genesis pool
-and journals), and `None` is #188's static deployment. A seed folds its own chosen prefix each
-tick; every other node keeps one long-polling `Read` per system journal open against a seed —
-the public `Read` is how a seed serves a node outside the pool, so no peer message from outside
-the pool is ever needed. The driver applies the folds: a created journal naming the node starts
-(`JournalStores::create`, then the ordinary open), a tombstoned one stops for good and is
-refused as unknown, a registered node gets a peer lane at its address (`Outbound`'s lanes grow
-at runtime), a peer message from a node the registry fold does not have in the pool is refused
-before the core sees it (a liveness cost until the fold catches up, never safety), and the
-node's own retirement stops its user journals. System journals are never trimmed and serve no
-plane (the matchmaker, proxy and replica planes serve the first *user* journal). **The core's
-pool is runtime state** (`ColocatedNode::pool`, `extend_pool`): `Config::pool` at boot, grown —
-never shrunk — as the driver admits the registry's nodes, and refused on a deployment without
-matchmakers (plain Multi-Paxos never reconfigures, so its pool stays its membership and its
-learner traffic exactly today's). A retired node leaves no core pool; the driver keeps it out at
-the edge. A candidate whose matchmakers name a configuration with a node its pool has not
-admitted abandons the campaign or the probe (`MatchStep::UnknownMember`) instead of acting on it,
-and completes once its pool catches up — the one path where registry lag reached a hard
-`assert!`. A registered node joins every journal of `SystemPlan::spares` (the deployment's
-reconfigurable journal) **as a spare**, so a `Reconfigure` may name it and it takes part like
-any spare of the pool. In simulation the system journals run on half the seeds (`paros_sim::shape::system_journals`),
-the seed is the lowest rank alone (`SEED_COUNT = 1`: two more journals' beats on every link of a
-small cluster livelocked both a matchmaker deployment and the two survivors of a plain 3-node pool,
-and a one-member journal sends nothing), and system and created journals sit on fault-free
-world-backed seats outside the copy budget. The driver's boot report re-reports
-the recovered chosen prefix as walked (`report_boot_state`): a one-member journal has no other
-learner to report a slot chosen just before a crash. A node that follows the system journals keeps
-running with a journal quarantined, so the opener hears every quarantine at once
-(`JournalStores::quarantined`) and the harness reports a store parked for good right then, not at
-a re-open the run may end before. A joiner joins the default journal
-as a spare only on a seed with matchmakers and neither proxies nor replicas (their pools and
-address books are static), the chain client's composer then draws successors from the genesis pool
-plus the joiners the registry has registered, and the operators coordinate a joiner's retirement
-through the storage world's ledger (`StorageWorld::reserve_joiner_retirement`: never a joiner any
-reconfiguration named, and a reserved one is never named); matchmaker seeds create no journals. Their
-meaning is judged on the **system board** (`paros_sim::audit::system`): every node folds each
-system journal to the same event at every LSN, a created journal's id is `128 + its LSN` and
-never reused, and no node acknowledges an append to a journal after folding its tombstone; its
-gates are a name race decided by slot order, a joiner that learned the system journals before
-any pool had it, and a joiner's message refused by a node that had not folded its registration
-and accepted once it had, and — where joiners can join — a node registered at runtime joining a
-journal's configuration through `Reconfigure`.
-
-**Storage direction.** The seam stays the high-level `LogStorage` / `MatchmakerStorage`
-traits (the durable writes, truncate / trimmed-to semantics, the boot scan, the format
-marker); what sits behind it changed. paros's **durable, production-generic stores are built on
-`moonpool-journal`** — the CLSTORE write-ahead journal over moonpool's `BlockFile`, generic over
-the provider's `StorageProvider` — as `paros::journal` (`JournalStorage`,
-`JournalMatchmakerStorage`, `JournalStoreConfig`): the same code runs over Tokio's filesystem in
-production and over `SimStorageProvider` under test ("test the code you ship", applied to the
-disk). This reverses the earlier "paros does not use moonpool's storage layer" line, at the
-user's request: the journal is the high-level engine that line was waiting for, and the reusable
-gaps it had (a caller identity wider than one epoch, a kept ambiguous tail, batched replay,
-metadata self-repair, the whole last batch reported as ambiguous) went upstream
-(PierreZ/moonpool#284, #285) instead of being rebuilt here. The
-mapping is a **log of write operations folded at boot**, never the state itself (an acceptor
-re-accepts a slot while later slots stay; the journal's index is dense): each staged write is
-one entry whose far identifier carries its kind (as the epoch) and its identity tag
-(`(slot, ballot)` for a vote, a ballot for a registration); the promise and the format marker live in the journal's two-copy metadata,
-flushed before the log so a record never outruns the promise covering it; periodic bracketed
-checkpoints let the journal drop whole segments. The journal's corruption report is wired to
-CTRL: a damaged vote becomes `faulty(slot, ballot)` from its tag, a damaged chosen index /
-truncation / trim jump is forgotten (each is re-derivable, and
-forgetting leaves the store as it was before it), a damaged registry record or trusted
-checkpoint header is a crash verdict; the per-kind table is on `paros::journal`. The stores
-carry **no application** and neither does paros (#186): a journal's client folds what it reads.
-**The simulation harness runs them on half the plain seeds (#187)**: `paros_sim::shape::journal_store`
-draws a seeded coin on a perturbed seed without matchmakers, and a heads seed runs every
-acceptor on `JournalStorage` over `SimStorageProvider` (`world/node_store.rs`, `NodeStore`)
-under every network fault, attrition and moonpool's own disk model (unsynced writes resolved at
-a crash, the `BuggifyKnobs` disk extremes) — but no world-injected corruption. The other seeds,
-every matchmaker seed and the corpus stay on the world-backed stores (`crates/paros-sim/src/world/`),
-because those carry what a moonpool disk fault cannot: the cross-node copy budget (a clean
-Phase-1 quorum copy of every record survives), the ground-truth fault ledger the audit resolves
-every injected fault against, and the corpus's per-record masks. What a journal seed keeps of
-the world is the **provisioning ledger** (#147), in two steps (`LedgeredJournal`: begun at the
-format, landed with the sync that makes the marker durable; a kill between the two is resolved
-at the next boot by reading the disk), and a fault ledger of its own: every error the journal
-store surfaced is counted at the store boundary, so "every fault surfaces as exactly one typed
-crash decision" still binds. The journal stores are also proven by their own crash loops on the
-simulated disk (`crates/paros/src/journal/tests.rs`, two fault models) and by both contract
-suites. Moving matchmaker seeds and injected corruption onto the journal is #176. **The seam is async.** Every
-`LogStorage` / `MatchmakerStorage` method that may touch the device — the writes, the flush,
-the boot scan — returns a `Send`
-future (declared `-> impl Future<…> + Send`, moonpool's provider convention; implementations
-write plain `async fn`s), and the driver awaits each one in persist-before-send order. The core's
-read-only recovery ports (`paros_core::Storage`, `RegistryStorage`) and the accessors that
-report what a store already knows about itself (`is_formatted`) stay synchronous: `boot_scan` is where a store loads
-and verifies its records, and everything the synchronous ports answer afterwards is served from
-memory (`MemStorage::from_records` is that in-memory index). The sim's world-backed disks complete
-every operation on the poll that started it, so the async seam moves no seed's draw schedule;
-modelling device latency through the time provider is a future knob, not something the seam
-implies.
-
-**Where each kind of turbulence lives.** Three layers, and nothing crosses them (this is the FDB
-separation; #81 removed the message-class nemesis, which mixed them):
-
-- **Environmental faults belong to moonpool.** Drop, delay, duplicate, reorder, directional
-  partitions (`AsymmetricSend`/`AsymmetricRecv`), random close, bit-flip, buggified delay,
-  crash/restart attrition, seeded-random scheduling — all swarm-masked per seed. paros never
-  re-implements one of these at the protocol layer. They all ride the **one combined campaign**
-  axis (`chaos_surfaces()`): network turbulence used to need a separate safety-only axis because
-  moonpool's faults outlived `chaos_duration`, but since the moonpool pin at `43304d8` the cutoff
-  enters *recovery mode* — no new simulator faults, partitions in force healed, persistent damage
-  (closed connections, degraded pair latency, clock skew, rotted records, killed processes) kept —
-  so the workload's remaining lifetime is a genuine protocol-recovery tail and the liveness /
-  convergence oracles apply to network faults too. Do not re-split the axis.
-- **`paros-core` is never buggified.** No behavioral cargo feature, no conditional compilation, no
-  RNG, no knob: the sans-IO core stays unconditionally pure (its two features, `serde` and
-  `tracing`, add derives and spans — observation, never a decision), and it is perturbed **only through its public
-  API** — the methods its caller chooses to call, and the data it is handed. Where a rare-but-valid
-  decision needs to become reachable, the core's job is to *expose that decision as a method with an
-  honest contract* (`ColocatedNode::resend_pending` — "the driver is expected to call this each beat;
-  skipping is always safe, re-send is pure optimization"; `ColocatedNode::step_down` — "a leader may
-  resign") and nothing more. Removing every perturbation must leave the shipped program unchanged,
-  which here is trivially true: the perturbation is a caller that stops calling.
-- **BUGGIFY, prong 1 — hook the driver's rare-but-valid decisions.** Timing and policy choices the
-  driver owns (skip a pending `Accept` re-send, resign leadership, and future choices such as
-  timeout-jitter extremes) are methods on the provider-generic `DriverHooks` trait. Production
-  passes `NoHooks`, whose default methods are all false. `paros-sim` implements each behavior with
-  its own `buggify_with_prob!` call site, preserving BUGGIFY's per-seed activation × per-call firing
-  model without putting simulation dependencies in `paros` or `paros-core`. Consult a hook only
-  when the choice can have an observable effect (for example, only ask to skip when accepts are
-  pending), trace the action that actually happened, and disable disruptive hooks after the chaos
-  window so recovery gets a quiet tail.
-
-  **Consult a hook only from the node loop, never from a spawned task.** A hook answer is a
-  randomness draw, and moonpool's BUGGIFY state is a thread-local whose draw order is stable only
-  for a stable *call sequence*; the node loop is where the simulation steps deterministically,
-  while a `spawn_task(..).detach()`ed task can outlive its simulation and shift the **next** run's
-  stream. That is not theoretical: consulting two hooks from inside the peer-delivery task broke
-  `same_seed_replays_identically` on CI (a seed's first in-process replay diverged from its second)
-  while replaying clean locally, because whether the leftover task got polled was environment-
-  dependent. A decision a spawned task needs is taken on the loop and *carried* to it — the peer
-  mailbox's `hold_next` / `reverse_next` flags are the pattern.
-- **BUGGIFY, prong 2 — tunables are workload-buggified config.** Anything that *shapes* a run — the
-  cluster size, request counts, timing windows, fault firing rates, attrition knobs (the #61 swarm
-  surface) — belongs in plain config data that the **workload/harness layer** randomizes
-  per seed, FDB knob style (`if buggify → an extreme value, else the default`). New tunables should
-  be **born that way**, as data a workload can buggify, not as a constant buried in core or driver
-  code, so per-seed swarm variation composes without either layer knowing about it. One knob is one
-  location: give each tunable its own `buggify_knob!` call site rather than one multiplier over a
-  family, so a seed can be extreme in one dimension and ordinary in the next.
-
-  **Every knob documents its floor**, and a knob only exists where the extreme is a *valid
-  configuration*: pushing it must not make a run unwinnable. The floor is usually structural rather
-  than numeric — the fault window closes long before the recovery tail does, a budget bounds how
-  many copies of a record may be lost — and where it is numeric it is a lesson: a peer queue that
-  cannot hold one tick's traffic starves whichever class is enqueued last *every* tick, and a
-  one-message delivery batch caps per-peer throughput below the protocol's own rate. Both are
-  permanent partitions wearing a knob's clothes, which is not a configuration but a defeat of
-  eventual synchrony. Two things are **never** buggified: **oracle thresholds**
-  (`DEPOSED_TICK_SLACK`, `PLATEAU_SEEDS`, `CHAOS_DURATION_MS`, `SETTLE`, `WAIT_SETTLE`, `FLOOR_GRACE`),
-  because they are the judgement the run is measured against — moving them does not explore a new
-  state, it changes the verdict on the old one — and **schedule ceilings** (`*_ITERATIONS`), which
-  feed the guided seed schedule rather than the run. Constants that a correctness argument depends
-  on (`MAX_TORN_TAIL` must equal the driver's real unwitnessed in-flight window) are not tunables at
-  all, and say so where they are defined.
-
-The driver's provider-generic `DriverHooks` also exposes the durability seams process-level
-attrition cannot reach — four today (`Seam` in `crates/paros/src/hooks.rs`): the node driver's
-`BeforeSync` and `AfterSyncBeforeSend`, and the matchmaker driver's `MatchBeforeSync` /
-`MatchAfterSyncBeforeReply` (the apply, boot-replay and chunk-repair seams went with the
-application, #186). Give each seam its
-own BUGGIFY location; sharing one location prevents the sweep from independently selecting the
-distinct failure modes.
-
-**Audit doctrine — observation, never perturbation.** The mirror image of the `DriverHooks` rule.
-The driver also carries a provider-generic `Audit` port (`paros::Audit`, production passes
-`NoAudit`): it *reports* every externally meaningful transition — promise raised, accept persisted,
-slot applied, message sent or dropped at the send seam, leader elected, gap observed, client acked,
-node recovered — typed, once, at the instant it happens, right where the matching `tracing` event is
-emitted. Nothing an `Audit` implementation does may change the run: it returns nothing, it draws no
-randomness, it reads no wall clock, and deleting every audit call must leave the shipped program
-bit-identical. Hooks perturb; the audit only watches.
-
-**Correctness lives in the audit + workload `check()`, not in trace scanning.** `paros-sim`'s
-`audit::AuditWorld` is the per-iteration shared checker (published on the `StateHandle` beside the
-storage world, factory-created per seed): every callback folds one transition into O(1) incremental
-state and asserts there. Client-visible correctness — linearizability, client liveness — lives in
-the **workload**, which records its own operation history and checks it in `check()`; the client is
-the only party that knows its own program order. The clients' folds of the journal
-(`ChainState`: one command and one state per LSN, each client's fold in LSN order) meet in the
-audit too, reported by each client as it folds (`AuditWorld::fold_applied`). Tracing is for humans only: nothing reads the trace back, and there is no `Invariant`
-type to add one to. If a fact a check needs exists nowhere the audit can see, add the `Audit`
-callback that reports it — never a scan over the event stream (it is O(trace²) across a run's
-observability pumps). Preserve assertion **message strings** when moving a check — the assertion
-slot is the hash of its message, so a reworded message silently resets the sweep's saturation
-history.
-
-**Tracing spans.** Every important method carries a `#[tracing::instrument]` span, and the rule is
-by layer. In `paros` and `paros-sim` the spans are **non-optional**: the driver's loop stages
-(`run_node`, `drain_ready`, `persist_writes`, `maintain`, `report_boot_state`, the peer-delivery
-task), the RPC handlers, the `LogStorage` implementations, the process
-and workload lifecycles, the fault world's injections, and the audit's gate checks. In `paros-core`
-the same attribute is written `#[cfg_attr(feature = "tracing", tracing::instrument(..))]` behind
-the default-on `tracing` feature, so a `default-features = false` build is the bare state machine
-(the wasm gate checks both). Conventions: `skip_all` plus a few cheap, explicit `fields` — the node
-id (`node = self.config.id.0`, `node = self_id`) and a message's coordinates (`from`, `round`,
-`slot`), never a whole `Message`, `Command`, or storage handle; public entry points at
-`level = "debug"`, per-message handlers and per-tick internals at `level = "trace"`; no `ret` and
-no `err` (a seam crash is a deliberate exit, not an error to log). Spans nest under moonpool's
-`process`/`workload` spans and the sim layer resolves an event's source by walking outward, so an
-`#[instrument]` never changes what the timeline captures; and a span draws no randomness, so it
-never moves a seed. Nor does a span slow the sweep: since the moonpool pin at `3a73c8e` the sim
-subscriber is floored at `INFO`, so a `debug`/`trace` span is refused before the registry allocates
-it — one level compare per call. Spans, like events, are for humans: nothing reads them back.
-
-**Assertion doctrine (TigerBeetle-style).** Two assertion families, split by layer, and neither
-substitutes for the other:
-
-- **`paros-core` uses hard `assert!` — always on, in production too.** A broken invariant is a
-  programmer error, never an operating condition: crash beats corruption. Operating errors (a
-  non-leader proposal, a stale trim point, a below-floor prepare) stay result values / guarded
-  returns — never assert on external input; re-assert it only once it has crossed the validation
-  boundary. Style rules: precondition stacks at function entry, postconditions at exit, split
-  compound conditions, assert positive *and* negative space, pair each property across two code
-  paths (e.g. the write-side flush ordering vs. the boot read-back). `ColocatedNode::assert_invariants`
-  is the dedicated cross-field checker (ordering chain, role/election couplings, floor bounds,
-  chosen-gap contract), called at boot and at every public mutating entry point — cheap checks
-  stay O(1)/O(log n); O(N) structural checks are *also* hard `assert!` (owner's call: no
-  `debug_assert!` anywhere in this project — the state maps are small and crash beats corruption
-  in release too). Public functions that assert need a `# Panics` doc section (clippy
-  pedantic enforces it). This adds no deps and no conditional compilation, so the "core is never
-  buggified" rule is untouched.
-- **Sim layers use moonpool macros, never plain `assert!`.** In `paros-sim`, a violation should
-  *record and continue* (`assert_always!` + detail map), so one root cause surfaces its full
-  cascade in a single deterministic trace; coverage claims are `assert_sometimes!` (only where the
-  sweep is certain to reach it — an evaluated-but-never-true sometimes fails the runner) or a
-  branch-guarded `assert_reachable!` (the `reach_once!` idiom; creates no slot when unreached, so
-  it can never fail coverage); guidance is the numeric/`sometimes_all`/`sometimes_each` family.
-  **Which one:** a `sometimes` names an *outcome* the run must be proven to reach — a leader is
-  elected, a below-floor node recovers by a trim-point jump, a read commits across a leader change,
-  a corruption class is detected — and its failing is a finding about the harness's reach. A
-  `reachable` names a *cause* that fired — a hook, a knob extreme, a fault coin, an operation the
-  client happened to draw — and only records that it did. A perturbation never gets a
-  `sometimes`: whether a seed draws it is the swarm's business, and a gate on it turns a tuned
-  probability into a CI failure. Pair every BUGGIFY site with a reachable proving it fired.
-  **Budget:** one slot per
-  unique message string (identity = the message hash — never reword an existing message), 512
-  slots per campaign process shared with moonpool's own internals; overflow is reported as an
-  always violation. Count before adding, keep messages short/stable/free of interpolated ids, and
-  put dynamic context in the detail map.
-- The audit (`paros_sim::audit`) and workload `check()` remain where *cluster-level protocol and
-  client-visible* correctness live (see above); in-core asserts guard single-node state-machine
-  invariants — the two catch different bug shapes and deliberately overlap (e.g. promise
-  monotonicity is asserted in `set_promise` *and* audited across restarts).
-
-**Truncation doctrine (#186: no application, no snapshot; #204: positions).** Record bytes are
-opaque: paros never *interprets or compacts* application state, and since #186 it runs no
-application at all — a journal's client reads the log (`Read`) and folds what it reads, and owns
-compaction of its own state. What paros interprets is the journal-control state of each journal
-(`journal_state.rs`), and what it owns is its *log*, whose prefix it drops one way:
-
-- **Truncation is a Paxos-decided control command.** A log slot decides a `Command`, which is either
-  a `Write(Entry)` (a writer's batch of opaque records) or a `Control` metadata command —
-  `SetLeader`, `Truncate{up_to}` or the `Noop` a new leader fills an undecided hole with (see
-  *Election gap fill* below). A client asks the **leader** to truncate (the `Truncate` RPC →
-  `ColocatedNode::propose_control`); the leader decides it by ordinary consensus, with no
-  precondition beyond its own leadership (a truncation is the client's statement that it no
-  longer needs the records before position `up_to`); the fold raises `first_seq`, and every node
-  truncates *lazily* when its contiguous chosen walk reaches that slot (`ColocatedNode::compact`,
-  `WriteOp::Truncate`, dropping every slot below the one holding the first retained record and
-  sealing the journal state there), giving **one cluster-wide floor** forwarded by normal
-  replication + catch-up. The consensus/acceptor paths treat `Command` fully opaquely; only the
-  replica's fold interprets one. A reader below `first_seq` is answered `truncated`.
-- **A trim-point jump recovers a below-floor node.** Acceptors refuse `Prepare`/`Accept` below their
-  floor (safety). A node that was down while the cluster truncated past it comes back below the
-  floor, where commit-replay catch-up cannot heal it (the entries are gone for everyone). A peer
-  answering its `CatchUpRequest` from below its own floor sends `Message::TrimmedTo { point,
-  state }` — its floor and the journal state sealed there, **no bytes and no ballot** —
-  and the node persists `WriteOp::TrimmedTo` (`LogStorage::trimmed_to`), raises its floor to the
-  point and its chosen index to at least `point - 1`, then heals the rest by ordinary catch-up. Its
-  promise never moves (the old `InstallSnapshot` adopted the sender's ballot; the jump carries
-  none). The snapshot machinery of #101 — `Snap` markers, custody, the chunk-repair plane,
-  `InstallSnapshot`, the application and its repair — is gone, not dormant.
-
-A **wiped** node that lost its durable *promise* (amnesia: a lost disk, not a clean crash) **never
-rejoins** (#124): a trim jump restores the log's floor, not the promise, so a naive rejoin could regress a
-promise it once made. **The library enforces that rule (#147), not the harness.** Every store
-carries a durable **format marker** (`LogStorage::is_formatted` / `format`, TigerBeetle's
-superblock idea): `run_node` takes the operator's claim as data (`BootKind::{FirstBoot,
-ExistingMember}`, never inferred from the store), formats the store durably on a first boot
-*before* the core reads a byte, and **refuses** an existing member whose store has no marker
-(`RunError::Refused(BootRefusal::Amnesia)`, reported through `Audit::boot_refused`) — an
-empty-but-openable store is otherwise indistinguishable from a first boot to `ColocatedNode::new`.
-A first boot on a formatted store is refused too (`AlreadyFormatted`: two identities on one
-disk). The marker **records the `Config` it was written under** (#207,
-`LogStorage::formatted_config`; `MatchmakerStorage::formatted_config` for the registry's
-`MatchmakerConfig`), and an existing member handed another one is refused as `ConfigMismatch`:
-the bootstrap membership, the quorum system and the counts are safety inputs read once at
-construction, never edited in a configuration file across a restart. In simulation an operator
-restarts a node or a matchmaker under an edited file (`NodeShape::config_edit_pct`, a
-`buggify_knob!`), the library refuses it, and the operator restores the file and restarts. The
-marker is a store property, not protocol state: no `HardState` scalar, and the plain
-deployment persists the same two scalars. In the harness the operator's claim is the storage
-world's **provisioning ledger**, recorded exactly when the marker lands durably and kept outside
-the disks, so a wipe erases the marker but not the memory of having provisioned the node: the
-process reboots a wiped identity as an existing member, the library refuses it, and the world
-keeps the identity parked *for the budget and the composer only*. Removing that refusal and
-rebooting the wiped node fresh is the red witness (the audit's "a node's promised ballot never
-decreases", folded from the boot report). The acceptor set heals around a wiped identity by
-reconfiguration — the client's composer draws successors from the live pool and moves a dead
-member out first. moonpool's `prob_wipe` stays `0` (it wipes moonpool's disk, which the harness's
-world-backed stores do not live on); the storage world draws its own wipe coin at a chaotic restart on a matchmaker
-seed, under the same dead-node budget as a corruption park. A moonpool issue asks for the reboot
-kind to be exposed to a restarted process so a harness-owned disk can honor `CrashAndWipe`
-directly. **The matchmaker's registry carries the same marker (#183)**: `MatchmakerStorage::
-is_formatted` / `format` (the in-memory, journal-backed and world-backed stores alike, covered by
-`matchmaker_storage_contract_suite`), and `run_matchmaker` takes a `BootKind` and refuses an
-existing matchmaker whose registry has none (`Audit::matchmaker_boot_refused`). An amnesiac
-matchmaker that rejoined would answer a matchmaking quorum as if it had never seen a registration
-it once acknowledged — a registration on `{A, B}`, `B` wiped, a later quorum `{B, C}` that misses
-it — which is exactly the history hole a cross-configuration Phase 1 exists to close; and it would
-forget its GC watermark and its generation too. The harness's matchmaker loss coin is therefore a
-**wipe**, not a park: the registry's disk goes, the provisioning ledger (shared with the nodes,
-keyed by IP) remembers the matchmaker, the process reboots it as an existing member, the library
-refuses it, and a matchmaker-set handover replaces it (the audit's `sometimes` "a refused
-matchmaker is replaced by a handover"). Removing the refusal is red on the audit's "a restart
-recovers every durable registration".
-
-**Cooperative leader handoff (`DPaxos`).** Leadership changes hands two ways. An
-*election* destroys a leader's authority and makes the successor rediscover the log
-through Phase 1. A *handoff* moves the existing logical Phase-2 authority to another
-physical node, which continues under the **same ballot** with **no second Phase 1** —
-`ColocatedNode::relinquish_to` → `Message::Relinquish` → `on_relinquish`. What travels is
-small and explicit: the ballot, the allocator frontier (`next_slot`), and the tail
-`[first_unchosen, next_slot)` split into slots already chosen and slots with an open
-Phase-2 round; the two **exactly tile** the range, and a handoff-installed recovery has
-**gap filling off** (no Phase-1 quorum report licenses inventing a `Noop`). Three rules
-carry the safety:
-
-- **Abdication is synchronous with the decision.** `relinquish_to` queues the message and
-  `become_follower`s in the *same call*, before any I/O — so emitting it without
-  abdicating is not expressible. No durable fence is needed for the crash case, because
-  paros leadership is entirely volatile (`ColocatedNode::new` always boots a Follower, and
-  `on_check_leader` only campaigns at a strictly higher round): a crash *is* an
-  abdication.
-- **The successor is named inside the payload** (`to`), so a duplicate, a misroute, or a
-  replay can never hand one authority to a second node; the receiver also refuses an
-  authority its own promise dominates, one that would rewind the allocator, and one it
-  already holds.
-- **One hop only.** `can_relinquish` requires `LeadershipOrigin::Elected`: only the node
-  that *minted* a ballot may hand it on. The sweep found the general case unsafe (a
-  replayed `Relinquish` re-installs an authority at a node that already handed it on,
-  while its successor still exercises it), and closing that would need a durable
-  relinquishment fence — a new `HardState` scalar and its whole storage surface — for
-  one extra cooperative hop. Handing leadership on again costs the ordinary election
-  that mints a fresh ballot.
-
-A handoff is refused while any Phase-1-shaped work is open (leader recovery, CTRL repair
-probe, local `faulty` records) and while the tail exceeds
-`HANDOFF_BATCH`. A successor whose inherited read fence stays uncovered for
-`HANDOFF_FENCE_ELECTIONS` election timeouts resigns: ordinary Phase 1 is always the
-fallback, and a failed handoff costs availability, never safety. Design note:
-`docs/analysis/consensus/dpaxos-leader-handoff.md`.
-
-**Election gap fill.** A new leader has two duties, not one. It re-proposes every slot its promise
-quorum reported accepted (the P2c value-selection rule), *and* it fills every slot in
-`first_unchosen()..next_slot` the quorum reported **nothing** for with a `Control::Noop`. The second
-is not optional: pipelining lets a slot reach the old leader alone while a *later* slot reaches the
-quorum, so the earlier slot lands in neither `chosen` nor `Election::recovered` while `next_slot`
-(derived from the accepted log) steps over it. Nothing would ever propose it again — `propose` only
-allocates `next_slot`, and a restart recomputes `next_slot` the same way — and the contiguous chosen
-prefix would freeze one below it cluster-wide and forever, with reads fenced above it and
-commit-replay catch-up unable to help (every node is frozen at the same place). Filling is safe by
-quorum intersection: a value already chosen there would have been reported by some Promise. The core
-surfaces the failure through `node.replica().chosen_gap()` (the `Ready` handshake only ever hands out the
-*contiguous* prefix, so a stranded chosen slot is otherwise invisible), which the driver reports
-each tick through `Audit::chosen_gap` and `paros_sim::audit` asserts against at quiescence.
-
-## Simulation-driven development
-
-This project is simulation-first: the deterministic simulation (moonpool DST + the `paros-sim`
-oracles) is the source of truth for correctness, not hand-written unit tests.
-
-When reading code surfaces a *potential* safety or liveness bug, do NOT reach for a classic unit
-test. Reproduce it as a **failing simulation**:
-
-1. State the invariant it would violate (e.g. "at most one value is chosen per slot").
-2. Make the scenario reachable. Add the chaos it needs (network loss/reorder, crash/restart via
-   `Chaos::Attrition`, storage faults) and use `buggify!()` / `buggify_knob!()` to make the rare
-   interleaving likely. If the harness lacks a capability (e.g. persistent storage across restart),
-   **build that capability**, do not downgrade to a unit test.
-3. Add or strengthen a check so the violation surfaces as a
-   `SimulationReport.assertion_violation`. Put it where the fact arrives: a driver-observable
-   transition goes in `paros_sim::audit` (adding an `Audit` callback if the driver does not report
-   it yet), a client-observable one in the workload's own history + `check()`, a
-   storage fact in the storage layer's audit callbacks. The trace is never read back.
-4. Run the sweep, confirm it goes **red** on the unfixed code, and replay that seed while you work.
-5. Fix `paros-core`.
-6. Run the sweep, confirm it goes **green** and saturates.
-7. Write the red→green result down where it stays true: the commit message, and the doc comment on
-   the rule or oracle it proved load-bearing. Cite the witness seed there if it helps a reader —
-   and then let the seed go. It is evidence that the step happened, not a live reproduction (see
-   *Pinned seeds are not a regression mechanism*), and pinning it into the suite only buys a replay
-   that quietly stops reproducing.
-
-A deterministic unit test may pin the *mechanism* afterward — a core state-machine trap, a storage
-contract — but it never replaces step 4, and it is written against the mechanism, not a seed. A
-critical claim the simulation cannot reproduce is treated as **unproven** (it is probably not a real
-bug: safety is often preserved by an invariant you missed). Do not add speculative defensive code
-for an unreproducible claim.
-
-The sim surface is never finished, and growing it is part of every change, not a follow-up.
-Every new feature or protocol path lands *with* its `sometimes`/`reachable` gates (so saturation
-proves the path is genuinely visited, not merely present), with its rare-but-valid decisions
-hooked through `DriverHooks` BUGGIFY locations, and with its tunables born as workload-buggified
-config. And beyond the operation alphabet: keep planting **new inline `buggify_with_prob!` /
-`buggify_knob!` call sites** at the boundaries the BUGGIFY post names — optional work that can be
-skipped, error-handling paths that can be taken spuriously, concurrency windows that can be
-stretched, tuning knobs that can be pushed to extremes — wherever a rare-but-valid state needs to
-become *likely* instead of waiting for the swarm to stumble into it. Those sites live in the
-driver hooks and the sim/workload layers (per the turbulence doctrine above — never in
-`paros-core`), each as its own independent location so per-seed activation composes.
-
-## Simulation references
-
-- [BUGGIFY](https://transactional.blog/simulation/buggify) — place high-level fault injection at
-  optional-work, error-handling, concurrency, and tuning-knob boundaries; activate locations per
-  run, fire them only sometimes, and stop disruptive injection when the test needs to recover.
-- [Designing Rust FDB Workloads That Actually Find Bugs](https://pierrezemb.fr/posts/writing-rust-fdb-workloads-that-find-bugs/)
-  — design deterministic operation alphabets and invariants, use seeded randomness exclusively,
-  and bias simulation toward adversarial and rare-but-valid states.
-
-## Layout
-
-Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
-Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner, and `paros` ← `parosd`.
-`paros-core` is dependency-free with `default-features = false` (its only deps, `serde` and
-`tracing`, are optional and observation-only); everything ultimately points into it.
-
-- `crates/paros-core/` — the sans-IO Paxos roles (`acceptor.rs`, `proposer.rs`, `replica.rs`,
-  the membership boundary in `membership.rs`) and `ColocatedNode`, the node that wires them
-  (`node.rs`; its `node/*.rs` submodules are named by *concern* — election, replication,
-  Phase 2 and the learner half, handoff, GC, matchmaking, reconfiguration — and hold the
-  wiring for that concern, never a role's state), the proxy leader (`proxy_leader.rs`, the
-  Phase-2 tally on its own process) and, beside it, the sans-IO
-  matchmaker registry (`Matchmaker`, `crates/paros-core/src/matchmaker.rs` — a separate handle
-  the caller drives, never stepped by `ColocatedNode`), its generation handover
-  (`matchmaker/reconfigurer.rs`) and the successor decree it decides with over the shared
-  roles (`matchmaker/decree.rs`): std-only, wasm-safe, and dependency-free
-  with `default-features = false` (CI checks that build too). Two features, both observation-only:
-  `serde` (off) adds derives; `tracing` (on) adds the `#[instrument]` spans described under
-  *Tracing spans* — see the turbulence doctrine above: the core is never buggified and gains no
-  simulation-only conditional compilation. Sancov crate-under-test.
-- `crates/paros/` — **the library.** Re-exports `paros-core`, plus the provider-generic driver
-  (`run_node` over `P: Providers`, `S: LogStorage`), the default in-memory `MemStorage`, the
-  node RPC contract (the journal API of #204: `Write`, `Read`, `Truncate`, `SetLeader`, every
-  call naming a `JournalId`), and the matchmaker's driver + storage seam
-  (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
-  lands here; the `parosd` binary is its own crate. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
-  transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and
-  `moonpool-journal` (the durable stores of `paros::journal`, `JournalStorage` /
-  `JournalMatchmakerStorage`: a log of write operations folded at boot, see *Storage
-  direction*). The faulty fake the campaign runs on is still the harness's world-backed store
-  (`crates/paros-sim/src/world/storage.rs`).
-- `crates/parosd/` — the daemon (`publish = false`, #206): the first build that links moonpool's
-  `TokioProviders`. `parosd node|matchmaker|replica|proxy` runs the library's drivers over Tokio
-  with `paros::journal`'s stores in a data directory (`DirStores`, one directory per journal),
-  the operator's boot claim as `--first-boot`, a tracing subscriber, `SIGTERM` to the shutdown
-  token and an exit code per `RunError` (75 restart, 78 refused, 1 infra); `parosd set-leader|
-  write|read` is the smallest client. Its tests run the two storage contract suites on a real
-  filesystem and a one-node, one-matchmaker, one-replica deployment end to end. The `paros`
-  library itself stays wasm-safe and provider-free.
-- `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
-  deployment/role map, the fault world, the one client workload, the audit, and the scripted
-  corpus. Depends on `paros` + `moonpool-sim`.
-- `crates/paros-sim-runner/` — native sim runner + hunt binaries (`publish = false`).
-- `crates/paros-play/` — the interactive Paxos game's engine + its wasm glue
-  (`publish = false`): a **driver** over the core's public API with a player where the
-  network and the clock would be — worlds, player verbs, the levels and their goals, the
-  role prompts (judged on clones of `Acceptor` / `Proposer` / `Replica`, so a wrong
-  answer never enters the core), the derived narration, and the one `ts-rs` view contract
-  the browser reads. The TypeScript app is beside it in `web/play/`.
-- `crates/xtask/` — build automation (the sancov sim runner).
-- `docs/references/papers/` — Paxos/consensus papers with transcripts.
-- `docs/analysis/` — design notes (e.g. sans-IO patterns for Multi-Paxos, the `DPaxos`
-  cooperative leader-handoff restatement, the matchmaker GC and generations restatement).
-
-**Organize as you grow.** A module holds one concern. When a file starts holding a second one,
-split it in the same change rather than in a follow-up, and never leave a file that needs a
-table-of-contents comment to navigate. Deleting is part of every change: a superseded axis,
-process type, flag, or gate goes out in the PR that supersedes it.
-
-Publishing/changelogs mirror moonpool: library crates share a `version_group` with per-crate
-`CHANGELOG.md` (release-plz); binaries/xtask are `publish = false`. **Never edit a `CHANGELOG.md`
-by hand**: release-plz generates it from the commit history at release time, so a hand-written
-entry is duplicated or conflicts with the generated one. The commit message is where a change is
-described. Note: `paros` and
-`paros-sim` depend on moonpool via a **git** pin, so they are *not* `cargo publish`-able until a
-moonpool release is pinned — `paros-core` is currently the only truly publishable crate.
-
-## Environment detection & setup
+## Environment & Nix
 
 At the start of a session, run:
 
     echo "entrypoint=$CLAUDE_CODE_ENTRYPOINT sandboxed=$CLAUDE_CODE_SANDBOXED"
 
-If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`),
-this project is open in **Claude Code on the web** (an isolated, Anthropic-managed
-cloud VM). Set up Nix before doing anything else:
+If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`), this is
+**Claude Code on the web**. Set up Nix before anything else:
 
-    # The sandbox ships broken third-party APT sources (deadsnakes, ondrej), so a
-    # plain `apt-get update` fails with 403s — and `update && install` then
-    # short-circuits before nix-bin is installed. Install straight from the
-    # already-cached package lists; only fall back to `update` if that fails.
+    # The sandbox's third-party APT sources 403, so install from the cached lists first.
     if ! command -v nix-store >/dev/null 2>&1; then
       sudo apt-get install -y nix-bin \
         || { sudo apt-get update; sudo apt-get install -y nix-bin; }
     fi
-
-    # Enable flakes and point Nix at the agent proxy's CA so it can fetch through
-    # the proxy. Export these in every shell that runs a `nix` command (or add
-    # them to ~/.bashrc):
+    # Export in every shell that runs `nix` (or add to ~/.bashrc):
     export NIX_CONFIG="experimental-features = nix-command flakes"
     export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt
 
-Any other value (e.g. `cli`, `vscode`) means it's running locally — do NOT run
-the install; assume Nix is already set up on the host.
+Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
-## Always use Nix-provided software
+**Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries
+(the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
+`brew` (`nix-bin` above is the one exception). On the web the flake's inputs are GitHub tarballs
+the egress policy blocks (a 403 is org policy, not a bug to retry), so use a Nix `rustup`, which
+reads `rust-toolchain.toml`, plus `protobuf` (`crates/paros/build.rs` runs `prost-build`):
 
-Use Nix-provided software for ALL tooling. **Never** run the sandbox's
-pre-installed binaries — in particular the `rustup`/`cargo`/`rustc` under
-`/root/.cargo`. Whatever the sandbox image ships is off-limits; every tool comes
-from Nix so versions are reproducible across sessions.
+    nix shell nixpkgs#rustup nixpkgs#protobuf -c bash -c 'export PROTOC=$(command -v protoc); cargo build'
+    nix shell nixpkgs#rustup nixpkgs#protobuf nixpkgs#cargo-nextest \
+      -c bash -c 'export PROTOC=$(command -v protoc); cargo nextest run'
 
-- **Locally** (`cli`/`vscode` sessions) just use the project dev shell:
-  `nix develop` (or rely on direnv), then run `cargo …` inside it.
-- **On Claude Code on the web** the project's `nix develop` shell can't be built:
-  its flake inputs (`flake-utils`, `rust-overlay`, `nix-systems`, `nixpkgs`) are
-  fetched as GitHub tarballs the sandbox egress policy blocks with a 403
-  (`…not enabled for this session`). Do not fight it — that is an org-policy
-  denial, not a bug to retry. Instead get a **Nix-provided `rustup`**, which reads
-  `rust-toolchain.toml` and runs the pinned channel (1.95.0 +
-  `wasm32-unknown-unknown` + clippy/rustfmt):
+Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the flake.
 
-      nix shell nixpkgs#rustup -c cargo build
-      nix shell nixpkgs#rustup -c cargo test           # nextest: add nixpkgs#cargo-nextest
-      nix shell nixpkgs#rustup -c cargo clippy -- -D warnings
-      nix shell nixpkgs#rustup -c cargo fmt
-      nix shell nixpkgs#rustup -c cargo check --target wasm32-unknown-unknown -p paros-core
+## Workflow rules
 
-  `nix shell nixpkgs#…` resolves against `cache.nixos.org` (which the egress
-  policy allows), so it works even where `nix develop` does not. The `rustc`/
-  `cargo` it runs are the official upstream pinned toolchain — never the sandbox's.
-- **Other one-off tools:** `nix shell nixpkgs#<tool> -c <command>` or
-  `nix run nixpkgs#<tool> -- <args>`. Do NOT use `apt-get`, `pip install`,
-  `npm -g`, `brew`, or similar (`nix-bin` in setup is the sole exception, and only
-  to bootstrap Nix itself).
-- If a required tool isn't available, add it to the project's flake (or fetch it
-  via `nixpkgs#<tool>`) rather than installing it globally.
+- **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly three issues;
+  update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
+- **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
+  (`moonpool-consultant` agent).
+- **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
+  in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
+- **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
+  a change is described.
+- **Organize as you grow**: a module holds one concern; split a file the moment it holds a
+  second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
+  PR that supersedes it.
+
+## Simulation rules
+
+- **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
+  gate: it exits non-zero on any safety violation and must *saturate* assertion and code
+  coverage; prove a red→green result there. The nextest sim tests are a fast smoke
+  (`SMOKE_ITERATIONS = 50` seeds through the safety oracles) and assert no saturation. Never
+  put a multi-thousand-iteration `explore()` into a nextest test.
+- **No pinned seeds.** A seed names a draw schedule, not a scenario: any added or removed draw
+  shifts every seed, so a "stays red/green" replay silently stops testing anything. Do not add
+  seed constants, seed lists or seed-replay tests; cite a witness in a commit or doc comment
+  and let it go. A test may hard-code a seed that is not a witness (a determinism replay, a
+  corpus case whose seed is its input, a display seed). Reach comes from volume and BUGGIFY.
+- **Hunt budget** (`sim-paros-hunt`): 2,000–3,000 seeds normally, 10,000 only for a substantial
+  protocol, harness or fault-model change, more only when the user asks. A hunt's deliverable
+  is a failing seed and its diagnosis.
+- **Canary** (`sim-paros-hunt canary`, moonpool's `check_determinism`): run a few hundred seeds
+  after any change to the harness's randomness, the driver hooks or the process lifecycle.
+- **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
+  256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
+  message: never reword a message, keep messages short with no interpolated ids, and never use
+  slots, ballots, request ids, seeds or hashes as identities. Exploration is in-process
+  (`workers: 0`); every workload and process is factory-created.
+
+Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENTS.md`.
+
+## The harness in one paragraph
+
+Two axes, one workload, two judges. The **main campaign** is a pool of
+`NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
+joiners, under every moonpool fault, the driver hooks and the disk's fault coins; the
+**corpus** is a scripted three-node cluster (and one four-node case) with every fault a
+targeted injection and an analytically known outcome. The one workload is `ChainWorkload`,
+which drives every call through the library client `paros::client`; its misbehaviours (stale
+writes, duplicates, dual submits) are explicit calls, never the library's defaults. Every run is
+judged by the client's own history (`ClientHistory`, searched for a linearization against the
+journal's model) and the shared `AuditWorld`. Roles come from moonpool process groups
+(`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`) through the
+deployment/role map `paros_sim::roles`. No third workload, no per-scenario process type, no
+check that reads a trace. Depth: `crates/paros-sim/AGENTS.md` (the op-id table, the role map,
+the quorum-system and grid draws, the journal and storage coins).
+
+## Architecture
+
+**Sans-IO core, driver outside** (etcd-raft's `RawNode`/`Node` split: `ColocatedNode` in
+`paros-core`, `paros::run_node` in `paros`). The core is a pure synchronous state machine:
+`step`/`tick` in, one `Ready` out, `advance()`; no I/O, clock, RNG or deps. `ready(&mut self)
+-> Ready<'_>` holds the unique borrow, so a second `ready()` before `advance()` is a compile
+error. Persist-before-send ordering is documented on `Ready`/`HardState`
+(`docs/analysis/go-raft/etcd-raft-sans-io-patterns.md`).
+
+**One file per role; `ColocatedNode` is wiring** (timers, messages, the persist-before-send
+batch) and holds **no protocol tally of its own**:
+
+- `acceptor.rs` (+ `acceptor/retention.rs`, the floor-moving ops) — promise, records, floor, CTRL
+- `proposer.rs` (+ `proposer/rounds.rs` the standalone Phase-2 tally, `proposer/authority.rs`
+  the standing authority) — election, repair probe, recovery
+- `replica.rs` — chosen prefix, apply walk, journal fold · `journal_state.rs` — the one
+  journal-control state machine, judged at apply
+- `quorum_read.rs` — leaderless reads · `collector.rs` — the leader-side GC tally
+- `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
+- `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`,
+  `decree.rs`) — the registry, its generation handover and decree
+- `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
+
+The map is `crates/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
+the current deployment colocates it**: the proposer builds no message, the acceptor never reads
+the chosen prefix, the replica never sees a ballot tally; the caller hands each the data it
+needs. **Every quorum question crosses `membership.rs`**: predicates are phase-split
+(`has_phase1_quorum` / `has_phase2_quorum`, cross-intersecting) and no tally compares a count
+against a threshold on its own; a new quorum system is a `QuorumSystem` variant, never a tally
+rewrite. Policies are explicit types, never flags.
+
+**The driver is written once, generic over moonpool's `P: Providers`** (`run_node`,
+`run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`), so the same code runs in
+production (`TokioProviders`, `parosd`) and in simulation ("test the code you ship"). Protocol
+logic lives there, never in a sim-only path. `paros::client` is likewise provider-generic.
+
+## Plain Multi-Paxos is first-class and permanent; everything else is opt-in
+
+Multi-Paxos without matchmakers — a fixed membership read once from storage — is a permanent
+configuration, not a transitional state. Before touching `on_check_leader`, `Election`,
+`HardState` or the role map:
+
+- The static case is the **`None` arm of the same state machine**: never a cargo feature, never
+  conditional compilation (`serde` and `tracing` are paros-core's only features, observation-only).
+- No matchmaker message, no `HardState` field and no extra round trip enters the plain path;
+  `ColocatedNode` never steps a matchmaker message. Removing every opt-in feature must leave the
+  plain program's behaviour unchanged.
+- A reconfiguration request on a deployment without matchmakers is **refused**, never honored.
+- Flexible quorums, grids, matchmakers, proxies and replicas are **configuration data**, never
+  implied by code being present, and in simulation each is drawn per seed so one campaign proves
+  every mode. Every peer and client message is framed by a `JournalId`; inside that frame the
+  plain deployment exchanges the same messages and persists the same scalars.
+
+## Matchmaking, reconfiguration, GC, generations
+
+- **Matchmaking, then Phase 1.** A candidate registers `(b, C_b)` at a matchmaker quorum before
+  any `Prepare`; histories are unioned above the **maximum** watermark into `H_b`. Phase 1 needs
+  a promise quorum of **every** configuration in `H_b` — never `quorum(union)` — and Phase 2
+  addresses `C_b` alone. A refusal abandons the campaign; a slow one is re-asked on election
+  timeouts, never abandoned by the clock.
+- **A belief is not a fact.** A registration is a belief (an ordinary campaign) or a
+  reconfiguration; the **effective configuration** is the highest-ballot reconfiguration a
+  quorum holds. A campaign whose histories name another abandons, adopts it and re-campaigns
+  (`MatchStep::StaleConfiguration`); beliefs never trigger that.
+- **Membership probe** (`MembershipProbe`): every incarnation boots believing the bootstrap
+  configuration and asks a matchmaker quorum for the effective one, registering nothing, before
+  its first campaign or skip. A node only registers a belief it heard.
+- **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
+  to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
+  down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are
+  pool-based, never configuration-based).
+- **GC**: a configuration is forgotten only once no future leader can need its Phase-1 quorum. A
+  floor is **effective only once a matchmaker quorum acked it durably** (`GcStep::Effective`);
+  only then are acceptors retirable. The compaction floor and the GC watermark never wait on
+  each other.
+- **Retire carries the evidence**: the operator sends the effective watermark and
+  `ColocatedNode::may_retire` checks five legs (matchmakers, not a member, not the leader,
+  watermark above `last_member_ballot`, belief bound to exactly that watermark). The operator's
+  half: retire no node a reconfiguration it asked for above the floor names.
+- **Matchmaker sets are generations**: every matchmaking message is fenced by generation;
+  matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
+  `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
+  quorum's maximum decree promise; any node that meets `Stopped { successor: None }` finishes
+  the handover. `MatchmakerSet::new` / `AcceptorConfig::new` are the only constructors.
+
+Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure.rs`,
+`node/gc.rs` (`may_retire`), `matchmaker.rs`, `matchmaker/reconfigurer.rs`,
+`matchmaker/handover_model.rs`; `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
+`matchmaker-interaction-verification.md`.
+
+## Journals, system journals, storage, boot safety
+
+- **Share processes, disks and connections, never protocol state.** Each journal has its own
+  `ColocatedNode`, ballots, log and store; the one cross-journal property is non-interference.
+  The `JournalId` rides the `Deliver` envelope per message (never a fingerprint) and the driver
+  demuxes before the core; each journal has its own peer-mailbox lane. Ids: `0` unset, `1..=127`
+  system, user journals from `JournalId::FIRST_USER` (128).
+- **A storage fault quarantines its journal, not the process**; it re-opens after
+  `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
+- **System journals** (1 = directory, 2 = node registry) are opt-in through a `SystemPlan`
+  (`None` is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
+  journal's id is `128 +` its LSN, never reused. The core's pool grows, never shrinks
+  (`extend_pool`), and only with matchmakers.
+- **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
+  returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
+  stay synchronous, served from memory after `boot_scan`. Production stores are
+  `paros::journal` on `moonpool-journal`: a log of write operations folded at boot.
+- **Boot safety is the library's job.** Every store carries a format marker; `run_node` /
+  `run_matchmaker` take the operator's `BootKind` as data and refuse `Amnesia` (an existing member
+  with no marker), `AlreadyFormatted` and `ConfigMismatch` (the marker records the `Config`; the
+  membership, quorum system and counts are never edited across a restart). **A wiped node never
+  rejoins**: a trim jump restores the floor, not the promise. The acceptor set heals around it by
+  reconfiguration; a wiped matchmaker is replaced by a handover.
+
+Depth: `crates/paros/AGENTS.md`; module docs of `driver/journals.rs`, `driver/system.rs`,
+`driver/boot.rs`, `storage/mod.rs`, `journal/mod.rs`, `matchmaker/mod.rs`.
+
+## Turbulence layers
+
+Three layers, and nothing crosses them:
+
+- **Environmental faults belong to moonpool** (drop, delay, duplicate, reorder, partitions,
+  close, attrition, scheduling), swarm-masked per seed, on **one combined campaign axis**
+  (`chaos_surfaces()`); after `CHAOS_DURATION_MS` moonpool enters recovery mode, so the tail is
+  a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
+  the axis.
+- **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
+  decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
+  perturbed only by a caller that stops calling.
+- **Prong 1, `DriverHooks`**: the driver's rare-but-valid choices, one `buggify_with_prob!`
+  location each in `paros-sim` (`NoHooks` in production). Consult a hook only where its answer
+  has an observable effect, trace what happened, quiet disruptive hooks after the chaos window.
+  Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`
+  is deliberately not `Send + 'static`); a decision a spawned task needs is carried to it.
+  Each durability `Seam` (`BeforeSync`, `AfterSyncBeforeSend`, `MatchBeforeSync`,
+  `MatchAfterSyncBeforeReply`) is its own location.
+- **Prong 2, knobs**: anything that shapes a run is config data the harness draws per seed, one
+  `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
+  must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a
+  partition, not a knob). **Never buggified**: oracle thresholds (`DEPOSED_TICK_SLACK`,
+  `PLATEAU_SEEDS`, `CHAOS_DURATION_MS`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
+  (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
+
+Depth: the `adding-a-buggify-site` skill, `crates/paros/src/hooks.rs`.
+
+## Audit, correctness, assertions, spans
+
+- **The audit observes, never perturbs.** `paros::Audit` (`NoAudit` in production) reports each
+  meaningful transition once, typed, where its `tracing` event is; it returns nothing, draws no
+  randomness, reads no clock.
+- **Correctness lives in `paros_sim::audit` and the workload's `check()`**, folded into O(1)
+  incremental state — never a scan of the trace. A missing fact gets a new `Audit` callback.
+- **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
+  on external input (operating errors are results). `ColocatedNode::assert_invariants` runs at
+  boot and every public mutating entry; public functions that assert document `# Panics`.
+- **Sim layers use moonpool macros, never plain `assert!`**: `assert_always!` with a detail map
+  (record and continue), `assert_sometimes!` for an **outcome** the run must reach,
+  `reach_once!`/`assert_reachable!` for a **cause** that fired. A perturbation never gets a
+  `sometimes`; every BUGGIFY site is paired with a reachable.
+- **Spans**: `#[tracing::instrument]` is non-optional on the important methods of `paros` and
+  `paros-sim`; in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.
+  Use `skip_all` plus a few cheap `fields` (node id, `from`, `round`, `slot`); entry points at
+  `debug`, per-message and per-tick at `trace`; no `ret`/`err`. Spans are for humans only.
+
+Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
+
+## Protocol invariants to remember
+
+- **Truncation is a Paxos-decided control command** (`Truncate`, proposed by the leader): the
+  fold raises `first_seq` and every node compacts lazily when its walk reaches the slot. paros
+  runs no application and takes no snapshot; record bytes are opaque.
+- **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
+  and the journal state, no bytes and **no ballot**; the promise never moves.
+- **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the
+  decision, the successor is named inside the payload, and only the elected minter of a ballot
+  may hand it on (one hop). A failed handoff costs availability, never safety
+  (`docs/analysis/consensus/dpaxos-leader-handoff.md`).
+- **Election gap fill**: a new leader re-proposes every reported slot *and* fills every
+  unreported slot below its frontier with a `Noop`, because pipelining can strand a slot no one
+  would ever propose again, freezing the chosen prefix cluster-wide.
+- **The allocator frontier is durable by construction**: a leader records every round it opens
+  (`record_own_round`).
+
+## Simulation-driven development
+
+The deterministic simulation is the source of truth. For a suspected safety or liveness bug:
+
+1. State the invariant it would violate.
+2. Make it reachable (chaos, `buggify!`/`buggify_knob!`); build a missing harness capability.
+3. Put the check where the fact arrives (audit, workload `check()`, storage callbacks).
+4. Run the sweep: **red** on the unfixed code; replay that seed while working.
+5. Fix `paros-core`.
+6. Run the sweep: **green** and saturated.
+7. Record red→green in the commit and the doc comment of the rule it proved; let the seed go.
+
+A unit test may pin a mechanism afterwards, never replace step 4. A claim the simulation cannot
+reproduce is unproven: no speculative defensive code. Growing the sim surface is part of every
+change: a new path lands with its gates, hooks and knobs, and new BUGGIFY sites go wherever a
+rare-but-valid state should become likely. References:
+[BUGGIFY](https://transactional.blog/simulation/buggify),
+[Designing Rust FDB Workloads That Actually Find Bugs](https://pierrezemb.fr/posts/writing-rust-fdb-workloads-that-find-bugs/).
+Procedure: the `simulation-driven-fix` skill.
+
+## Layout
+
+Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` ← `paros` ←
+`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`. Each crate's `AGENTS.md` is its map.
+
+- `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
+  `default-features = false`, wasm-safe; sancov crate-under-test.
+- `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
+  `prost-build`), stores, `paros::client`; wasm-safe and provider-free.
+- `parosd` — the `parosd` daemon over Tokio and `parosctl` (`src/bin/parosctl/`), the CLI over
+  `paros::client` (`publish = false`).
+- `paros-sim` — the DST harness: processes, role map, fault world, workload, audit, corpus.
+- `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
+- `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
+- `xtask` — `cargo xtask sim` (the sancov runner).
+
+Elsewhere: `book/` (mdbook; `book/CLAUDE.md`, the `update-the-book` skill),
+`docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`), `.claude/skills/` and
+`.claude/agents/`.
+
+Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
+`CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
+moonpool by **git** rev (eight lines across their `Cargo.toml`s, advanced together), so only
+`paros-core` is truly publishable.

@@ -19,14 +19,19 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than, buggify_knob,
     buggify_with_prob, swarm_op_enabled,
 };
+use paros::client::{
+    ClaimOutcome, ClientTunables, MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome,
+    ReconfigureOutcome, Resolution, Retarget, RetireOutcome, TruncateOutcome, WriteOptions,
+    WriteOutcome, Writer, WriterOutcome,
+};
 use paros::{
-    ClientId, Command, Entry, Generation, JournalId, JournalState, QuorumSystem, ReadAck,
-    RetireRequest, Seq, Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
+    Command, Entry, JournalId, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
+    Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
 };
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
 use crate::chain::{hash_text, trace_truncate, user_command_hash};
-use crate::client::{ClientRuntime, SimClient, client_rpc_config};
+use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod fold;
 mod races;
@@ -34,10 +39,7 @@ mod rpc;
 mod system;
 
 use crate::{CHAOS_DURATION_MS, DigestSink};
-use rpc::{
-    CallLog, ReconfigureMatchmakersResult, ReconfigureResult, SetLeaderResult, TruncateResult,
-    WriteResult, inspect, read_once, set_leader_once, state_of, within,
-};
+use rpc::{CallLog, judged_truncate, judged_write, read_once, within};
 
 /// A journal `Write` (#204) by an owner at the position it believes next —
 /// or, from a writer another owner superseded, under its old generation,
@@ -195,8 +197,20 @@ struct ChainConfig {
     /// Idle between a redirect and the next attempt. Floor 0 (tight loop
     /// bounded by the request deadline).
     redirect_sleep_ms: u64,
-    /// Idle between recovery-batch retries. Floor 0, same bound.
+    /// Idle between recovery-batch retries, and between the identical
+    /// re-sends that settle an ambiguous write (`ClientTunables::
+    /// retry_backoff`). Floor 0, same bound.
     retry_backoff_ms: u64,
+    /// Redirects one write follows inside its deadline
+    /// (`ClientTunables::redirect_limit`). Floor 1: a write that gives up
+    /// after its first redirect still reports it, and the next step retries
+    /// at the hinted leader.
+    write_redirect_limit: u8,
+    /// Identical re-sends that settle an ambiguous write after its
+    /// read-back (`ClientTunables::retry_budget`). Floor 1: one re-send,
+    /// the reconciling retry the client always made; an unsettled write
+    /// stays ambiguous, never assumed.
+    resolve_attempts: u8,
     /// Convergence probe cadence. Floor 10 ms: the probe is one inspect RPC
     /// per live node, and the tail is tens of seconds.
     probe_interval_ms: u64,
@@ -305,6 +319,8 @@ impl ChainConfig {
             abandon_pct: buggify_knob!(15_u64, 0_u64..61_u64),
             redirect_sleep_ms: buggify_knob!(10_u64, 0_u64..101_u64),
             retry_backoff_ms: buggify_knob!(25_u64, 0_u64..201_u64),
+            write_redirect_limit: buggify_knob!(16_u8, 1_u8..33_u8),
+            resolve_attempts: buggify_knob!(2_u8, 1_u8..5_u8),
             probe_interval_ms: buggify_knob!(50_u64, 10_u64..251_u64),
             compact_beat_ms: buggify_knob!(60_u64, 10_u64..301_u64),
             compact_attempts: buggify_knob!(4_u8, 1_u8..9_u8),
@@ -391,6 +407,49 @@ impl ChainConfig {
         }
     }
 
+    /// The library client's tunables for the journal calls (#221): the
+    /// knobs above, each its own location.
+    fn tunables(&self) -> ClientTunables {
+        ClientTunables {
+            request_timeout: Duration::from_millis(self.request_timeout_ms),
+            read_timeout: Duration::from_millis(self.read_timeout_ms),
+            redirect_limit: u32::from(self.write_redirect_limit),
+            redirect_backoff: Duration::from_millis(self.redirect_sleep_ms),
+            retry_budget: u32::from(self.resolve_attempts),
+            retry_backoff: Duration::from_millis(self.retry_backoff_ms),
+            page_size: self.read_limit,
+            wait_ms: self.read_wait_ms,
+        }
+    }
+
+    /// A truncation's: `compact_attempts` asks, `compact_beat_ms` apart.
+    fn truncate_tunables(&self) -> ClientTunables {
+        ClientTunables {
+            redirect_limit: u32::from(self.compact_attempts),
+            retry_backoff: Duration::from_millis(self.compact_beat_ms),
+            ..self.tunables()
+        }
+    }
+
+    /// An acceptor reconfiguration's: `reconfigure_attempts` asks,
+    /// `reconfigure_beat_ms` apart.
+    fn reconfigure_tunables(&self) -> ClientTunables {
+        ClientTunables {
+            retry_budget: u32::from(self.reconfigure_attempts),
+            retry_backoff: Duration::from_millis(self.reconfigure_beat_ms),
+            ..self.tunables()
+        }
+    }
+
+    /// A matchmaker-set reconfiguration's.
+    fn matchmakers_tunables(&self) -> ClientTunables {
+        ClientTunables {
+            retry_budget: u32::from(self.reconfigure_matchmakers_attempts),
+            retry_backoff: Duration::from_millis(self.reconfigure_beat_ms),
+            ..self.tunables()
+        }
+    }
+
     fn weight(&self, operation: u8) -> u64 {
         self.weights[usize::from(operation)]
     }
@@ -417,90 +476,17 @@ fn weighted_index(weights: &[u64], draw: u64) -> usize {
 }
 
 /// Where a client sends its next attempt after a redirect, a transport error,
-/// or an ambiguous outcome. Drawn per step, so a seed can be a client that
-/// always follows the hint, one that stubbornly re-asks the same node (the
-/// dedup path on the node that may have committed the abandoned attempt), or
-/// one that walks the ring.
-#[derive(Clone, Copy, Debug)]
-enum Retarget {
-    FollowHint,
-    SameNode,
-    NextNode,
-}
-
-impl Retarget {
-    /// Two bits of `draw` pick the policy; the hint-following default keeps
-    /// half the mass so the ordinary client stays the common shape.
-    fn from_draw(draw: u64) -> Self {
-        match draw % 4 {
-            0 | 1 => Self::FollowHint,
-            2 => Self::SameNode,
-            _ => Self::NextNode,
-        }
-    }
-
-    fn next(self, current: usize, hinted: Option<u64>, routes: Routes) -> usize {
-        let hint = hinted.and_then(|id| routes.index(id));
-        match self {
-            Self::FollowHint => hint.unwrap_or((current + 1) % routes.servers),
-            Self::SameNode => current,
-            Self::NextNode => (current + 1) % routes.servers,
-        }
-    }
-}
-
-/// How the client reaches a node by its id (#189): the genesis pool at its
-/// rank, and a joiner — a node the registry admitted, which a
-/// reconfiguration may make a member and then a leader — after them, at
-/// `servers + rank`. Every draw the client makes stays over the genesis
-/// pool; only a leader a reply names can route to a joiner.
-#[derive(Clone, Copy, Debug)]
-struct Routes {
-    servers: usize,
-    joiners: usize,
-}
-
-impl Routes {
-    /// The client index of node `id`, if the client can reach it.
-    fn index(self, id: u64) -> Option<usize> {
-        let id = usize::try_from(id).ok()?;
-        if id < self.servers {
-            return Some(id);
-        }
-        let joiner_base = usize::try_from(crate::roles::joiner_node_id(0).0).ok()?;
-        id.checked_sub(joiner_base)
-            .filter(|rank| *rank < self.joiners)
-            .map(|rank| self.servers + rank)
-    }
-
-    /// The node id of client index `index` (the inverse of [`Routes::index`]).
-    fn id(self, index: usize) -> u64 {
-        match index.checked_sub(self.servers) {
-            Some(rank) => crate::roles::joiner_node_id(rank).0,
-            None => index as u64,
-        }
-    }
-}
-
-/// The client's belief about who leads: the current hint, and the leader it
-/// last replaced (the stale leader a `COMPACT_STORM` step aims at).
-#[derive(Clone, Copy, Default)]
-struct LeaderHint {
-    current: Option<usize>,
-    stale: Option<usize>,
-}
-
-impl LeaderHint {
-    /// Adopt the leader a reply named (`None`, or an id outside the pool,
-    /// clears the hint); a change of leader remembers the previous one.
-    fn observe(&mut self, observed: Option<u64>, routes: Routes) {
-        let next = observed.and_then(|id| routes.index(id));
-        if let (Some(previous), Some(next)) = (self.current, next)
-            && previous != next
-        {
-            self.stale = Some(previous);
-        }
-        self.current = next;
+/// or an ambiguous outcome (the library's [`Retarget`]). Drawn per step, so a
+/// seed can be a client that always follows the hint, one that stubbornly
+/// re-asks the same node (the dedup path on the node that may have
+/// committed the abandoned attempt), or one that walks the ring. Two bits
+/// of `draw` pick it; the hint-following default keeps half the mass so the
+/// ordinary client stays the common shape.
+fn retarget_from_draw(draw: u64) -> Retarget {
+    match draw % 4 {
+        0 | 1 => Retarget::FollowHint,
+        2 => Retarget::SameNode,
+        _ => Retarget::NextNode,
     }
 }
 
@@ -623,11 +609,13 @@ fn ledger_request(state: &moonpool_sim::StateHandle, members: &[u64]) -> u64 {
 /// File the leader's answer to ledger request `id`: the round it started
 /// at, or a refusal. An ambiguous answer is never filed — the request may
 /// have registered anywhere, and the ledger keeps it as such.
-fn ledger_answer(state: &moonpool_sim::StateHandle, id: u64, outcome: &ReconfigureResult) {
+fn ledger_answer(state: &moonpool_sim::StateHandle, id: u64, outcome: &ReconfigureOutcome) {
     let started = match outcome {
-        ReconfigureResult::Started { round, .. } => Some(*round),
-        ReconfigureResult::Refused { .. } => None,
-        ReconfigureResult::Ambiguous => return,
+        ReconfigureOutcome::Started { round, .. } => Some(*round),
+        ReconfigureOutcome::NotLeader { .. }
+        | ReconfigureOutcome::Refused { .. }
+        | ReconfigureOutcome::Unrecognized { .. } => None,
+        ReconfigureOutcome::Ambiguous => return,
     };
     crate::world::storage_world(state)
         .lock()
@@ -643,49 +631,6 @@ fn live_candidates(ips: &[String], dead: &std::collections::BTreeSet<String>) ->
         .filter(|(_, ip)| !dead.contains(*ip))
         .map(|(i, _)| u64::try_from(i).unwrap_or(u64::MAX))
         .collect()
-}
-
-/// This client's belief as a writer (#204): the generation it believes it
-/// owns and the position it writes next. Corrected by every verdict — a
-/// refusal names the journal's writer and next position — so a wrong belief
-/// costs a refused write, never a wrong one.
-#[derive(Clone, Copy, Debug, Default)]
-struct Writer {
-    /// The generation it believes it owns (`None`: it does not).
-    owned: Option<u64>,
-    /// The last generation it owned — what a superseded writer keeps writing
-    /// under, to be fenced.
-    last: u64,
-    /// The position it writes next.
-    next_seq: u64,
-}
-
-impl Writer {
-    /// The generation its next write names.
-    fn generation(self) -> u64 {
-        self.owned.unwrap_or(self.last)
-    }
-
-    /// Learn from a state a verdict named: the journal's writer and next
-    /// position. A state naming this client as the writer (a claim whose
-    /// answer was lost, a position it had wrong) is adopted whole; any
-    /// other writer supersedes it.
-    fn learn(&mut self, me: u64, state: &JournalState) {
-        if state.owner == Some(ClientId(me)) {
-            self.owned = Some(state.generation.0);
-            self.last = state.generation.0;
-            self.next_seq = state.next_seq.0;
-        } else {
-            self.owned = None;
-        }
-    }
-
-    /// A claim won: own `state`'s generation and continue at its position.
-    fn won(&mut self, state: &JournalState) {
-        self.owned = Some(state.generation.0);
-        self.last = state.generation.0;
-        self.next_seq = state.next_seq.0;
-    }
 }
 
 /// One write this client issued: its entry, the payload class its bytes
@@ -725,21 +670,21 @@ struct WrittenCommand {
 /// position, this client's written records inside the page are in it (a
 /// page never hides a record), the state it was served from covers every
 /// write this client saw written before the read, and a truncated answer
-/// carries nothing.
-fn judge_read(audit: &AuditWorld, from: u64, ack: &ReadAck, written: &[WrittenCommand]) {
-    if !ack.served || ack.unknown_journal {
-        return;
-    }
-    let state = state_of(ack.state);
-    if ack.truncated {
-        assert_always!(
-            ack.records.is_empty() && from < state.first_seq.0,
-            "chain: a trimmed read carries nothing and names a point above its start",
-            { "from" => from, "first_seq" => state.first_seq.0 }
-        );
-        return;
-    }
-    for (position, record) in (from..).zip(&ack.records) {
+/// names a floor above where it started.
+fn judge_read(audit: &AuditWorld, from: u64, answer: &ReadOutcome, written: &[WrittenCommand]) {
+    let (records, state) = match answer {
+        ReadOutcome::Page { records, state, .. } => (records, state),
+        ReadOutcome::Truncated { state } => {
+            assert_always!(
+                from < state.first_seq.0,
+                "chain: a trimmed read carries nothing and names a point above its start",
+                { "from" => from, "first_seq" => state.first_seq.0 }
+            );
+            return;
+        }
+        _ => return,
+    };
+    for (position, record) in (from..).zip(records) {
         if let Some(accepted) = audit.record_at(position) {
             assert_always!(
                 accepted == user_command_hash(record),
@@ -748,13 +693,13 @@ fn judge_read(audit: &AuditWorld, from: u64, ack: &ReadAck, written: &[WrittenCo
             );
         }
     }
-    let next = from + ack.records.len() as u64;
+    let next = from + records.len() as u64;
     for own in written {
         for (position, record) in (own.seq..own.seq + own.count).zip(&own.entry.records) {
             if position >= from && position < next {
                 let offset = usize::try_from(position - from).unwrap_or(usize::MAX);
                 assert_always!(
-                    ack.records.get(offset) == Some(&record.0),
+                    records.get(offset) == Some(&record.0),
                     "chain: a read covering an acked append returns it",
                     { "position" => position, "from" => from, "next" => next }
                 );
@@ -949,12 +894,10 @@ impl ChainWorkload {
         for record in &records {
             audit.note_submitted(user_command_hash(&record.0));
         }
-        let entry = Entry {
-            generation: Generation(writer.generation()),
-            owner: ClientId(self.client_id),
-            seq: Seq(writer.next_seq),
-            records,
-        };
+        // An owner's write; a superseded writer's is the deliberate
+        // misbehaviour (#204: under its old generation, which the journal
+        // must refuse).
+        let entry = writer.stale_entry(records);
         let cmd_hash = command_hash(&Command::Write(entry.clone()));
         // The non-interference oracle's ground truth (#188): this write
         // belongs to this client's journal and to no other.
@@ -1010,58 +953,37 @@ impl ChainWorkload {
     }
 }
 
-/// Claim `journal` (#204): read where it stands, then `SetLeader` against the
-/// generation read, asked of `clients[target]`. Returns what the claim came
-/// back with (`None` when no server answered the read — then nothing is
-/// asked).
+/// Claim `journal` (#204) through the library ([`ChainClient::claim`]):
+/// read where it stands — a quorum read any node serves, moving on to the
+/// next node while one goes unserved (a leader whose own reads cannot
+/// confirm, a slow link to its row, must not also fence every claim sent
+/// its way — witness seed 13376948288886643991, where two owners' claims
+/// read at such a leader for the whole recovery tail) — then `SetLeader`
+/// against the generation read, asked of `nodes[target]`.
 ///
-/// The read is a quorum read any node serves, so it starts at `target` and
-/// moves on to the next node while one goes unserved: a leader whose own
-/// reads cannot confirm (a slow link to its row, say) must not also fence
-/// every claim sent its way — witness seed 13376948288886643991, where two
-/// owners' claims read at such a leader for the whole recovery tail.
+/// A claim against its own generation would supersede this client's own
+/// ownership: with a request timeout under the claim's answer, every claim
+/// won and every answer was lost, and the client re-claimed forever, one
+/// generation a claim (witness seed 3544251723324122292, #205: generations
+/// 1–58 all its own, no write in 60 s) — the library adopts such a read as
+/// `Owned`. `fresh` is the deliberate exception: an owner minting a new
+/// generation of its own (the races of #205).
 async fn claim(
-    ctx: &SimContext,
-    clients: &[SimClient],
-    log: &CallLog,
+    nodes: &ChainClient,
     journal: JournalId,
     target: usize,
     (me, fresh): (u64, bool),
-    (read_timeout, timeout): (Duration, Duration),
-) -> Option<SetLeaderResult> {
-    let mut served = None;
-    for offset in 0..clients.len() {
-        let read = read_once(
-            &clients[(target + offset) % clients.len()],
-            log,
-            journal.0,
-            0,
-            1,
-            0,
-        );
-        // A node outside this journal (a joiner, #189) refuses it as
-        // unknown: a node to skip, not an answer.
-        if let Some(ack) = within(ctx, read_timeout, None, read).await
-            && ack.served
-            && !ack.unknown_journal
-        {
-            served = Some(ack);
-            break;
-        }
-    }
-    let tail = state_of(served?.state);
-    // A claim against its own generation would supersede this client's own
-    // ownership: with a request timeout under the claim's answer, every
-    // claim won and every answer was lost, and the client re-claimed
-    // forever, one generation a claim (witness seed 3544251723324122292,
-    // #205: generations 1–58 all its own, no write in 60 s).
-    // `fresh` is the deliberate exception: an owner minting a new generation
-    // of its own (the races of #205, an owner restarting).
-    if !fresh && tail.owner == Some(ClientId(me)) {
-        return Some(SetLeaderResult::Owned { state: tail });
-    }
-    let ask = set_leader_once(clients, log, journal, target, tail.generation.0, me, false);
-    Some(within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await)
+) -> ClaimOutcome {
+    let outcome = nodes.claim(journal, me, target, fresh).await;
+    assert_always!(
+        outcome != ClaimOutcome::Malformed,
+        "chain: a node answers a well-formed journal state"
+    );
+    assert_always!(
+        outcome != ClaimOutcome::UnknownJournal,
+        "chain: a node serves the journal the client names"
+    );
+    outcome
 }
 
 #[async_trait]
@@ -1145,43 +1067,78 @@ impl Workload for ChainWorkload {
                 Duration::from_millis(config.keep_alive_timeout_ms),
             ),
         )?;
-        let mut clients = runtime.clients(&servers)?;
+        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
+        let journal = self.journal;
+        // Every attempt at this client's journal, logged at the RPC seam:
+        // the library client reports each one to it (#221).
+        let log = CallLog::new(journal, client_id, ctx.time().clone());
+        self.calls = Some(log.clone());
+        let observer: Arc<dyn paros::client::CallObserver> = Arc::new(log.clone());
+        let server_count = servers.len();
+        // The library client this workload drives every journal call
+        // through (#221): the genesis pool at its rank, then the joiners
+        // (#189) — a reconfiguration may make one a member and then the
+        // leader, and a client that cannot reach its leader cannot append at
+        // all. Every draw the client makes stays over the genesis pool (the
+        // rotation); only a leader a reply names routes to a joiner.
+        let node_ids: Vec<(u64, String)> = servers
+            .iter()
+            .enumerate()
+            .map(|(rank, ip)| (rank as u64, ip.clone()))
+            .chain(
+                deployment
+                    .joiners()
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, ip)| (crate::roles::joiner_node_id(rank).0, ip.clone())),
+            )
+            .collect();
+        let nodes = runtime
+            .chain_client(ctx, &node_ids, config.tunables())?
+            .with_observer(observer.clone())
+            .rotating_over(server_count);
         // The replica tier (#144): never proposed to, only probed — a replica
         // applies the same log, so the settle tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let replica_clients = if self.journal == JournalId::default() {
-            runtime.clients(deployment.replicas())?
+        let replica_ips: Vec<(u64, String)> = if self.journal == JournalId::default() {
+            deployment
+                .replicas()
+                .iter()
+                .enumerate()
+                .map(|(rank, ip)| {
+                    let id = crate::roles::replica_node_id(paros::ReplicaId(rank as u64));
+                    (id.0, ip.clone())
+                })
+                .collect()
         } else {
             Vec::new()
         };
+        let replica_count = replica_ips.len();
         // Every process that serves a journal `Read`: the nodes, then the
         // replicas (a fold's rotation, `Fold::read_to_tail`).
-        let readers: Vec<SimClient> = clients.iter().chain(&replica_clients).cloned().collect();
+        let readers = runtime
+            .chain_client(
+                ctx,
+                &node_ids[..server_count]
+                    .iter()
+                    .cloned()
+                    .chain(replica_ips)
+                    .collect::<Vec<_>>(),
+                config.tunables(),
+            )?
+            .with_observer(observer);
 
         let operations = Self::enabled_operations();
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
-        let client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         self.history.set_client(client_id);
-        let journal = self.journal;
         let audit = audit_world_for(ctx.state(), journal);
-        let log = CallLog::new(journal, client_id, time.clone());
-        self.calls = Some(log.clone());
         let now_ms = {
             let time = time.clone();
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
-        };
-        let server_count = clients.len();
-        // The joiners (#189), reachable after the genesis pool: a
-        // reconfiguration may make one a member and then the leader, and a
-        // client that cannot reach its leader cannot append at all.
-        clients.extend(runtime.clients(deployment.joiners())?);
-        let routes = Routes {
-            servers: server_count,
-            joiners: deployment.joiners().len(),
         };
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let read_timeout = Duration::from_millis(config.read_timeout_ms);
@@ -1189,8 +1146,13 @@ impl Workload for ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        let mut hint = LeaderHint::default();
         let mut successful_after_ambiguity = false;
+        // The library's decisions as outcomes (#221): a write redirected
+        // and written at the leader, an ambiguous write the session settled,
+        // a superseded writer that stopped.
+        let mut redirected_written = false;
+        let mut ambiguity_resolved = false;
+        let mut superseded_stopped = false;
         let mut written = Vec::<WrittenCommand>::new();
         // The highest tail a read of this client was served (`None` before
         // any): this client runs one operation at a time, so a later read
@@ -1200,7 +1162,7 @@ impl Workload for ChainWorkload {
         // This client's fold of the journal (#186): the application this
         // client is, and its tailing cursor — a position (#204) — where its
         // tailing reads start, only ever moved forward.
-        let mut fold = fold::Fold::new(journal, log.clone());
+        let mut fold = fold::Fold::new(journal);
         // Owner or reader (#204): a journal's first client always writes, so
         // every journal has a writer; any other client may be a reader for
         // the whole run. Clients are dealt to journals round-robin, so the
@@ -1208,7 +1170,7 @@ impl Workload for ChainWorkload {
         // journal would have nothing for its tail to converge on.
         let journal_count = self.plan.as_ref().map_or(1, |plan| plan.ids.len().max(1));
         let reader = config.reader && usize::try_from(client_id).unwrap_or(0) >= journal_count;
-        let mut writer = Writer::default();
+        let mut writer = Writer::new(journal, client_id);
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
         let mut system_ops = system::SystemOps::new(
@@ -1220,21 +1182,21 @@ impl Workload for ChainWorkload {
                 .unwrap_or_default(),
             client_id,
             request_timeout,
-            log.clone(),
         );
 
-        // The RPC retry layer (`rpc`), bound to this client's connections.
+        // The one-attempt write the races and the misbehaviours make
+        // (`rpc`), bound to this client's journal.
         let write_once = |target: usize, entry: &Entry, abandon: bool| {
-            rpc::write_once(
-                &clients, &log, &time, journal, target, entry, abandon, false,
-            )
-        };
-        let truncate_once = |target: usize, up_to: u64| {
-            rpc::truncate_once(&clients, &log, &time, journal, &config, target, up_to)
+            rpc::write_once(&nodes, journal, target, entry, abandon, false)
         };
         // One truncation request as the trace tells it: the `Truncate` it
         // asks for, clamped below every folding client's cursor (the fence,
         // `fold`), then whether the leader applied it.
+        let truncator = nodes.with_tunables(config.truncate_tunables());
+        let truncate_once = |target: usize, up_to: u64| {
+            let truncator = truncator.clone();
+            async move { judged_truncate(truncator.truncate(journal, up_to, target).await) }
+        };
         let truncate_traced = |target: usize, up_to: u64| {
             let attempt = fold::clamp(ctx.state(), journal, up_to).map(|up_to| {
                 trace_truncate(up_to);
@@ -1242,47 +1204,22 @@ impl Workload for ChainWorkload {
             });
             async move {
                 if let Some((up_to, attempt)) = attempt
-                    && matches!(attempt.await, TruncateResult::Applied { .. })
+                    && matches!(attempt.await, TruncateOutcome::Applied { .. })
                 {
                     tracing::info!(up_to, "chain_compact_accepted");
                 }
             }
         };
-        let reconfigure_once = |target: usize, members: Vec<u64>, quorum_system: QuorumSystem| {
-            rpc::reconfigure_once(&clients, &time, &config, target, members, quorum_system)
-        };
-        let reconfigure_matchmakers_once = |target: usize, members: Vec<u64>| {
-            rpc::reconfigure_matchmakers_once(&clients, &time, &config, target, members)
-        };
+        let reconfigurer = nodes.with_tunables(config.reconfigure_tunables());
+        let matchmaker_reconfigurer = nodes.with_tunables(config.matchmakers_tunables());
 
         // An owner claims the journal first (#204): read where it stands and
         // `SetLeader` against it. Losing is a valid start — another owner
         // won, and this client's writes are fenced until it claims again.
         if !reader {
             let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-            if let Some(result) = claim(
-                ctx,
-                &clients,
-                &log,
-                journal,
-                first,
-                (client_id, false),
-                (read_timeout, request_timeout),
-            )
-            .await
-            {
-                match result {
-                    SetLeaderResult::Won { state } => {
-                        writer.won(&state);
-                        hint.observe(u64::try_from(first).ok(), routes);
-                    }
-                    SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state } => {
-                        writer.learn(client_id, &state);
-                    }
-                    SetLeaderResult::Redirect { leader } => hint.observe(leader, routes),
-                    SetLeaderResult::Ambiguous => {}
-                }
-            }
+            let outcome = claim(&nodes, journal, first, (client_id, false)).await;
+            writer.claimed(&outcome);
         }
 
         // Start with a small concurrent batch when writes are enabled. This
@@ -1306,31 +1243,29 @@ impl Workload for ChainWorkload {
                         .unwrap_or(0);
                 let submission =
                     self.submit(&audit, &config, ahead, &mut next_op, raw, raw, now_ms());
-                ahead.next_seq += submission.entry.count();
-                let target = hint.current.unwrap_or(primer_target);
+                ahead.advance_to(ahead.next_seq() + submission.entry.count());
+                let target = nodes.leader().unwrap_or(primer_target);
                 primer.push((submission, target));
             }
             // Race 1 (#205): the owner's own claim, in the middle of the
             // burst.
             let race = buggify_with_prob!(0.25).then(|| {
                 let delay = raw % (config.burst_claim_delay_ms + 1);
-                (Duration::from_millis(delay), hint.current.unwrap_or(0))
+                (Duration::from_millis(delay), nodes.leader().unwrap_or(0))
             });
             self.burst(
                 ctx,
-                &clients,
-                &log,
+                &nodes,
                 &config,
                 primer,
                 race,
-                routes,
-                (&mut writer, &mut hint, &mut written),
+                (&mut writer, &mut written),
             )
             .await;
-            if config.compaction && writer.next_seq > 0 {
+            if config.compaction && writer.next_seq() > 0 {
                 let fallback =
                     usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-                truncate_traced(hint.current.unwrap_or(fallback), writer.next_seq).await;
+                truncate_traced(nodes.leader().unwrap_or(fallback), writer.next_seq()).await;
             }
         }
 
@@ -1389,7 +1324,7 @@ impl Workload for ChainWorkload {
             };
             let target =
                 usize::try_from(raw_target % u64::try_from(server_count).unwrap_or(1)).unwrap_or(0);
-            let retarget = Retarget::from_draw(raw_policy);
+            let retarget = retarget_from_draw(raw_policy);
             // One step in eight ignores the leader hint outright: a write to
             // whoever `target` is, which after a turnover is the *old*
             // leader — the stale-hint edge `WRITE_TO_NON_LEADER` reaches only
@@ -1403,9 +1338,9 @@ impl Workload for ChainWorkload {
                     // journal again while it is in flight. Its entries are
                     // spread off the step's draws, so the step still draws
                     // six times.
-                    if op == WRITE && writer.owned.is_some() && buggify_with_prob!(0.10) {
+                    if op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.10) {
                         assert_reachable!("chain: an owner pipelines a burst of writes mid-run");
-                        let via = hint.current.unwrap_or(target);
+                        let via = nodes.leader().unwrap_or(target);
                         let mut ahead = writer;
                         let mut burst = Vec::with_capacity(config.pipeline_depth);
                         for k in 0..config.pipeline_depth as u64 {
@@ -1419,7 +1354,7 @@ impl Workload for ChainWorkload {
                                 spread,
                                 now_ms(),
                             );
-                            ahead.next_seq += submission.entry.count();
+                            ahead.advance_to(ahead.next_seq() + submission.entry.count());
                             burst.push((submission, via));
                         }
                         let race = buggify_with_prob!(0.5).then(|| {
@@ -1429,13 +1364,11 @@ impl Workload for ChainWorkload {
                         });
                         self.burst(
                             ctx,
-                            &clients,
-                            &log,
+                            &nodes,
                             &config,
                             burst,
                             race,
-                            routes,
-                            (&mut writer, &mut hint, &mut written),
+                            (&mut writer, &mut written),
                         )
                         .await;
                         continue;
@@ -1450,7 +1383,7 @@ impl Workload for ChainWorkload {
                         now_ms(),
                     );
                     let chosen_target = if op == WRITE_TO_NON_LEADER {
-                        hint.current.map_or(target, |leader| {
+                        nodes.leader().map_or(target, |leader| {
                             if server_count > 1 {
                                 (leader + 1 + target % (server_count - 1)) % server_count
                             } else {
@@ -1460,7 +1393,7 @@ impl Workload for ChainWorkload {
                     } else if ignore_hint {
                         target
                     } else {
-                        hint.current.unwrap_or(target)
+                        nodes.leader().unwrap_or(target)
                     };
                     // Honest ambiguity: abandon the client observation, never
                     // falsify a server acknowledgement. The identical write
@@ -1469,7 +1402,7 @@ impl Workload for ChainWorkload {
                     // its ack (`ack_race_timeout_ms`), so the owner gives up
                     // on a write that may still land.
                     let ack_race =
-                        op == WRITE && writer.owned.is_some() && buggify_with_prob!(0.25);
+                        op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.25);
                     #[allow(clippy::cast_precision_loss)]
                     let abandon = !ack_race
                         && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
@@ -1482,85 +1415,88 @@ impl Workload for ChainWorkload {
                     let result = if ack_race {
                         self.ack_race(
                             ctx,
-                            &clients,
-                            &log,
+                            &nodes,
                             &config,
                             &submission,
                             chosen_target,
-                            routes,
-                            (&mut writer, &mut hint),
+                            &mut writer,
                         )
                         .await
                     } else {
-                        let deadline =
-                            time.now() + Duration::from_millis(config.request_timeout_ms);
-                        let mut attempt_target = chosen_target;
-                        let mut first_attempt = true;
-                        let result = loop {
-                            let remaining = deadline.saturating_sub(time.now());
-                            if remaining.is_zero() {
-                                break WriteResult::Ambiguous;
-                            }
-                            let attempt = within(
-                                ctx,
-                                remaining,
-                                WriteResult::Ambiguous,
-                                write_once(
-                                    attempt_target,
-                                    &submission.entry,
-                                    abandon && first_attempt,
-                                ),
-                            )
-                            .await;
-                            first_attempt = false;
-                            match attempt {
-                                WriteResult::Redirect { leader }
-                                    if op == WRITE && time.now() < deadline =>
-                                {
-                                    attempt_target = retarget.next(attempt_target, leader, routes);
-                                    time.sleep(Duration::from_millis(config.redirect_sleep_ms))
-                                        .await
-                                        .ok();
-                                }
-                                terminal => break terminal,
-                            }
-                        };
-                        if matches!(result, WriteResult::Ambiguous) {
-                            tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
-                            // The reconciling retry, byte for byte (#204: the
-                            // journal answers it from the log): by policy, back
-                            // to the node that may have committed the abandoned
-                            // attempt, or on to the hinted leader / the next
-                            // node.
-                            let retry_target = retarget.next(
+                        // The library's write (#221): the identical write,
+                        // following redirects (a `WRITE_TO_NON_LEADER` stops
+                        // at the first) inside one request deadline.
+                        let request = writer.request(&submission.entry);
+                        log.open_write(submission.op);
+                        let report = nodes
+                            .write(
+                                &request,
                                 chosen_target,
-                                hint.current.and_then(|node| u64::try_from(node).ok()),
-                                routes,
-                            );
-                            let reconciled = within(
-                                ctx,
-                                request_timeout,
-                                WriteResult::Ambiguous,
-                                write_once(retry_target, &submission.entry, false),
+                                WriteOptions {
+                                    retarget,
+                                    stop_at_redirect: op != WRITE,
+                                    abandon_first_after: abandon
+                                        .then_some(Duration::from_millis(10)),
+                                },
                             )
                             .await;
-                            if matches!(reconciled, WriteResult::Written { .. }) {
-                                successful_after_ambiguity = true;
+                        let result = judged_write(report.outcome, false);
+                        if report.redirects > 0 && matches!(result, WriteOutcome::Written { .. }) {
+                            redirected_written = true;
+                        }
+                        let result = if matches!(result, WriteOutcome::Ambiguous) {
+                            tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
+                            // Settle it (#204: the journal answers the
+                            // identical write from the log): read the
+                            // position back, then re-send it byte for byte —
+                            // by policy, back to the node that may have
+                            // committed the abandoned attempt, or on to the
+                            // hinted leader / the next node.
+                            let retry_target = nodes.retarget(
+                                retarget,
+                                chosen_target,
+                                nodes.leader().map(|leader| nodes.id_of(leader)),
+                            );
+                            let resolved = nodes.resolve(&request, retry_target, retarget).await;
+                            if resolved.by_read_back {
+                                assert_reachable!(
+                                    "client: a read-back alone proves an ambiguous write fenced"
+                                );
                             }
-                            reconciled
+                            match resolved.resolution {
+                                Resolution::Written { seq, count } => {
+                                    successful_after_ambiguity = true;
+                                    ambiguity_resolved = true;
+                                    WriteOutcome::Written {
+                                        seq,
+                                        count,
+                                        duplicate: true,
+                                    }
+                                }
+                                Resolution::NotWritten { state } => {
+                                    ambiguity_resolved = true;
+                                    WriteOutcome::Refused { state }
+                                }
+                                Resolution::Truncated { state } => {
+                                    WriteOutcome::Truncated { state }
+                                }
+                                Resolution::Unresolved => WriteOutcome::Ambiguous,
+                            }
                         } else {
                             result
-                        }
+                        };
+                        log.close_write();
+                        result
                     };
                     match result {
-                        WriteResult::Written { seq, count, .. } => {
-                            writer.next_seq = writer.next_seq.max(seq + count);
+                        WriteOutcome::Written { seq, count, .. } => {
+                            writer.advance_to(seq + count);
                             self.record_written(&submission, seq, count, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             written.push(submission.written(
                                 seq,
                                 count,
-                                hint.current.unwrap_or(chosen_target),
+                                nodes.leader().unwrap_or(chosen_target),
                             ));
                             if config.compaction
                                 && submission.op.is_multiple_of(config.compact_every)
@@ -1574,24 +1510,27 @@ impl Workload for ChainWorkload {
                                     1 => end + 1 + (raw_policy >> 7) % 8,
                                     _ => end,
                                 };
-                                truncate_traced(hint.current.unwrap_or(chosen_target), up_to).await;
+                                truncate_traced(nodes.leader().unwrap_or(chosen_target), up_to)
+                                    .await;
                             }
                         }
-                        WriteResult::Refused { state } | WriteResult::Truncated { state } => {
+                        WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
                             self.history.record_write_failed(submission.op);
-                            if writer.owned.is_none()
+                            if writer.owned().is_none()
                                 && state.generation.0 > submission.entry.generation.0
                             {
                                 self.adversarial.fenced = true;
                             }
-                            writer.learn(client_id, &state);
+                            writer.learn(&state);
                             tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_command_rejected");
                         }
-                        WriteResult::Redirect { leader } => {
-                            hint.observe(leader, routes);
+                        WriteOutcome::Redirect { leader } => {
+                            nodes.observe_leader(leader);
                             self.history.record_write_failed(submission.op);
                         }
-                        WriteResult::Ambiguous => {
+                        WriteOutcome::UnknownJournal
+                        | WriteOutcome::Malformed
+                        | WriteOutcome::Ambiguous => {
                             self.history.record_write_failed(submission.op);
                         }
                     }
@@ -1601,20 +1540,11 @@ impl Workload for ChainWorkload {
                         assert_reachable!("chain: set-leader operation executes");
                         self.adversarial.set_leader_executed = true;
                     }
-                    let via = hint.current.unwrap_or(target);
-                    match claim(
-                        ctx,
-                        &clients,
-                        &log,
-                        journal,
-                        via,
-                        (client_id, false),
-                        (read_timeout, request_timeout),
-                    )
-                    .await
-                    {
-                        Some(SetLeaderResult::Won { state }) => {
-                            writer.won(&state);
+                    let via = nodes.leader().unwrap_or(target);
+                    let outcome = claim(&nodes, journal, via, (client_id, false)).await;
+                    writer.claimed(&outcome);
+                    match outcome {
+                        ClaimOutcome::Won { state } => {
                             self.adversarial.claim_won = true;
                             tracing::info!(
                                 generation = state.generation.0,
@@ -1622,18 +1552,14 @@ impl Workload for ChainWorkload {
                                 "chain_claim_won"
                             );
                         }
-                        Some(
-                            SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state },
-                        ) => {
-                            writer.learn(client_id, &state);
+                        ClaimOutcome::Lost { state } | ClaimOutcome::Owned { state } => {
                             tracing::info!(generation = state.generation.0, "chain_claim_lost");
                         }
-                        Some(SetLeaderResult::Redirect { leader }) => hint.observe(leader, routes),
-                        Some(SetLeaderResult::Ambiguous) | None => {}
+                        _ => {}
                     }
                 }
                 DUP_WRITE => {
-                    if let Some(current_leader) = hint.current {
+                    if let Some(current_leader) = nodes.leader() {
                         let candidates = written
                             .iter()
                             .filter(|command| command.node != current_leader)
@@ -1668,12 +1594,12 @@ impl Workload for ChainWorkload {
                         let result = within(
                             ctx,
                             request_timeout,
-                            WriteResult::Ambiguous,
+                            WriteOutcome::Ambiguous,
                             write_once(duplicate_target, &command.entry, false),
                         )
                         .await;
                         match result {
-                            WriteResult::Written { seq, duplicate, .. } => {
+                            WriteOutcome::Written { seq, duplicate, .. } => {
                                 // A write already in the journal is answered
                                 // from the log, at the position it holds.
                                 assert_always!(
@@ -1692,15 +1618,18 @@ impl Workload for ChainWorkload {
                                     self.adversarial.duplicate_across_leader_change = true;
                                 }
                             }
-                            WriteResult::Refused { state } => {
+                            WriteOutcome::Refused { state } => {
                                 assert_always!(
                                     false,
                                     "chain: a retried write is never refused",
                                     { "seq" => command.seq, "next_seq" => state.next_seq.0 }
                                 );
                             }
-                            WriteResult::Redirect { leader } => hint.observe(leader, routes),
-                            WriteResult::Truncated { .. } | WriteResult::Ambiguous => {}
+                            WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
+                            WriteOutcome::Truncated { .. }
+                            | WriteOutcome::UnknownJournal
+                            | WriteOutcome::Malformed
+                            | WriteOutcome::Ambiguous => {}
                         }
                     }
                 }
@@ -1737,7 +1666,7 @@ impl Workload for ChainWorkload {
                             within(
                                 ctx,
                                 request_timeout,
-                                WriteResult::Ambiguous,
+                                WriteOutcome::Ambiguous,
                                 write_once(*target, &submission.entry, false),
                             )
                         });
@@ -1746,7 +1675,7 @@ impl Workload for ChainWorkload {
                         let mut refused: Option<JournalState> = None;
                         for (attempt_target, result) in targets.into_iter().zip(results) {
                             match result {
-                                WriteResult::Written { seq, count, .. } => {
+                                WriteOutcome::Written { seq, count, .. } => {
                                     if let Some((original, _, _)) = committed {
                                         assert_always!(
                                             seq == original,
@@ -1761,23 +1690,25 @@ impl Workload for ChainWorkload {
                                         committed = Some((seq, count, attempt_target));
                                     }
                                 }
-                                WriteResult::Refused { state }
-                                | WriteResult::Truncated { state } => {
+                                WriteOutcome::Refused { state }
+                                | WriteOutcome::Truncated { state } => {
                                     refused = Some(state);
                                 }
-                                WriteResult::Redirect { leader } => hint.observe(leader, routes),
-                                WriteResult::Ambiguous => {}
+                                WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
+                                WriteOutcome::UnknownJournal
+                                | WriteOutcome::Malformed
+                                | WriteOutcome::Ambiguous => {}
                             }
                         }
                         if let Some((seq, count, ack_target)) = committed {
-                            writer.next_seq = writer.next_seq.max(seq + count);
+                            writer.advance_to(seq + count);
                             self.record_written(&submission, seq, count, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             written.push(submission.written(seq, count, ack_target));
                         } else {
                             self.history.record_write_failed(submission.op);
                             if let Some(state) = refused {
-                                writer.learn(client_id, &state);
+                                writer.learn(&state);
                             }
                         }
                     }
@@ -1793,18 +1724,17 @@ impl Workload for ChainWorkload {
                             target,
                             client_id,
                             config.read_limit,
-                            read_timeout,
                         )
                         .await;
                         // Everything this client has read is what it may
                         // drop: its fold's cursor, or its own writes' end
                         // when it wrote past what it read.
-                        let up_to = writer.next_seq.max(fold.cursor());
-                        truncate_traced(hint.current.unwrap_or(target), up_to).await;
+                        let up_to = writer.next_seq().max(fold.cursor());
+                        truncate_traced(nodes.leader().unwrap_or(target), up_to).await;
                     }
                 }
                 TRUNCATE_STORM => {
-                    let base = writer.next_seq.max(fold.cursor());
+                    let base = writer.next_seq().max(fold.cursor());
                     if config.compaction && base > 0 {
                         let first_mode = usize::try_from(raw_pause % 3).unwrap_or(0);
                         for attempt in 0..config.compact_storm_attempts {
@@ -1818,10 +1748,10 @@ impl Workload for ChainWorkload {
                                 0 => (
                                     "overask",
                                     base.saturating_add(10_000 + raw_payload % 10_000),
-                                    hint.current.unwrap_or(target),
+                                    nodes.leader().unwrap_or(target),
                                 ),
-                                1 if server_count > 1 && hint.current.is_some() => {
-                                    let leader = hint.current.unwrap_or(target) % server_count;
+                                1 if server_count > 1 && nodes.leader().is_some() => {
+                                    let leader = nodes.leader().unwrap_or(target) % server_count;
                                     let offset = 1 + usize::try_from(
                                         (raw_target + u64::try_from(attempt).unwrap_or(0))
                                             % u64::try_from(server_count - 1).unwrap_or(1),
@@ -1829,8 +1759,10 @@ impl Workload for ChainWorkload {
                                     .unwrap_or(0);
                                     ("follower", base, (leader + offset) % server_count)
                                 }
-                                2 if hint.stale.is_some() && hint.stale != hint.current => {
-                                    ("stale-leader", base, hint.stale.unwrap_or(target))
+                                2 if nodes.hint().stale.is_some()
+                                    && nodes.hint().stale != nodes.leader() =>
+                                {
+                                    ("stale-leader", base, nodes.hint().stale.unwrap_or(target))
                                 }
                                 _ => continue,
                             };
@@ -1865,16 +1797,20 @@ impl Workload for ChainWorkload {
                                 self.adversarial.compact_storm_modes[mode] = true;
                             }
                             match truncate_once(request_target, up_to).await {
-                                TruncateResult::Applied { state } => {
-                                    hint.observe(u64::try_from(request_target).ok(), routes);
+                                TruncateOutcome::Applied { state } => {
+                                    nodes.observe_leader_at(request_target);
                                     tracing::info!(
                                         up_to,
                                         first_seq = state.first_seq.0,
                                         "chain_compact_accepted"
                                     );
                                 }
-                                TruncateResult::Rejected { leader } => hint.observe(leader, routes),
-                                TruncateResult::Ambiguous => {}
+                                TruncateOutcome::Redirect { leader } => {
+                                    nodes.observe_leader(leader);
+                                }
+                                TruncateOutcome::UnknownJournal
+                                | TruncateOutcome::Malformed
+                                | TruncateOutcome::Ambiguous => {}
                             }
                         }
                     }
@@ -1914,9 +1850,8 @@ impl Workload for ChainWorkload {
                             }
                         }
                     };
-                    let race_up_to = writer.next_seq.max(fold.cursor());
+                    let race_up_to = writer.next_seq().max(fold.cursor());
                     // Any node or replica serves a journal read.
-                    let replica_count = replica_clients.len();
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
                     // A client naming a journal this deployment does not
@@ -1947,51 +1882,60 @@ impl Workload for ChainWorkload {
                         loop {
                             let remaining = deadline.saturating_sub(time.now());
                             if remaining.is_zero() || shutdown.is_cancelled() {
-                                break None;
+                                break ReadOutcome::Ambiguous;
                             }
                             attempts += 1;
-                            let client = readers[drawn].clone();
                             let call = read_once(
-                                &client,
-                                &log,
+                                &readers,
+                                drawn,
                                 named,
                                 from,
                                 config.read_limit,
                                 config.read_wait_ms,
                             );
-                            match within(ctx, remaining, None, call).await {
-                                Some(ack) if ack.served || ack.unknown_journal => break Some(ack),
-                                _ => drawn = (drawn + 1) % span.max(1),
+                            let answer = within(ctx, remaining, ReadOutcome::Ambiguous, call).await;
+                            if answer.is_served() || answer == ReadOutcome::UnknownJournal {
+                                break answer;
                             }
+                            drawn = (drawn + 1) % span.max(1);
                         }
                     };
                     let truncation = async {
                         if racing && !reader && config.compaction {
                             assert_reachable!("chain: a truncation races a reader's cursor");
-                            truncate_traced(hint.current.unwrap_or(target), race_up_to).await;
+                            truncate_traced(nodes.leader().unwrap_or(target), race_up_to).await;
                         }
                     };
                     let (answer, ()) = futures::join!(read, truncation);
-                    let trimmed_at = answer
-                        .as_ref()
-                        .filter(|ack| racing && ack.served && ack.truncated && !ack.unknown_journal)
-                        .map(|ack| state_of(ack.state).first_seq.0);
+                    // Race 3's reader (#205): a cursor at `from`, folding
+                    // the answer — a truncation moves it to the floor the
+                    // refusal names and reports the gap (the library's
+                    // `Reader`).
+                    let mut race_reader = paros::client::Reader::new(journal, from);
+                    let gap = (racing && matches!(answer, ReadOutcome::Truncated { .. }))
+                        .then(|| race_reader.absorb(answer.clone()));
+                    // Only an answer is judged: one that never came (the unset
+                    // id is refused at the edge, as a transport error) or went
+                    // unserved is ambiguous, never assumed.
+                    let answered = answer.is_served() || answer == ReadOutcome::UnknownJournal;
                     match answer {
-                        Some(ack) if stray => {
+                        answer if stray && answered => {
                             assert_always!(
-                                ack.unknown_journal && ack.records.is_empty(),
+                                answer == ReadOutcome::UnknownJournal,
                                 "chain: a read naming another journal is refused",
                                 { "journal" => named }
                             );
                             self.history.record_read_failed(op_id);
                         }
-                        Some(ack) if ack.served => {
+                        answer if answered => {
                             assert_always!(
-                                !ack.unknown_journal,
+                                answer != ReadOutcome::UnknownJournal,
                                 "chain: a node serves the journal the client names"
                             );
-                            judge_read(&audit, from, &ack, &written);
-                            let tail = state_of(ack.state).next_seq.0.checked_sub(1);
+                            judge_read(&audit, from, &answer, &written);
+                            let tail = answer
+                                .state()
+                                .and_then(|state| state.next_seq.0.checked_sub(1));
                             // Per-client monotonicity: this client's reads
                             // never observe a shrinking journal.
                             assert_always!(
@@ -2003,12 +1947,16 @@ impl Workload for ChainWorkload {
                                 }
                             );
                             last_read_tail = last_read_tail.max(tail);
-                            self.history
-                                .record_read_ack(op_id, tail, attempts, now_ms());
+                            if answer.is_served() {
+                                self.history
+                                    .record_read_ack(op_id, tail, attempts, now_ms());
+                            } else {
+                                self.history.record_read_failed(op_id);
+                            }
                             if tailing {
                                 // A tailing page folds into this client's
                                 // state and moves its cursor forward.
-                                fold.absorb(&audit, ctx.state(), client_id, from, &ack);
+                                fold.absorb(&audit, ctx.state(), client_id, from, &answer);
                             }
                         }
                         // Unserved (its quorum read did not confirm in
@@ -2017,22 +1965,27 @@ impl Workload for ChainWorkload {
                     }
                     // The raced reader resumes at the floor it was refused
                     // below — or, truncated again, at the next floor.
-                    if let Some(mut floor) = trimmed_at {
+                    if let Some(paros::client::ReaderOutcome::Gap { .. }) = gap {
                         for k in 0..span.clamp(1, 4) {
-                            let client = readers[(drawn + k) % span.max(1)].clone();
-                            let call =
-                                read_once(&client, &log, journal.0, floor, config.read_limit, 0);
-                            match within(ctx, read_timeout, None, call).await {
-                                Some(ack) if ack.served && !ack.unknown_journal => {
-                                    if ack.truncated {
-                                        floor = state_of(ack.state).first_seq.0;
-                                        continue;
-                                    }
-                                    judge_read(&audit, floor, &ack, &written);
-                                    self.adversarial.reader_resumed = true;
-                                    break;
-                                }
-                                _ => {}
+                            let resume_at = race_reader.cursor();
+                            let call = read_once(
+                                &readers,
+                                (drawn + k) % span.max(1),
+                                journal.0,
+                                resume_at,
+                                config.read_limit,
+                                0,
+                            );
+                            let answer =
+                                within(ctx, read_timeout, ReadOutcome::Ambiguous, call).await;
+                            if answer.is_served() {
+                                judge_read(&audit, resume_at, &answer, &written);
+                            }
+                            if let paros::client::ReaderOutcome::Records { .. } =
+                                race_reader.absorb(answer)
+                            {
+                                self.adversarial.reader_resumed = true;
+                                break;
                             }
                         }
                     }
@@ -2040,18 +1993,10 @@ impl Workload for ChainWorkload {
                 READ_STATE => {
                     // Fold to the tail through any node or replica: the
                     // application's state is this client's fold (#186).
-                    let span = server_count + replica_clients.len();
+                    let span = server_count + replica_count;
                     let drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
-                    fold.read_to_tail(
-                        ctx,
-                        &audit,
-                        &readers,
-                        drawn,
-                        client_id,
-                        config.read_limit,
-                        read_timeout,
-                    )
-                    .await;
+                    fold.read_to_tail(ctx, &audit, &readers, drawn, client_id, config.read_limit)
+                        .await;
                     tracing::info!(
                         index = fold.state().applied_count,
                         state = %hash_text(fold.state().chain_hash),
@@ -2074,25 +2019,21 @@ impl Workload for ChainWorkload {
                     // ballot's `Prepare`, so a stale answer only makes the
                     // request refused (`unchanged`, `unknown_member`) — an
                     // operating condition, never a wrong state.
-                    let probe_target = hint.current.unwrap_or(target);
-                    let probe = clients[probe_target].clone();
-                    let in_force =
-                        inspect(ctx, &probe, journal, request_timeout)
-                            .await
-                            .map(|reply| {
-                                let wire = WireQuorumSystem {
-                                    quorum_system: reply.quorum_system,
-                                    phase1_quorum: reply.phase1_quorum,
-                                    phase2_quorum: reply.phase2_quorum,
-                                    rows: reply.rows,
-                                    cols: reply.cols,
-                                };
-                                (reply.members, quorum_system_from_proto(&wire).ok())
-                            });
+                    let probe_target = nodes.leader().unwrap_or(target);
+                    let in_force = nodes.inspect(probe_target, journal.0).await.map(|reply| {
+                        let wire = WireQuorumSystem {
+                            quorum_system: reply.quorum_system,
+                            phase1_quorum: reply.phase1_quorum,
+                            phase2_quorum: reply.phase2_quorum,
+                            rows: reply.rows,
+                            cols: reply.cols,
+                        };
+                        (reply.members, quorum_system_from_proto(&wire).ok())
+                    });
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
                     let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
-                    let leader_id = hint.current.map(|l| routes.id(l));
+                    let leader_id = nodes.leader().map(|l| nodes.id_of(l));
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
                     // is never asked for, and is the first one moved out.
@@ -2105,7 +2046,7 @@ impl Workload for ChainWorkload {
                     // composition and its ledger entry, which take no await
                     // between them — a retirement reserved in the meantime
                     // is re-checked at the ledger.
-                    let joinable = system_ops.joinable(ctx, &clients, raw_payload).await;
+                    let joinable = system_ops.joinable(ctx, &nodes, raw_payload).await;
                     live.extend(joinable.iter().copied());
                     // The adversarial draw (R5): compose from *every* rank
                     // instead, so the request may name an identity the run
@@ -2284,11 +2225,11 @@ impl Workload for ChainWorkload {
                         // request leaves, answered below; a retirement reads
                         // it (`StorageWorld::retire`).
                         let ledger_id = ledger_request(ctx.state(), &next);
-                        let outcome = reconfigure_once(probe_target, next.clone(), system).await;
+                        let outcome = reconfigurer.reconfigure(&next, system, probe_target).await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_outcome");
                         ledger_answer(ctx.state(), ledger_id, &outcome);
                         match outcome {
-                            ReconfigureResult::Started { leader, .. } => {
+                            ReconfigureOutcome::Started { leader, .. } => {
                                 // The AGENTS.md rule, client-visible: a
                                 // deployment without matchmakers never honors
                                 // a reconfiguration.
@@ -2303,7 +2244,7 @@ impl Workload for ChainWorkload {
                                     { "shape" => name }
                                 );
                                 self.adversarial.reconfigure_started[observed] = true;
-                                hint.observe(leader, routes);
+                                nodes.observe_leader(leader);
                                 // A rare-but-valid operator act (#173):
                                 // reboot every member of the configuration
                                 // just installed. Each loses its belief in
@@ -2336,8 +2277,8 @@ impl Workload for ChainWorkload {
                                     }
                                 }
                             }
-                            ReconfigureResult::Refused { leader, refusal } => {
-                                if refusal == "no_matchmakers" {
+                            ReconfigureOutcome::Refused { leader, refusal } => {
+                                if refusal == ReconfigureRefusal::NoMatchmakers {
                                     assert_always!(
                                         !has_matchmakers,
                                         "reconfiguration: only a deployment without matchmakers refuses for lack of them",
@@ -2345,7 +2286,7 @@ impl Workload for ChainWorkload {
                                     );
                                     self.adversarial.reconfigure_refused_plain = true;
                                 }
-                                if refusal == "malformed" {
+                                if refusal == ReconfigureRefusal::Malformed {
                                     assert_always!(
                                         malformed,
                                         "reconfiguration: only a configuration that does not admit its quorum system is refused as malformed",
@@ -2355,9 +2296,13 @@ impl Workload for ChainWorkload {
                                         "reconfiguration: a configuration that does not admit its quorum system is refused"
                                     );
                                 }
-                                hint.observe(leader, routes);
+                                nodes.observe_leader(leader);
                             }
-                            ReconfigureResult::Ambiguous => {}
+                            ReconfigureOutcome::NotLeader { leader }
+                            | ReconfigureOutcome::Unrecognized { leader } => {
+                                nodes.observe_leader(leader);
+                            }
+                            ReconfigureOutcome::Ambiguous => {}
                         }
                     }
                 }
@@ -2367,11 +2312,10 @@ impl Workload for ChainWorkload {
                     // step's target and ask that same node. A stale answer
                     // only makes the handover superseded or refused — an
                     // operating condition, never a wrong state.
-                    let probe = clients[target].clone();
-                    let current: Option<(u64, Vec<u64>)> =
-                        inspect(ctx, &probe, journal, request_timeout)
-                            .await
-                            .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
+                    let current: Option<(u64, Vec<u64>)> = nodes
+                        .inspect(target, journal.0)
+                        .await
+                        .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
                     let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
                     let candidates = live_candidates(
                         &matchmaker_ips,
@@ -2428,10 +2372,12 @@ impl Workload for ChainWorkload {
                             );
                         }
                         tracing::info!(shape = name, members = ?next, "chain_reconfigure_matchmakers_request");
-                        let outcome = reconfigure_matchmakers_once(target, next).await;
+                        let outcome = matchmaker_reconfigurer
+                            .reconfigure_matchmakers(&next, target)
+                            .await;
                         tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_matchmakers_outcome");
                         match outcome {
-                            ReconfigureMatchmakersResult::Started { generation } => {
+                            ReconfigureMatchmakersOutcome::Started { generation } => {
                                 assert_always!(
                                     has_matchmakers,
                                     "generation: a deployment without matchmakers never accepts a matchmaker reconfiguration",
@@ -2451,14 +2397,14 @@ impl Workload for ChainWorkload {
                                 self.adversarial.reconfigure_matchmakers_started[observed_slot] =
                                     true;
                             }
-                            ReconfigureMatchmakersResult::Refused { refusal } => {
+                            ReconfigureMatchmakersOutcome::Refused(refusal) => {
                                 assert_always!(
-                                    (refusal == "no_matchmakers") != has_matchmakers,
+                                    (refusal == MatchmakersRefusal::NoMatchmakers) != has_matchmakers,
                                     "generation: only a deployment without matchmakers refuses for lack of them",
-                                    { "shape" => name, "refusal" => refusal.clone() }
+                                    { "shape" => name, "refusal" => format!("{refusal:?}") }
                                 );
                             }
-                            ReconfigureMatchmakersResult::Ambiguous => {}
+                            ReconfigureMatchmakersOutcome::Ambiguous => {}
                         }
                     }
                 }
@@ -2466,15 +2412,14 @@ impl Workload for ChainWorkload {
                     // Only a leader reports what its effective floor retired;
                     // a follower answers an empty list and the step is a
                     // no-op.
-                    let probe_target = hint.current.unwrap_or(target);
-                    let probe = clients[probe_target].clone();
+                    let probe_target = nodes.leader().unwrap_or(target);
                     // The retirable list, the configuration in force and the
                     // effective GC watermark come from the *same* reply: the
                     // world can hold the protocol to "a retirable node is
                     // outside C_b", and the node itself refuses the request
                     // unless the watermark proves every configuration it was
                     // a member of is forgotten (#123).
-                    let inspected = inspect(ctx, &probe, journal, request_timeout).await;
+                    let inspected = nodes.inspect(probe_target, journal.0).await;
                     let (retirable, in_force, gc_watermark) = inspected
                         .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
                         .unwrap_or_default();
@@ -2504,12 +2449,8 @@ impl Workload for ChainWorkload {
                             "gc: an operator probes the members' beliefs before a retirement"
                         );
                         let candidates: Vec<usize> = in_force.iter().filter_map(live).collect();
-                        let beliefs = join_all(
-                            candidates
-                                .iter()
-                                .map(|i| inspect(ctx, &clients[*i], journal, request_timeout)),
-                        )
-                        .await;
+                        let beliefs =
+                            join_all(candidates.iter().map(|i| nodes.inspect(*i, journal.0))).await;
                         stale_member = candidates.iter().zip(beliefs).find_map(|(i, reply)| {
                             let own = u64::try_from(*i).unwrap_or(u64::MAX);
                             reply
@@ -2565,7 +2506,8 @@ impl Workload for ChainWorkload {
                             );
                             let ledger_id = ledger_request(ctx.state(), &readd);
                             let system = policy.system(readd.len());
-                            let outcome = reconfigure_once(probe_target, readd, system).await;
+                            let outcome =
+                                reconfigurer.reconfigure(&readd, system, probe_target).await;
                             ledger_answer(ctx.state(), ledger_id, &outcome);
                         }
                         // Park the identity first, under the dead-node budget
@@ -2590,20 +2532,12 @@ impl Workload for ChainWorkload {
                         };
                         if reserved {
                             tracing::info!(node = victim as u64, "chain_retire_request");
-                            let client = clients[victim].clone();
-                            let accepted: Option<bool> =
-                                within(ctx, request_timeout, None, async {
-                                    client
-                                        .retire(&RetireRequest { gc_watermark })
-                                        .await
-                                        .ok()
-                                        .map(|ack| ack.accepted)
-                                })
-                                .await;
-                            tracing::info!(node = victim as u64, accepted = ?accepted, "chain_retire_outcome");
-                            match accepted {
-                                Some(true) => self.adversarial.retired = true,
-                                Some(false) => {
+                            let outcome =
+                                nodes.retire(victim, RetireRequest { gc_watermark }).await;
+                            tracing::info!(node = victim as u64, outcome = ?outcome, "chain_retire_outcome");
+                            match outcome {
+                                RetireOutcome::Retired => self.adversarial.retired = true,
+                                RetireOutcome::Refused(_) => {
                                     // Refused means the node is a member of
                                     // the configuration in force, is the
                                     // leader, or no effective floor sits
@@ -2628,25 +2562,25 @@ impl Workload for ChainWorkload {
                                 // honored retirement must never come back),
                                 // so the audit excuses the identity now
                                 // rather than at a boot that may never come.
-                                None if !aim_at_member => audit
+                                RetireOutcome::Ambiguous if !aim_at_member => audit
                                     .note_retired_parked(u64::try_from(victim).unwrap_or(u64::MAX)),
-                                None => {}
+                                RetireOutcome::Ambiguous => {}
                             }
                         }
                     }
                 }
                 CREATE_JOURNAL => {
                     system_ops
-                        .create(ctx, &clients, (raw_class, raw_payload))
+                        .create(ctx, &nodes, (raw_class, raw_payload))
                         .await;
                 }
-                DELETE_JOURNAL => system_ops.delete(ctx, &clients, raw_payload).await,
+                DELETE_JOURNAL => system_ops.delete(ctx, &nodes, raw_payload).await,
                 REGISTER_NODE => {
                     // An operator who registers a node usually adds it next
                     // (#189): the client's next step grows a configuration
                     // onto the joiner it just registered.
                     reconfigure_next = system_ops
-                        .registry_step(ctx, &clients, None, raw_payload)
+                        .registry_step(ctx, &nodes, None, raw_payload)
                         .await
                         && journal == JournalId::default()
                         && operations.contains(&RECONFIGURE);
@@ -2655,7 +2589,7 @@ impl Workload for ChainWorkload {
                     let _ = system_ops
                         .registry_step(
                             ctx,
-                            &clients,
+                            &nodes,
                             Some(paros::system::NodeStanding::Registered),
                             raw_payload,
                         )
@@ -2665,7 +2599,7 @@ impl Workload for ChainWorkload {
                     let _ = system_ops
                         .registry_step(
                             ctx,
-                            &clients,
+                            &nodes,
                             Some(paros::system::NodeStanding::Draining),
                             raw_payload,
                         )
@@ -2789,10 +2723,9 @@ impl Workload for ChainWorkload {
             ctx,
             &audit,
             &readers,
-            usize::try_from(client_id).unwrap_or(0) % readers.len().max(1),
+            usize::try_from(client_id).unwrap_or(0) % readers.server_count(),
             client_id,
             config.read_limit,
-            read_timeout,
         )
         .await;
         // A replica held down across the tail (#205), its own location: an
@@ -2824,7 +2757,7 @@ impl Workload for ChainWorkload {
         let recovery_deadline = time.now() + Duration::from_millis(config.recovery_budget_ms);
         let mut recovery_acked = 0_u64;
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-        let mut target = hint.current.unwrap_or(first) % server_count;
+        let mut target = nodes.leader().unwrap_or(first) % server_count;
         for k in 0..config.recovery_proposals {
             if reader {
                 break;
@@ -2845,17 +2778,9 @@ impl Workload for ChainWorkload {
                 && config.compaction
                 && !shutdown.is_cancelled()
             {
-                fold.read_to_tail(
-                    ctx,
-                    &audit,
-                    &readers,
-                    target,
-                    client_id,
-                    config.read_limit,
-                    read_timeout,
-                )
-                .await;
-                truncate_traced(target, writer.next_seq.max(fold.cursor())).await;
+                fold.read_to_tail(ctx, &audit, &readers, target, client_id, config.read_limit)
+                    .await;
+                truncate_traced(target, writer.next_seq().max(fold.cursor())).await;
             }
             let raw = ctx.random().random::<u64>();
             let mut acknowledged = false;
@@ -2866,32 +2791,29 @@ impl Workload for ChainWorkload {
             // reads that already saw the first.
             let mut pending: Option<Submission> = None;
             while time.now() < recovery_deadline && !shutdown.is_cancelled() {
-                if writer.owned.is_none() {
-                    match claim(
-                        ctx,
-                        &clients,
-                        &log,
-                        journal,
-                        target,
-                        (client_id, false),
-                        (read_timeout, request_timeout),
-                    )
-                    .await
-                    {
-                        Some(SetLeaderResult::Won { state }) => writer.won(&state),
-                        Some(
-                            SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state },
-                        ) => writer.learn(client_id, &state),
-                        Some(SetLeaderResult::Redirect { leader }) => {
+                // The library's writer session (#221): claim when it owns
+                // nothing, write as the owner, and stop — send nothing —
+                // the moment a newer owner supersedes it.
+                if writer.owned().is_none() {
+                    match claim(&nodes, journal, target, (client_id, false)).await {
+                        outcome @ (ClaimOutcome::Won { .. }
+                        | ClaimOutcome::Lost { .. }
+                        | ClaimOutcome::Owned { .. }) => {
+                            writer.claimed(&outcome);
+                        }
+                        ClaimOutcome::Redirect { leader } => {
                             target = leader
-                                .and_then(|id| routes.index(id))
+                                .and_then(|id| nodes.index_of(id))
                                 .unwrap_or((target + 1) % server_count);
                         }
-                        Some(SetLeaderResult::Ambiguous) | None => {
+                        ClaimOutcome::UnknownJournal
+                        | ClaimOutcome::Malformed
+                        | ClaimOutcome::Unread
+                        | ClaimOutcome::Ambiguous => {
                             target = (target + 1) % server_count;
                         }
                     }
-                    if writer.owned.is_none() {
+                    if writer.owned().is_none() {
                         time.sleep(Duration::from_millis(config.retry_backoff_ms))
                             .await
                             .ok();
@@ -2901,41 +2823,64 @@ impl Workload for ChainWorkload {
                 let submission = match pending.take() {
                     Some(retry)
                         if retry.entry.generation.0 == writer.generation()
-                            && retry.entry.seq.0 == writer.next_seq =>
+                            && retry.entry.seq.0 == writer.next_seq() =>
                     {
                         retry
                     }
                     _ => self.submit(&audit, &config, writer, &mut next_op, raw, raw, now_ms()),
                 };
-                let result = within(
-                    ctx,
-                    request_timeout,
-                    WriteResult::Ambiguous,
-                    write_once(target, &submission.entry, false),
-                )
-                .await;
-                match result {
-                    WriteResult::Written { seq, count, .. } => {
+                log.open_write(submission.op);
+                let outcome = writer.write_entry(&nodes, &submission.entry, target).await;
+                log.close_write();
+                match outcome {
+                    WriterOutcome::Written {
+                        seq,
+                        count,
+                        resolved,
+                        ..
+                    } => {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
-                        writer.next_seq = writer.next_seq.max(seq + count);
+                        ambiguity_resolved |= resolved;
+                        let via = nodes.leader().unwrap_or(target);
                         self.record_written(&submission, seq, count, now_ms());
-                        written.push(submission.written(seq, count, target));
+                        written.push(submission.written(seq, count, via));
                         break;
                     }
-                    WriteResult::Refused { state } | WriteResult::Truncated { state } => {
+                    WriterOutcome::Superseded { state } => {
+                        // The writer owns nothing now: its next round
+                        // claims before it sends anything again.
                         self.history.record_write_failed(submission.op);
-                        writer.learn(client_id, &state);
+                        assert_always!(
+                            writer.owned().is_none()
+                                && state.owner.is_some_and(|owner| owner.0 != client_id),
+                            "client: a superseded writer owns nothing",
+                            { "generation" => state.generation.0 }
+                        );
+                        superseded_stopped = true;
                     }
-                    WriteResult::Redirect { leader } => {
+                    WriterOutcome::NotWritten { .. } => {
+                        self.history.record_write_failed(submission.op);
+                        ambiguity_resolved = true;
+                    }
+                    WriterOutcome::Refused { .. }
+                    | WriterOutcome::Truncated { .. }
+                    | WriterOutcome::NotOwner => {
+                        self.history.record_write_failed(submission.op);
+                    }
+                    WriterOutcome::Unavailable { leader } => {
                         self.history.record_write_failed(submission.op);
                         // A leader outside the genesis pool (#189: a joiner
                         // a reconfiguration pulled in) has no client here.
                         target = leader
-                            .and_then(|id| routes.index(id))
+                            .and_then(|id| nodes.index_of(id))
                             .unwrap_or((target + 1) % server_count);
                     }
-                    WriteResult::Ambiguous => {
+                    WriterOutcome::UnknownJournal => {
+                        self.history.record_write_failed(submission.op);
+                        assert_always!(false, "chain: a node serves the journal the client names");
+                    }
+                    WriterOutcome::Ambiguous => {
                         self.history.record_write_failed(submission.op);
                         target = (target + 1) % server_count;
                     }
@@ -2952,6 +2897,20 @@ impl Workload for ChainWorkload {
         if let Some(ip) = &held_replica {
             crate::lifecycle::restart(ctx, ip).await;
         }
+        // The library client's decisions (#221), by their outcomes — the
+        // recovery batch is the writer session's own path.
+        assert_sometimes!(
+            redirected_written,
+            "client: a redirected write is written at the leader"
+        );
+        assert_sometimes!(
+            ambiguity_resolved,
+            "client: an ambiguous write is resolved by a read-back"
+        );
+        assert_sometimes!(
+            superseded_stopped,
+            "client: a superseded writer stops writing"
+        );
         let tail = tail(ctx.state());
         {
             let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2998,16 +2957,14 @@ impl Workload for ChainWorkload {
             // (`server_count + rank`); its disk is never parked.
             let live: Vec<usize> = (0..server_count)
                 .filter(|i| !parked.contains(&servers[*i]))
-                .chain(server_count..server_count + replica_clients.len())
+                .chain(server_count..server_count + replica_count)
                 .collect();
             let mut observed: Vec<(usize, u64)> = Vec::with_capacity(live.len());
             let mut unanswered = false;
             for &node in &live {
-                let client = match node.checked_sub(server_count) {
-                    Some(replica) => replica_clients[replica].clone(),
-                    None => clients[node].clone(),
-                };
-                let end = inspect(ctx, &client, journal, request_timeout)
+                // `readers` holds the nodes, then the replicas: index `node`.
+                let end = readers
+                    .inspect(node, journal.0)
                     .await
                     .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
                 let Some(end) = end else {
@@ -3097,16 +3054,8 @@ impl Workload for ChainWorkload {
         // last fold from this client's cursor to the tail, so every client's
         // fold meets every other's on the entries they share.
         if converged && let Some(&(node, _)) = last_probe.first() {
-            fold.read_to_tail(
-                ctx,
-                &audit,
-                &readers,
-                node,
-                client_id,
-                config.read_limit,
-                read_timeout,
-            )
-            .await;
+            fold.read_to_tail(ctx, &audit, &readers, node, client_id, config.read_limit)
+                .await;
             tracing::info!(
                 index = fold.state().applied_count,
                 state = %hash_text(fold.state().chain_hash),
@@ -3149,7 +3098,8 @@ impl Workload for ChainWorkload {
             // Which leg failed: the cluster, or this owner's recovery writes.
             eprintln!(
                 "chain run RED: client {client_id} converged={converged} recovery_acked={recovery_acked} reader={reader} owned={:?} next_seq={}",
-                writer.owned, writer.next_seq
+                writer.owned(),
+                writer.next_seq()
             );
             // Failure diagnostic (fires only on the red path): which node is
             // stuck, and where, by real node id (the parked nodes are absent,

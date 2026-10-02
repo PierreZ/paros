@@ -1,10 +1,17 @@
-# parosd
+# parosd and parosctl
 
-The paros daemon: every role of a paros deployment over moonpool's Tokio
-providers, with `paros::journal`'s stores on a real filesystem. The drivers and
-the stores are the library's — the same code the deterministic simulation runs
-— and this crate adds only what a process needs: arguments, a data directory,
-a tracing subscriber, signals and exit codes.
+`parosd` is the paros daemon: every role of a paros deployment over moonpool's
+Tokio providers, with `paros::journal`'s stores on a real filesystem. The
+drivers and the stores are the library's — the same code the deterministic
+simulation runs — and this crate adds only what a process needs: arguments, a
+data directory, a tracing subscriber, signals and exit codes.
+
+`parosctl` is the client, over `paros::client` — the library client the
+simulation's workload drives too. It holds no client policy of its own: which
+server to ask, following a redirect, re-sending the identical write, settling
+an ambiguous one, claiming a journal and resuming a reader after a truncation
+are all the library's. The split follows etcd's (`etcd`, `etcdctl`,
+`clientv3`).
 
 ## A deployment on a laptop
 
@@ -19,10 +26,11 @@ parosd matchmaker --id 0    --data-dir mm --first-boot $D &
 parosd node       --id 0    --data-dir n0 --first-boot $D &
 parosd replica    --id 1000 --data-dir r0 --first-boot $D &
 
-# Claim journal 128, write two records, read them back (from the replica too).
-parosd set-leader --server 127.0.0.1:4500 --expected 0 --owner 7
-parosd write --server 127.0.0.1:4500 --owner 7 --generation 1 --seq 0 hello world
-parosd read  --server 127.0.0.1:4700 --from 0
+# Write two records to journal 128 — claimed on the way — and read them back
+# (from the replica too).
+export PAROSCTL_SERVERS=0=127.0.0.1:4500,1000=127.0.0.1:4700
+parosctl write 128 hello world --owner 7
+parosctl read 128
 ```
 
 Every later start drops `--first-boot`: the stores must carry their format
@@ -53,10 +61,34 @@ A refusal is one of three:
   count). Restore the deployment it was provisioned with; membership changes
   go through reconfiguration, never through the configuration.
 
-The client commands print one `key=value` line per answer (and a `record
-seq=… data=…` line per record read) and exit 0 on success, 3 on an answered
-but unsuccessful call (refused, lost, not served) and 1 when the server did
-not answer.
+## parosctl
+
+The servers come from `--servers ID=HOST:PORT,…` (or `PAROSCTL_SERVERS`); the
+id is the node id a leader hint names the server by (a bare `HOST:PORT` takes
+its position in the list).
+
+| command | what it does |
+|---|---|
+| `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
+| `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
+| `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
+| `parosctl truncate <journal> --up-to N` | drops every record below `N` |
+| `parosctl set-leader <journal> --owner X [--expected G]` | compare-and-swaps the writer (against the generation read when `--expected` is absent) |
+| `parosctl inspect [--journal J]` | every server's view: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers |
+| `parosctl reconfigure --members 0,1,2 [--quorum majority\|flexible:Q1:Q2\|grid:RxC]` | asks the leader for a new acceptor set |
+| `parosctl retire --node N [--gc-watermark ROUND.NODE]` | retires a node, carrying the GC watermark (read from the leader's `inspect` when absent) |
+
+Output is text — one line per record or answer, `key=value` details — or, with
+`--json`, one JSON document per answer. Diagnostics (a claim made on the way, a
+truncation gap) go to stderr.
+
+| exit | meaning |
+|---|---|
+| 0 | success |
+| 3 | answered, and not what was asked: refused, lost, superseded, not served |
+| 4 | ambiguous: a write (or another mutation) may or may not have happened |
+| 5 | no server decided anything: no leader yet, nothing served |
+| 2 | bad arguments |
 
 ## Data directory
 

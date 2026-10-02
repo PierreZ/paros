@@ -3,17 +3,23 @@
 //! per server bound to it.
 //!
 //! The corpus builds its [`CorpusClients`](crate::corpus) on it, and the
-//! chain workload opens one per run.
+//! chain workload opens one per run and builds its [`ChainClient`]s — the
+//! library's `paros::client` — over it.
 
 use std::time::Duration;
 
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use moonpool_sim::{SimContext, SimProviders, SimulationError, SimulationResult, TaskProvider};
+use paros::client::{ClientTunables, Server};
 use paros::{NodeClient, parse_addr};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// A workload's client to one server.
 pub(crate) type SimClient = NodeClient<SimProviders>;
+
+/// The library's client (#221) over the simulation's providers: what the
+/// chain workload drives every journal call through.
+pub(crate) type ChainClient = paros::client::Client<SimProviders>;
 
 /// A client-only RPC runtime, driven on its own task until this handle
 /// drops: every exit path from a workload stops it (the drop guard cancels
@@ -56,6 +62,32 @@ impl ClientRuntime {
             rpc,
             _stop: stop.drop_guard(),
         })
+    }
+
+    /// The library client of `servers` — `(node id, ip)` pairs, in the
+    /// order the client indexes them — under `tunables`.
+    pub(crate) fn chain_client(
+        &self,
+        ctx: &SimContext,
+        servers: &[(u64, String)],
+        tunables: ClientTunables,
+    ) -> SimulationResult<ChainClient> {
+        if servers.is_empty() {
+            return Err(SimulationError::InvalidState(
+                "a client needs at least one server".into(),
+            ));
+        }
+        let ips: Vec<String> = servers.iter().map(|(_, ip)| ip.clone()).collect();
+        let stubs = self.clients(&ips)?;
+        let servers = servers
+            .iter()
+            .zip(stubs)
+            .map(|((id, _), node)| Server { id: *id, node })
+            .collect();
+        Ok(
+            paros::client::Client::new(ctx.providers(), servers, tunables)
+                .with_shutdown(ctx.shutdown().clone()),
+        )
     }
 
     /// One client per server, in `servers` order.
