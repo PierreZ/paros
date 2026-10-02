@@ -21,7 +21,7 @@
 //!
 //! | Durable state | Where it lives | Entry identity (epoch kind, tag) |
 //! |---|---|---|
-//! | promise ([`HardState::max_promised_ballot`](paros_core::HardState)) + format marker (#147) | journal **metadata** (two copies, temp + fsync + rename) | — |
+//! | promise ([`HardState::max_promised_ballot`](paros_core::HardState)) + format marker and the configuration it was written under (#147, #207) | journal **metadata** (two copies, temp + fsync + rename) | — |
 //! | accepted / learned `(slot, ballot, command)` | `Accepted` entry | `(slot, ballot.round, ballot.node)` |
 //! | a faulty slot carried by a checkpoint | `Faulty` entry | `(slot, ballot.round, ballot.node)` |
 //! | chosen index | `ChosenIndex` entry (a `Relaxed` batch is deferred to the next `Sync`) | — |
@@ -29,7 +29,7 @@
 //! | trim-point jump (point, journal state; #186) | `TrimmedTo` entry | — |
 //! | matchmaker registration | `Register` entry | `(ballot.round, ballot.node)` |
 //! | matchmaker scalars (generation, freeze, decree, watermark) | `Scalars` entry, the whole image | — |
-//! | matchmaker format marker (#183) | journal **metadata** | — |
+//! | matchmaker format marker and its configuration (#183, #207) | journal **metadata** | — |
 //!
 //! Every entry's epoch is its record kind, so the far identifier alone says
 //! what a damaged entry *was*; the journal itself tracks append batches and

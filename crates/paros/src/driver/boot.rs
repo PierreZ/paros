@@ -21,10 +21,20 @@ use super::ready::{report_applied, storage_fault_crash};
 /// first boot formats the store durably first — the marker lands on disk no
 /// later than the first promise, which is the ordering the refusal relies on.
 ///
+/// #207: the marker records the [`Config`](paros_core::Config) it was written
+/// under, and an existing member is refused when the operator now hands it
+/// another one ([`BootRefusal::ConfigMismatch`]). The bootstrap membership,
+/// the quorum system and the counts are safety inputs the core reads once,
+/// at construction: an edited configuration file must never change them
+/// across a restart — a node that silently switched from a majority to a
+/// flexible split, or to a membership missing a peer, would count quorums
+/// its peers do not.
+///
 /// # Errors
 ///
-/// [`RunError::Refused`] when the claim and the marker disagree (nothing was
-/// written); [`RunError::Storage`] when formatting the store failed.
+/// [`RunError::Refused`] when the claim and the marker disagree, or the
+/// marker names another configuration (nothing was written);
+/// [`RunError::Storage`] when formatting the store failed.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id))]
 pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
     storage: &mut S,
@@ -32,11 +42,21 @@ pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
     self_id: u64,
     audit: &A,
 ) -> Result<(), RunError> {
-    let refusal = match (boot, storage.is_formatted()) {
-        (BootKind::ExistingMember, true) => return Ok(()),
-        (BootKind::FirstBoot, false) => {
+    let (_, operator) = storage.initial_state();
+    let refusal = match (boot, storage.formatted_config()) {
+        (BootKind::ExistingMember, Some(formatted)) if formatted == operator => return Ok(()),
+        (BootKind::ExistingMember, Some(formatted)) => {
+            tracing::error!(
+                node = self_id,
+                formatted = ?formatted,
+                operator = ?operator,
+                "boot_config_mismatch"
+            );
+            BootRefusal::ConfigMismatch
+        }
+        (BootKind::FirstBoot, None) => {
             storage
-                .format()
+                .format(&operator)
                 .await
                 .map_err(|e| storage_fault_crash(audit, self_id, e))?;
             storage
@@ -46,15 +66,11 @@ pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
             tracing::info!(node = self_id, "store_formatted");
             return Ok(());
         }
-        (BootKind::ExistingMember, false) => BootRefusal::Amnesia,
-        (BootKind::FirstBoot, true) => BootRefusal::AlreadyFormatted,
+        (BootKind::ExistingMember, None) => BootRefusal::Amnesia,
+        (BootKind::FirstBoot, Some(_)) => BootRefusal::AlreadyFormatted,
     };
     audit.boot_refused(NodeId(self_id), refusal);
-    let label = match refusal {
-        BootRefusal::Amnesia => "amnesia",
-        BootRefusal::AlreadyFormatted => "already_formatted",
-    };
-    tracing::warn!(node = self_id, refusal = label, "boot_refused");
+    tracing::warn!(node = self_id, refusal = refusal.label(), "boot_refused");
     Err(RunError::Refused(refusal))
 }
 

@@ -1354,6 +1354,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     { "node" => node.0 }
                 );
             }
+            // #207: the operator's edited configuration file is refused;
+            // the identity is not gone — the operator restores the file and
+            // the node restarts as the member it was, so convergence still
+            // waits for it.
+            BootRefusal::ConfigMismatch => {
+                reach_once!(
+                    st.config_mismatch_refused,
+                    "storage: the library refuses a restart under an edited configuration"
+                );
+            }
         }
     }
 
@@ -2163,6 +2173,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     false,
                     "matchmaker: a first boot never meets a formatted registry",
                     { "matchmaker" => matchmaker.0 }
+                );
+            }
+            // #207: an edited configuration is refused, then restored.
+            BootRefusal::ConfigMismatch => {
+                let mut st = self.state();
+                reach_once!(
+                    st.matchmaker_config_mismatch_refused,
+                    "matchmaker: the library refuses a restart under an edited configuration"
                 );
             }
         }

@@ -793,6 +793,25 @@ async fn run_acceptor(
             tracing::info!(node = self_rank.0, "storage_wiped");
         }
     }
+    // #207: the operator restarts this node with an edited configuration
+    // file — a peer dropped from the bootstrap membership — and the library
+    // refuses the store that was formatted under the old one; the operator
+    // restores the file and restarts (the `ConfigMismatch` arm below). Only
+    // a node whose every journal it serves is the one seat, on a seed
+    // without system journals: a refused journal is down for good on a node
+    // that still serves another, and the operator's correction is a restart
+    // of the whole process. The edit is applied below, inside the loop and
+    // only to an identity the provisioning ledger knows: a first boot under
+    // an edited file would format the edit.
+    let mut edit = OperatorEdit::new(
+        incarnation.is_restart()
+            && perturb
+            && seats.len() == 1
+            && system.is_none()
+            && seats[0].config.peers.len() > 1
+            && ctx.time().now() < crate::CHAOS_DURATION
+            && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
+    );
 
     // Recovery loop: a `buggify`-injected seam crash unwinds the driver, we
     // drop the volatile nodes, rebuild storage from the (surviving) worlds,
@@ -807,6 +826,18 @@ async fn run_acceptor(
     loop {
         if journal_store.is_some() {
             resolve_provisioning(ctx, &seats, my_ip, journal_store).await;
+        }
+        let provisioned = seats[0]
+            .world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .provisioned(my_ip);
+        if edit.apply(provisioned, &mut seats[0].config, |config| {
+            config.peers.pop();
+        }) {
+            // BUGGIFY pairing: the operator's edit genuinely reaches a boot.
+            assert_reachable!("operator: a node restarts under an edited configuration");
+            tracing::info!(node = self_rank.0, "config_edited");
         }
         let stores = SimStores {
             ctx,
@@ -900,6 +931,30 @@ async fn run_acceptor(
                 tracing::info!(node = self_rank.0, "amnesia_refused_stays_down");
                 return Ok(());
             }
+            // #207: the library refused a store formatted under another
+            // configuration. Only the operator's edit above ever changes
+            // one, so the refusal must name it; the operator restores the
+            // file and restarts, and the node comes back as the member it
+            // was — nothing was written by the refused boot.
+            Err(RunError::Refused(BootRefusal::ConfigMismatch)) => {
+                let restored = edit.restore(&mut seats[0].config);
+                assert_always!(
+                    restored,
+                    "storage: a configuration refusal names an operator's edit",
+                    { "node" => self_rank.0 }
+                );
+                if !restored {
+                    return Err(SimulationError::InvalidState(format!(
+                        "node {} refused a configuration nobody edited",
+                        self_rank.0
+                    )));
+                }
+                tracing::info!(node = self_rank.0, "config_restored");
+                restart_delay!(
+                    ctx,
+                    "a node refused under an edited configuration restarts under the restored one"
+                );
+            }
             // A first boot on a formatted store is a harness bug: the
             // provisioning ledger and the disks disagree.
             Err(RunError::Refused(BootRefusal::AlreadyFormatted)) => {
@@ -917,6 +972,49 @@ async fn run_acceptor(
             // propagates to the harness instead of being retried.
             Err(RunError::Infra(e)) => return Err(e),
             Ok(()) => return Ok(()),
+        }
+    }
+}
+
+/// The operator's edit of a configuration file (#207): drawn at a restart,
+/// applied to the first boot of an identity the provisioning ledger knows,
+/// and undone when the library refuses it.
+struct OperatorEdit<C> {
+    /// The coin fired and the edit has not reached a boot yet.
+    pending: bool,
+    /// The configuration the edit replaced, until the refusal restores it.
+    edited_from: Option<C>,
+}
+
+impl<C: Clone> OperatorEdit<C> {
+    fn new(pending: bool) -> Self {
+        Self {
+            pending,
+            edited_from: None,
+        }
+    }
+
+    /// Apply the pending edit to `config` when `provisioned` (a first boot
+    /// under an edited file would format the edit); `true` when it did.
+    fn apply(&mut self, provisioned: bool, config: &mut C, edit: impl FnOnce(&mut C)) -> bool {
+        if !self.pending || !provisioned {
+            return false;
+        }
+        self.pending = false;
+        self.edited_from = Some(config.clone());
+        edit(config);
+        true
+    }
+
+    /// The library refused the edit: restore the original into `config`;
+    /// `false` when there was no edit to restore (a refusal nobody caused).
+    fn restore(&mut self, config: &mut C) -> bool {
+        match self.edited_from.take() {
+            Some(original) => {
+                *config = original;
+                true
+            }
+            None => false,
         }
     }
 }
@@ -1316,6 +1414,8 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
 /// crash/recovery loop as the node — a seam crash unwinds `run_matchmaker`,
 /// the volatile `Matchmaker` is dropped, and the next incarnation restores
 /// its registry from the durable world.
+// One recovery loop with per-exit-kind handling, like `run_acceptor`'s.
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(matchmaker = id.0))]
 async fn run_matchmaker_role(
     ctx: &SimContext,
@@ -1335,7 +1435,7 @@ async fn run_matchmaker_role(
     .into_iter()
     .map(MatchmakerId)
     .collect();
-    let config = MatchmakerConfig {
+    let mut config = MatchmakerConfig {
         id,
         bootstrap: bootstrap.clone(),
     };
@@ -1369,6 +1469,18 @@ async fn run_matchmaker_role(
         assert_reachable!("matchmaker: a restarted matchmaker's registry is lost for good");
         tracing::info!(matchmaker = id.0, "matchmaker_wiped");
     }
+    // #207: the operator restarts this matchmaker with an edited bootstrap
+    // set in its configuration file; the library refuses the registry
+    // formatted under the old one, and the operator restores the file and
+    // restarts (the `ConfigMismatch` arm below). Applied in the loop, and
+    // only to a matchmaker the provisioning ledger knows.
+    let mut edit = OperatorEdit::new(
+        incarnation.is_restart()
+            && perturb
+            && config.bootstrap.len() > 1
+            && ctx.time().now() < crate::CHAOS_DURATION
+            && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
+    );
     loop {
         // The operator's claim is the provisioning ledger (#183), kept
         // outside the disks: a wipe erases the marker, never the memory of
@@ -1382,6 +1494,13 @@ async fn run_matchmaker_role(
         } else {
             BootKind::FirstBoot
         };
+        if edit.apply(boot == BootKind::ExistingMember, &mut config, |config| {
+            config.bootstrap.pop();
+        }) {
+            // BUGGIFY pairing: the operator's edit genuinely reaches a boot.
+            assert_reachable!("operator: a matchmaker restarts under an edited configuration");
+            tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
+        }
         let storage = DurableMatchmakerStorage::restore(
             Arc::downgrade(&world),
             my_ip.to_string(),
@@ -1431,6 +1550,28 @@ async fn run_matchmaker_role(
                 );
                 stay_down(&checker, Down::MatchmakerLost(id.0));
                 return Ok(());
+            }
+            // #207: the library refused a registry formatted under another
+            // configuration; only the operator's edit above changes one.
+            // The operator restores the file and restarts.
+            Err(RunError::Refused(BootRefusal::ConfigMismatch)) => {
+                let restored = edit.restore(&mut config);
+                assert_always!(
+                    restored,
+                    "matchmaker: a configuration refusal names an operator's edit",
+                    { "matchmaker" => id.0 }
+                );
+                if !restored {
+                    return Err(SimulationError::InvalidState(format!(
+                        "matchmaker {} refused a configuration nobody edited",
+                        id.0
+                    )));
+                }
+                tracing::info!(matchmaker = id.0, "matchmaker_config_restored");
+                restart_delay!(
+                    ctx,
+                    "a matchmaker refused under an edited configuration restarts under the restored one"
+                );
             }
             // A first boot on a formatted registry is a harness bug: the
             // provisioning ledger and the disks disagree.

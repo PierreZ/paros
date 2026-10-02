@@ -328,6 +328,12 @@ pub(super) struct AuditState {
     pub(super) wiped_any: bool,
     /// The library refused an amnesiac member (#147).
     pub(super) amnesia_refused: bool,
+    /// The library refused a node's restart under an edited configuration
+    /// (#207).
+    pub(super) config_mismatch_refused: bool,
+    /// The library refused a matchmaker's restart under an edited
+    /// configuration (#207).
+    pub(super) matchmaker_config_mismatch_refused: bool,
     /// A client asked some leader to reconfigure the matchmaker set.
     pub(super) reconfigure_matchmakers_started: bool,
     /// Some leader refused a matchmaker-set reconfiguration request.

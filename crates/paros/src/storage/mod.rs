@@ -9,7 +9,7 @@
 use std::fmt;
 use std::future::Future;
 
-use paros_core::{Ballot, Command, JournalState, MustSync, Slot, Storage};
+use paros_core::{Ballot, Command, Config, JournalState, MustSync, Slot, Storage};
 
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 
@@ -290,26 +290,39 @@ pub trait LogStorage: Storage {
         async { Ok(()) }
     }
 
-    /// Whether this store carries the **format marker** (#147): the durable
-    /// proof that the identity this store belongs to has been provisioned —
-    /// written once by [`format`](LogStorage::format) on the identity's
-    /// first boot, before any protocol state, and never removed. The driver
-    /// judges the operator's [`BootKind`](crate::BootKind) claim against it:
-    /// an existing member whose store has no marker has lost its disk, and
-    /// its durable promise with it, and is refused rather than rejoined.
-    /// Synchronous, answered from what the boot scan loaded, like every
-    /// accessor that reports what a store knows about itself.
-    fn is_formatted(&self) -> bool;
+    /// The configuration this store was **formatted** with (#147, #207), or
+    /// `None` on a store that carries no format marker. The marker *is* this
+    /// record: the durable proof that the identity this store belongs to has
+    /// been provisioned — written once by [`format`](LogStorage::format) on
+    /// the identity's first boot, before any protocol state, and never
+    /// removed. The driver judges the operator's
+    /// [`BootKind`](crate::BootKind) claim against it: an existing member
+    /// whose store has no marker has lost its disk, and its durable promise
+    /// with it, and is refused rather than rejoined; an existing member
+    /// whose store was formatted under another [`Config`] than the one the
+    /// operator hands it now ([`Storage::initial_state`]) is refused too —
+    /// the bootstrap membership, the quorum system and the counts are safety
+    /// inputs, and an edited configuration file must not change them across
+    /// a restart. Synchronous, answered from what the boot scan loaded, like
+    /// every accessor that reports what a store knows about itself.
+    fn formatted_config(&self) -> Option<Config>;
 
-    /// Write the format marker (#147). Staged like every other write and
+    /// Whether this store carries the format marker (#147):
+    /// [`formatted_config`](LogStorage::formatted_config) is `Some`.
+    fn is_formatted(&self) -> bool {
+        self.formatted_config().is_some()
+    }
+
+    /// Write the format marker (#147) and, with it, the configuration the
+    /// store is provisioned under (#207). Staged like every other write and
     /// durable at the next [`sync`](LogStorage::sync); the driver syncs it
     /// alone, on a first boot, before the core reads the store, so the
     /// marker is on disk no later than the first promise. Nothing but this
-    /// method writes it, and nothing removes it.
+    /// method writes it, and nothing removes or edits it.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
-    fn format(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn format(&mut self, config: &Config) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Persist a raised promised ballot (Phase 1).
     ///

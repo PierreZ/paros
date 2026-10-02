@@ -81,7 +81,9 @@ fn match_crash_if<H: DriverHooks, A: Audit>(
 /// one peer that also missed the record would skip the Phase 1 that record
 /// demands. So the refusal happens here, on the claim. A first boot formats
 /// the registry durably first — the marker lands no later than the first
-/// registration, the ordering the refusal relies on.
+/// registration, the ordering the refusal relies on. And, #207, a registry
+/// formatted under another [`MatchmakerConfig`] — another identity, another
+/// bootstrap set — is refused as [`BootRefusal::ConfigMismatch`].
 ///
 /// Load-bearing, measured: with the `Amnesia` arm removed, a 3,000-seed
 /// `sim-paros-hunt main` went red on 4 seeds — "matchmaker: a restart
@@ -94,18 +96,28 @@ fn match_crash_if<H: DriverHooks, A: Audit>(
 ///
 /// [`RunError::Refused`] when the claim and the marker disagree (nothing was
 /// written); [`RunError::Storage`] when formatting the registry failed.
-#[tracing::instrument(level = "debug", skip_all, fields(matchmaker = id.0))]
+#[tracing::instrument(level = "debug", skip_all, fields(matchmaker = config.id.0))]
 async fn check_format_marker<S: MatchmakerStorage, A: Audit>(
     storage: &mut S,
     boot: BootKind,
-    id: MatchmakerId,
+    config: &MatchmakerConfig,
     audit: &A,
 ) -> Result<(), RunError> {
-    let refusal = match (boot, storage.is_formatted()) {
-        (BootKind::ExistingMember, true) => return Ok(()),
-        (BootKind::FirstBoot, false) => {
+    let id = config.id;
+    let refusal = match (boot, storage.formatted_config()) {
+        (BootKind::ExistingMember, Some(formatted)) if formatted == *config => return Ok(()),
+        (BootKind::ExistingMember, Some(formatted)) => {
+            tracing::error!(
+                matchmaker = id.0,
+                formatted = ?formatted,
+                operator = ?config,
+                "matchmaker_boot_config_mismatch"
+            );
+            BootRefusal::ConfigMismatch
+        }
+        (BootKind::FirstBoot, None) => {
             storage
-                .format()
+                .format(config)
                 .await
                 .map_err(|e| storage_fault_crash(audit, id, e))?;
             storage
@@ -115,17 +127,13 @@ async fn check_format_marker<S: MatchmakerStorage, A: Audit>(
             tracing::info!(matchmaker = id.0, "matchmaker_store_formatted");
             return Ok(());
         }
-        (BootKind::ExistingMember, false) => BootRefusal::Amnesia,
-        (BootKind::FirstBoot, true) => BootRefusal::AlreadyFormatted,
+        (BootKind::ExistingMember, None) => BootRefusal::Amnesia,
+        (BootKind::FirstBoot, Some(_)) => BootRefusal::AlreadyFormatted,
     };
     audit.matchmaker_boot_refused(id, refusal);
-    let label = match refusal {
-        BootRefusal::Amnesia => "amnesia",
-        BootRefusal::AlreadyFormatted => "already_formatted",
-    };
     tracing::warn!(
         matchmaker = id.0,
-        refusal = label,
+        refusal = refusal.label(),
         "matchmaker_boot_refused"
     );
     Err(RunError::Refused(refusal))
@@ -424,7 +432,7 @@ where
         .boot_scan()
         .await
         .map_err(|e| storage_fault_crash(audit, id, e))?;
-    check_format_marker(&mut storage, boot, id, audit).await?;
+    check_format_marker(&mut storage, boot, &config, audit).await?;
 
     let mut edge = RpcEdge::listen(&providers, &local_addr, "matchmaker", &tunables).await?;
     let mut inbox = MatchmakerInbox::serve(&edge)?;

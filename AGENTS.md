@@ -970,7 +970,14 @@ ExistingMember}`, never inferred from the store), formats the store durably on a
 (`RunError::Refused(BootRefusal::Amnesia)`, reported through `Audit::boot_refused`) — an
 empty-but-openable store is otherwise indistinguishable from a first boot to `ColocatedNode::new`.
 A first boot on a formatted store is refused too (`AlreadyFormatted`: two identities on one
-disk). The marker is a store property, not protocol state: no `HardState` scalar, and the plain
+disk). The marker **records the `Config` it was written under** (#207,
+`LogStorage::formatted_config`; `MatchmakerStorage::formatted_config` for the registry's
+`MatchmakerConfig`), and an existing member handed another one is refused as `ConfigMismatch`:
+the bootstrap membership, the quorum system and the counts are safety inputs read once at
+construction, never edited in a configuration file across a restart. In simulation an operator
+restarts a node or a matchmaker under an edited file (`NodeShape::config_edit_pct`, a
+`buggify_knob!`), the library refuses it, and the operator restores the file and restarts. The
+marker is a store property, not protocol state: no `HardState` scalar, and the plain
 deployment persists the same two scalars. In the harness the operator's claim is the storage
 world's **provisioning ledger**, recorded exactly when the marker lands durably and kept outside
 the disks, so a wipe erases the marker but not the memory of having provisioned the node: the

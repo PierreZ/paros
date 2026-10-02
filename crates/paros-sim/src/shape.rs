@@ -57,6 +57,10 @@ const MIN_LOSS_PCT: u32 = 5;
 /// bound the damage, so the extreme stays a valid deployment.
 const MAX_LOSS_PCT: u32 = 75;
 
+/// The default per-restart chance that the operator restarts a node under an
+/// edited configuration (#207, [`NodeShape::config_edit_pct`]).
+const DEFAULT_CONFIG_EDIT_PCT: u32 = 10;
+
 /// Everything the swarm fixes about one logical node for one seed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct NodeShape {
@@ -82,6 +86,15 @@ pub(crate) struct NodeShape {
     /// argument: the matchmaker-loss budget (one per run, and only where the
     /// bootstrap set can spare it) bounds it.
     pub(crate) matchmaker_loss_pct: u32,
+    /// Percent chance that a chaotic restart of this node is attempted under
+    /// an **edited configuration** (#207): the operator changed the
+    /// bootstrap membership in the configuration file, the library refuses
+    /// the store formatted under the old one, and the operator restores it
+    /// and restarts. No floor to defend and the ceiling is structural: a
+    /// refused incarnation writes nothing, and the corrected restart is an
+    /// ordinary restart, so even an operator who edits on every restart
+    /// costs the cluster one restart delay per edit.
+    pub(crate) config_edit_pct: u32,
 }
 
 impl NodeShape {
@@ -93,6 +106,7 @@ impl NodeShape {
             write_rates: WritePathRates::default(),
             wipe_pct: DEFAULT_LOSS_PCT,
             matchmaker_loss_pct: DEFAULT_LOSS_PCT,
+            config_edit_pct: DEFAULT_CONFIG_EDIT_PCT,
         }
     }
 
@@ -293,6 +307,7 @@ impl NodeShape {
             write_rates: WritePathRates::draw(),
             wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
+            config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),
         }
     }
 }

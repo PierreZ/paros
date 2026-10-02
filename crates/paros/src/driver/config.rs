@@ -336,6 +336,26 @@ pub enum BootRefusal {
     /// A first boot found a store already formatted: another identity's
     /// disk, or a provisioning mistake. Nothing is written.
     AlreadyFormatted,
+    /// An existing member's store was formatted under another configuration
+    /// than the one the operator hands it now (#207): the bootstrap
+    /// membership, the quorum system, the counts or the identity changed
+    /// across a restart. These are safety inputs, never edited in place —
+    /// the operator restores the configuration the store was provisioned
+    /// with, and changes the membership by reconfiguration. Nothing is
+    /// written.
+    ConfigMismatch,
+}
+
+impl BootRefusal {
+    /// The refusal's stable label, for traces and exit reports.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            BootRefusal::Amnesia => "amnesia",
+            BootRefusal::AlreadyFormatted => "already_formatted",
+            BootRefusal::ConfigMismatch => "config_mismatch",
+        }
+    }
 }
 
 /// Why a driver loop stopped, typed — the shared exit of every provider-generic
@@ -388,6 +408,11 @@ impl std::fmt::Display for RunError {
                     "boot refused: a first boot on a store that is already formatted"
                 )
             }
+            RunError::Refused(BootRefusal::ConfigMismatch) => write!(
+                f,
+                "boot refused: the store was formatted under another configuration \
+                 (restore the configuration it was provisioned with)"
+            ),
             RunError::Infra(e) => write!(f, "infrastructure failure: {e}"),
         }
     }

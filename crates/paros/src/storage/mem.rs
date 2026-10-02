@@ -25,9 +25,9 @@ pub struct MemStorage {
     first: Slot,
     /// The journal state sealed at the floor (see [`LogStorage::truncate`]).
     sealed: JournalState,
-    /// The format marker (#147): set by [`LogStorage::format`], never
-    /// cleared.
-    formatted: bool,
+    /// The format marker (#147) and the configuration it was written under
+    /// (#207): set by [`LogStorage::format`], never cleared.
+    formatted: Option<Config>,
 }
 
 impl MemStorage {
@@ -40,7 +40,7 @@ impl MemStorage {
             config,
             first: Slot(0),
             sealed: JournalState::default(),
-            formatted: false,
+            formatted: None,
         }
     }
 
@@ -52,6 +52,9 @@ impl MemStorage {
     /// below `first` are dropped, exactly as a durable [`truncate`](LogStorage::truncate)
     /// would have left them.
     #[must_use]
+    ///
+    /// Records read back from a formatted store: the marker was written
+    /// before any of them could be, under `config`.
     pub fn from_records(
         config: Config,
         hard_state: HardState,
@@ -60,6 +63,7 @@ impl MemStorage {
         sealed: JournalState,
     ) -> Self {
         Self {
+            formatted: Some(config.clone()),
             hard_state,
             accepted: accepted
                 .into_iter()
@@ -69,9 +73,6 @@ impl MemStorage {
             config,
             first,
             sealed,
-            // Records read back from a formatted store: the marker was
-            // written before any of them could be.
-            formatted: true,
         }
     }
 
@@ -87,13 +88,13 @@ impl MemStorage {
 }
 
 impl LogStorage for MemStorage {
-    fn is_formatted(&self) -> bool {
-        self.formatted
+    fn formatted_config(&self) -> Option<Config> {
+        self.formatted.clone()
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn format(&mut self) -> Result<(), StorageError> {
-        self.formatted = true;
+    async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
+        self.formatted = Some(config.clone());
         Ok(())
     }
 

@@ -567,10 +567,24 @@ The marker is a store property and not protocol state, so the plain deployment
 persists the same two scalars it always did. What heals the cluster is a change of
 the acceptor set, which draws its successors from the live nodes.
 
-**In the code.** `LogStorage::is_formatted`, `LogStorage::format`
+The marker also records the **configuration** the store was formatted under: the
+bootstrap membership, the quorum system, the counts and the identity. The core
+reads them once, at construction, and counts every quorum by them, so they are
+safety inputs. An existing member whose operator now hands it a different
+configuration is refused too. A node that quietly switched from a majority to a
+flexible split, or to a membership missing a peer, would count quorums its peers
+do not. The operator restores the configuration the store was provisioned with,
+and changes the membership the only way it ever changes: by reconfiguration. The
+matchmaker's registry records its own configuration (its identity and bootstrap
+set) the same way. In the simulation an operator sometimes restarts a node or a
+matchmaker under an edited file, and the library has to refuse it before the
+restored file brings it back as the member it was.
+
+**In the code.** `LogStorage::formatted_config`, `LogStorage::format`
 (`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
-`BootKind::ExistingMember`, `BootRefusal::Amnesia`
-(`crates/paros/src/driver/config.rs`); `Audit::boot_refused`. Play it:
+`BootKind::ExistingMember`, `BootRefusal::Amnesia`,
+`BootRefusal::ConfigMismatch` (`crates/paros/src/driver/config.rs`);
+`Audit::boot_refused`. Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
 
 ## Many journals on one process

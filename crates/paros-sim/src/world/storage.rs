@@ -308,10 +308,11 @@ pub(crate) struct DurableStorage<T> {
     /// [`Storage::faulty_entries`].
     faulty_list: Vec<(Slot, Ballot)>,
     /// The format marker as of boot (#147), served through
-    /// [`LogStorage::is_formatted`].
-    formatted: bool,
+    /// [`LogStorage::formatted_config`] (boxed: it is read once a boot and
+    /// keeps the store's handle small).
+    formatted: Option<Box<Config>>,
     /// A format marker staged for the next durability flush (#147).
-    staged_format: bool,
+    staged_format: Option<Box<Config>>,
     /// Writes staged since the last flush (lost if the incarnation is dropped).
     staged_ballot: Option<Ballot>,
     staged_accepted: BTreeMap<Slot, (Ballot, Command)>,
@@ -341,7 +342,7 @@ impl<T: TimeProvider> DurableStorage<T> {
     ) -> Self {
         let mut boot = MemStorage::new(config.clone());
         let mut evidence = BootEvidence::default();
-        let mut formatted = false;
+        let mut formatted = None;
         if let Some(strong) = world.upgrade() {
             let mut guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
             // Stage 7 rot: latent faults that surfaced while the node was
@@ -359,7 +360,7 @@ impl<T: TimeProvider> DurableStorage<T> {
                 "a node boots from a prior incarnation's durable records"
             );
             if let Some(disk) = guard.disks.get(&key) {
-                formatted = disk.formatted;
+                formatted = disk.formatted.clone().map(Box::new);
                 // Read-back pair of the flush ordering `sync` claims: a floor
                 // that reached the disk never outruns the chosen index that
                 // reached the disk (the flush applies the floor last, and a
@@ -418,7 +419,7 @@ impl<T: TimeProvider> DurableStorage<T> {
             staged_floor: None,
             staged_jump: None,
             formatted,
-            staged_format: false,
+            staged_format: None,
             staged_sealed: None,
         }
     }
@@ -686,7 +687,7 @@ impl<T: TimeProvider> DurableStorage<T> {
         let node = self.node_id;
         self.with_world(|w| {
             w.clear_marks(&key, flushed_slots.iter().copied());
-            if format {
+            if format.is_some() {
                 // The marker lands and the operator's ledger records the
                 // provisioning at the same instant (#147): a lost format
                 // sync leaves both unset, so the next boot is a first boot
@@ -694,8 +695,8 @@ impl<T: TimeProvider> DurableStorage<T> {
                 w.provisioned.insert(key.clone());
             }
             let d = w.disk_mut(&key);
-            if format {
-                d.formatted = true;
+            if let Some(config) = format {
+                d.formatted = Some(*config);
             }
             if let Some(b) = ballot {
                 // The promise is monotonic: never let a flush lower it (a
@@ -806,8 +807,8 @@ impl<T: TimeProvider> DurableStorage<T> {
 }
 
 impl<T: TimeProvider> LogStorage for DurableStorage<T> {
-    fn is_formatted(&self) -> bool {
-        self.formatted
+    fn formatted_config(&self) -> Option<Config> {
+        self.formatted.as_deref().cloned()
     }
 
     /// The format marker (#147) stages like every write and lands on the
@@ -815,8 +816,8 @@ impl<T: TimeProvider> LogStorage for DurableStorage<T> {
     /// written once at provisioning, and the seam every swarm fault targets
     /// is the protocol's, not the operator's.
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn format(&mut self) -> Result<(), StorageError> {
-        self.staged_format = true;
+    async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
+        self.staged_format = Some(Box::new(config.clone()));
         Ok(())
     }
 
