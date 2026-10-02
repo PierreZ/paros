@@ -138,7 +138,7 @@ its position in the list).
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
-| `parosctl truncate <journal> --up-to N` | drops every record below `N` |
+| `parosctl truncate <journal> --up-to N [--owner N] [--generation G]` | drops every record below `N`, as the journal's owner (claimed like `write`); a superseded owner is refused |
 | `parosctl set-leader <journal> --owner X [--expected G]` | compare-and-swaps the writer (against the generation read when `--expected` is absent) |
 | `parosctl inspect [--journal J]` | every server's view: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers |
 | `parosctl reconfigure --members 0,1,2 [--quorum majority\|flexible:Q1:Q2\|grid:RxC]` | asks the leader for a new acceptor set |

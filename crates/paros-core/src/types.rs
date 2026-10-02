@@ -127,12 +127,19 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Control {
-    /// Truncate the journal (#204, `Truncate(up_to_seq)`): drop every record
-    /// below `up_to`. Monotone, clamped to the journal's next position. Every
-    /// node applies it when its contiguous walk reaches this slot, and drops
-    /// the log slots whose records all lie below the new first position —
-    /// forwarded by normal replication + catch-up.
+    /// Truncate the journal (#228, `Truncate(generation, owner, up_to_seq)`):
+    /// drop every record below `up_to`. Fenced like a `Write`: it applies iff
+    /// `(generation, owner)` is the journal's current writer, judged at apply
+    /// in slot order, and is otherwise refused in place. Monotone, clamped to
+    /// the journal's next position. Every node applies an accepted one when
+    /// its contiguous walk reaches this slot, and drops the log slots whose
+    /// records all lie below the new first position — forwarded by normal
+    /// replication + catch-up.
     Truncate {
+        /// The writer generation the caller truncates under.
+        generation: Generation,
+        /// The client truncating: the writer of that generation.
+        owner: ClientId,
         /// The first position the client still needs (every record below it
         /// may go).
         up_to: Seq,
@@ -225,8 +232,14 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             }
             hash
         }
-        Command::Control(Control::Truncate { up_to }) => {
+        Command::Control(Control::Truncate {
+            generation,
+            owner,
+            up_to,
+        }) => {
             let hash = fnv1a(FNV_OFFSET, &[1]);
+            let hash = fnv1a(hash, &generation.0.to_le_bytes());
+            let hash = fnv1a(hash, &owner.0.to_le_bytes());
             fnv1a(hash, &up_to.0.to_le_bytes())
         }
         Command::Control(Control::Noop) => fnv1a(FNV_OFFSET, &[2]),

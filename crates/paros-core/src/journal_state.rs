@@ -18,8 +18,13 @@
 //! - **`SetLeader(expected_gen, new_owner)`** ([`Control::SetLeader`]) is a
 //!   pure compare-and-swap: it wins iff `expected_gen` is current, and the
 //!   generation becomes `expected_gen + 1`. No lease, no clock.
-//! - **`Truncate(up_to_seq)`** ([`Control::Truncate`]) raises `first_seq` to
-//!   `up_to_seq`, clamped to `next_seq`. Monotone.
+//! - **`Truncate(generation, owner, up_to_seq)`** ([`Control::Truncate`],
+//!   #228) is fenced like a `Write`: it is accepted iff `(generation, owner)`
+//!   is current, and then raises `first_seq` to `up_to_seq`, clamped to
+//!   `next_seq`. Monotone. A superseded or foreign caller is refused
+//!   ([`Outcome::TruncateRefused`]) and nothing moves: anyone holding the
+//!   tenant could otherwise truncate to a position that is not the owner's
+//!   checkpoint.
 //!
 //! A refusal is answered in place and names the state it was judged against,
 //! so an owner learns where the journal is (the next position) or that it was
@@ -95,6 +100,9 @@ pub enum Outcome {
     /// The `Truncate` applied: the state after it (`first_seq` raised, or
     /// left where a higher truncation already put it).
     Trimmed(JournalState),
+    /// The `Truncate` was refused (#228): its `(generation, owner)` is not
+    /// the current writer. Nothing moved; the state names the current writer.
+    TruncateRefused(JournalState),
     /// A `Noop`: nothing moved.
     Noop,
 }
@@ -129,7 +137,11 @@ impl JournalState {
             Command::Control(Control::SetLeader { expected, owner }) => {
                 self.apply_set_leader(*expected, *owner)
             }
-            Command::Control(Control::Truncate { up_to }) => self.apply_truncate(*up_to),
+            Command::Control(Control::Truncate {
+                generation,
+                owner,
+                up_to,
+            }) => self.apply_truncate(*generation, *owner, *up_to),
             Command::Control(Control::Noop) => Outcome::Noop,
         };
         // Monotone in every scalar but the owner, and the owner moves only
@@ -180,7 +192,7 @@ impl JournalState {
                 _ => Outcome::Refused(*self),
             };
         }
-        let current = self.owner == Some(entry.owner) && self.generation == entry.generation;
+        let current = self.is_current(entry.generation, entry.owner);
         if !current || entry.seq != self.next_seq || entry.records.is_empty() {
             return Outcome::Refused(*self);
         }
@@ -201,9 +213,19 @@ impl JournalState {
         Outcome::Leader(*self)
     }
 
-    fn apply_truncate(&mut self, up_to: Seq) -> Outcome {
+    fn apply_truncate(&mut self, generation: Generation, owner: ClientId, up_to: Seq) -> Outcome {
+        if !self.is_current(generation, owner) {
+            return Outcome::TruncateRefused(*self);
+        }
         self.first_seq = self.first_seq.max(up_to.min(self.next_seq));
         Outcome::Trimmed(*self)
+    }
+
+    /// Whether `(generation, owner)` is the journal's current writer: the
+    /// fence a `Write` and a `Truncate` are both judged against.
+    #[must_use]
+    pub fn is_current(&self, generation: Generation, owner: ClientId) -> bool {
+        self.owner == Some(owner) && self.generation == generation
     }
 
     /// The state's own ordering.
@@ -235,6 +257,14 @@ mod tests {
             owner: ClientId(owner),
             seq: Seq(seq),
             records: records.iter().map(|r| Value(r.to_vec())).collect(),
+        })
+    }
+
+    fn truncate(generation: u64, owner: u64, up_to: u64) -> Command {
+        Command::Control(Control::Truncate {
+            generation: Generation(generation),
+            owner: ClientId(owner),
+            up_to: Seq(up_to),
         })
     }
 
@@ -332,7 +362,7 @@ mod tests {
             write(1, 1, 0, &[b"a"]),
             set_leader(1, 2),
             write(1, 1, 0, &[b"a"]),
-            Command::Control(Control::Truncate { up_to: Seq(1) }),
+            truncate(2, 2, 1),
             write(1, 1, 0, &[b"a"]),
         ]);
         assert!(matches!(outcomes[3], Outcome::Duplicate { .. }));
@@ -354,9 +384,29 @@ mod tests {
         let (state, _) = fold(&[
             set_leader(0, 1),
             write(1, 1, 0, &[b"a", b"b"]),
-            Command::Control(Control::Truncate { up_to: Seq(9) }),
-            Command::Control(Control::Truncate { up_to: Seq(1) }),
+            truncate(1, 1, 9),
+            truncate(1, 1, 1),
         ]);
         assert_eq!(state.first_seq, Seq(2));
+    }
+
+    #[test]
+    fn truncate_is_fenced_like_a_write() {
+        let (state, outcomes) = fold(&[
+            truncate(0, 1, 0),
+            set_leader(0, 1),
+            write(1, 1, 0, &[b"a", b"b"]),
+            truncate(1, 2, 1),
+            set_leader(1, 2),
+            truncate(1, 1, 2),
+            truncate(2, 2, 1),
+        ]);
+        assert!(matches!(outcomes[0], Outcome::TruncateRefused(s) if s.owner.is_none()));
+        assert!(matches!(outcomes[3], Outcome::TruncateRefused(s) if s.first_seq == Seq(0)));
+        assert!(
+            matches!(outcomes[5], Outcome::TruncateRefused(s) if s.generation == Generation(2))
+        );
+        assert!(matches!(outcomes[6], Outcome::Trimmed(s) if s.first_seq == Seq(1)));
+        assert_eq!(state.first_seq, Seq(1));
     }
 }

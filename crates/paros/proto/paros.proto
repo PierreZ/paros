@@ -23,7 +23,9 @@ service Paros {
   // Phase-1 quorum's vote watermarks, then this server's fold once it
   // covers them. Long-polls at the tail for `wait_ms`.
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
-  // Drop every record below `up_to` (#204). Monotone, decided by consensus.
+  // Drop every record below `up_to` (#204). Fenced by `(generation, owner)`
+  // like a `Write` (#228), monotone, decided by consensus and judged at
+  // apply in slot order; a stale or foreign caller is refused in place.
   rpc Truncate(.paros.v1.Truncate) returns (.paros.v1.TruncateAck);
   // Compare-and-swap the journal's writer (#204): wins iff `expected` is the
   // current generation, which then becomes `expected + 1`.
@@ -108,14 +110,23 @@ message Truncate {
   uint64 journal = 1;
   // The first position the client still needs.
   uint64 up_to = 2;
+  // The writer fence (#228): the caller's generation and owner id, judged
+  // against the journal's current writer at apply.
+  uint64 generation = 3;
+  uint64 owner = 4;
 }
 
 message TruncateAck {
-  // Whether the truncation was decided and applied (`state` is after it).
+  // Whether the truncation was judged at apply (applied or refused).
   bool decided = 1;
   optional uint64 leader = 2;
   bool unknown_journal = 3;
+  // Applied: the state after it. Refused: the state it was judged against,
+  // naming the current writer.
   .paros.common.v1.JournalState state = 4;
+  // Judged and refused (#228): `(generation, owner)` is not the current
+  // writer. Nothing moved.
+  bool refused = 5;
 }
 
 message SetLeader {

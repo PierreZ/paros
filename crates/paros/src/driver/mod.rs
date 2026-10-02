@@ -1080,7 +1080,8 @@ where
             }
             Some((req, reply)) = rpc.truncate.recv() => {
                 // A journal `Truncate` (#204): decided into the log, judged
-                // at apply (monotone, clamped to `next_seq`), and every node
+                // at apply (fenced by the writer like a `Write`, #228;
+                // monotone, clamped to `next_seq`), and every node
                 // drops the slots whose records all lie below the new
                 // `first_seq` when its walk reaches it.
                 let journal = JournalId(req.journal);
@@ -1101,11 +1102,14 @@ where
                     continue;
                 }
                 let up_to = Seq(req.up_to);
+                let generation = Generation(req.generation);
+                let owner = ClientId(req.owner);
                 let delegation = delegation_choice(&rt.node, hooks);
-                let result = rt
-                    .node
-                    .propose_control_in(Control::Truncate { up_to }, delegation);
-                park_call(rt, result, Call::Truncate { up_to, reply }, &shared);
+                let result = rt.node.propose_control_in(
+                    Control::Truncate { generation, owner, up_to },
+                    delegation,
+                );
+                park_call(rt, result, Call::Truncate { generation, owner, up_to, reply }, &shared);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }

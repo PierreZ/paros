@@ -57,13 +57,22 @@ async fn journal_state(client: &ParosClient, journal: JournalId) -> Option<Journ
     client.read_any(&read, start(client)).await.outcome.state()
 }
 
+/// Who a writing command acts as: the journal, the owner id, and the
+/// overrides of `parosctl write` (a truncation names no position).
+struct Identity {
+    journal: u64,
+    owner: u64,
+    generation: Option<u64>,
+    seq: Option<u64>,
+}
+
 /// Become the journal's writer: under `--generation` (at `--seq`, or the
 /// tail a read finds) as given, or by a claim — a read naming this owner
 /// already is adopted, never re-claimed.
 async fn become_writer(
     client: &ParosClient,
     out: &Printer,
-    args: &WriteArgs,
+    args: &Identity,
 ) -> Result<Writer, Ending> {
     let journal = JournalId(args.journal);
     let mut writer = Writer::new(journal, args.owner);
@@ -121,7 +130,13 @@ async fn become_writer(
 /// superseded writer stopped.
 pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Ending {
     let journal = JournalId(args.journal);
-    let mut writer = match become_writer(client, out, &args).await {
+    let identity = Identity {
+        journal: args.journal,
+        owner: args.owner,
+        generation: args.generation,
+        seq: args.seq,
+    };
+    let mut writer = match become_writer(client, out, &identity).await {
         Ok(writer) => writer,
         Err(ending) => return ending,
     };
@@ -360,12 +375,34 @@ pub struct TruncateArgs {
     /// Drop every record below this position.
     #[arg(long)]
     up_to: u64,
+    /// The client truncating (its identity as the journal's owner).
+    #[arg(long, env = "PAROSCTL_OWNER", default_value = "1")]
+    owner: u64,
+    /// Override: truncate under this generation instead of claiming.
+    #[arg(long)]
+    generation: Option<u64>,
 }
 
-/// `parosctl truncate`: ask the leader to raise the journal's floor.
+/// `parosctl truncate`: become the writer exactly as `parosctl write` does
+/// (a claim, or `--generation`), then ask the leader to raise the journal's
+/// floor under that fence (#228). A stale owner is refused and says so.
 pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -> Ending {
     let journal = JournalId(args.journal);
-    match client.truncate(journal, args.up_to, start(client)).await {
+    let identity = Identity {
+        journal: args.journal,
+        owner: args.owner,
+        generation: args.generation,
+        seq: None,
+    };
+    let mut writer = match become_writer(client, out, &identity).await {
+        Ok(writer) => writer,
+        Err(ending) => return ending,
+    };
+    let Some(outcome) = writer.truncate(client, args.up_to, start(client)).await else {
+        note("this writer owns no generation of the journal");
+        return Ending::Refused;
+    };
+    match outcome {
         TruncateOutcome::Applied { state } => {
             out.emit(
                 || format!("truncated {}", state_text(&state)),
@@ -373,6 +410,11 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
             );
             Ending::Success
         }
+        // The refusal named another writer: this one was superseded.
+        TruncateOutcome::Refused { state } if writer.owned().is_none() => {
+            refused(out, "superseded", &state)
+        }
+        TruncateOutcome::Refused { state } => refused(out, "refused", &state),
         TruncateOutcome::UnknownJournal => unknown_journal(journal),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");

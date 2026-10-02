@@ -87,9 +87,12 @@ message WriteEntry {
   repeated bytes records = 4;
 }
 
-// Drop every record below `up_to` (a position, #204).
+// Drop every record below `up_to` (a position, #204), fenced by the
+// writer `(generation, owner)` like a `Write` (#228).
 message Truncate {
   uint64 up_to = 1;
+  uint64 generation = 2;
+  uint64 owner = 3;
 }
 
 message Noop {}

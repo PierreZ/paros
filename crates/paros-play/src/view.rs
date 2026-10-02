@@ -59,7 +59,9 @@ pub fn value_text(command: &Command) -> String {
             .collect::<Vec<_>>()
             .join(", "),
         Command::Control(Control::Noop) => "Noop".to_string(),
-        Command::Control(Control::Truncate { up_to }) => format!("Truncate before {}", up_to.0),
+        Command::Control(Control::Truncate { up_to, .. }) => {
+            format!("Truncate before {}", up_to.0)
+        }
         Command::Control(Control::SetLeader { expected, owner }) => {
             format!("SetLeader {} after generation {}", owner.0, expected.0)
         }

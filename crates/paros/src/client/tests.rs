@@ -172,7 +172,7 @@ fn a_read_reply_is_a_page_a_truncation_or_unserved() {
 }
 
 #[test]
-fn a_truncation_is_applied_or_redirected() {
+fn a_truncation_is_applied_refused_or_redirected() {
     let s = state(None, 0, 9, 5);
     let applied = TruncateAck {
         decided: true,
@@ -190,6 +190,16 @@ fn a_truncation_is_applied_or_redirected() {
     assert_eq!(
         TruncateOutcome::judge(&Ok(redirect)),
         TruncateOutcome::Redirect { leader: Some(1) }
+    );
+    let refused = TruncateAck {
+        decided: true,
+        refused: true,
+        state: Some(journal_state_to_proto(s)),
+        ..TruncateAck::default()
+    };
+    assert_eq!(
+        TruncateOutcome::judge(&Ok(refused)),
+        TruncateOutcome::Refused { state: s }
     );
 }
 
@@ -299,6 +309,12 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
         (request.journal, request.generation, request.seq),
         (journal.0, 3, 10)
     );
+    // A truncation carries the owner's own fence (#228).
+    let truncate = writer.truncate_request(5).expect("an owner truncates");
+    assert_eq!(
+        (truncate.generation, truncate.owner, truncate.up_to),
+        (3, 7, 5)
+    );
 
     // A written batch moves the position past it, never back.
     assert_eq!(
@@ -333,6 +349,12 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     assert_eq!(writer.owned(), None);
     assert_eq!(writer.entry(vec![]), None);
     assert_eq!(writer.stale_entry(vec![]).generation, Generation(3));
+    assert_eq!(
+        writer.truncate_request(1),
+        None,
+        "a superseded writer truncates nothing"
+    );
+    assert_eq!(writer.stale_truncate_request(1).generation, 3);
     assert_eq!(
         writer.learn(&state(Some(8), 4, 14, 0)),
         Learned::NotOwner,

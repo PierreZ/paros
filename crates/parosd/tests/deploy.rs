@@ -282,8 +282,26 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     assert_eq!(fenced.status.code(), Some(CTL_REFUSED), "{fenced:?}");
     assert_eq!(json(&fenced)["outcome"], "superseded");
 
+    // A truncation is fenced like a write (#228): the superseded owner is
+    // refused, the current one truncates.
+    let stale = ctl(
+        &node,
+        &[
+            "truncate",
+            "128",
+            "--up-to",
+            "1",
+            "--owner",
+            "7",
+            "--generation",
+            &(generation - 1).to_string(),
+        ],
+    );
+    assert_eq!(stale.status.code(), Some(CTL_REFUSED), "{stale:?}");
+    assert_eq!(json(&stale)["outcome"], "superseded");
+
     // A truncation, and a reader from 0 told about the gap.
-    let truncated = until_ok(&node, &["truncate", "128", "--up-to", "1"]);
+    let truncated = until_ok(&node, &["truncate", "128", "--up-to", "1", "--owner", "8"]);
     assert_eq!(truncated["state"]["first_seq"], 1, "{truncated}");
     let (records, gaps) = read_back(&node, 2);
     assert_eq!(records, vec!["beta", "gamma"]);

@@ -216,7 +216,11 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
     }
 
     // The leader admits the truncate as a control command at the next slot (4).
-    let r = nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
+    let r = nodes[0].propose_control(Control::Truncate {
+        generation: Generation(1),
+        owner: ClientId(1),
+        up_to: Seq(2),
+    });
     assert!(
         matches!(r, ProposeResult::Accepted(Slot(4))),
         "control command takes the next free slot"

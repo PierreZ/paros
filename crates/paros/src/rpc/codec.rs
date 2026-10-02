@@ -203,9 +203,15 @@ pub(super) fn command_to_proto(command: &Command) -> internal::Command {
         }),
         Command::Control(control) => {
             let kind = match control {
-                Control::Truncate { up_to } => {
-                    internal::control_command::Kind::Truncate(internal::Truncate { up_to: up_to.0 })
-                }
+                Control::Truncate {
+                    generation,
+                    owner,
+                    up_to,
+                } => internal::control_command::Kind::Truncate(internal::Truncate {
+                    up_to: up_to.0,
+                    generation: generation.0,
+                    owner: owner.0,
+                }),
                 Control::Noop => internal::control_command::Kind::Noop(internal::Noop {}),
                 Control::SetLeader { expected, owner } => {
                     internal::control_command::Kind::SetLeader(internal::SetLeader {
@@ -237,6 +243,8 @@ pub(super) fn command_from_proto(
         internal::command::Kind::Control(control) => {
             let control = match control.kind.ok_or("missing control command kind")? {
                 internal::control_command::Kind::Truncate(truncate) => Control::Truncate {
+                    generation: Generation(truncate.generation),
+                    owner: ClientId(truncate.owner),
                     up_to: Seq(truncate.up_to),
                 },
                 internal::control_command::Kind::Noop(_) => Control::Noop,

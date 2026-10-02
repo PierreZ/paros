@@ -282,9 +282,11 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 
 ## Protocol invariants to remember
 
-- **Truncation is a Paxos-decided control command** (`Truncate`, proposed by the leader): the
-  fold raises `first_seq` and every node compacts lazily when its walk reaches the slot. paros
-  runs no application and takes no snapshot; record bytes are opaque.
+- **Truncation is a Paxos-decided control command** (`Truncate`, proposed by the leader), **fenced
+  by `(generation, owner)` like a `Write`** (#228): judged at apply, a stale or foreign caller is
+  refused in place; an accepted one raises `first_seq` and every node compacts lazily when its
+  walk reaches the slot. paros runs no application and takes no snapshot; record bytes are
+  opaque.
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
 - **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the

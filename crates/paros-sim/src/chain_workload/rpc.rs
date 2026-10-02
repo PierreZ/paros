@@ -132,7 +132,11 @@ impl CallObserver for CallLog {
                 from: r.from_seq,
                 limit: r.limit,
             },
-            Attempted::Truncate(t) => Call::Truncate { up_to: t.up_to },
+            Attempted::Truncate(t) => Call::Truncate {
+                generation: t.generation,
+                owner: t.owner,
+                up_to: t.up_to,
+            },
         };
         if matches!(call, Call::Write { .. }) {
             self.judge_retry(&call);
@@ -186,6 +190,9 @@ fn seen(answer: Answered<'_>) -> Option<Seen> {
         }),
         Answered::Read(ReadOutcome::Truncated { state }) => Some(Seen::ReadTruncated(*state)),
         Answered::Truncate(TruncateOutcome::Applied { state }) => Some(Seen::Trimmed(*state)),
+        Answered::Truncate(TruncateOutcome::Refused { state }) => {
+            Some(Seen::TruncateRefused(*state))
+        }
         _ => None,
     }
 }

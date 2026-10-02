@@ -36,7 +36,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `rpc/tests.rs` → round-trip tests; malformed input refused.
 - `client/mod.rs` → `Client`, `ClientTunables`, `Retarget`, `LeaderHint` → policy loops: `write`, `resolve`, `read_any`, `read_until`, `claim`, `set_leader`, `truncate`, `reconfigure*`, `inspect`, `retire`; `*_attempt` one-shot calls.
 - `client/outcome.rs` → `WriteOutcome`, `ReadOutcome`, … → every reply judged once.
-- `client/writer.rs` → `Writer` (`stale_entry` is the explicit misbehaviour) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
+- `client/writer.rs` → `Writer` (`truncate` carries the owner's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of journals 1 and 2.
 - `corruption.rs` → `classify_log` → CTRL record classification.

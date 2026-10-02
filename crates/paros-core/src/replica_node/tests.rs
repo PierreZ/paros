@@ -418,7 +418,11 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
     for seq in 0..=2 {
         tier.write(1, seq, |_, _| true);
     }
-    let _ = tier.nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
+    let _ = tier.nodes[0].propose_control(Control::Truncate {
+        generation: Generation(1),
+        owner: ClientId(1),
+        up_to: Seq(2),
+    });
     let q = tier.drain_node(0);
     tier.deliver(q, |_, _| true);
     for r in 0..REPLICAS.len() {
@@ -445,7 +449,11 @@ fn a_replica_below_the_floor_jumps_to_the_trim_point() {
     for seq in 0..=2 {
         tier.write(1, seq, away);
     }
-    let _ = tier.nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
+    let _ = tier.nodes[0].propose_control(Control::Truncate {
+        generation: Generation(1),
+        owner: ClientId(1),
+        up_to: Seq(2),
+    });
     let q = tier.drain_node(0);
     tier.deliver(q, away);
     assert_eq!(tier.nodes[0].acceptor().first_slot(), Slot(3));

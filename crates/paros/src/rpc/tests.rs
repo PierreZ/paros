@@ -64,7 +64,11 @@ fn every_variant() -> Vec<Message> {
     let command = Command::Write(entry.clone());
     // Control commands in the accepted suffix exercise every protobuf
     // control variant alongside the client-write case.
-    let control = Command::Control(Control::Truncate { up_to: Seq(3) });
+    let control = Command::Control(Control::Truncate {
+        generation: Generation(2),
+        owner: ClientId(9),
+        up_to: Seq(3),
+    });
     let claim = Command::Control(Control::SetLeader {
         expected: Generation(3),
         owner: ClientId(9),
@@ -229,7 +233,11 @@ fn every_variant() -> Vec<Message> {
                         round: 6,
                         node: NodeId(2),
                     },
-                    Command::Control(Control::Truncate { up_to: Seq(2) }),
+                    Command::Control(Control::Truncate {
+                        generation: Generation(2),
+                        owner: ClientId(9),
+                        up_to: Seq(2),
+                    }),
                 ),
             )]),
             pending: BTreeMap::from([

@@ -62,8 +62,12 @@ pub(crate) enum Call {
     Read { from: u64, limit: u64 },
     /// `SetLeader(expected_gen, new_owner)`.
     SetLeader { expected: u64, owner: u64 },
-    /// `Truncate(up_to_seq)`.
-    Truncate { up_to: u64 },
+    /// `Truncate(generation, owner, up_to_seq)` (#228).
+    Truncate {
+        generation: u64,
+        owner: u64,
+        up_to: u64,
+    },
 }
 
 /// What the client was told: a verdict, never a redirect or a timeout (those
@@ -95,6 +99,9 @@ pub(crate) enum Seen {
     Lost(JournalState),
     /// The truncation applied: `state` is the one after it.
     Trimmed(JournalState),
+    /// The truncation was refused against `state` (#228): its fence is not
+    /// the writer in force.
+    TruncateRefused(JournalState),
 }
 
 /// One attempt: who made it, when, what it asked and — when it was
@@ -281,20 +288,14 @@ impl<'a> Model<'a> {
                     matches!(seen, Some(Seen::Lost(state)) if s.is(state))
                 }
             }
-            Call::Truncate { up_to } => {
-                let after = Scalars {
-                    first_seq: s.first_seq.max((*up_to).min(s.next_seq)),
-                    ..s
-                };
-                let answered = match seen {
-                    None => after != s,
-                    Some(Seen::Trimmed(state)) => after.is(state),
-                    Some(_) => false,
-                };
-                if answered {
-                    self.scalars = after;
-                }
-                answered
+            Call::Truncate {
+                generation,
+                owner,
+                up_to,
+            } => {
+                let (generation, owner, up_to) = (*generation, *owner, *up_to);
+                let seen = seen.cloned();
+                self.step_truncate(generation, owner, up_to, seen.as_ref())
             }
             Call::Read { from, limit } => match seen {
                 Some(Seen::ReadTruncated(state)) => s.is(state) && *from < s.first_seq,
@@ -305,6 +306,34 @@ impl<'a> Model<'a> {
             },
         };
         ok.then_some(undo)
+    }
+
+    /// Linearize a `Truncate`: fenced like a write (#228) — only the writer
+    /// in force truncates, anyone else is refused against the state.
+    fn step_truncate(
+        &mut self,
+        generation: u64,
+        owner: u64,
+        up_to: u64,
+        seen: Option<&Seen>,
+    ) -> bool {
+        let s = self.scalars;
+        if s.owner != Some(owner) || s.generation != generation {
+            return matches!(seen, Some(Seen::TruncateRefused(state)) if s.is(state));
+        }
+        let after = Scalars {
+            first_seq: s.first_seq.max(up_to.min(s.next_seq)),
+            ..s
+        };
+        let answered = match seen {
+            None => after != s,
+            Some(Seen::Trimmed(state)) => after.is(state),
+            Some(_) => false,
+        };
+        if answered {
+            self.scalars = after;
+        }
+        answered
     }
 
     /// Whether `page` is a page the journal could serve from `from` at the
@@ -691,7 +720,11 @@ mod tests {
             at(
                 0,
                 6,
-                Call::Truncate { up_to: 9 },
+                Call::Truncate {
+                    generation: 1,
+                    owner: 0,
+                    up_to: 9,
+                },
                 Some((7, Seen::Trimmed(state(Some(0), 1, 2, 2)))),
             ),
             at(
@@ -735,6 +768,47 @@ mod tests {
         history[2].inv = 2;
         history[1].seen = Some((3, Seen::Won(state(Some(1), 2, 1, 0))));
         assert!(linearizable(&history));
+    }
+
+    /// The truncation fence (#228): a superseded owner's `Truncate` is
+    /// refused against the writer in force, and one acked as applied after
+    /// the claim that fenced it has no linearization.
+    #[test]
+    fn a_superseded_owner_truncation_is_refused() {
+        let mut history = vec![
+            at(
+                0,
+                0,
+                Call::SetLeader {
+                    expected: 0,
+                    owner: 0,
+                },
+                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+            ),
+            at(0, 2, write(1, 0, 0, &[7]), Some((3, written(0, 1, false)))),
+            at(
+                1,
+                4,
+                Call::SetLeader {
+                    expected: 1,
+                    owner: 1,
+                },
+                Some((5, Seen::Won(state(Some(1), 2, 1, 0)))),
+            ),
+            at(
+                0,
+                6,
+                Call::Truncate {
+                    generation: 1,
+                    owner: 0,
+                    up_to: 1,
+                },
+                Some((7, Seen::TruncateRefused(state(Some(1), 2, 1, 0)))),
+            ),
+        ];
+        assert!(linearizable(&history));
+        history[3].seen = Some((7, Seen::Trimmed(state(Some(1), 2, 1, 1))));
+        assert!(!linearizable(&history));
     }
 
     /// An unknown write may have landed — a read that shows it is explained —

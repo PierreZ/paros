@@ -61,7 +61,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
 
 `WRITE=0` (owner writes at its believed next position; a superseded writer's stale write must be
-refused) · `WRITE_TO_NON_LEADER=1` · `TRUNCATE=2` (clamped by the trim fence) · `READ_STATE=3`
+refused) · `WRITE_TO_NON_LEADER=1` · `TRUNCATE=2` (an owner's, under its own fence and clamped by the trim fence; a superseded owner's stale truncate, `stale_truncate_pct`, must be refused, #228) · `READ_STATE=3`
 (fold to tail) · `PAUSE=4` · `DUP_WRITE=5` (must fold `Duplicate`) · `DUAL_SUBMIT=6` (one
 position per verdict) · `TRUNCATE_STORM=7` · `READ_INDEX=8` retired · `MATCHMAKE=9`,
 `MATCH_GC=10` retired · `RECONFIGURE=11` (compose from the live pool; refused on a plain seed)
@@ -78,7 +78,7 @@ it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=1
 - Races (#205, each a BUGGIFY location): a claim racing its own burst, a write with
   `ack_race_timeout_ms` below its ack retried across a re-claim, a `READ` from a lagging cursor
   racing the client's truncation.
-- **Every call goes through `paros::client`**; misbehaviours (`Writer::stale_entry`,
+- **Every call goes through `paros::client`**; misbehaviours (`Writer::stale_entry`, `Writer::stale_truncate_request`,
   `write_attempt`, `DUAL_SUBMIT`, `DUP_WRITE`) are explicit calls. Timeouts are `Ambiguous`; a
   retry is the identical write. `ChainConfig::tunables` maps knobs onto `ClientTunables`
   (`write_redirect_limit` → `redirect_limit`, `resolve_attempts` → `retry_budget`, …).

@@ -47,20 +47,29 @@ slot. So paros makes the floor a **decided value**.
 
 A decided slot holds a `Command` (`crates/paros-core/src/types.rs`), which is
 either a `Write(Entry)` with a writer's batch of opaque records or one of
-paros's own `Control` commands: `Truncate { up_to }`, `SetLeader` and the
+paros's own `Control` commands: `Truncate { generation, owner, up_to }`, `SetLeader` and the
 `Noop` gap filler. The acceptors and the replication path do not tell the
 variants apart, exactly as Compartmentalized Paxos treats a `Noop`. Only the
 **learner's walk** interprets a slot: it judges each one, in slot order, with
 the journal state machine (`JournalState::apply`, `journal_state.rs`). A client
 asks the leader to truncate with the `Truncate` RPC, naming `up_to`, the first
-position it still needs; the leader proposes `Control::Truncate { up_to }` into
-the next slot, and a non-leader redirects the client, as it does for a
-`Write`. There is no other precondition: the client decides when its own state
-covers the prefix.
+position it still needs, and its writer fence `(generation, owner)`; the leader
+proposes `Control::Truncate` into the next slot, and a non-leader redirects the
+client, as it does for a `Write`.
+
+A truncation is **fenced like a write**. The fold accepts it only if its
+`(generation, owner)` is the journal's current writer, and otherwise refuses it
+in place (`Outcome::TruncateRefused`), naming the writer in force; nothing
+moves, but the slot is spent, like a refused `Write`. Without the fence, anyone
+holding the tenant could truncate any of its journals, and a stale or buggy
+caller could truncate to a position that is not the owner's checkpoint and break
+every reader's fold. Kafka refuses client `DeleteRecords` on its metadata topic
+for the same reason (KIP-630). There is no other precondition: the owner decides
+when its own state covers the prefix.
 
 One decision therefore gives one cluster-wide floor, forwarded by ordinary
 replication. Every node truncates lazily, when its contiguous chosen walk
-reaches the `Truncate` slot: the fold raises the journal's `first_seq` to
+reaches an accepted `Truncate` slot: the fold raises the journal's `first_seq` to
 `up_to` (never past `next_seq`), and the node drops every log slot whose
 records all lie below it — its floor becomes the slot that holds the first
 retained record (`ColocatedNode::compact`). The drop is clamped to the node's
@@ -140,7 +149,8 @@ never rejoins; see [the wiped node](beyond-multi-paxos.md#the-wiped-node).
 | Protocol name | Symbol |
 |---|---|
 | The truncation command | `Control::Truncate` (`types.rs`) |
-| The client's request | the `Truncate` RPC (`paros::client::Client::truncate`), `ColocatedNode::propose_control` |
+| The client's request | the `Truncate` RPC (`paros::client::Writer::truncate`, `Client::truncate`), `ColocatedNode::propose_control` |
+| The fence | `JournalState::is_current`, `Outcome::TruncateRefused`, `TruncateAck.refused` |
 | The journal state it raises | `JournalState::first_seq`, `JournalState::apply` (`journal_state.rs`) |
 | The local prefix drop | `ColocatedNode::compact`, `WriteOp::Truncate` (its `sealed` state) |
 | The answer below the floor | `serve_catchup`, `Message::TrimmedTo` (`node/catch_up.rs`) |
