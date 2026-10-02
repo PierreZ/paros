@@ -28,6 +28,7 @@
 //! traffic reaches the pool alone.
 
 mod audit;
+pub mod client;
 mod corruption;
 mod driver;
 mod hooks;
