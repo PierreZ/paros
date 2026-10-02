@@ -183,7 +183,7 @@ routing.
 
 ### 3.6 Status
 
-`paros status [--tenant t]` shows three columns, globally and per tenant: desired (what the
+`parosctl status [--tenant t]` shows three columns, globally and per tenant: desired (what the
 tenant asked for), available (machines registered, not drained, seen alive) and current (what
 is placed and serving, with each journal's word: Healthy, Degraded, Unavailable). All three are
 folds of the admin tenant's journals. There is no separate monitoring store.
@@ -280,8 +280,8 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | Milestone | Name | Content |
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
-| M8 | parosd deployable (#206 to #209, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision`, the uniform binary with class and capacity, Compose, the `paros` CLI, a tracing subscriber, exit codes; the API-independent parts start in parallel with M7 |
-| M9 | Tenants and control plane (#216, #192, #211, #190, #210, #212, #191, #213) | the admin tenant over the system journals, the tenant and journal creation API, the machine registry with class and capacity, the per-tenant coordinator via `SetLeader`, placement as fenced writes, the front door with JWT `Authz`, per-tenant matchmaker sets, `paros status` |
+| M8 | parosd deployable (#206 to #209, #221, #220, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision`, the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes; the API-independent parts start in parallel with M7 |
+| M9 | Tenants and control plane (#216, #192, #211, #190, #210, #212, #191, #213) | the admin tenant over the system journals, the tenant and journal creation API, the machine registry with class and capacity, the per-tenant coordinator via `SetLeader`, placement as fenced writes, the front door with JWT `Authz`, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers, tenant modes applied by the reconciler, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 
@@ -290,10 +290,10 @@ Verification is not a milestone: every milestone carries its own share of sectio
 ## 9. The toy, done means
 
 From a fresh clone: `docker compose --profile provision up`, then `docker compose up`. Create a
-tenant and mint its JWT. Create a journal. `write`, `read` and `tail` from the CLI. `set-leader`
+tenant and mint its JWT. Create a journal. `write`, `read` and `tail` from `parosctl`. `set-leader`
 to a second client and see the first one refused. Kill one `storage` and one `stateless`
 container and keep writing. Wipe one volume, see the amnesia refusal, and see the journal healed
-by reconfiguration onto another machine. `paros status` shows desired, available and current,
+by reconfiguration onto another machine. `parosctl status` shows desired, available and current,
 per tenant and globally. The simulation is green in every shape and the coverage-guided sweep
 saturates.
 

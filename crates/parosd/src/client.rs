@@ -2,9 +2,9 @@
 //! line of `key=value` output per answer (and one line per record a read
 //! returns), for operators and scripts alike.
 //!
-//! A full `paros` CLI — tenants, journals by name, `paros status` — is
-//! #196's; this is the smallest client that proves a deployment works:
-//! claim a journal, write to it, read it back.
+//! The real client is `parosctl` (#220) over `paros::client` (#221), which
+//! replaces these subcommands; this is the smallest client that proves a
+//! deployment works: claim a journal, write to it, read it back.
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
