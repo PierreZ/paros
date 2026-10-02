@@ -31,12 +31,12 @@ use paros::{
     AcceptorConfig, Command, Entry, Generation, JournalId, NodeId, QuorumSystem, Seq, Value,
 };
 
-use super::rpc::{
-    CallLog, SetLeaderResult, WriteResult, read_once, set_leader_once, state_of, within, write_once,
-};
+use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
+
+use super::rpc::{read_once, set_leader_once, within, write_once};
 use crate::audit::audit_world_for;
 use crate::chain::user_command_hash;
-use crate::client::SimClient;
+use crate::client::ChainClient;
 
 /// How many asks a system write spends before it calls the outcome
 /// ambiguous.
@@ -79,9 +79,6 @@ pub(super) struct SystemOps {
     /// Journals this client created and has not asked to delete.
     created: Vec<JournalId>,
     timeout: Duration,
-    /// The client's call log: the RPC seam logs the calls naming its own
-    /// journal only, so a system or created journal's calls pass through.
-    log: CallLog,
 }
 
 impl SystemOps {
@@ -94,7 +91,6 @@ impl SystemOps {
         genesis: Vec<JournalId>,
         client_id: u64,
         timeout: Duration,
-        log: CallLog,
     ) -> Self {
         let pool = deployment.acceptors().len();
         let matchmakers = !deployment.matchmakers().is_empty();
@@ -119,7 +115,6 @@ impl SystemOps {
             client_id,
             created: Vec::new(),
             timeout,
-            log,
         }
     }
 
@@ -128,13 +123,13 @@ impl SystemOps {
     async fn append(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         journal: JournalId,
         command: &SystemCommand,
         draw: u64,
     ) -> Appended {
         let seeds: Vec<usize> = (0..self.seeds).collect();
-        self.claim_and_write(ctx, clients, journal, &seeds, command.encode(), draw)
+        self.claim_and_write(ctx, nodes, journal, &seeds, command.encode(), draw)
             .await
     }
 
@@ -148,7 +143,7 @@ impl SystemOps {
     async fn claim_and_write(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         journal: JournalId,
         targets: &[usize],
         record: Vec<u8>,
@@ -160,20 +155,16 @@ impl SystemOps {
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
         let mut claim: Option<(u64, u64)> = None;
         for _ in 0..APPEND_ATTEMPTS {
-            let node = targets[target % targets.len()] % clients.len();
-            let client = clients[node].clone();
+            let node = targets[target % targets.len()] % nodes.server_count();
             let Some((generation, position)) = claim else {
                 // Read where the journal stands, then claim it.
-                let read = read_once(&client, &self.log, journal.0, 0, 1, 0);
-                let Some(ack) = within(ctx, self.timeout, None, read).await else {
-                    target += 1;
-                    continue;
-                };
-                if ack.unknown_journal && created {
+                let read = read_once(nodes, node, journal.0, 0, 1, 0);
+                let answer = within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await;
+                if answer == ReadOutcome::UnknownJournal && created {
                     target += 1;
                     continue;
                 }
-                if ack.unknown_journal {
+                if answer == ReadOutcome::UnknownJournal {
                     assert_always!(
                         !self.active || !paros::system::is_system(journal),
                         "system: a seed serves the system journals",
@@ -186,28 +177,30 @@ impl SystemOps {
                     }
                     return Appended::Unknown;
                 }
-                if !ack.served {
+                assert_always!(
+                    answer != ReadOutcome::Malformed,
+                    "chain: a node answers a well-formed journal state"
+                );
+                let Some(tail) = answer.state() else {
                     target += 1;
                     continue;
-                }
-                let tail = state_of(ack.state);
+                };
                 let ask = set_leader_once(
-                    clients,
-                    &self.log,
+                    nodes,
                     journal,
                     node,
-                    tail.generation.0,
-                    self.client_id,
+                    (tail.generation.0, self.client_id),
                     created,
                 );
-                match within(ctx, self.timeout, SetLeaderResult::Ambiguous, ask).await {
-                    SetLeaderResult::Won { state } => {
+                match within(ctx, self.timeout, SetLeaderOutcome::Ambiguous, ask).await {
+                    SetLeaderOutcome::Won { state } => {
                         claim = Some((state.generation.0, state.next_seq.0));
                     }
-                    SetLeaderResult::Lost { .. }
-                    | SetLeaderResult::Owned { .. }
-                    | SetLeaderResult::Ambiguous => {}
-                    SetLeaderResult::Redirect { leader } => {
+                    SetLeaderOutcome::Lost { .. }
+                    | SetLeaderOutcome::UnknownJournal
+                    | SetLeaderOutcome::Malformed
+                    | SetLeaderOutcome::Ambiguous => {}
+                    SetLeaderOutcome::Redirect { leader } => {
                         target = leader
                             .and_then(|l| targets.iter().position(|t| *t as u64 == l))
                             .unwrap_or(target + 1);
@@ -222,26 +215,21 @@ impl SystemOps {
                 records: vec![Value(record.clone())],
             };
             audit.note_appended(paros::command_hash(&Command::Write(entry.clone())));
-            let write = write_once(
-                clients,
-                &self.log,
-                ctx.time(),
-                journal,
-                node,
-                &entry,
-                false,
-                created,
-            );
-            match within(ctx, self.timeout, WriteResult::Ambiguous, write).await {
-                WriteResult::Written { seq, .. } => return Appended::At(seq),
+            let write = write_once(nodes, journal, node, &entry, false, created);
+            match within(ctx, self.timeout, WriteOutcome::Ambiguous, write).await {
+                WriteOutcome::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
-                WriteResult::Refused { .. } | WriteResult::Truncated { .. } => claim = None,
-                WriteResult::Redirect { leader } => {
+                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = None,
+                WriteOutcome::Redirect { leader } => {
                     target = leader
                         .and_then(|l| targets.iter().position(|t| *t as u64 == l))
                         .unwrap_or(target + 1);
                 }
-                WriteResult::Ambiguous => target += 1,
+                WriteOutcome::UnknownJournal
+                | WriteOutcome::Malformed
+                | WriteOutcome::Ambiguous => {
+                    target += 1;
+                }
             }
         }
         Appended::Ambiguous
@@ -252,23 +240,24 @@ impl SystemOps {
     async fn read_back(
         &self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         journal: JournalId,
         draw: u64,
     ) -> Option<(Vec<(u64, SystemEvent)>, Directory, Registry)> {
-        let client = clients[usize::try_from(draw % self.seeds as u64).unwrap_or(0)].clone();
+        let seed = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
         let mut directory = Directory::new(self.genesis.iter().copied());
         let mut registry = Registry::new((0..self.pool as u64).map(NodeId));
         let mut events = Vec::new();
         let mut from = 0;
         loop {
-            let read = read_once(&client, &self.log, journal.0, from, READ_RECORDS, 0);
-            let ack = within(ctx, self.timeout, None, read).await?;
-            if ack.unknown_journal || ack.truncated || !ack.served {
+            let read = read_once(nodes, seed, journal.0, from, READ_RECORDS, 0);
+            let ReadOutcome::Page { records, state, .. } =
+                within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await
+            else {
                 return None;
-            }
-            let next = from + ack.records.len() as u64;
-            for (position, record) in (from..).zip(&ack.records) {
+            };
+            let next = from + records.len() as u64;
+            for (position, record) in (from..).zip(&records) {
                 let event = if journal == DIRECTORY {
                     SystemEvent::Directory(directory.fold(position, record))
                 } else {
@@ -276,7 +265,7 @@ impl SystemOps {
                 };
                 events.push((position, event));
             }
-            if next <= from || next >= state_of(ack.state).next_seq.0 {
+            if next <= from || next >= state.next_seq.0 {
                 return Some((events, directory, registry));
             }
             from = next;
@@ -290,13 +279,13 @@ impl SystemOps {
     pub(super) async fn create(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         (class, payload): (u64, u64),
     ) {
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
         let mut candidates: Vec<NodeId> = (0..self.pool as u64).map(NodeId).collect();
         if self.active
-            && let Some((_, _, registry)) = self.read_back(ctx, clients, REGISTRY, payload).await
+            && let Some((_, _, registry)) = self.read_back(ctx, nodes, REGISTRY, payload).await
         {
             candidates.extend(
                 registry
@@ -332,13 +321,11 @@ impl SystemOps {
             name,
             config: config.clone(),
         };
-        let Appended::At(position) = self
-            .append(ctx, clients, DIRECTORY, &command, payload)
-            .await
+        let Appended::At(position) = self.append(ctx, nodes, DIRECTORY, &command, payload).await
         else {
             return;
         };
-        let Some((events, _, _)) = self.read_back(ctx, clients, DIRECTORY, payload).await else {
+        let Some((events, _, _)) = self.read_back(ctx, nodes, DIRECTORY, payload).await else {
             return;
         };
         match events
@@ -349,7 +336,7 @@ impl SystemOps {
             Some(SystemEvent::Directory(DirectoryEvent::Created { id, .. })) => {
                 assert_reachable!("system: a client creates a journal and reads back its id");
                 self.created.push(id);
-                self.append_to_created(ctx, clients, id, &config, payload)
+                self.append_to_created(ctx, nodes, id, &config, payload)
                     .await;
             }
             Some(SystemEvent::Directory(DirectoryEvent::Refused(
@@ -368,7 +355,7 @@ impl SystemOps {
     async fn append_to_created(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         journal: JournalId,
         config: &AcceptorConfig,
         draw: u64,
@@ -383,7 +370,7 @@ impl SystemOps {
         }
         let record = draw.to_le_bytes().to_vec();
         if let Appended::At(_) = self
-            .claim_and_write(ctx, clients, journal, &genesis, record, draw)
+            .claim_and_write(ctx, nodes, journal, &genesis, record, draw)
             .await
         {
             assert_reachable!("system: a created journal commits an append");
@@ -392,7 +379,7 @@ impl SystemOps {
 
     /// `DELETE_JOURNAL`: tombstone a journal this client created, then ask a
     /// genesis member for one more append to it.
-    pub(super) async fn delete(&mut self, ctx: &SimContext, clients: &[SimClient], draw: u64) {
+    pub(super) async fn delete(&mut self, ctx: &SimContext, nodes: &ChainClient, draw: u64) {
         let id = if self.created.is_empty() {
             // Nothing of its own: a delete of an id nobody created, which
             // folds to a refusal.
@@ -402,7 +389,7 @@ impl SystemOps {
                 .remove(usize::try_from(draw % self.created.len() as u64).unwrap_or(0))
         };
         let command = SystemCommand::DeleteJournal { id };
-        if let Appended::At(_) = self.append(ctx, clients, DIRECTORY, &command, draw).await {
+        if let Appended::At(_) = self.append(ctx, nodes, DIRECTORY, &command, draw).await {
             assert_reachable!("system: a client deletes a journal");
         }
     }
@@ -413,7 +400,7 @@ impl SystemOps {
     pub(super) async fn joinable(
         &self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         draw: u64,
     ) -> Vec<u64> {
         // Only where a registered joiner joins the default journal: a
@@ -422,7 +409,7 @@ impl SystemOps {
         if !self.active || !self.spares || self.joiners.is_empty() {
             return Vec::new();
         }
-        let Some((_, _, registry)) = self.read_back(ctx, clients, REGISTRY, draw).await else {
+        let Some((_, _, registry)) = self.read_back(ctx, nodes, REGISTRY, draw).await else {
             return Vec::new();
         };
         let world = crate::world::storage_world(ctx.state());
@@ -445,7 +432,7 @@ impl SystemOps {
     pub(super) async fn registry_step(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
+        nodes: &ChainClient,
         standing: Option<NodeStanding>,
         draw: u64,
     ) -> bool {
@@ -465,7 +452,7 @@ impl SystemOps {
             }
             Some(standing) => {
                 let registry = if self.active {
-                    self.read_back(ctx, clients, REGISTRY, draw)
+                    self.read_back(ctx, nodes, REGISTRY, draw)
                         .await
                         .map(|(_, _, registry)| registry)
                 } else {
@@ -506,7 +493,7 @@ impl SystemOps {
                 }
             }
         };
-        if let Appended::At(_) = self.append(ctx, clients, REGISTRY, &command, draw).await {
+        if let Appended::At(_) = self.append(ctx, nodes, REGISTRY, &command, draw).await {
             match command {
                 SystemCommand::RegisterNode { .. } => {
                     assert_reachable!("system: a client registers a joiner");

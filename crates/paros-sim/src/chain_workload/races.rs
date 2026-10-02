@@ -11,13 +11,12 @@ use std::time::Duration;
 use futures::future::join_all;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
 use paros::ClientId;
+use paros::client::{ClaimOutcome, WriteOutcome, Writer};
 
-use super::rpc::{self, CallLog, SetLeaderResult, WriteResult, within};
-use super::{
-    ChainConfig, ChainWorkload, LeaderHint, Routes, Submission, Writer, WrittenCommand, claim,
-};
+use super::rpc::{self, within};
+use super::{ChainConfig, ChainWorkload, Submission, WrittenCommand, claim};
 use crate::chain::hash_text;
-use crate::client::SimClient;
+use crate::client::ChainClient;
 
 impl ChainWorkload {
     /// Send `burst` — writes at consecutive positions, each to its target —
@@ -37,19 +36,16 @@ impl ChainWorkload {
     pub(super) async fn burst(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
-        log: &CallLog,
+        nodes: &ChainClient,
         config: &ChainConfig,
         burst: Vec<(Submission, usize)>,
         race: Option<(Duration, usize)>,
-        routes: Routes,
-        (writer, hint, written): (&mut Writer, &mut LeaderHint, &mut Vec<WrittenCommand>),
+        (writer, written): (&mut Writer, &mut Vec<WrittenCommand>),
     ) {
         let time = ctx.time().clone();
         let journal = self.journal;
         let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
-        let read_timeout = Duration::from_millis(config.read_timeout_ms);
         // A raced burst is spread over the claim's span (`burst_spacing_ms`),
         // so the claim lands inside it rather than behind every write.
         let spacing = if race.is_some() {
@@ -63,41 +59,24 @@ impl ChainWorkload {
                 if !spacing.is_zero() {
                     time.sleep(spacing * k).await.ok();
                 }
-                let attempt = rpc::write_once(
-                    clients,
-                    log,
-                    &time,
-                    journal,
-                    *target,
-                    &submission.entry,
-                    false,
-                    false,
-                );
-                within(ctx, timeout, WriteResult::Ambiguous, attempt).await
+                let attempt =
+                    rpc::write_once(nodes, journal, *target, &submission.entry, false, false);
+                within(ctx, timeout, WriteOutcome::Ambiguous, attempt).await
             }
         }));
         let claimed = async {
             let (delay, via) = race?;
             assert_reachable!("chain: a claim races an owner's pipelined burst");
             time.sleep(delay).await.ok()?;
-            claim(
-                ctx,
-                clients,
-                log,
-                journal,
-                via % clients.len(),
-                (me, true),
-                (read_timeout, timeout),
-            )
-            .await
+            Some(claim(nodes, journal, via % nodes.server_count(), (me, true)).await)
         };
         let (results, claimed) = futures::join!(sends, claimed);
-        let mut next = writer.next_seq;
+        let mut next = writer.next_seq();
         let (mut landed, mut fenced) = (false, false);
         for ((submission, target), result) in burst.into_iter().zip(results) {
             match result {
-                WriteResult::Written { seq, count, .. } => {
-                    hint.observe(u64::try_from(target).ok(), routes);
+                WriteOutcome::Written { seq, count, .. } => {
+                    nodes.observe_leader_at(target);
                     next = next.max(seq + count);
                     landed = true;
                     let now = u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX);
@@ -105,39 +84,40 @@ impl ChainWorkload {
                     self.adversarial.payload_classes[submission.payload_class] = true;
                     written.push(submission.written(seq, count, target));
                 }
-                WriteResult::Refused { state } | WriteResult::Truncated { state } => {
+                WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
                     self.history.record_write_failed(submission.op);
                     fenced |= state.generation.0 > submission.entry.generation.0;
                     if state.owner == Some(ClientId(me)) {
                         next = next.max(state.next_seq.0);
                     } else {
-                        writer.learn(me, &state);
+                        writer.learn(&state);
                     }
                     tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_command_rejected");
                 }
-                WriteResult::Redirect { leader } => {
-                    hint.observe(leader, routes);
+                WriteOutcome::Redirect { leader } => {
+                    nodes.observe_leader(leader);
                     self.history.record_write_failed(submission.op);
                 }
-                WriteResult::Ambiguous => {
+                WriteOutcome::UnknownJournal
+                | WriteOutcome::Malformed
+                | WriteOutcome::Ambiguous => {
                     self.history.record_write_failed(submission.op);
                     tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
                 }
             }
         }
-        writer.next_seq = next;
+        writer.advance_to(next);
         match claimed {
-            Some(SetLeaderResult::Won { state }) => {
+            Some(ClaimOutcome::Won { state }) => {
                 writer.won(&state);
                 // A fenced write names a state at or past the claim's.
-                writer.next_seq = writer.next_seq.max(next);
+                writer.advance_to(next);
                 self.adversarial.burst_fenced |= landed && fenced;
             }
-            Some(SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state }) => {
-                writer.learn(me, &state);
+            Some(outcome) => {
+                writer.claimed(&outcome);
             }
-            Some(SetLeaderResult::Redirect { leader }) => hint.observe(leader, routes),
-            Some(SetLeaderResult::Ambiguous) | None => {}
+            None => {}
         }
     }
 
@@ -152,49 +132,26 @@ impl ChainWorkload {
     pub(super) async fn ack_race(
         &mut self,
         ctx: &SimContext,
-        clients: &[SimClient],
-        log: &CallLog,
+        nodes: &ChainClient,
         config: &ChainConfig,
         submission: &Submission,
         target: usize,
-        routes: Routes,
-        (writer, hint): (&mut Writer, &mut LeaderHint),
-    ) -> WriteResult {
-        let time = ctx.time().clone();
+        writer: &mut Writer,
+    ) -> WriteOutcome {
         let journal = self.journal;
         let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
-        let read_timeout = Duration::from_millis(config.read_timeout_ms);
         let send = |target: usize| {
-            rpc::write_once(
-                clients,
-                log,
-                &time,
-                journal,
-                target,
-                &submission.entry,
-                false,
-                false,
-            )
+            rpc::write_once(nodes, journal, target, &submission.entry, false, false)
         };
         let short = Duration::from_millis(config.ack_race_timeout_ms);
-        let first = within(ctx, short, WriteResult::Ambiguous, send(target)).await;
-        if !matches!(first, WriteResult::Ambiguous) {
+        let first = within(ctx, short, WriteOutcome::Ambiguous, send(target)).await;
+        if !matches!(first, WriteOutcome::Ambiguous) {
             return first;
         }
         assert_reachable!("chain: a write's timeout is shorter than its ack");
-        let moved = match claim(
-            ctx,
-            clients,
-            log,
-            journal,
-            target,
-            (me, true),
-            (read_timeout, timeout),
-        )
-        .await
-        {
-            Some(SetLeaderResult::Won { state }) => {
+        let moved = match claim(nodes, journal, target, (me, true)).await {
+            ClaimOutcome::Won { state } => {
                 writer.won(&state);
                 true
             }
@@ -203,37 +160,37 @@ impl ChainWorkload {
             // Already the owner: an earlier claim of its own won. The
             // ownership changed only if that claim minted a generation past
             // the one this write was built under.
-            Some(SetLeaderResult::Owned { state }) => {
-                writer.learn(me, &state);
+            ClaimOutcome::Owned { state } => {
+                writer.learn(&state);
                 state.generation.0 > submission.entry.generation.0
             }
-            Some(SetLeaderResult::Lost { state }) => {
-                writer.learn(me, &state);
+            ClaimOutcome::Lost { state } => {
+                writer.learn(&state);
                 true
             }
-            Some(SetLeaderResult::Redirect { leader }) => {
-                hint.observe(leader, routes);
-                false
-            }
-            Some(SetLeaderResult::Ambiguous) | None => false,
+            ClaimOutcome::Redirect { .. }
+            | ClaimOutcome::UnknownJournal
+            | ClaimOutcome::Malformed
+            | ClaimOutcome::Unread
+            | ClaimOutcome::Ambiguous => false,
         };
         let retry = within(
             ctx,
             timeout,
-            WriteResult::Ambiguous,
-            send(hint.current.unwrap_or(target)),
+            WriteOutcome::Ambiguous,
+            send(nodes.leader().unwrap_or(target)),
         )
         .await;
         if moved {
             match &retry {
-                WriteResult::Written { duplicate, .. } => {
+                WriteOutcome::Written { duplicate, .. } => {
                     assert_always!(
                         *duplicate,
                         "journal: a write retried across an ownership change is never accepted anew"
                     );
                     self.adversarial.retry_acked_across_claim = true;
                 }
-                WriteResult::Refused { state }
+                WriteOutcome::Refused { state }
                     if state.generation.0 > submission.entry.generation.0 =>
                 {
                     self.adversarial.retry_superseded = true;

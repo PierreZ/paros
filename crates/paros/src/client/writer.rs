@@ -250,10 +250,8 @@ impl Writer {
         outcome
     }
 
-    /// Write `records` at the tail as the owner: to the believed leader (or
-    /// `first`), following redirects; an ambiguous answer is settled by
-    /// [`Client::resolve`] before this returns. Sends nothing when it owns
-    /// no generation.
+    /// Write `records` at the tail as the owner: see [`Writer::write_entry`].
+    /// Sends nothing when it owns no generation.
     pub async fn write<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -263,7 +261,24 @@ impl Writer {
         let Some(entry) = self.entry(records) else {
             return WriterOutcome::NotOwner;
         };
-        let request = self.request(&entry);
+        self.write_entry(client, &entry, first).await
+    }
+
+    /// Write `entry` — built by [`Writer::entry`], or a retry of one whose
+    /// generation and position still stand — to the believed leader (or
+    /// `first`), following redirects; an ambiguous answer is settled by
+    /// [`Client::resolve`] before this returns. Sends nothing when the
+    /// writer does not own `entry`'s generation: a superseded writer stops.
+    pub async fn write_entry<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        entry: &Entry,
+        first: usize,
+    ) -> WriterOutcome {
+        if self.owned != Some(entry.generation.0) || entry.owner != self.owner {
+            return WriterOutcome::NotOwner;
+        }
+        let request = self.request(entry);
         let start = client.leader().unwrap_or(first);
         let report = client.write(&request, start, WriteOptions::default()).await;
         let learned = self.absorb(&report.outcome);

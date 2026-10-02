@@ -419,15 +419,15 @@ impl<P: Providers> Client<P> {
     /// the previous one.
     pub fn observe_leader(&self, id: Option<u64>) {
         let next = id.and_then(|id| self.index_of(id));
-        self.set_leader(next);
+        self.adopt_leader(next);
     }
 
     /// Adopt server `index` as the leader (it gave a verdict).
     pub fn observe_leader_at(&self, index: usize) {
-        self.set_leader(Some(index % self.servers.len()));
+        self.adopt_leader(Some(index % self.servers.len()));
     }
 
-    fn set_leader(&self, next: Option<usize>) {
+    fn adopt_leader(&self, next: Option<usize>) {
         let mut hint = self.hint.lock().unwrap_or_else(PoisonError::into_inner);
         if let (Some(previous), Some(next)) = (hint.current, next)
             && previous != next
@@ -720,62 +720,75 @@ impl<P: Providers> Client<P> {
     }
 
     /// Read `request`, starting at server `first` and moving on through the
-    /// whole server list while a server leaves it unserved or unanswered —
-    /// one attempt per server, each bounded by `read_timeout` plus the
-    /// request's own `wait_ms`. A served answer (or an unknown journal) is
-    /// returned at once.
+    /// whole server list while a server leaves it unserved, unanswered, or
+    /// does not serve the journal — one attempt per server, each bounded by
+    /// `read_timeout` plus the request's own `wait_ms`. A served answer is
+    /// returned at once; [`ReadOutcome::UnknownJournal`] only when every
+    /// server answered so.
     pub async fn read_any(&self, request: &Read, first: usize) -> ReadReport {
-        let per_attempt = self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
-        let mut server = first % self.servers.len();
-        let mut outcome = ReadOutcome::Ambiguous;
-        let mut attempts = 0;
-        for _ in 0..self.servers.len() {
-            if self.shutdown.is_cancelled() {
-                break;
-            }
-            attempts += 1;
-            let attempt = self.read_attempt(server, *request);
-            outcome = self
-                .bounded(per_attempt, ReadOutcome::Ambiguous, attempt)
-                .await;
-            if outcome.is_served() || outcome == ReadOutcome::UnknownJournal {
-                break;
-            }
-            server = (server + 1) % self.servers.len();
-        }
-        ReadReport {
-            outcome,
-            server,
-            attempts,
-        }
+        self.read_rotating(request, first, false).await
     }
 
     /// Read `request` inside **one** deadline (`read_timeout` plus its
     /// `wait_ms`), starting at server `first` and moving on to the next
-    /// server whenever one leaves it unserved or unanswered.
+    /// server whenever one leaves it unserved or unanswered (or does not
+    /// serve the journal: a whole pass of those ends the read as
+    /// [`ReadOutcome::UnknownJournal`]).
     pub async fn read_until(&self, request: &Read, first: usize) -> ReadReport {
-        let deadline =
-            self.time.now() + self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
-        let mut server = first % self.servers.len();
-        let mut outcome = ReadOutcome::Ambiguous;
-        let mut attempts = 0;
+        self.read_rotating(request, first, true).await
+    }
+
+    async fn read_rotating(&self, request: &Read, first: usize, one_deadline: bool) -> ReadReport {
+        let span = self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
+        let deadline = self.time.now() + span;
+        let servers = self.servers.len();
+        let mut server = first % servers;
+        let mut attempts = 0_u64;
+        // The last answer that was not "unknown journal", and how many
+        // servers in a row answered so.
+        let mut other = ReadOutcome::Ambiguous;
+        let mut unknown_run = 0;
         loop {
-            let remaining = deadline.saturating_sub(self.time.now());
-            if remaining.is_zero() || self.shutdown.is_cancelled() {
+            if self.shutdown.is_cancelled() {
+                break;
+            }
+            let bound = if one_deadline {
+                deadline.saturating_sub(self.time.now())
+            } else if usize::try_from(attempts).unwrap_or(usize::MAX) >= servers {
+                Duration::ZERO
+            } else {
+                span
+            };
+            if bound.is_zero() {
                 break;
             }
             attempts += 1;
             let attempt = self.read_attempt(server, *request);
-            outcome = self
-                .bounded(remaining, ReadOutcome::Ambiguous, attempt)
-                .await;
-            if outcome.is_served() || outcome == ReadOutcome::UnknownJournal {
-                break;
+            let outcome = self.bounded(bound, ReadOutcome::Ambiguous, attempt).await;
+            if outcome.is_served() {
+                return ReadReport {
+                    outcome,
+                    server,
+                    attempts,
+                };
             }
-            server = (server + 1) % self.servers.len();
+            if outcome == ReadOutcome::UnknownJournal {
+                unknown_run += 1;
+                if unknown_run >= servers {
+                    break;
+                }
+            } else {
+                unknown_run = 0;
+                other = outcome;
+            }
+            server = (server + 1) % servers;
         }
         ReadReport {
-            outcome,
+            outcome: if unknown_run >= servers {
+                ReadOutcome::UnknownJournal
+            } else {
+                other
+            },
             server,
             attempts,
         }
@@ -812,22 +825,63 @@ impl<P: Providers> Client<P> {
         if !fresh && state.owner.is_some_and(|current| current.0 == owner) {
             return ClaimOutcome::Owned { state };
         }
-        let ask = self.set_leader_attempt(first, journal, state.generation.0, owner);
-        let outcome = self
-            .bounded(
-                self.tunables.request_timeout,
-                SetLeaderOutcome::Ambiguous,
-                ask,
-            )
-            .await;
-        match &outcome {
-            SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. } => {
-                self.observe_leader_at(first);
+        self.set_leader(journal, state.generation.0, owner, first)
+            .await
+            .into()
+    }
+
+    /// `SetLeader(expected → owner)` on `journal`, starting at server
+    /// `first`: a redirect naming another server is followed, one naming
+    /// none is re-asked of the next server `redirect_backoff` later, for at
+    /// most `redirect_limit` redirects, all inside one `request_timeout`.
+    /// Only a redirect is re-asked — a node that redirects proposed
+    /// nothing — so this never mints two generations.
+    pub async fn set_leader(
+        &self,
+        journal: JournalId,
+        expected: u64,
+        owner: u64,
+        first: usize,
+    ) -> SetLeaderOutcome {
+        let deadline = self.time.now() + self.tunables.request_timeout;
+        let mut server = first % self.servers.len();
+        let mut redirects = 0;
+        loop {
+            let remaining = deadline.saturating_sub(self.time.now());
+            if remaining.is_zero() {
+                return SetLeaderOutcome::Ambiguous;
             }
-            SetLeaderOutcome::Redirect { leader } => self.observe_leader(*leader),
-            _ => {}
+            let ask = self.set_leader_attempt(server, journal, expected, owner);
+            let outcome = self
+                .bounded(remaining, SetLeaderOutcome::Ambiguous, ask)
+                .await;
+            match outcome {
+                SetLeaderOutcome::Redirect { leader }
+                    if redirects < self.tunables.redirect_limit =>
+                {
+                    self.observe_leader(leader);
+                    redirects += 1;
+                    match leader.and_then(|id| self.index_of(id)) {
+                        Some(next) if next != server => server = next,
+                        _ => {
+                            if !self.pause(self.tunables.redirect_backoff).await {
+                                return outcome;
+                            }
+                            server = (server + 1) % self.rotation;
+                        }
+                    }
+                }
+                SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. } => {
+                    self.observe_leader_at(server);
+                    return outcome;
+                }
+                SetLeaderOutcome::Redirect { leader } => {
+                    self.observe_leader(leader);
+                    return outcome;
+                }
+                outcome => return outcome,
+            }
         }
-        outcome.into()
     }
 
     /// Truncate `journal` below `up_to` (a caller's fence: everything it

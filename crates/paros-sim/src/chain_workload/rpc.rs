@@ -1,36 +1,39 @@
-//! The chain client's RPC retry layer: one request (or one bounded retry
-//! loop at a leader) per call, judged into a terminal outcome. No function
-//! here draws randomness; every choice a retry makes is read off the reply.
+//! The chain client's seam onto `paros::client` (#221): the history the
+//! linearizability checker reads, recorded as the library's
+//! [`CallObserver`], and the handful of one-attempt calls the workload
+//! makes on purpose — the misbehaviours and the races, which no policy loop
+//! of the library would make — each judged here against the oracles every
+//! answer must pass.
 //!
-//! The `*_once` calls clone what they need **when called** and return the
-//! request's future, so the run's call sequence — and the `select!`s each
-//! one races — is fixed by the caller alone.
+//! The one-attempt calls build their request (and log it) **when called**
+//! and return the attempt's future, so the run's call sequence — and the
+//! `select!`s each one races — is fixed by the caller alone. No function
+//! here draws randomness.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_rpc::RpcError;
 use moonpool_sim::{SimContext, SimTimeProvider, TimeProvider, assert_always, assert_reachable};
-use paros::{
-    Entry, InspectReply, JournalId, JournalState, QuorumSystem, Read, ReadAck, Reconfigure,
-    ReconfigureMatchmakers, SetLeader, Truncate, Write, WriteAck, journal_state_from_proto,
-    quorum_system_to_proto, wire::public::WriteOutcome,
+use paros::client::{
+    Answered, Attempted, CallObserver, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
+    WriteOutcome, write_request,
 };
+use paros::{Entry, JournalId, Read};
 
-use super::ChainConfig;
 use crate::audit::{Attempt, Call, Seen};
 use crate::chain::user_command_hash;
-use crate::client::SimClient;
+use crate::client::ChainClient;
 
 /// One client's journal calls as the linearizability checker reads them
-/// (#205): every attempt at its own journal, recorded **here, at the RPC
-/// seam**, so no call site can forget one. An attempt is logged when its
-/// request is built and answered when a verdict comes back; one whose
-/// future is dropped (a timeout, an abandoned observation, the shutdown)
-/// or that comes back without a verdict stays unknown. Calls naming any
-/// other journal (the system journals, a created one, a stray id) are not
-/// this history's and are not logged.
+/// (#205): every attempt at its own journal, recorded **at the RPC seam** —
+/// the library client reports every attempt it builds and every answer it
+/// judges ([`CallObserver`]), so no call site can forget one. An attempt is
+/// logged when its request is built and answered when a verdict comes back;
+/// one whose future is dropped (a timeout, an abandoned observation, the
+/// shutdown) or that comes back without a verdict stays unknown. Calls
+/// naming any other journal (the system journals, a created one, a stray
+/// id) are not this history's and are not logged.
 #[derive(Clone)]
 pub(crate) struct CallLog {
     journal: u64,
@@ -53,12 +56,34 @@ impl CallLog {
         u64::try_from(self.time.now().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// Log an attempt at `call` on `journal`, invoked now; its index, or
-    /// `None` when `journal` is not this log's.
-    fn invoke(&self, journal: u64, call: Call) -> Option<usize> {
-        if journal != self.journal {
+    /// Every attempt so far, handed to the history at `check()`.
+    pub(crate) fn take(&self) -> Vec<Attempt> {
+        std::mem::take(&mut *self.attempts.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl CallObserver for CallLog {
+    fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
+        if attempt.journal() != self.journal {
             return None;
         }
+        let call = match attempt {
+            Attempted::Write(w) => Call::Write {
+                generation: w.generation,
+                owner: w.owner,
+                seq: w.seq,
+                records: w.records.iter().map(|r| user_command_hash(r)).collect(),
+            },
+            Attempted::SetLeader(s) => Call::SetLeader {
+                expected: s.expected,
+                owner: s.owner,
+            },
+            Attempted::Read(r) => Call::Read {
+                from: r.from_seq,
+                limit: r.limit,
+            },
+            Attempted::Truncate(t) => Call::Truncate { up_to: t.up_to },
+        };
         let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
         attempts.push(Attempt {
             client: self.client,
@@ -66,156 +91,107 @@ impl CallLog {
             call,
             seen: None,
         });
-        Some(attempts.len() - 1)
+        Some(attempts.len() as u64 - 1)
     }
 
-    /// Attempt `id` was told `seen`, now.
-    fn answer(&self, id: Option<usize>, seen: Option<Seen>) {
-        let (Some(id), Some(seen)) = (id, seen) else {
+    fn answered(&self, token: u64, answer: Answered<'_>) {
+        let Some(seen) = seen(answer) else {
             return;
         };
         let now = self.now();
         let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
-        let attempt = &mut attempts[id];
+        let Some(attempt) = usize::try_from(token)
+            .ok()
+            .and_then(|id| attempts.get_mut(id))
+        else {
+            return;
+        };
         attempt.seen = Some((now.max(attempt.inv), seen));
     }
+}
 
-    /// Every attempt so far, handed to the history at `check()`.
-    pub(crate) fn take(&self) -> Vec<Attempt> {
-        std::mem::take(&mut *self.attempts.lock().unwrap_or_else(PoisonError::into_inner))
+/// The verdict the checker reads off an answer; `None` for no verdict (a
+/// redirect, an unserved read, no answer).
+fn seen(answer: Answered<'_>) -> Option<Seen> {
+    match answer {
+        Answered::Write(WriteOutcome::Written {
+            seq,
+            count,
+            duplicate,
+        }) => Some(Seen::Written {
+            seq: *seq,
+            count: *count,
+            duplicate: *duplicate,
+        }),
+        Answered::Write(WriteOutcome::Refused { state }) => Some(Seen::Refused(*state)),
+        Answered::Write(WriteOutcome::Truncated { state }) => Some(Seen::WriteTruncated(*state)),
+        Answered::SetLeader(SetLeaderOutcome::Won { state }) => Some(Seen::Won(*state)),
+        Answered::SetLeader(SetLeaderOutcome::Lost { state }) => Some(Seen::Lost(*state)),
+        Answered::Read(ReadOutcome::Page { records, state, .. }) => Some(Seen::Page {
+            records: records.iter().map(|r| user_command_hash(r)).collect(),
+            state: *state,
+        }),
+        Answered::Read(ReadOutcome::Truncated { state }) => Some(Seen::ReadTruncated(*state)),
+        Answered::Truncate(TruncateOutcome::Applied { state }) => Some(Seen::Trimmed(*state)),
+        _ => None,
     }
 }
 
-/// The terminal outcome of one `Write` attempt (#204).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum WriteResult {
-    /// The journal holds the batch at `[seq, seq + count)`: accepted now,
-    /// or (`duplicate`) acked from the log as the retry of a write accepted
-    /// there earlier.
-    Written {
-        seq: u64,
-        count: u64,
-        duplicate: bool,
-    },
-    /// Refused in place: a stale or foreign writer, a position that is not
-    /// the next one, or a retry whose bytes differ. `state` names the
-    /// current writer and the next position.
-    Refused { state: JournalState },
-    /// The position is below `first_seq`: whether it was written is
-    /// unknowable, and `state` says where the journal stands.
-    Truncated { state: JournalState },
-    /// No verdict: redirected (with a hint) or not answered.
-    Redirect { leader: Option<u64> },
-    /// No answer in time.
-    Ambiguous,
-}
-
-/// A journal state off the wire, judged well-formed.
-pub(super) fn state_of(state: Option<paros::wire::common::JournalState>) -> JournalState {
-    let decoded = journal_state_from_proto(state);
+/// Judge a `Write` outcome against the oracles every answer passes: a node
+/// serves the journal the client names, and names a well-formed state. On
+/// a journal `created` at runtime (#189) an unknown answer is no verdict:
+/// a member that has not folded the create yet does not serve it.
+pub(super) fn judged_write(outcome: WriteOutcome, created: bool) -> WriteOutcome {
     assert_always!(
-        decoded.is_ok(),
+        outcome != WriteOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
     );
-    decoded.unwrap_or_default()
-}
-
-impl WriteResult {
-    /// The verdict the checker reads off this result; `None` for no verdict.
-    fn seen(&self) -> Option<Seen> {
-        match self {
-            Self::Written {
-                seq,
-                count,
-                duplicate,
-            } => Some(Seen::Written {
-                seq: *seq,
-                count: *count,
-                duplicate: *duplicate,
-            }),
-            Self::Refused { state } => Some(Seen::Refused(*state)),
-            Self::Truncated { state } => Some(Seen::WriteTruncated(*state)),
-            Self::Redirect { .. } | Self::Ambiguous => None,
-        }
+    if created && outcome == WriteOutcome::UnknownJournal {
+        assert_reachable!("system: a member that has not folded a create refuses its journal");
+        return WriteOutcome::Redirect { leader: None };
     }
-
-    /// Judge one `Write` RPC's answer: a transport error is ambiguous, a
-    /// reply is a verdict or a redirect. On a journal `created` at runtime
-    /// an unknown answer is no verdict: a member that has not folded the
-    /// create yet does not serve it.
-    fn from_response(response: Result<WriteAck, RpcError>, created: bool) -> Self {
-        let Some(ack) = response.ok() else {
-            return Self::Ambiguous;
-        };
-        if created && ack.unknown_journal {
-            assert_reachable!("system: a member that has not folded a create refuses its journal");
-            return Self::Redirect { leader: None };
-        }
-        assert_always!(
-            !ack.unknown_journal,
-            "chain: a node serves the journal the client names"
-        );
-        match ack.outcome() {
-            WriteOutcome::Accepted | WriteOutcome::Duplicate => Self::Written {
-                seq: ack.seq,
-                count: ack.count,
-                duplicate: ack.outcome() == WriteOutcome::Duplicate,
-            },
-            WriteOutcome::Refused => Self::Refused {
-                state: state_of(ack.state),
-            },
-            WriteOutcome::Truncated => Self::Truncated {
-                state: state_of(ack.state),
-            },
-            WriteOutcome::None => Self::Redirect { leader: ack.leader },
-        }
+    assert_always!(
+        outcome != WriteOutcome::UnknownJournal,
+        "chain: a node serves the journal the client names"
+    );
+    match outcome {
+        WriteOutcome::UnknownJournal => WriteOutcome::Redirect { leader: None },
+        WriteOutcome::Malformed => WriteOutcome::Ambiguous,
+        outcome => outcome,
     }
 }
 
-/// The terminal outcome of one `SetLeader` attempt (#204).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum SetLeaderResult {
-    /// The compare-and-swap won: `state` is the new generation.
-    Won { state: JournalState },
-    /// It lost: `state` names the current writer.
-    Lost { state: JournalState },
-    /// Not asked: the read the claim starts with already names this client
-    /// the owner — an earlier claim of its own won and its answer was lost
-    /// — so it adopts `state` instead of claiming against itself.
-    Owned { state: JournalState },
-    /// No verdict.
-    Redirect { leader: Option<u64> },
-    /// No answer in time.
-    Ambiguous,
+/// [`judged_write`] for a `SetLeader` outcome.
+pub(super) fn judged_set_leader(outcome: SetLeaderOutcome, created: bool) -> SetLeaderOutcome {
+    assert_always!(
+        outcome != SetLeaderOutcome::Malformed,
+        "chain: a node answers a well-formed journal state"
+    );
+    if created && outcome == SetLeaderOutcome::UnknownJournal {
+        assert_reachable!("system: a member that has not folded a create refuses its journal");
+        return SetLeaderOutcome::Redirect { leader: None };
+    }
+    assert_always!(
+        outcome != SetLeaderOutcome::UnknownJournal,
+        "chain: a node serves the journal the client names"
+    );
+    match outcome {
+        SetLeaderOutcome::UnknownJournal => SetLeaderOutcome::Redirect { leader: None },
+        SetLeaderOutcome::Malformed => SetLeaderOutcome::Ambiguous,
+        outcome => outcome,
+    }
 }
 
-/// The terminal outcome of one truncation operation.
-pub(super) enum TruncateResult {
-    Applied { state: JournalState },
-    Rejected { leader: Option<u64> },
-    Ambiguous,
-}
-
-/// The terminal outcome of one matchmaker-set reconfiguration operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ReconfigureMatchmakersResult {
-    Started { generation: u64 },
-    Refused { refusal: String },
-    Ambiguous,
-}
-
-/// The terminal outcome of one reconfiguration operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ReconfigureResult {
-    Started {
-        leader: Option<u64>,
-        round: u64,
-    },
-    Refused {
-        leader: Option<u64>,
-        refusal: String,
-    },
-    Ambiguous,
+/// The journal state a truncation answered with, judged well-formed.
+pub(super) fn judged_truncate(outcome: TruncateOutcome) -> TruncateOutcome {
+    assert_always!(
+        outcome != TruncateOutcome::Malformed,
+        "chain: a node answers a well-formed journal state"
+    );
+    match outcome {
+        TruncateOutcome::Malformed => TruncateOutcome::Ambiguous,
+        outcome => outcome,
+    }
 }
 
 /// Race `request` against `timeout` and the run's shutdown: `fallback` when
@@ -233,342 +209,52 @@ pub(super) async fn within<T>(
     }
 }
 
-/// One `Inspect` probe of `client`, bounded like every other request.
-pub(super) async fn inspect(
-    ctx: &SimContext,
-    client: &SimClient,
-    journal: JournalId,
-    timeout: Duration,
-) -> Option<InspectReply> {
-    let probe = async { client.inspect_journal(journal.0).await.ok() };
-    within(ctx, timeout, None, probe).await
-}
-
-/// One `Write` of `entry` to `journal` at `target`. With `abandon` the
-/// client stops listening after 10 ms and records the observation as
-/// ambiguous. `created` says the journal was created at runtime (#189),
-/// so a member may not serve it yet.
-#[allow(clippy::too_many_arguments)]
+/// One `Write` of `entry` to `journal` at server `target` — one attempt,
+/// no redirect followed. With `abandon` the client stops listening after
+/// 10 ms and records the observation as ambiguous. `created` as for
+/// [`judged_write`].
 pub(super) fn write_once(
-    clients: &[SimClient],
-    log: &CallLog,
-    time: &SimTimeProvider,
+    nodes: &ChainClient,
     journal: JournalId,
     target: usize,
     entry: &Entry,
     abandon: bool,
     created: bool,
-) -> impl Future<Output = WriteResult> + use<> {
-    let client = clients[target].clone();
-    let time = time.clone();
-    let request = Write {
-        journal: journal.0,
-        generation: entry.generation.0,
-        owner: entry.owner.0,
-        seq: entry.seq.0,
-        records: entry.records.iter().map(|r| r.0.clone()).collect(),
-    };
-    let log = log.clone();
-    let id = log.invoke(
-        journal.0,
-        Call::Write {
-            generation: entry.generation.0,
-            owner: entry.owner.0,
-            seq: entry.seq.0,
-            records: entry
-                .records
-                .iter()
-                .map(|r| user_command_hash(&r.0))
-                .collect(),
-        },
-    );
-    async move {
-        let call = client.write(&request);
-        let result = if abandon {
-            moonpool_sim::select! {
-                response = call => WriteResult::from_response(response, created),
-                _ = time.sleep(Duration::from_millis(10)) => WriteResult::Ambiguous,
-            }
-        } else {
-            WriteResult::from_response(call.await, created)
-        };
-        log.answer(id, result.seen());
-        result
-    }
+) -> impl Future<Output = WriteOutcome> + use<> {
+    let listen = abandon.then_some(Duration::from_millis(10));
+    let attempt = nodes.write_attempt(target, write_request(journal, entry), listen);
+    async move { judged_write(attempt.await, created) }
 }
 
-/// One `SetLeader(expected, owner)` asked of `target`; `created` as for
-/// [`write_once`].
+/// One `SetLeader(expected, owner)` asked of server `target`; `created` as
+/// for [`judged_write`].
 pub(super) fn set_leader_once(
-    clients: &[SimClient],
-    log: &CallLog,
+    nodes: &ChainClient,
     journal: JournalId,
     target: usize,
-    expected: u64,
-    owner: u64,
+    (expected, owner): (u64, u64),
     created: bool,
-) -> impl Future<Output = SetLeaderResult> + use<> {
-    let client = clients[target].clone();
-    let request = SetLeader {
-        journal: journal.0,
-        expected,
-        owner,
-    };
-    let log = log.clone();
-    let id = log.invoke(journal.0, Call::SetLeader { expected, owner });
-    async move {
-        let Ok(ack) = client.set_leader(&request).await else {
-            return SetLeaderResult::Ambiguous;
-        };
-        if created && ack.unknown_journal {
-            assert_reachable!("system: a member that has not folded a create refuses its journal");
-            return SetLeaderResult::Redirect { leader: None };
-        }
-        assert_always!(
-            !ack.unknown_journal,
-            "chain: a node serves the journal the client names"
-        );
-        let result = match (ack.decided, ack.won) {
-            (true, true) => SetLeaderResult::Won {
-                state: state_of(ack.state),
-            },
-            (true, false) => SetLeaderResult::Lost {
-                state: state_of(ack.state),
-            },
-            _ => SetLeaderResult::Redirect { leader: ack.leader },
-        };
-        log.answer(
-            id,
-            match &result {
-                SetLeaderResult::Won { state } => Some(Seen::Won(*state)),
-                SetLeaderResult::Lost { state } => Some(Seen::Lost(*state)),
-                _ => None,
-            },
-        );
-        result
-    }
+) -> impl Future<Output = SetLeaderOutcome> + use<> {
+    let attempt = nodes.set_leader_attempt(target, journal, expected, owner);
+    async move { judged_set_leader(attempt.await, created) }
 }
 
-/// One journal `Read` of `journal` from `from`, asked of `client`.
+/// One journal `Read` of `journal` from `from`, asked of server `target`.
 pub(super) fn read_once(
-    client: &SimClient,
-    log: &CallLog,
+    client: &ChainClient,
+    target: usize,
     journal: u64,
     from: u64,
     limit: u64,
     wait_ms: u64,
-) -> impl Future<Output = Option<ReadAck>> + use<> {
-    let client = client.clone();
-    let request = Read {
-        journal,
-        from_seq: from,
-        limit,
-        wait_ms,
-    };
-    let log = log.clone();
-    let id = log.invoke(journal, Call::Read { from, limit });
-    async move {
-        let ack = client.read(&request).await.ok();
-        log.answer(id, ack.as_ref().and_then(read_seen));
-        ack
-    }
-}
-
-/// The verdict the checker reads off a read's answer: a page or a
-/// truncation, when it was served from this journal.
-fn read_seen(ack: &ReadAck) -> Option<Seen> {
-    if !ack.served || ack.unknown_journal {
-        return None;
-    }
-    let state = journal_state_from_proto(ack.state).ok()?;
-    Some(if ack.truncated {
-        Seen::ReadTruncated(state)
-    } else {
-        Seen::Page {
-            records: ack.records.iter().map(|r| user_command_hash(r)).collect(),
-            state,
-        }
-    })
-}
-
-/// One truncation below `up_to`, starting at `target` and following
-/// redirects for at most `config.compact_attempts` asks.
-pub(super) fn truncate_once(
-    clients: &[SimClient],
-    log: &CallLog,
-    time: &SimTimeProvider,
-    journal: JournalId,
-    config: &ChainConfig,
-    target: usize,
-    up_to: u64,
-) -> impl Future<Output = TruncateResult> + use<> {
-    let clients = clients.to_vec();
-    let time = time.clone();
-    let config = *config;
-    let log = log.clone();
-    async move {
-        let mut attempt_target = target % clients.len();
-        for _attempt in 0..config.compact_attempts {
-            let client = clients[attempt_target].clone();
-            let request = Truncate {
-                journal: journal.0,
-                up_to,
-            };
-            let id = log.invoke(journal.0, Call::Truncate { up_to });
-            let outcome = moonpool_sim::select! {
-                response = client.truncate(&request) => match response {
-                    Ok(ack) if ack.decided => TruncateResult::Applied { state: state_of(ack.state) },
-                    Ok(ack) => TruncateResult::Rejected { leader: ack.leader },
-                    Err(_) => TruncateResult::Ambiguous,
-                },
-                _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => TruncateResult::Ambiguous,
-            };
-            if let TruncateResult::Applied { state } = &outcome {
-                log.answer(id, Some(Seen::Trimmed(*state)));
-            }
-            match outcome {
-                // A redirect to another node: follow it. The same node, or
-                // none named: a beat later, at the next node.
-                TruncateResult::Rejected { leader: Some(next) }
-                    if usize::try_from(next).is_ok_and(|next| next != attempt_target) =>
-                {
-                    attempt_target = usize::try_from(next).unwrap_or(0) % clients.len();
-                }
-                TruncateResult::Rejected { .. } => {
-                    if time
-                        .sleep(Duration::from_millis(config.compact_beat_ms))
-                        .await
-                        .is_err()
-                    {
-                        return outcome;
-                    }
-                    attempt_target = (attempt_target + 1) % clients.len();
-                }
-                terminal => return terminal,
-            }
-        }
-        TruncateResult::Ambiguous
-    }
-}
-
-/// One acceptor reconfiguration onto `members` under `quorum_system`,
-/// starting at `target`: redirects are followed, an `unsettled` leader is
-/// re-asked a beat later, every other refusal is terminal.
-pub(super) fn reconfigure_once(
-    clients: &[SimClient],
-    time: &SimTimeProvider,
-    config: &ChainConfig,
-    target: usize,
-    members: Vec<u64>,
-    quorum_system: QuorumSystem,
-) -> impl Future<Output = ReconfigureResult> + use<> {
-    let clients = clients.to_vec();
-    let time = time.clone();
-    let config = *config;
-    async move {
-        let mut attempt_target = target % clients.len();
-        let mut client = clients[attempt_target].clone();
-        let wire = quorum_system_to_proto(quorum_system);
-        for _attempt in 0..config.reconfigure_attempts {
-            let request = Reconfigure {
-                members: members.clone(),
-                quorum_system: wire.quorum_system,
-                phase1_quorum: wire.phase1_quorum,
-                phase2_quorum: wire.phase2_quorum,
-                rows: wire.rows,
-                cols: wire.cols,
-            };
-            let outcome = moonpool_sim::select! {
-                response = client.reconfigure(&request) => match response {
-                    Ok(ack) => {
-                        if ack.accepted {
-                            ReconfigureResult::Started { leader: ack.leader, round: ack.round.unwrap_or(0) }
-                        } else {
-                            ReconfigureResult::Refused { leader: ack.leader, refusal: ack.refusal }
-                        }
-                    }
-                    Err(_) => ReconfigureResult::Ambiguous,
-                },
-                _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ReconfigureResult::Ambiguous,
-            };
-            match &outcome {
-                // A redirect: follow the hint. Every other refusal is
-                // terminal for this operation — `unsettled` included,
-                // after one beat at the same leader.
-                ReconfigureResult::Refused {
-                    leader: Some(next),
-                    refusal,
-                } if refusal == "not_leader" => {
-                    let Ok(next) = usize::try_from(*next) else {
-                        return outcome;
-                    };
-                    attempt_target = next % clients.len();
-                    client = clients[attempt_target].clone();
-                }
-                ReconfigureResult::Refused { refusal, .. } if refusal == "unsettled" => {
-                    if time
-                        .sleep(Duration::from_millis(config.reconfigure_beat_ms))
-                        .await
-                        .is_err()
-                    {
-                        return outcome;
-                    }
-                }
-                _ => return outcome,
-            }
-        }
-        ReconfigureResult::Ambiguous
-    }
-}
-
-/// One matchmaker-set reconfiguration onto `members`, asked of `target`: a
-/// `busy` reconfigurer is re-asked a beat later, every other refusal is
-/// terminal.
-pub(super) fn reconfigure_matchmakers_once(
-    clients: &[SimClient],
-    time: &SimTimeProvider,
-    config: &ChainConfig,
-    target: usize,
-    members: Vec<u64>,
-) -> impl Future<Output = ReconfigureMatchmakersResult> + use<> {
-    let clients = clients.to_vec();
-    let time = time.clone();
-    let config = *config;
-    async move {
-        let client = clients[target % clients.len()].clone();
-        for _attempt in 0..config.reconfigure_matchmakers_attempts {
-            let request = ReconfigureMatchmakers {
-                members: members.clone(),
-            };
-            let outcome = moonpool_sim::select! {
-                response = client.reconfigure_matchmakers(&request) => match response {
-                    Ok(ack) => {
-                        if ack.accepted {
-                            ReconfigureMatchmakersResult::Started { generation: ack.generation.unwrap_or(0) }
-                        } else {
-                            ReconfigureMatchmakersResult::Refused { refusal: ack.refusal }
-                        }
-                    }
-                    Err(_) => ReconfigureMatchmakersResult::Ambiguous,
-                },
-                _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => ReconfigureMatchmakersResult::Ambiguous,
-            };
-            match &outcome {
-                // A busy reconfigurer finishes on its own cadence:
-                // re-ask a beat later. Every other refusal is
-                // terminal for this operation.
-                ReconfigureMatchmakersResult::Refused { refusal } if refusal == "busy" => {
-                    if time
-                        .sleep(Duration::from_millis(config.reconfigure_beat_ms))
-                        .await
-                        .is_err()
-                    {
-                        return outcome;
-                    }
-                }
-                _ => return outcome,
-            }
-        }
-        ReconfigureMatchmakersResult::Ambiguous
-    }
+) -> impl Future<Output = ReadOutcome> + use<> {
+    client.read_attempt(
+        target,
+        Read {
+            journal,
+            from_seq: from,
+            limit,
+            wait_ms,
+        },
+    )
 }
