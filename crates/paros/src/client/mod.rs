@@ -427,6 +427,15 @@ impl<P: Providers> Client<P> {
         self.adopt_leader(Some(index % self.servers.len()));
     }
 
+    /// Drop the leader hint (its server did not answer); it becomes the
+    /// stale one.
+    fn forget_leader(&self) {
+        let mut hint = self.hint.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(previous) = hint.current.take() {
+            hint.stale = Some(previous);
+        }
+    }
+
     fn adopt_leader(&self, next: Option<usize>) {
         let mut hint = self.hint.lock().unwrap_or_else(PoisonError::into_inner);
         if let (Some(previous), Some(next)) = (hint.current, next)
@@ -620,6 +629,18 @@ impl<P: Providers> Client<P> {
                     match &outcome {
                         WriteOutcome::Redirect { leader } => self.observe_leader(*leader),
                         outcome if outcome.is_verdict() => self.observe_leader_at(server),
+                        // No answer from the server believed to lead: the
+                        // belief is dropped, so the caller's next write
+                        // starts where *it* chooses. Kept, a hint naming a
+                        // node that went down for good pinned every later
+                        // write (and every re-send `resolve` makes) on it,
+                        // each one ambiguous, and the writer never reached
+                        // the new leader nor learned it was superseded
+                        // (#224's hunt: witness 17857554070660782028, a
+                        // recovery that never acked a write in 60 s).
+                        WriteOutcome::Ambiguous if self.leader() == Some(server) => {
+                            self.forget_leader();
+                        }
                         _ => {}
                     }
                     return WriteReport {
