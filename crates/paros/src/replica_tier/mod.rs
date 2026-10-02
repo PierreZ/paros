@@ -425,6 +425,7 @@ fn inspect(replica: &ReplicaNode) -> InspectReply {
         cols,
         folded: replica.replica().folded().0,
         journal: Some(journal_state_to_proto(replica.replica().journal())),
+        node: replica.config().id.0,
         ..InspectReply::default()
     }
 }

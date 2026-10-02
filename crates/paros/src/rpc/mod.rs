@@ -44,6 +44,13 @@ pub mod system {
     include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));
 }
 
+/// The machine contract (#196, #216), generated from `proto/machine.proto`:
+/// what an uninitialized `parosd` serves while it waits for `init`.
+pub mod machine {
+    #![allow(missing_docs, clippy::pedantic)]
+    include!(concat!(env!("OUT_DIR"), "/paros.machine.v1.rs"));
+}
+
 mod client;
 mod codec;
 mod consensus;

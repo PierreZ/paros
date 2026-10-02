@@ -13,13 +13,15 @@
 //!   a replica.
 //! - `0x5041_0201..` — the matchmaker contract (`proto/matchmaker.proto`),
 //!   served by a matchmaker.
+//! - `0x5041_0301..` — the machine contract (`proto/machine.proto`, #196),
+//!   served by an uninitialized `parosd` while it waits for `init`.
 //!
 //! A role that does not serve a method simply does not register it, and a
 //! call to it is refused `EndpointNotFound` before any handler runs.
 
 use moonpool_rpc::{MethodId, RpcMethod, SchemaVersion, WellKnownId};
 
-use super::{internal, matchmaker, public};
+use super::{internal, machine, matchmaker, public};
 
 /// A method served at a fixed [`WellKnownId`] on every process that serves
 /// it: callers address it by `ip:port` alone, and it answers whichever
@@ -118,4 +120,18 @@ well_known_method!(
     MatchmakerReconfigureRpc, 0x5041_0203,
     matchmaker::ReconfigureRequest => matchmaker::ReconfigureReply,
     "paros.matchmaker.Reconfigure"
+);
+well_known_method!(
+    /// Who a waiting machine is (#196).
+    IdentifyRpc, 0x5041_0301, machine::Identify => machine::IdentifyAck,
+    "paros.machine.Identify"
+);
+well_known_method!(
+    /// Join a cell: record its plan and start serving its journals (#196).
+    FormCellRpc, 0x5041_0302, machine::FormCell => machine::FormCellAck,
+    "paros.machine.FormCell"
+);
+well_known_method!(
+    /// Form the cell over the seeds, from one of them (#196, #216).
+    InitRpc, 0x5041_0303, machine::Init => machine::InitAck, "paros.machine.Init"
 );

@@ -355,4 +355,7 @@ message InspectReply {
   // node alone — a read of the journal is `Read`, which a quorum confirms.
   uint64 folded = 16;
   .paros.common.v1.JournalState journal = 17;
+  // The answering node's own id (#196): node ids are random (#225), so a
+  // client given addresses alone learns each server's id here.
+  uint64 node = 18;
 }

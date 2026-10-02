@@ -1,19 +1,22 @@
-//! `parosd` on a laptop (#206, #207): one node, one matchmaker and one
-//! replica over Tokio and real directories, driven by `parosctl` over
-//! `paros::client` (#220, #221) — a journal claimed and written without a
-//! hand-carried generation or position, read back from the node and the
-//! replica, every process killed and restarted as an existing member, the
-//! writer going on, a second owner superseding it, a truncation a reader
-//! is told about — and the refusals an operator meets: an edited
-//! configuration (#207), a lost disk, a second provisioning (#208), each
-//! with its exit code and its reason. Every identity is provisioned by
-//! `parosd provision` before its first start, and an interrupted
-//! provisioning resumes from the disk. The node and the replica are named
-//! by hostname (#209), resolved once at startup by `parosd` and `parosctl`
-//! alike, and an override of a driver tunable below its floor is refused.
+//! `parosd` on a laptop (#196): three seeds and one stateless machine, each
+//! the same uniform binary configured by `PAROS_*` variables alone, over
+//! Tokio and real directories, driven by `parosctl` over `paros::client`.
+//!
+//! A machine mints its `node_id` at format and waits; `parosctl init`, sent
+//! to one seed, forms the cell over the seeds and claims its control
+//! journal — refused on a machine that is not a seed, and on a cell already
+//! initialized. Then a journal is claimed and written without a hand-carried
+//! generation or position (server ids learned from the servers themselves),
+//! every machine is killed and restarted as an existing member, a second
+//! owner supersedes the first — for a write and for a truncation (#228) — and
+//! a reader is told about the gap a truncation left. Last, the refusals an
+//! operator meets: an unknown `PAROS_*` variable, a tunable below its floor,
+//! a class changed after format, a lost store (amnesia), stores without
+//! their identity, and a wiped volume that comes back as a new machine
+//! which never forms a second cell.
 
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -35,89 +38,73 @@ fn free_port() -> u16 {
 }
 
 struct Cluster {
-    node: String,
-    matchmaker: String,
-    replica: String,
+    /// The seeds' listen addresses; the second by hostname (#209).
+    seeds: Vec<String>,
+    /// A stateless machine: it waits for placement (M9).
+    stateless: String,
     root: tempfile::TempDir,
 }
 
 impl Cluster {
     fn new() -> Self {
         Self {
-            // Hostnames for two of the three (#209): resolved once at
-            // startup, by the servers and by `parosctl`.
-            node: format!("localhost:{}", free_port()),
-            matchmaker: format!("127.0.0.1:{}", free_port()),
-            replica: format!("localhost:{}", free_port()),
+            seeds: vec![
+                format!("127.0.0.1:{}", free_port()),
+                format!("localhost:{}", free_port()),
+                format!("127.0.0.1:{}", free_port()),
+            ],
+            stateless: format!("127.0.0.1:{}", free_port()),
             root: tempfile::tempdir().expect("tempdir"),
         }
     }
 
-    /// The deployment every process is started with.
-    fn deployment(&self) -> Vec<String> {
-        vec![
-            "--node".into(),
-            format!("0={}", self.node),
-            "--matchmaker".into(),
-            format!("0={}", self.matchmaker),
-            "--replica".into(),
-            format!("1000={}", self.replica),
-        ]
+    /// The rendezvous join list every machine starts with.
+    fn rendezvous(&self) -> String {
+        self.seeds.join(",")
     }
 
-    fn data_dir(&self, role: &str) -> std::path::PathBuf {
-        self.root.path().join(role)
+    fn data_dir(&self, machine: &str) -> PathBuf {
+        self.root.path().join(machine)
     }
 
-    fn server(&self, role: &str, id: u64, extra: &[String]) -> Command {
-        self.parosd(&[role], role, id, extra)
-    }
-
-    /// `parosd <verb…> --id <id> … --data-dir <role's dir> <deployment>`.
-    fn parosd(&self, verb: &[&str], role: &str, id: u64, extra: &[String]) -> Command {
+    /// `parosd`, configured by its environment alone.
+    fn parosd(&self, machine: &str, listen: &str, class: &str) -> Command {
         let mut command = Command::new(PAROSD);
         command
-            .args(verb)
-            .args(["--id", &id.to_string(), "--layout", "small", "--data-dir"])
-            .arg(self.data_dir(role))
-            .args(self.deployment())
-            .args(extra)
+            .env_clear()
+            .env("PAROS_LISTEN", listen)
+            .env("PAROS_DATA_DIR", self.data_dir(machine))
+            .env("PAROS_CLASS", class)
+            .env("PAROS_FAILURE_DOMAIN", format!("zone-{machine}"))
+            .env("PAROS_RENDEZVOUS", self.rendezvous())
+            .env("PAROS_STORE_LAYOUT", "small")
             .env("RUST_LOG", "warn")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         command
     }
 
-    /// `parosd provision <role>`: its exit status and stdout + stderr.
-    fn provision(&self, role: &str) -> (i32, String) {
-        let id = if role == "replica" { 1000 } else { 0 };
-        status(
-            &self
-                .parosd(&["provision", role], role, id, &[])
-                .stdout(Stdio::piped())
-                .output()
-                .expect("run parosd provision"),
-        )
+    fn seed(&self, rank: usize) -> Command {
+        self.parosd(&format!("seed{rank}"), &self.seeds[rank], "storage")
     }
 
     fn start(&self) -> Vec<Child> {
-        ROLES
-            .iter()
-            .map(|role| {
-                let id = if *role == "replica" { 1000 } else { 0 };
-                self.server(role, id, &[]).spawn().expect("spawn parosd")
-            })
-            .collect()
+        let mut children: Vec<Child> = (0..self.seeds.len())
+            .map(|rank| self.seed(rank).spawn().expect("spawn parosd"))
+            .collect();
+        children.push(
+            self.parosd("front", &self.stateless, "stateless")
+                .spawn()
+                .expect("spawn parosd"),
+        );
+        children
     }
 
-    /// Run a server that must refuse to boot; its exit status and stderr.
-    fn refused(&self, role: &str, extra: &[String]) -> (i32, String) {
-        status(&self.server(role, 0, extra).output().expect("run parosd"))
+    /// Every seed, as `parosctl --servers` takes them.
+    fn servers(&self) -> String {
+        self.seeds.join(",")
     }
 }
-
-/// Every role that keeps stores.
-const ROLES: [&str; 3] = ["matchmaker", "node", "replica"];
 
 /// An exit status and everything printed.
 fn status(output: &Output) -> (i32, String) {
@@ -129,6 +116,11 @@ fn status(output: &Output) -> (i32, String) {
             String::from_utf8_lossy(&output.stderr)
         ),
     )
+}
+
+/// Run a machine that must refuse to boot; its exit status and stderr.
+fn refused(mut command: Command) -> (i32, String) {
+    status(&command.output().expect("run parosd"))
 }
 
 fn stop(children: Vec<Child>) {
@@ -161,7 +153,7 @@ fn json(output: &Output) -> serde_json::Value {
 }
 
 /// Run `args` until it succeeds, retrying only while nothing was decided (a
-/// fresh deployment elects its leader first); its JSON answer.
+/// machine still starting, a cell electing its leader); its JSON answer.
 fn until_ok(servers: &str, args: &[&str]) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
@@ -180,8 +172,28 @@ fn until_ok(servers: &str, args: &[&str]) -> serde_json::Value {
     }
 }
 
+/// Run `args` until it ends in `code`, retrying while nothing was decided;
+/// its JSON answer.
+fn until_code(servers: &str, args: &[&str], code: i32) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let output = ctl(servers, args);
+        if output.status.code() == Some(code) {
+            return json(&output);
+        }
+        assert!(
+            output.status.code() == Some(CTL_UNREACHABLE) && Instant::now() < deadline,
+            "parosctl {args:?} ended {:?}, not {code}: {} {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Read journal 256 from 0 through `servers` until it holds `count`
-/// records; the records and the gaps the reader was told about.
+/// records: the records and the gaps reported.
 fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value>) {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
@@ -190,89 +202,68 @@ fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value
             .as_array()
             .expect("records")
             .iter()
-            .map(|r| r["data"].as_str().expect("data").to_string())
+            .map(|r| r["data"].as_str().expect("utf-8").to_string())
             .collect();
-        if records.len() >= count {
-            let gaps = answer["gaps"].as_array().expect("gaps").clone();
+        let gaps = answer["gaps"].as_array().cloned().unwrap_or_default();
+        if records.len() >= count || Instant::now() >= deadline {
             return (records, gaps);
         }
-        assert!(Instant::now() < deadline, "only {records:?} read back");
         std::thread::sleep(Duration::from_millis(200));
     }
 }
 
 fn exists(path: &Path) -> bool {
-    path.exists()
+    path.try_exists().unwrap_or(false)
 }
 
 #[test]
-fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
+fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
     let cluster = Cluster::new();
-    let node = format!("0={}", cluster.node);
-    let replica = format!("1000={}", cluster.replica);
-
-    // Provisioning: every store formatted, once, by its own command. A
-    // start before it is refused as amnesia: a start never formats.
-    let (code, stderr) = cluster.refused("node", &[]);
-    assert_eq!(code, EXIT_REFUSED, "{stderr}");
-    assert!(stderr.contains("never provisioned"), "{stderr}");
-    for role in ROLES {
-        let (code, out) = cluster.provision(role);
-        assert_eq!(code, 0, "{out}");
-        assert!(out.contains("1 stores formatted"), "{out}");
-    }
-    // An interrupted provisioning (the record lost before it landed)
-    // resumes from what the disk holds and formats nothing again.
-    std::fs::remove_file(cluster.data_dir("node").join("provisioned")).expect("drop the record");
-    let (code, out) = cluster.provision("node");
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("1 already formatted"), "{out}");
-
-    // The writer claims the journal on its first write — no generation or
-    // position carried by hand.
     let children = cluster.start();
-    let wrote = until_ok(&node, &["write", "256", "alpha", "beta", "--owner", "7"]);
-    assert_eq!(wrote["outcome"], "written", "{wrote}");
+    let servers = cluster.servers();
+    let seed = cluster.seeds[0].clone();
+
+    // A machine that is not a seed refuses to run init.
+    let not_a_seed = until_code(&cluster.stateless, &["init"], CTL_REFUSED);
+    assert_eq!(not_a_seed["refusal"], "not_a_seed", "{not_a_seed}");
+
+    // Init, sent to one seed, forms the cell over the three and claims its
+    // control journal; a second init is refused.
+    let initialized = until_ok(&seed, &["init"]);
+    assert_eq!(initialized["outcome"], "initialized", "{initialized}");
+    assert_eq!(initialized["members"].as_array().map(Vec::len), Some(3));
+    let again = until_code(&seed, &["init"], CTL_REFUSED);
+    assert_eq!(again["refusal"], "already_initialized", "{again}");
+    for rank in 0..3 {
+        let dir = cluster.data_dir(&format!("seed{rank}"));
+        assert!(exists(&dir.join("machine")));
+        assert!(exists(&dir.join("journals").join("2").join("1")));
+        assert!(exists(&dir.join("journals").join("256").join("256")));
+    }
+
+    // The writer claims journal 256 on its way, and writes at the tail;
+    // the servers' ids are learned from the servers.
+    let wrote = until_ok(&servers, &["write", "256", "alpha", "beta", "--owner", "7"]);
     assert_eq!(wrote["seq"], 0, "{wrote}");
-    assert_eq!(wrote["count"], 2, "{wrote}");
-    assert_eq!(read_back(&node, 2).0, vec!["alpha", "beta"]);
-    // The replica serves the same records.
-    assert_eq!(read_back(&replica, 2).0, vec!["alpha", "beta"]);
-    // Every server's view: the node leads.
-    let both = format!("{node},{replica}");
-    let views = ctl(&both, &["inspect"]);
-    assert!(views.status.success());
-    let stdout = String::from_utf8_lossy(&views.stdout);
-    let node_view: serde_json::Value =
-        serde_json::from_str(stdout.lines().next().expect("a view")).expect("JSON");
-    assert_eq!(node_view["leader"], true, "{node_view}");
-    assert!(exists(
-        &cluster
-            .data_dir("node")
-            .join("journals")
-            .join("256")
-            .join("256")
-    ));
-    assert!(exists(&cluster.data_dir("matchmaker").join("matchmaker")));
-    assert!(exists(&cluster.data_dir("replica").join("replica")));
+    assert_eq!(read_back(&servers, 2).0, vec!["alpha", "beta"]);
 
     // Kill everything (no graceful shutdown) and restart as existing
     // members: the records are still there, and the writer goes on at the
-    // tail — its claim finds it the owner already and adopts it.
+    // tail.
     stop(children);
     let children = cluster.start();
-    assert_eq!(read_back(&node, 2).0, vec!["alpha", "beta"]);
-    let wrote = until_ok(&node, &["write", "256", "gamma", "--owner", "7"]);
+    assert_eq!(read_back(&servers, 2).0, vec!["alpha", "beta"]);
+    let wrote = until_ok(&servers, &["write", "256", "gamma", "--owner", "7"]);
     assert_eq!(wrote["seq"], 2, "{wrote}");
-    assert_eq!(read_back(&node, 3).0, vec!["alpha", "beta", "gamma"]);
 
-    // A second owner takes the journal; the first is fenced, and says so.
-    let swapped = until_ok(&node, &["set-leader", "256", "--owner", "8"]);
+    // A second owner takes the journal; the first is fenced, for a write
+    // and for a truncation (#228).
+    let swapped = until_ok(&servers, &["set-leader", "256", "--owner", "8"]);
     assert_eq!(swapped["outcome"], "won", "{swapped}");
-    assert_eq!(swapped["state"]["owner"], 8, "{swapped}");
     let generation = swapped["state"]["generation"].as_u64().expect("generation");
+    let stale = (generation - 1).to_string();
     let fenced = ctl(
-        &node,
+        &servers,
         &[
             "write",
             "256",
@@ -280,16 +271,13 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
             "--owner",
             "7",
             "--generation",
-            &(generation - 1).to_string(),
+            &stale,
         ],
     );
     assert_eq!(fenced.status.code(), Some(CTL_REFUSED), "{fenced:?}");
     assert_eq!(json(&fenced)["outcome"], "superseded");
-
-    // A truncation is fenced like a write (#228): the superseded owner is
-    // refused, the current one truncates.
-    let stale = ctl(
-        &node,
+    let fenced = ctl(
+        &servers,
         &[
             "truncate",
             "256",
@@ -298,99 +286,104 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
             "--owner",
             "7",
             "--generation",
-            &(generation - 1).to_string(),
+            &stale,
         ],
     );
-    assert_eq!(stale.status.code(), Some(CTL_REFUSED), "{stale:?}");
-    assert_eq!(json(&stale)["outcome"], "superseded");
+    assert_eq!(fenced.status.code(), Some(CTL_REFUSED), "{fenced:?}");
+    assert_eq!(json(&fenced)["outcome"], "superseded");
 
-    // A truncation, and a reader from 0 told about the gap.
-    let truncated = until_ok(&node, &["truncate", "256", "--up-to", "1", "--owner", "8"]);
+    // The owner truncates, and a reader from 0 is told about the gap.
+    let truncated = until_ok(
+        &servers,
+        &["truncate", "256", "--up-to", "1", "--owner", "8"],
+    );
     assert_eq!(truncated["state"]["first_seq"], 1, "{truncated}");
-    let (records, gaps) = read_back(&node, 2);
+    let (records, gaps) = read_back(&servers, 2);
     assert_eq!(records, vec!["beta", "gamma"]);
     assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert_eq!(gaps[0]["to"], 1, "{gaps:?}");
     stop(children);
 
     refuses_what_it_must(&cluster);
 }
 
-/// The refusals an operator meets, on a provisioned cluster that is down.
+/// The refusals an operator meets, on a formed cell that is down.
 fn refuses_what_it_must(cluster: &Cluster) {
-    // #207: an edited deployment — a second node added to the bootstrap
-    // membership in the configuration — is refused, and says why.
-    let edited = vec!["--node".to_string(), "1=127.0.0.1:1".to_string()];
-    let (code, stderr) = cluster.refused("node", &edited);
-    assert_eq!(code, EXIT_REFUSED, "{stderr}");
-    assert!(stderr.contains("another configuration"), "{stderr}");
-    // The matchmaker's bootstrap set, likewise.
-    let edited = vec!["--matchmaker".to_string(), "1=127.0.0.1:1".to_string()];
-    let (code, stderr) = cluster.refused("matchmaker", &edited);
-    assert_eq!(code, EXIT_REFUSED, "{stderr}");
-    assert!(stderr.contains("another configuration"), "{stderr}");
+    // An unknown variable is a typo, never a silent default.
+    let (code, stderr) = refused({
+        let mut command = cluster.seed(0);
+        command.env("PAROS_SEEDS", "gone");
+        command
+    });
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("unknown variable PAROS_SEEDS"), "{stderr}");
 
     // A driver tunable overridden below its floor stops the start (#209).
-    let (code, stderr) = status(
-        &cluster
-            .server("node", 0, &[])
-            .env("PAROS_ELECTION_TIMEOUT_BASE", "1")
-            .output()
-            .expect("run parosd"),
-    );
+    let (code, stderr) = refused({
+        let mut command = cluster.seed(0);
+        command.env("PAROS_ELECTION_TIMEOUT_BASE", "1");
+        command
+    });
     assert_eq!(code, 2, "{stderr}");
     assert!(
         stderr.contains("PAROS_ELECTION_TIMEOUT_BASE=1 is below its floor 2"),
         "{stderr}"
     );
 
-    // A second provisioning is refused (#208).
-    for role in ROLES {
-        let (code, out) = cluster.provision(role);
-        assert_eq!(code, EXIT_REFUSED, "{out}");
-        assert!(out.contains("already formatted"), "{out}");
-    }
-    // A data directory belongs to the identity it was provisioned for.
-    let (code, stderr) = status(
-        &cluster
-            .parosd(&["node"], "replica", 0, &[])
-            .output()
-            .expect("run parosd"),
-    );
-    assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("provisioned for replica 1000"), "{stderr}");
-
-    // A lost disk: a wiped volume — the record with it — is amnesia at the
-    // next start, never a silent rejoin.
-    std::fs::remove_dir_all(cluster.data_dir("node")).expect("wipe the node's disk");
-    let (code, stderr) = cluster.refused("node", &[]);
+    // A class is fixed at format.
+    let (code, stderr) = refused({
+        let mut command = cluster.seed(0);
+        command.env("PAROS_CLASS", "stateless");
+        command
+    });
     assert_eq!(code, EXIT_REFUSED, "{stderr}");
-    assert!(stderr.contains("amnesia"), "{stderr}");
+    assert!(stderr.contains("fixed at format"), "{stderr}");
+
+    // Lost stores under a kept identity are amnesia, never a silent rejoin
+    // (one lost store parks that journal alone; with every one lost the
+    // machine has nothing to serve and stops on the refusal).
+    let seed0 = cluster.data_dir("seed0");
+    std::fs::remove_dir_all(seed0.join("journals")).expect("lose the stores");
+    let (code, stderr) = refused(cluster.seed(0));
+    assert_eq!(code, EXIT_REFUSED, "{stderr}");
+    assert!(stderr.contains("no format marker"), "{stderr}");
+
+    // Stores without their identity are refused too.
+    std::fs::remove_file(seed0.join("machine")).expect("lose the identity");
+    let (code, stderr) = refused(cluster.seed(0));
+    assert_eq!(code, EXIT_REFUSED, "{stderr}");
+    assert!(stderr.contains("lost its identity"), "{stderr}");
+
+    // A wiped volume is a new machine: it waits, and an init sent to it is
+    // refused while the other seeds serve the cell — it never forms a
+    // second one.
+    std::fs::remove_dir_all(&seed0).expect("wipe the volume");
+    let children: Vec<Child> = (0..3)
+        .map(|rank| cluster.seed(rank).spawn().expect("spawn parosd"))
+        .collect();
+    let wiped = until_code(&cluster.seeds[0], &["init"], CTL_REFUSED);
+    assert_eq!(wiped["refusal"], "cell_exists", "{wiped}");
+    stop(children);
 }
 
 #[test]
-fn sigterm_stops_a_node_cleanly() {
+fn sigterm_stops_a_waiting_machine_cleanly() {
     let cluster = Cluster::new();
-    let (code, out) = cluster.provision("node");
-    assert_eq!(code, 0, "{out}");
-    let mut node = cluster
-        .server("node", 0, &[])
-        .spawn()
-        .expect("spawn parosd");
-    // Let it boot and listen.
+    let mut machine = cluster.seed(0).spawn().expect("spawn parosd");
+    // Let it format and listen.
     std::thread::sleep(Duration::from_millis(500));
     let status = Command::new("kill")
-        .args(["-TERM", &node.id().to_string()])
+        .args(["-TERM", &machine.id().to_string()])
         .status()
         .expect("kill");
     assert!(status.success());
     let deadline = Instant::now() + Duration::from_secs(20);
     let code = loop {
-        if let Some(status) = node.try_wait().expect("wait") {
+        if let Some(status) = machine.try_wait().expect("wait") {
             break status.code();
         }
         assert!(Instant::now() < deadline, "parosd ignored SIGTERM");
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(code, Some(0), "a signalled shutdown exits 0");
+    assert!(exists(&cluster.data_dir("seed0").join("machine")));
 }

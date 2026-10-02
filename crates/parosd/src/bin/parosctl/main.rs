@@ -18,6 +18,7 @@
 //! | 2 | bad arguments (clap's own) |
 
 mod commands;
+mod init;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
@@ -29,8 +30,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use moonpool_core::TokioProviders;
-use moonpool_rpc::{RpcConfig, RpcDriver};
-use paros::client::{Client, ClientTunables};
+use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
+use paros::client::{Client, ClientTunables, bootstrap};
 
 use crate::output::Printer;
 
@@ -47,9 +48,11 @@ struct Cli {
 /// Options every command takes.
 #[derive(Args, Debug)]
 struct Global {
-    /// The servers to ask, comma-separated: `ID=HOST:PORT` (the node id a
-    /// leader hint names it by) or `HOST:PORT` (its position in the list).
-    /// A host is an IP or a name, resolved once, at startup.
+    /// The servers to ask, comma-separated: `HOST:PORT` — a name that
+    /// resolves to several machines (the seeds' rendezvous name) stands for
+    /// them all, and each server's node id is learned from its own
+    /// `Inspect` — or `ID=HOST:PORT` to name the id outright. A host is an
+    /// IP or a name, resolved once, at startup.
     #[arg(long, env = "PAROSCTL_SERVERS", value_delimiter = ',', global = true)]
     servers: Vec<ServerArg>,
     /// Print JSON, one document per answer, instead of text.
@@ -60,36 +63,70 @@ struct Global {
     timeout_ms: u64,
 }
 
-/// One server: its node id and address.
+/// One server entry: an explicit node id, or the addresses a name resolves
+/// to.
 #[derive(Clone, Debug)]
 struct ServerArg {
     id: Option<u64>,
-    addr: SocketAddr,
+    addrs: Vec<SocketAddr>,
 }
 
 impl FromStr for ServerArg {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (id, addr) = match s.split_once('=') {
-            Some((id, addr)) => (
-                Some(
+        match s.split_once('=') {
+            Some((id, addr)) => Ok(Self {
+                id: Some(
                     id.trim()
                         .parse()
                         .map_err(|e| format!("bad id in {s:?}: {e}"))?,
                 ),
-                addr,
-            ),
-            None => (None, s),
-        };
-        let addr =
-            resolve::resolve(addr.trim()).map_err(|e| format!("bad address in {s:?}: {e}"))?;
-        Ok(Self { id, addr })
+                addrs: vec![
+                    resolve::resolve(addr.trim())
+                        .map_err(|e| format!("bad address in {s:?}: {e}"))?,
+                ],
+            }),
+            None => Ok(Self {
+                id: None,
+                addrs: resolve::resolve_all(s.trim())
+                    .map_err(|e| format!("bad address in {s:?}: {e}"))?,
+            }),
+        }
+    }
+}
+
+impl Global {
+    /// Every address named, in order, without duplicates.
+    fn addrs(&self) -> Vec<SocketAddr> {
+        let mut addrs = Vec::new();
+        for addr in self.servers.iter().flat_map(|s| s.addrs.iter().copied()) {
+            if !addrs.contains(&addr) {
+                addrs.push(addr);
+            }
+        }
+        addrs
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms)
     }
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Form the cell over its seeds (#196, #216): sent to the first server,
+    /// a waiting seed; then the first cell coordinator claims the cell
+    /// control journal. Refused on an initialized cell; a re-run resumes.
+    Init(init::InitArgs),
+    /// A call to a formed cell.
+    #[command(flatten)]
+    Cell(CellCommand),
+}
+
+/// The calls to a formed cell, each through a client of its servers.
+#[derive(Subcommand, Debug)]
+enum CellCommand {
     /// Write records at the journal's tail, claiming it first if needed.
     Write(commands::WriteArgs),
     /// Read records from a position.
@@ -133,12 +170,14 @@ impl From<Ending> for ExitCode {
     }
 }
 
-/// The library client of `global.servers`, over a client-only RPC runtime
-/// driven on a task of its own for the life of the process.
-fn connect(global: &Global) -> Result<Client<TokioProviders>, String> {
-    if global.servers.is_empty() {
-        return Err("no servers: pass --servers or set PAROSCTL_SERVERS".into());
-    }
+/// The client-only RPC runtime, driven on a task of its own for the life
+/// of the process.
+struct Runtime {
+    providers: TokioProviders,
+    rpc: RpcHandle<TokioProviders>,
+}
+
+fn runtime() -> Result<Runtime, String> {
     let config = RpcConfig {
         max_frame_bytes: paros::MAX_FRAME_BYTES,
         ..RpcConfig::default()
@@ -150,19 +189,39 @@ fn connect(global: &Global) -> Result<Client<TokioProviders>, String> {
         let error = driver.run().await;
         tracing::warn!(%error, "client RPC runtime failed");
     });
-    let servers: Vec<(u64, SocketAddr)> = global
-        .servers
-        .iter()
-        .zip(0_u64..)
-        .map(|(server, position)| (server.id.unwrap_or(position), server.addr))
-        .collect();
-    let timeout = Duration::from_millis(global.timeout_ms);
+    Ok(Runtime { providers, rpc })
+}
+
+/// The library client of `servers` (id and address each).
+fn client(
+    runtime: &Runtime,
+    servers: &[(u64, SocketAddr)],
+    timeout: Duration,
+) -> Client<TokioProviders> {
     let tunables = ClientTunables {
         request_timeout: timeout,
         read_timeout: timeout,
         ..ClientTunables::default()
     };
-    Ok(Client::connect(&providers, &rpc, &servers, tunables))
+    Client::connect(&runtime.providers, &runtime.rpc, servers, tunables)
+}
+
+/// The servers `global` names, each with its node id: an explicit one, or
+/// the one its own `Inspect` reports (#196: ids are random). A server that
+/// does not answer is left out.
+async fn servers(runtime: &Runtime, global: &Global) -> Vec<(u64, SocketAddr)> {
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for server in &global.servers {
+        match server.id {
+            Some(id) => known.push((id, server.addrs[0])),
+            None => unknown.extend(server.addrs.iter().copied()),
+        }
+    }
+    let found =
+        bootstrap::discover(&runtime.providers, &runtime.rpc, &unknown, global.timeout()).await;
+    known.extend(found);
+    known
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -175,23 +234,51 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
-    let client = match connect(&cli.global) {
-        Ok(client) => client,
+    if cli.global.servers.is_empty() {
+        eprintln!("parosctl: no servers: pass --servers or set PAROSCTL_SERVERS");
+        return ExitCode::FAILURE;
+    }
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("parosctl: {error}");
             return ExitCode::FAILURE;
         }
     };
     let out = Printer::new(cli.global.json);
-    let ending = match cli.command {
-        Command::Write(args) => commands::write(&client, &out, args).await,
-        Command::Read(args) => commands::read(&client, &out, args).await,
-        Command::Tail(args) => commands::tail(&client, &out, args).await,
-        Command::Truncate(args) => commands::truncate(&client, &out, args).await,
-        Command::SetLeader(args) => commands::set_leader(&client, &out, args).await,
-        Command::Inspect(args) => commands::inspect(&client, &out, args).await,
-        Command::Reconfigure(args) => commands::reconfigure(&client, &out, args).await,
-        Command::Retire(args) => commands::retire(&client, &out, args).await,
+    let command = match cli.command {
+        Command::Init(args) => {
+            let timeout = cli.global.timeout();
+            let addrs = cli.global.addrs();
+            let connect = |servers: &[(u64, SocketAddr)]| client(&runtime, servers, timeout);
+            return init::run(
+                &runtime.providers,
+                &runtime.rpc,
+                &addrs,
+                connect,
+                &out,
+                args,
+            )
+            .await
+            .into();
+        }
+        Command::Cell(command) => command,
+    };
+    let servers = servers(&runtime, &cli.global).await;
+    if servers.is_empty() {
+        eprintln!("parosctl: no server answered with its node id");
+        return Ending::Unreachable.into();
+    }
+    let client = client(&runtime, &servers, cli.global.timeout());
+    let ending = match command {
+        CellCommand::Write(args) => commands::write(&client, &out, args).await,
+        CellCommand::Read(args) => commands::read(&client, &out, args).await,
+        CellCommand::Tail(args) => commands::tail(&client, &out, args).await,
+        CellCommand::Truncate(args) => commands::truncate(&client, &out, args).await,
+        CellCommand::SetLeader(args) => commands::set_leader(&client, &out, args).await,
+        CellCommand::Inspect(args) => commands::inspect(&client, &out, args).await,
+        CellCommand::Reconfigure(args) => commands::reconfigure(&client, &out, args).await,
+        CellCommand::Retire(args) => commands::retire(&client, &out, args).await,
     };
     ending.into()
 }

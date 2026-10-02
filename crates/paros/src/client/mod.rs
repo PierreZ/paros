@@ -56,6 +56,7 @@
 //! The module is wasm-safe: it needs the provider's time and the caller's
 //! RPC runtime, and nothing else.
 
+pub mod bootstrap;
 mod observer;
 pub mod outcome;
 mod reader;

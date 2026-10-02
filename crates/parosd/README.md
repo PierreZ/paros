@@ -13,56 +13,122 @@ an ambiguous one, claiming a journal and resuming a reader after a truncation
 are all the library's. The split follows etcd's (`etcd`, `etcdctl`,
 `clientv3`).
 
-## A deployment on a laptop
+## The toy: a cell with Docker Compose
 
-> **Interim shape (M8).** One role per subcommand, a static address book
-> typed on every command line, and provisioning per role are scaffolding.
-> The end goal (`docs/architecture.md`, §3.2) is one uniform `parosd` per
-> machine with a class (#196), roles assigned by placement (#212), and no
-> address book: one rendezvous name and the machine registry (#216), with
-> provisioning per machine from the initial seeds (#213). What stays is the
-> boot rule (a start never formats; only provisioning does), the
-> provisioning record, created journals as first boots until their store
-> has booted, and the driver tunables with their `PAROS_*` overrides.
-
-Every process is handed the same deployment: each role's `ID=HOST:PORT`. The
-acceptor pool is the bootstrap membership under a majority.
+From a fresh clone, Docker alone (the image is a plain multi-stage Rust build,
+the one build outside Nix):
 
 ```sh
-D="--node 0=127.0.0.1:4500 --matchmaker 0=127.0.0.1:4600 --replica 1000=127.0.0.1:4700"
+docker compose up -d --build        # five machines; each formats and waits
+docker compose run --rm init        # forms the cell over the three seeds
+docker compose run --rm parosctl write 256 hello world --owner 7
+docker compose run --rm parosctl read 256
+```
 
-# Provision every identity once: format its stores, record it, exit.
-parosd provision matchmaker --id 0    --data-dir mm $D
-parosd provision node       --id 0    --data-dir n0 $D
-parosd provision replica    --id 1000 --data-dir r0 $D
+`docker-compose.yml` runs one cell of five `parosd` machines over three failure
+domains, every one the same image configured by `PAROS_*` variables alone:
 
-# Start them: every start, the first included, is an existing member's.
-parosd matchmaker --id 0    --data-dir mm $D &
-parosd node       --id 0    --data-dir n0 $D &
-parosd replica    --id 1000 --data-dir r0 $D &
+| machine | class | failure domain | role today |
+|---|---|---|---|
+| `seed1`, `seed2`, `seed3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
+| `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
+| `front1` | `stateless` | `zone-b` | waits for placement (M9) |
 
-# Write two records to journal 256 of the default tenant (frame 256/256) —
-# claimed on the way — and read them back
-# (from the replica too).
-export PAROSCTL_SERVERS=0=127.0.0.1:4500,1000=127.0.0.1:4700
+**Start and wait.** A machine starts with its listen address, its data
+directory (a named volume), its class, capacity and failure domain, and its
+rendezvous — here `seeds:4500`, which resolves to the three seeds. On its first
+start it **mints its `node_id`** at random and records it in its data directory
+(there is no `PAROS_ID`), then waits. A machine never forms a cell on its own.
+
+**Init.** `parosctl init` goes to one seed (`seed1`, which every seed's join
+list names). That seed identifies every seed, mints the cell's id, records the
+plan, forms every other seed and then itself; every seed then serves the **cell
+control journal** (`2/1`) and the toy's journal (`256/256`, the static
+assignment that stands in for placement until M9), plain Multi-Paxos over the
+seeds. Last, the first cell coordinator — the lowest seed id, until the
+coordinator election of #225 — claims the cell control journal with
+`SetLeader(expected_gen = 0)`. Re-running `init` resumes an interrupted one; on
+an initialized cell it is refused (`already_initialized`). The fleet steps of
+`init` — the meta tenant and the cell's registration in its directory — are
+#229.
+
+**Write and read.** `parosctl` is handed addresses only: `--servers seeds:4500`
+stands for every seed, and each server's node id is learned from its own
+`Inspect`. The writer claims the journal on its way (`SetLeader` against the
+generation it read), then writes at the tail.
+
+**Kill and restart.** `docker compose kill seed2` (a storage machine) and
+`docker compose kill front1` (a stateless one): the journal keeps a majority and
+keeps taking writes. `docker compose start seed2` brings the machine back as an
+existing member: same `node_id`, same stores. There is no restart policy on
+purpose: exit 78 means an operator must act.
+
+**Supersede a writer.** `parosctl set-leader 256 --owner 8` takes the journal;
+the first owner's writes and truncations are refused from then on
+(`superseded`, exit 3), and the new owner's `truncate --up-to N --owner 8`
+applies.
+
+**Lose a disk.** Two ways, both refused:
+
+- *the stores, not the identity* (`docker compose run --rm --entrypoint sh
+  seed2 -c 'rm -rf /var/lib/paros/journals'` while `seed2` is stopped): the next
+  start finds stores without their format marker and stops with **amnesia**
+  (exit 78). Losing one journal's store alone parks that journal on the machine
+  and keeps serving the others.
+- *the whole volume* (`docker compose rm -sf seed2 && docker volume rm
+  paros_seed2 && docker compose up -d seed2`): the machine comes back as a **new
+  machine** with a new `node_id`, and waits. It never rejoins as the old one: an
+  `init` sent to it (`docker compose run --rm --entrypoint parosctl parosctl
+  --servers seed2:4500 init`) is refused (`cell_exists`), since the other seeds
+  serve the cell. Healing the cell around it is reconfiguration onto another machine,
+  driven by the tenant coordinator in M9.
+
+**What is not proven in simulation yet.** The journals' protocol, the driver
+and the stores are the code the deterministic simulation runs. The machine
+phase — formatting an identity, waiting, `init` and `FormCell` — and the
+uniform start are not in the simulation yet (#216); the deploy test
+(`tests/deploy.rs`) runs them on a laptop, and CI runs the Compose smoke test
+(`scripts/compose-smoke.sh`).
+
+## Without Docker
+
+The same three seeds on one host, configured by the environment (each variable
+also has its `--flag`, see `parosd --help`):
+
+```sh
+export PAROS_RENDEZVOUS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
+export PAROS_STORE_LAYOUT=small
+for i in 1 2 3; do
+  PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=seed$i parosd &
+done
+export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
+parosctl --servers 127.0.0.1:4501 init
 parosctl write 256 hello world --owner 7
 parosctl read 256
 ```
 
-A start never formats: the stores must carry their format marker, and the
-configuration they were formatted under must be the one handed in. `parosd proxy --id 0 $D` runs a proxy leader (stateless) when the
-deployment names `--proxy 0=…`. `--journal` (repeatable, default `256`) lists
-the journals the pool serves, each `TENANT/JOURNAL` or a bare `JOURNAL` in the
-default tenant `256` (both ids `>= 256`; `0..=255` are reserved, #235); the first is the one the matchmakers, proxies
-and replicas serve, every other one is plain Multi-Paxos over the pool.
+## Configuration
 
-Until the rendezvous name of #216 replaces the address book, every address
-is `HOST:PORT` with an explicit port; the host is an IP or a
-name — a Compose service name, say. A process resolves the deployment's names
-**once, at startup**, asking again for up to 30 seconds while a peer's name
-does not resolve yet, and exits 1 if one never does. A peer that comes back at
-another address is reached again after a restart of the processes that name
-it. `parosctl --servers` takes names too.
+Environment variables, validated at startup; an unknown `PAROS_*` variable is an
+error (exit 2), so a typo never silently keeps a default.
+
+| variable | meaning |
+|---|---|
+| `PAROS_LISTEN` | `HOST:PORT` the machine serves at, which its peers dial |
+| `PAROS_DATA_DIR` | its identity (`machine`) and its stores |
+| `PAROS_CLASS` | `storage` (default) or `stateless`; fixed at format |
+| `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
+| `PAROS_FAILURE_DOMAIN` | its failure domain label |
+| `PAROS_RENDEZVOUS` | the cell's seeds: one name that resolves to them, or a comma-separated join list; recorded at format, re-read on every boot |
+| `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
+| `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
+| `RUST_LOG` | the log filter (default `warn,parosd=info`) |
+
+Every address is `HOST:PORT` with an explicit port; the host is an IP or a
+name — a Compose service name, say. A machine resolves its names **once, at
+startup**, asking again for up to 30 seconds while a name does not resolve
+yet, and exits 2 if one never does. A rendezvous name resolves to every
+address it stands for. `parosctl --servers` takes names too.
 
 ## Driver tunables
 
@@ -115,28 +181,30 @@ outlast a heartbeat round trip. Every field's contract is documented on
 | 75 | a storage fault crashed the process | restart it: the next boot recovers from the disk |
 | 78 | the boot was refused | do **not** restart; the message says why |
 | 1 | infrastructure (bind, a name that never resolved) | fix the environment |
-| 2 | an inconsistent deployment or a tunable below its floor | fix the arguments |
+| 2 | an invalid configuration: an unknown variable, a tunable below its floor, a name that never resolved | fix the variables |
 
-A refusal is one of three:
+A refusal is one of:
 
-- **amnesia** — the store carries no format marker: the disk was lost, or the
-  identity was never provisioned. A lost identity never rejoins (its promises
-  went with the disk); replace it by reconfiguration.
-- **already formatted** — `parosd provision` on a data directory that carries a
-  provisioning record.
-- **another configuration** (#207) — the store was formatted under another
-  deployment (another bootstrap membership, quorum system, matchmaker set or
-  count). Restore the deployment it was provisioned with; membership changes
-  go through reconfiguration, never through the configuration.
+- **amnesia** — the stores carry no format marker: the disk was lost. A lost
+  store never rejoins (its promises went with the disk); wipe the machine to
+  start it as a new one, and heal the journal by reconfiguration.
+- **lost identity** — stores without a machine record. Wipe the directory.
+- **a class change** — the class is fixed at format.
+- **another configuration** (#207) — a store was formatted under another
+  membership or quorum system. Membership changes go through reconfiguration,
+  never through the configuration.
 
 ## parosctl
 
-The servers come from `--servers ID=HOST:PORT,…` (or `PAROSCTL_SERVERS`); the
-id is the node id a leader hint names the server by (a bare `HOST:PORT` takes
-its position in the list).
+The servers come from `--servers HOST:PORT,…` (or `PAROSCTL_SERVERS`): a name
+that resolves to several machines stands for them all, and each server's node
+id — the one a leader hint names it by — is learned from its own `Inspect`
+(`ID=HOST:PORT` names it outright). A journal is `[TENANT/]JOURNAL`, a bare id
+in the default tenant `256` (#235).
 
 | command | what it does |
 |---|---|
+| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, then claims the cell control journal; resumes an interrupted init, refused on an initialized cell |
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
@@ -161,35 +229,14 @@ truncation gap) go to stderr.
 ## Data directory
 
 ```text
-<data-dir>/journals/<id>/   one moonpool-journal per journal a node serves
-<data-dir>/matchmaker/      a matchmaker's registry
-<data-dir>/replica/         a replica's chosen log
-<data-dir>/provisioned      the provisioning record
+<data-dir>/machine                     the machine's identity and its cell's plan
+<data-dir>/provisioned                 the journal stores it formatted
+<data-dir>/journals/<tenant>/<journal>/  one moonpool-journal per journal it serves (#235)
 ```
 
-## Provisioning
-
-Per role today; per machine once `parosd` is uniform (#196, #213).
-
-`parosd provision <role>` takes the arguments the role's start takes. It
-formats every store the identity keeps — a node's one per journal, a
-matchmaker's registry, a replica's log — syncs each, and only then writes the
-**provisioning record**, `<data-dir>/provisioned` (the role, the id and the
-journals provisioned), atomically. It is never part of a start:
-
-- **provision twice** — refused as *already formatted* (exit 78): the record is
-  there.
-- **an interrupted provision** (killed before the record) — run it again: a
-  store already formatted under the same deployment is left as it is, the rest
-  are formatted, and the record lands. A store formatted under another
-  deployment is refused.
-- **a wiped volume** — the record and the stores went together, and the next
-  start is refused as *amnesia*. Provisioning it again would bring a new,
-  empty identity under the old id: replace it by reconfiguration instead.
-- **another identity's directory** — a start whose role or id is not the
-  record's exits 2.
-
-A journal the directory creates on a running node is formatted by the node
-itself on its first open and added to the record once its store has booted; a
-node killed in between finds the formatted store on its next start and records
-it then.
+The machine record is written at format (`node_id`, class, capacity, failure
+domain, rendezvous) and again when the machine forms its cell: the seed running
+`init` records the plan as *pending* first (a re-run resumes it), and every seed
+records it as *formed* only after every journal store of the plan is formatted
+and the provisioning record names them — the commit point. Every start after
+that is an existing member's: a start never formats a journal store.

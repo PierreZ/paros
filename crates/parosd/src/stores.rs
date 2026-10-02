@@ -4,14 +4,14 @@
 //!
 //! ```text
 //! <data-dir>/
+//!   machine                       the machine's identity and cell (#196)
+//!   provisioned                   the journal stores it formatted (#208)
 //!   journals/<tenant>/<journal>/  one moonpool-journal per journal a node
 //!                                 serves, by its frame (#235)
-//!   matchmaker/               a matchmaker's registry
-//!   replica/                  a replica's chosen log
 //! ```
 //!
 //! Every ordinary start is an existing member's (#208): the stores were
-//! formatted by `parosd provision`, never by a start. A journal the
+//! formatted when the machine formed its cell, never by a start. A journal the
 //! directory creates (#189) is the one store a running node formats: it is
 //! a first boot until its store has booted once, then the provisioning
 //! record ([`Record`]) names it and every later open is an existing
@@ -43,18 +43,6 @@ pub fn journal_dir(data_dir: &Path, journal: JournalKey) -> PathBuf {
         .join("journals")
         .join(journal.tenant.0.to_string())
         .join(journal.journal.0.to_string())
-}
-
-/// The directory of a matchmaker's registry under `data_dir`.
-#[must_use]
-pub fn matchmaker_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("matchmaker")
-}
-
-/// The directory of a replica's log under `data_dir`.
-#[must_use]
-pub fn replica_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("replica")
 }
 
 /// A path the storage provider takes (it speaks `&str`).
@@ -99,7 +87,7 @@ impl DirStores {
         let mut stores = Self {
             provider: TokioStorageProvider::new(),
             record: read.unwrap_or_else(|| Record {
-                role: "node".into(),
+                role: crate::machine_record::ROLE.into(),
                 id,
                 journals: BTreeSet::new(),
             }),
@@ -108,7 +96,7 @@ impl DirStores {
             genesis,
             created: BTreeMap::new(),
         };
-        stores.record.check("node", id)?;
+        stores.record.check(crate::machine_record::ROLE, id)?;
         stores.resolve_created().await?;
         Ok(stores)
     }

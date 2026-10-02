@@ -1,0 +1,4 @@
+target
+web/play/node_modules
+.git
+**/*.rs.bk

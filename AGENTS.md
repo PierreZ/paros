@@ -47,7 +47,10 @@ If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`
 
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
-**Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries
+**Use Nix-provided software for all tooling.** The one documented exception is the image
+(`Dockerfile`, `docker-compose.yml`, #196): a plain multi-stage Rust build so a fresh clone runs
+with Docker alone; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
+`scripts/check-dockerfile-toolchain.sh`). Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
 `brew` (`nix-bin` above is the one exception). On the web the flake's inputs are GitHub tarballs
 the egress policy blocks (a 403 is org policy, not a bug to retry), so use a Nix `rustup`, which
@@ -334,8 +337,10 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `default-features = false`, wasm-safe; sancov crate-under-test.
 - `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
   `prost-build`), stores, `paros::client`; wasm-safe and provider-free.
-- `parosd` — the `parosd` daemon over Tokio and `parosctl` (`src/bin/parosctl/`), the CLI over
-  `paros::client` (`publish = false`).
+- `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
+  `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
+  (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
+  Compose toy are `Dockerfile` and `docker-compose.yml` at the root.
 - `paros-sim` — the DST harness: processes, role map, fault world, workload, audit, corpus.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
@@ -343,7 +348,8 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 
 Elsewhere: `book/` (mdbook; `book/CLAUDE.md`, the `update-the-book` skill),
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`,
+`compose-smoke.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

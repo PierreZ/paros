@@ -67,6 +67,18 @@ fn variable(field: &str, millis: bool) -> String {
     format!("PAROS_{}{suffix}", field.to_ascii_uppercase())
 }
 
+/// Every override variable this module reads, so the configuration layer
+/// can refuse a `PAROS_*` variable nobody reads (a typo).
+pub fn variables() -> Vec<String> {
+    FIELDS
+        .iter()
+        .map(|field| match field {
+            Field::Millis(name, _) => variable(name, true),
+            Field::Count(name, _) => variable(name, false),
+        })
+        .collect()
+}
+
 /// The production tunables with the process environment's overrides.
 ///
 /// # Errors
