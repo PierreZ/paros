@@ -73,8 +73,12 @@ confirmation surfaces through the `Ready` handshake as a consume-once
 `ReadState{ctx, index}`, after the batch's committed entries are applied. The
 driver parks the client's reply under `ctx` and answers when the `ReadState`
 arrives. paros holds no application state machine, so the state a read serves is
-the **applied log prefix itself**: `ReadAck.read_index` is the watermark, and
-`None` is the empty prefix.
+the **applied log prefix itself**: the confirmed `ReadState`'s `index` is the
+watermark, and `None` is the empty prefix. The core keeps this path because it
+teaches the problem, but since the journal API (#204) no public call reaches
+it: every public `Read` is a leaderless
+[quorum read](beyond-multi-paxos.md#quorum-reads), served by any node or
+replica.
 
 ## The fresh-leader trap
 
@@ -121,15 +125,17 @@ contiguous walk reaches it, strictly in order: from then on a client that reads 
 log through this node can see it and fold it into its own state. A node that acks a chosen-but-unapplied
 command promises the client something that no node can read back yet. paros had
 that bug: `mark_chosen` recorded a command as applied the moment the slot was
-learned chosen. The fix is a definition rather than a special case, because
-`applied_seq` is written **only** by the contiguous walk.
+learned chosen. The fix is a definition rather than a special case: the
+replica's fold position (`folded`) moves **only** with the contiguous walk.
 
-Both dedup tables must move together, which matters more than it looks. Move the
-applied table alone and a retry in that window misses both tables. It then takes a
-fresh slot for a command that is already chosen, and executes it twice. That is
-worse than the early ack. So `mark_chosen` re-points the in-flight table at the
-slot instead. A retry there gets `Duplicate(k)`, the reply parks on slot `k`, and
-the apply loop fires it when the write enters the prefix.
+The same definition answers a retry. Since the journal API (#204) there is no
+dedup table at all: the log is the at-most-once table. A retry is the identical
+write — generation, owner, position and bytes — and the journal state machine
+judges it at apply like any other slot (`JournalState::apply`): it is a
+`Duplicate` exactly when the log already holds that write at that position.
+Nothing is judged at propose time, and the driver answers a call only with the
+verdict its slot folded to (`paros::driver::calls`), so an acknowledged write
+is always one a read through this node can already see.
 
 ## Where this lives in paros
 
@@ -140,8 +146,8 @@ the apply loop fires it when the write enters the prefix.
 | Credit and confirm | `Proposer::credit_read_ack`, `Proposer::confirm_reads` |
 | The fresh-leader guard | `Proposer::read_floor`, `Replica::covers` |
 | The driver seam | `Ready::read_states`, `ReadState{ctx, index}` |
-| The two dedup tables | `Replica::applied_at`, `Replica::inflight_at` |
-| A retry's answer | `ProposeResult::Duplicate`, `ProposeResult::Chosen` |
+| The verdict at apply | `JournalState::apply`, `Outcome` (`journal_state.rs`) |
+| A retry's answer | `Outcome::Duplicate`, answered from the fold (`paros::driver::calls`) |
 
 ## Proven, not asserted
 
@@ -167,9 +173,9 @@ scenario. What stands guard is the sweep itself, beside the core test
 
 The write ack got the same treatment. The fast path acked with no slot at all, and
 both the workload and the audit skipped slotless acks, so the exemption was
-exactly the size of the bug. `ProposeResult::Chosen` now carries its slot, so the
-ack is falsifiable. The audit joins every committed ack (`Audit::client_acked`)
-against the acking node's applied prefix (`Audit::applied`), and asserts **"a
+exactly the size of the bug. Every answer now names its slot, so the ack is
+falsifiable. The audit joins every answered verdict (`Audit::answered`) against
+the answering node's applied prefix (`Audit::applied`), and asserts **"a
 committed write ack names a slot the acking node had already applied"**. It went
 red on twelve seeds in the first two thousand.
 

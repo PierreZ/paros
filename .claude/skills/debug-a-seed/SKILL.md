@@ -60,11 +60,23 @@ stale. The usual shapes:
 - a floor (compaction, GC watermark, promise) that regressed across a reboot;
 - a configuration belief adopted from a `Prepare`/`Heartbeat` that a later
   reconfiguration superseded;
-- a client retry that changed `(client, seq, bytes)` and was treated as new.
+- a client retry that changed the write — generation, owner, position or
+  bytes — and was treated as new (`CallLog`'s retry-identity check in
+  `chain_workload/rpc.rs` names it).
 
-Use `tracing` output for reading only; never add a check that scans it.
-Setting the seed's trace to DEBUG means raising the level in the runner's
-`init_sim_tracing` call for the replay, not an environment variable.
+Use `tracing` for reading only; never add a check that scans it. Note what a
+replay actually shows: `sim-paros-hunt` installs no subscriber of its own
+(`crates/paros-sim-runner/src/` has no tracing setup), and each moonpool run
+installs a **capture-only** `SimulationLayer` as the thread's default,
+floored at `SimulationBuilder::trace_level` (`INFO` unless the builder lowers
+it). It feeds the timeline and prints nothing, so the flake's `RUST_LOG=debug`
+changes nothing and there is no verbosity flag. The replay's output is
+`GREEN`/`RED` plus the `assertion_violations` list with each detail map:
+when you need more context, put it in a detail map (or a throwaway local
+print on the replay path you do not commit). Lowering `.trace_level(..)` on
+the `run_chain_seed` builder in `crates/paros-sim/src/lib.rs` only enlarges
+the capture; a level never changes scheduling or randomness, so the seed still
+replays identically.
 
 ## 4. Decide who is wrong
 

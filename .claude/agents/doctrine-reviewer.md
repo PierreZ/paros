@@ -1,6 +1,6 @@
 ---
 name: doctrine-reviewer
-description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with # Panics, every quorum question through membership.rs, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use before committing any change to paros-core, paros, or paros-sim, or when asked to review a PR.
+description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership.rs, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use before committing any change to paros-core, paros, or paros-sim, or when asked to review a PR.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
@@ -38,7 +38,13 @@ Check, in this order:
    layer; a hook consulted from a spawned task; a knob without a documented
    floor or whose extreme makes a run unwinnable; an oracle threshold or
    iteration ceiling buggified; a tunable born as a constant instead of
-   `DriverTunables` + `NodeShape`/`ChainConfig`.
+   `DriverTunables` + `NodeShape`/`ChainConfig`; a new `ClientTunables`
+   field without its own `buggify_knob!` in `ChainConfig`.
+   In `paros::client`: a randomness draw, a retry that is not the identical
+   write, an ambiguous outcome treated as "not done", a misbehaviour made a
+   default instead of an explicit call, an attempt not reported to the
+   `CallObserver`, or client policy added to `parosctl` instead of the
+   library (`working-on-the-client` skill).
 6. **Seeds and traces.** A seed constant, seed list, or seed-replay test that
    is a witness (a scripted mask input or a same-seed determinism replay is
    fine); any code that reads the trace back; an audit callback that returns
@@ -49,7 +55,7 @@ Check, in this order:
 8. **Files and docs.** A module that now holds two concerns and was not
    split; a superseded axis, flag or gate not deleted; a doctrine change not
    reflected in the crate's `AGENTS.md`, the book, or a design note under
-   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (six, across two manifests).
+   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (eight, across `crates/paros`, `crates/paros-sim` and `crates/parosd`'s manifests).
 9. **Evidence.** A protocol fix whose commit message lacks the invariant and
    the red→green result; a claim the simulation was not made to reproduce.
 

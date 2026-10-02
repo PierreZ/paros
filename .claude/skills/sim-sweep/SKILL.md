@@ -22,6 +22,19 @@ Both are built with sancov only under xtask (`scripts/sancov-rustc.sh` as
 the hunt under plain `cargo run` is faster and coverage-blind, which is fine
 for volume.
 
+xtask sets `SANCOV_CRATES` and the target dir but **not** `RUSTC_WRAPPER`:
+the flake's `shellHook` exports `RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"`.
+Outside the flake shell (Claude Code on the web, where `nix develop` cannot
+build) export it yourself, or the sweep runs uninstrumented and its code
+coverage never guides the seeds. `crates/paros/build.rs` also needs `protoc`
+there (see `/validate`):
+
+```bash
+nix shell nixpkgs#rustup nixpkgs#protobuf -c bash -c \
+  'export PROTOC=$(command -v protoc) RUSTC_WRAPPER=$PWD/scripts/sancov-rustc.sh;
+   cargo xtask sim run paros-chain'
+```
+
 ## Hunt axes and replay commands (`crates/paros-sim-runner/src/hunt.rs`)
 
 Axes: `main` (default; the combined swarm campaign), `canary`, `corpus` (CTRL

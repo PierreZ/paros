@@ -42,8 +42,8 @@ exhaustive where the swarm can only sample it.
    `shape::config_floor`; a case that exceeds it is not a corpus case.
 2. Implement the workload: prime the log (`PRIME_BUDGET`), inject the mask
    through the world, script the lifecycle, then wait for the outcome inside
-   `OUTCOME_BUDGET` with `WAIT_SETTLE`/`FLOOR_GRACE` — those thresholds are
-   oracle judgement and are never buggified.
+   `OUTCOME_BUDGET` with `WAIT_SETTLE` (all three in `corpus.rs`) — those
+   thresholds are oracle judgement and are never buggified.
 3. Assert the outcome with `assert_always!` and a detail map, report
    **non-vacuity** (the case actually exercised its terrain) so a vacuous
    run cannot pass silently, and gate reached outcomes with `sometimes`.

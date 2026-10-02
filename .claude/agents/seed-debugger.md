@@ -17,8 +17,9 @@ edit `paros-core`, the driver, or any assertion message; deleting or weakening
 an oracle is never a fix, and a reworded message resets its saturation slot.
 
 Run everything through the Nix prefix the repository requires
-(`nix develop --command` locally, `nix shell nixpkgs#rustup -c` on Claude Code
-on the web); never the sandbox toolchain.
+(`nix develop --command` locally; on Claude Code on the web
+`nix shell nixpkgs#rustup nixpkgs#protobuf -c bash -c 'export PROTOC=$(command -v protoc); cargo …'`,
+since `crates/paros/build.rs` runs `prost-build`); never the sandbox toolchain.
 
 Work in this order and report where you stopped if you cannot finish:
 

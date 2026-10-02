@@ -131,15 +131,18 @@ The argument is single-configuration, so a read is bound to the configuration it
 opened against. A `PreReadAck` carries the answerer's configuration ballot, and a
 node abandons its open reads when it learns a newer configuration.
 
-A client reaches this path through `CheckTail` on its quorum path. It may ask any
-node, and the node never redirects it: the leader, a follower and a spare all
-serve the read the same way. The simulation's client draws the node at random,
-and the same history check that judges read-index reads judges these reads.
+Every public `Read` uses this path. A client may ask any node or any replica,
+and the server never redirects it: the leader, a follower, a spare and a replica
+all serve the read the same way. A `Read` at the tail waits for new records for
+the time that its `wait_ms` gives. A `Read` below `first_seq` gets the answer
+`truncated`, and the client starts again at the floor that the answer names.
+The simulation's client draws the server at random, and the client-history check
+judges every read.
 
 **In the code.** `QuorumRead`, `QuorumReads` (`quorum_read.rs`);
 `ColocatedNode::quorum_read(ctx)` and `quorum_read_in(ctx, row)`
-(`node/quorum_reads.rs`); the `CheckTail` RPC's quorum path (`paros.proto`), which the driver
-parks like a read-index read;
+(`node/quorum_reads.rs`); the `Read` RPC (`paros.proto`), which the driver
+parks until the read is confirmed and serves from the fold (`driver/log_reads.rs`);
 `Acceptor::vote_watermark` (`acceptor.rs`); `Message::PreRead`,
 `Message::PreReadAck` (`message.rs`); `Replica::covers`, `Ready::read_states`.
 Paper: Whittaker et al., *Compartmentalized Paxos* §3.4, *Paxos Quorum Reads*.
