@@ -35,8 +35,9 @@ pub enum InitOutcome {
     /// A machine answered there without the machine endpoint: it serves a
     /// cell already.
     NotWaiting,
-    /// Nothing answered within the patience: the machine is not up yet, or
-    /// the answer was lost (`Init` is resumable: send it again).
+    /// Nothing decided within the patience: the machine, or another seed,
+    /// is not up yet, or the answer was lost (`Init` is resumable: send it
+    /// again).
     Unreachable,
 }
 
@@ -46,7 +47,8 @@ const INIT_ATTEMPT: Duration = Duration::from_secs(10);
 const INIT_RETRY: Duration = Duration::from_millis(500);
 
 /// Send `Init` to the waiting seed at `seed`, again while nothing answers
-/// (a machine still starting), for up to `patience`. Each attempt waits up
+/// or the seed finds another seed not up yet (`seed_unreachable`: a machine
+/// still starting), for up to `patience`; then [`InitOutcome::Unreachable`]. Each attempt waits up
 /// to [`INIT_ATTEMPT`]: the seed calls every other seed before it answers.
 /// Re-sending is safe: a seed resumes the plan it recorded, never redraws.
 pub async fn init<P: Providers>(
@@ -71,6 +73,10 @@ pub async fn init<P: Providers>(
                 return CellPlan::from_wire(ack.cell_id, &ack.members, &ack.journals)
                     .map_or(InitOutcome::Malformed, InitOutcome::Formed);
             }
+            // Another seed is not up yet: nothing was decided, and `init`
+            // resumes, so ask again — the seeds of a fresh deployment start
+            // in any order.
+            Ok(Ok(ack)) if ack.refusal == "seed_unreachable" => {}
             Ok(Ok(ack)) => return InitOutcome::Refused(ack.refusal),
             Ok(Err(error)) if *error.reason() == ErrorReason::EndpointNotFound => {
                 return InitOutcome::NotWaiting;

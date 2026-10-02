@@ -76,7 +76,9 @@ pub async fn run(
             return Ending::Unreachable;
         }
         InitOutcome::Unreachable => {
-            note(&format!("no machine answered init at {target}"));
+            note(&format!(
+                "init at {target} decided nothing in time: a seed is not up yet; run it again"
+            ));
             return Ending::Unreachable;
         }
         // No machine endpoint: the target serves a cell already (a re-run
