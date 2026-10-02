@@ -1,6 +1,7 @@
 //! `parosd` — the paros daemon (#206): every role of a deployment over
 //! moonpool's `TokioProviders` and the journal stores on a real
-//! filesystem, plus a small client for the four journal calls.
+//! filesystem. `parosd` serves; the client is `parosctl` (#220), over
+//! `paros::client`.
 //!
 //! The drivers it runs are the library's provider-generic ones — the same
 //! code the deterministic simulation runs over `SimProviders` — and the
@@ -16,7 +17,6 @@
 //! | 78 (`EX_CONFIG`) | [`RunError::Refused`]: the boot claim or the configuration disagrees with the store | do **not** restart: resolve the claim (amnesia, a formatted store, an edited configuration) |
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
 
-mod client;
 mod deployment;
 mod stores;
 
@@ -36,7 +36,7 @@ use tracing_subscriber::EnvFilter;
 use crate::deployment::Deployment;
 use crate::stores::{DirStores, matchmaker_dir, path_str, replica_dir};
 
-/// The paros daemon and its client.
+/// The paros daemon.
 #[derive(Parser, Debug)]
 #[command(name = "parosd", version, about)]
 struct Cli {
@@ -54,12 +54,6 @@ enum Command {
     Replica(ServerArgs),
     /// Run a proxy leader (stateless: no data directory, no boot claim).
     Proxy(ProxyArgs),
-    /// Compare-and-swap a journal's writer.
-    SetLeader(client::SetLeaderArgs),
-    /// Write records to a journal as its owner.
-    Write(client::WriteArgs),
-    /// Read a journal's records from a position.
-    Read(client::ReadArgs),
 }
 
 /// The store layout a server runs.
@@ -153,9 +147,6 @@ async fn run(command: Command) -> ExitCode {
         Command::Matchmaker(args) => Box::pin(serve("matchmaker", run_matchmaker(args))).await,
         Command::Replica(args) => Box::pin(serve("replica", run_replica(args))).await,
         Command::Proxy(args) => Box::pin(serve("proxy", run_proxy(args))).await,
-        Command::SetLeader(args) => client::set_leader(args).await,
-        Command::Write(args) => client::write(args).await,
-        Command::Read(args) => client::read(args).await,
     }
 }
 

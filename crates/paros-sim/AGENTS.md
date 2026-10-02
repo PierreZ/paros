@@ -46,14 +46,19 @@ a trace scan. Every constant that shapes a campaign is a `pub const` in
   consulted / fired / recovered* per hook.
 - `client.rs` `ClientRuntime` (a workload's client-only moonpool-rpc
   runtime, driven on its own task and stopped when the handle drops; one
-  `paros::NodeClient` per server; the corpus builds on it) · `state.rs` `published` (the
+  `paros::NodeClient` per server, which the corpus builds on, and
+  `ChainClient`, the library's `paros::client::Client` the chain workload drives every call
+  through, #221) · `state.rs` `published` (the
   get-or-publish of every per-iteration singleton on the `StateHandle`).
 - `chain.rs` `ChainState` (the Chain-of-Blocks fold a journal client
   computes, #186) · `chain_workload.rs` `ChainWorkload` + `ChainConfig`
   (every field a `buggify_knob!`; the operation-id table `WRITE=0 …
   SET_LEADER=22`, `OP_COUNT`, the weight table, the reconfiguration shape
   rings) · `chain_workload/system.rs` the system-journal operations (#189,
-  `CREATE_JOURNAL=17 … RETIRE_NODE=21`) and their read-back · `chain_workload/fold.rs` the client's `Fold` of the journal and
+  `CREATE_JOURNAL=17 … RETIRE_NODE=21`) and their read-back · `chain_workload/rpc.rs` the
+  seam onto `paros::client`: `CallLog` (the history, as the library's `CallObserver`), the
+  per-answer oracles, and the one-attempt calls the races and misbehaviours make ·
+  `chain_workload/races.rs` races 1 and 2 of #205 · `chain_workload/fold.rs` the client's `Fold` of the journal and
   the run's trim fence (every trim clamped below every folding client's
   cursor).
 - `world/mod.rs` `StorageWorld` (the protocol-blind fake disk, budgets,

@@ -1,8 +1,11 @@
 //! `parosd` on a laptop (#206, #207): one node, one matchmaker and one
-//! replica over Tokio and real directories, a journal claimed, written and
-//! read back through the CLI, every process killed and restarted as an
-//! existing member, and the refusals an operator meets — an edited
-//! configuration (#207), a lost disk, a second first boot — each with its
+//! replica over Tokio and real directories, driven by `parosctl` over
+//! `paros::client` (#220, #221) — a journal claimed and written without a
+//! hand-carried generation or position, read back from the node and the
+//! replica, every process killed and restarted as an existing member, the
+//! writer going on, a second owner superseding it, a truncation a reader
+//! is told about — and the refusals an operator meets: an edited
+//! configuration (#207), a lost disk, a second first boot, each with its
 //! exit code and its reason.
 
 use std::net::TcpListener;
@@ -11,6 +14,11 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const PAROSD: &str = env!("CARGO_BIN_EXE_parosd");
+const PAROSCTL: &str = env!("CARGO_BIN_EXE_parosctl");
+/// `parosctl`'s exit when an answer was not what was asked.
+const CTL_REFUSED: i32 = 3;
+/// `parosctl`'s exit when nothing was decided (no leader yet, say).
+const CTL_UNREACHABLE: i32 = 5;
 /// `EX_CONFIG`: the boot was refused.
 const EXIT_REFUSED: i32 = 78;
 
@@ -104,52 +112,63 @@ fn stop(children: Vec<Child>) {
     }
 }
 
-fn cli(args: &[&str]) -> Output {
-    Command::new(PAROSD)
+/// `parosctl --json --servers <servers> <args>`.
+fn ctl(servers: &str, args: &[&str]) -> Output {
+    Command::new(PAROSCTL)
+        .args(["--json", "--timeout-ms", "10000", "--servers", servers])
         .args(args)
         .env("RUST_LOG", "error")
         .output()
-        .expect("run parosd client")
+        .expect("run parosctl")
 }
 
-/// Retry `args` until it exits 0 (a fresh deployment elects its leader
-/// first), returning its stdout.
-fn until_ok(args: &[&str]) -> String {
+/// The last JSON document `output` printed.
+fn json(output: &Output) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().last().unwrap_or_else(|| {
+        panic!(
+            "parosctl printed nothing; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
+}
+
+/// Run `args` until it succeeds, retrying only while nothing was decided (a
+/// fresh deployment elects its leader first); its JSON answer.
+fn until_ok(servers: &str, args: &[&str]) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
-        let output = cli(args);
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let output = ctl(servers, args);
         if output.status.success() {
-            return stdout;
+            return json(&output);
         }
         assert!(
-            Instant::now() < deadline,
-            "parosd {args:?} never succeeded; last: {stdout} {}",
+            output.status.code() == Some(CTL_UNREACHABLE) && Instant::now() < deadline,
+            "parosctl {args:?} failed ({:?}): {} {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         std::thread::sleep(Duration::from_millis(200));
     }
 }
 
-/// The value of `key=` in a `key=value` line.
-fn field<'a>(line: &'a str, key: &str) -> &'a str {
-    line.split_whitespace()
-        .find_map(|pair| pair.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
-        .unwrap_or_else(|| panic!("no {key} in {line:?}"))
-}
-
-/// Read the journal from 0 on `server` until it holds `count` records.
-fn read_back(server: &str, count: usize) -> Vec<String> {
+/// Read journal 128 from 0 through `servers` until it holds `count`
+/// records; the records and the gaps the reader was told about.
+fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value>) {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
-        let out = until_ok(&["read", "--server", server, "--from", "0"]);
-        let records: Vec<String> = out
-            .lines()
-            .filter(|line| line.starts_with("record "))
-            .map(|line| field(line, "data").to_string())
+        let answer = until_ok(servers, &["read", "128", "--from", "0"]);
+        let records: Vec<String> = answer["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|r| r["data"].as_str().expect("data").to_string())
             .collect();
         if records.len() >= count {
-            return records;
+            let gaps = answer["gaps"].as_array().expect("gaps").clone();
+            return (records, gaps);
         }
         assert!(Instant::now() < deadline, "only {records:?} read back");
         std::thread::sleep(Duration::from_millis(200));
@@ -163,38 +182,27 @@ fn exists(path: &Path) -> bool {
 #[test]
 fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     let cluster = Cluster::new();
+    let node = format!("0={}", cluster.node);
+    let replica = format!("1000={}", cluster.replica);
 
-    // First boot: every store formatted.
+    // First boot: every store formatted. The writer claims the journal on
+    // its first write — no generation or position carried by hand.
     let children = cluster.start(true);
-    let claim = until_ok(&[
-        "set-leader",
-        "--server",
-        &cluster.node,
-        "--expected",
-        "0",
-        "--owner",
-        "7",
-    ]);
-    let generation = field(&claim, "generation").to_string();
-    let next = field(&claim, "next_seq").to_string();
-    let wrote = until_ok(&[
-        "write",
-        "--server",
-        &cluster.node,
-        "--owner",
-        "7",
-        "--generation",
-        &generation,
-        "--seq",
-        &next,
-        "alpha",
-        "beta",
-    ]);
-    assert_eq!(field(&wrote, "outcome"), "accepted", "{wrote}");
-    assert_eq!(field(&wrote, "count"), "2", "{wrote}");
-    assert_eq!(read_back(&cluster.node, 2), vec!["alpha", "beta"]);
+    let wrote = until_ok(&node, &["write", "128", "alpha", "beta", "--owner", "7"]);
+    assert_eq!(wrote["outcome"], "written", "{wrote}");
+    assert_eq!(wrote["seq"], 0, "{wrote}");
+    assert_eq!(wrote["count"], 2, "{wrote}");
+    assert_eq!(read_back(&node, 2).0, vec!["alpha", "beta"]);
     // The replica serves the same records.
-    assert_eq!(read_back(&cluster.replica, 2), vec!["alpha", "beta"]);
+    assert_eq!(read_back(&replica, 2).0, vec!["alpha", "beta"]);
+    // Every server's view: the node leads.
+    let both = format!("{node},{replica}");
+    let views = ctl(&both, &["inspect"]);
+    assert!(views.status.success());
+    let stdout = String::from_utf8_lossy(&views.stdout);
+    let node_view: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("a view")).expect("JSON");
+    assert_eq!(node_view["leader"], true, "{node_view}");
     assert!(exists(
         &cluster.data_dir("node").join("journals").join("128")
     ));
@@ -202,24 +210,42 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     assert!(exists(&cluster.data_dir("replica").join("replica")));
 
     // Kill everything (no graceful shutdown) and restart as existing
-    // members: the records are still there, and the writer goes on.
+    // members: the records are still there, and the writer goes on at the
+    // tail — its claim finds it the owner already and adopts it.
     stop(children);
     let children = cluster.start(false);
-    assert_eq!(read_back(&cluster.node, 2), vec!["alpha", "beta"]);
-    let wrote = until_ok(&[
-        "write",
-        "--server",
-        &cluster.node,
-        "--owner",
-        "7",
-        "--generation",
-        &generation,
-        "--seq",
-        &(next.parse::<u64>().expect("seq") + 2).to_string(),
-        "gamma",
-    ]);
-    assert_eq!(field(&wrote, "outcome"), "accepted", "{wrote}");
-    assert_eq!(read_back(&cluster.node, 3), vec!["alpha", "beta", "gamma"]);
+    assert_eq!(read_back(&node, 2).0, vec!["alpha", "beta"]);
+    let wrote = until_ok(&node, &["write", "128", "gamma", "--owner", "7"]);
+    assert_eq!(wrote["seq"], 2, "{wrote}");
+    assert_eq!(read_back(&node, 3).0, vec!["alpha", "beta", "gamma"]);
+
+    // A second owner takes the journal; the first is fenced, and says so.
+    let swapped = until_ok(&node, &["set-leader", "128", "--owner", "8"]);
+    assert_eq!(swapped["outcome"], "won", "{swapped}");
+    assert_eq!(swapped["state"]["owner"], 8, "{swapped}");
+    let generation = swapped["state"]["generation"].as_u64().expect("generation");
+    let fenced = ctl(
+        &node,
+        &[
+            "write",
+            "128",
+            "delta",
+            "--owner",
+            "7",
+            "--generation",
+            &(generation - 1).to_string(),
+        ],
+    );
+    assert_eq!(fenced.status.code(), Some(CTL_REFUSED), "{fenced:?}");
+    assert_eq!(json(&fenced)["outcome"], "superseded");
+
+    // A truncation, and a reader from 0 told about the gap.
+    let truncated = until_ok(&node, &["truncate", "128", "--up-to", "1"]);
+    assert_eq!(truncated["state"]["first_seq"], 1, "{truncated}");
+    let (records, gaps) = read_back(&node, 2);
+    assert_eq!(records, vec!["beta", "gamma"]);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0]["to"], 1, "{gaps:?}");
     stop(children);
 
     // #207: an edited deployment — a second node added to the bootstrap

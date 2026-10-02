@@ -91,6 +91,17 @@ the driver, never in a sim-only path.
   `serve_deliveries` (the `Deliver` lane's edge task: ack on enqueue),
   `rpc_config` · `rpc/client.rs` `NodeClient` (the public client: one
   at-most-once attempt per call) and the driver's `MatchmakerClient`.
+- `client/` (`pub mod client`, #221) the client's policy over `NodeClient`, provider-generic
+  and wasm-safe: `mod.rs` `Client` (servers with node ids, the leader hint, `Retarget`,
+  `ClientTunables`; observed one-attempt calls — the request built and reported when called —
+  and the policy loops: `write` inside one deadline, `resolve` — read-back, then the identical
+  re-send — `read_any` / `read_until`, `claim`, `set_leader`, `truncate`, `reconfigure`,
+  `reconfigure_matchmakers`, `inspect`, `retire`) · `outcome.rs` every reply judged once into a
+  typed outcome, refusal labels included · `writer.rs` `Writer` (generation, next position,
+  stops when superseded; `stale_entry` is the explicit misbehaviour) · `reader.rs` `Reader`
+  (a cursor; a truncation is a reported `Gap`) · `observer.rs` `CallObserver` (observation
+  only, `NoObserver` for production). The client draws no randomness: every choice is the
+  caller's.
 - `system.rs` (`pub mod system`, #189) the system journals' entries (`SystemCommand`, one
   record per slot, `proto/system.proto`) and their pure folds: `Directory` (id = `128 +` the
   create's LSN, never reused, name races decided by slot order) and `Registry` (the pool is the

@@ -168,7 +168,12 @@ folding, and a client that leaves (done writing) may be overtaken and stops fold
 `READ_STATE` is a fold to the tail through a node or replica drawn at random. Client timeouts
 and deliberately abandoned observations are `Ambiguous`, never assumed aborted; a retry is the
 same write — generation, owner, position and bytes — sent again, and the log answers it.
-Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
+**Every call goes through `paros::client` (#221)**, the library client `parosctl` ships: the
+workload's `CallLog` is the library's `CallObserver`, the ordinary write is `Client::write` and
+`Client::resolve`, the recovery batch is the `Writer` session, race 3's resume is the `Reader`;
+the misbehaviours (`Writer::stale_entry`, a listen-bounded `write_attempt`, `DUAL_SUBMIT`,
+`DUP_WRITE`) are explicit calls, never the library's defaults, and every `ClientTunables`
+field is a `buggify_knob!`. Exploration is in-process (`workers: 0`) and every workload/process is factory-created so
 recipes replay from a fresh builder. The shared assertion tables allow at most 512 sites and 256
 `sometimes_each` buckets; never use slots, ballots, request IDs, seeds, or hashes as identities.
 
@@ -1133,8 +1138,12 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner, and `paro
   (`run_node` over `P: Providers`, `S: LogStorage`), the default in-memory `MemStorage`, the
   node RPC contract (the journal API of #204: `Write`, `Read`, `Truncate`, `SetLeader`, every
   call naming a `JournalId`), and the matchmaker's driver + storage seam
-  (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
-  lands here; the `parosd` binary is its own crate. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
+  (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`), and
+  `paros::client` (#221, `crates/paros/src/client/`): the client's policy over `NodeClient` —
+  servers and a leader hint, redirects, the identical retry, ambiguity settled by a read-back,
+  the `Writer` session and the `Reader` cursor, the operator calls, typed outcomes,
+  `ClientTunables`, and a `CallObserver` port the sim's history implements. The `parosd`
+  binary is its own crate. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
   transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and
   `moonpool-journal` (the durable stores of `paros::journal`, `JournalStorage` /
   `JournalMatchmakerStorage`: a log of write operations folded at boot, see *Storage
@@ -1144,9 +1153,12 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner, and `paro
   `TokioProviders`. `parosd node|matchmaker|replica|proxy` runs the library's drivers over Tokio
   with `paros::journal`'s stores in a data directory (`DirStores`, one directory per journal),
   the operator's boot claim as `--first-boot`, a tracing subscriber, `SIGTERM` to the shutdown
-  token and an exit code per `RunError` (75 restart, 78 refused, 1 infra); `parosd set-leader|
-  write|read` is the smallest client. Its tests run the two storage contract suites on a real
-  filesystem and a one-node, one-matchmaker, one-replica deployment end to end. The `paros`
+  token and an exit code per `RunError` (75 restart, 78 refused, 1 infra). Beside it,
+  `parosctl` (#220, `src/bin/parosctl/`) is the CLI over `paros::client` — `write`, `read`,
+  `tail`, `truncate`, `set-leader`, `inspect`, `reconfigure`, `retire`, `--json`, an exit code
+  per outcome (3 refused, 4 ambiguous, 5 nothing decided) — and holds no client policy of its
+  own. Its tests run the two storage contract suites on a real filesystem and a one-node,
+  one-matchmaker, one-replica deployment end to end, driven by `parosctl`. The `paros`
   library itself stays wasm-safe and provider-free.
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
   deployment/role map, the fault world, the one client workload, the audit, and the scripted
