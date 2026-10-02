@@ -11,6 +11,16 @@
 //! with no live journal and none waiting to re-open has nothing left to
 //! serve, and exits with the fault that took the last one — which, for a
 //! one-journal node, is exactly the pre-#188 fail-stop crash.
+//!
+//! The journal id rides the `Deliver` envelope, **per message**, and the
+//! loop demuxes on it before any core sees a byte; a message for a journal
+//! this node does not run is dropped and the sender's re-send repairs it.
+//! The id is never folded into a command fingerprint instead: that would
+//! protect only `Accepted`'s vhash, while `Prepare`, `Promise`, `Commit`,
+//! `Heartbeat` and catch-up would still cross journals. The matchmaker
+//! plane, the proxy leaders and the replica tier serve one journal each —
+//! the node's first user journal (asserted at boot); every other journal is
+//! plain Multi-Paxos over the whole pool.
 
 use std::collections::{BTreeMap, BTreeSet};
 
