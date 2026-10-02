@@ -126,9 +126,12 @@ pub struct DriverTunables {
     /// [`Audit::dropped_at_mailbox`](crate::Audit::dropped_at_mailbox)
     /// — a likely event instead of a rare one.
     pub peer_queue_capacity: usize,
-    /// Maximum Paxos messages packed into one `Deliver` request. The
-    /// extreme (one per request) maximizes RPC framing pressure and the
-    /// batcher's keep-the-newest overflow shedding.
+    /// Maximum Paxos messages packed into one `Deliver` request. A small
+    /// batch raises RPC framing pressure and the batcher's keep-the-newest
+    /// overflow shedding; its floor is a throughput floor — a link carries
+    /// every journal its two ends serve, so a batch too small for their
+    /// combined rate is a permanent partition (the harness keeps it at 24
+    /// or more, `paros_sim::shape`).
     pub delivery_batch: usize,
     /// Ticks between re-sends of an open matchmaking request
     /// (`ColocatedNode::resend_matchmaking`), on a deployment with matchmakers.

@@ -191,14 +191,16 @@ impl AuditWorld {
     }
 
     /// Merge one client's recorded history into the shared one and run the
-    /// client-visible checks over everything merged so far. Every client
-    /// workload calls this from `check()`; the merged history only grows, so a
-    /// later caller sees a superset and the checks stay sound at every step.
+    /// client-visible checks over everything merged so far; the
+    /// linearizability search runs once, when the last of the journal's
+    /// `clients` clients merged. Every client workload calls this from
+    /// `check()`; the merged history only grows, so a later caller sees a
+    /// superset and the per-operation checks stay sound at every step.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn check_client_history(&self, history: &ClientHistory) {
+    pub(crate) fn check_client_history(&self, history: &ClientHistory, clients: usize) {
         let mut st = self.lock();
         st.lin.merge(history);
-        st.check_client_history();
+        st.check_client_history(clients);
     }
 
     /// How many Stage-6 write/fsync faults the drivers *detected* (one typed
@@ -530,9 +532,9 @@ impl AuditWorld {
 /// The whole check, in one place: the two perspectives a run is judged from.
 ///
 /// **Client side** — the workload's own history, merged into the shared one:
-/// disclosed-order linearizability over real time (L1–L4), the sequential
-/// per-client checks (C1–C3), and every acked identity present in the audit's
-/// applied map. **Audit side** — the coverage gates recorded once per run, the
+/// once the journal's last client (of `clients`) merged, the search for a
+/// linearization of every attempt against the journal's sequential model
+/// (#205), and every acked write inside the journal's positions. **Audit side** — the coverage gates recorded once per run, the
 /// storage world's injected⇔detected correlation, and the one liveness claim:
 /// every live node ends on the cluster's applied prefix, which covers every
 /// acked slot. All of it over `journal`'s own worlds (#188). Returns the
@@ -542,9 +544,10 @@ pub(crate) fn check_run(
     state: &StateHandle,
     journal: paros::JournalId,
     history: &ClientHistory,
+    clients: usize,
 ) -> u64 {
     let audit = audit_world_for(state, journal);
-    audit.check_client_history(history);
+    audit.check_client_history(history, clients);
     audit.check_gates();
     crate::world::check_storage_gates(state, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, assert_sometimes_all};
 use paros::{AcceptorConfig, Ballot, HEARTBEAT_TICKS, NodeId, Party, QuorumSystem, Slot};
 
-use super::client::{LinHistory, check_disclosed_order, check_sequential_client};
+use super::client::{LinHistory, check_linearizable};
 use super::matchmaker::MatchmakerAudit;
 
 /// Ticks of slack past two `CheckQuorum` windows a deposed leader may keep
@@ -1429,8 +1429,14 @@ impl AuditState {
         }
     }
 
-    /// The client-visible checks over the merged history (see [`LinHistory`]).
-    pub(super) fn check_client_history(&self) {
+    /// The client-visible checks over the merged history (see [`LinHistory`]);
+    /// the linearizability search once `clients` clients have merged — every
+    /// client of the journal.
+    pub(super) fn check_client_history(&mut self, clients: usize) {
+        if self.lin.merged >= clients && !self.lin.searched {
+            self.lin.searched = true;
+            check_linearizable(&self.lin);
+        }
         let h = &self.lin;
         // A terminal event is only ever recorded for an op that was issued.
         assert_always!(
@@ -1457,20 +1463,6 @@ impl AuditState {
         );
         // With no chaos a proposal does come back.
         assert_sometimes!(h.acked > 0, "at least one proposal is acknowledged");
-        check_disclosed_order(h);
-        // The sequential fast path, per client: every client runs one operation
-        // at a time (a primer batch completes before the next op starts), so
-        // program order is real-time order within a client even where
-        // timestamps tie, and C1-C3 are strictly stronger than L1-L4 there.
-        let committed_clients: BTreeSet<u64> = h
-            .write_slot
-            .keys()
-            .chain(h.read_wm.keys())
-            .map(|&(c, _)| c)
-            .collect();
-        for &client in &committed_clients {
-            check_sequential_client(client, h);
-        }
         h.check_coverage_gates(self.leader_change_ms);
     }
 }

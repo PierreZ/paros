@@ -118,3 +118,13 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     }
     hash
 }
+
+/// Spread one draw into another (`splitmix64`): the entries of a burst
+/// drawn from one step's draws, and the linearizability search's hashes.
+#[must_use]
+pub(crate) fn splitmix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}

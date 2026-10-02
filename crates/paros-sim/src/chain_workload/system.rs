@@ -32,7 +32,7 @@ use paros::{
 };
 
 use super::rpc::{
-    SetLeaderResult, WriteResult, read_once, set_leader_once, state_of, within, write_once,
+    CallLog, SetLeaderResult, WriteResult, read_once, set_leader_once, state_of, within, write_once,
 };
 use crate::audit::audit_world_for;
 use crate::chain::user_command_hash;
@@ -79,6 +79,9 @@ pub(super) struct SystemOps {
     /// Journals this client created and has not asked to delete.
     created: Vec<JournalId>,
     timeout: Duration,
+    /// The client's call log: the RPC seam logs the calls naming its own
+    /// journal only, so a system or created journal's calls pass through.
+    log: CallLog,
 }
 
 impl SystemOps {
@@ -91,6 +94,7 @@ impl SystemOps {
         genesis: Vec<JournalId>,
         client_id: u64,
         timeout: Duration,
+        log: CallLog,
     ) -> Self {
         let pool = deployment.acceptors().len();
         let matchmakers = !deployment.matchmakers().is_empty();
@@ -115,6 +119,7 @@ impl SystemOps {
             client_id,
             created: Vec::new(),
             timeout,
+            log,
         }
     }
 
@@ -159,7 +164,7 @@ impl SystemOps {
             let client = clients[node].clone();
             let Some((generation, position)) = claim else {
                 // Read where the journal stands, then claim it.
-                let read = read_once(&client, journal.0, 0, 1, 0);
+                let read = read_once(&client, &self.log, journal.0, 0, 1, 0);
                 let Some(ack) = within(ctx, self.timeout, None, read).await else {
                     target += 1;
                     continue;
@@ -188,6 +193,7 @@ impl SystemOps {
                 let tail = state_of(ack.state);
                 let ask = set_leader_once(
                     clients,
+                    &self.log,
                     journal,
                     node,
                     tail.generation.0,
@@ -198,7 +204,9 @@ impl SystemOps {
                     SetLeaderResult::Won { state } => {
                         claim = Some((state.generation.0, state.next_seq.0));
                     }
-                    SetLeaderResult::Lost { .. } | SetLeaderResult::Ambiguous => {}
+                    SetLeaderResult::Lost { .. }
+                    | SetLeaderResult::Owned { .. }
+                    | SetLeaderResult::Ambiguous => {}
                     SetLeaderResult::Redirect { leader } => {
                         target = leader
                             .and_then(|l| targets.iter().position(|t| *t as u64 == l))
@@ -214,7 +222,16 @@ impl SystemOps {
                 records: vec![Value(record.clone())],
             };
             audit.note_appended(paros::command_hash(&Command::Write(entry.clone())));
-            let write = write_once(clients, ctx.time(), journal, node, &entry, false, created);
+            let write = write_once(
+                clients,
+                &self.log,
+                ctx.time(),
+                journal,
+                node,
+                &entry,
+                false,
+                created,
+            );
             match within(ctx, self.timeout, WriteResult::Ambiguous, write).await {
                 WriteResult::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
@@ -245,7 +262,7 @@ impl SystemOps {
         let mut events = Vec::new();
         let mut from = 0;
         loop {
-            let read = read_once(&client, journal.0, from, READ_RECORDS, 0);
+            let read = read_once(&client, &self.log, journal.0, from, READ_RECORDS, 0);
             let ack = within(ctx, self.timeout, None, read).await?;
             if ack.unknown_journal || ack.truncated || !ack.served {
                 return None;

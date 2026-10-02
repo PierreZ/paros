@@ -122,9 +122,18 @@ impl NodeShape {
         // accepts + commits need — which is a permanent partition in
         // disguise, and 7/500 seeds wedged without ever converging
         // (witness seed 4877033065878342564: an n=2 cluster that never
-        // chose a single slot in 67 s). Eight-to-32 still shrinks frames
-        // 2-8x against the default 64 without making the run unwinnable.
-        let delivery_batch = buggify_knob!(defaults.delivery_batch, 8_usize..33_usize);
+        // chose a single slot in 67 s). The rate is **per journal**, and a
+        // link carries every journal its two ends serve — the genesis ones
+        // and every one a client created at runtime (#189) — so a floor of
+        // eight, sized for one journal, left a link carrying three with a
+        // backlog that never drained: each message waited ~7 round trips
+        // behind the others' beats, and under a `q1 = n` split every quorum
+        // read waited on that link and expired, so no claim ever wrote
+        // (witness seed 9499531859745476743, #205's hunt: 56 messages queued
+        // node 2 → 0 for the whole 130 s tail; 1–3 at a floor of 24).
+        // Twenty-four to 32 still shrinks frames 2-2.7x against the
+        // default 64.
+        let delivery_batch = buggify_knob!(defaults.delivery_batch, 24_usize..33_usize);
         if peer_queue_capacity != defaults.peer_queue_capacity {
             // BUGGIFY pairing: the capacity extreme genuinely runs.
             assert_reachable!("a node runs with an extreme peer-queue capacity");
@@ -145,9 +154,18 @@ impl NodeShape {
         // a knob's clothes, not a configuration. The tick itself may go fast
         // (a 10 ms tick is 25 heartbeats per round trip); the tick-counted
         // timeouts are then raised to keep their wall-clock floor. The ranges
-        // still cross the client's knobbed deadline (350 ms..3 s) in both
+        // still cross the client's knobbed deadline (1 s..3 s) in both
         // directions: a node slower than the client's patience is a valid,
         // ambiguous outcome, never a wrong one.
+        // A read's confirmation window is the one exception to a single
+        // round trip: a quorum read waits on the *slowest* member of its
+        // quorum, through delivery batching on a link that carries every
+        // journal's beats, so on a loaded link it lands just past one round
+        // trip on every read and the driver answers each one unserved before
+        // its acks arrive — no claim (#204: claims start with a read) for a
+        // whole run (witness seed 3336991135298497961, #205's 10k hunt:
+        // confirmations at ~9 ticks against a 5-tick window, 172 s without a
+        // write). Its floor is two round trips.
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
@@ -158,7 +176,7 @@ impl NodeShape {
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             connection_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
-            read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(floor_ticks),
+            read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(2 * floor_ticks),
             // Floor 0: a zero wait answers every journal read at the end at
             // once, empty, and the client re-asks; the ceiling crosses the
             // client's deadline, where a long-poll the client stops waiting

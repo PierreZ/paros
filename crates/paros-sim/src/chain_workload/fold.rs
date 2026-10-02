@@ -19,7 +19,7 @@ use std::time::Duration;
 use moonpool_sim::{SimContext, StateHandle, assert_always};
 use paros::{JournalId, ReadAck};
 
-use super::rpc::{read_once, state_of, within};
+use super::rpc::{CallLog, read_once, state_of, within};
 use crate::audit::AuditWorld;
 use crate::chain::{ChainState, user_command_hash};
 use crate::client::SimClient;
@@ -89,11 +89,14 @@ pub(super) struct Fold {
     /// overtake the cursor and the fold stops (`detached`).
     fenced: bool,
     detached: bool,
+    /// Where this client's reads are logged for the linearizability check.
+    log: CallLog,
 }
 
 impl Fold {
-    pub(super) fn new(journal: JournalId) -> Self {
+    pub(super) fn new(journal: JournalId, log: CallLog) -> Self {
         Self {
+            log,
             journal,
             state: ChainState::default(),
             cursor: 0,
@@ -204,7 +207,14 @@ impl Fold {
             let from = self.cursor;
             let mut served = None;
             for _ in 0..vias.len() {
-                let call = read_once(&vias[via % vias.len()], self.journal.0, from, limit, 0);
+                let call = read_once(
+                    &vias[via % vias.len()],
+                    &self.log,
+                    self.journal.0,
+                    from,
+                    limit,
+                    0,
+                );
                 match within(ctx, timeout, None, call).await {
                     Some(ack) if ack.served || ack.unknown_journal => {
                         served = Some(ack);

@@ -38,12 +38,14 @@ macro_rules! reach_once {
 mod client;
 mod journal_model;
 pub(crate) mod journals;
+mod linearizability;
 mod matchmaker;
 mod state;
 pub(crate) mod system;
 mod world;
 
 pub(crate) use client::ClientHistory;
+pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};

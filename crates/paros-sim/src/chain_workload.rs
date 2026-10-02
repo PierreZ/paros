@@ -29,13 +29,14 @@ use crate::chain::{hash_text, trace_truncate, user_command_hash};
 use crate::client::{ClientRuntime, SimClient, client_rpc_config};
 
 mod fold;
+mod races;
 mod rpc;
 mod system;
 
 use crate::{CHAOS_DURATION_MS, DigestSink};
 use rpc::{
-    ReconfigureMatchmakersResult, ReconfigureResult, SetLeaderResult, TruncateResult, WriteResult,
-    inspect, read_once, set_leader_once, state_of, within,
+    CallLog, ReconfigureMatchmakersResult, ReconfigureResult, SetLeaderResult, TruncateResult,
+    WriteResult, inspect, read_once, set_leader_once, state_of, within,
 };
 
 /// A journal `Write` (#204) by an owner at the position it believes next —
@@ -157,9 +158,16 @@ struct ChainConfig {
     command_bytes: usize,
     /// Large payload size. Ceiling 16 KiB, still far under the batch cap.
     large_command_bytes: usize,
-    /// Per-request client deadline. Floor 350 ms sits *below* the election
-    /// timeout, so every leader change turns into an ambiguous outcome and the
-    /// retry/dedup surface saturates; that is a valid client, not a stall.
+    /// Per-request client deadline. Floor 1 s: a write is answered once its
+    /// slot is decided and applied, ~500 ms on a slow deployment (a proxy,
+    /// a slow tick), and a retry is answered from the log only once its own
+    /// slot is, so a deadline under that answer abandons every write and
+    /// every retry of it — no write acked for a whole tail (witness seed
+    /// 4408998525606429529, #205's 10k hunt: a 376 ms deadline against
+    /// ~480 ms answers). The old 350 ms floor sat below the election timeout
+    /// to make leader changes ambiguous; that ambiguity now has its own
+    /// generators — `abandon_pct`, and race 2's `ack_race_timeout_ms`, under
+    /// any ack by design.
     request_timeout_ms: u64,
     /// Idle between ops in a `PAUSE` step. Floor 1 ms.
     pause_ms: u64,
@@ -229,12 +237,38 @@ struct ChainConfig {
     /// How long a connection may stay silent after a ping. Floor 250 ms: a
     /// timeout under the round trip fails a healthy connection on every ping.
     keep_alive_timeout_ms: u64,
+    /// The deadline of every journal read this client makes — a fold's
+    /// page, a `READ`, the read a claim starts with. Its own knob, apart
+    /// from `request_timeout_ms`: a read is a quorum read the node confirms
+    /// over its peers' answers (5–10 driver ticks under load), so a deadline
+    /// under that window abandons every read before its answer comes back,
+    /// and since every claim starts with a read (#204) an owner could never
+    /// claim again (witness seed 14892420475698485454, #205's 10k hunt: a
+    /// 358 ms request timeout, every read of a 130 s tail abandoned). Floor
+    /// 1 s: twice the driver's default confirmation window.
+    read_timeout_ms: u64,
     /// The records a journal `READ` asks a page for. Floor 1: a reader that
     /// walks the journal one record per call — slower, never stuck.
     read_limit: u64,
     /// How long a `READ` lets the server wait at the tail. Floor 0: answered
     /// at once, empty when nothing is past the cursor.
     read_wait_ms: u64,
+    /// Race 1 of #205: how long after a pipelined burst leaves the owner's
+    /// own claim races it. Floor 0: the claim leaves with the burst, and the
+    /// slot order alone says which writes it fences.
+    burst_claim_delay_ms: u64,
+    /// Race 1 of #205: the gap between a raced burst's writes leaving. A
+    /// claim is a read and a decided `SetLeader`, several round trips; a
+    /// burst sent all at once is proposed within one, so the claim landed
+    /// after every write of it (one fenced burst in 19,925 runs). Spread
+    /// over the claim's own span, the claim lands inside it. Floor 0: all
+    /// at once, the burst the primer sends when nothing races it.
+    burst_spacing_ms: u64,
+    /// Race 2 of #205: the timeout of a write whose ack is meant to be late
+    /// — shorter than any round trip, so the owner gives up on a write that
+    /// may still land, re-claims, and retries it across the ownership
+    /// change. Floor 1 ms: an attempt abandoned at once, still sent.
+    ack_race_timeout_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -260,7 +294,7 @@ impl ChainConfig {
             reader: buggify_knob!(0_u64, 0_u64..2_u64) == 1,
             command_bytes: buggify_knob!(64_usize, 1_usize..257_usize),
             large_command_bytes: buggify_knob!(4096_usize, 512_usize..16_385_usize),
-            request_timeout_ms: buggify_knob!(1500_u64, 350_u64..3001_u64),
+            request_timeout_ms: buggify_knob!(1500_u64, 1000_u64..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
             compaction: buggify_knob!(1_u64, 0_u64..1_u64) == 1,
@@ -281,8 +315,12 @@ impl ChainConfig {
             connect_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
             keep_alive_interval_ms: buggify_knob!(2000_u64, 250_u64..5001_u64),
             keep_alive_timeout_ms: buggify_knob!(1000_u64, 250_u64..3001_u64),
+            read_timeout_ms: buggify_knob!(2000_u64, 1000_u64..4001_u64),
             read_limit: buggify_knob!(64_u64, 1_u64..257_u64),
             read_wait_ms: buggify_knob!(0_u64, 0_u64..401_u64),
+            burst_claim_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
+            burst_spacing_ms: buggify_knob!(60_u64, 0_u64..121_u64),
+            ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -786,6 +824,16 @@ struct AdversarialCoverage {
     /// A superseded writer's write was refused, naming the generation that
     /// fenced it.
     fenced: bool,
+    /// Race 2 (#205): a retry that crossed an ownership change was answered
+    /// from the log, or refused as superseded.
+    retry_acked_across_claim: bool,
+    retry_superseded: bool,
+    /// Race 1 (#205): a claim landed inside an owner's burst — writes ahead
+    /// of it written, the rest fenced by the generation it minted.
+    burst_fenced: bool,
+    /// Race 3 (#205): a read raced past by a truncation was refused, and the
+    /// reader resumed at the floor the refusal named.
+    reader_resumed: bool,
     /// One flag per [`RECONFIGURE_SHAPES`] entry: the shape was requested and
     /// the leader started it.
     reconfigure_started: [bool; 5],
@@ -825,6 +873,9 @@ pub(crate) struct ChainWorkload {
     plan: Option<crate::shape::JournalPlan>,
     /// This client's id (set in `setup`): its identity as an owner.
     client_id: u64,
+    /// Every attempt at this client's journal, logged at the RPC seam
+    /// (set in `run`), handed to the history at `check()`.
+    calls: Option<CallLog>,
 }
 
 impl ChainWorkload {
@@ -837,6 +888,7 @@ impl ChainWorkload {
             journal: JournalId::default(),
             plan: None,
             client_id: 0,
+            calls: None,
         }
     }
 
@@ -925,19 +977,10 @@ impl ChainWorkload {
     }
 
     /// Record a write seen written at `[seq, seq + count)` in the history and
-    /// the trace; `duplicate` when the journal answered it from the log
-    /// (#204), which the history judges differently (`record_write_ack`).
-    fn record_written(
-        &mut self,
-        submission: &Submission,
-        seq: u64,
-        count: u64,
-        duplicate: bool,
-        now_ms: u64,
-    ) {
+    /// the trace.
+    fn record_written(&mut self, submission: &Submission, seq: u64, count: u64, now_ms: u64) {
         let last = (seq + count).checked_sub(1);
-        self.history
-            .record_write_ack(submission.op, last, duplicate, now_ms);
+        self.history.record_write_ack(submission.op, last, now_ms);
         tracing::info!(
             cmd = %hash_text(submission.cmd_hash),
             op = submission.op,
@@ -980,15 +1023,17 @@ impl ChainWorkload {
 async fn claim(
     ctx: &SimContext,
     clients: &[SimClient],
+    log: &CallLog,
     journal: JournalId,
     target: usize,
-    me: u64,
-    timeout: Duration,
+    (me, fresh): (u64, bool),
+    (read_timeout, timeout): (Duration, Duration),
 ) -> Option<SetLeaderResult> {
     let mut served = None;
     for offset in 0..clients.len() {
         let read = read_once(
             &clients[(target + offset) % clients.len()],
+            log,
             journal.0,
             0,
             1,
@@ -996,7 +1041,7 @@ async fn claim(
         );
         // A node outside this journal (a joiner, #189) refuses it as
         // unknown: a node to skip, not an answer.
-        if let Some(ack) = within(ctx, timeout, None, read).await
+        if let Some(ack) = within(ctx, read_timeout, None, read).await
             && ack.served
             && !ack.unknown_journal
         {
@@ -1005,7 +1050,17 @@ async fn claim(
         }
     }
     let tail = state_of(served?.state);
-    let ask = set_leader_once(clients, journal, target, tail.generation.0, me, false);
+    // A claim against its own generation would supersede this client's own
+    // ownership: with a request timeout under the claim's answer, every
+    // claim won and every answer was lost, and the client re-claimed
+    // forever, one generation a claim (witness seed 3544251723324122292,
+    // #205: generations 1–58 all its own, no write in 60 s).
+    // `fresh` is the deliberate exception: an owner minting a new generation
+    // of its own (the races of #205, an owner restarting).
+    if !fresh && tail.owner == Some(ClientId(me)) {
+        return Some(SetLeaderResult::Owned { state: tail });
+    }
+    let ask = set_leader_once(clients, log, journal, target, tail.generation.0, me, false);
     Some(within(ctx, timeout, SetLeaderResult::Ambiguous, ask).await)
 }
 
@@ -1113,6 +1168,8 @@ impl Workload for ChainWorkload {
         self.history.set_client(client_id);
         let journal = self.journal;
         let audit = audit_world_for(ctx.state(), journal);
+        let log = CallLog::new(journal, client_id, time.clone());
+        self.calls = Some(log.clone());
         let now_ms = {
             let time = time.clone();
             move || u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
@@ -1127,6 +1184,7 @@ impl Workload for ChainWorkload {
             joiners: deployment.joiners().len(),
         };
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
+        let read_timeout = Duration::from_millis(config.read_timeout_ms);
         let mut next_op = 0_u64;
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
@@ -1142,7 +1200,7 @@ impl Workload for ChainWorkload {
         // This client's fold of the journal (#186): the application this
         // client is, and its tailing cursor — a position (#204) — where its
         // tailing reads start, only ever moved forward.
-        let mut fold = fold::Fold::new(journal);
+        let mut fold = fold::Fold::new(journal, log.clone());
         // Owner or reader (#204): a journal's first client always writes, so
         // every journal has a writer; any other client may be a reader for
         // the whole run. Clients are dealt to journals round-robin, so the
@@ -1162,14 +1220,17 @@ impl Workload for ChainWorkload {
                 .unwrap_or_default(),
             client_id,
             request_timeout,
+            log.clone(),
         );
 
         // The RPC retry layer (`rpc`), bound to this client's connections.
         let write_once = |target: usize, entry: &Entry, abandon: bool| {
-            rpc::write_once(&clients, &time, journal, target, entry, abandon, false)
+            rpc::write_once(
+                &clients, &log, &time, journal, target, entry, abandon, false,
+            )
         };
         let truncate_once = |target: usize, up_to: u64| {
-            rpc::truncate_once(&clients, &time, journal, &config, target, up_to)
+            rpc::truncate_once(&clients, &log, &time, journal, &config, target, up_to)
         };
         // One truncation request as the trace tells it: the `Truncate` it
         // asks for, clamped below every folding client's cursor (the fence,
@@ -1199,15 +1260,25 @@ impl Workload for ChainWorkload {
         // won, and this client's writes are fenced until it claims again.
         if !reader {
             let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-            if let Some(result) =
-                claim(ctx, &clients, journal, first, client_id, request_timeout).await
+            if let Some(result) = claim(
+                ctx,
+                &clients,
+                &log,
+                journal,
+                first,
+                (client_id, false),
+                (read_timeout, request_timeout),
+            )
+            .await
             {
                 match result {
                     SetLeaderResult::Won { state } => {
                         writer.won(&state);
                         hint.observe(u64::try_from(first).ok(), routes);
                     }
-                    SetLeaderResult::Lost { state } => writer.learn(client_id, &state),
+                    SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state } => {
+                        writer.learn(client_id, &state);
+                    }
                     SetLeaderResult::Redirect { leader } => hint.observe(leader, routes),
                     SetLeaderResult::Ambiguous => {}
                 }
@@ -1224,11 +1295,12 @@ impl Workload for ChainWorkload {
         if operations.contains(&WRITE) && !reader {
             let mut primer = Vec::with_capacity(config.pipeline_depth);
             let mut ahead = writer;
+            let mut raw = 0;
             for _ in 0..config.pipeline_depth {
                 // One draw per primer entry shapes its payload class, its
                 // bytes, and its first target — every combination is a valid
                 // client.
-                let raw = ctx.random().random::<u64>();
+                raw = ctx.random().random::<u64>();
                 let primer_target =
                     usize::try_from((raw >> 2) % u64::try_from(server_count).unwrap_or(1))
                         .unwrap_or(0);
@@ -1238,55 +1310,27 @@ impl Workload for ChainWorkload {
                 let target = hint.current.unwrap_or(primer_target);
                 primer.push((submission, target));
             }
-            let results = join_all(primer.iter().map(|(submission, target)| {
-                let attempt = write_once(*target, &submission.entry, false);
-                let time = time.clone();
-                async move {
-                    moonpool_sim::select! {
-                        result = attempt => result,
-                        _ = time.sleep(Duration::from_millis(config.request_timeout_ms)) => WriteResult::Ambiguous,
-                    }
-                }
-            }))
+            // Race 1 (#205): the owner's own claim, in the middle of the
+            // burst.
+            let race = buggify_with_prob!(0.25).then(|| {
+                let delay = raw % (config.burst_claim_delay_ms + 1);
+                (Duration::from_millis(delay), hint.current.unwrap_or(0))
+            });
+            self.burst(
+                ctx,
+                &clients,
+                &log,
+                &config,
+                primer,
+                race,
+                routes,
+                (&mut writer, &mut hint, &mut written),
+            )
             .await;
-            let mut next = writer.next_seq;
-            for ((submission, target), result) in primer.into_iter().zip(results) {
-                match result {
-                    WriteResult::Written {
-                        seq,
-                        count,
-                        duplicate,
-                    } => {
-                        hint.observe(u64::try_from(target).ok(), routes);
-                        next = next.max(seq + count);
-                        self.record_written(&submission, seq, count, duplicate, now_ms());
-                        self.adversarial.payload_classes[submission.payload_class] = true;
-                        written.push(submission.written(seq, count, target));
-                    }
-                    WriteResult::Refused { state } | WriteResult::Truncated { state } => {
-                        self.history.record_write_failed(submission.op);
-                        if state.owner == Some(ClientId(client_id)) {
-                            next = next.max(state.next_seq.0);
-                        } else {
-                            writer.learn(client_id, &state);
-                        }
-                        tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_command_rejected");
-                    }
-                    WriteResult::Redirect { leader } => {
-                        hint.observe(leader, routes);
-                        self.history.record_write_failed(submission.op);
-                    }
-                    WriteResult::Ambiguous => {
-                        self.history.record_write_failed(submission.op);
-                        tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
-                    }
-                }
-            }
-            writer.next_seq = next;
-            if config.compaction && next > 0 {
+            if config.compaction && writer.next_seq > 0 {
                 let fallback =
                     usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-                truncate_traced(hint.current.unwrap_or(fallback), next).await;
+                truncate_traced(hint.current.unwrap_or(fallback), writer.next_seq).await;
             }
         }
 
@@ -1354,6 +1398,48 @@ impl Workload for ChainWorkload {
 
             match op {
                 WRITE | WRITE_TO_NON_LEADER => {
+                    // Race 1 (#205), mid-run: an owner pipelines a burst at
+                    // consecutive positions, and on a second coin claims the
+                    // journal again while it is in flight. Its entries are
+                    // spread off the step's draws, so the step still draws
+                    // six times.
+                    if op == WRITE && writer.owned.is_some() && buggify_with_prob!(0.10) {
+                        assert_reachable!("chain: an owner pipelines a burst of writes mid-run");
+                        let via = hint.current.unwrap_or(target);
+                        let mut ahead = writer;
+                        let mut burst = Vec::with_capacity(config.pipeline_depth);
+                        for k in 0..config.pipeline_depth as u64 {
+                            let spread = crate::chain::splitmix(raw_payload ^ k);
+                            let submission = self.submit(
+                                &audit,
+                                &config,
+                                ahead,
+                                &mut next_op,
+                                raw_class.wrapping_add(k),
+                                spread,
+                                now_ms(),
+                            );
+                            ahead.next_seq += submission.entry.count();
+                            burst.push((submission, via));
+                        }
+                        let race = buggify_with_prob!(0.5).then(|| {
+                            assert_reachable!("chain: a claim races a mid-run burst");
+                            let delay = raw_pause % (config.burst_claim_delay_ms + 1);
+                            (Duration::from_millis(delay), via)
+                        });
+                        self.burst(
+                            ctx,
+                            &clients,
+                            &log,
+                            &config,
+                            burst,
+                            race,
+                            routes,
+                            (&mut writer, &mut hint, &mut written),
+                        )
+                        .await;
+                        continue;
+                    }
                     let submission = self.submit(
                         &audit,
                         &config,
@@ -1379,76 +1465,97 @@ impl Workload for ChainWorkload {
                     // Honest ambiguity: abandon the client observation, never
                     // falsify a server acknowledgement. The identical write
                     // is retried below.
+                    // Race 2 (#205): this attempt's timeout is shorter than
+                    // its ack (`ack_race_timeout_ms`), so the owner gives up
+                    // on a write that may still land.
+                    let ack_race =
+                        op == WRITE && writer.owned.is_some() && buggify_with_prob!(0.25);
                     #[allow(clippy::cast_precision_loss)]
-                    let abandon = time.now() < Duration::from_millis(CHAOS_DURATION_MS)
+                    let abandon = !ack_race
+                        && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
                         && buggify_with_prob!(config.abandon_pct as f64 / 100.0);
                     if abandon {
                         // BUGGIFY pairing: the deliberate mid-flight
                         // abandonment (the honest-ambiguity generator) fires.
                         assert_reachable!("chain: a client abandons an in-flight observation");
                     }
-                    let deadline = time.now() + Duration::from_millis(config.request_timeout_ms);
-                    let mut attempt_target = chosen_target;
-                    let mut first_attempt = true;
-                    let result = loop {
-                        let remaining = deadline.saturating_sub(time.now());
-                        if remaining.is_zero() {
-                            break WriteResult::Ambiguous;
-                        }
-                        let attempt = within(
+                    let result = if ack_race {
+                        self.ack_race(
                             ctx,
-                            remaining,
-                            WriteResult::Ambiguous,
-                            write_once(attempt_target, &submission.entry, abandon && first_attempt),
-                        )
-                        .await;
-                        first_attempt = false;
-                        match attempt {
-                            WriteResult::Redirect { leader }
-                                if op == WRITE && time.now() < deadline =>
-                            {
-                                attempt_target = retarget.next(attempt_target, leader, routes);
-                                time.sleep(Duration::from_millis(config.redirect_sleep_ms))
-                                    .await
-                                    .ok();
-                            }
-                            terminal => break terminal,
-                        }
-                    };
-                    let result = if matches!(result, WriteResult::Ambiguous) {
-                        tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
-                        // The reconciling retry, byte for byte (#204: the
-                        // journal answers it from the log): by policy, back
-                        // to the node that may have committed the abandoned
-                        // attempt, or on to the hinted leader / the next
-                        // node.
-                        let retry_target = retarget.next(
+                            &clients,
+                            &log,
+                            &config,
+                            &submission,
                             chosen_target,
-                            hint.current.and_then(|node| u64::try_from(node).ok()),
                             routes,
-                        );
-                        let reconciled = within(
-                            ctx,
-                            request_timeout,
-                            WriteResult::Ambiguous,
-                            write_once(retry_target, &submission.entry, false),
+                            (&mut writer, &mut hint),
                         )
-                        .await;
-                        if matches!(reconciled, WriteResult::Written { .. }) {
-                            successful_after_ambiguity = true;
-                        }
-                        reconciled
+                        .await
                     } else {
-                        result
+                        let deadline =
+                            time.now() + Duration::from_millis(config.request_timeout_ms);
+                        let mut attempt_target = chosen_target;
+                        let mut first_attempt = true;
+                        let result = loop {
+                            let remaining = deadline.saturating_sub(time.now());
+                            if remaining.is_zero() {
+                                break WriteResult::Ambiguous;
+                            }
+                            let attempt = within(
+                                ctx,
+                                remaining,
+                                WriteResult::Ambiguous,
+                                write_once(
+                                    attempt_target,
+                                    &submission.entry,
+                                    abandon && first_attempt,
+                                ),
+                            )
+                            .await;
+                            first_attempt = false;
+                            match attempt {
+                                WriteResult::Redirect { leader }
+                                    if op == WRITE && time.now() < deadline =>
+                                {
+                                    attempt_target = retarget.next(attempt_target, leader, routes);
+                                    time.sleep(Duration::from_millis(config.redirect_sleep_ms))
+                                        .await
+                                        .ok();
+                                }
+                                terminal => break terminal,
+                            }
+                        };
+                        if matches!(result, WriteResult::Ambiguous) {
+                            tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
+                            // The reconciling retry, byte for byte (#204: the
+                            // journal answers it from the log): by policy, back
+                            // to the node that may have committed the abandoned
+                            // attempt, or on to the hinted leader / the next
+                            // node.
+                            let retry_target = retarget.next(
+                                chosen_target,
+                                hint.current.and_then(|node| u64::try_from(node).ok()),
+                                routes,
+                            );
+                            let reconciled = within(
+                                ctx,
+                                request_timeout,
+                                WriteResult::Ambiguous,
+                                write_once(retry_target, &submission.entry, false),
+                            )
+                            .await;
+                            if matches!(reconciled, WriteResult::Written { .. }) {
+                                successful_after_ambiguity = true;
+                            }
+                            reconciled
+                        } else {
+                            result
+                        }
                     };
                     match result {
-                        WriteResult::Written {
-                            seq,
-                            count,
-                            duplicate,
-                        } => {
+                        WriteResult::Written { seq, count, .. } => {
                             writer.next_seq = writer.next_seq.max(seq + count);
-                            self.record_written(&submission, seq, count, duplicate, now_ms());
+                            self.record_written(&submission, seq, count, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             written.push(submission.written(
                                 seq,
@@ -1495,7 +1602,17 @@ impl Workload for ChainWorkload {
                         self.adversarial.set_leader_executed = true;
                     }
                     let via = hint.current.unwrap_or(target);
-                    match claim(ctx, &clients, journal, via, client_id, request_timeout).await {
+                    match claim(
+                        ctx,
+                        &clients,
+                        &log,
+                        journal,
+                        via,
+                        (client_id, false),
+                        (read_timeout, request_timeout),
+                    )
+                    .await
+                    {
                         Some(SetLeaderResult::Won { state }) => {
                             writer.won(&state);
                             self.adversarial.claim_won = true;
@@ -1505,7 +1622,9 @@ impl Workload for ChainWorkload {
                                 "chain_claim_won"
                             );
                         }
-                        Some(SetLeaderResult::Lost { state }) => {
+                        Some(
+                            SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state },
+                        ) => {
                             writer.learn(client_id, &state);
                             tracing::info!(generation = state.generation.0, "chain_claim_lost");
                         }
@@ -1623,16 +1742,12 @@ impl Workload for ChainWorkload {
                             )
                         });
                         let results = join_all(attempts).await;
-                        let mut committed: Option<(u64, u64, usize, bool)> = None;
+                        let mut committed: Option<(u64, u64, usize)> = None;
                         let mut refused: Option<JournalState> = None;
                         for (attempt_target, result) in targets.into_iter().zip(results) {
                             match result {
-                                WriteResult::Written {
-                                    seq,
-                                    count,
-                                    duplicate,
-                                } => {
-                                    if let Some((original, _, _, _)) = committed {
+                                WriteResult::Written { seq, count, .. } => {
+                                    if let Some((original, _, _)) = committed {
                                         assert_always!(
                                             seq == original,
                                             "chain: dual-submit committed slots agree",
@@ -1643,7 +1758,7 @@ impl Workload for ChainWorkload {
                                             }
                                         );
                                     } else {
-                                        committed = Some((seq, count, attempt_target, duplicate));
+                                        committed = Some((seq, count, attempt_target));
                                     }
                                 }
                                 WriteResult::Refused { state }
@@ -1654,9 +1769,9 @@ impl Workload for ChainWorkload {
                                 WriteResult::Ambiguous => {}
                             }
                         }
-                        if let Some((seq, count, ack_target, duplicate)) = committed {
+                        if let Some((seq, count, ack_target)) = committed {
                             writer.next_seq = writer.next_seq.max(seq + count);
-                            self.record_written(&submission, seq, count, duplicate, now_ms());
+                            self.record_written(&submission, seq, count, now_ms());
                             self.adversarial.payload_classes[submission.payload_class] = true;
                             written.push(submission.written(seq, count, ack_target));
                         } else {
@@ -1678,7 +1793,7 @@ impl Workload for ChainWorkload {
                             target,
                             client_id,
                             config.read_limit,
-                            request_timeout,
+                            read_timeout,
                         )
                         .await;
                         // Everything this client has read is what it may
@@ -1775,18 +1890,31 @@ impl Workload for ChainWorkload {
                     // moves), this client's own last written position, the
                     // journal's start, or far past any tail (a long-poll
                     // answered empty).
-                    let tailing = raw_class % 4 < 2;
-                    let from = match raw_class % 4 {
-                        0 | 1 => fold.cursor(),
-                        2 => written.last().map_or(0, |w| w.seq),
-                        _ => {
-                            if raw_class & (1 << 8) != 0 {
-                                0
-                            } else {
-                                fold.cursor().saturating_add(1 << 20)
+                    //
+                    // Race 3 (#205): a reader at a lagging cursor — at or
+                    // below this client's fold, outside the trim fence — while
+                    // this client truncates to everything it folded. The
+                    // slot order decides whether the page or the truncation
+                    // comes first; a reader refused as truncated resumes at
+                    // the floor the refusal names.
+                    let racing = buggify_with_prob!(0.15);
+                    let tailing = !racing && raw_class % 4 < 2;
+                    let from = if racing {
+                        raw_payload % (fold.cursor() + 1)
+                    } else {
+                        match raw_class % 4 {
+                            0 | 1 => fold.cursor(),
+                            2 => written.last().map_or(0, |w| w.seq),
+                            _ => {
+                                if raw_class & (1 << 8) != 0 {
+                                    0
+                                } else {
+                                    fold.cursor().saturating_add(1 << 20)
+                                }
                             }
                         }
                     };
+                    let race_up_to = writer.next_seq.max(fold.cursor());
                     // Any node or replica serves a journal read.
                     let replica_count = replica_clients.len();
                     let span = server_count + replica_count;
@@ -1794,7 +1922,7 @@ impl Workload for ChainWorkload {
                     // A client naming a journal this deployment does not
                     // serve (`0`, the unset id, or another user journal) must
                     // be refused, never answered from the wrong journal.
-                    let stray = buggify_with_prob!(0.05);
+                    let stray = !racing && buggify_with_prob!(0.05);
                     let named = if stray {
                         assert_reachable!("chain: a client asks for a journal nobody serves");
                         if raw_policy & 1 == 0 {
@@ -1813,25 +1941,41 @@ impl Workload for ChainWorkload {
                     // One read, retried at the next server while its
                     // quorum read goes unserved, inside one deadline.
                     let deadline =
-                        time.now() + request_timeout + Duration::from_millis(config.read_wait_ms);
+                        time.now() + read_timeout + Duration::from_millis(config.read_wait_ms);
                     let mut attempts = 0_u64;
-                    let answer = loop {
-                        let remaining = deadline.saturating_sub(time.now());
-                        if remaining.is_zero() || shutdown.is_cancelled() {
-                            break None;
-                        }
-                        attempts += 1;
-                        let client = match drawn.checked_sub(server_count) {
-                            Some(replica) => replica_clients[replica].clone(),
-                            None => clients[drawn].clone(),
-                        };
-                        let call =
-                            read_once(&client, named, from, config.read_limit, config.read_wait_ms);
-                        match within(ctx, remaining, None, call).await {
-                            Some(ack) if ack.served || ack.unknown_journal => break Some(ack),
-                            _ => drawn = (drawn + 1) % span.max(1),
+                    let read = async {
+                        loop {
+                            let remaining = deadline.saturating_sub(time.now());
+                            if remaining.is_zero() || shutdown.is_cancelled() {
+                                break None;
+                            }
+                            attempts += 1;
+                            let client = readers[drawn].clone();
+                            let call = read_once(
+                                &client,
+                                &log,
+                                named,
+                                from,
+                                config.read_limit,
+                                config.read_wait_ms,
+                            );
+                            match within(ctx, remaining, None, call).await {
+                                Some(ack) if ack.served || ack.unknown_journal => break Some(ack),
+                                _ => drawn = (drawn + 1) % span.max(1),
+                            }
                         }
                     };
+                    let truncation = async {
+                        if racing && !reader && config.compaction {
+                            assert_reachable!("chain: a truncation races a reader's cursor");
+                            truncate_traced(hint.current.unwrap_or(target), race_up_to).await;
+                        }
+                    };
+                    let (answer, ()) = futures::join!(read, truncation);
+                    let trimmed_at = answer
+                        .as_ref()
+                        .filter(|ack| racing && ack.served && ack.truncated && !ack.unknown_journal)
+                        .map(|ack| state_of(ack.state).first_seq.0);
                     match answer {
                         Some(ack) if stray => {
                             assert_always!(
@@ -1871,6 +2015,27 @@ impl Workload for ChainWorkload {
                         // time), or no answer: ambiguous, never assumed.
                         _ => self.history.record_read_failed(op_id),
                     }
+                    // The raced reader resumes at the floor it was refused
+                    // below — or, truncated again, at the next floor.
+                    if let Some(mut floor) = trimmed_at {
+                        for k in 0..span.clamp(1, 4) {
+                            let client = readers[(drawn + k) % span.max(1)].clone();
+                            let call =
+                                read_once(&client, &log, journal.0, floor, config.read_limit, 0);
+                            match within(ctx, read_timeout, None, call).await {
+                                Some(ack) if ack.served && !ack.unknown_journal => {
+                                    if ack.truncated {
+                                        floor = state_of(ack.state).first_seq.0;
+                                        continue;
+                                    }
+                                    judge_read(&audit, floor, &ack, &written);
+                                    self.adversarial.reader_resumed = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 READ_STATE => {
                     // Fold to the tail through any node or replica: the
@@ -1884,7 +2049,7 @@ impl Workload for ChainWorkload {
                         drawn,
                         client_id,
                         config.read_limit,
-                        request_timeout,
+                        read_timeout,
                     )
                     .await;
                     tracing::info!(
@@ -2518,6 +2683,23 @@ impl Workload for ChainWorkload {
             self.adversarial.duplicate_across_leader_change,
             "journal: a retried write is acked from the log across a leader change"
         );
+        // The three races of #205, by their outcomes.
+        assert_sometimes!(
+            self.adversarial.retry_superseded,
+            "journal: a retry after an ownership change is refused as superseded"
+        );
+        assert_sometimes!(
+            self.adversarial.retry_acked_across_claim,
+            "journal: a retry across an ownership change is acked from the log"
+        );
+        assert_sometimes!(
+            self.adversarial.burst_fenced,
+            "journal: a claim fences the rest of an owner's burst"
+        );
+        assert_sometimes!(
+            self.adversarial.reader_resumed,
+            "journal: a reader hits Truncated and resumes above the floor"
+        );
         if self.adversarial.claim_won {
             assert_reachable!("chain: a client claims the journal mid-run");
         }
@@ -2596,6 +2778,39 @@ impl Workload for ChainWorkload {
                 .await
                 .ok();
         }
+        // Every client folds to the tail as the chaos window closes (#205):
+        // a client whose program never drew a fold holds the trim fence at
+        // zero, which refused every truncation of the run — the reason the
+        // trim-point reach collapsed once positions replaced slots. With
+        // every cursor past zero, the tail truncation below can raise the
+        // floor past a node or replica still down from the chaos window, and
+        // the one coming back jumps to the trim point.
+        fold.read_to_tail(
+            ctx,
+            &audit,
+            &readers,
+            usize::try_from(client_id).unwrap_or(0) % readers.len().max(1),
+            client_id,
+            config.read_limit,
+            read_timeout,
+        )
+        .await;
+        // A replica held down across the tail (#205), its own location: an
+        // operator stops a replica as the chaos window closes and starts it
+        // again only once this owner's recovery batch and tail truncation
+        // went by, so it comes back below the floor every acceptor raised
+        // without it — the jump to the trim point a replica exists to
+        // survive, which attrition alone reached once in a thousand runs
+        // (its restarts mostly land before any truncation of the tail).
+        let held_replica = (journal == JournalId::default() && client_id == 0)
+            .then(|| deployment.replicas())
+            .filter(|replicas| !replicas.is_empty())
+            .filter(|_| buggify_with_prob!(0.5))
+            .map(|replicas| replicas[0].clone());
+        if let Some(ip) = &held_replica {
+            assert_reachable!("chain: a replica is held down across the tail truncation");
+            crate::lifecycle::crash(ctx, ip).await;
+        }
         // The applied count the tail must move past (the audit tracks the
         // applied *slot*; the count is one past it).
         let pre_tail_count = audit.cluster_applied_max().map_or(0, |slot| slot + 1);
@@ -2610,9 +2825,37 @@ impl Workload for ChainWorkload {
         let mut recovery_acked = 0_u64;
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
         let mut target = hint.current.unwrap_or(first) % server_count;
-        for _ in 0..config.recovery_proposals {
+        for k in 0..config.recovery_proposals {
             if reader {
                 break;
+            }
+            // The tail truncation, before the batch's last write: an owner
+            // that wrote its batch drops everything every client has folded
+            // (the fence's clamp; it folds its own batch first, since the
+            // fence holds a truncation below its own cursor too). Before the
+            // last write, never after it: the chosen prefix is contiguous,
+            // so that write's ack means the truncation's slot was decided
+            // too. Issued last, an attempt that lingered past its answer (a
+            // delegated round taken back beats later) was decided after
+            // every client had judged the run converged, one slot past a
+            // node the run then ended on (witness seed 11017340697535666646,
+            // #205's 10k hunt: decided 2.8 s after its call gave up).
+            if k + 1 == config.recovery_proposals
+                && recovery_acked > 0
+                && config.compaction
+                && !shutdown.is_cancelled()
+            {
+                fold.read_to_tail(
+                    ctx,
+                    &audit,
+                    &readers,
+                    target,
+                    client_id,
+                    config.read_limit,
+                    read_timeout,
+                )
+                .await;
+                truncate_traced(target, writer.next_seq.max(fold.cursor())).await;
             }
             let raw = ctx.random().random::<u64>();
             let mut acknowledged = false;
@@ -2624,9 +2867,21 @@ impl Workload for ChainWorkload {
             let mut pending: Option<Submission> = None;
             while time.now() < recovery_deadline && !shutdown.is_cancelled() {
                 if writer.owned.is_none() {
-                    match claim(ctx, &clients, journal, target, client_id, request_timeout).await {
+                    match claim(
+                        ctx,
+                        &clients,
+                        &log,
+                        journal,
+                        target,
+                        (client_id, false),
+                        (read_timeout, request_timeout),
+                    )
+                    .await
+                    {
                         Some(SetLeaderResult::Won { state }) => writer.won(&state),
-                        Some(SetLeaderResult::Lost { state }) => writer.learn(client_id, &state),
+                        Some(
+                            SetLeaderResult::Lost { state } | SetLeaderResult::Owned { state },
+                        ) => writer.learn(client_id, &state),
                         Some(SetLeaderResult::Redirect { leader }) => {
                             target = leader
                                 .and_then(|id| routes.index(id))
@@ -2660,15 +2915,11 @@ impl Workload for ChainWorkload {
                 )
                 .await;
                 match result {
-                    WriteResult::Written {
-                        seq,
-                        count,
-                        duplicate,
-                    } => {
+                    WriteResult::Written { seq, count, .. } => {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
                         writer.next_seq = writer.next_seq.max(seq + count);
-                        self.record_written(&submission, seq, count, duplicate, now_ms());
+                        self.record_written(&submission, seq, count, now_ms());
                         written.push(submission.written(seq, count, target));
                         break;
                     }
@@ -2697,6 +2948,9 @@ impl Workload for ChainWorkload {
             if !acknowledged {
                 break;
             }
+        }
+        if let Some(ip) = &held_replica {
+            crate::lifecycle::restart(ctx, ip).await;
         }
         let tail = tail(ctx.state());
         {
@@ -2850,7 +3104,7 @@ impl Workload for ChainWorkload {
                 node,
                 client_id,
                 config.read_limit,
-                request_timeout,
+                read_timeout,
             )
             .await;
             tracing::info!(
@@ -2964,7 +3218,16 @@ impl Workload for ChainWorkload {
         // The two perspectives, and nothing else: the client's own history
         // (linearizability over what it was told), and the audit's fold of
         // every driver transition (safety, restart, and the one liveness claim).
-        let mut digest = check_run(ctx.state(), self.journal, &self.history);
+        if let Some(calls) = &self.calls {
+            self.history.set_attempts(calls.take());
+        }
+        // The linearizability search waits for every client of the journal.
+        let clients = self.plan.as_ref().map_or(1, |plan| {
+            (0..ctx.client_count())
+                .filter(|client| plan.for_client(*client) == self.journal)
+                .count()
+        });
+        let mut digest = check_run(ctx.state(), self.journal, &self.history, clients);
         // A journal no client appends to (#188: more journals than clients)
         // is judged by client 0, on an empty history: its audit's safety
         // oracles ran all along, and its final claim holds too.
@@ -2972,7 +3235,7 @@ impl Workload for ChainWorkload {
             && let Some(plan) = &self.plan
         {
             for idle in plan.ids.iter().skip(ctx.client_count()) {
-                digest ^= check_run(ctx.state(), *idle, &ClientHistory::default());
+                digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
             }
         }
         if let Some(sink) = &self.digest {

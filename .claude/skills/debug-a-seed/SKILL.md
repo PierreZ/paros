@@ -33,8 +33,9 @@ Every oracle message is a stable string and its detail map carries the ids
 - `crates/paros-sim/src/audit/state.rs` — protocol safety folded per
   transition (promise monotonicity across restarts, one value per slot, the
   chosen prefix, the storage gates);
-- `audit/client.rs` — `ClientHistory`: linearizability over disclosed order
-  and sequential-client consistency;
+- `audit/client.rs` and `audit/linearizability.rs` — `ClientHistory` and the
+  search for a linearization of every attempt against the journal model; a
+  refutation prints every attempt and the one the deepest prefix stuck at;
 - `audit/matchmaker.rs` — the registry, the leader-side matchmaking, GC and
   generation oracles;
 - `audit/world.rs` — `AuditWorld`, `check_run` (the end-of-run convergence and
