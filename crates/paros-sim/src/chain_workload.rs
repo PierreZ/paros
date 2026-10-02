@@ -1153,6 +1153,10 @@ impl Workload for ChainWorkload {
         let mut redirected_written = false;
         let mut ambiguity_resolved = false;
         let mut superseded_stopped = false;
+        // An unanswered write at the hinted leader dropped the hint, and
+        // the write after it reached a leader.
+        let mut hint_dropped = false;
+        let mut dropped_hint_written = false;
         let mut written = Vec::<WrittenCommand>::new();
         // The highest tail a read of this client was served (`None` before
         // any): this client runs one operation at a time, so a later read
@@ -2830,8 +2834,12 @@ impl Workload for ChainWorkload {
                     _ => self.submit(&audit, &config, writer, &mut next_op, raw, raw, now_ms()),
                 };
                 log.open_write(submission.op);
+                let hinted = nodes.leader().is_some();
                 let outcome = writer.write_entry(&nodes, &submission.entry, target).await;
                 log.close_write();
+                if hinted && nodes.leader().is_none() && outcome == WriterOutcome::Ambiguous {
+                    hint_dropped = true;
+                }
                 match outcome {
                     WriterOutcome::Written {
                         seq,
@@ -2842,6 +2850,8 @@ impl Workload for ChainWorkload {
                         recovery_acked = recovery_acked.saturating_add(1);
                         acknowledged = true;
                         ambiguity_resolved |= resolved;
+                        dropped_hint_written |= hint_dropped;
+                        hint_dropped = false;
                         let via = nodes.leader().unwrap_or(target);
                         self.record_written(&submission, seq, count, now_ms());
                         written.push(submission.written(seq, count, via));
@@ -2910,6 +2920,10 @@ impl Workload for ChainWorkload {
         assert_sometimes!(
             superseded_stopped,
             "client: a superseded writer stops writing"
+        );
+        assert_sometimes!(
+            dropped_hint_written,
+            "client: a write after a dropped leader hint is written"
         );
         let tail = tail(ctx.state());
         {

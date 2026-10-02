@@ -57,11 +57,13 @@ pub(crate) mod reply;
 mod report;
 mod system;
 pub(crate) mod transport;
+mod tunables;
 
 pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
 pub use events::{command_hash, message_kind, registration_history_hash};
 pub use journals::JournalStores;
 pub use system::SystemPlan;
+pub use tunables::BelowFloor;
 
 use std::collections::BTreeMap;
 
@@ -1658,6 +1660,7 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
     match boot_journal(providers, storage, boot, audit, tunables, hooks).await {
         Ok(rt) => {
             journals.live.insert(journal, rt);
+            stores.opened(journal);
         }
         Err(fault @ RunError::Storage(_)) => journals.requarantine(journal, now, fault),
         Err(fault) => journals.park(journal, Some(fault)),

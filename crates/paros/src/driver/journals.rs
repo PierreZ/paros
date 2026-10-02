@@ -68,6 +68,16 @@ pub trait JournalStores {
         false
     }
 
+    /// `journal`'s store passed its boot: scanned, and its format marker
+    /// judged against the claim [`JournalStores::open`] returned — on a
+    /// first boot, written and synced. From here on the store is
+    /// provisioned on disk, so an opener that keeps a provisioning record
+    /// outside its stores (#208) records `journal` now, and every later
+    /// open is an existing member's. The default does nothing.
+    fn opened(&mut self, journal: JournalId) {
+        let _ = journal;
+    }
+
     /// `journal` was just quarantined on this node: a storage fault ended its
     /// incarnation, and the driver re-opens it after
     /// [`DriverTunables::quarantine_ticks`]. An opener that already knows

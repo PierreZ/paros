@@ -5,8 +5,12 @@
 //! replica, every process killed and restarted as an existing member, the
 //! writer going on, a second owner superseding it, a truncation a reader
 //! is told about — and the refusals an operator meets: an edited
-//! configuration (#207), a lost disk, a second first boot, each with its
-//! exit code and its reason.
+//! configuration (#207), a lost disk, a second provisioning (#208), each
+//! with its exit code and its reason. Every identity is provisioned by
+//! `parosd provision` before its first start, and an interrupted
+//! provisioning resumes from the disk. The node and the replica are named
+//! by hostname (#209), resolved once at startup by `parosd` and `parosctl`
+//! alike, and an override of a driver tunable below its floor is refused.
 
 use std::net::TcpListener;
 use std::path::Path;
@@ -40,9 +44,11 @@ struct Cluster {
 impl Cluster {
     fn new() -> Self {
         Self {
-            node: format!("127.0.0.1:{}", free_port()),
+            // Hostnames for two of the three (#209): resolved once at
+            // startup, by the servers and by `parosctl`.
+            node: format!("localhost:{}", free_port()),
             matchmaker: format!("127.0.0.1:{}", free_port()),
-            replica: format!("127.0.0.1:{}", free_port()),
+            replica: format!("localhost:{}", free_port()),
             root: tempfile::tempdir().expect("tempdir"),
         }
     }
@@ -63,10 +69,15 @@ impl Cluster {
         self.root.path().join(role)
     }
 
-    fn server(&self, role: &str, id: u64, first_boot: bool, extra: &[String]) -> Command {
+    fn server(&self, role: &str, id: u64, extra: &[String]) -> Command {
+        self.parosd(&[role], role, id, extra)
+    }
+
+    /// `parosd <verb…> --id <id> … --data-dir <role's dir> <deployment>`.
+    fn parosd(&self, verb: &[&str], role: &str, id: u64, extra: &[String]) -> Command {
         let mut command = Command::new(PAROSD);
         command
-            .arg(role)
+            .args(verb)
             .args(["--id", &id.to_string(), "--layout", "small", "--data-dir"])
             .arg(self.data_dir(role))
             .args(self.deployment())
@@ -74,35 +85,50 @@ impl Cluster {
             .env("RUST_LOG", "warn")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        if first_boot {
-            command.arg("--first-boot");
-        }
         command
     }
 
-    fn start(&self, first_boot: bool) -> Vec<Child> {
-        ["matchmaker", "node", "replica"]
+    /// `parosd provision <role>`: its exit status and stdout + stderr.
+    fn provision(&self, role: &str) -> (i32, String) {
+        let id = if role == "replica" { 1000 } else { 0 };
+        status(
+            &self
+                .parosd(&["provision", role], role, id, &[])
+                .stdout(Stdio::piped())
+                .output()
+                .expect("run parosd provision"),
+        )
+    }
+
+    fn start(&self) -> Vec<Child> {
+        ROLES
             .iter()
             .map(|role| {
                 let id = if *role == "replica" { 1000 } else { 0 };
-                self.server(role, id, first_boot, &[])
-                    .spawn()
-                    .expect("spawn parosd")
+                self.server(role, id, &[]).spawn().expect("spawn parosd")
             })
             .collect()
     }
 
     /// Run a server that must refuse to boot; its exit status and stderr.
-    fn refused(&self, role: &str, first_boot: bool, extra: &[String]) -> (i32, String) {
-        let output = self
-            .server(role, 0, first_boot, extra)
-            .output()
-            .expect("run parosd");
-        (
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
+    fn refused(&self, role: &str, extra: &[String]) -> (i32, String) {
+        status(&self.server(role, 0, extra).output().expect("run parosd"))
     }
+}
+
+/// Every role that keeps stores.
+const ROLES: [&str; 3] = ["matchmaker", "node", "replica"];
+
+/// An exit status and everything printed.
+fn status(output: &Output) -> (i32, String) {
+    (
+        output.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
 }
 
 fn stop(children: Vec<Child>) {
@@ -185,9 +211,26 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     let node = format!("0={}", cluster.node);
     let replica = format!("1000={}", cluster.replica);
 
-    // First boot: every store formatted. The writer claims the journal on
-    // its first write — no generation or position carried by hand.
-    let children = cluster.start(true);
+    // Provisioning: every store formatted, once, by its own command. A
+    // start before it is refused as amnesia: a start never formats.
+    let (code, stderr) = cluster.refused("node", &[]);
+    assert_eq!(code, EXIT_REFUSED, "{stderr}");
+    assert!(stderr.contains("never provisioned"), "{stderr}");
+    for role in ROLES {
+        let (code, out) = cluster.provision(role);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("1 stores formatted"), "{out}");
+    }
+    // An interrupted provisioning (the record lost before it landed)
+    // resumes from what the disk holds and formats nothing again.
+    std::fs::remove_file(cluster.data_dir("node").join("provisioned")).expect("drop the record");
+    let (code, out) = cluster.provision("node");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("1 already formatted"), "{out}");
+
+    // The writer claims the journal on its first write — no generation or
+    // position carried by hand.
+    let children = cluster.start();
     let wrote = until_ok(&node, &["write", "128", "alpha", "beta", "--owner", "7"]);
     assert_eq!(wrote["outcome"], "written", "{wrote}");
     assert_eq!(wrote["seq"], 0, "{wrote}");
@@ -213,7 +256,7 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     // members: the records are still there, and the writer goes on at the
     // tail — its claim finds it the owner already and adopts it.
     stop(children);
-    let children = cluster.start(false);
+    let children = cluster.start();
     assert_eq!(read_back(&node, 2).0, vec!["alpha", "beta"]);
     let wrote = until_ok(&node, &["write", "128", "gamma", "--owner", "7"]);
     assert_eq!(wrote["seq"], 2, "{wrote}");
@@ -248,26 +291,57 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     assert_eq!(gaps[0]["to"], 1, "{gaps:?}");
     stop(children);
 
+    refuses_what_it_must(&cluster);
+}
+
+/// The refusals an operator meets, on a provisioned cluster that is down.
+fn refuses_what_it_must(cluster: &Cluster) {
     // #207: an edited deployment — a second node added to the bootstrap
     // membership in the configuration — is refused, and says why.
     let edited = vec!["--node".to_string(), "1=127.0.0.1:1".to_string()];
-    let (code, stderr) = cluster.refused("node", false, &edited);
+    let (code, stderr) = cluster.refused("node", &edited);
     assert_eq!(code, EXIT_REFUSED, "{stderr}");
     assert!(stderr.contains("another configuration"), "{stderr}");
     // The matchmaker's bootstrap set, likewise.
     let edited = vec!["--matchmaker".to_string(), "1=127.0.0.1:1".to_string()];
-    let (code, stderr) = cluster.refused("matchmaker", false, &edited);
+    let (code, stderr) = cluster.refused("matchmaker", &edited);
     assert_eq!(code, EXIT_REFUSED, "{stderr}");
     assert!(stderr.contains("another configuration"), "{stderr}");
 
-    // A second first boot on a formatted store is refused.
-    let (code, stderr) = cluster.refused("node", true, &[]);
-    assert_eq!(code, EXIT_REFUSED, "{stderr}");
-    assert!(stderr.contains("already formatted"), "{stderr}");
+    // A driver tunable overridden below its floor stops the start (#209).
+    let (code, stderr) = status(
+        &cluster
+            .server("node", 0, &[])
+            .env("PAROS_ELECTION_TIMEOUT_BASE", "1")
+            .output()
+            .expect("run parosd"),
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("PAROS_ELECTION_TIMEOUT_BASE=1 is below its floor 2"),
+        "{stderr}"
+    );
 
-    // A lost disk: an existing member on an empty store is amnesia.
+    // A second provisioning is refused (#208).
+    for role in ROLES {
+        let (code, out) = cluster.provision(role);
+        assert_eq!(code, EXIT_REFUSED, "{out}");
+        assert!(out.contains("already formatted"), "{out}");
+    }
+    // A data directory belongs to the identity it was provisioned for.
+    let (code, stderr) = status(
+        &cluster
+            .parosd(&["node"], "replica", 0, &[])
+            .output()
+            .expect("run parosd"),
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("provisioned for replica 1000"), "{stderr}");
+
+    // A lost disk: a wiped volume — the record with it — is amnesia at the
+    // next start, never a silent rejoin.
     std::fs::remove_dir_all(cluster.data_dir("node")).expect("wipe the node's disk");
-    let (code, stderr) = cluster.refused("node", false, &[]);
+    let (code, stderr) = cluster.refused("node", &[]);
     assert_eq!(code, EXIT_REFUSED, "{stderr}");
     assert!(stderr.contains("amnesia"), "{stderr}");
 }
@@ -275,11 +349,13 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
 #[test]
 fn sigterm_stops_a_node_cleanly() {
     let cluster = Cluster::new();
+    let (code, out) = cluster.provision("node");
+    assert_eq!(code, 0, "{out}");
     let mut node = cluster
-        .server("node", 0, true, &[])
+        .server("node", 0, &[])
         .spawn()
         .expect("spawn parosd");
-    // Let it format and listen.
+    // Let it boot and listen.
     std::thread::sleep(Duration::from_millis(500));
     let status = Command::new("kill")
         .args(["-TERM", &node.id().to_string()])

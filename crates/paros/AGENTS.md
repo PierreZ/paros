@@ -10,8 +10,9 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 ## Map
 
 - `driver/mod.rs` → `run_node`, `run_journals`, `RunError`, `BootKind` → the node loop; one journal or a static list (#188).
-- `driver/journals.rs` → `JournalStores`, `SingleStore` → per-journal runtime and quarantine (`quarantine_ticks`).
+- `driver/journals.rs` → `JournalStores` (`opened`: a store passed its boot, #208), `SingleStore` → per-journal runtime and quarantine (`quarantine_ticks`).
 - `driver/system.rs` → `SystemPlan` → system-journal follower; applies directory/registry folds (#189).
+- `provision.rs` → `provision_store`, `provision_matchmaker_store`, `Provisioned` → format a store ahead of its first start; an interrupted run resumes from the disk (#208).
 - `driver/{boot,ready,report}.rs` → format-marker check, the `Ready` I/O side in persist-before-send order, boot report.
 - `driver/transport.rs` → `PeerMailbox`, `LaneOpener`, `peer_address` → keep-newest lanes per journal, round-robin.
 - `driver/{matchmaking,handover,operator,events}.rs` → matchmaker wire, set handover, Reconfigure/Retire/Inspect, events.
@@ -19,7 +20,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/reply.rs` → `answer`, `match_answer`, `maybe_duplicate` → the one client-reply seam.
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
-- `driver/config.rs` → `DriverTunables` → every driver cadence/budget, with production defaults.
+- `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
 - `hooks.rs` → `DriverHooks`, `NoHooks`, `Seam` (four), `HandoffContext`, `Reply` → BUGGIFY prong-1 surface.
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
@@ -46,7 +47,8 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 
 ## Public surface
 
-`run_node`, `run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`; `paros::client`;
+`run_node`, `run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`; `provision_store`,
+`provision_matchmaker_store`; `paros::client`;
 `paros::system`; `paros::journal`; `paros::wire::{methods, common, public, internal,
 matchmaker, system}`; the RPC request/ack types (`lib.rs`).
 

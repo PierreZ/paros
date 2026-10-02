@@ -148,14 +148,6 @@ impl NodeShape {
         // Twenty-four to 32 still shrinks frames 2-2.7x against the
         // default 64.
         let delivery_batch = buggify_knob!(defaults.delivery_batch, 24_usize..33_usize);
-        if peer_queue_capacity != defaults.peer_queue_capacity {
-            // BUGGIFY pairing: the capacity extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme peer-queue capacity");
-        }
-        if delivery_batch != defaults.delivery_batch {
-            // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme delivery batch");
-        }
         // Every duration that races the network has the same structural
         // floor, `ROUND_TRIP_FLOOR_MS`: moonpool's default cross-datacenter
         // link is 20-80 ms one way, so a Phase-1 round trip plus one delivery
@@ -183,7 +175,7 @@ impl NodeShape {
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
-        let tunables = DriverTunables {
+        let drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
@@ -276,23 +268,46 @@ impl NodeShape {
             // leaderless cluster's re-election.
             election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
         };
-        if tunables.election_backoff_doublings != 3 {
+        // The production profile `parosd` ships (#209), whole: every field
+        // at once, which the per-field locations above would draw together
+        // only by chance. Each of its values lies inside its knob's range
+        // (a 100 ms tick, a ten-tick election base, two-second reads), so
+        // this is a point of the swept space, not a new extreme, and it
+        // clears the round-trip floor above in wall-clock terms.
+        // The per-field pairings below judge `drawn`, and only when it is
+        // what runs: under the production profile no drawn extreme does.
+        let production = buggify_knob!(0_u8, 1_u8..2_u8) == 1;
+        let tunables = if production {
+            assert_reachable!("a node runs the production driver tunables");
+            DriverTunables::production()
+        } else {
+            drawn
+        };
+        if !production && peer_queue_capacity != defaults.peer_queue_capacity {
+            // BUGGIFY pairing: the capacity extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme peer-queue capacity");
+        }
+        if !production && delivery_batch != defaults.delivery_batch {
+            // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
+            assert_reachable!("a node runs with an extreme delivery batch");
+        }
+        if !production && drawn.election_backoff_doublings != 3 {
             // BUGGIFY pairing: the election backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme election backoff ceiling");
         }
-        if tunables.gc_resend_ticks != 5 {
+        if !production && drawn.gc_resend_ticks != 5 {
             // BUGGIFY pairing: the GC cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme GC re-send cadence");
         }
-        if tunables.reconfigurer_resend_ticks != 5 {
+        if !production && drawn.reconfigurer_resend_ticks != 5 {
             // BUGGIFY pairing: the handover cadence extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover re-send cadence");
         }
-        if tunables.reconfigure_timeout_elections != 4 {
+        if !production && drawn.reconfigure_timeout_elections != 4 {
             // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover stall budget");
         }
-        if tunables.reconfigure_backoff_max_ticks != 10 {
+        if !production && drawn.reconfigure_backoff_max_ticks != 10 {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme decree backoff ceiling");
         }

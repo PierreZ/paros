@@ -16,25 +16,35 @@
 //! | 75 (`EX_TEMPFAIL`) | [`RunError::Storage`]: the fail-stop crash on a storage fault | restart: the next boot recovers from what the disk holds |
 //! | 78 (`EX_CONFIG`) | [`RunError::Refused`]: the boot claim or the configuration disagrees with the store | do **not** restart: resolve the claim (amnesia, a formatted store, an edited configuration) |
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
+//!
+//! Provisioning is its own command (#208): `parosd provision <role>` formats
+//! every store of an identity, writes the provisioning record and exits;
+//! every ordinary start is an existing member's ([`BootKind::ExistingMember`]),
+//! so a start never formats and a wiped volume is refused as amnesia.
 
 mod deployment;
+mod record;
+mod resolve;
 mod stores;
+mod tunables;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use moonpool_core::TokioProviders;
 use paros::{
-    BootKind, BootRefusal, DriverTunables, JournalId, JournalMatchmakerStorage, JournalStorage,
-    JournalStoreConfig, MatchmakerId, NoAudit, NoHooks, NodeId, ProxyId, RunError,
+    BootKind, BootRefusal, JournalId, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
+    MatchmakerId, NoAudit, NoHooks, NodeId, Provisioned, ProxyId, RunError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use crate::deployment::Deployment;
-use crate::stores::{DirStores, matchmaker_dir, path_str, replica_dir};
+use crate::record::Record;
+use crate::stores::{DirStores, journal_dir, matchmaker_dir, path_str, replica_dir};
 
 /// The paros daemon.
 #[derive(Parser, Debug)]
@@ -54,6 +64,21 @@ enum Command {
     Replica(ServerArgs),
     /// Run a proxy leader (stateless: no data directory, no boot claim).
     Proxy(ProxyArgs),
+    /// Provision an identity, once: format every store it keeps, record
+    /// it, and exit. Never part of a start.
+    #[command(subcommand)]
+    Provision(Provision),
+}
+
+/// The roles that keep stores, each provisioned once.
+#[derive(Subcommand, Debug)]
+enum Provision {
+    /// Format an acceptor node's stores: one per journal of the deployment.
+    Node(ServerArgs),
+    /// Format a matchmaker's registry.
+    Matchmaker(ServerArgs),
+    /// Format a replica's log.
+    Replica(ServerArgs),
 }
 
 /// The store layout a server runs.
@@ -79,15 +104,11 @@ struct ServerArgs {
     /// This process's id in its role's list of the deployment.
     #[arg(long)]
     id: u64,
-    /// Where this process keeps its stores.
+    /// Where this process keeps its stores. A start finds them formatted
+    /// by `parosd provision`, or refuses: a store without its format marker
+    /// is amnesia, and a lost disk never rejoins.
     #[arg(long, env = "PAROS_DATA_DIR")]
     data_dir: PathBuf,
-    /// The operator's claim that this identity has never been provisioned:
-    /// its stores are formatted before anything else. Without it the stores
-    /// must already carry their format marker, and a store that does not is
-    /// refused as amnesia — a lost disk never rejoins.
-    #[arg(long)]
-    first_boot: bool,
     /// The store layout.
     #[arg(long, value_enum, default_value = "default")]
     layout: Layout,
@@ -96,11 +117,17 @@ struct ServerArgs {
 }
 
 impl ServerArgs {
-    fn boot(&self) -> BootKind {
-        if self.first_boot {
-            BootKind::FirstBoot
-        } else {
-            BootKind::ExistingMember
+    /// The provisioning record a start finds: it must name this identity
+    /// when present. A missing one is not refused here — the stores'
+    /// markers judge the start, and name what is missing.
+    fn check_record(&self, role: &str) -> Result<(), String> {
+        match Record::read(&self.data_dir) {
+            Ok(Some(record)) => record.check(role, self.id),
+            Ok(None) => {
+                tracing::warn!(data_dir = %self.data_dir.display(), "parosd_unprovisioned");
+                Ok(())
+            }
+            Err(error) => Err(format!("provisioning record: {error}")),
         }
     }
 }
@@ -119,14 +146,36 @@ const EXIT_RESTART: u8 = 75;
 /// `EX_CONFIG`: the boot was refused; an operator must act.
 const EXIT_REFUSED: u8 = 78;
 
+/// How long a start waits for the deployment's names to resolve (#209): a
+/// Compose service's peers may still be starting.
+const RESOLVE_PATIENCE: Duration = Duration::from_secs(30);
+/// How often an unresolved name is asked again.
+const RESOLVE_RETRY: Duration = Duration::from_millis(500);
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
+    // Names are resolved once, here, before any driver runs (#209).
+    // Provisioning binds nothing and resolves nothing: it runs before the
+    // peers it names exist.
+    let deployment = match &mut cli.command {
+        Command::Node(args) | Command::Matchmaker(args) | Command::Replica(args) => {
+            Some(&mut args.deployment)
+        }
+        Command::Proxy(args) => Some(&mut args.deployment),
+        Command::Provision(_) => None,
+    };
+    if let Some(deployment) = deployment
+        && let Err(error) = deployment.resolve(RESOLVE_PATIENCE, RESOLVE_RETRY)
+    {
+        eprintln!("parosd: {error}");
+        return ExitCode::FAILURE;
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -147,6 +196,7 @@ async fn run(command: Command) -> ExitCode {
         Command::Matchmaker(args) => Box::pin(serve("matchmaker", run_matchmaker(args))).await,
         Command::Replica(args) => Box::pin(serve("replica", run_replica(args))).await,
         Command::Proxy(args) => Box::pin(serve("proxy", run_proxy(args))).await,
+        Command::Provision(role) => Box::pin(serve("provision", provision(role))).await,
     }
 }
 
@@ -182,13 +232,13 @@ async fn serve(
 fn remedy(refusal: BootRefusal) -> &'static str {
     match refusal {
         BootRefusal::Amnesia => {
-            "this identity's store carries no format marker: its disk was lost (or this is a \
-             first boot: pass --first-boot exactly once). A lost identity never rejoins; \
-             replace it by reconfiguration"
+            "this identity's store carries no format marker: its disk was lost, or it was \
+             never provisioned (run `parosd provision` once, before its first start). A lost \
+             identity never rejoins; replace it by reconfiguration"
         }
         BootRefusal::AlreadyFormatted => {
-            "--first-boot on a store that is already formatted: drop --first-boot to restart \
-             this identity, or point --data-dir at an empty directory"
+            "this identity is already provisioned (its data directory carries the provisioning \
+             record): start it with `parosd <role>`, or point --data-dir at an empty directory"
         }
         BootRefusal::ConfigMismatch => {
             "the store was formatted under another configuration (the boot_config_mismatch \
@@ -237,17 +287,13 @@ async fn run_node(args: ServerArgs) -> Result<Result<(), RunError>, String> {
     d.validate()?;
     let id = NodeId(args.id);
     let addr = Deployment::addr_of(&d.nodes, "node", args.id)?;
-    let genesis: BTreeMap<JournalId, paros::Config> = d
-        .journals
-        .iter()
-        .map(|&journal| (JournalId(journal), d.node_config(id, JournalId(journal))))
-        .collect();
-    let stores = DirStores::new(
+    let stores = DirStores::load(
+        args.id,
         args.data_dir.clone(),
         args.layout.config(),
-        genesis,
-        args.boot(),
-    );
+        genesis(d, id),
+    )
+    .await?;
     tracing::info!(node = id.0, %addr, data_dir = %args.data_dir.display(), "parosd_node_starting");
     Ok(paros::run_journals(
         TokioProviders::new(),
@@ -258,7 +304,7 @@ async fn run_node(args: ServerArgs) -> Result<Result<(), RunError>, String> {
         d.proxy_book(),
         d.replica_book(),
         None,
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
     )
@@ -269,6 +315,7 @@ async fn run_matchmaker(args: ServerArgs) -> Result<Result<(), RunError>, String
     let d = &args.deployment;
     d.validate()?;
     let addr = Deployment::addr_of(&d.matchmakers, "matchmaker", args.id)?;
+    args.check_record("matchmaker")?;
     let providers = TokioProviders::new();
     let storage = JournalMatchmakerStorage::new(
         moonpool_core::Providers::storage(&providers).clone(),
@@ -279,10 +326,10 @@ async fn run_matchmaker(args: ServerArgs) -> Result<Result<(), RunError>, String
     Ok(paros::run_matchmaker(
         providers,
         storage,
-        args.boot(),
+        BootKind::ExistingMember,
         addr,
         d.matchmaker_config(MatchmakerId(args.id)),
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
         &NoAudit,
@@ -294,6 +341,7 @@ async fn run_replica(args: ServerArgs) -> Result<Result<(), RunError>, String> {
     let d = &args.deployment;
     d.validate()?;
     let addr = Deployment::addr_of(&d.replicas, "replica", args.id)?;
+    args.check_record("replica")?;
     let providers = TokioProviders::new();
     let storage = JournalStorage::new(
         moonpool_core::Providers::storage(&providers).clone(),
@@ -307,8 +355,8 @@ async fn run_replica(args: ServerArgs) -> Result<Result<(), RunError>, String> {
         storage,
         addr,
         d.node_book(),
-        args.boot(),
-        DriverTunables::default(),
+        BootKind::ExistingMember,
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
         &NoAudit,
@@ -327,10 +375,107 @@ async fn run_proxy(args: ProxyArgs) -> Result<Result<(), RunError>, String> {
         d.proxy_config(ProxyId(args.id)),
         d.node_book(),
         d.replica_book(),
-        DriverTunables::default(),
+        tunables::from_env()?,
         shutdown_on_signal(),
         &NoHooks,
         &NoAudit,
     )
     .await)
+}
+
+/// Node `id`'s genesis journals and their configurations, in id order.
+fn genesis(d: &Deployment, id: NodeId) -> BTreeMap<JournalId, paros::Config> {
+    d.journals
+        .iter()
+        .map(|&journal| (JournalId(journal), d.node_config(id, JournalId(journal))))
+        .collect()
+}
+
+/// `parosd provision <role>` (#208): format every store of the identity,
+/// then write the provisioning record. A data directory that carries a
+/// record was provisioned already and is refused; one without a record
+/// resumes an interrupted provisioning from what its disk holds.
+async fn provision(role: Provision) -> Result<Result<(), RunError>, String> {
+    let (name, args) = match &role {
+        Provision::Node(args) => ("node", args),
+        Provision::Matchmaker(args) => ("matchmaker", args),
+        Provision::Replica(args) => ("replica", args),
+    };
+    let d = &args.deployment;
+    d.validate()?;
+    let book = match role {
+        Provision::Node(_) => &d.nodes,
+        Provision::Matchmaker(_) => &d.matchmakers,
+        Provision::Replica(_) => &d.replicas,
+    };
+    Deployment::addr_of(book, name, args.id)?;
+    match Record::read(&args.data_dir) {
+        Ok(None) => {}
+        Ok(Some(_)) => return Ok(Err(RunError::Refused(BootRefusal::AlreadyFormatted))),
+        Err(error) => return Err(format!("provisioning record: {error}")),
+    }
+    let provider = moonpool_core::TokioStorageProvider::new();
+    let layout = args.layout.config();
+    let mut outcomes = Vec::new();
+    let mut journals = std::collections::BTreeSet::new();
+    match role {
+        Provision::Node(_) => {
+            for (journal, config) in genesis(d, NodeId(args.id)) {
+                let mut store = JournalStorage::new(
+                    provider.clone(),
+                    path_str(&journal_dir(&args.data_dir, journal)),
+                    config,
+                    layout,
+                );
+                match paros::provision_store(&mut store).await {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(error) => return Ok(Err(error)),
+                }
+                journals.insert(journal);
+            }
+        }
+        Provision::Matchmaker(_) => {
+            let mut store = JournalMatchmakerStorage::new(
+                provider,
+                path_str(&matchmaker_dir(&args.data_dir)),
+                layout,
+            );
+            let config = d.matchmaker_config(MatchmakerId(args.id));
+            match paros::provision_matchmaker_store(&mut store, &config).await {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(error) => return Ok(Err(error)),
+            }
+        }
+        Provision::Replica(_) => {
+            let mut store = JournalStorage::new(
+                provider,
+                path_str(&replica_dir(&args.data_dir)),
+                d.replica_config(NodeId(args.id)),
+                layout,
+            );
+            match paros::provision_store(&mut store).await {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(error) => return Ok(Err(error)),
+            }
+        }
+    }
+    let record = Record {
+        role: name.into(),
+        id: args.id,
+        journals,
+    };
+    record
+        .write(&args.data_dir)
+        .map_err(|e| format!("provisioning record: {e}"))?;
+    let resumed = outcomes
+        .iter()
+        .filter(|o| **o == Provisioned::Resumed)
+        .count();
+    println!(
+        "provisioned {name} {}: {} stores formatted, {resumed} already formatted by an \
+         interrupted run",
+        args.id,
+        outcomes.len() - resumed
+    );
+    Ok(Ok(()))
 }

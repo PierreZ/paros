@@ -583,11 +583,20 @@ set) the same way. In the simulation an operator sometimes restarts a node or a
 matchmaker under an edited file, and the library has to refuse it before the
 restored file brings it back as the member it was.
 
+In production the claim is not a flag on the start. `parosd provision` formats
+every store of an identity once, as its own command, and records that it did in
+a provisioning record beside the stores; every ordinary start is an existing
+member. A start therefore never formats: a wiped volume is refused as amnesia,
+and a second `provision` is refused as already formatted. A provisioning
+interrupted between its formats and its record resumes by reading the disk, the
+rule the simulation's operator follows too.
+
 **In the code.** `LogStorage::formatted_config`, `LogStorage::format`
 (`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,
 `BootRefusal::ConfigMismatch` (`crates/paros/src/driver/config.rs`);
-`Audit::boot_refused`. Play it:
+`Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`) and
+`parosd`'s `Record` (`crates/parosd/src/record.rs`). Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
 
 ## Many journals on one process

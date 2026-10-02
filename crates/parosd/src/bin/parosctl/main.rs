@@ -19,6 +19,8 @@
 
 mod commands;
 mod output;
+#[path = "../../resolve.rs"]
+mod resolve;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -47,6 +49,7 @@ struct Cli {
 struct Global {
     /// The servers to ask, comma-separated: `ID=HOST:PORT` (the node id a
     /// leader hint names it by) or `HOST:PORT` (its position in the list).
+    /// A host is an IP or a name, resolved once, at startup.
     #[arg(long, env = "PAROSCTL_SERVERS", value_delimiter = ',', global = true)]
     servers: Vec<ServerArg>,
     /// Print JSON, one document per answer, instead of text.
@@ -79,10 +82,8 @@ impl FromStr for ServerArg {
             ),
             None => (None, s),
         };
-        let addr = paros::parse_addr(addr.trim())
-            .map_err(|e| format!("bad address in {s:?}: {e}"))?
-            .parse()
-            .map_err(|e| format!("bad address in {s:?}: {e}"))?;
+        let addr =
+            resolve::resolve(addr.trim()).map_err(|e| format!("bad address in {s:?}: {e}"))?;
         Ok(Self { id, addr })
     }
 }
