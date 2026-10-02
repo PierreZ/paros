@@ -10,6 +10,7 @@
 //! `select!`s each one races — is fixed by the caller alone. No function
 //! here draws randomness.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -34,12 +35,28 @@ use crate::client::ChainClient;
 /// shutdown) or that comes back without a verdict stays unknown. Calls
 /// naming any other journal (the system journals, a created one, a stray
 /// id) are not this history's and are not logged.
+///
+/// It also holds the library to **a retry is the same write** (#204, #221):
+/// while the workload has an operation open ([`CallLog::open_write`]),
+/// every `Write` attempt the library makes for it must carry the request
+/// the first one did — generation, owner, position and bytes. A client
+/// that re-sent a write at a fresh position would write it twice; the
+/// journal model cannot tell two such attempts from two writes, so this is
+/// where it is caught.
 #[derive(Clone)]
 pub(crate) struct CallLog {
     journal: u64,
     client: u64,
     time: SimTimeProvider,
     attempts: Arc<Mutex<Vec<Attempt>>>,
+    retries: Arc<Mutex<Retries>>,
+}
+
+/// The write operation open now, and the request each operation first sent.
+#[derive(Default)]
+struct Retries {
+    open: Option<u64>,
+    first: BTreeMap<u64, Call>,
 }
 
 impl CallLog {
@@ -49,7 +66,40 @@ impl CallLog {
             client,
             time,
             attempts: Arc::default(),
+            retries: Arc::default(),
         }
+    }
+
+    /// The `Write` attempts from now until [`CallLog::close_write`] are all
+    /// the workload's operation `op`: one write, however many times the
+    /// library sends it.
+    pub(crate) fn open_write(&self, op: u64) {
+        self.retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .open = Some(op);
+    }
+
+    /// Close the operation [`CallLog::open_write`] opened.
+    pub(crate) fn close_write(&self) {
+        self.retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .open = None;
+    }
+
+    /// Hold an attempt of the open operation to the request it first sent.
+    fn judge_retry(&self, call: &Call) {
+        let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(op) = retries.open else {
+            return;
+        };
+        let first = retries.first.entry(op).or_insert_with(|| call.clone());
+        assert_always!(
+            first == call,
+            "client: every attempt of one write is the identical write",
+            { "op" => op }
+        );
     }
 
     fn now(&self) -> u64 {
@@ -84,6 +134,9 @@ impl CallObserver for CallLog {
             },
             Attempted::Truncate(t) => Call::Truncate { up_to: t.up_to },
         };
+        if matches!(call, Call::Write { .. }) {
+            self.judge_retry(&call);
+        }
         let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
         attempts.push(Attempt {
             client: self.client,

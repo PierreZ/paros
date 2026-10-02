@@ -1427,6 +1427,7 @@ impl Workload for ChainWorkload {
                         // following redirects (a `WRITE_TO_NON_LEADER` stops
                         // at the first) inside one request deadline.
                         let request = writer.request(&submission.entry);
+                        log.open_write(submission.op);
                         let report = nodes
                             .write(
                                 &request,
@@ -1443,7 +1444,7 @@ impl Workload for ChainWorkload {
                         if report.redirects > 0 && matches!(result, WriteOutcome::Written { .. }) {
                             redirected_written = true;
                         }
-                        if matches!(result, WriteOutcome::Ambiguous) {
+                        let result = if matches!(result, WriteOutcome::Ambiguous) {
                             tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
                             // Settle it (#204: the journal answers the
                             // identical write from the log): read the
@@ -1483,7 +1484,9 @@ impl Workload for ChainWorkload {
                             }
                         } else {
                             result
-                        }
+                        };
+                        log.close_write();
+                        result
                     };
                     match result {
                         WriteOutcome::Written { seq, count, .. } => {
@@ -1911,8 +1914,12 @@ impl Workload for ChainWorkload {
                     let mut race_reader = paros::client::Reader::new(journal, from);
                     let gap = (racing && matches!(answer, ReadOutcome::Truncated { .. }))
                         .then(|| race_reader.absorb(answer.clone()));
+                    // Only an answer is judged: one that never came (the unset
+                    // id is refused at the edge, as a transport error) or went
+                    // unserved is ambiguous, never assumed.
+                    let answered = answer.is_served() || answer == ReadOutcome::UnknownJournal;
                     match answer {
-                        answer if stray => {
+                        answer if stray && answered => {
                             assert_always!(
                                 answer == ReadOutcome::UnknownJournal,
                                 "chain: a read naming another journal is refused",
@@ -1920,7 +1927,7 @@ impl Workload for ChainWorkload {
                             );
                             self.history.record_read_failed(op_id);
                         }
-                        answer if answer.is_served() || answer == ReadOutcome::UnknownJournal => {
+                        answer if answered => {
                             assert_always!(
                                 answer != ReadOutcome::UnknownJournal,
                                 "chain: a node serves the journal the client names"
@@ -2822,7 +2829,9 @@ impl Workload for ChainWorkload {
                     }
                     _ => self.submit(&audit, &config, writer, &mut next_op, raw, raw, now_ms()),
                 };
+                log.open_write(submission.op);
                 let outcome = writer.write_entry(&nodes, &submission.entry, target).await;
+                log.close_write();
                 match outcome {
                     WriterOutcome::Written {
                         seq,
