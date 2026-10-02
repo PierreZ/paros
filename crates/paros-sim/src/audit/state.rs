@@ -328,6 +328,12 @@ pub(super) struct AuditState {
     pub(super) wiped_any: bool,
     /// The library refused an amnesiac member (#147).
     pub(super) amnesia_refused: bool,
+    /// The library refused a node's restart under an edited configuration
+    /// (#207).
+    pub(super) config_mismatch_refused: bool,
+    /// The library refused a matchmaker's restart under an edited
+    /// configuration (#207).
+    pub(super) matchmaker_config_mismatch_refused: bool,
     /// A client asked some leader to reconfigure the matchmaker set.
     pub(super) reconfigure_matchmakers_started: bool,
     /// Some leader refused a matchmaker-set reconfiguration request.
@@ -506,6 +512,9 @@ pub(super) struct AuditState {
     pub(super) acked_by_other: BTreeMap<u64, u64>,
     /// A quorum read was served by a replica (§3.4, #144).
     pub(super) quorum_read_on_replica: bool,
+    /// A quorum read was served by a replica on a matchmaker deployment
+    /// (#206: the replica follows the configuration the beats carry).
+    pub(super) quorum_read_on_replica_with_matchmakers: bool,
     /// Journal-read outcomes (#204): a long-poll was woken by a newly
     /// folded write, a read was served by a replica, a read below
     /// `first_seq` was refused.
@@ -847,6 +856,10 @@ impl AuditState {
         assert_sometimes!(
             self.quorum_read_on_replica,
             "replica: a quorum read is served by a replica"
+        );
+        assert_sometimes!(
+            self.quorum_read_on_replica_with_matchmakers,
+            "replica: a quorum read is served by a replica on a matchmaker deployment"
         );
         self.check_journal_read_gates();
     }

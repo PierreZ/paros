@@ -57,6 +57,7 @@ pub struct HardState {
 ///   later removed; either way it stays addressable, answers Phase 1 for the
 ///   ballots it took part in, and learns the chosen log as a replica.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Config {
     /// This node's identity.
     pub id: NodeId,

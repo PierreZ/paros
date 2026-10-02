@@ -64,6 +64,11 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     // unformatted (that is exactly the wiped-disk shape the driver refuses).
     let s = fresh().await;
     assert!(!s.is_formatted(), "a fresh store carries no format marker");
+    assert_eq!(
+        s.formatted_config(),
+        None,
+        "a fresh store records no configuration"
+    );
     let mut s = fresh().await;
     s.persist_ballot(ballot(1)).await.expect("ballot");
     s.sync(MustSync::Sync).await.expect("sync ballot");
@@ -72,11 +77,30 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         !s.is_formatted(),
         "protocol writes never format a store on their own"
     );
+    // #207: the marker records the configuration it was written under —
+    // the one handed to `format`, byte for byte, never the one the store is
+    // opened with later. The store keeps answering the operator's own
+    // configuration through the recovery port; the driver compares the two.
     let mut s = fresh().await;
-    s.format().await.expect("format");
+    let (_, operator) = s.initial_state();
+    let provisioned = paros_core::Config {
+        replica_count: operator.replica_count + 1,
+        ..operator.clone()
+    };
+    s.format(&provisioned).await.expect("format");
     s.sync(MustSync::Sync).await.expect("sync format");
     let s = reopen(s).await;
     assert!(s.is_formatted(), "the format marker survives a reopen");
+    assert_eq!(
+        s.formatted_config().as_ref(),
+        Some(&provisioned),
+        "the format marker records the configuration it was written under"
+    );
+    assert_eq!(
+        s.initial_state().1,
+        operator,
+        "the recorded configuration never replaces the operator's"
+    );
     let mut s = reopen(s).await;
     s.persist_ballot(ballot(2))
         .await
@@ -84,6 +108,11 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     s.sync(MustSync::Sync).await.expect("sync after format");
     let s = reopen(s).await;
     assert!(s.is_formatted(), "the format marker is never removed");
+    assert_eq!(
+        s.formatted_config().as_ref(),
+        Some(&provisioned),
+        "later writes never edit the recorded configuration"
+    );
 
     // Scalars + per-slot records round-trip through a Sync flush.
     let mut s = fresh().await;

@@ -29,8 +29,8 @@ use std::sync::{Mutex, PoisonError, Weak};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::{
-    Ballot, MatchmakerHardState, MatchmakerStorage, Registration, RegistryStorage, StorageError,
-    StorageRecord, WriteOutcome,
+    Ballot, MatchmakerConfig, MatchmakerHardState, MatchmakerStorage, Registration,
+    RegistryStorage, StorageError, StorageRecord, WriteOutcome,
 };
 
 use super::StorageWorld;
@@ -42,16 +42,17 @@ use super::storage::StorageFaults;
 pub(super) struct MatchmakerDisk {
     pub(super) hard_state: MatchmakerHardState,
     pub(super) registry: BTreeMap<Ballot, Registration>,
-    /// The format marker (#183): written by the driver on the matchmaker's
-    /// first boot, never cleared — gone only with the whole disk (a wipe).
-    pub(super) formatted: bool,
+    /// The format marker (#183) and the configuration it was written under
+    /// (#207): written by the driver on the matchmaker's first boot, never
+    /// cleared — gone only with the whole disk (a wipe).
+    pub(super) formatted: Option<MatchmakerConfig>,
 }
 
 impl MatchmakerDisk {
     /// Apply one flushed write, in batch order.
     fn apply(&mut self, op: Staged) {
         match op {
-            Staged::Format => self.formatted = true,
+            Staged::Format(config) => self.formatted = Some(config),
             Staged::Register(ballot, registration) => {
                 // Write-once, seen from the disk: a re-write of a registered
                 // ballot carries the same bytes (the core never re-registers,
@@ -94,7 +95,7 @@ impl MatchmakerDisk {
 
 /// One staged write, replayed in order at the fsync.
 enum Staged {
-    Format,
+    Format(MatchmakerConfig),
     Register(Ballot, Registration),
     Watermark(Ballot),
     Scalars(MatchmakerHardState),
@@ -109,7 +110,7 @@ pub(crate) struct DurableMatchmakerStorage<T> {
     boot_registry: BTreeMap<Ballot, Registration>,
     /// The format marker as of this boot, raised by a staged `format` (the
     /// driver reads it once, before the core, and formats at most once).
-    formatted: bool,
+    formatted: Option<MatchmakerConfig>,
     world: Weak<Mutex<StorageWorld>>,
     /// This matchmaker's IP — its key into the world.
     key: String,
@@ -142,7 +143,7 @@ impl<T: TimeProvider> DurableMatchmakerStorage<T> {
                     (
                         disk.hard_state.clone(),
                         disk.registry.clone(),
-                        disk.formatted,
+                        disk.formatted.clone(),
                     )
                 })
             })
@@ -189,13 +190,13 @@ impl<T: TimeProvider> RegistryStorage for DurableMatchmakerStorage<T> {
 }
 
 impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
-    fn is_formatted(&self) -> bool {
-        self.formatted
+    fn formatted_config(&self) -> Option<MatchmakerConfig> {
+        self.formatted.clone()
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn format(&mut self) -> Result<(), StorageError> {
-        self.staged.push(Staged::Format);
+    async fn format(&mut self, config: &MatchmakerConfig) -> Result<(), StorageError> {
+        self.staged.push(Staged::Format(config.clone()));
         Ok(())
     }
 
@@ -261,12 +262,15 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
             }
         }
         let key = self.key.clone();
-        let formats = staged.iter().any(|op| matches!(op, Staged::Format));
+        let formats = staged.iter().find_map(|op| match op {
+            Staged::Format(config) => Some(config.clone()),
+            _ => None,
+        });
         self.with_world(|w| {
             // The operator's provisioning ledger (#147, #183) records the
             // matchmaker exactly when its marker lands durably: a first boot
             // whose format sync was lost is a first boot again.
-            if formats {
+            if formats.is_some() {
                 w.note_provisioned(&key);
             }
             let disk = w.matchmakers.entry(key).or_default();
@@ -274,8 +278,8 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
                 disk.apply(op);
             }
         })?;
-        if formats {
-            self.formatted = true;
+        if formats.is_some() {
+            self.formatted = formats;
         }
         Ok(())
     }

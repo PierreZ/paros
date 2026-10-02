@@ -231,7 +231,7 @@ fn a_damaged_accepted_record_is_reported_faulty_mid_log_and_at_the_tail() {
         run(&mut sim, |provider| async move {
             let store = small(1_000);
             let mut node = open_node(provider.clone(), "n", store).await.expect("open");
-            node.format().await.expect("format");
+            node.format(&config()).await.expect("format");
             node.persist_ballot(ballot(5)).await.expect("promise");
             for (slot, byte) in [(0, 0xA1), (1, 0xA2), (2, 0xA3)] {
                 node.append_accepted(Slot(slot), ballot(5), user(slot, byte))
@@ -285,7 +285,7 @@ fn checkpoints_drop_the_prefix_and_fold_back_to_the_same_state() {
             // checkpoint, so the prefix really goes.
             let store = small(8);
             let mut node = open_node(provider.clone(), "c", store).await.expect("open");
-            node.format().await.expect("format");
+            node.format(&config()).await.expect("format");
             for round in 1..=300_u64 {
                 node.persist_ballot(ballot(round)).await.expect("promise");
                 node.set_chosen_index(Slot(round)).await.expect("index");

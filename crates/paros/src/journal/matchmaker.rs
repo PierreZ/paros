@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 
 use moonpool_core::StorageProvider;
 use moonpool_journal::{EntryId, Journal, Record, Tag};
-use paros_core::{Ballot, MatchmakerHardState, NodeId, Registration, RegistryStorage};
+use paros_core::{
+    Ballot, MatchmakerConfig, MatchmakerHardState, NodeId, Registration, RegistryStorage,
+};
 use serde::{Deserialize, Serialize};
 
 use super::frame::{Framed, Kind, Scanned, encode, epoch, tag, words};
@@ -86,18 +88,20 @@ impl Framed for MatchRecord {
 }
 
 /// What the journal's two-copy metadata holds for a matchmaker: the format
-/// marker (#183), the one fact whose loss no replay can recover.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// marker (#183) and the configuration it was written under (#207), the one
+/// fact whose loss no replay can recover.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct MatchMeta {
-    /// Set once by `format`, never cleared.
-    formatted: bool,
+    /// Set once by `format`, never cleared or edited.
+    formatted: Option<MatchmakerConfig>,
 }
 
-/// Version byte in front of the metadata's encoding.
-const MATCH_META_VERSION: u8 = 1;
+/// Version byte in front of the metadata's encoding. Version 2 (#207)
+/// replaced the bare marker with the configuration it was written under.
+const MATCH_META_VERSION: u8 = 2;
 
 impl MatchMeta {
-    fn encode(self) -> Vec<u8> {
+    fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![MATCH_META_VERSION];
         bytes.extend(postcard::to_stdvec(&self).expect("in-memory encoding of the metadata"));
         bytes
@@ -406,14 +410,14 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         self.load().await
     }
 
-    fn is_formatted(&self) -> bool {
-        self.meta.formatted
+    fn formatted_config(&self) -> Option<MatchmakerConfig> {
+        self.meta.formatted.clone()
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
-    async fn format(&mut self) -> Result<(), StorageError> {
+    async fn format(&mut self, config: &MatchmakerConfig) -> Result<(), StorageError> {
         self.opened().await?;
-        self.meta.formatted = true;
+        self.meta.formatted = Some(config.clone());
         self.meta_dirty = true;
         Ok(())
     }

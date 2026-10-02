@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
 use paros::{
-    Ballot, Command, HardState, IntegrityFault, MetadataFault, Slot, StorageRecord, WitnessStatus,
+    Ballot, Command, Config, HardState, IntegrityFault, MetadataFault, Slot, StorageRecord,
+    WitnessStatus,
 };
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
@@ -121,9 +122,10 @@ pub(super) struct NodeDisk {
     /// One pending transient read-`EIO` target, cleared when it surfaces (the
     /// retry — the next boot — reads clean).
     read_eio: Option<StorageRecord>,
-    /// The format marker (#147): written by the driver on the identity's
-    /// first boot, never cleared — gone only with the whole disk (a wipe).
-    formatted: bool,
+    /// The format marker (#147) and the configuration it was written under
+    /// (#207): written by the driver on the identity's first boot, never
+    /// cleared or edited — gone only with the whole disk (a wipe).
+    formatted: Option<Config>,
 }
 
 impl NodeDisk {

@@ -20,8 +20,8 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing",
 # moonpool-rpc over those providers, so the SAME code — transport included —
 # runs in production (TokioProviders) and deterministic simulation
 # (SimProviders). Both Moonpool crates come in without production providers so
-# `paros` stays wasm-safe; a future `native` feature + `parosd` binary layers
-# tokio back on. Pinned to a commit on moonpool's `main` (it evolves fast; not
+# `paros` stays wasm-safe; the `parosd` crate layers tokio back on (#206).
+# Pinned to a commit on moonpool's `main` (it evolves fast; not
 # the crates.io release) — same rev as paros-sim.
 moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "7a066e9c236050856b7a8caca03b3e6a171d096c", default-features = false, features = ["select"] }
 # Typed request/reply RPC over the provider traits, protobuf bodies (prost).

@@ -390,7 +390,7 @@ The **driver** (`paros::run_node`, the etcd-raft `Node` layer) owns the `Colocat
 `paros::run_matchmaker`, `paros::run_proxy` and `paros::run_replica` are the same shape for
 the three other roles.
 It is written **once, generic over moonpool's `P: Providers`** (and `S: LogStorage`), so the *same*
-code runs in production (`TokioProviders` + a future `parosd` binary) and deterministic simulation
+code runs in production (`TokioProviders`, the `parosd` binary) and deterministic simulation
 (`SimProviders`). The boundary is the only thing that differs: `paros-sim` adapts it to a moonpool
 `Process`; production adapts a `tokio::main`. This "test the code you ship" rule is load-bearing —
 protocol logic added in later stages lives in the provider-generic driver, never in a sim-only path.
@@ -970,7 +970,14 @@ ExistingMember}`, never inferred from the store), formats the store durably on a
 (`RunError::Refused(BootRefusal::Amnesia)`, reported through `Audit::boot_refused`) — an
 empty-but-openable store is otherwise indistinguishable from a first boot to `ColocatedNode::new`.
 A first boot on a formatted store is refused too (`AlreadyFormatted`: two identities on one
-disk). The marker is a store property, not protocol state: no `HardState` scalar, and the plain
+disk). The marker **records the `Config` it was written under** (#207,
+`LogStorage::formatted_config`; `MatchmakerStorage::formatted_config` for the registry's
+`MatchmakerConfig`), and an existing member handed another one is refused as `ConfigMismatch`:
+the bootstrap membership, the quorum system and the counts are safety inputs read once at
+construction, never edited in a configuration file across a restart. In simulation an operator
+restarts a node or a matchmaker under an edited file (`NodeShape::config_edit_pct`, a
+`buggify_knob!`), the library refuses it, and the operator restores the file and restarts. The
+marker is a store property, not protocol state: no `HardState` scalar, and the plain
 deployment persists the same two scalars. In the harness the operator's claim is the storage
 world's **provisioning ledger**, recorded exactly when the marker lands durably and kept outside
 the disks, so a wipe erases the marker but not the memory of having provisioned the node: the
@@ -1104,7 +1111,7 @@ driver hooks and the sim/workload layers (per the turbulence doctrine above — 
 ## Layout
 
 Cargo workspace (mirrors moonpool). All Rust packages live under `crates/`.
-Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
+Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner, and `paros` ← `parosd`.
 `paros-core` is dependency-free with `default-features = false` (its only deps, `serde` and
 `tracing`, are optional and observation-only); everything ultimately points into it.
 
@@ -1127,12 +1134,20 @@ Dependency stack: `paros-core` ← `paros` ← `paros-sim` ← runner.
   node RPC contract (the journal API of #204: `Write`, `Read`, `Truncate`, `SetLeader`, every
   call naming a `JournalId`), and the matchmaker's driver + storage seam
   (`run_matchmaker` over `S: MatchmakerStorage`, `crates/paros/src/matchmaker/`). The client API
-  + a `parosd` binary land here. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
+  lands here; the `parosd` binary is its own crate. Deps: `paros-core`, `moonpool-core` + `moonpool-rpc` (the
   transport: typed request/reply over the provider traits, protobuf bodies; wasm-safe) and
   `moonpool-journal` (the durable stores of `paros::journal`, `JournalStorage` /
   `JournalMatchmakerStorage`: a log of write operations folded at boot, see *Storage
   direction*). The faulty fake the campaign runs on is still the harness's world-backed store
   (`crates/paros-sim/src/world/storage.rs`).
+- `crates/parosd/` — the daemon (`publish = false`, #206): the first build that links moonpool's
+  `TokioProviders`. `parosd node|matchmaker|replica|proxy` runs the library's drivers over Tokio
+  with `paros::journal`'s stores in a data directory (`DirStores`, one directory per journal),
+  the operator's boot claim as `--first-boot`, a tracing subscriber, `SIGTERM` to the shutdown
+  token and an exit code per `RunError` (75 restart, 78 refused, 1 infra); `parosd set-leader|
+  write|read` is the smallest client. Its tests run the two storage contract suites on a real
+  filesystem and a one-node, one-matchmaker, one-replica deployment end to end. The `paros`
+  library itself stays wasm-safe and provider-free.
 - `crates/paros-sim/` — the DST harness on top of `paros`: the moonpool `Process` adapter, the
   deployment/role map, the fault world, the one client workload, the audit, and the scripted
   corpus. Depends on `paros` + `moonpool-sim`.

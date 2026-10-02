@@ -14,16 +14,19 @@ use crate::storage::{LogStorage, StorageError, StorageRecord};
 
 /// The scalars the journal's two-copy metadata holds: the ones whose loss
 /// no peer can repair.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NodeMeta {
-    /// The format marker (#147): set once, never cleared.
-    formatted: bool,
+    /// The format marker (#147) and the configuration the store was
+    /// provisioned under (#207): set once, never cleared or edited.
+    formatted: Option<Config>,
     /// The promised ballot.
     promise: Ballot,
 }
 
-/// Version byte in front of the metadata's encoding.
-const META_VERSION: u8 = 1;
+/// Version byte in front of the metadata's encoding. Version 2 (#207)
+/// replaced the bare marker with the configuration it was written under; a
+/// version-1 store does not decode (no deployment ever ran one).
+const META_VERSION: u8 = 2;
 
 impl NodeMeta {
     fn encode(&self) -> Vec<u8> {
@@ -350,14 +353,14 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         self.load().await
     }
 
-    fn is_formatted(&self) -> bool {
-        self.meta.formatted
+    fn formatted_config(&self) -> Option<Config> {
+        self.meta.formatted.clone()
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
-    async fn format(&mut self) -> Result<(), StorageError> {
+    async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
         self.opened().await?;
-        self.meta.formatted = true;
+        self.meta.formatted = Some(config.clone());
         self.meta_dirty = true;
         Ok(())
     }

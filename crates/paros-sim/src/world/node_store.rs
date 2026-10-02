@@ -146,20 +146,20 @@ impl LogStorage for NodeStore {
         }
     }
 
-    fn is_formatted(&self) -> bool {
+    fn formatted_config(&self) -> Option<Config> {
         match self {
-            Self::World(s) => s.is_formatted(),
-            Self::Journal(s) => s.inner.is_formatted(),
+            Self::World(s) => s.formatted_config(),
+            Self::Journal(s) => s.inner.formatted_config(),
         }
     }
 
-    async fn format(&mut self) -> Result<(), StorageError> {
+    async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
         match self {
-            Self::World(s) => s.format().await,
+            Self::World(s) => s.format(config).await,
             Self::Journal(s) => {
                 let ip = s.ip.clone();
                 s.with_world(|w| w.note_provisioning(&ip));
-                let formatted = s.inner.format().await;
+                let formatted = s.inner.format(config).await;
                 s.ledger(formatted)?;
                 s.format_pending = true;
                 Ok(())

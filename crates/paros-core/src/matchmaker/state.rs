@@ -196,6 +196,7 @@ pub(crate) fn raise_effective(
 /// A matchmaker's static configuration: its identity and the deployment's
 /// bootstrap matchmaker set (generation 0).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchmakerConfig {
     /// This matchmaker's identity.
     pub id: MatchmakerId,

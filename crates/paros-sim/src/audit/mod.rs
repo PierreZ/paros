@@ -1135,6 +1135,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.quorum_read_on_row |= row.is_some();
         // §3.4's own shape (#144): the read answered from a replica's state.
         st.quorum_read_on_replica |= st.replicas.contains(&node.0);
+        // The same on a matchmaker deployment, where the configuration a
+        // read is bound to moves with every registration: a replica must
+        // follow it from the beats to have its reads confirmed at all.
+        st.quorum_read_on_replica_with_matchmakers |=
+            st.replicas.contains(&node.0) && st.matchmaker.has_matchmakers();
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -1352,6 +1357,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     false,
                     "storage: a first boot never meets a formatted store",
                     { "node" => node.0 }
+                );
+            }
+            // #207: the operator's edited configuration file is refused;
+            // the identity is not gone — the operator restores the file and
+            // the node restarts as the member it was, so convergence still
+            // waits for it.
+            BootRefusal::ConfigMismatch => {
+                reach_once!(
+                    st.config_mismatch_refused,
+                    "storage: the library refuses a restart under an edited configuration"
                 );
             }
         }
@@ -2163,6 +2178,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     false,
                     "matchmaker: a first boot never meets a formatted registry",
                     { "matchmaker" => matchmaker.0 }
+                );
+            }
+            // #207: an edited configuration is refused, then restored.
+            BootRefusal::ConfigMismatch => {
+                let mut st = self.state();
+                reach_once!(
+                    st.matchmaker_config_mismatch_refused,
+                    "matchmaker: the library refuses a restart under an edited configuration"
                 );
             }
         }
