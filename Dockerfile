@@ -19,10 +19,12 @@ RUN apt-get update \
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 WORKDIR /src
 COPY . .
+# No `--locked`: the workspace commits no `Cargo.lock` (a library crate,
+# `.gitignore`), so the build resolves its dependencies as every build does.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p parosd \
+    cargo build --release -p parosd \
  && cp target/release/parosd target/release/parosctl /usr/local/bin/
 
 FROM debian:bookworm-slim
