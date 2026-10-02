@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::{
     AcceptorConfig, Audit, Ballot, BootRefusal, Command, Deployment, EdgeRejection, GcAck, GcStep,
-    HANDOFF_BATCH, Handoff, HistoryPage, JournalId, LEADER_RECOVERY_BATCH, LogReadAnswer,
+    HANDOFF_BATCH, Handoff, HistoryPage, JournalKey, LEADER_RECOVERY_BATCH, LogReadAnswer,
     LogReadReport, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     Message, NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
@@ -77,7 +77,7 @@ pub(crate) struct NodeAudit<T> {
     world: Arc<AuditWorld>,
     /// The journal this port reports for and the run's cross-journal board
     /// (#188); `None` for a port outside the journal plane (a matchmaker).
-    journal: Option<(JournalId, Arc<Mutex<journals::JournalBoard>>)>,
+    journal: Option<(JournalKey, Arc<Mutex<journals::JournalBoard>>)>,
     /// The run's system-journal board (#189), on a node that follows the
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
@@ -142,7 +142,7 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// on `board` see its applies, its sends and its quarantines.
     pub(crate) fn in_journal(
         mut self,
-        journal: JournalId,
+        journal: JournalKey,
         board: Arc<Mutex<journals::JournalBoard>>,
     ) -> Self {
         self.journal = Some((journal, board));
@@ -165,7 +165,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             assert_always!(
                 self.state().appended.contains(&vhash),
                 "journal: a slot holds only a command appended to its own journal",
-                { "node" => node.0, "journal" => journal.0, "command" => vhash }
+                { "node" => node.0, "journal" => journal.to_string(), "command" => vhash }
             );
         }
         let in_chaos = self.time.now() < crate::CHAOS_DURATION;
@@ -449,7 +449,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             assert_always!(
                 !board.is_quarantined(node.0, *journal),
                 "journal: a quarantined journal sends nothing",
-                { "node" => node.0, "journal" => journal.0 }
+                { "node" => node.0, "journal" => journal.to_string() }
             );
             board.sent(node.0, *journal);
         }
@@ -1054,15 +1054,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.journal_read_on_replica |= st.replicas.contains(&node.0);
     }
 
-    fn journal_refused(&self, _node: NodeId, _journal: JournalId, _call: &'static str) {
+    fn journal_refused(&self, _node: NodeId, _journal: JournalKey, _call: &'static str) {
         assert_reachable!("journal: a call naming an unserved journal is refused");
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, journal = journal.0, seq))]
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, journal = %journal, seq))]
     fn system_folded(
         &self,
         node: NodeId,
-        journal: JournalId,
+        journal: JournalKey,
         seq: u64,
         event: &paros::system::SystemEvent,
     ) {
@@ -1071,25 +1071,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn journal_started(&self, node: NodeId, _journal: JournalId) {
+    fn journal_started(&self, node: NodeId, _journal: JournalKey) {
         if let Some(mut board) = self.system_board() {
             board.started(node);
         }
     }
 
-    fn journal_stopped(&self, node: NodeId, journal: JournalId) {
+    fn journal_stopped(&self, node: NodeId, journal: JournalKey) {
         assert_reachable!(
             "system: a node stops a journal the directory tombstoned or its retirement ended"
         );
         // A joiner the registry retired leaves the default journal for good
         // (#189): convergence excuses it, exactly like an operator
         // retirement (#123).
-        if journal == JournalId::default() {
+        if journal == JournalKey::default() {
             self.world.note_left_pool(node.0);
         }
     }
 
-    fn unpooled_message(&self, node: NodeId, _journal: JournalId, from: NodeId) {
+    fn unpooled_message(&self, node: NodeId, _journal: JournalKey, from: NodeId) {
         if let Some(mut board) = self.system_board() {
             board.refused(node, from);
         }

@@ -38,7 +38,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/outcome.rs` → `WriteOutcome`, `ReadOutcome`, … → every reply judged once.
 - `client/writer.rs` → `Writer` (`truncate` carries the owner's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
-- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of journals 1 and 2.
+- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (`DIRECTORY`, `REGISTRY`: two tenants' control journals, #235); a create carries its drawn id.
 - `corruption.rs` → `classify_log` → CTRL record classification.
 - `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.
 - `journal/{frame,plan,node_image}.rs` → record ↔ entry codec, boot fold start, node records + per-kind corruption table.

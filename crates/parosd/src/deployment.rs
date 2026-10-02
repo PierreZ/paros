@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use clap::Args;
 use paros::{
-    AcceptorConfig, Config, JournalId, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig,
-    ProxyId, QuorumSystem,
+    AcceptorConfig, Config, JournalId, JournalKey, MatchmakerConfig, MatchmakerId, NodeId,
+    ProxyConfig, ProxyId, QuorumSystem,
 };
 
 /// One entry of an address book: `ID=HOST:PORT`.
@@ -81,11 +81,13 @@ pub struct Deployment {
     /// ids). None is the plain deployment.
     #[arg(long = "replica", value_name = "ID=ADDR")]
     pub replicas: Vec<Entry>,
-    /// A journal the pool serves (`>= 128`); repeat for several. The first
-    /// is the deployment's: the matchmakers, proxies and replicas serve it,
-    /// and every other one is plain Multi-Paxos over the whole pool.
-    #[arg(long = "journal", value_name = "ID", default_value = "128")]
-    pub journals: Vec<u64>,
+    /// A journal the pool serves, `TENANT/JOURNAL` or a bare `JOURNAL` in
+    /// the default tenant (both ids `>= 256`, #235); repeat for several. The
+    /// first is the deployment's: the matchmakers, proxies and replicas
+    /// serve it, and every other one is plain Multi-Paxos over the whole
+    /// pool.
+    #[arg(long = "journal", value_name = "[TENANT/]ID", default_value = "256")]
+    pub journals: Vec<JournalKey>,
 }
 
 impl Deployment {
@@ -118,9 +120,9 @@ impl Deployment {
         }
         let mut seen = std::collections::BTreeSet::new();
         for &journal in &self.journals {
-            if !JournalId(journal).is_user() {
+            if !journal.is_user() || !journal.tenant.is_user() {
                 return Err(format!(
-                    "journal {journal} is reserved: user journals start at {}",
+                    "journal {journal} is reserved: user tenants and journals start at {}",
                     JournalId::FIRST_USER.0
                 ));
             }
@@ -189,8 +191,8 @@ impl Deployment {
 
     /// The deployment's journal: the first listed.
     #[must_use]
-    pub fn first_journal(&self) -> JournalId {
-        JournalId(self.journals[0])
+    pub fn first_journal(&self) -> JournalKey {
+        self.journals[0]
     }
 
     /// The bootstrap acceptor configuration: the whole pool, a majority.
@@ -205,7 +207,7 @@ impl Deployment {
     /// the driver's rule that only a node's first journal names
     /// matchmakers, proxies or replicas.
     #[must_use]
-    pub fn node_config(&self, id: NodeId, journal: JournalId) -> Config {
+    pub fn node_config(&self, id: NodeId, journal: JournalKey) -> Config {
         let pool = self.pool();
         let plain = Config {
             journal,
@@ -335,7 +337,7 @@ mod tests {
             matchmakers: vec!["0=127.0.0.1:3".parse().expect("valid entry")],
             proxies: Vec::new(),
             replicas: vec!["1000=127.0.0.1:4".parse().expect("valid entry")],
-            journals: vec![128, 129],
+            journals: vec![JournalKey::default(), "256/257".parse().expect("a frame")],
         }
     }
 
@@ -343,14 +345,14 @@ mod tests {
     fn only_the_first_journal_names_the_planes() {
         let d = deployment();
         d.validate().expect("valid entry");
-        let first = d.node_config(NodeId(0), JournalId(128));
+        let first = d.node_config(NodeId(0), JournalKey::default());
         assert_eq!(first.peers, vec![NodeId(0), NodeId(1)]);
         assert_eq!(first.matchmakers, vec![MatchmakerId(0)]);
         assert_eq!(first.replica_count, 1);
-        let second = d.node_config(NodeId(0), JournalId(129));
+        let second = d.node_config(NodeId(0), "256/257".parse().expect("a frame"));
         assert!(second.matchmakers.is_empty());
         assert_eq!(second.replica_count, 0);
-        assert_eq!(second.journal, JournalId(129));
+        assert_eq!(second.journal.journal, JournalId(257));
         let replica = d.replica_config(NodeId(1000));
         assert_eq!(replica.matchmakers, first.matchmakers);
         assert!(!replica.peers.contains(&NodeId(1000)));
@@ -362,7 +364,7 @@ mod tests {
         d.replicas = vec!["1=127.0.0.1:4".parse().expect("valid entry")];
         assert!(d.validate().is_err(), "a replica id inside the pool");
         let mut d = deployment();
-        d.journals = vec![2];
+        d.journals = vec![JournalKey::control(paros::TenantId::default())];
         assert!(d.validate().is_err(), "a system journal id");
         let mut d = deployment();
         d.proxies = vec!["1=127.0.0.1:5".parse().expect("valid entry")];

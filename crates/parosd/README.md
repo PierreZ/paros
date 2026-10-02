@@ -41,17 +41,19 @@ parosd matchmaker --id 0    --data-dir mm $D &
 parosd node       --id 0    --data-dir n0 $D &
 parosd replica    --id 1000 --data-dir r0 $D &
 
-# Write two records to journal 128 — claimed on the way — and read them back
+# Write two records to journal 256 of the default tenant (frame 256/256) —
+# claimed on the way — and read them back
 # (from the replica too).
 export PAROSCTL_SERVERS=0=127.0.0.1:4500,1000=127.0.0.1:4700
-parosctl write 128 hello world --owner 7
-parosctl read 128
+parosctl write 256 hello world --owner 7
+parosctl read 256
 ```
 
 A start never formats: the stores must carry their format marker, and the
 configuration they were formatted under must be the one handed in. `parosd proxy --id 0 $D` runs a proxy leader (stateless) when the
-deployment names `--proxy 0=…`. `--journal` (repeatable, default `128`) lists
-the journals the pool serves; the first is the one the matchmakers, proxies
+deployment names `--proxy 0=…`. `--journal` (repeatable, default `256`) lists
+the journals the pool serves, each `TENANT/JOURNAL` or a bare `JOURNAL` in the
+default tenant `256` (both ids `>= 256`; `0..=255` are reserved, #235); the first is the one the matchmakers, proxies
 and replicas serve, every other one is plain Multi-Paxos over the pool.
 
 Until the rendezvous name of #216 replaces the address book, every address

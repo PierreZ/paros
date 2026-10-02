@@ -72,10 +72,12 @@ message ConsensusMessage {
     PreReadAck pre_read_ack = 18;
     TrimmedTo trimmed_to = 19;
   }
-  // The journal this message belongs to (#188): the envelope, per message,
-  // that keeps one journal's protocol state out of another's. Every node
-  // demuxes on it; `0` (unset) is refused at the edge.
+  // The journal this message belongs to, framed by its tenant (#188, #235):
+  // the envelope, per message, that keeps one journal's protocol state out
+  // of another's. Every node demuxes on the pair; an unset half (`0`) is
+  // refused at the edge.
   uint64 journal = 20;
+  uint64 tenant = 21;
 }
 
 // A journal `Write` decided into one slot (#204): judged at apply by the
@@ -311,8 +313,10 @@ message PreReadAck {
 }
 
 message InspectRequest {
-  // The journal to inspect (#188); `0` asks for the node's first journal.
+  // The journal to inspect, with its tenant (#188, #235); a `0` journal asks
+  // for the node's first journal.
   uint64 journal = 1;
+  uint64 tenant = 2;
 }
 
 message InspectReply {

@@ -8,18 +8,18 @@
 use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
-use paros::JournalId;
+use paros::JournalKey;
 
 /// The key of `journal`'s copy of a per-journal singleton (#188): `base`
 /// itself for the default journal — so a one-journal run keeps every key it
 /// always had — and `base` suffixed by the id for any other. Every journal
 /// gets its own audit world and its own storage world, which is how every
 /// oracle is keyed by journal without an oracle knowing.
-pub(crate) fn journal_key(base: &str, journal: JournalId) -> String {
-    if journal == JournalId::default() {
+pub(crate) fn journal_key(base: &str, journal: JournalKey) -> String {
+    if journal == JournalKey::default() {
         base.to_string()
     } else {
-        format!("{base}-{}", journal.0)
+        format!("{base}-{}-{}", journal.tenant.0, journal.journal.0)
     }
 }
 

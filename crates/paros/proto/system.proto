@@ -9,13 +9,14 @@ import "common.proto";
 // entry's identity. The core keeps them opaque like every user entry; only
 // `paros::system` reads them, and every node folds them the same way.
 //
-// Journal 1, the **directory**: `CreateJournal` and `DeleteJournal`. A created
-// journal's id is `128 + the slot of its CreateJournal entry`, so the log
-// order is the allocator and an id is never reused.
+// The **directory**, a tenant's control journal (#235): `CreateJournal` and
+// `DeleteJournal`. A created journal's id is random, drawn by its creator
+// from the user range (`>= 256`) and checked here at apply: a reserved or
+// already used id is refused and the creator redraws. An id is never reused.
 //
-// Journal 2, the **node registry**: `RegisterNode`, `DrainNode`,
-// `RetireNode`. The node pool is the genesis pool plus every registered
-// node not yet retired.
+// The **node registry**, the cell tenant's control journal: `RegisterNode`,
+// `DrainNode`, `RetireNode`. The node pool is the genesis pool plus every
+// registered node not yet retired.
 message SystemEntry {
   oneof kind {
     CreateJournal create_journal = 1;
@@ -26,11 +27,13 @@ message SystemEntry {
   }
 }
 
-// Create a journal named `name` (opaque bytes) over `config`, its static
-// acceptor configuration. Of two creates with one name, the lower slot wins.
+// Create journal `id` named `name` (opaque bytes) over `config`, its static
+// acceptor configuration. Of two creates with one name, or one id, the
+// lower slot wins.
 message CreateJournal {
   bytes name = 1;
   paros.common.v1.AcceptorConfig config = 2;
+  uint64 id = 3;
 }
 
 // Delete journal `id`: a tombstone, never a reuse.

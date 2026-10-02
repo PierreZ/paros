@@ -25,8 +25,8 @@ use paros::client::{
     WriteOutcome, Writer, WriterOutcome,
 };
 use paros::{
-    Command, Entry, JournalId, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
-    Truncate, Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
+    Command, Entry, JournalKey, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
+    TenantId, Truncate, Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
 };
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
@@ -110,15 +110,16 @@ const READ: u8 = 15;
 const CHECK_TAIL: u8 = 16;
 /// Create a journal through the **directory** (#189): a `CreateJournal` of a
 /// name drawn from a four-name alphabet over three members of the pool
-/// (genesis nodes and registered joiners), written to journal 1 at a seed,
-/// then read back — `Created` with its id, or refused for a taken name — and
+/// (genesis nodes and registered joiners), under a journal id it draws
+/// (#235), written to the directory at a seed, then read back — `Created`
+/// with its id, refused for a taken id (redrawn once) or a taken name — and
 /// one record written to a journal it created. On a seed without system
 /// journals the write is still sent, and must be refused as unknown.
 const CREATE_JOURNAL: u8 = 17;
 /// Tombstone a journal this client created (#189): a `DeleteJournal`.
 const DELETE_JOURNAL: u8 = 18;
 /// Register a joiner in the **node registry** (#189): a `RegisterNode` of
-/// its id and address, written to journal 2 at a seed.
+/// its id and address, written to the registry at a seed.
 const REGISTER_NODE: u8 = 19;
 /// Drain a registered joiner (#189): a `DrainNode`.
 const DRAIN_NODE: u8 = 20;
@@ -771,7 +772,7 @@ struct Tail {
     /// The journals some client saw converged (#188): the run ends only once
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
-    converged: BTreeSet<JournalId>,
+    converged: BTreeSet<JournalKey>,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -842,7 +843,7 @@ pub(crate) struct ChainWorkload {
     digest: Option<DigestSink>,
     /// The journal this client writes and reads (#188), and the run's
     /// plan (set in `setup`).
-    journal: JournalId,
+    journal: JournalKey,
     plan: Option<crate::shape::JournalPlan>,
     /// This client's id (set in `setup`): its identity as an owner.
     client_id: u64,
@@ -858,7 +859,7 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
-            journal: JournalId::default(),
+            journal: JournalKey::default(),
             plan: None,
             client_id: 0,
             calls: None,
@@ -998,7 +999,7 @@ impl ChainWorkload {
 /// generation of its own (the races of #205).
 async fn claim(
     nodes: &ChainClient,
-    journal: JournalId,
+    journal: JournalKey,
     target: usize,
     (me, fresh): (u64, bool),
 ) -> ClaimOutcome {
@@ -1130,7 +1131,7 @@ impl Workload for ChainWorkload {
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let replica_ips: Vec<(u64, String)> = if self.journal == JournalId::default() {
+        let replica_ips: Vec<(u64, String)> = if self.journal == JournalKey::default() {
             deployment
                 .replicas()
                 .iter()
@@ -1236,7 +1237,8 @@ impl Workload for ChainWorkload {
                 fold::clamp(ctx.state(), journal, up_to).map(|up_to| {
                     trace_truncate(generation, owner, up_to);
                     let request = Truncate {
-                        journal: journal.0,
+                        journal: journal.journal.0,
+                        tenant: journal.tenant.0,
                         up_to,
                         generation,
                         owner,
@@ -1343,7 +1345,7 @@ impl Workload for ChainWorkload {
             // The matchmaker plane — an acceptor or matchmaker
             // reconfiguration, a retirement — belongs to the default journal
             // (#188): a client of another journal pauses instead.
-            let op = if journal != JournalId::default()
+            let op = if journal != JournalKey::default()
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
                 PAUSE
@@ -1871,7 +1873,8 @@ impl Workload for ChainWorkload {
                                 self.adversarial.compact_storm_modes[mode] = true;
                             }
                             let request = Truncate {
-                                journal: journal.0,
+                                journal: journal.journal.0,
+                                tenant: journal.tenant.0,
                                 up_to,
                                 generation,
                                 owner,
@@ -1940,20 +1943,22 @@ impl Workload for ChainWorkload {
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
                     // A client naming a journal this deployment does not
-                    // serve (`0`, the unset id, or another user journal) must
-                    // be refused, never answered from the wrong journal.
+                    // serve (the unset frame, or another tenant's) must be
+                    // refused, never answered from the wrong journal.
                     let stray = !racing && buggify_with_prob!(0.05);
                     let named = if stray {
                         assert_reachable!("chain: a client asks for a journal nobody serves");
                         if raw_policy & 1 == 0 {
-                            0
+                            JournalKey::UNSET
                         } else {
-                            // Past every journal a run serves (#188: at
-                            // most three, from `FIRST_USER`).
-                            JournalId::FIRST_USER.0 + 1000
+                            // A frame nobody serves (#235): this journal's
+                            // id in a tenant no run draws (`u64::MAX` is
+                            // outside every draw) — the right journal id
+                            // under the wrong tenant must be refused too.
+                            JournalKey::new(TenantId(u64::MAX), journal.journal)
                         }
                     } else {
-                        journal.0
+                        journal
                     };
                     let op_id = next_op;
                     next_op += 1;
@@ -2061,7 +2066,7 @@ impl Workload for ChainWorkload {
                             let call = read_once(
                                 &readers,
                                 (drawn + k) % span.max(1),
-                                journal.0,
+                                journal,
                                 resume_at,
                                 config.read_limit,
                                 0,
@@ -2110,7 +2115,7 @@ impl Workload for ChainWorkload {
                     // request refused (`unchanged`, `unknown_member`) — an
                     // operating condition, never a wrong state.
                     let probe_target = nodes.leader().unwrap_or(target);
-                    let in_force = nodes.inspect(probe_target, journal.0).await.map(|reply| {
+                    let in_force = nodes.inspect(probe_target, journal).await.map(|reply| {
                         let wire = WireQuorumSystem {
                             quorum_system: reply.quorum_system,
                             phase1_quorum: reply.phase1_quorum,
@@ -2403,7 +2408,7 @@ impl Workload for ChainWorkload {
                     // only makes the handover superseded or refused — an
                     // operating condition, never a wrong state.
                     let current: Option<(u64, Vec<u64>)> = nodes
-                        .inspect(target, journal.0)
+                        .inspect(target, journal)
                         .await
                         .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
                     let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
@@ -2509,7 +2514,7 @@ impl Workload for ChainWorkload {
                     // outside C_b", and the node itself refuses the request
                     // unless the watermark proves every configuration it was
                     // a member of is forgotten (#123).
-                    let inspected = nodes.inspect(probe_target, journal.0).await;
+                    let inspected = nodes.inspect(probe_target, journal).await;
                     let (retirable, in_force, gc_watermark) = inspected
                         .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
                         .unwrap_or_default();
@@ -2540,7 +2545,7 @@ impl Workload for ChainWorkload {
                         );
                         let candidates: Vec<usize> = in_force.iter().filter_map(live).collect();
                         let beliefs =
-                            join_all(candidates.iter().map(|i| nodes.inspect(*i, journal.0))).await;
+                            join_all(candidates.iter().map(|i| nodes.inspect(*i, journal))).await;
                         stale_member = candidates.iter().zip(beliefs).find_map(|(i, reply)| {
                             let own = u64::try_from(*i).unwrap_or(u64::MAX);
                             reply
@@ -2672,7 +2677,7 @@ impl Workload for ChainWorkload {
                     reconfigure_next = system_ops
                         .registry_step(ctx, &nodes, None, raw_payload)
                         .await
-                        && journal == JournalId::default()
+                        && journal == JournalKey::default()
                         && operations.contains(&RECONFIGURE);
                 }
                 DRAIN_NODE => {
@@ -2825,7 +2830,7 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == JournalId::default() && client_id == 0)
+        let held_replica = (journal == JournalKey::default() && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))
@@ -3067,7 +3072,7 @@ impl Workload for ChainWorkload {
             for &node in &live {
                 // `readers` holds the nodes, then the replicas: index `node`.
                 let end = readers
-                    .inspect(node, journal.0)
+                    .inspect(node, journal)
                     .await
                     .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
                 let Some(end) = end else {
@@ -3123,7 +3128,7 @@ impl Workload for ChainWorkload {
         // siblings — a client whose journal is quiet keeps the run alive for
         // one still settling.
         if converged {
-            let appended_to: BTreeSet<JournalId> = self
+            let appended_to: BTreeSet<JournalKey> = self
                 .plan
                 .as_ref()
                 .map(|plan| {
@@ -3228,13 +3233,13 @@ impl Workload for ChainWorkload {
                 .unwrap_or_default();
             eprintln!(
                 "  JOURNAL {} of {journals:?} (held {:?})",
-                journal.0,
+                journal,
                 self.plan.as_ref().and_then(|plan| plan.held)
             );
             for other in &journals {
                 eprintln!(
                     "  AUDIT[{}] {}",
-                    other.0,
+                    other,
                     crate::audit::audit_world_for(ctx.state(), *other).diagnostics()
                 );
             }
@@ -3243,7 +3248,7 @@ impl Workload for ChainWorkload {
                 .flat_map(|j| servers.iter().map(move |ip| (ip, *j)))
             {
                 if let Some(probe) = crate::world::disk_probe_for(ctx.state(), disk_journal, ip) {
-                    eprint!("  [journal {}]", disk_journal.0);
+                    eprint!("  [journal {disk_journal}]");
                     eprintln!(
                         "  DISK {ip}: floor={} chosen={:?} clean_slots={}..={}",
                         probe.floor,

@@ -54,8 +54,10 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
 - `journals` → `JournalPlan`: 1–3 journals (one on a matchmaker seed), one held for the chaos
-  window (`hold_journal`). `journal_store` → `JournalStorage` on half the plain seeds, no
-  injected corruption. `system_journals` → journals 1 and 2 on half the seeds, on `SEED_COUNT`
+  window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
+  (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
+  id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
+  injected corruption. `system_journals` → the directory and the registry on half the seeds, on `SEED_COUNT`
   (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
@@ -67,7 +69,7 @@ position per verdict) · `TRUNCATE_STORM=7` · `READ_INDEX=8` retired · `MATCHM
 `MATCH_GC=10` retired · `RECONFIGURE=11` (compose from the live pool; refused on a plain seed)
 · `RECONFIGURE_MATCHMAKERS=12` · `RETIRE=13` · `QUORUM_READ=14` retired · `READ=15` (judged as
 it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=18`,
-`REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to journal 1 or 2; refused
+`REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to the directory or the registry; a create draws its id and redraws on `IdTaken`; refused
 `unknown_journal` without system journals) · `SET_LEADER=22` (CAS on the generation) ·
 `OP_COUNT=23`. Retired ids are no-ops that keep their slot in the alphabet.
 
@@ -89,7 +91,8 @@ it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=1
   appended to `j`; a quarantined journal sends nothing; a sibling keeps committing while one is
   held; a node keeps serving the rest while one is quarantined.
 - **System board** (`audit/system.rs`): every node folds each system journal alike per LSN; a
-  created id is `128 + LSN`, never reused; no append acked after its tombstone; gates for name
+  created journal takes its creator's drawn user id, never reused (`IdTaken` only for an id
+  created before); no append acked after its tombstone; gates for name
   races, joiners learning before admission, refused-then-accepted joiner messages.
 
 ## Entry points (`lib.rs:309-578`)

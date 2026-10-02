@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use paros_core::{JournalId, LogRead, NodeId, ReadState, Seq, Slot};
+use paros_core::{JournalKey, LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::hooks::{DriverHooks, Reply};
@@ -122,21 +122,20 @@ fn send<H: DriverHooks, A: Audit>(
 }
 
 /// The refusal a call naming a journal this process does not serve gets
-/// (#185: `0`, or anything but its own), reported through
+/// (#185: an unset half, or any frame but its own, #235), reported through
 /// [`Audit::journal_refused`]. `true` when the call was refused.
 pub(crate) fn refuse_journal<A: Audit>(
-    served: JournalId,
-    asked: u64,
+    served: JournalKey,
+    asked: JournalKey,
     call: &'static str,
     node: NodeId,
     audit: &A,
 ) -> bool {
-    let asked = JournalId(asked);
     if asked.is_set() && asked == served {
         return false;
     }
     audit.journal_refused(node, asked, call);
-    tracing::info!(node = node.0, journal = asked.0, call, "journal_refused");
+    tracing::info!(node = node.0, journal = %asked, call, "journal_refused");
     true
 }
 

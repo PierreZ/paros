@@ -12,18 +12,64 @@ pub struct NodeId(pub u64);
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Slot(pub u64);
 
-/// The identity of one **journal** (#184, M6): an independent ordered log
-/// with its own ballots, its own chosen prefix and its own store. Every
-/// client call names one, and a process serves a static list of them.
+/// The identity of one **tenant** (#226, #235): the owner of a set of
+/// journals, and the first half of the frame every peer and client message
+/// carries ([`JournalKey`]).
+///
+/// `0` means *unset* and is never served. `0..=255` are reserved for system
+/// tenants: `1` is the meta tenant (one per fleet), `2` is the cell tenant
+/// (one per cell). A user tenant's id is random, drawn by its creator and
+/// checked by meta; it is fleet-unique, so moving a tenant never renumbers
+/// it. The core never makes a protocol decision on the id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TenantId(pub u64);
+
+impl TenantId {
+    /// The unset id: refused wherever a tenant must be named.
+    pub const UNSET: Self = Self(0);
+    /// The meta tenant: the fleet's directory (`docs/architecture.md` §3.7).
+    pub const META: Self = Self(1);
+    /// The cell tenant: the cell's machine registry and capacity (§3.1).
+    pub const CELL: Self = Self(2);
+    /// The first id a user tenant may take (`0..=255` are reserved).
+    pub const FIRST_USER: Self = Self(256);
+
+    /// Whether this id names a tenant at all (`0` does not).
+    #[must_use]
+    pub const fn is_set(self) -> bool {
+        self.0 != 0
+    }
+
+    /// Whether this id is a user tenant's (`>= 256`).
+    #[must_use]
+    pub const fn is_user(self) -> bool {
+        self.0 >= Self::FIRST_USER.0
+    }
+}
+
+impl Default for TenantId {
+    /// The one user tenant of a deployment that creates none
+    /// ([`TenantId::FIRST_USER`]) — never [`TenantId::UNSET`].
+    fn default() -> Self {
+        Self::FIRST_USER
+    }
+}
+
+/// The identity of one **journal** inside its tenant (#184, #235): an
+/// independent ordered log with its own ballots, its own chosen prefix and
+/// its own store. A journal is named by its [`JournalKey`], the pair
+/// `(TenantId, JournalId)`: a journal id is unique only within its tenant.
 ///
 /// `0` means *unset* and is never served ([`JournalId::is_set`]): a request
 /// that names no journal is refused at the wire, never routed to a default.
-/// `1..=127` are reserved for system journals
-/// ([`JournalId::FIRST_USER`]` - 1` and below); user journals start at
-/// [`JournalId::FIRST_USER`]. The core never makes a protocol decision on
-/// the id — a [`crate::ColocatedNode`] carries it in its [`crate::Config`]
-/// for assertions and tracing only; routing a message to its journal is
-/// the driver's envelope.
+/// `0..=255` are reserved in every tenant, and `1` is every tenant's
+/// **control journal** ([`JournalId::CONTROL`]); user journals take random
+/// ids from [`JournalId::FIRST_USER`], drawn by their creator and checked at
+/// apply by the tenant's control journal (never a log position). The core
+/// never makes a protocol decision on the id — a [`crate::ColocatedNode`]
+/// carries it in its [`crate::Config`] for assertions and tracing only;
+/// routing a message to its journal is the driver's envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalId(pub u64);
@@ -31,8 +77,10 @@ pub struct JournalId(pub u64);
 impl JournalId {
     /// The unset id: refused wherever a journal must be named.
     pub const UNSET: Self = Self(0);
-    /// The first id a user journal may take (`1..=127` are system journals).
-    pub const FIRST_USER: Self = Self(128);
+    /// Every tenant's control journal (`docs/architecture.md` §3.1).
+    pub const CONTROL: Self = Self(1);
+    /// The first id a user journal may take (`0..=255` are reserved).
+    pub const FIRST_USER: Self = Self(256);
 
     /// Whether this id names a journal at all (`0` does not).
     #[must_use]
@@ -40,7 +88,7 @@ impl JournalId {
         self.0 != 0
     }
 
-    /// Whether this id is a user journal's (`>= 128`).
+    /// Whether this id is a user journal's (`>= 256`).
     #[must_use]
     pub const fn is_user(self) -> bool {
         self.0 >= Self::FIRST_USER.0
@@ -53,6 +101,87 @@ impl Default for JournalId {
     /// defaulted [`crate::Config`] serves a journal a client can name.
     fn default() -> Self {
         Self::FIRST_USER
+    }
+}
+
+/// The **frame** of every peer and client message (#226, #235): the tenant
+/// and the journal inside it. Uniqueness is only ever needed where it can be
+/// checked — a tenant id by meta, a journal id by its tenant's control
+/// journal — so a journal is only ever named by the pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct JournalKey {
+    /// The tenant that owns the journal.
+    pub tenant: TenantId,
+    /// The journal, unique within its tenant.
+    pub journal: JournalId,
+}
+
+impl JournalKey {
+    /// The unset frame: both halves `0`. Never served; an `Inspect` reads it
+    /// as "the node's first journal".
+    pub const UNSET: Self = Self::new(TenantId::UNSET, JournalId::UNSET);
+
+    /// The journal `journal` of tenant `tenant`.
+    #[must_use]
+    pub const fn new(tenant: TenantId, journal: JournalId) -> Self {
+        Self { tenant, journal }
+    }
+
+    /// `tenant`'s control journal (journal `1`).
+    #[must_use]
+    pub const fn control(tenant: TenantId) -> Self {
+        Self::new(tenant, JournalId::CONTROL)
+    }
+
+    /// Whether both halves are set: a frame with an unset half names
+    /// nothing and is refused.
+    #[must_use]
+    pub const fn is_set(self) -> bool {
+        self.tenant.is_set() && self.journal.is_set()
+    }
+
+    /// Whether this is a user journal (its journal id is in the user
+    /// range): not a tenant's control journal or another reserved id.
+    #[must_use]
+    pub const fn is_user(self) -> bool {
+        self.journal.is_user()
+    }
+
+    /// Whether this is a tenant's control journal.
+    #[must_use]
+    pub const fn is_control(self) -> bool {
+        self.journal.0 == JournalId::CONTROL.0
+    }
+}
+
+impl core::fmt::Display for JournalKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}/{}", self.tenant.0, self.journal.0)
+    }
+}
+
+impl core::str::FromStr for JournalKey {
+    type Err = &'static str;
+
+    /// `<tenant>/<journal>`, the form [`JournalKey`]'s `Display` renders,
+    /// or a bare `<journal>` in the default tenant ([`TenantId::default`]).
+    /// Both halves must be set.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (tenant, journal) = match text.split_once('/') {
+            Some((tenant, journal)) => (
+                TenantId(tenant.parse().map_err(|_| "a tenant id is a u64")?),
+                journal,
+            ),
+            None => (TenantId::default(), text),
+        };
+        let journal = JournalId(journal.parse().map_err(|_| "a journal id is a u64")?);
+        let key = Self::new(tenant, journal);
+        if key.is_set() {
+            Ok(key)
+        } else {
+            Err("a journal frame names a tenant and a journal, both non-zero")
+        }
     }
 }
 

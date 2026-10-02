@@ -37,8 +37,8 @@ pub mod matchmaker {
 }
 
 /// The system journals' entries (#189), generated from
-/// `proto/system.proto`: one record per slot of journal 1 (the directory) or
-/// journal 2 (the node registry), read by `paros::system`.
+/// `proto/system.proto`: one record per slot of the directory or
+/// the node registry (two tenants' control journals, #235), read by `paros::system`.
 pub mod system {
     #![allow(missing_docs, clippy::pedantic)]
     include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));

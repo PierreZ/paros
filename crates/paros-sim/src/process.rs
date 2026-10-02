@@ -633,7 +633,7 @@ async fn run_acceptor(
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let quorum_system = policy.system(bootstrap.len());
     let config = Config {
-        journal: paros::JournalId::default(),
+        journal: paros::JournalKey::default(),
         id: self_rank,
         peers: bootstrap,
         quorum_system,
@@ -692,7 +692,7 @@ async fn run_acceptor(
         .ids
         .iter()
         .map(|&journal| {
-            let config = if journal == paros::JournalId::default() {
+            let config = if journal == paros::JournalKey::default() {
                 config.clone()
             } else {
                 Config {
@@ -1022,7 +1022,7 @@ impl<C: Clone> OperatorEdit<C> {
 /// One journal's seat on an acceptor process (#188): its configuration, its
 /// storage world, its audit world and its audit port.
 struct Seat {
-    journal: paros::JournalId,
+    journal: paros::JournalKey,
     config: Config,
     world: Arc<Mutex<StorageWorld>>,
     checker: Arc<AuditWorld>,
@@ -1048,7 +1048,7 @@ impl Seat {
     /// own audit world and port, reporting to the system board too.
     fn quiet(
         ctx: &SimContext,
-        journal: paros::JournalId,
+        journal: paros::JournalKey,
         config: Config,
         system: &Arc<Mutex<crate::audit::system::SystemBoard>>,
     ) -> Self {
@@ -1057,7 +1057,7 @@ impl Seat {
         // budget; a joiner's seat on a genesis journal (#189, a spare) shares
         // that journal's world and leaves its budget as the genesis nodes
         // sized it — a fault-free copy only ever adds to what it defends.
-        if journal != paros::JournalId::default() {
+        if journal != paros::JournalKey::default() {
             world
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1103,9 +1103,9 @@ struct SimStores<'a> {
 }
 
 /// The directory a journal's store lives in on a node's simulated disk
-/// (#187, #188: one directory per journal).
-fn journal_dir(journal: paros::JournalId) -> String {
-    format!("paros/journals/{}", journal.0)
+/// (#187, #188: one directory per journal, by its frame, #235).
+fn journal_dir(journal: paros::JournalKey) -> String {
+    format!("paros/journals/{}/{}", journal.tenant.0, journal.journal.0)
 }
 
 /// Resolve an interrupted provisioning before a boot (#187): a journal
@@ -1152,7 +1152,7 @@ async fn resolve_provisioning(
 }
 
 impl SimStores<'_> {
-    fn seat(&self, journal: paros::JournalId) -> Option<&Seat> {
+    fn seat(&self, journal: paros::JournalKey) -> Option<&Seat> {
         self.seats.iter().find(|seat| seat.journal == journal)
     }
 }
@@ -1161,7 +1161,7 @@ impl JournalStores for SimStores<'_> {
     type Store = NodeStore;
     type Audit = NodeAudit<SimTimeProvider>;
 
-    fn journals(&self) -> Vec<paros::JournalId> {
+    fn journals(&self) -> Vec<paros::JournalKey> {
         self.seats
             .iter()
             .filter(|seat| !seat.created)
@@ -1169,7 +1169,7 @@ impl JournalStores for SimStores<'_> {
             .collect()
     }
 
-    fn open(&mut self, journal: paros::JournalId) -> Option<(Self::Store, BootKind)> {
+    fn open(&mut self, journal: paros::JournalKey) -> Option<(Self::Store, BootKind)> {
         let seat = self.seat(journal).filter(|seat| !seat.deleted)?;
         let (parked, boot) = {
             let guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1232,7 +1232,7 @@ impl JournalStores for SimStores<'_> {
         Some((NodeStore::World(storage), boot))
     }
 
-    fn audit(&self, journal: paros::JournalId) -> Self::Audit {
+    fn audit(&self, journal: paros::JournalKey) -> Self::Audit {
         self.seat(journal).map_or_else(
             || {
                 // A node that serves no seat for `journal` — a joiner's
@@ -1253,7 +1253,7 @@ impl JournalStores for SimStores<'_> {
     /// A journal the directory created naming this node (#189): a quiet seat
     /// under `config`, kept across incarnations (a restart re-folds the
     /// directory and asks again).
-    fn create(&mut self, journal: paros::JournalId, config: Config) -> bool {
+    fn create(&mut self, journal: paros::JournalKey, config: Config) -> bool {
         let Some(board) = &self.system else {
             return false;
         };
@@ -1272,7 +1272,7 @@ impl JournalStores for SimStores<'_> {
     /// a one-journal node's fail-stop exit, rather than at a re-open the run
     /// may end before (a node that serves the system journals keeps running
     /// with the journal down; witness 18183308543219257601).
-    fn quarantined(&mut self, journal: paros::JournalId) {
+    fn quarantined(&mut self, journal: paros::JournalKey) {
         if let Some(seat) = self.seat(journal)
             && seat
                 .world
@@ -1285,7 +1285,7 @@ impl JournalStores for SimStores<'_> {
         }
     }
 
-    fn delete(&mut self, journal: paros::JournalId) {
+    fn delete(&mut self, journal: paros::JournalKey) {
         if let Some(seat) = self.seats.iter_mut().find(|seat| seat.journal == journal) {
             seat.deleted = true;
         }
@@ -1303,7 +1303,7 @@ fn quiet_faults(ctx: &SimContext) -> StorageFaults<SimTimeProvider> {
 }
 
 /// Arm the system journals on a genesis node (#189): the board, the seats of
-/// journals 1 and 2 on a seed, every seat's port reporting to the board, and
+/// the system journals on a seed, every seat's port reporting to the board, and
 /// the plan the driver follows them by.
 fn system_rig(
     ctx: &SimContext,
@@ -1398,7 +1398,7 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
             .collect();
     let policy = crate::shape::quorum_policy(ctx.state(), pool_len, true);
     Some(Config {
-        journal: paros::JournalId::default(),
+        journal: paros::JournalKey::default(),
         id: NodeId(0),
         quorum_system: policy.system(bootstrap.len()),
         peers: bootstrap,
@@ -1613,7 +1613,7 @@ async fn run_proxy_role(
     let config = ProxyConfig {
         id,
         acceptors: bootstrap_config(ctx, members.len(), has_matchmakers, perturb),
-        journal: paros::JournalId::default(),
+        journal: paros::JournalKey::default(),
     };
     // A proxy has a shape too — its tick cadence and transport tunables —
     // drawn once per seed like a node's and kept across its reboots.

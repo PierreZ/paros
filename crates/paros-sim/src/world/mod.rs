@@ -29,7 +29,7 @@ const STORAGE_WORLD_KEY: &str = "paros-storage-world";
 /// Get-or-create the singleton [`StorageWorld`] for this iteration
 /// (`crate::state::published`).
 pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
-    storage_world_for(state, paros::JournalId::default())
+    storage_world_for(state, paros::JournalKey::default())
 }
 
 /// `journal`'s own [`StorageWorld`] (#188): its disks, its copy budget, its
@@ -37,7 +37,7 @@ pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
 /// is per journal and a journal's faults never excuse another's.
 pub(crate) fn storage_world_for(
     state: &StateHandle,
-    journal: paros::JournalId,
+    journal: paros::JournalKey,
 ) -> Arc<Mutex<StorageWorld>> {
     crate::state::published(
         state,
@@ -1128,7 +1128,7 @@ pub(crate) struct StorageFaultStats {
 /// Fold the storage world's ground truth (empty world = no faults).
 pub(crate) fn storage_fault_stats(
     handle: &StateHandle,
-    journal: paros::JournalId,
+    journal: paros::JournalKey,
 ) -> StorageFaultStats {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1197,7 +1197,7 @@ pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
 /// retired by the operator. The workload's convergence probe skips exactly
 /// these — the availability cost the dead-node budget bounds so the cluster
 /// keeps serving — and its reconfigurations never name one of them.
-pub(crate) fn parked_nodes(handle: &StateHandle, journal: paros::JournalId) -> BTreeSet<String> {
+pub(crate) fn parked_nodes(handle: &StateHandle, journal: paros::JournalKey) -> BTreeSet<String> {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.parked.keys().cloned().collect()
@@ -1241,13 +1241,13 @@ pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: 
 }
 
 pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
-    disk_probe_for(handle, paros::JournalId::default(), ip)
+    disk_probe_for(handle, paros::JournalKey::default(), ip)
 }
 
 /// [`corpus_disk_probe`] of `journal`'s disk on `ip` (#188).
 pub(crate) fn disk_probe_for(
     handle: &StateHandle,
-    journal: paros::JournalId,
+    journal: paros::JournalKey,
     ip: &str,
 ) -> Option<CorpusDiskProbe> {
     let world = storage_world_for(handle, journal);
@@ -1314,7 +1314,10 @@ pub(crate) struct CorruptionStats {
     flags: Stage7Flags,
 }
 
-pub(crate) fn corruption_stats(handle: &StateHandle, journal: paros::JournalId) -> CorruptionStats {
+pub(crate) fn corruption_stats(
+    handle: &StateHandle,
+    journal: paros::JournalKey,
+) -> CorruptionStats {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let mut crashed = 0_u64;
@@ -1357,7 +1360,7 @@ pub(crate) fn corruption_stats(handle: &StateHandle, journal: paros::JournalId) 
 /// evaluated once per run from the workload's `check()` (the shared-gate
 /// doctrine in [`crate::audit`]).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalId) {
+pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalKey) {
     let stats = storage_fault_stats(handle, journal);
     let corruption = corruption_stats(handle, journal);
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
@@ -1410,7 +1413,7 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalI
 /// per-verdict coverage gates.
 fn check_corruption_gates(
     handle: &StateHandle,
-    journal: paros::JournalId,
+    journal: paros::JournalKey,
     corruption: &CorruptionStats,
 ) {
     // Every exercised corruption is detected as exactly one typed crash

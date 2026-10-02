@@ -164,7 +164,8 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 - A reconfiguration request on a deployment without matchmakers is **refused**, never honored.
 - Flexible quorums, grids, matchmakers, proxies and replicas are **configuration data**, never
   implied by code being present, and in simulation each is drawn per seed so one campaign proves
-  every mode. Every peer and client message is framed by a `JournalId`; inside that frame the
+  every mode. Every peer and client message is framed by a `JournalKey` `(TenantId, JournalId)`;
+  inside that frame the
   plain deployment exchanges the same messages and persists the same scalars.
 
 ## Matchmaking, reconfiguration, GC, generations
@@ -208,14 +209,19 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 
 - **Share processes, disks and connections, never protocol state.** Each journal has its own
   `ColocatedNode`, ballots, log and store; the one cross-journal property is non-interference.
-  The `JournalId` rides the `Deliver` envelope per message (never a fingerprint) and the driver
-  demuxes before the core; each journal has its own peer-mailbox lane. Ids: `0` unset, `1..=127`
-  system, user journals from `JournalId::FIRST_USER` (128).
+  The frame `JournalKey { tenant, journal }` (#235) rides the `Deliver` envelope per message
+  (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
+  each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
+  check them, never a log position: `TenantId` `0` unset, `1` meta, `2` the cell, `0..=255`
+  reserved; `JournalId` `0` unset, `1` every tenant's control journal, `0..=255` reserved, user
+  journals from `JournalId::FIRST_USER` (256). Stores live at `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
-- **System journals** (1 = directory, 2 = node registry) are opt-in through a `SystemPlan`
-  (`None` is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
-  journal's id is `128 +` its LSN, never reused. The core's pool grows, never shrinks
+- **System journals** (the directory = the user tenant's control journal `256/1`, the node
+  registry = the cell tenant's control journal `2/1`) are opt-in through a `SystemPlan` (`None`
+  is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
+  journal's id is drawn by its creator and checked at apply (`Reserved`, `IdTaken`: the creator
+  redraws), never reused. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports

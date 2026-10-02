@@ -33,7 +33,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    AcceptorConfig, Audience, Ballot, JournalId, Message, NodeId, Party, ProxyId, ProxyLeader, Slot,
+    AcceptorConfig, Audience, Ballot, JournalKey, Message, NodeId, Party, ProxyId, ProxyLeader,
+    Slot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -59,7 +60,7 @@ pub struct ProxyConfig {
     /// The one journal this proxy serves (#188): it tags every send with it
     /// and drops a message naming another. Journal-tagged proxies serving
     /// several journals are #193.
-    pub journal: JournalId,
+    pub journal: JournalKey,
 }
 
 /// The coordinates of a delegated `Accept` the report needs once the core
@@ -155,7 +156,7 @@ fn report_delegation<A: Audit>(
 #[tracing::instrument(level = "trace", skip_all, fields(proxy = proxy.id().0))]
 fn drain<H: DriverHooks, A: Audit>(
     proxy: &mut ProxyLeader,
-    journal: JournalId,
+    journal: JournalKey,
     pool: &[NodeId],
     out: &Outbound,
     hooks: &H,
@@ -352,7 +353,7 @@ where
             error = edge.run() => return Err(error.into()),
             Some((journal, msg)) = inbox.recv() => {
                 if journal != config.journal {
-                    tracing::info!(proxy = id.0, journal = journal.0, "foreign_journal_dropped");
+                    tracing::info!(proxy = id.0, journal = %journal, "foreign_journal_dropped");
                     continue;
                 }
                 // A delegated `Accept`, an `Accepted`, a `Nack` → the core's

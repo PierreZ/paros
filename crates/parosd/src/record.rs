@@ -22,15 +22,26 @@
 //! ```text
 //! role node
 //! id 0
-//! journal 128
+//! journal 256/256
 //! ```
+//!
+//! A journal is named by its frame `<tenant>/<journal>` (#235).
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use paros::JournalId;
+use paros::JournalKey;
+#[cfg(test)]
+use paros::{JournalId, TenantId};
+
+/// Parse a journal frame written `<tenant>/<journal>` (#235), the form
+/// [`JournalKey`]'s `Display` renders.
+#[must_use]
+pub fn parse_key(text: &str) -> Option<JournalKey> {
+    text.contains('/').then(|| text.parse().ok()).flatten()
+}
 
 /// The record's file name under the data directory.
 const FILE: &str = "provisioned";
@@ -44,7 +55,7 @@ pub struct Record {
     pub id: u64,
     /// The journals whose stores are provisioned (a node's; empty for a
     /// matchmaker or a replica).
-    pub journals: BTreeSet<JournalId>,
+    pub journals: BTreeSet<JournalKey>,
 }
 
 impl Record {
@@ -88,10 +99,9 @@ impl Record {
                     );
                 }
                 "journal" => {
-                    let journal = value
-                        .parse()
-                        .map_err(|e| format!("bad journal {value:?}: {e}"))?;
-                    journals.insert(JournalId(journal));
+                    let journal =
+                        parse_key(value).ok_or_else(|| format!("bad journal {value:?}"))?;
+                    journals.insert(journal);
                 }
                 _ => return Err(format!("unknown record key {key:?}")),
             }
@@ -107,7 +117,7 @@ impl Record {
         let mut text = format!("role {}\nid {}\n", self.role, self.id);
         for journal in &self.journals {
             text.push_str("journal ");
-            text.push_str(&journal.0.to_string());
+            text.push_str(&journal.to_string());
             text.push('\n');
         }
         text
@@ -170,7 +180,12 @@ mod tests {
         let record = Record {
             role: "node".into(),
             id: 3,
-            journals: [JournalId(128), JournalId(200)].into_iter().collect(),
+            journals: [
+                JournalKey::default(),
+                JournalKey::new(TenantId(300), JournalId(9_000)),
+            ]
+            .into_iter()
+            .collect(),
         };
         record.write(dir.path()).expect("write");
         let read = Record::read(dir.path()).expect("read").expect("a record");

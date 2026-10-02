@@ -12,7 +12,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::ServiceClient;
-use paros_core::{Audience, JournalId, Message, NodeId, Party, ProxyId};
+use paros_core::{Audience, JournalKey, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -102,11 +102,11 @@ pub(crate) struct PeerMailbox {
 /// A mailbox's journal lanes and the round-robin cursor over them.
 #[derive(Default)]
 struct Lanes {
-    /// Journal id → its keep-newest lane (`BTreeMap`: the drain order is
-    /// part of determinism).
-    by_journal: BTreeMap<u64, VecDeque<internal::ConsensusMessage>>,
-    /// The journal the next drain starts looking from.
-    cursor: u64,
+    /// The envelope's frame `(tenant, journal)` (#235) → its keep-newest
+    /// lane (`BTreeMap`: the drain order is part of determinism).
+    by_journal: BTreeMap<(u64, u64), VecDeque<internal::ConsensusMessage>>,
+    /// The frame the next drain starts looking from.
+    cursor: (u64, u64),
     /// Messages queued over every lane.
     total: usize,
 }
@@ -123,11 +123,11 @@ impl Lanes {
             .map(|(journal, _)| *journal)?;
         let message = self.by_journal.get_mut(&journal)?.pop_front()?;
         self.total -= 1;
-        self.cursor = journal.saturating_add(1);
+        self.cursor = (journal.0, journal.1.saturating_add(1));
         Some(message)
     }
 
-    fn lane_len(&self, journal: u64) -> usize {
+    fn lane_len(&self, journal: (u64, u64)) -> usize {
         self.by_journal.get(&journal).map_or(0, VecDeque::len)
     }
 }
@@ -153,7 +153,7 @@ impl PeerMailbox {
     }
 
     /// Whether `journal`'s lane is full (the next push into it evicts).
-    fn is_full(&self, journal: u64) -> bool {
+    fn is_full(&self, journal: (u64, u64)) -> bool {
         self.lock().lane_len(journal) >= self.capacity
     }
 
@@ -173,7 +173,7 @@ impl PeerMailbox {
     ) -> Option<internal::ConsensusMessage> {
         let evicted = {
             let mut lanes = self.lock();
-            let journal = message.journal;
+            let journal = (message.tenant, message.journal);
             let lanes = &mut *lanes;
             let queue = lanes.by_journal.entry(journal).or_default();
             let evicted = if queue.len() >= self.capacity {
@@ -362,7 +362,7 @@ impl Outbound {
         &self,
         hooks: &H,
         audit: &A,
-        journal: JournalId,
+        journal: JournalKey,
         to: Party,
         msg: &Message,
     ) {
@@ -424,15 +424,18 @@ impl Outbound {
                 );
                 return;
             };
-            // The envelope (#188): the receiver demuxes on it.
-            message.journal = journal.0;
+            // The envelope (#188), framed by the tenant (#235): the
+            // receiver demuxes on the pair.
+            message.tenant = journal.tenant.0;
+            message.journal = journal.journal.0;
             // The mailbox's four decisions, all taken here on the node loop,
             // each consulted only where it can have an observable effect.
             //
             // Two act on this enqueue: overtake needs something already queued
             // to jump, evicting across kinds needs a full queue to evict from.
             let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
-            let evict_across_kinds = queue.is_full(journal.0) && hooks.evict_across_kinds(to, msg);
+            let evict_across_kinds = queue.is_full((journal.tenant.0, journal.journal.0))
+                && hooks.evict_across_kinds(to, msg);
             // Two arm the *drain*: this message's arrival is what makes the
             // next batch worth holding or reversing. Holding needs a queue that
             // is already non-empty (parking a drain of nothing changes
@@ -674,7 +677,7 @@ pub(crate) fn send_messages<H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    journal: JournalId,
+    journal: JournalKey,
     messages: Vec<(Party, Message)>,
 ) where
     H: DriverHooks,
@@ -713,6 +716,7 @@ mod tests {
             chosen: None,
         })
         .expect("a heartbeat ack encodes");
+        message.tenant = 256;
         message.journal = journal;
         message
     }
@@ -730,8 +734,8 @@ mod tests {
                 assert_eq!(evicted.journal, 128, "only the busy journal's lane evicts");
             }
         }
-        assert!(mailbox.is_full(128));
-        assert!(!mailbox.is_full(129));
+        assert!(mailbox.is_full((256, 128)));
+        assert!(!mailbox.is_full((256, 129)));
         assert_eq!(mailbox.len(), 3);
         let order: Vec<u64> = std::iter::from_fn(|| mailbox.try_pop())
             .map(|m| m.journal)

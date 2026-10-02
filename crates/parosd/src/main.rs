@@ -36,8 +36,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use moonpool_core::TokioProviders;
 use paros::{
-    BootKind, BootRefusal, JournalId, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
-    MatchmakerId, NoAudit, NoHooks, NodeId, Provisioned, ProxyId, RunError,
+    BootKind, BootRefusal, JournalKey, JournalMatchmakerStorage, JournalStorage,
+    JournalStoreConfig, MatchmakerId, NoAudit, NoHooks, NodeId, Provisioned, ProxyId, RunError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -384,10 +384,10 @@ async fn run_proxy(args: ProxyArgs) -> Result<Result<(), RunError>, String> {
 }
 
 /// Node `id`'s genesis journals and their configurations, in id order.
-fn genesis(d: &Deployment, id: NodeId) -> BTreeMap<JournalId, paros::Config> {
+fn genesis(d: &Deployment, id: NodeId) -> BTreeMap<JournalKey, paros::Config> {
     d.journals
         .iter()
-        .map(|&journal| (JournalId(journal), d.node_config(id, JournalId(journal))))
+        .map(|&journal| (journal, d.node_config(id, journal)))
         .collect()
 }
 

@@ -180,12 +180,12 @@ fn until_ok(servers: &str, args: &[&str]) -> serde_json::Value {
     }
 }
 
-/// Read journal 128 from 0 through `servers` until it holds `count`
+/// Read journal 256 from 0 through `servers` until it holds `count`
 /// records; the records and the gaps the reader was told about.
 fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value>) {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
-        let answer = until_ok(servers, &["read", "128", "--from", "0"]);
+        let answer = until_ok(servers, &["read", "256", "--from", "0"]);
         let records: Vec<String> = answer["records"]
             .as_array()
             .expect("records")
@@ -231,7 +231,7 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     // The writer claims the journal on its first write — no generation or
     // position carried by hand.
     let children = cluster.start();
-    let wrote = until_ok(&node, &["write", "128", "alpha", "beta", "--owner", "7"]);
+    let wrote = until_ok(&node, &["write", "256", "alpha", "beta", "--owner", "7"]);
     assert_eq!(wrote["outcome"], "written", "{wrote}");
     assert_eq!(wrote["seq"], 0, "{wrote}");
     assert_eq!(wrote["count"], 2, "{wrote}");
@@ -247,7 +247,11 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
         serde_json::from_str(stdout.lines().next().expect("a view")).expect("JSON");
     assert_eq!(node_view["leader"], true, "{node_view}");
     assert!(exists(
-        &cluster.data_dir("node").join("journals").join("128")
+        &cluster
+            .data_dir("node")
+            .join("journals")
+            .join("256")
+            .join("256")
     ));
     assert!(exists(&cluster.data_dir("matchmaker").join("matchmaker")));
     assert!(exists(&cluster.data_dir("replica").join("replica")));
@@ -258,12 +262,12 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     stop(children);
     let children = cluster.start();
     assert_eq!(read_back(&node, 2).0, vec!["alpha", "beta"]);
-    let wrote = until_ok(&node, &["write", "128", "gamma", "--owner", "7"]);
+    let wrote = until_ok(&node, &["write", "256", "gamma", "--owner", "7"]);
     assert_eq!(wrote["seq"], 2, "{wrote}");
     assert_eq!(read_back(&node, 3).0, vec!["alpha", "beta", "gamma"]);
 
     // A second owner takes the journal; the first is fenced, and says so.
-    let swapped = until_ok(&node, &["set-leader", "128", "--owner", "8"]);
+    let swapped = until_ok(&node, &["set-leader", "256", "--owner", "8"]);
     assert_eq!(swapped["outcome"], "won", "{swapped}");
     assert_eq!(swapped["state"]["owner"], 8, "{swapped}");
     let generation = swapped["state"]["generation"].as_u64().expect("generation");
@@ -271,7 +275,7 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
         &node,
         &[
             "write",
-            "128",
+            "256",
             "delta",
             "--owner",
             "7",
@@ -288,7 +292,7 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
         &node,
         &[
             "truncate",
-            "128",
+            "256",
             "--up-to",
             "1",
             "--owner",
@@ -301,7 +305,7 @@ fn a_laptop_deployment_writes_reads_restarts_and_refuses_what_it_must() {
     assert_eq!(json(&stale)["outcome"], "superseded");
 
     // A truncation, and a reader from 0 told about the gap.
-    let truncated = until_ok(&node, &["truncate", "128", "--up-to", "1", "--owner", "8"]);
+    let truncated = until_ok(&node, &["truncate", "256", "--up-to", "1", "--owner", "8"]);
     assert_eq!(truncated["state"]["first_seq"], 1, "{truncated}");
     let (records, gaps) = read_back(&node, 2);
     assert_eq!(records, vec!["beta", "gamma"]);

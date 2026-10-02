@@ -17,13 +17,13 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 /// Get-or-create the singleton [`AuditWorld`] for this iteration
 /// (`crate::state::published_arc`).
 pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
-    audit_world_for(state, paros::JournalId::default())
+    audit_world_for(state, paros::JournalKey::default())
 }
 
 /// `journal`'s own [`AuditWorld`] (#188): every oracle folds one journal's
 /// transitions, so safety, the clients' folds, convergence and the storage
 /// gates are all keyed by journal without any of them knowing.
-pub(crate) fn audit_world_for(state: &StateHandle, journal: paros::JournalId) -> Arc<AuditWorld> {
+pub(crate) fn audit_world_for(state: &StateHandle, journal: paros::JournalKey) -> Arc<AuditWorld> {
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
@@ -542,7 +542,7 @@ impl AuditWorld {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_run(
     state: &StateHandle,
-    journal: paros::JournalId,
+    journal: paros::JournalKey,
     history: &ClientHistory,
     clients: usize,
 ) -> u64 {

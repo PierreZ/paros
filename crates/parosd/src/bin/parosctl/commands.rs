@@ -12,8 +12,9 @@ use paros::client::{
 };
 use paros::wire::common::Ballot;
 use paros::{
-    ClientId, Generation, InspectReply, JournalId, JournalState, QuorumSystem, Read, RetireRequest,
-    Seq, Value, WireQuorumSystem, journal_state_from_proto, quorum_system_from_proto,
+    ClientId, Generation, InspectReply, JournalKey, JournalState, QuorumSystem, Read,
+    RetireRequest, Seq, Value, WireQuorumSystem, journal_state_from_proto,
+    quorum_system_from_proto,
 };
 use serde_json::{Value as Json, json};
 
@@ -30,8 +31,8 @@ fn start(client: &ParosClient) -> usize {
 /// `parosctl write`.
 #[derive(Args, Debug)]
 pub struct WriteArgs {
-    /// The journal.
-    journal: u64,
+    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    journal: JournalKey,
     /// The records, in order, each one argument.
     #[arg(required = true)]
     records: Vec<String>,
@@ -47,9 +48,10 @@ pub struct WriteArgs {
 }
 
 /// Where `journal` stands, read from any server.
-async fn journal_state(client: &ParosClient, journal: JournalId) -> Option<JournalState> {
+async fn journal_state(client: &ParosClient, journal: JournalKey) -> Option<JournalState> {
     let read = Read {
-        journal: journal.0,
+        journal: journal.journal.0,
+        tenant: journal.tenant.0,
         from_seq: 0,
         limit: 1,
         wait_ms: 0,
@@ -60,7 +62,7 @@ async fn journal_state(client: &ParosClient, journal: JournalId) -> Option<Journ
 /// Who a writing command acts as: the journal, the owner id, and the
 /// overrides of `parosctl write` (a truncation names no position).
 struct Identity {
-    journal: u64,
+    journal: JournalKey,
     owner: u64,
     generation: Option<u64>,
     seq: Option<u64>,
@@ -74,7 +76,7 @@ async fn become_writer(
     out: &Printer,
     args: &Identity,
 ) -> Result<Writer, Ending> {
-    let journal = JournalId(args.journal);
+    let journal = args.journal;
     let mut writer = Writer::new(journal, args.owner);
     let at = |generation: u64, next: u64| JournalState {
         owner: Some(ClientId(args.owner)),
@@ -97,8 +99,7 @@ async fn become_writer(
     match writer.claim(client, start(client), false).await {
         ClaimOutcome::Won { state } => {
             note(&format!(
-                "claimed journal {}: {}",
-                journal.0,
+                "claimed journal {journal}: {}",
                 state_text(&state)
             ));
         }
@@ -129,7 +130,7 @@ async fn become_writer(
 /// settled, a refusal for a stale position corrected and retried, a
 /// superseded writer stopped.
 pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Ending {
-    let journal = JournalId(args.journal);
+    let journal = args.journal;
     let identity = Identity {
         journal: args.journal,
         owner: args.owner,
@@ -218,16 +219,16 @@ fn refused(out: &Printer, what: &str, state: &JournalState) -> Ending {
     Ending::Refused
 }
 
-fn unknown_journal(journal: JournalId) -> Ending {
-    note(&format!("no server serves journal {}", journal.0));
+fn unknown_journal(journal: JournalKey) -> Ending {
+    note(&format!("no server serves journal {journal}"));
     Ending::Refused
 }
 
 /// `parosctl read`.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
-    /// The journal.
-    journal: u64,
+    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    journal: JournalKey,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -242,7 +243,7 @@ pub struct ReadArgs {
 /// `parosctl read`: page from `--from` to the tail (or `--limit`), one line
 /// per record; a truncated range is reported and skipped, never hidden.
 pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending {
-    let journal = JournalId(args.journal);
+    let journal = args.journal;
     let mut reader = paros::client::Reader::new(journal, args.from);
     let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut gaps: Vec<(u64, u64)> = Vec::new();
@@ -293,7 +294,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
         },
         || {
             json!({
-                "journal": journal.0,
+                "journal": journal.to_string(),
                 "records": records
                     .iter()
                     .map(|(seq, record)| json!({ "seq": seq, "data": record_text(record) }))
@@ -312,8 +313,8 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
 /// `parosctl tail`.
 #[derive(Args, Debug)]
 pub struct TailArgs {
-    /// The journal.
-    journal: u64,
+    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    journal: JournalKey,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -326,7 +327,7 @@ pub struct TailArgs {
 /// document) per record as it lands; a truncation the reader falls behind
 /// is reported and skipped.
 pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending {
-    let journal = JournalId(args.journal);
+    let journal = args.journal;
     let mut reader = paros::client::Reader::new(journal, args.from);
     let backoff = client.tunables().retry_backoff;
     let follow = async {
@@ -370,8 +371,8 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
 /// `parosctl truncate`.
 #[derive(Args, Debug)]
 pub struct TruncateArgs {
-    /// The journal.
-    journal: u64,
+    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    journal: JournalKey,
     /// Drop every record below this position.
     #[arg(long)]
     up_to: u64,
@@ -387,7 +388,7 @@ pub struct TruncateArgs {
 /// (a claim, or `--generation`), then ask the leader to raise the journal's
 /// floor under that fence (#228). A stale owner is refused and says so.
 pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -> Ending {
-    let journal = JournalId(args.journal);
+    let journal = args.journal;
     let identity = Identity {
         journal: args.journal,
         owner: args.owner,
@@ -430,8 +431,8 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
 /// `parosctl set-leader`.
 #[derive(Args, Debug)]
 pub struct SetLeaderArgs {
-    /// The journal.
-    journal: u64,
+    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    journal: JournalKey,
     /// The client that should own the journal.
     #[arg(long)]
     owner: u64,
@@ -444,7 +445,7 @@ pub struct SetLeaderArgs {
 /// `parosctl set-leader`: compare-and-swap the journal's writer — against
 /// `--expected`, or against the generation a read finds.
 pub async fn set_leader(client: &ParosClient, out: &Printer, args: SetLeaderArgs) -> Ending {
-    let journal = JournalId(args.journal);
+    let journal = args.journal;
     let outcome = match args.expected {
         Some(expected) => client
             .set_leader(journal, expected, args.owner, start(client))
@@ -483,9 +484,10 @@ pub async fn set_leader(client: &ParosClient, out: &Printer, args: SetLeaderArgs
 /// `parosctl inspect`.
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// The journal to inspect (0: each node's first journal).
-    #[arg(long, default_value = "0")]
-    journal: u64,
+    /// The journal to inspect, `[TENANT/]JOURNAL` (default: each node's
+    /// first journal).
+    #[arg(long)]
+    journal: Option<JournalKey>,
 }
 
 fn ballot_text(ballot: Option<Ballot>) -> String {
@@ -517,7 +519,10 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
     let mut answered = false;
     for server in 0..client.server_count() {
         let id = client.id_of(server);
-        let Some(reply) = client.inspect(server, args.journal).await else {
+        let Some(reply) = client
+            .inspect(server, args.journal.unwrap_or(JournalKey::UNSET))
+            .await
+        else {
             out.emit(
                 || format!("node {id}: no answer"),
                 || json!({ "node": id, "answered": false }),
@@ -671,7 +676,7 @@ fn parse_ballot(s: &str) -> Result<Ballot, String> {
 /// The effective GC watermark a leader reports, read from every server.
 async fn leader_watermark(client: &ParosClient) -> Option<Ballot> {
     for server in 0..client.server_count() {
-        if let Some(reply) = client.inspect(server, 0).await
+        if let Some(reply) = client.inspect(server, JournalKey::UNSET).await
             && reply.leader
             && reply.gc_watermark.is_some()
         {

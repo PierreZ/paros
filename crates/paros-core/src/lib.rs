@@ -115,7 +115,7 @@ pub use retained::RetainedWindow;
 pub use state::{Config, HardState};
 pub use storage::Storage;
 pub use types::{
-    Ballot, ClientId, Command, Control, Entry, Fingerprint, Generation, JournalId, NodeId, Seq,
-    Slot, Value, command_fingerprint,
+    Ballot, ClientId, Command, Control, Entry, Fingerprint, Generation, JournalId, JournalKey,
+    NodeId, Seq, Slot, TenantId, Value, command_fingerprint,
 };
 pub use write::{AcceptorWrite, MustSync, WriteOp};

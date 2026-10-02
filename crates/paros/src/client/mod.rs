@@ -70,7 +70,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalState, QuorumSystem};
+use paros_core::{JournalKey, JournalState, QuorumSystem};
 use tokio_util::sync::CancellationToken;
 
 pub use observer::{Answered, Attempted, CallObserver, NoObserver};
@@ -525,14 +525,15 @@ impl<P: Providers> Client<P> {
     pub fn set_leader_attempt(
         &self,
         target: usize,
-        journal: JournalId,
+        journal: JournalKey,
         expected: u64,
         owner: u64,
     ) -> impl Future<Output = SetLeaderOutcome> + Send + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
         let request = SetLeader {
-            journal: journal.0,
+            journal: journal.journal.0,
+            tenant: journal.tenant.0,
             expected,
             owner,
         };
@@ -671,6 +672,7 @@ impl<P: Providers> Client<P> {
             .read_any(
                 &Read {
                     journal: request.journal,
+                    tenant: request.tenant,
                     from_seq: request.seq,
                     limit: count.max(1),
                     wait_ms: 0,
@@ -827,13 +829,14 @@ impl<P: Providers> Client<P> {
     /// generation of its own on purpose.
     pub async fn claim(
         &self,
-        journal: JournalId,
+        journal: JournalKey,
         owner: u64,
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
         let read = Read {
-            journal: journal.0,
+            journal: journal.journal.0,
+            tenant: journal.tenant.0,
             from_seq: 0,
             limit: 1,
             wait_ms: 0,
@@ -860,7 +863,7 @@ impl<P: Providers> Client<P> {
     /// nothing — so this never mints two generations.
     pub async fn set_leader(
         &self,
-        journal: JournalId,
+        journal: JournalKey,
         expected: u64,
         owner: u64,
         first: usize,
@@ -1040,9 +1043,9 @@ impl<P: Providers> Client<P> {
         ReconfigureMatchmakersOutcome::Ambiguous
     }
 
-    /// One bounded `Inspect` of `journal` on server `target` (`0` names the
-    /// node's first journal); `None` without an answer.
-    pub async fn inspect(&self, target: usize, journal: u64) -> Option<InspectReply> {
+    /// One bounded `Inspect` of `journal` on server `target` (an unset key
+    /// names the node's first journal); `None` without an answer.
+    pub async fn inspect(&self, target: usize, journal: JournalKey) -> Option<InspectReply> {
         let node = self.node(target).clone();
         let probe = async move { node.inspect_journal(journal).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)

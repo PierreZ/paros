@@ -6,7 +6,7 @@
 //! silently would hand its caller a fold with a hole it cannot see.
 
 use moonpool_core::Providers;
-use paros_core::{JournalId, JournalState};
+use paros_core::{JournalKey, JournalState};
 
 use super::Client;
 use super::outcome::ReadOutcome;
@@ -45,20 +45,20 @@ pub enum ReaderOutcome {
 /// A cursor into one journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reader {
-    journal: JournalId,
+    journal: JournalKey,
     cursor: u64,
 }
 
 impl Reader {
     /// A reader of `journal` from position `cursor`.
     #[must_use]
-    pub fn new(journal: JournalId, cursor: u64) -> Self {
+    pub fn new(journal: JournalKey, cursor: u64) -> Self {
         Self { journal, cursor }
     }
 
     /// The journal it reads.
     #[must_use]
-    pub fn journal(&self) -> JournalId {
+    pub fn journal(&self) -> JournalKey {
         self.journal
     }
 
@@ -79,7 +79,8 @@ impl Reader {
     #[must_use]
     pub fn request(&self, limit: u64, wait_ms: u64) -> Read {
         Read {
-            journal: self.journal.0,
+            journal: self.journal.journal.0,
+            tenant: self.journal.tenant.0,
             from_seq: self.cursor,
             limit,
             wait_ms,

@@ -4,7 +4,7 @@
 //! The policy loops are judged by the simulation, which runs them.
 
 use moonpool_rpc::{ErrorReason, RpcError};
-use paros_core::{ClientId, Generation, JournalId, JournalState, ReconfigureRefusal, Seq, Value};
+use paros_core::{ClientId, Generation, JournalKey, JournalState, ReconfigureRefusal, Seq, Value};
 
 use super::outcome::{
     MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome, ReconfigureOutcome,
@@ -292,7 +292,7 @@ fn every_refusal_label_the_node_sends_is_typed() {
 
 #[test]
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
-    let journal = JournalId::FIRST_USER;
+    let journal = JournalKey::default();
     let mut writer = Writer::new(journal, 7);
     assert_eq!(writer.entry(vec![Value(b"x".to_vec())]), None);
 
@@ -307,7 +307,7 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     let request = writer.request(&entry);
     assert_eq!(
         (request.journal, request.generation, request.seq),
-        (journal.0, 3, 10)
+        (journal.journal.0, 3, 10)
     );
     // A truncation carries the owner's own fence (#228).
     let truncate = writer.truncate_request(5).expect("an owner truncates");
@@ -374,7 +374,7 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
 
 #[test]
 fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
-    let journal = JournalId::FIRST_USER;
+    let journal = JournalKey::default();
     let mut reader = Reader::new(journal, 3);
     let request = reader.request(16, 50);
     assert_eq!(
@@ -384,7 +384,7 @@ fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
             request.limit,
             request.wait_ms
         ),
-        (journal.0, 3, 16, 50)
+        (journal.journal.0, 3, 16, 50)
     );
 
     let floor = state(None, 0, 20, 8);

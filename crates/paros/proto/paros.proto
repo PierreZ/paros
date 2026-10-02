@@ -41,8 +41,9 @@ service Paros {
   rpc ReconfigureMatchmakers(.paros.v1.ReconfigureMatchmakers) returns (.paros.v1.ReconfigureMatchmakersAck);
 }
 
-// Every journal call names its journal (#184): `0` is unset and always
-// refused (`unknown_journal`), as is any journal this process does not serve.
+// Every journal call names its journal by the frame `(tenant, journal)`
+// (#184, #235): a `0` half is unset and always refused (`unknown_journal`),
+// as is any journal this process does not serve.
 // A reply that carries no verdict — a redirect, an unknown journal, a
 // deliberately abandoned wait — is ambiguous: the call may still take effect.
 
@@ -54,6 +55,7 @@ message Write {
   uint64 seq = 4;
   // The records, in order: accepted or refused whole, in one slot.
   repeated bytes records = 5;
+  uint64 tenant = 6;
 }
 
 enum WriteOutcome {
@@ -88,6 +90,7 @@ message Read {
   uint64 limit = 3;
   // Wait at the tail up to this long for a record (0: answer at once).
   uint64 wait_ms = 4;
+  uint64 tenant = 5;
 }
 
 message ReadAck {
@@ -114,6 +117,7 @@ message Truncate {
   // against the journal's current writer at apply.
   uint64 generation = 3;
   uint64 owner = 4;
+  uint64 tenant = 5;
 }
 
 message TruncateAck {
@@ -135,6 +139,7 @@ message SetLeader {
   uint64 expected = 2;
   // The client that should own the journal.
   uint64 owner = 3;
+  uint64 tenant = 4;
 }
 
 message SetLeaderAck {
