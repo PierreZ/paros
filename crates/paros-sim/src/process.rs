@@ -354,7 +354,6 @@ async fn run_joiner(
     my_ip: &str,
     perturb: bool,
 ) -> SimulationResult<()> {
-    let has_matchmakers = !deployment.matchmakers().is_empty();
     if !crate::shape::system_journals(ctx.state(), perturb) {
         // No system journals on this seed: nothing to join.
         ctx.shutdown().cancelled().await;
@@ -364,7 +363,7 @@ async fn run_joiner(
     // A joiner that joins the default journal as a spare campaigns through
     // the matchmakers like any member of it.
     let matchmakers = ranked(deployment.matchmakers(), MatchmakerId)?;
-    let plan = crate::shape::journals(ctx.state(), has_matchmakers, perturb);
+    let plan = crate::shape::journals(ctx.state(), perturb);
     let board = crate::audit::system::system_board(ctx.state());
     let (system_plan, _) = system_plan(ctx, deployment, &members, &plan, id);
     let RoleRig {
@@ -646,7 +645,7 @@ async fn run_acceptor(
     // The run's journals (#188): the static list every node serves — the
     // default journal alone unless the deployment is plain and the seed drew
     // more — and the one held on every node for the chaos window, if any.
-    let plan = crate::shape::journals(ctx.state(), !matchmakers.is_empty(), perturb);
+    let plan = crate::shape::journals(ctx.state(), perturb);
     // The store (#187): the world-backed store, or — on a plain seed that
     // drew it — the library's `JournalStorage` on the simulated disk.
     let journal_store = crate::shape::journal_store(ctx.state(), !matchmakers.is_empty(), perturb);
@@ -775,10 +774,13 @@ async fn run_acceptor(
         // rejoined (an empty disk under an old identity would answer a
         // Phase 1 with "nothing accepted" for slots it voted on). Only a
         // matchmaker deployment can replace, so the coin is dark on a plain
-        // seed — and a matchmaker deployment runs one journal; the world's
-        // dead-node budget bounds it either way.
+        // seed, and on a seed serving several journals (#201): the wiped
+        // node stays down for every journal it serves, and only the default
+        // one can replace it. The world's dead-node budget bounds it either
+        // way.
         let wipe = perturb
             && config.has_matchmakers()
+            && seats.len() == 1
             && ctx.time().now() < crate::CHAOS_DURATION
             && moonpool_sim::buggify_with_prob!(f64::from(shape.wipe_pct) / 100.0);
         if wipe
@@ -1348,15 +1350,29 @@ fn system_plan(
         .collect();
     let board = crate::audit::system::system_board(ctx.state());
     let spares = spare_template(ctx, deployment);
+    let machines = crate::shape::joiner_machines(ctx.state(), deployment.joiners().len());
     crate::audit::system::lock(&board).arm(
         plan.ids.iter().copied(),
         members.iter().map(|(id, _)| id.0),
         !deployment.joiners().is_empty(),
         spares.is_some() && !deployment.joiners().is_empty(),
+        machines.iter().enumerate().map(|(rank, machine)| {
+            (
+                crate::roles::joiner_node_id(rank).0,
+                (machine.class, machine.capacity),
+            )
+        }),
     );
+    // A joiner's class is its machine's (#211); a genesis node is storage.
+    let class = machines
+        .iter()
+        .enumerate()
+        .find(|(rank, _)| crate::roles::joiner_node_id(*rank) == self_id)
+        .map_or(paros::system::Class::Storage, |(_, machine)| machine.class);
     (
         SystemPlan {
             self_id,
+            class,
             seeds: members
                 .iter()
                 .filter(|(id, _)| seeds.contains(id))

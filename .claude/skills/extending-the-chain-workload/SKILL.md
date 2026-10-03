@@ -1,6 +1,6 @@
 ---
 name: extending-the-chain-workload
-description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (WRITE=0 through SET_LEADER=22, OP_COUNT=23, retired ids 8, 9, 10, 14, 16 reserved as no-ops), the per-op weight knobs in ChainConfig, swarm_op_enabled, every call driven through the library client paros::client (Client, Writer, Reader) with CallLog as its CallObserver and retry-identity oracle, ClientTunables drawn from ChainConfig knobs, deliberate misbehaviours as explicit calls, and the reachable gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, a system-journal operation, or when changing how the client retries or judges a reply.
+description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (WRITE=0 through BOOK_CAPACITY=24, OP_COUNT=25, retired ids 8, 9, 10, 14, 16 reserved as no-ops), the per-op weight knobs in ChainConfig, swarm_op_enabled, every call driven through the library client paros::client (Client, Writer, Reader) with CallLog as its CallObserver and retry-identity oracle, ClientTunables drawn from ChainConfig knobs, deliberate misbehaviours as explicit calls, and the reachable gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, a system-journal operation, or when changing how the client retries or judges a reply.
 ---
 
 # Extending the chain workload
@@ -39,7 +39,8 @@ MATCHMAKE=9 (retired)  MATCH_GC=10 (retired)  RECONFIGURE=11
 RECONFIGURE_MATCHMAKERS=12  RETIRE=13  QUORUM_READ=14 (retired)  READ=15
 CHECK_TAIL=16 (retired)  CREATE_JOURNAL=17  DELETE_JOURNAL=18
 REGISTER_NODE=19  DRAIN_NODE=20  RETIRE_NODE=21  SET_LEADER=22
-OP_COUNT=23
+CHECKPOINT=23  BOOK_CAPACITY=24
+OP_COUNT=25
 ```
 
 moonpool's operation swarm decides per seed which ids are on as a pure

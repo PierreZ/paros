@@ -225,7 +225,10 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
   journal's id is drawn by its creator and checked at apply (`Reserved`, `IdTaken`: the creator
   redraws), never reused. The core's pool grows, never shrinks
-  (`extend_pool`), and only with matchmakers.
+  (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
+  machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
+  and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
+  journal.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are

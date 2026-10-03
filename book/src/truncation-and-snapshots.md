@@ -37,6 +37,18 @@ those records, or checkpointed what it built from them — and then asks paros t
 `Truncate`. From then on, the records below that position exist only inside
 whatever the clients made of them.
 
+`paros::client::checkpoint` is that pattern, written once for any journal owner
+(#230). The owner folds its journal into a state it can encode, writes the state
+as one **checkpoint record** — an ordinary fenced `Write` at the journal's next
+position `s`, marked by a magic prefix so readers tell it from entries — and
+then `Truncate(up_to = s)`: the checkpoint becomes the journal's first record.
+A reader below the floor is answered `truncated`, jumps to the floor and
+restores from the checkpoint there (`Folder`); a reader that already holds the
+whole prefix compares the checkpoint with its own state instead. An owner that
+crashes between the two steps leaves the checkpoint mid-log, where every fold
+resets on it and the next checkpoint truncates past it. The node registry, the
+cell's control journal, is the first journal kept this way.
+
 ## Truncation is a decision, not a side-channel
 
 Each node can prune its own log whenever it wants to. That method fails as soon as

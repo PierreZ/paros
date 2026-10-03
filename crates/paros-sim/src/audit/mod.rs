@@ -1071,6 +1071,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn checkpoint_folded(
+        &self,
+        node: NodeId,
+        _journal: JournalKey,
+        seq: u64,
+        verified: Option<bool>,
+    ) {
+        if let Some(mut board) = self.system_board() {
+            board.checkpoint_folded(node, seq, verified);
+        }
+    }
+
     fn journal_started(&self, node: NodeId, _journal: JournalKey) {
         if let Some(mut board) = self.system_board() {
             board.started(node);
