@@ -2,20 +2,32 @@
 //! [`DurableStorage`] every seed ran on until now, or the library's shipped
 //! [`JournalStorage`] over the simulated disk (`SimStorageProvider`).
 //!
-//! A journal seed runs the store a real deployment runs, under every fault
-//! but injected disk corruption: the world's copy budget and fault ledger
-//! exist only because the world injects corruption, so a seed that injects
-//! none needs neither, and moonpool's own crash model on the simulated disk
-//! (unsynced writes resolved at a crash) is its storage fault. What the
-//! world still owns on a journal seed is the operator's **provisioning
-//! ledger** (#147), which [`LedgeredJournal`] keeps: the journal's format
-//! marker lands only with the sync after the format, so the ledger records
-//! the provisioning in two steps — begun at the format, landed when that
-//! sync returns — and a process killed in between leaves the operator
-//! honestly unsure, which the next boot resolves by reading the disk
-//! (`crate::process`).
+//! A journal seed runs the store a real deployment runs, under every fault,
+//! disk corruption included: moonpool's storage chaos on the simulated
+//! disk, spread over the acceptors by a replicated fault pattern
+//! (`crate::chain_builder`) that keeps every record's copies damaged in at
+//! most one node at once — the world's copy budget, enforced by the
+//! simulator. [`LedgeredJournal`] is the store's boundary with the world:
+//!
+//! - the operator's **provisioning ledger** (#147): the journal's format
+//!   marker lands only with the sync after the format, so the ledger
+//!   records the provisioning in two steps — begun at the format, landed
+//!   when that sync returns — and a process killed in between leaves the
+//!   operator honestly unsure, which the next boot resolves by reading the
+//!   disk (`crate::process`);
+//! - the **fault ledger**: every I/O error and every corruption verdict the
+//!   store surfaced is counted, so "exactly one typed crash decision" still
+//!   binds; a corruption verdict is persistent (the boot scan would find
+//!   the same damage again), so it parks the node, as the world's own
+//!   detect ⇒ crash does;
+//! - the **recovery declaration**: a node holding a faulty vote has lost a
+//!   record its disk may no longer show (a checkpoint rewrites the marker
+//!   onto clean sectors), so it tells moonpool it is still recovering, and
+//!   the rolling pattern's turn waits for the cluster to give the record
+//!   back before damaging another node.
 
-use std::sync::{Mutex, PoisonError, Weak};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, SimTimeProvider, assert_reachable};
 use paros::{
@@ -26,12 +38,21 @@ use paros::{
 use super::StorageWorld;
 use super::storage::DurableStorage;
 
-/// The journal store, keeping the world's provisioning ledger in step with
-/// its format marker (see the module doc).
+/// The journals of one node incarnation still holding a faulty vote: the
+/// node is recovering while any is (see the module doc).
+pub(crate) type Recovering = Arc<Mutex<BTreeSet<paros::JournalKey>>>;
+
+/// The journal store at its boundary with the world (see the module doc).
 pub(crate) struct LedgeredJournal {
     inner: JournalStorage<SimStorageProvider>,
     world: Weak<Mutex<StorageWorld>>,
     ip: String,
+    /// The node's rank, as the world's parking ledger keys it.
+    rank: u64,
+    /// The node's disk, which the recovery declaration goes to.
+    disk: SimStorageProvider,
+    key: paros::JournalKey,
+    recovering: Recovering,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
 }
@@ -41,12 +62,42 @@ impl LedgeredJournal {
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
+        rank: u64,
+        disk: SimStorageProvider,
+        (key, recovering): (paros::JournalKey, Recovering),
     ) -> Self {
         Self {
             inner,
             world,
             ip,
+            rank,
+            disk,
+            key,
+            recovering,
             format_pending: false,
+        }
+    }
+
+    /// Tell moonpool whether this node still holds a faulty vote in any of
+    /// its journals.
+    fn declare_recovery(&self) {
+        let faulty = !self.inner.faulty_entries().is_empty();
+        let mut journals = self
+            .recovering
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let changed = if faulty {
+            journals.insert(self.key)
+        } else {
+            journals.remove(&self.key)
+        };
+        if changed {
+            if faulty {
+                assert_reachable!("journal store: a node declares a faulty vote still recovering");
+            }
+            // Only a shut-down simulation refuses, and then nothing is
+            // left to damage.
+            let _ = self.disk.set_recovering(!journals.is_empty());
         }
     }
 
@@ -56,13 +107,20 @@ impl LedgeredJournal {
         }
     }
 
-    /// Count an I/O fault the simulated disk handed back, the journal
-    /// seed's fault ledger (the world injected nothing): the driver must
-    /// surface each one as exactly one crash decision. A corruption verdict
-    /// is not counted here — it has its own excuse path in the audit.
+    /// Count a fault the simulated disk handed back, the journal seed's
+    /// fault ledger: the driver must surface each one as exactly one crash
+    /// decision. An I/O fault is transient; a corruption verdict is the
+    /// damage the boot scan would find again, so it parks the node.
     fn ledger<T>(&self, result: Result<T, StorageError>) -> Result<T, StorageError> {
-        if let Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. }) = &result {
-            self.with_world(StorageWorld::note_disk_fault);
+        match &result {
+            Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. }) => {
+                self.with_world(StorageWorld::note_disk_fault);
+            }
+            Err(StorageError::Corruption { .. } | StorageError::Metadata { .. }) => {
+                let (ip, rank) = (self.ip.clone(), self.rank);
+                self.with_world(|w| w.note_disk_corruption(&ip, rank));
+            }
+            _ => {}
         }
         result
     }
@@ -128,6 +186,7 @@ impl LogStorage for NodeStore {
             Self::Journal(s) => {
                 let scanned = s.inner.boot_scan().await;
                 s.ledger(scanned)?;
+                s.declare_recovery();
                 let facts = s.inner.boot_facts();
                 if facts.checkpoint_truncated {
                     // A cause the geometry makes likely (a small layout, a
@@ -140,6 +199,12 @@ impl LogStorage for NodeStore {
                     assert_reachable!(
                         "journal store: a crash leaves an ambiguous last batch the journal keeps"
                     );
+                }
+                if facts.corrupt_reported > 0 {
+                    assert_reachable!("journal store: mid-log rot is reported as faulty votes");
+                }
+                if facts.meta_repaired {
+                    assert_reachable!("journal store: a damaged metadata copy is repaired");
                 }
                 Ok(())
             }
@@ -208,6 +273,7 @@ impl LogStorage for NodeStore {
             Self::Journal(s) => {
                 let synced = s.inner.sync(must_sync).await;
                 s.ledger(synced)?;
+                s.declare_recovery();
                 if std::mem::take(&mut s.format_pending) {
                     // The marker is durable: the provisioning landed.
                     let ip = s.ip.clone();
@@ -223,7 +289,9 @@ impl LogStorage for NodeStore {
             Self::World(s) => s.truncate(first, sealed).await,
             Self::Journal(s) => {
                 let result = s.inner.truncate(first, sealed).await;
-                s.ledger(result)
+                s.ledger(result)?;
+                s.declare_recovery();
+                Ok(())
             }
         }
     }
@@ -233,7 +301,9 @@ impl LogStorage for NodeStore {
             Self::World(s) => s.trimmed_to(point, state).await,
             Self::Journal(s) => {
                 let result = s.inner.trimmed_to(point, state).await;
-                s.ledger(result)
+                s.ledger(result)?;
+                s.declare_recovery();
+                Ok(())
             }
         }
     }

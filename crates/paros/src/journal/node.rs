@@ -84,6 +84,11 @@ pub struct JournalBootFacts {
     pub ambiguous_kept: usize,
     /// A torn tail (never acknowledged) was discarded.
     pub torn_tail: bool,
+    /// Damaged entries below the last batch (rot in the middle of the log)
+    /// the journal reported, each folded as a faulty vote or forgotten.
+    pub corrupt_reported: usize,
+    /// One damaged metadata copy was repaired from its twin.
+    pub meta_repaired: bool,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
@@ -160,6 +165,8 @@ impl<P: StorageProvider> JournalStorage<P> {
             checkpoint_truncated: journal.start_index() != GENESIS,
             ambiguous_kept: recovery.ambiguous_batch.len(),
             torn_tail: recovery.torn_tail,
+            corrupt_reported: recovery.corrupt.len(),
+            meta_repaired: recovery.meta_repaired,
         };
         self.meta = match journal.meta() {
             None => NodeMeta::default(),

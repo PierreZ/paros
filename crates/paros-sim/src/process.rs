@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, TimeProvider,
-    assert_always, assert_reachable, buggify_knob,
+    FaultFocus, Process, SimContext, SimTimeProvider, SimulationError, SimulationResult,
+    TimeProvider, assert_always, assert_reachable, buggify_knob,
 };
 
 use crate::audit::journals::{journal_board, lock as board_lock};
@@ -38,7 +38,7 @@ use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
 use crate::world::matchmaker::DurableMatchmakerStorage;
-use crate::world::node_store::{LedgeredJournal, NodeStore};
+use crate::world::node_store::{LedgeredJournal, NodeStore, Recovering};
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
@@ -381,6 +381,7 @@ async fn run_joiner(
             rank: id.0,
             faults: &faults,
             journal_store: None,
+            recovering: Recovering::default(),
             system: Some(board.clone()),
         };
         match Box::pin(run_journals(
@@ -846,6 +847,7 @@ async fn run_acceptor(
             rank: self_rank.0,
             faults: &faults,
             journal_store: journal_store.map(|layout| (ctx.storage().clone(), layout)),
+            recovering: Recovering::default(),
             system: system.as_ref().map(|(_, board)| board.clone()),
         };
         // Boxed: the node loop's future is large (every arm's state lives
@@ -1097,6 +1099,8 @@ struct SimStores<'a> {
     /// The simulated disk and the journal layout, on a journal-store seed
     /// (#187).
     journal_store: Option<(SimStorageProvider, JournalStoreConfig)>,
+    /// This incarnation's journals still holding a faulty vote.
+    recovering: Recovering,
     /// The system board, on a seed that runs the system journals (#189):
     /// the directory's created journals get seats here at runtime.
     system: Option<Arc<Mutex<crate::audit::system::SystemBoard>>>,
@@ -1211,14 +1215,27 @@ impl JournalStores for SimStores<'_> {
             return Some((NodeStore::World(storage), boot));
         }
         if let Some((provider, layout)) = &self.journal_store {
-            let journal = JournalStorage::new(
+            if seat.clean_copies == seat.floor {
+                // A quorum system that tolerates no lost copy (a grid, a
+                // phase-1 quorum of the whole pool): no replicated fault
+                // pattern can damage a record anywhere and keep it
+                // recoverable, so this disk takes no damage at all. Only a
+                // shut-down simulation refuses.
+                let _ = provider.focus_faults(FaultFocus::new().background(0.0));
+            }
+            let store = LedgeredJournal::new(
+                JournalStorage::new(
+                    provider.clone(),
+                    journal_dir(journal),
+                    seat.config.clone(),
+                    *layout,
+                ),
+                Arc::downgrade(&seat.world),
+                self.ip.to_string(),
+                self.rank,
                 provider.clone(),
-                journal_dir(journal),
-                seat.config.clone(),
-                *layout,
+                (journal, self.recovering.clone()),
             );
-            let store =
-                LedgeredJournal::new(journal, Arc::downgrade(&seat.world), self.ip.to_string());
             return Some((NodeStore::Journal(store), boot));
         }
         let storage = DurableStorage::restore(

@@ -539,11 +539,14 @@ impl JournalPlan {
 /// Whether the run's acceptors store on the library's `JournalStorage` over
 /// the simulated disk instead of the world-backed store (#187), and with
 /// which layout — drawn once per seed, a seeded coin on a perturbed seed
-/// without matchmakers (the only seeds that may): the world store's copy budget and fault ledger
-/// exist because the world injects disk corruption, and a journal seed
-/// injects none (no rot, no write-path coin, no wipe — a plain seed never
-/// wipes); matchmaker seeds and the corpus stay on the world store until
-/// #176. The draw is paired with a `reachable`; the layout is the library's
+/// without matchmakers (the only seeds that may). A journal seed takes
+/// moonpool's storage chaos on the simulated disk, bounded by the replicated
+/// fault pattern `crate::chain_builder` installs (the copy budget, enforced by
+/// the simulator); the world injects nothing there (no rot, no write-path
+/// coin, no wipe — a plain seed never wipes) and keeps only the provisioning
+/// and fault ledgers at the store boundary (`world/node_store.rs`). Matchmaker
+/// seeds and the corpus stay on the world store until the rest of #176. The
+/// draw is paired with a `reachable`; the layout is the library's
 /// `JournalStoreConfig::small()`. A tighter geometry (16-slot segments, a
 /// checkpoint every append) is not a knob: moonpool's `BuggifyKnobs` also
 /// slows the simulated disk (IOPS, bandwidth, stalls), and the two together

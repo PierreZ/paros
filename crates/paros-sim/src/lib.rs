@@ -40,9 +40,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig,
-    LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
-    WorkloadCount,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, DomainLevel, ExplorationConfig,
+    FaultPatternKind, LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask,
+    ReplicatedFaults, SimulationBuilder, StorageFault, StorageFaultMask, WorkloadCount,
 };
 
 use crate::chain_workload::ChainWorkload;
@@ -221,15 +221,17 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// leader (#142) is the fault the leader's take-back exists for: every slot
 /// delegated to it stalls until the leader runs it colocated, and a proxy
 /// killed at the chaos cutoff stays down for the whole recovery tail.
-/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
-/// wipes its own storage provider, which paros does not use (the fake disk is
-/// the `StorageWorld`), so the amnesia fault is the world's own coin, drawn at
-/// a restart in `crate::process` (#124) and answered by replacement through
-/// reconfiguration, never by a rejoin. The recovery window is
+/// `prob_wipe = 0` **stays** zero: the amnesia fault is the world's own
+/// coin, drawn at a restart in `crate::process` (#124) on matchmaker seeds
+/// and answered by replacement through reconfiguration, never by a rejoin;
+/// moonpool's `CrashAndWipe` would bypass the world's provisioning ledger.
+/// The disk surface is `Chaos::Storage`: it reaches only the journal store's
+/// simulated disk (the world-backed stores keep their bytes in the world), and
+/// [`chain_builder`] bounds it to what a replicated store survives. The recovery window is
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
-fn chaos_surfaces() -> [Chaos; 6] {
+fn chaos_surfaces() -> [Chaos; 7] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -242,6 +244,7 @@ fn chaos_surfaces() -> [Chaos; 6] {
     };
     [
         Chaos::Network(ChaosMode::Swarm),
+        Chaos::Storage(ChaosMode::Swarm),
         Chaos::Attrition {
             config: regime(AttritionVictims::group(ACCEPTOR_GROUP)),
             mode: ChaosMode::Swarm,
@@ -270,9 +273,33 @@ fn chaos_surfaces() -> [Chaos; 6] {
 /// an intact transport models damage no deployed link delivers, and would
 /// fabricate a *client observation* rather than cluster state (moonpool#183
 /// terrain).
+///
+/// The disk (#176): storage chaos lands on the journal store's simulated
+/// disk, and a replicated fault pattern over the acceptors (each its own
+/// machine) keeps every record's copies damaged on at most one node at once:
+/// the copy budget, enforced by the simulator. Only two patterns fit a store
+/// whose corruption verdict parks the node: a **minority** (one node takes
+/// all the damage) and a **rolling** turn (one node at a time, moving on
+/// once its disk is clean and it holds no faulty vote). A striped pattern
+/// damages every node, and a parked one would cost each record a second
+/// copy. Two families no pattern bounds are masked: a failed disk hangs a
+/// node until a reboot nobody owes it, and a lying sync loses an
+/// acknowledged promise — amnesia, which paros answers by replacement, not
+/// by surviving it. A seed whose quorum system tolerates no lost copy makes
+/// its disks immune (`crate::process`).
 fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .storage_fault_mask(
+            StorageFaultMask::all()
+                .without(StorageFault::DiskFailure)
+                .without(StorageFault::BarrierViolation),
+        )
+        .replicated_storage_faults(
+            ReplicatedFaults::new(DomainLevel::Machine)
+                .group(ACCEPTOR_GROUP)
+                .patterns(&[FaultPatternKind::Minority, FaultPatternKind::Rolling]),
+        )
         .cluster(LocalityConfig::new(PROCESS_POOL_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess::chaotic())
         })

@@ -364,6 +364,10 @@ pub(crate) struct StorageWorld {
     /// world injected none of them, so they are counted at the store
     /// boundary and join `injected` in the one-crash-per-fault correlation.
     disk_faults: usize,
+    /// Corruption verdicts a journal store surfaced (moonpool's storage
+    /// chaos, under a replicated fault pattern): each is one crash decision
+    /// and a park, counted at the store boundary.
+    disk_corruptions: usize,
     /// The replica tier's disks (#144), by IP: learners that are not
     /// acceptors. Their records are never a *copy* the budget defends — a
     /// replica answers no Phase 1 — so the copy count never looks at them,
@@ -438,6 +442,15 @@ impl StorageWorld {
     }
 
     /// A journal store surfaced an I/O fault from the simulated disk (#187).
+    /// A journal store surfaced a corruption verdict for `key`: one crash
+    /// decision the audit must see, and a persistent fault, so the node
+    /// parks (a replicated fault pattern keeps that within the dead-node
+    /// budget).
+    pub(crate) fn note_disk_corruption(&mut self, key: &str, node: u64) {
+        self.disk_corruptions += 1;
+        self.park(key, node);
+    }
+
     pub(crate) fn note_disk_fault(&mut self) {
         self.disk_faults += 1;
     }
@@ -1347,8 +1360,8 @@ pub(crate) fn corruption_stats(
         }
     }
     CorruptionStats {
-        injected: guard.corruptions.len(),
-        crashed,
+        injected: guard.corruptions.len() + guard.disk_corruptions,
+        crashed: crashed + u64::try_from(guard.disk_corruptions).unwrap_or(u64::MAX),
         accounted,
         parked: guard.detected_parks(),
         parked_within_budget: guard.detected_parks() <= guard.dead_budget(),
