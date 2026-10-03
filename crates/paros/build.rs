@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/matchmaker.proto",
                 "proto/system.proto",
                 "proto/machine.proto",
+                "proto/checkpoint.proto",
             ],
             &["proto"],
         )?;

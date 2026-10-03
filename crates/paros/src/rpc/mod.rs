@@ -51,6 +51,13 @@ pub mod machine {
     include!(concat!(env!("OUT_DIR"), "/paros.machine.v1.rs"));
 }
 
+/// The checkpoint record (#230), generated from `proto/checkpoint.proto`:
+/// read and written by `paros::client::checkpoint`.
+pub mod checkpoint {
+    #![allow(missing_docs, clippy::pedantic)]
+    include!(concat!(env!("OUT_DIR"), "/paros.checkpoint.v1.rs"));
+}
+
 mod client;
 mod codec;
 mod consensus;

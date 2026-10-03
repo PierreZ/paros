@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package paros.checkpoint.v1;
+
+// A checkpoint record (#227, #230): the state an owner folded from every
+// record below `covers_up_to`, written by the owner as an ordinary fenced
+// `Write` at exactly that position, then made the journal's floor by a fenced
+// `Truncate(up_to = covers_up_to)`. The record follows a magic prefix
+// (`paros::client::checkpoint::MAGIC`) so a reader tells it from the owner's
+// own entries, which paros never interprets.
+//
+// Both forms are read from day one; the writer emits `Inline` only (M9).
+message CheckpointRecord {
+  uint64 covers_up_to = 1;
+  oneof form {
+    Inline inline = 2;
+    Ref ref = 3;
+  }
+}
+
+// The state itself, chunked by key range (one chunk in M9). The state is the
+// chunks concatenated in order.
+message Inline {
+  repeated bytes chunks = 1;
+}
+
+// The state lives in a separate checkpoint journal of the same tenant
+// (Pulsar PIP-14's compacted ledger): its records `[0, end_seq)` are the
+// chunks, and `checksum` is the CRC-32C of their concatenation.
+// `covers_up_to` repeats the record's own, so the referenced journal names
+// the horizon it was built for.
+message Ref {
+  uint64 journal_id = 1;
+  uint64 covers_up_to = 2;
+  uint64 end_seq = 3;
+  uint32 checksum = 4;
+}

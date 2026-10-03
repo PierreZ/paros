@@ -30,6 +30,11 @@
 //!   sends the owner's own `(generation, owner)`, and a refusal supersedes
 //!   the writer like a refused write. [`Client::truncate`] follows
 //!   redirects for whatever request it is handed.
+//! - **Checkpoint and truncate** ([`checkpoint`], #230): a journal owner
+//!   folds its journal, writes the state as a checkpoint record, and
+//!   truncates to it; every reader restarts from the checkpoint at the
+//!   floor. The pure [`checkpoint::Folder`] is what the system journals'
+//!   node follower runs too.
 //! - **The operator calls** pass through with the same discipline: [`Client::reconfigure`] and
 //!   [`Client::reconfigure_matchmakers`] re-ask a busy or unsettled node,
 //!   [`Client::inspect`] and [`Client::retire`] are one bounded attempt.
@@ -57,6 +62,7 @@
 //! RPC runtime, and nothing else.
 
 pub mod bootstrap;
+pub mod checkpoint;
 mod observer;
 pub mod outcome;
 mod reader;
@@ -121,6 +127,14 @@ pub struct ClientTunables {
     /// How long a `Read` at the tail lets the server wait for a record.
     /// Floor 0: answered at once, empty when nothing is past the cursor.
     pub wait_ms: u64,
+    /// A [`checkpoint::Checkpointer`] checkpoints once the entries since its
+    /// last checkpoint reach this many times the state's size: the extra
+    /// writes are capped at `1/k`. Floor 1: a checkpoint per state's worth
+    /// of entries.
+    pub checkpoint_factor: u32,
+    /// ... or once this long has passed since its last checkpoint, with any
+    /// entry since. Floor 0: a checkpoint after every entry.
+    pub checkpoint_interval: Duration,
 }
 
 impl Default for ClientTunables {
@@ -134,6 +148,19 @@ impl Default for ClientTunables {
             retry_backoff: Duration::from_millis(100),
             page_size: 0,
             wait_ms: 0,
+            checkpoint_factor: 4,
+            checkpoint_interval: Duration::from_mins(1),
+        }
+    }
+}
+
+impl ClientTunables {
+    /// The checkpoint policy these tunables name.
+    #[must_use]
+    pub fn checkpoint_policy(&self) -> checkpoint::CheckpointPolicy {
+        checkpoint::CheckpointPolicy {
+            factor: self.checkpoint_factor,
+            interval: self.checkpoint_interval,
         }
     }
 }
@@ -369,6 +396,12 @@ impl<P: Providers> Client<P> {
         );
         self.rotation = count;
         self
+    }
+
+    /// The provider's time now (what a checkpoint policy's time bound reads).
+    #[must_use]
+    pub fn now(&self) -> Duration {
+        self.time.now()
     }
 
     /// The tunables.

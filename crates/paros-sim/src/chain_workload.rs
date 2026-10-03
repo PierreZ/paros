@@ -295,6 +295,14 @@ struct ChainConfig {
     /// may still land, re-claims, and retries it across the ownership
     /// change. Floor 1 ms: an attempt abandoned at once, still sent.
     ack_race_timeout_ms: u64,
+    /// A registry owner checkpoints once the log since its last checkpoint
+    /// reaches this many times the registry's size
+    /// (`ClientTunables::checkpoint_factor`). Floor 1: a checkpoint per
+    /// registry's worth of entries, every write still costing at most one.
+    checkpoint_factor: u32,
+    /// ... or once this long has passed since it opened
+    /// (`ClientTunables::checkpoint_interval`). Floor 0: due after any entry.
+    checkpoint_interval_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -350,6 +358,8 @@ impl ChainConfig {
             burst_claim_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             burst_spacing_ms: buggify_knob!(60_u64, 0_u64..121_u64),
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
+            checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
+            checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -432,6 +442,8 @@ impl ChainConfig {
             retry_backoff: Duration::from_millis(self.retry_backoff_ms),
             page_size: self.read_limit,
             wait_ms: self.read_wait_ms,
+            checkpoint_factor: self.checkpoint_factor,
+            checkpoint_interval: Duration::from_millis(self.checkpoint_interval_ms),
         }
     }
 
