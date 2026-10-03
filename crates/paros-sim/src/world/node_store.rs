@@ -12,27 +12,32 @@
 //! - the operator's **provisioning ledger** (#147): the journal's format
 //!   marker lands only with the sync after the format, so the ledger
 //!   records the provisioning in two steps — begun at the format, landed
-//!   when that sync returns — and a process killed in between leaves the
-//!   operator honestly unsure, which the next boot resolves by reading the
-//!   disk (`crate::process`);
+//!   when that sync returns. A kill, or a failed sync that quarantines the
+//!   journal, in between leaves the operator honestly unsure; the next open
+//!   (a reboot or a quarantine's re-open alike) claims an existing member
+//!   and the boot scan settles it from the disk: a store that carries the
+//!   marker was provisioned, and one that does not gets the interrupted
+//!   provisioning finished — the format and sync a first boot would run;
 //! - the **fault ledger**: every I/O error and every corruption verdict the
 //!   store surfaced is counted, so "exactly one typed crash decision" still
-//!   binds; a corruption verdict is persistent (the boot scan would find
+//!   binds; an integrity verdict is persistent (the boot scan would find
 //!   the same damage again), so it parks the node, as the world's own
-//!   detect ⇒ crash does;
+//!   detect ⇒ crash does, while an I/O error the open reported as
+//!   corruption only crashes it;
 //! - the **recovery declaration**: a node holding a faulty vote has lost a
 //!   record its disk may no longer show (a checkpoint rewrites the marker
 //!   onto clean sectors), so it tells moonpool it is still recovering, and
 //!   the rolling pattern's turn waits for the cluster to give the record
-//!   back before damaging another node.
+//!   back before damaging another node. A parked journal declares it for
+//!   good (`hold_turn_for_good`).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, SimTimeProvider, assert_reachable};
 use paros::{
-    Ballot, Command, Config, HardState, JournalState, JournalStorage, LogStorage, MustSync, Slot,
-    Storage, StorageError,
+    Ballot, Command, Config, HardState, IntegrityFault, JournalState, JournalStorage, LogStorage,
+    MustSync, RunError, Slot, Storage, StorageError,
 };
 
 use super::StorageWorld;
@@ -41,6 +46,23 @@ use super::storage::DurableStorage;
 /// The journals of one node incarnation still holding a faulty vote: the
 /// node is recovering while any is (see the module doc).
 pub(crate) type Recovering = Arc<Mutex<BTreeSet<paros::JournalKey>>>;
+
+/// A parked journal never recovers: its node holds the rolling turn for
+/// the rest of the run, whatever its disk shows (a verdict can come from a
+/// transient fault, a misdirected read, that left the disk clean).
+pub(crate) fn hold_turn_for_good(
+    disk: &SimStorageProvider,
+    recovering: &Recovering,
+    key: paros::JournalKey,
+) {
+    recovering
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key);
+    // Only a shut-down simulation refuses, and then nothing is left to
+    // damage.
+    let _ = disk.set_recovering(true);
+}
 
 /// The journal store at its boundary with the world (see the module doc).
 pub(crate) struct LedgeredJournal {
@@ -107,6 +129,13 @@ impl LedgeredJournal {
         }
     }
 
+    /// Whether the operator's provisioning of this node was interrupted.
+    fn provisioning_ambiguous(&self) -> bool {
+        let mut ambiguous = false;
+        self.with_world(|w| ambiguous = w.provisioning_ambiguous(&self.ip));
+        ambiguous
+    }
+
     /// Count a fault the simulated disk handed back, the journal seed's
     /// fault ledger: the driver must surface each one as exactly one crash
     /// decision. An I/O fault is transient; a corruption verdict is the
@@ -116,9 +145,17 @@ impl LedgeredJournal {
             Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. }) => {
                 self.with_world(StorageWorld::note_disk_fault);
             }
+            // An I/O error while the journal opened (a read EIO, a read
+            // a crash cut short) is reported as corruption, but a reboot can
+            // read past it: one crash decision, no park.
+            Err(StorageError::Corruption {
+                fault: IntegrityFault::ReadError,
+                ..
+            }) => self.with_world(|w| w.note_disk_corruption(None)),
             Err(StorageError::Corruption { .. } | StorageError::Metadata { .. }) => {
                 let (ip, rank) = (self.ip.clone(), self.rank);
-                self.with_world(|w| w.note_disk_corruption(&ip, rank));
+                self.with_world(|w| w.note_disk_corruption(Some((&ip, rank))));
+                hold_turn_for_good(&self.disk, &self.recovering, self.key);
             }
             _ => {}
         }
@@ -184,8 +221,27 @@ impl LogStorage for NodeStore {
         match self {
             Self::World(s) => s.boot_scan().await,
             Self::Journal(s) => {
-                let scanned = s.inner.boot_scan().await;
-                s.ledger(scanned)?;
+                if s.provisioning_ambiguous() {
+                    // Settled from the disk by the operator's own command
+                    // (see the module doc): a scan, then the format and
+                    // sync only if the marker never landed.
+                    assert_reachable!(
+                        "journal store: an interrupted provisioning is resolved from the disk"
+                    );
+                    match paros::provision_store(&mut s.inner).await {
+                        Ok(_) => {
+                            let ip = s.ip.clone();
+                            s.with_world(|w| w.note_provisioned(&ip));
+                        }
+                        Err(RunError::Storage(fault)) => return s.ledger(Err(fault)),
+                        // A marker under another configuration: the driver
+                        // refuses it at boot, as a mismatch.
+                        Err(_) => {}
+                    }
+                } else {
+                    let scanned = s.inner.boot_scan().await;
+                    s.ledger(scanned)?;
+                }
                 s.declare_recovery();
                 let facts = s.inner.boot_facts();
                 if facts.checkpoint_truncated {

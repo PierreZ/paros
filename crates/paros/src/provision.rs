@@ -9,7 +9,8 @@
 //! wiped volume is refused as amnesia, not silently rejoined.
 //!
 //! Provisioning resolves an interrupted provisioning **by reading the
-//! disk**, the simulation's rule (`resolve_provisioning` in `paros-sim`): a
+//! disk**, the simulation's rule too (`paros-sim` runs this very function on
+//! an interrupted journal provisioning, `world/node_store.rs`): a
 //! store that already carries the marker under the configuration it is
 //! handed now was formatted by the interrupted run and is
 //! [`Provisioned::Resumed`]; one formatted under another configuration is

@@ -442,13 +442,14 @@ impl StorageWorld {
     }
 
     /// A journal store surfaced an I/O fault from the simulated disk (#187).
-    /// A journal store surfaced a corruption verdict for `key`: one crash
-    /// decision the audit must see, and a persistent fault, so the node
-    /// parks (a replicated fault pattern keeps that within the dead-node
-    /// budget).
-    pub(crate) fn note_disk_corruption(&mut self, key: &str, node: u64) {
+    /// A journal store surfaced a corruption verdict: one crash decision
+    /// the audit must see. A persistent one parks `park`'s `(key, node)` (a
+    /// replicated fault pattern keeps that within the dead-node budget).
+    pub(crate) fn note_disk_corruption(&mut self, park: Option<(&str, u64)>) {
         self.disk_corruptions += 1;
-        self.park(key, node);
+        if let Some((key, node)) = park {
+            self.park(key, node);
+        }
     }
 
     pub(crate) fn note_disk_fault(&mut self) {
@@ -465,12 +466,6 @@ impl StorageWorld {
     /// may or may not be on its disk (#187).
     pub(crate) fn provisioning_ambiguous(&self, ip: &str) -> bool {
         self.provisioning.contains(ip) && !self.provisioned.contains(ip)
-    }
-
-    /// The disk said the interrupted provisioning of `ip` never landed: the
-    /// identity is unprovisioned, and its next boot is a first boot.
-    pub(crate) fn abandon_provisioning(&mut self, ip: &str) {
-        self.provisioning.remove(ip);
     }
 
     /// Whether `ip`'s registry was wiped (lost for good).

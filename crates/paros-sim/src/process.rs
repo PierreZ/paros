@@ -38,14 +38,13 @@ use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
 use crate::world::matchmaker::DurableMatchmakerStorage;
-use crate::world::node_store::{LedgeredJournal, NodeStore, Recovering};
+use crate::world::node_store::{LedgeredJournal, NodeStore, Recovering, hold_turn_for_good};
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
     AcceptorConfig, BootKind, BootRefusal, Config, JournalStorage, JournalStoreConfig,
-    JournalStores, LogStorage, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId,
-    ReplicaId, RunError, SystemPlan, parse_addr, run_journals, run_matchmaker, run_proxy,
-    run_replica,
+    JournalStores, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId, ReplicaId,
+    RunError, SystemPlan, parse_addr, run_journals, run_matchmaker, run_proxy, run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -825,9 +824,6 @@ async fn run_acceptor(
     // exits cleanly: it stays down. A **wiped** identity (#124) is not on
     // that list: it boots, and the library refuses it (#147, below).
     loop {
-        if journal_store.is_some() {
-            resolve_provisioning(ctx, &seats, my_ip, journal_store).await;
-        }
         let provisioned = seats[0]
             .world
             .lock()
@@ -1112,49 +1108,6 @@ fn journal_dir(journal: paros::JournalKey) -> String {
     format!("paros/journals/{}/{}", journal.tenant.0, journal.journal.0)
 }
 
-/// Resolve an interrupted provisioning before a boot (#187): a journal
-/// store's format marker lands only with the sync after the format, and a
-/// process killed in between leaves the operator's ledger saying "begun"
-/// and nothing else. The operator does what an operator would: looks at the
-/// disk — a store that carries the marker was provisioned, one that does
-/// not was not, and its next boot is a first boot again.
-#[tracing::instrument(level = "debug", skip_all, fields(ip = %ip))]
-async fn resolve_provisioning(
-    ctx: &SimContext,
-    seats: &[Seat],
-    ip: &str,
-    journal_store: Option<JournalStoreConfig>,
-) {
-    let Some(layout) = journal_store else {
-        return;
-    };
-    for seat in seats {
-        let ambiguous = seat
-            .world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .provisioning_ambiguous(ip);
-        if !ambiguous {
-            continue;
-        }
-        let mut probe = JournalStorage::new(
-            ctx.storage().clone(),
-            journal_dir(seat.journal),
-            seat.config.clone(),
-            layout,
-        );
-        let formatted = probe.boot_scan().await.is_ok() && probe.is_formatted();
-        drop(probe);
-        let mut guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
-        if formatted {
-            guard.note_provisioned(ip);
-        } else {
-            guard.abandon_provisioning(ip);
-        }
-        assert_reachable!("journal store: an interrupted provisioning is resolved from the disk");
-    }
-}
-
 impl SimStores<'_> {
     fn seat(&self, journal: paros::JournalKey) -> Option<&Seat> {
         self.seats.iter().find(|seat| seat.journal == journal)
@@ -1182,8 +1135,12 @@ impl JournalStores for SimStores<'_> {
                 // The operator's claim (#147): an identity the world's
                 // provisioning ledger knows is an existing member — a wiped
                 // one included, which is the whole point — and any other is
-                // a first boot the driver formats.
-                if guard.provisioned(self.ip) {
+                // a first boot the driver formats. An interrupted journal
+                // provisioning is claimed as a member too: the store settles
+                // it from the disk at its boot scan (`LedgeredJournal`).
+                if guard.provisioned(self.ip)
+                    || (self.journal_store.is_some() && guard.provisioning_ambiguous(self.ip))
+                {
                     BootKind::ExistingMember
                 } else {
                     BootKind::FirstBoot
@@ -1196,6 +1153,9 @@ impl JournalStores for SimStores<'_> {
                 return None;
             }
             Some(ParkReason::Corruption) => {
+                if let Some((provider, _)) = &self.journal_store {
+                    hold_turn_for_good(provider, &self.recovering, journal);
+                }
                 stay_down(&seat.checker, Down::StorageParked(self.rank));
                 return None;
             }
