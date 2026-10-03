@@ -65,6 +65,11 @@ pub(crate) struct JournalReads {
     confirming: BTreeMap<u64, PendingRead>,
     /// Confirmed reads waiting at the tail, oldest first.
     parked: Vec<PendingRead>,
+    /// The token the next read's quorum read opens with. It starts at a base
+    /// drawn per incarnation ([`JournalReads::starting_at`]), never at 0: a
+    /// peer's answer to the previous incarnation's read at the same token
+    /// can still be in flight, and folding it into a new read would confirm
+    /// it at a watermark from before the read opened.
     next_ctx: u64,
     /// The driver tick of the last upkeep ([`JournalReads::expire`]): the
     /// clock every deadline here is counted on.
@@ -146,6 +151,16 @@ pub(crate) fn wait_ticks(wait_ms: u64, tick: Duration, cap: u64) -> u64 {
 }
 
 impl JournalReads {
+    /// No reads yet, the first quorum read opening at token `base` — a
+    /// value the caller draws fresh for every incarnation of the reader
+    /// (every boot, every re-open of a quarantined journal).
+    pub(crate) fn starting_at(base: u64) -> Self {
+        Self {
+            next_ctx: base,
+            ..Self::default()
+        }
+    }
+
     /// The `ctx` the next read's quorum read opens with.
     pub(crate) fn next_ctx(&self) -> u64 {
         self.next_ctx
@@ -163,7 +178,7 @@ impl JournalReads {
         opened: Option<Slot>,
     ) {
         let ctx = self.next_ctx;
-        self.next_ctx += 1;
+        self.next_ctx = self.next_ctx.wrapping_add(1);
         let limit = match usize::try_from(req.limit).unwrap_or(usize::MAX) {
             0 => READ_PAGE_RECORDS,
             limit => limit.min(READ_PAGE_RECORDS),

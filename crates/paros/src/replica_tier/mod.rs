@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_core::{Providers, SimulationResult, TimeProvider};
+use moonpool_core::{Providers, RandomProvider, SimulationResult, TimeProvider};
 use paros_core::{
     Ballot, Command, JournalId, JournalKey, MustSync, NodeId, Outcome, Party, QuorumSystem,
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
@@ -308,7 +308,8 @@ where
     // before the crash complete it on the way back up.
     drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
 
-    let mut reads = JournalReads::default();
+    // A fresh read-token base per incarnation (see `JournalReads::next_ctx`).
+    let mut reads = JournalReads::starting_at(providers.random().random());
     let journal = replica.config().journal;
     let mut ticks: u64 = 0;
     let time = providers.time().clone();

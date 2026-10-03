@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_core::Providers;
+use moonpool_core::{Providers, RandomProvider};
 use paros_core::{ColocatedNode, JournalKey, NodeId};
 
 use crate::audit::Audit;
@@ -33,6 +33,7 @@ use crate::storage::LogStorage;
 
 use super::boot::{check_format_marker, report_boot_state};
 use super::config::{BootKind, DriverTunables, RunError};
+use super::log_reads::JournalReads;
 use super::ready::{ClientWaiters, storage_fault_crash};
 use super::report::{Cadence, Deltas, draw_election_timeout};
 
@@ -174,7 +175,12 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A:
         node,
         storage,
         audit,
-        waiters: ClientWaiters::default(),
+        // A fresh read-token base per incarnation (see
+        // `JournalReads::next_ctx`).
+        waiters: ClientWaiters {
+            reads: JournalReads::starting_at(providers.random().random()),
+            ..ClientWaiters::default()
+        },
         last,
         match_resend: Cadence::default(),
         gc_resend: Cadence::default(),

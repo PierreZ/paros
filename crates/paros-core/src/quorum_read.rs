@@ -25,7 +25,12 @@
 //! is therefore at least `s`, and the replica serves only after applying
 //! `s`. Every write acked before the read is thus visible to it, which is
 //! the read half of linearizability (§3.5's case analysis); the write half
-//! is the leader's, unchanged. **No clock anywhere**: the paper's read
+//! is the leader's, unchanged. The argument needs every watermark folded
+//! into a read to have been sent *after* the read opened, so the caller's
+//! token must never repeat while an answer to an earlier read at that token
+//! can still be in flight — across the reader's restarts and re-opens too,
+//! not only within one run of it. The driver draws a fresh token base per
+//! incarnation for exactly that. **No clock anywhere**: the paper's read
 //! leases (§9) assume clock synchrony, and this rung refuses exactly that.
 //!
 //! The liveness trade is the mirror image: a watermark raised by an accept
