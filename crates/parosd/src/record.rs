@@ -1,17 +1,16 @@
 //! The provisioning record (#208): `<data-dir>/provisioned`, the
-//! operator's memory of having provisioned this identity, kept **outside
+//! machine's memory of which journal stores it formatted, kept **outside
 //! the stores**.
 //!
 //! A store's format marker says "this store was formatted"; it cannot say
-//! "this identity was provisioned before", because an interrupted
-//! provisioning and a completed one leave the same marker. The record is
-//! written only once every store it names is formatted durably, so:
+//! "this machine meant to serve it", because an interrupted formation and a
+//! completed one leave the same marker. The record is written only once
+//! every store it names is formatted durably, so:
 //!
-//! - `parosd provision` on a data directory that carries a record is a
-//!   second provisioning, refused as already formatted;
-//! - `parosd provision` without a record resumes an interrupted one by
-//!   reading the disk (a store already formatted under the same
-//!   configuration is left as it is);
+//! - a cell's formation (#196, [`crate::machine_record`]) formats every
+//!   journal of the plan, then writes this record, then commits the plan;
+//!   an interrupted formation resumes from the disk (a store already
+//!   formatted under the same configuration is left as it is);
 //! - a journal the directory created on this node (#189) is a first boot
 //!   until its store has booted once, and an existing member from then on
 //!   — the record, not the journal's directory, remembers which.
@@ -20,17 +19,28 @@
 //! temporary file, `fsync`, `rename`, `fsync` of the directory):
 //!
 //! ```text
-//! role node
-//! id 0
-//! journal 128
+//! role machine
+//! id 6150928431937019931
+//! journal 256/256
 //! ```
+//!
+//! A journal is named by its frame `<tenant>/<journal>` (#235).
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use paros::JournalId;
+use paros::JournalKey;
+#[cfg(test)]
+use paros::{JournalId, TenantId};
+
+/// Parse a journal frame written `<tenant>/<journal>` (#235), the form
+/// [`JournalKey`]'s `Display` renders.
+#[must_use]
+pub fn parse_key(text: &str) -> Option<JournalKey> {
+    text.contains('/').then(|| text.parse().ok()).flatten()
+}
 
 /// The record's file name under the data directory.
 const FILE: &str = "provisioned";
@@ -44,7 +54,7 @@ pub struct Record {
     pub id: u64,
     /// The journals whose stores are provisioned (a node's; empty for a
     /// matchmaker or a replica).
-    pub journals: BTreeSet<JournalId>,
+    pub journals: BTreeSet<JournalKey>,
 }
 
 impl Record {
@@ -88,10 +98,9 @@ impl Record {
                     );
                 }
                 "journal" => {
-                    let journal = value
-                        .parse()
-                        .map_err(|e| format!("bad journal {value:?}: {e}"))?;
-                    journals.insert(JournalId(journal));
+                    let journal =
+                        parse_key(value).ok_or_else(|| format!("bad journal {value:?}"))?;
+                    journals.insert(journal);
                 }
                 _ => return Err(format!("unknown record key {key:?}")),
             }
@@ -107,7 +116,7 @@ impl Record {
         let mut text = format!("role {}\nid {}\n", self.role, self.id);
         for journal in &self.journals {
             text.push_str("journal ");
-            text.push_str(&journal.0.to_string());
+            text.push_str(&journal.to_string());
             text.push('\n');
         }
         text
@@ -120,15 +129,7 @@ impl Record {
     ///
     /// Any filesystem failure.
     pub fn write(&self, data_dir: &Path) -> io::Result<()> {
-        fs::create_dir_all(data_dir)?;
-        let staged = data_dir.join(format!("{FILE}.tmp"));
-        {
-            let mut file = File::create(&staged)?;
-            file.write_all(self.render().as_bytes())?;
-            file.sync_all()?;
-        }
-        fs::rename(&staged, Self::path(data_dir))?;
-        sync_dir(data_dir)
+        write_atomically(data_dir, FILE, &self.render())
     }
 
     /// Whether this record was written for `role` `id`.
@@ -146,6 +147,25 @@ impl Record {
             self.role, self.id
         ))
     }
+}
+
+/// Write `text` to `data_dir/name` whole and durably: a temporary file,
+/// `fsync`, `rename`, `fsync` of the directory. On return it survives a
+/// crash; a crash before it leaves the previous file (or none).
+///
+/// # Errors
+///
+/// Any filesystem failure.
+pub fn write_atomically(data_dir: &Path, name: &str, text: &str) -> io::Result<()> {
+    fs::create_dir_all(data_dir)?;
+    let staged = data_dir.join(format!("{name}.tmp"));
+    {
+        let mut file = File::create(&staged)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&staged, data_dir.join(name))?;
+    sync_dir(data_dir)
 }
 
 /// Make a directory's entries durable (the rename above).
@@ -170,7 +190,12 @@ mod tests {
         let record = Record {
             role: "node".into(),
             id: 3,
-            journals: [JournalId(128), JournalId(200)].into_iter().collect(),
+            journals: [
+                JournalKey::default(),
+                JournalKey::new(TenantId(300), JournalId(9_000)),
+            ]
+            .into_iter()
+            .collect(),
         };
         record.write(dir.path()).expect("write");
         let read = Record::read(dir.path()).expect("read").expect("a record");

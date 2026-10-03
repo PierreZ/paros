@@ -26,8 +26,11 @@
 //! - **A reader** ([`Reader`]): a cursor, paged `Read`s with a long-poll at
 //!   the tail, and a `truncated` answer resumed at the floor it names and
 //!   reported as a [`ReaderOutcome::Gap`] — never skipped silently.
-//! - **The operator calls** pass through with the same discipline:
-//!   [`Client::truncate`] follows redirects, [`Client::reconfigure`] and
+//! - **A truncation is fenced like a write** (#228): [`Writer::truncate`]
+//!   sends the owner's own `(generation, owner)`, and a refusal supersedes
+//!   the writer like a refused write. [`Client::truncate`] follows
+//!   redirects for whatever request it is handed.
+//! - **The operator calls** pass through with the same discipline: [`Client::reconfigure`] and
 //!   [`Client::reconfigure_matchmakers`] re-ask a busy or unsettled node,
 //!   [`Client::inspect`] and [`Client::retire`] are one bounded attempt.
 //!
@@ -40,7 +43,8 @@
 //! writes under a stale generation, re-sends a write it saw written,
 //! submits one write to two servers at once, or gives up on an attempt
 //! before its ack can come back. Each of those is a call a caller makes on
-//! purpose — [`Writer::stale_entry`], [`Client::write_attempt`] with a
+//! purpose — [`Writer::stale_entry`], [`Writer::stale_truncate_request`]
+//! (a superseded owner's truncation), [`Client::write_attempt`] with a
 //! `listen` bound, [`Client::write_attempt`] to two targets — and none of
 //! them is what [`Writer::write`] does.
 //!
@@ -52,6 +56,7 @@
 //! The module is wasm-safe: it needs the provider's time and the caller's
 //! RPC runtime, and nothing else.
 
+pub mod bootstrap;
 mod observer;
 pub mod outcome;
 mod reader;
@@ -66,7 +71,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalState, QuorumSystem};
+use paros_core::{JournalKey, JournalState, QuorumSystem};
 use tokio_util::sync::CancellationToken;
 
 pub use observer::{Answered, Attempted, CallObserver, NoObserver};
@@ -521,14 +526,15 @@ impl<P: Providers> Client<P> {
     pub fn set_leader_attempt(
         &self,
         target: usize,
-        journal: JournalId,
+        journal: JournalKey,
         expected: u64,
         owner: u64,
     ) -> impl Future<Output = SetLeaderOutcome> + Send + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
         let request = SetLeader {
-            journal: journal.0,
+            journal: journal.journal.0,
+            tenant: journal.tenant.0,
             expected,
             owner,
         };
@@ -560,19 +566,16 @@ impl<P: Providers> Client<P> {
         }
     }
 
-    /// One `Truncate` of `journal` below `up_to`, asked of `target`.
+    /// One fenced `Truncate` (#228), asked of `target`. Build `request` with
+    /// [`Writer::truncate_request`] (the owner's own fence) or, as a
+    /// deliberate misbehaviour, [`Writer::stale_truncate_request`].
     pub fn truncate_attempt(
         &self,
         target: usize,
-        journal: JournalId,
-        up_to: u64,
+        request: Truncate,
     ) -> impl Future<Output = TruncateOutcome> + Send + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
-        let request = Truncate {
-            journal: journal.0,
-            up_to,
-        };
         let token = observer.invoked(Attempted::Truncate(&request));
         async move {
             let outcome = TruncateOutcome::judge(&node.truncate(&request).await);
@@ -670,6 +673,7 @@ impl<P: Providers> Client<P> {
             .read_any(
                 &Read {
                     journal: request.journal,
+                    tenant: request.tenant,
                     from_seq: request.seq,
                     limit: count.max(1),
                     wait_ms: 0,
@@ -826,13 +830,14 @@ impl<P: Providers> Client<P> {
     /// generation of its own on purpose.
     pub async fn claim(
         &self,
-        journal: JournalId,
+        journal: JournalKey,
         owner: u64,
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
         let read = Read {
-            journal: journal.0,
+            journal: journal.journal.0,
+            tenant: journal.tenant.0,
             from_seq: 0,
             limit: 1,
             wait_ms: 0,
@@ -859,7 +864,7 @@ impl<P: Providers> Client<P> {
     /// nothing — so this never mints two generations.
     pub async fn set_leader(
         &self,
-        journal: JournalId,
+        journal: JournalKey,
         expected: u64,
         owner: u64,
         first: usize,
@@ -910,10 +915,10 @@ impl<P: Providers> Client<P> {
     /// redirect naming another server is followed, one naming none (or the
     /// same server) is re-asked of the next server `retry_backoff` later,
     /// for at most `redirect_limit` asks in all.
-    pub async fn truncate(&self, journal: JournalId, up_to: u64, target: usize) -> TruncateOutcome {
+    pub async fn truncate(&self, request: &Truncate, target: usize) -> TruncateOutcome {
         let mut server = target % self.servers.len();
         for _ in 0..self.tunables.redirect_limit.max(1) {
-            let attempt = self.truncate_attempt(server, journal, up_to);
+            let attempt = self.truncate_attempt(server, *request);
             let outcome = self
                 .bounded(
                     self.tunables.request_timeout,
@@ -936,6 +941,10 @@ impl<P: Providers> Client<P> {
                 TruncateOutcome::Applied { state } => {
                     self.observe_leader_at(server);
                     return TruncateOutcome::Applied { state };
+                }
+                TruncateOutcome::Refused { state } => {
+                    self.observe_leader_at(server);
+                    return TruncateOutcome::Refused { state };
                 }
                 terminal => return terminal,
             }
@@ -1035,9 +1044,9 @@ impl<P: Providers> Client<P> {
         ReconfigureMatchmakersOutcome::Ambiguous
     }
 
-    /// One bounded `Inspect` of `journal` on server `target` (`0` names the
-    /// node's first journal); `None` without an answer.
-    pub async fn inspect(&self, target: usize, journal: u64) -> Option<InspectReply> {
+    /// One bounded `Inspect` of `journal` on server `target` (an unset key
+    /// names the node's first journal); `None` without an answer.
+    pub async fn inspect(&self, target: usize, journal: JournalKey) -> Option<InspectReply> {
         let node = self.node(target).clone();
         let probe = async move { node.inspect_journal(journal).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)

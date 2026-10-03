@@ -1,180 +1,92 @@
-//! `parosd` — the paros daemon (#206): every role of a deployment over
-//! moonpool's `TokioProviders` and the journal stores on a real
+//! `parosd` — the paros daemon (#196): **one uniform binary** every machine
+//! runs, over moonpool's `TokioProviders` and the journal stores on a real
 //! filesystem. `parosd` serves; the client is `parosctl` (#220), over
 //! `paros::client`.
 //!
-//! The drivers it runs are the library's provider-generic ones — the same
-//! code the deterministic simulation runs over `SimProviders` — and the
-//! stores are `paros::journal`'s, the same code the simulation runs over
-//! the simulated disk. What this binary adds is only what a process needs:
-//! argument parsing, a tracing subscriber, the data directory, signals, and
-//! an exit code per way a driver can stop:
+//! A machine starts with its listen address, its data directory, its class,
+//! capacity and failure domain, and its rendezvous join list — environment
+//! variables, validated at startup ([`settings`]). There is no role to pick
+//! and no identity to pass:
 //!
-//! | exit | driver outcome | what the operator does |
+//! 1. **Format, once.** On an empty data directory the machine mints its
+//!    `node_id` at random (#225) and records it ([`machine_record`]). A
+//!    directory that holds stores but no identity lost it, and is refused.
+//! 2. **Wait.** Until it belongs to a cell, it serves the machine contract
+//!    (`paros::machine::wait_for_cell`): `Identify`, and — on a seed of
+//!    class `storage`, one its own join list names — `Init` and
+//!    `FormCell`. It never forms a cell on its own (#216).
+//! 3. **Serve.** A formed machine runs `paros::run_journals` over its
+//!    cell's plan: the cell control journal and the static assignment that
+//!    stands in for placement until M9 (#212), plain Multi-Paxos over the
+//!    seeds. Every start after formation is an existing member's
+//!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
+//!
+//! The drivers are the library's provider-generic ones — the same code the
+//! deterministic simulation runs — and the stores are `paros::journal`'s.
+//! The machine phase (steps 1 and 2) is not yet in the simulation (#216).
+//!
+//! | exit | outcome | what the operator does |
 //! |---|---|---|
 //! | 0 | shut down on `SIGTERM` / `SIGINT` | nothing |
 //! | 75 (`EX_TEMPFAIL`) | [`RunError::Storage`]: the fail-stop crash on a storage fault | restart: the next boot recovers from what the disk holds |
-//! | 78 (`EX_CONFIG`) | [`RunError::Refused`]: the boot claim or the configuration disagrees with the store | do **not** restart: resolve the claim (amnesia, a formatted store, an edited configuration) |
+//! | 78 (`EX_CONFIG`) | [`RunError::Refused`]: the store or the identity disagrees with the configuration | do **not** restart: resolve it (amnesia, an edited configuration, a class change) |
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
-//!
-//! Provisioning is its own command (#208): `parosd provision <role>` formats
-//! every store of an identity, writes the provisioning record and exits;
-//! every ordinary start is an existing member's ([`BootKind::ExistingMember`]),
-//! so a start never formats and a wiped volume is refused as amnesia.
+//! | 2 | an invalid configuration | fix the variables |
 
-mod deployment;
+mod machine_record;
 mod record;
 mod resolve;
+mod settings;
 mod stores;
 mod tunables;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand, ValueEnum};
-use moonpool_core::TokioProviders;
-use paros::{
-    BootKind, BootRefusal, JournalId, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
-    MatchmakerId, NoAudit, NoHooks, NodeId, Provisioned, ProxyId, RunError,
-};
+use clap::Parser;
+use moonpool_core::{Providers, RandomProvider, TokioProviders};
+use paros::client::bootstrap::TOY_JOURNAL;
+use paros::machine::{CellPlan, MachineFacts};
+use paros::{BootRefusal, DriverTunables, JournalKey, NoHooks, NodeId, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use crate::deployment::Deployment;
-use crate::record::Record;
-use crate::stores::{DirStores, journal_dir, matchmaker_dir, path_str, replica_dir};
-
-/// The paros daemon.
-#[derive(Parser, Debug)]
-#[command(name = "parosd", version, about)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Run an acceptor node: every journal of the deployment.
-    Node(ServerArgs),
-    /// Run a matchmaker (the deployment must name matchmakers).
-    Matchmaker(ServerArgs),
-    /// Run a replica: the deployment's journal, learned, never voted on.
-    Replica(ServerArgs),
-    /// Run a proxy leader (stateless: no data directory, no boot claim).
-    Proxy(ProxyArgs),
-    /// Provision an identity, once: format every store it keeps, record
-    /// it, and exit. Never part of a start.
-    #[command(subcommand)]
-    Provision(Provision),
-}
-
-/// The roles that keep stores, each provisioned once.
-#[derive(Subcommand, Debug)]
-enum Provision {
-    /// Format an acceptor node's stores: one per journal of the deployment.
-    Node(ServerArgs),
-    /// Format a matchmaker's registry.
-    Matchmaker(ServerArgs),
-    /// Format a replica's log.
-    Replica(ServerArgs),
-}
-
-/// The store layout a server runs.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Layout {
-    /// The CLSTORE layout: 64 MiB segments.
-    Default,
-    /// 256 KiB segments and frequent checkpoints, for tests and laptops.
-    Small,
-}
-
-impl Layout {
-    fn config(self) -> JournalStoreConfig {
-        match self {
-            Layout::Default => JournalStoreConfig::default(),
-            Layout::Small => JournalStoreConfig::small(),
-        }
-    }
-}
-
-#[derive(clap::Args, Debug)]
-struct ServerArgs {
-    /// This process's id in its role's list of the deployment.
-    #[arg(long)]
-    id: u64,
-    /// Where this process keeps its stores. A start finds them formatted
-    /// by `parosd provision`, or refuses: a store without its format marker
-    /// is amnesia, and a lost disk never rejoins.
-    #[arg(long, env = "PAROS_DATA_DIR")]
-    data_dir: PathBuf,
-    /// The store layout.
-    #[arg(long, value_enum, default_value = "default")]
-    layout: Layout,
-    #[command(flatten)]
-    deployment: Deployment,
-}
-
-impl ServerArgs {
-    /// The provisioning record a start finds: it must name this identity
-    /// when present. A missing one is not refused here — the stores'
-    /// markers judge the start, and name what is missing.
-    fn check_record(&self, role: &str) -> Result<(), String> {
-        match Record::read(&self.data_dir) {
-            Ok(Some(record)) => record.check(role, self.id),
-            Ok(None) => {
-                tracing::warn!(data_dir = %self.data_dir.display(), "parosd_unprovisioned");
-                Ok(())
-            }
-            Err(error) => Err(format!("provisioning record: {error}")),
-        }
-    }
-}
-
-#[derive(clap::Args, Debug)]
-struct ProxyArgs {
-    /// This proxy's id (`0..n`).
-    #[arg(long)]
-    id: u64,
-    #[command(flatten)]
-    deployment: Deployment,
-}
+use crate::machine_record::{DirLedger, MachineRecord, journal_config};
+use crate::settings::Settings;
+use crate::stores::DirStores;
 
 /// `EX_TEMPFAIL`: a storage fault crashed the process; restart it.
 const EXIT_RESTART: u8 = 75;
 /// `EX_CONFIG`: the boot was refused; an operator must act.
 const EXIT_REFUSED: u8 = 78;
 
-/// How long a start waits for the deployment's names to resolve (#209): a
-/// Compose service's peers may still be starting.
+/// How long a start waits for its names to resolve (#209): a Compose
+/// service's peers may still be starting.
 const RESOLVE_PATIENCE: Duration = Duration::from_secs(30);
 /// How often an unresolved name is asked again.
 const RESOLVE_RETRY: Duration = Duration::from_millis(500);
 
+/// How a start ended before any driver ran.
+enum Stop {
+    /// The configuration is invalid (exit 2).
+    Invalid(String),
+    /// The data directory disagrees with the configuration (exit 78).
+    Refused(String),
+}
+
 fn main() -> ExitCode {
-    let mut cli = Cli::parse();
+    let settings = Settings::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn,parosd=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
-    // Names are resolved once, here, before any driver runs (#209).
-    // Provisioning binds nothing and resolves nothing: it runs before the
-    // peers it names exist.
-    let deployment = match &mut cli.command {
-        Command::Node(args) | Command::Matchmaker(args) | Command::Replica(args) => {
-            Some(&mut args.deployment)
-        }
-        Command::Proxy(args) => Some(&mut args.deployment),
-        Command::Provision(_) => None,
-    };
-    if let Some(deployment) = deployment
-        && let Err(error) = deployment.resolve(RESOLVE_PATIENCE, RESOLVE_RETRY)
-    {
+    if let Err(error) = settings::check_unknown(std::env::vars().map(|(name, _)| name)) {
         eprintln!("parosd: {error}");
-        return ExitCode::FAILURE;
+        return ExitCode::from(2);
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -186,45 +98,256 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(run(cli.command))
+    runtime.block_on(Box::pin(run(settings)))
 }
 
-async fn run(command: Command) -> ExitCode {
-    match command {
-        // Boxed: a driver's future holds every arm's state of its loop.
-        Command::Node(args) => Box::pin(serve("node", run_node(args))).await,
-        Command::Matchmaker(args) => Box::pin(serve("matchmaker", run_matchmaker(args))).await,
-        Command::Replica(args) => Box::pin(serve("replica", run_replica(args))).await,
-        Command::Proxy(args) => Box::pin(serve("proxy", run_proxy(args))).await,
-        Command::Provision(role) => Box::pin(serve("provision", provision(role))).await,
+/// Format if needed, wait for a cell if needed, then serve it.
+async fn run(settings: Settings) -> ExitCode {
+    let providers = TokioProviders::new();
+    let tunables = match tunables::from_env() {
+        Ok(tunables) => tunables,
+        Err(error) => return stopped(Stop::Invalid(error)),
+    };
+    let record = match identity(&providers, &settings) {
+        Ok(record) => record,
+        Err(stop) => return stopped(stop),
+    };
+    let facts = match facts(&settings, &record) {
+        Ok(facts) => facts,
+        Err(stop) => return stopped(stop),
+    };
+    tracing::info!(
+        node = facts.node_id.0,
+        addr = %facts.addr,
+        seeds = facts.seeds.len(),
+        class = facts.class.as_str(),
+        "parosd_starting"
+    );
+    let shutdown = shutdown_on_signal();
+    let plan = if let Some(plan) = record.formed() {
+        plan.clone()
+    } else {
+        let mut ledger = DirLedger {
+            data_dir: settings.data_dir.clone(),
+            layout: settings.layout.config(),
+            record,
+        };
+        let waited = paros::machine::wait_for_cell(
+            providers.clone(),
+            &facts,
+            &[TOY_JOURNAL],
+            &mut ledger,
+            &tunables,
+            shutdown.clone(),
+        )
+        .await;
+        match waited {
+            Ok(Some(plan)) => plan,
+            Ok(None) => {
+                tracing::info!("parosd_stopped");
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => return exit(&error),
+        }
+    };
+    serve(
+        providers,
+        &settings,
+        facts.node_id,
+        plan,
+        tunables,
+        shutdown,
+    )
+    .await
+}
+
+/// The machine's identity: read, or minted on an empty data directory.
+fn identity(providers: &TokioProviders, settings: &Settings) -> Result<MachineRecord, Stop> {
+    let dir = &settings.data_dir;
+    let read =
+        MachineRecord::read(dir).map_err(|e| Stop::Refused(format!("machine record: {e}")))?;
+    let Some(mut record) = read else {
+        // A directory with stores and no identity lost it: never a new
+        // machine on top of an old one's stores.
+        if dir.join("journals").exists() || record::Record::read(dir).ok().flatten().is_some() {
+            return Err(Stop::Refused(format!(
+                "{}: stores without a machine record — this machine lost its identity \
+                 (amnesia); wipe the directory to start a new machine, which never rejoins \
+                 as the old one",
+                dir.display()
+            )));
+        }
+        let rendezvous = settings.rendezvous.clone().ok_or_else(|| {
+            Stop::Invalid("PAROS_RENDEZVOUS is required on a machine's first start".into())
+        })?;
+        let node_id = loop {
+            let id: u64 = providers.random().random();
+            if id != 0 {
+                break NodeId(id);
+            }
+        };
+        let record = MachineRecord {
+            node_id,
+            class: settings.class,
+            capacity: settings.capacity,
+            failure_domain: settings.failure_domain.clone(),
+            rendezvous,
+            plan: None,
+        };
+        record
+            .write(dir)
+            .map_err(|e| Stop::Refused(format!("machine record: {e}")))?;
+        tracing::info!(node = node_id.0, "machine_formatted");
+        return Ok(record);
+    };
+    if record.class != settings.class {
+        return Err(Stop::Refused(format!(
+            "this machine was formatted as {}, not {}: a class is fixed at format",
+            record.class.as_str(),
+            settings.class.as_str()
+        )));
+    }
+    let mut changed =
+        record.capacity != settings.capacity || record.failure_domain != settings.failure_domain;
+    record.capacity = settings.capacity;
+    record.failure_domain.clone_from(&settings.failure_domain);
+    if let Some(rendezvous) = &settings.rendezvous
+        && *rendezvous != record.rendezvous
+    {
+        record.rendezvous.clone_from(rendezvous);
+        changed = true;
+    }
+    if changed {
+        record
+            .write(dir)
+            .map_err(|e| Stop::Refused(format!("machine record: {e}")))?;
+    }
+    Ok(record)
+}
+
+/// What the machine knows of itself: its address and its seeds, resolved
+/// once, here (#209), retried while a Compose peer starts.
+fn facts(settings: &Settings, record: &MachineRecord) -> Result<MachineFacts, Stop> {
+    let addr = patiently(|| resolve::resolve(&settings.listen)).map_err(Stop::Invalid)?;
+    let mut seeds: Vec<SocketAddr> = Vec::new();
+    for entry in record
+        .rendezvous
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        for seed in patiently(|| resolve::resolve_all(entry)).map_err(Stop::Invalid)? {
+            if !seeds.contains(&seed) {
+                seeds.push(seed);
+            }
+        }
+    }
+    if seeds.is_empty() {
+        return Err(Stop::Invalid("the rendezvous names no seed".into()));
+    }
+    Ok(MachineFacts {
+        node_id: record.node_id,
+        class: record.class,
+        capacity: record.capacity,
+        failure_domain: record.failure_domain.clone(),
+        addr,
+        seeds,
+    })
+}
+
+/// `resolve` until it answers or [`RESOLVE_PATIENCE`] runs out.
+fn patiently<T>(resolve: impl Fn() -> Result<T, String>) -> Result<T, String> {
+    let deadline = std::time::Instant::now() + RESOLVE_PATIENCE;
+    loop {
+        match resolve() {
+            Ok(found) => return Ok(found),
+            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(RESOLVE_RETRY),
+        }
     }
 }
 
-/// Run one role until it stops, and map how it stopped to an exit code.
+/// Serve the cell's journals until shutdown.
 async fn serve(
-    role: &str,
-    driver: impl Future<Output = Result<Result<(), RunError>, String>>,
+    providers: TokioProviders,
+    settings: &Settings,
+    node_id: NodeId,
+    plan: CellPlan,
+    tunables: DriverTunables,
+    shutdown: CancellationToken,
 ) -> ExitCode {
-    match driver.await {
-        Err(invalid) => {
-            eprintln!("parosd {role}: {invalid}");
-            ExitCode::from(2)
-        }
-        Ok(Ok(())) => {
-            tracing::info!(role, "parosd_stopped");
+    let genesis: BTreeMap<JournalKey, paros::Config> = plan
+        .journals
+        .iter()
+        .map(|&journal| (journal, journal_config(&plan, node_id, journal)))
+        .collect();
+    let stores = match DirStores::load(
+        node_id.0,
+        settings.data_dir.clone(),
+        settings.layout.config(),
+        genesis,
+    )
+    .await
+    {
+        Ok(stores) => stores,
+        Err(error) => return stopped(Stop::Refused(error)),
+    };
+    let addr = plan
+        .members
+        .iter()
+        .find(|(id, _)| *id == node_id)
+        .map_or_else(|| settings.listen.clone(), |(_, addr)| addr.to_string());
+    let book: Vec<(NodeId, String)> = plan
+        .members
+        .iter()
+        .map(|(id, addr)| (*id, addr.to_string()))
+        .collect();
+    tracing::info!(node = node_id.0, cell = plan.cell_id, %addr, "parosd_serving");
+    let ran = paros::run_journals(
+        providers,
+        stores,
+        addr,
+        book,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        tunables,
+        shutdown,
+        &NoHooks,
+    )
+    .await;
+    match ran {
+        Ok(()) => {
+            tracing::info!("parosd_stopped");
             ExitCode::SUCCESS
         }
-        Ok(Err(error)) => {
-            eprintln!("parosd {role}: {error}");
-            match error {
-                RunError::Storage(_) => ExitCode::from(EXIT_RESTART),
-                RunError::Refused(refusal) => {
-                    eprintln!("parosd {role}: {}", remedy(refusal));
-                    ExitCode::from(EXIT_REFUSED)
-                }
-                RunError::Infra(_) | RunError::SeamCrash(_) => ExitCode::FAILURE,
-            }
+        Err(error) => exit(&error),
+    }
+}
+
+fn stopped(stop: Stop) -> ExitCode {
+    match stop {
+        Stop::Invalid(error) => {
+            eprintln!("parosd: {error}");
+            ExitCode::from(2)
         }
+        Stop::Refused(error) => {
+            eprintln!("parosd: {error}");
+            ExitCode::from(EXIT_REFUSED)
+        }
+    }
+}
+
+fn exit(error: &RunError) -> ExitCode {
+    eprintln!("parosd: {error}");
+    match error {
+        RunError::Storage(_) => ExitCode::from(EXIT_RESTART),
+        RunError::Refused(refusal) => {
+            eprintln!("parosd: {}", remedy(*refusal));
+            ExitCode::from(EXIT_REFUSED)
+        }
+        RunError::Infra(_) | RunError::SeamCrash(_) => ExitCode::FAILURE,
     }
 }
 
@@ -232,18 +355,17 @@ async fn serve(
 fn remedy(refusal: BootRefusal) -> &'static str {
     match refusal {
         BootRefusal::Amnesia => {
-            "this identity's store carries no format marker: its disk was lost, or it was \
-             never provisioned (run `parosd provision` once, before its first start). A lost \
-             identity never rejoins; replace it by reconfiguration"
+            "a journal store of this machine's cell carries no format marker: its disk was \
+             lost. A lost store never rejoins; wipe the machine's data directory to start it \
+             as a new machine, and heal the cell by reconfiguration"
         }
         BootRefusal::AlreadyFormatted => {
-            "this identity is already provisioned (its data directory carries the provisioning \
-             record): start it with `parosd <role>`, or point --data-dir at an empty directory"
+            "this store is already formatted: the machine record and the stores disagree"
         }
         BootRefusal::ConfigMismatch => {
             "the store was formatted under another configuration (the boot_config_mismatch \
-             event above names both): restore the deployment it was provisioned with; \
-             membership changes go through reconfiguration, never through the configuration"
+             event above names both); membership changes go through reconfiguration, never \
+             through the configuration"
         }
     }
 }
@@ -280,202 +402,4 @@ async fn wait_for_signal() {
 #[cfg(not(unix))]
 async fn wait_for_signal() {
     tokio::signal::ctrl_c().await.ok();
-}
-
-async fn run_node(args: ServerArgs) -> Result<Result<(), RunError>, String> {
-    let d = &args.deployment;
-    d.validate()?;
-    let id = NodeId(args.id);
-    let addr = Deployment::addr_of(&d.nodes, "node", args.id)?;
-    let stores = DirStores::load(
-        args.id,
-        args.data_dir.clone(),
-        args.layout.config(),
-        genesis(d, id),
-    )
-    .await?;
-    tracing::info!(node = id.0, %addr, data_dir = %args.data_dir.display(), "parosd_node_starting");
-    Ok(paros::run_journals(
-        TokioProviders::new(),
-        stores,
-        addr,
-        d.node_book(),
-        d.matchmaker_book(),
-        d.proxy_book(),
-        d.replica_book(),
-        None,
-        tunables::from_env()?,
-        shutdown_on_signal(),
-        &NoHooks,
-    )
-    .await)
-}
-
-async fn run_matchmaker(args: ServerArgs) -> Result<Result<(), RunError>, String> {
-    let d = &args.deployment;
-    d.validate()?;
-    let addr = Deployment::addr_of(&d.matchmakers, "matchmaker", args.id)?;
-    args.check_record("matchmaker")?;
-    let providers = TokioProviders::new();
-    let storage = JournalMatchmakerStorage::new(
-        moonpool_core::Providers::storage(&providers).clone(),
-        path_str(&matchmaker_dir(&args.data_dir)),
-        args.layout.config(),
-    );
-    tracing::info!(matchmaker = args.id, %addr, "parosd_matchmaker_starting");
-    Ok(paros::run_matchmaker(
-        providers,
-        storage,
-        BootKind::ExistingMember,
-        addr,
-        d.matchmaker_config(MatchmakerId(args.id)),
-        tunables::from_env()?,
-        shutdown_on_signal(),
-        &NoHooks,
-        &NoAudit,
-    )
-    .await)
-}
-
-async fn run_replica(args: ServerArgs) -> Result<Result<(), RunError>, String> {
-    let d = &args.deployment;
-    d.validate()?;
-    let addr = Deployment::addr_of(&d.replicas, "replica", args.id)?;
-    args.check_record("replica")?;
-    let providers = TokioProviders::new();
-    let storage = JournalStorage::new(
-        moonpool_core::Providers::storage(&providers).clone(),
-        path_str(&replica_dir(&args.data_dir)),
-        d.replica_config(NodeId(args.id)),
-        args.layout.config(),
-    );
-    tracing::info!(replica = args.id, %addr, "parosd_replica_starting");
-    Ok(paros::run_replica(
-        providers,
-        storage,
-        addr,
-        d.node_book(),
-        BootKind::ExistingMember,
-        tunables::from_env()?,
-        shutdown_on_signal(),
-        &NoHooks,
-        &NoAudit,
-    )
-    .await)
-}
-
-async fn run_proxy(args: ProxyArgs) -> Result<Result<(), RunError>, String> {
-    let d = &args.deployment;
-    d.validate()?;
-    let addr = Deployment::addr_of(&d.proxies, "proxy", args.id)?;
-    tracing::info!(proxy = args.id, %addr, "parosd_proxy_starting");
-    Ok(paros::run_proxy(
-        TokioProviders::new(),
-        addr,
-        d.proxy_config(ProxyId(args.id)),
-        d.node_book(),
-        d.replica_book(),
-        tunables::from_env()?,
-        shutdown_on_signal(),
-        &NoHooks,
-        &NoAudit,
-    )
-    .await)
-}
-
-/// Node `id`'s genesis journals and their configurations, in id order.
-fn genesis(d: &Deployment, id: NodeId) -> BTreeMap<JournalId, paros::Config> {
-    d.journals
-        .iter()
-        .map(|&journal| (JournalId(journal), d.node_config(id, JournalId(journal))))
-        .collect()
-}
-
-/// `parosd provision <role>` (#208): format every store of the identity,
-/// then write the provisioning record. A data directory that carries a
-/// record was provisioned already and is refused; one without a record
-/// resumes an interrupted provisioning from what its disk holds.
-async fn provision(role: Provision) -> Result<Result<(), RunError>, String> {
-    let (name, args) = match &role {
-        Provision::Node(args) => ("node", args),
-        Provision::Matchmaker(args) => ("matchmaker", args),
-        Provision::Replica(args) => ("replica", args),
-    };
-    let d = &args.deployment;
-    d.validate()?;
-    let book = match role {
-        Provision::Node(_) => &d.nodes,
-        Provision::Matchmaker(_) => &d.matchmakers,
-        Provision::Replica(_) => &d.replicas,
-    };
-    Deployment::addr_of(book, name, args.id)?;
-    match Record::read(&args.data_dir) {
-        Ok(None) => {}
-        Ok(Some(_)) => return Ok(Err(RunError::Refused(BootRefusal::AlreadyFormatted))),
-        Err(error) => return Err(format!("provisioning record: {error}")),
-    }
-    let provider = moonpool_core::TokioStorageProvider::new();
-    let layout = args.layout.config();
-    let mut outcomes = Vec::new();
-    let mut journals = std::collections::BTreeSet::new();
-    match role {
-        Provision::Node(_) => {
-            for (journal, config) in genesis(d, NodeId(args.id)) {
-                let mut store = JournalStorage::new(
-                    provider.clone(),
-                    path_str(&journal_dir(&args.data_dir, journal)),
-                    config,
-                    layout,
-                );
-                match paros::provision_store(&mut store).await {
-                    Ok(outcome) => outcomes.push(outcome),
-                    Err(error) => return Ok(Err(error)),
-                }
-                journals.insert(journal);
-            }
-        }
-        Provision::Matchmaker(_) => {
-            let mut store = JournalMatchmakerStorage::new(
-                provider,
-                path_str(&matchmaker_dir(&args.data_dir)),
-                layout,
-            );
-            let config = d.matchmaker_config(MatchmakerId(args.id));
-            match paros::provision_matchmaker_store(&mut store, &config).await {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(error) => return Ok(Err(error)),
-            }
-        }
-        Provision::Replica(_) => {
-            let mut store = JournalStorage::new(
-                provider,
-                path_str(&replica_dir(&args.data_dir)),
-                d.replica_config(NodeId(args.id)),
-                layout,
-            );
-            match paros::provision_store(&mut store).await {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(error) => return Ok(Err(error)),
-            }
-        }
-    }
-    let record = Record {
-        role: name.into(),
-        id: args.id,
-        journals,
-    };
-    record
-        .write(&args.data_dir)
-        .map_err(|e| format!("provisioning record: {e}"))?;
-    let resumed = outcomes
-        .iter()
-        .filter(|o| **o == Provisioned::Resumed)
-        .count();
-    println!(
-        "provisioned {name} {}: {} stores formatted, {resumed} already formatted by an \
-         interrupted run",
-        args.id,
-        outcomes.len() - resumed
-    );
-    Ok(Ok(()))
 }

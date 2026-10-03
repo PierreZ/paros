@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{SimContext, StateHandle, assert_always};
-use paros::JournalId;
+use paros::JournalKey;
 use paros::client::ReadOutcome;
 
 use crate::audit::AuditWorld;
@@ -38,7 +38,7 @@ struct Fence {
 
 /// `journal`'s fence (#188: each journal's truncations wait only for the
 /// clients folding that journal).
-fn fence(state: &StateHandle, journal: JournalId) -> Arc<Mutex<Fence>> {
+fn fence(state: &StateHandle, journal: JournalKey) -> Arc<Mutex<Fence>> {
     crate::state::published(
         state,
         &crate::state::journal_key(FENCE_KEY, journal),
@@ -47,7 +47,7 @@ fn fence(state: &StateHandle, journal: JournalId) -> Arc<Mutex<Fence>> {
 }
 
 /// Register `client` in the fence at the log's start.
-pub(super) fn register(state: &StateHandle, journal: JournalId, client: u64) {
+pub(super) fn register(state: &StateHandle, journal: JournalKey, client: u64) {
     fence(state, journal)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -56,7 +56,7 @@ pub(super) fn register(state: &StateHandle, journal: JournalId, client: u64) {
 }
 
 /// Take `client` out of the fence: trims no longer wait for it.
-pub(super) fn release(state: &StateHandle, journal: JournalId, client: u64) {
+pub(super) fn release(state: &StateHandle, journal: JournalKey, client: u64) {
     fence(state, journal)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -67,7 +67,7 @@ pub(super) fn release(state: &StateHandle, journal: JournalId, client: u64) {
 /// The highest `Truncate(up_to)` the fence allows at most `up_to`: every
 /// record below it folded by every registered client. `None` while some
 /// registered client has folded nothing.
-pub(super) fn clamp(state: &StateHandle, journal: JournalId, up_to: u64) -> Option<u64> {
+pub(super) fn clamp(state: &StateHandle, journal: JournalKey, up_to: u64) -> Option<u64> {
     let guard = fence(state, journal);
     let guard = guard.lock().unwrap_or_else(PoisonError::into_inner);
     let fenced = guard
@@ -81,7 +81,7 @@ pub(super) fn clamp(state: &StateHandle, journal: JournalId, up_to: u64) -> Opti
 /// One client's fold: the state after every record below `cursor`.
 pub(super) struct Fold {
     /// The journal this client folds.
-    journal: JournalId,
+    journal: JournalKey,
     state: ChainState,
     cursor: u64,
     /// Whether the client is still in the fence. Once it left, a trim may
@@ -91,7 +91,7 @@ pub(super) struct Fold {
 }
 
 impl Fold {
-    pub(super) fn new(journal: JournalId) -> Self {
+    pub(super) fn new(journal: JournalKey) -> Self {
         Self {
             journal,
             state: ChainState::default(),
@@ -205,7 +205,8 @@ impl Fold {
             }
             let from = self.cursor;
             let request = paros::Read {
-                journal: self.journal.0,
+                journal: self.journal.journal.0,
+                tenant: self.journal.tenant.0,
                 from_seq: from,
                 limit,
                 wait_ms: 0,

@@ -34,8 +34,10 @@ pub(crate) enum Call {
         owner: ClientId,
         reply: ReplySender<SetLeaderAck>,
     },
-    /// A `Truncate`.
+    /// A `Truncate`, fenced by its writer (#228).
     Truncate {
+        generation: Generation,
+        owner: ClientId,
         up_to: Seq,
         reply: ReplySender<TruncateAck>,
     },
@@ -53,7 +55,16 @@ impl Call {
                 expected: *expected,
                 owner: *owner,
             }),
-            Call::Truncate { up_to, .. } => Command::Control(Control::Truncate { up_to: *up_to }),
+            Call::Truncate {
+                generation,
+                owner,
+                up_to,
+                ..
+            } => Command::Control(Control::Truncate {
+                generation: *generation,
+                owner: *owner,
+                up_to: *up_to,
+            }),
         }
     }
 
@@ -195,6 +206,12 @@ pub(crate) fn truncate_ack(outcome: &Outcome) -> TruncateAck {
     match outcome {
         Outcome::Trimmed(state) => TruncateAck {
             decided: true,
+            state: Some(journal_state_to_proto(*state)),
+            ..TruncateAck::default()
+        },
+        Outcome::TruncateRefused(state) => TruncateAck {
+            decided: true,
+            refused: true,
             state: Some(journal_state_to_proto(*state)),
             ..TruncateAck::default()
         },

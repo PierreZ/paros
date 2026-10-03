@@ -171,5 +171,6 @@ pub(crate) fn inspect(node: &ColocatedNode) -> InspectReply {
         gc_watermark,
         folded: node.replica().folded().0,
         journal: Some(journal_state_to_proto(node.replica().journal())),
+        node: node.config().id.0,
     }
 }

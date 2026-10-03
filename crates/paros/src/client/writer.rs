@@ -10,11 +10,11 @@
 //! would only be asking the journal to fence it again.
 
 use moonpool_core::Providers;
-use paros_core::{ClientId, Entry, Generation, JournalId, JournalState, Seq, Value};
+use paros_core::{ClientId, Entry, Generation, JournalKey, JournalState, Seq, Value};
 
-use super::outcome::{ClaimOutcome, WriteOutcome};
+use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};
 use super::{Client, Resolution, WriteOptions};
-use crate::rpc::Write;
+use crate::rpc::{Truncate, Write};
 
 /// What a writer learned from a journal state a verdict named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +83,7 @@ pub enum WriterOutcome {
 /// takes a copy, advances it per write, and folds the verdicts back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Writer {
-    journal: JournalId,
+    journal: JournalKey,
     owner: ClientId,
     /// The generation it believes it owns (`None`: it does not).
     owned: Option<u64>,
@@ -95,9 +95,10 @@ pub struct Writer {
 
 /// The `Write` request carrying `entry` to `journal`.
 #[must_use]
-pub fn write_request(journal: JournalId, entry: &Entry) -> Write {
+pub fn write_request(journal: JournalKey, entry: &Entry) -> Write {
     Write {
-        journal: journal.0,
+        journal: journal.journal.0,
+        tenant: journal.tenant.0,
         generation: entry.generation.0,
         owner: entry.owner.0,
         seq: entry.seq.0,
@@ -108,7 +109,7 @@ pub fn write_request(journal: JournalId, entry: &Entry) -> Write {
 impl Writer {
     /// A writer of `journal` as client `owner`, owning nothing yet.
     #[must_use]
-    pub fn new(journal: JournalId, owner: u64) -> Self {
+    pub fn new(journal: JournalKey, owner: u64) -> Self {
         Self {
             journal,
             owner: ClientId(owner),
@@ -120,7 +121,7 @@ impl Writer {
 
     /// The journal it writes.
     #[must_use]
-    pub fn journal(&self) -> JournalId {
+    pub fn journal(&self) -> JournalKey {
         self.journal
     }
 
@@ -214,6 +215,61 @@ impl Writer {
             seq: Seq(self.next_seq),
             records,
         }
+    }
+
+    /// The fenced `Truncate` (#228) of this writer's journal below `up_to`,
+    /// under the generation it owns; `None` when it owns none.
+    #[must_use]
+    pub fn truncate_request(&self, up_to: u64) -> Option<Truncate> {
+        self.owned.map(|generation| Truncate {
+            journal: self.journal.journal.0,
+            tenant: self.journal.tenant.0,
+            up_to,
+            generation,
+            owner: self.owner.0,
+        })
+    }
+
+    /// **Deliberate misbehaviour, for a harness:** the `Truncate` below
+    /// `up_to` under the generation it last owned, whether or not it still
+    /// owns it. A superseded owner's truncation, which the journal must
+    /// refuse; never what [`Writer::truncate`] sends.
+    #[must_use]
+    pub fn stale_truncate_request(&self, up_to: u64) -> Truncate {
+        Truncate {
+            journal: self.journal.journal.0,
+            tenant: self.journal.tenant.0,
+            up_to,
+            generation: self.generation(),
+            owner: self.owner.0,
+        }
+    }
+
+    /// Fold a truncation's verdict into the belief: a refusal names the
+    /// current writer. What it learned, when the verdict named a state.
+    pub fn absorb_truncate(&mut self, outcome: &TruncateOutcome) -> Option<Learned> {
+        match outcome {
+            TruncateOutcome::Refused { state } => Some(self.learn(state)),
+            _ => None,
+        }
+    }
+
+    /// Truncate the journal below `up_to` as its owner (#228): the request
+    /// carries this writer's own fence, to the believed leader (or
+    /// `first`), following redirects. `None` when it owns no generation:
+    /// nothing is sent. A refusal is folded back (a superseded writer
+    /// stops).
+    pub async fn truncate<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        up_to: u64,
+        first: usize,
+    ) -> Option<TruncateOutcome> {
+        let request = self.truncate_request(up_to)?;
+        let start = client.leader().unwrap_or(first);
+        let outcome = client.truncate(&request, start).await;
+        self.absorb_truncate(&outcome);
+        Some(outcome)
     }
 
     /// The `Write` request carrying `entry` to this writer's journal.

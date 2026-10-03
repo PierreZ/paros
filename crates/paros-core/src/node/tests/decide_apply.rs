@@ -146,7 +146,11 @@ fn restart_rebuilds_state_from_hard_state() {
 fn propose_control_is_leader_only() {
     let mut nodes = cluster_with_three_chosen();
     // A follower refuses to admit a control command and redirects to the leader.
-    let r = nodes[1].propose_control(Control::Truncate { up_to: Seq(1) });
+    let r = nodes[1].propose_control(Control::Truncate {
+        generation: Generation(1),
+        owner: ClientId(7),
+        up_to: Seq(1),
+    });
     assert!(
         matches!(r, ProposeResult::NotLeader(Some(NodeId(0)))),
         "a non-leader redirects the truncate to the leader"
@@ -497,7 +501,11 @@ fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
         let _ = nodes[0].propose(write(1, 7, seq, 10 + u8::try_from(seq).expect("small")));
         settle(&mut nodes);
     }
-    let _ = nodes[0].propose_control(Control::Truncate { up_to: Seq(2) });
+    let _ = nodes[0].propose_control(Control::Truncate {
+        generation: Generation(1),
+        owner: ClientId(7),
+        up_to: Seq(2),
+    });
     settle(&mut nodes);
     // Slot 0 is the claim, slots 1..=3 hold positions 0..=2: position 2's
     // slot (3) is the first retained one.

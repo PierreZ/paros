@@ -19,7 +19,9 @@
 //! - **no re-accept with other bytes**: a position is accepted once, and a
 //!   retry is acknowledged only with the bytes accepted there;
 //! - **truncation monotone**: `first_seq` never moves backwards along the
-//!   log, and never past `next_seq`.
+//!   log, and never past `next_seq`;
+//! - **truncation fenced** (#228): a `Truncate` is accepted only from the
+//!   current owner, and refused only from a caller that is not it.
 //!
 //! The per-slot facts arrive in whatever order the nodes walk; the checks
 //! that need slot order (density, the generation chain, truncation) run
@@ -45,6 +47,8 @@ struct WriteFact {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SlotFact {
     write: Option<WriteFact>,
+    /// A `Truncate`'s fence, `(generation, owner)` (#228).
+    truncate: Option<(u64, u64)>,
     outcome: Outcome,
 }
 
@@ -72,6 +76,7 @@ pub(super) struct JournalModel {
     lost_any: bool,
     truncated_any: bool,
     trimmed_any: bool,
+    stale_truncate_refused: bool,
     superseded_write_answered: bool,
 }
 
@@ -101,8 +106,15 @@ impl JournalModel {
             count: entry.count(),
             vhash,
         });
+        let truncate = match command {
+            Command::Control(Control::Truncate {
+                generation, owner, ..
+            }) => Some((generation.0, owner.0)),
+            _ => None,
+        };
         let fact = SlotFact {
             write,
+            truncate,
             outcome: outcome.clone(),
         };
         if let Some(known) = self.slots.get(&slot) {
@@ -210,13 +222,40 @@ impl JournalModel {
                     );
                 }
             }
-            (Outcome::Trimmed(_), None) => self.trimmed_any = true,
+            (Outcome::Trimmed(state) | Outcome::TruncateRefused(state), None) => {
+                self.truncate_verdict(slot, fact, state);
+            }
             (outcome, write) => {
                 assert_always!(
                     false,
                     "journal: a verdict matches the command it judged",
                     { "slot" => slot, "outcome" => format!("{outcome:?}"), "write" => write.is_some() }
                 );
+            }
+        }
+    }
+
+    /// A `Truncate`'s verdict against its fence (#228): accepted only from
+    /// the owner the state after it names, refused only from a caller that
+    /// is not the owner it was judged against.
+    fn truncate_verdict(&mut self, slot: u64, fact: &SlotFact, state: &JournalState) {
+        let (generation, owner) = fact.truncate.unwrap_or((u64::MAX, u64::MAX));
+        let owns = state.generation.0 == generation && state.owner.map(|o| o.0) == Some(owner);
+        if matches!(fact.outcome, Outcome::Trimmed(_)) {
+            self.trimmed_any = true;
+            assert_always!(
+                owns,
+                "journal: a Truncate is accepted only from the current owner",
+                { "slot" => slot, "generation" => generation }
+            );
+        } else {
+            assert_always!(
+                !owns,
+                "journal: a Truncate is refused only from a caller that is not the owner",
+                { "slot" => slot, "generation" => generation }
+            );
+            if generation > 0 && generation < state.generation.0 {
+                self.stale_truncate_refused = true;
             }
         }
     }
@@ -288,6 +327,15 @@ impl JournalModel {
             if let Outcome::Leader(state) = &fact.outcome {
                 current = Some((state.generation.0, state.owner.map_or(u64::MAX, |o| o.0)));
             }
+            if let (Outcome::Trimmed(_), Some(fence), Some(current)) =
+                (&fact.outcome, fact.truncate, current)
+            {
+                assert_always!(
+                    fence == current,
+                    "journal: a Truncate is accepted only from the writer in force",
+                    { "slot" => slot, "generation" => fence.0 }
+                );
+            }
             if let (Outcome::Accepted { .. }, Some(write)) = (&fact.outcome, fact.write) {
                 // The generation a write was accepted under was born in the
                 // log, at a lower slot, owned by its writer.
@@ -325,6 +373,10 @@ impl JournalModel {
             "journal: a SetLeader loses its compare-and-swap"
         );
         assert_sometimes!(self.trimmed_any, "journal: a truncation applies");
+        assert_sometimes!(
+            self.stale_truncate_refused,
+            "journal: a truncate from a stale owner is refused"
+        );
         if self.truncated_any {
             moonpool_sim::assert_reachable!(
                 "journal: a write below first_seq is answered truncated"
@@ -346,7 +398,8 @@ fn revealed(outcome: &Outcome) -> Option<JournalState> {
         | Outcome::Truncated(state)
         | Outcome::Leader(state)
         | Outcome::LeaderRefused(state)
-        | Outcome::Trimmed(state) => Some(*state),
+        | Outcome::Trimmed(state)
+        | Outcome::TruncateRefused(state) => Some(*state),
         Outcome::Accepted { .. } | Outcome::Duplicate { .. } | Outcome::Noop => None,
     }
 }

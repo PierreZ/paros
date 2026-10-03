@@ -274,6 +274,12 @@ pub enum TruncateOutcome {
         /// The journal state after the truncation.
         state: JournalState,
     },
+    /// Judged and refused (#228): the request's `(generation, owner)` is
+    /// not the journal's current writer. Nothing moved.
+    Refused {
+        /// The journal state it was judged against, naming the writer.
+        state: JournalState,
+    },
     /// Not decided by the node asked.
     Redirect {
         /// The node id the answering node believes leads.
@@ -300,7 +306,13 @@ impl TruncateOutcome {
         if !ack.decided {
             return Self::Redirect { leader: ack.leader };
         }
-        journal_state_from_proto(ack.state).map_or(Self::Malformed, |state| Self::Applied { state })
+        journal_state_from_proto(ack.state).map_or(Self::Malformed, |state| {
+            if ack.refused {
+                Self::Refused { state }
+            } else {
+                Self::Applied { state }
+            }
+        })
     }
 }
 

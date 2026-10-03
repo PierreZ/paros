@@ -33,6 +33,7 @@ mod corruption;
 mod driver;
 mod hooks;
 pub mod journal;
+pub mod machine;
 mod matchmaker;
 mod provision;
 mod proxy;
@@ -63,7 +64,7 @@ pub use rpc::{
 /// generated protobuf bodies.
 pub mod wire {
     pub use crate::rpc::methods;
-    pub use crate::rpc::{common, internal, matchmaker, public, system};
+    pub use crate::rpc::{common, internal, machine, matchmaker, public, system};
 }
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

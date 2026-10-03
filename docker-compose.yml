@@ -1,0 +1,103 @@
+# The paros toy (#196): one cell of five machines over three failure
+# domains, every one the same `parosd` image configured by PAROS_* variables.
+#
+#   docker compose up -d --build
+#   docker compose run --rm init
+#   docker compose run --rm parosctl write 256 hello world --owner 7
+#   docker compose run --rm parosctl read 256
+#
+# The walkthrough is crates/parosd/README.md. A machine mints its node id on
+# its first start and waits; `init`, sent to one seed, forms the cell over the
+# three seeds (the hosts the `seeds` alias resolves to) and claims its control
+# journal. `storage4` and `front1` wait for placement, which is M9 (#211,
+# #212). No restart policy: exit 78 means "do not restart" (an operator acts),
+# and `docker compose start <machine>` brings a killed machine back.
+
+name: paros
+
+x-parosd: &parosd
+  image: paros:local
+  build: .
+  environment: &env
+    PAROS_RENDEZVOUS: seeds:4500
+    PAROS_STORE_LAYOUT: small
+    RUST_LOG: warn,parosd=info,paros::machine=info
+
+x-parosctl: &parosctl
+  image: paros:local
+  entrypoint: ["parosctl", "--servers", "seeds:4500", "--timeout-ms", "10000"]
+  profiles: ["tools"]
+  restart: "no"
+
+services:
+  seed1:
+    <<: *parosd
+    hostname: seed1
+    environment:
+      <<: *env
+      PAROS_LISTEN: seed1:4500
+      PAROS_CLASS: storage
+      PAROS_FAILURE_DOMAIN: zone-a
+    volumes: [seed1:/var/lib/paros]
+    networks: { default: { aliases: [seeds] } }
+
+  seed2:
+    <<: *parosd
+    hostname: seed2
+    environment:
+      <<: *env
+      PAROS_LISTEN: seed2:4500
+      PAROS_CLASS: storage
+      PAROS_FAILURE_DOMAIN: zone-b
+    volumes: [seed2:/var/lib/paros]
+    networks: { default: { aliases: [seeds] } }
+
+  seed3:
+    <<: *parosd
+    hostname: seed3
+    environment:
+      <<: *env
+      PAROS_LISTEN: seed3:4500
+      PAROS_CLASS: storage
+      PAROS_FAILURE_DOMAIN: zone-c
+    volumes: [seed3:/var/lib/paros]
+    networks: { default: { aliases: [seeds] } }
+
+  storage4:
+    <<: *parosd
+    hostname: storage4
+    environment:
+      <<: *env
+      PAROS_LISTEN: storage4:4500
+      PAROS_CLASS: storage
+      PAROS_FAILURE_DOMAIN: zone-a
+    volumes: [storage4:/var/lib/paros]
+
+  front1:
+    <<: *parosd
+    hostname: front1
+    environment:
+      <<: *env
+      PAROS_LISTEN: front1:4500
+      PAROS_CLASS: stateless
+      PAROS_FAILURE_DOMAIN: zone-b
+    volumes: [front1:/var/lib/paros]
+
+  # `init`, once, after `up`: sent to one seed (seed1, which the `seeds` join
+  # list names). It waits for the seed to listen; re-running it resumes an
+  # interrupted init, and is refused on an initialized cell.
+  init:
+    <<: *parosctl
+    entrypoint: ["parosctl", "--servers", "seed1:4500", "init", "--patience-ms", "60000"]
+    depends_on: [seed1, seed2, seed3]
+
+  # Any parosctl command against the seeds: `docker compose run --rm parosctl …`.
+  parosctl:
+    <<: *parosctl
+
+volumes:
+  seed1:
+  seed2:
+  seed3:
+  storage4:
+  front1:

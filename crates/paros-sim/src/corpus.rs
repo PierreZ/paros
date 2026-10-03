@@ -44,7 +44,7 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes,
 };
 use paros::{
-    ClientId, Command, Control, Entry, Generation, InspectReply, JournalId, JournalState, Read,
+    ClientId, Command, Control, Entry, Generation, InspectReply, JournalKey, JournalState, Read,
     Reconfigure, Seq, SetLeader, Value, Write, wire::public::WriteOutcome,
 };
 
@@ -288,12 +288,14 @@ impl CorpusClients {
         deadline: Duration,
     ) -> Option<u64> {
         self.until_accepted(ctx, first, exclude, deadline, |client| async move {
-            let journal = JournalId::default().0;
+            let key = JournalKey::default();
+            let (journal, tenant) = (key.journal.0, key.tenant.0);
             match command {
                 Command::Write(entry) => {
                     let ack = client
                         .write(&Write {
                             journal,
+                            tenant,
                             generation: entry.generation.0,
                             owner: entry.owner.0,
                             seq: entry.seq.0,
@@ -312,6 +314,7 @@ impl CorpusClients {
                     let ack = client
                         .set_leader(&SetLeader {
                             journal,
+                            tenant,
                             expected: expected.0,
                             owner: owner.0,
                         })
@@ -385,7 +388,8 @@ impl CorpusClients {
         let mut from = 0;
         for _ in 0..FOLD_PAGES {
             let request = Read {
-                journal: JournalId::default().0,
+                journal: JournalKey::default().journal.0,
+                tenant: JournalKey::default().tenant.0,
                 from_seq: from,
                 limit: 0,
                 wait_ms: 0,

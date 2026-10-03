@@ -253,6 +253,7 @@ pub(crate) fn message_to_proto(
     Ok(internal::ConsensusMessage {
         kind: Some(kind),
         journal: 0,
+        tenant: 0,
     })
 }
 

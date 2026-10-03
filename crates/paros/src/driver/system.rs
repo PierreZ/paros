@@ -1,8 +1,8 @@
 //! The system journals' follower (#189): how a node learns the directory
-//! (journal 1) and the node registry (journal 2) by reading them.
+//! (the user tenant's control journal) and the node registry (the cell tenant's, #235) by reading them.
 //!
 //! A deployment that runs system journals hands the driver a [`SystemPlan`]:
-//! the **seeds** — the nodes that host journals 1 and 2, a static
+//! the **seeds** — the nodes that host the system journals, a static
 //! configuration of plain Multi-Paxos — and the genesis pool and journals the
 //! folds start from. Every node folds both journals with the same pure folds
 //! a client reads back through ([`crate::system`]): a seed reads its own
@@ -36,7 +36,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, LogPage, LogRead, NodeId, Party, Seq};
+use paros_core::{JournalKey, LogPage, LogRead, NodeId, Party, Seq};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -59,7 +59,7 @@ const FOLLOW_READ_RECORDS: u64 = 256;
 pub struct SystemPlan {
     /// This node's identity (a joiner may serve no journal at boot).
     pub self_id: NodeId,
-    /// The nodes that host journals 1 and 2, with their addresses: a node
+    /// The nodes that host the system journals, with their addresses: a node
     /// that does not host them follows them from here.
     pub seeds: Vec<(NodeId, String)>,
     /// The pool the deployment was booted with: always in the pool, never
@@ -67,7 +67,7 @@ pub struct SystemPlan {
     pub genesis_pool: Vec<NodeId>,
     /// The journals the deployment was booted with: ids the directory never
     /// allocates.
-    pub genesis_journals: Vec<JournalId>,
+    pub genesis_journals: Vec<JournalKey>,
     /// The journals a node outside the genesis pool joins **as a spare** once
     /// the registry admits it: each a configuration template (its journal,
     /// bootstrap membership, quorum system, matchmakers) whose identity and
@@ -80,11 +80,11 @@ pub struct SystemPlan {
 
 /// One remote follow read's answer, back on the loop.
 pub(crate) struct Followed {
-    journal: JournalId,
+    journal: JournalKey,
     reply: ReadAck,
 }
 
-/// The node's follow of journals 1 and 2, and the two folds.
+/// The node's follow of the system journals, and the two folds.
 pub(crate) struct SystemFollower<P: Providers> {
     self_id: NodeId,
     seeds: Vec<NodeClient<P>>,
@@ -94,11 +94,11 @@ pub(crate) struct SystemFollower<P: Providers> {
     directory: Directory,
     registry: Registry,
     /// Per system journal: where the next read starts.
-    cursors: BTreeMap<JournalId, u64>,
+    cursors: BTreeMap<JournalKey, u64>,
     /// System journals with a remote read in flight.
-    outstanding: BTreeSet<JournalId>,
+    outstanding: BTreeSet<JournalKey>,
     next_seed: usize,
-    tombstones: BTreeSet<JournalId>,
+    tombstones: BTreeSet<JournalKey>,
     spares: Vec<paros_core::Config>,
     replies: mpsc::Sender<Followed>,
     timeout: Duration,
@@ -143,7 +143,14 @@ impl<P: Providers> SystemFollower<P> {
                 self_id: plan.self_id,
                 seeds,
                 fixed,
-                directory: Directory::new(plan.genesis_journals.iter().copied()),
+                // The directory allocates inside its own tenant (#235): only
+                // that tenant's genesis journals are reserved there.
+                directory: Directory::new(
+                    plan.genesis_journals
+                        .iter()
+                        .filter(|key| key.tenant == DIRECTORY.tenant)
+                        .map(|key| key.journal),
+                ),
                 registry: Registry::new(plan.genesis_pool.iter().copied()),
                 cursors: BTreeMap::new(),
                 outstanding: BTreeSet::new(),
@@ -185,14 +192,14 @@ impl<P: Providers> SystemFollower<P> {
     }
 
     /// Whether `journal` was tombstoned in the directory fold.
-    pub(crate) fn is_tombstoned(&self, journal: JournalId) -> bool {
+    pub(crate) fn is_tombstoned(&self, journal: JournalKey) -> bool {
         self.tombstones.contains(&journal)
     }
 
     /// Fold one page of `journal` read from this node's own journal fold.
     pub(crate) fn fold_local(
         &mut self,
-        journal: JournalId,
+        journal: JournalKey,
         page: &LogPage,
     ) -> Vec<(u64, SystemEvent)> {
         let records: Vec<Vec<u8>> = page.records.iter().map(|r| r.0.clone()).collect();
@@ -200,7 +207,7 @@ impl<P: Providers> SystemFollower<P> {
     }
 
     /// Where the next read of `journal` starts.
-    pub(crate) fn cursor(&self, journal: JournalId) -> u64 {
+    pub(crate) fn cursor(&self, journal: JournalKey) -> u64 {
         self.cursors.get(&journal).copied().unwrap_or(0)
     }
 
@@ -219,7 +226,7 @@ impl<P: Providers> SystemFollower<P> {
     /// pages may overlap.
     fn fold(
         &mut self,
-        journal: JournalId,
+        journal: JournalKey,
         from: u64,
         records: Vec<Vec<u8>>,
     ) -> Vec<(u64, SystemEvent)> {
@@ -230,7 +237,8 @@ impl<P: Providers> SystemFollower<P> {
                 DIRECTORY if seq >= self.directory.next_seq() => {
                     let event = self.directory.fold(seq, &record);
                     if let DirectoryEvent::Deleted { id } = &event {
-                        self.tombstones.insert(*id);
+                        self.tombstones
+                            .insert(JournalKey::new(DIRECTORY.tenant, *id));
                     }
                     SystemEvent::Directory(event)
                 }
@@ -249,7 +257,7 @@ impl<P: Providers> SystemFollower<P> {
     /// Open a remote follow read of every system journal `local` says this
     /// node does not run and that has none in flight, each to the next seed
     /// in turn.
-    pub(crate) fn poll_remote(&mut self, providers: &P, local: impl Fn(JournalId) -> bool) {
+    pub(crate) fn poll_remote(&mut self, providers: &P, local: impl Fn(JournalKey) -> bool) {
         for journal in [DIRECTORY, REGISTRY] {
             if local(journal) || self.outstanding.contains(&journal) {
                 continue;
@@ -258,7 +266,8 @@ impl<P: Providers> SystemFollower<P> {
             self.next_seed = self.next_seed.wrapping_add(1);
             self.outstanding.insert(journal);
             let request = Read {
-                journal: journal.0,
+                journal: journal.journal.0,
+                tenant: journal.tenant.0,
                 from_seq: self.cursor(journal),
                 limit: FOLLOW_READ_RECORDS,
                 wait_ms: 0,
@@ -279,11 +288,11 @@ impl<P: Providers> SystemFollower<P> {
                     let reply = match answer {
                         Ok(Ok(reply)) => reply,
                         Ok(Err(error)) => {
-                            tracing::debug!(node = self_id, journal = journal.0, %error, "system_follow_failed");
+                            tracing::debug!(node = self_id, journal = %journal, %error, "system_follow_failed");
                             ReadAck { unknown_journal: true, ..ReadAck::default() }
                         }
                         Err(_) => {
-                            tracing::debug!(node = self_id, journal = journal.0, "system_follow_timed_out");
+                            tracing::debug!(node = self_id, journal = %journal, "system_follow_timed_out");
                             ReadAck { unknown_journal: true, ..ReadAck::default() }
                         }
                     };
@@ -298,7 +307,7 @@ impl<P: Providers> SystemFollower<P> {
 
 impl Followed {
     /// The system journal the answer is for.
-    pub(crate) fn journal(&self) -> JournalId {
+    pub(crate) fn journal(&self) -> JournalKey {
         self.journal
     }
 }
@@ -310,7 +319,7 @@ impl Followed {
 pub(crate) fn follow_local<P: Providers, S, A>(
     follower: &mut SystemFollower<P>,
     journals: &Journals<S, A>,
-) -> Vec<(JournalId, Vec<(u64, SystemEvent)>)> {
+) -> Vec<(JournalKey, Vec<(u64, SystemEvent)>)> {
     let page_records = usize::try_from(FOLLOW_READ_RECORDS).unwrap_or(usize::MAX);
     let mut moved = Vec::new();
     for journal in [DIRECTORY, REGISTRY] {

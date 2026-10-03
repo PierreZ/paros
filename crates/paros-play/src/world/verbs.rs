@@ -753,11 +753,21 @@ impl World {
                 "a compaction request goes to",
             ));
         }
+        // The level's writer holds generation 1 (see `Disk::provision_owner`),
+        // and a `Truncate` is fenced like its writes (#228): the compaction
+        // is asked under the journal's current writer.
+        let fence = node.replica().journal();
+        let generation = fence.generation;
+        let owner = fence.owner.unwrap_or(ClientId(0));
         let mark = self.narration.len();
         let accepted = self
             .drive(id, index, move |node| {
                 matches!(
-                    node.propose_control(Control::Truncate { up_to: Seq(up_to) }),
+                    node.propose_control(Control::Truncate {
+                        generation,
+                        owner,
+                        up_to: Seq(up_to),
+                    }),
                     ProposeResult::Accepted(_)
                 )
             })

@@ -25,8 +25,8 @@ use paros::client::{
     WriteOutcome, Writer, WriterOutcome,
 };
 use paros::{
-    Command, Entry, JournalId, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
-    Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
+    Command, Entry, JournalKey, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
+    TenantId, Truncate, Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
 };
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
@@ -48,8 +48,11 @@ const WRITE: u8 = 0;
 /// A `Write` aimed at a node other than the believed leader (the redirect
 /// path).
 const WRITE_TO_NON_LEADER: u8 = 1;
-/// A journal `Truncate` (#204), clamped by the fold fence. Replaced
-/// `COMPACT` and keeps its id.
+/// A journal `Truncate` (#204), clamped by the fold fence, issued by an
+/// owner under its own `(generation, owner)` fence (#228) — or, from an
+/// owner another one superseded, under its old generation
+/// ([`ChainConfig::stale_truncate_pct`]), which the journal must refuse.
+/// Replaced `COMPACT` and keeps its id.
 const TRUNCATE: u8 = 2;
 const READ_STATE: u8 = 3;
 const PAUSE: u8 = 4;
@@ -107,15 +110,16 @@ const READ: u8 = 15;
 const CHECK_TAIL: u8 = 16;
 /// Create a journal through the **directory** (#189): a `CreateJournal` of a
 /// name drawn from a four-name alphabet over three members of the pool
-/// (genesis nodes and registered joiners), written to journal 1 at a seed,
-/// then read back — `Created` with its id, or refused for a taken name — and
+/// (genesis nodes and registered joiners), under a journal id it draws
+/// (#235), written to the directory at a seed, then read back — `Created`
+/// with its id, refused for a taken id (redrawn once) or a taken name — and
 /// one record written to a journal it created. On a seed without system
 /// journals the write is still sent, and must be refused as unknown.
 const CREATE_JOURNAL: u8 = 17;
 /// Tombstone a journal this client created (#189): a `DeleteJournal`.
 const DELETE_JOURNAL: u8 = 18;
 /// Register a joiner in the **node registry** (#189): a `RegisterNode` of
-/// its id and address, written to journal 2 at a seed.
+/// its id and address, written to the registry at a seed.
 const REGISTER_NODE: u8 = 19;
 /// Drain a registered joiner (#189): a `DrainNode`.
 const DRAIN_NODE: u8 = 20;
@@ -183,6 +187,14 @@ struct ChainConfig {
     pipeline_depth: usize,
     /// Requests per compaction storm. Floor 1.
     compact_storm_attempts: usize,
+    /// Percent chance a `TRUNCATE` step of a superseded owner (one that
+    /// owned a generation once and owns none now) sends its truncation
+    /// under the old generation anyway (#228, `Writer::
+    /// stale_truncate_request`) — the deliberate misbehaviour the fence
+    /// refuses. Floor 0: such an owner sends nothing, as the library's
+    /// writer does; ceiling 100: it always tries. Either extreme is valid,
+    /// since a refused truncation moves nothing.
+    stale_truncate_pct: u64,
     /// The recovery tail, an order of magnitude past the 4 s chaos window and
     /// past the longest attrition restart (5 s after swarm rescaling) plus
     /// the below-floor snapshot recovery it forces. **Never below 45 s**.
@@ -314,6 +326,7 @@ impl ChainConfig {
             compaction: buggify_knob!(1_u64, 0_u64..1_u64) == 1,
             pipeline_depth: buggify_knob!(8_usize, 1_usize..17_usize),
             compact_storm_attempts: buggify_knob!(6_usize, 1_usize..13_usize),
+            stale_truncate_pct: buggify_knob!(50_u64, 0_u64..101_u64),
             recovery_budget_ms: buggify_knob!(60_000_u64, 45_000_u64..90_001_u64),
             recovery_proposals: buggify_knob!(12_u64, 1_u64..25_u64),
             abandon_pct: buggify_knob!(15_u64, 0_u64..61_u64),
@@ -482,6 +495,22 @@ fn weighted_index(weights: &[u64], draw: u64) -> usize {
 /// committed the abandoned attempt), or one that walks the ring. Two bits
 /// of `draw` pick it; the hint-following default keeps half the mass so the
 /// ordinary client stays the common shape.
+/// The writer fence an owner truncates under (#228): the generation it owns
+/// and its id, or `None` when it owns none (it sends nothing).
+fn fence(writer: &Writer) -> Option<(u64, u64)> {
+    writer
+        .truncate_request(0)
+        .map(|request| (request.generation, request.owner))
+}
+
+/// Fold a truncation's verdict back into the writer: a refusal names the
+/// writer in force, so a superseded owner stops.
+fn absorb_truncate(writer: &mut Writer, outcome: Option<&TruncateOutcome>) {
+    if let Some(outcome) = outcome {
+        writer.absorb_truncate(outcome);
+    }
+}
+
 fn retarget_from_draw(draw: u64) -> Retarget {
     match draw % 4 {
         0 | 1 => Retarget::FollowHint,
@@ -743,7 +772,7 @@ struct Tail {
     /// The journals some client saw converged (#188): the run ends only once
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
-    converged: BTreeSet<JournalId>,
+    converged: BTreeSet<JournalKey>,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -814,7 +843,7 @@ pub(crate) struct ChainWorkload {
     digest: Option<DigestSink>,
     /// The journal this client writes and reads (#188), and the run's
     /// plan (set in `setup`).
-    journal: JournalId,
+    journal: JournalKey,
     plan: Option<crate::shape::JournalPlan>,
     /// This client's id (set in `setup`): its identity as an owner.
     client_id: u64,
@@ -830,7 +859,7 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
-            journal: JournalId::default(),
+            journal: JournalKey::default(),
             plan: None,
             client_id: 0,
             calls: None,
@@ -970,7 +999,7 @@ impl ChainWorkload {
 /// generation of its own (the races of #205).
 async fn claim(
     nodes: &ChainClient,
-    journal: JournalId,
+    journal: JournalKey,
     target: usize,
     (me, fresh): (u64, bool),
 ) -> ClaimOutcome {
@@ -1102,7 +1131,7 @@ impl Workload for ChainWorkload {
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let replica_ips: Vec<(u64, String)> = if self.journal == JournalId::default() {
+        let replica_ips: Vec<(u64, String)> = if self.journal == JournalKey::default() {
             deployment
                 .replicas()
                 .iter()
@@ -1194,24 +1223,36 @@ impl Workload for ChainWorkload {
             rpc::write_once(&nodes, journal, target, entry, abandon, false)
         };
         // One truncation request as the trace tells it: the `Truncate` it
-        // asks for, clamped below every folding client's cursor (the fence,
-        // `fold`), then whether the leader applied it.
+        // asks for under the writer `fence` it carries (#228; `None` sends
+        // nothing — a writer that owns no generation), clamped below every
+        // folding client's cursor (the fold fence, `fold`), then whether the
+        // leader applied it.
         let truncator = nodes.with_tunables(config.truncate_tunables());
-        let truncate_once = |target: usize, up_to: u64| {
+        let truncate_once = |target: usize, request: Truncate| {
             let truncator = truncator.clone();
-            async move { judged_truncate(truncator.truncate(journal, up_to, target).await) }
+            async move { judged_truncate(truncator.truncate(&request, target).await) }
         };
-        let truncate_traced = |target: usize, up_to: u64| {
-            let attempt = fold::clamp(ctx.state(), journal, up_to).map(|up_to| {
-                trace_truncate(up_to);
-                (up_to, truncate_once(target, up_to))
+        let truncate_traced = |target: usize, fence: Option<(u64, u64)>, up_to: u64| {
+            let attempt = fence.and_then(|(generation, owner)| {
+                fold::clamp(ctx.state(), journal, up_to).map(|up_to| {
+                    trace_truncate(generation, owner, up_to);
+                    let request = Truncate {
+                        journal: journal.journal.0,
+                        tenant: journal.tenant.0,
+                        up_to,
+                        generation,
+                        owner,
+                    };
+                    (up_to, truncate_once(target, request))
+                })
             });
             async move {
-                if let Some((up_to, attempt)) = attempt
-                    && matches!(attempt.await, TruncateOutcome::Applied { .. })
-                {
+                let (up_to, attempt) = attempt?;
+                let outcome = attempt.await;
+                if matches!(outcome, TruncateOutcome::Applied { .. }) {
                     tracing::info!(up_to, "chain_compact_accepted");
                 }
+                Some(outcome)
             }
         };
         let reconfigurer = nodes.with_tunables(config.reconfigure_tunables());
@@ -1269,7 +1310,13 @@ impl Workload for ChainWorkload {
             if config.compaction && writer.next_seq() > 0 {
                 let fallback =
                     usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-                truncate_traced(nodes.leader().unwrap_or(fallback), writer.next_seq()).await;
+                let outcome = truncate_traced(
+                    nodes.leader().unwrap_or(fallback),
+                    fence(&writer),
+                    writer.next_seq(),
+                )
+                .await;
+                absorb_truncate(&mut writer, outcome.as_ref());
             }
         }
 
@@ -1298,7 +1345,7 @@ impl Workload for ChainWorkload {
             // The matchmaker plane — an acceptor or matchmaker
             // reconfiguration, a retirement — belongs to the default journal
             // (#188): a client of another journal pauses instead.
-            let op = if journal != JournalId::default()
+            let op = if journal != JournalKey::default()
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
                 PAUSE
@@ -1514,8 +1561,13 @@ impl Workload for ChainWorkload {
                                     1 => end + 1 + (raw_policy >> 7) % 8,
                                     _ => end,
                                 };
-                                truncate_traced(nodes.leader().unwrap_or(chosen_target), up_to)
-                                    .await;
+                                let outcome = truncate_traced(
+                                    nodes.leader().unwrap_or(chosen_target),
+                                    fence(&writer),
+                                    up_to,
+                                )
+                                .await;
+                                absorb_truncate(&mut writer, outcome.as_ref());
                             }
                         }
                         WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
@@ -1734,12 +1786,32 @@ impl Workload for ChainWorkload {
                         // drop: its fold's cursor, or its own writes' end
                         // when it wrote past what it read.
                         let up_to = writer.next_seq().max(fold.cursor());
-                        truncate_traced(nodes.leader().unwrap_or(target), up_to).await;
+                        // The owner truncates under its own fence (#228). A
+                        // superseded owner sends nothing — or, as the
+                        // deliberate misbehaviour, its old generation, which
+                        // the journal must refuse.
+                        let stale = writer.owned().is_none()
+                            && writer.generation() > 0
+                            && raw_policy % 100 < config.stale_truncate_pct;
+                        let fence = if stale {
+                            assert_reachable!("chain: a superseded owner sends a stale truncate");
+                            let request = writer.stale_truncate_request(up_to);
+                            Some((request.generation, request.owner))
+                        } else {
+                            fence(&writer)
+                        };
+                        let outcome =
+                            truncate_traced(nodes.leader().unwrap_or(target), fence, up_to).await;
+                        absorb_truncate(&mut writer, outcome.as_ref());
                     }
                 }
                 TRUNCATE_STORM => {
                     let base = writer.next_seq().max(fold.cursor());
-                    if config.compaction && base > 0 {
+                    // A storm is the owner's (#228): a writer that owns no
+                    // generation sends none.
+                    if let (true, Some((generation, owner))) =
+                        (config.compaction && base > 0, fence(&writer))
+                    {
                         let first_mode = usize::try_from(raw_pause % 3).unwrap_or(0);
                         for attempt in 0..config.compact_storm_attempts {
                             let mode = (first_mode + attempt) % 3;
@@ -1773,7 +1845,7 @@ impl Workload for ChainWorkload {
                             let Some(up_to) = fold::clamp(ctx.state(), journal, up_to) else {
                                 continue;
                             };
-                            trace_truncate(up_to);
+                            trace_truncate(generation, owner, up_to);
                             tracing::info!(
                                 up_to,
                                 target = request_target,
@@ -1800,7 +1872,14 @@ impl Workload for ChainWorkload {
                                 }
                                 self.adversarial.compact_storm_modes[mode] = true;
                             }
-                            match truncate_once(request_target, up_to).await {
+                            let request = Truncate {
+                                journal: journal.journal.0,
+                                tenant: journal.tenant.0,
+                                up_to,
+                                generation,
+                                owner,
+                            };
+                            match truncate_once(request_target, request).await {
                                 TruncateOutcome::Applied { state } => {
                                     nodes.observe_leader_at(request_target);
                                     tracing::info!(
@@ -1812,7 +1891,11 @@ impl Workload for ChainWorkload {
                                 TruncateOutcome::Redirect { leader } => {
                                     nodes.observe_leader(leader);
                                 }
-                                TruncateOutcome::UnknownJournal
+                                // Superseded mid-storm: the rest of the
+                                // storm is refused alike, and the writer
+                                // learns it from its next write.
+                                TruncateOutcome::Refused { .. }
+                                | TruncateOutcome::UnknownJournal
                                 | TruncateOutcome::Malformed
                                 | TruncateOutcome::Ambiguous => {}
                             }
@@ -1855,24 +1938,27 @@ impl Workload for ChainWorkload {
                         }
                     };
                     let race_up_to = writer.next_seq().max(fold.cursor());
+                    let race_fence = fence(&writer);
                     // Any node or replica serves a journal read.
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
                     // A client naming a journal this deployment does not
-                    // serve (`0`, the unset id, or another user journal) must
-                    // be refused, never answered from the wrong journal.
+                    // serve (the unset frame, or another tenant's) must be
+                    // refused, never answered from the wrong journal.
                     let stray = !racing && buggify_with_prob!(0.05);
                     let named = if stray {
                         assert_reachable!("chain: a client asks for a journal nobody serves");
                         if raw_policy & 1 == 0 {
-                            0
+                            JournalKey::UNSET
                         } else {
-                            // Past every journal a run serves (#188: at
-                            // most three, from `FIRST_USER`).
-                            JournalId::FIRST_USER.0 + 1000
+                            // A frame nobody serves (#235): this journal's
+                            // id in a tenant no run draws (`u64::MAX` is
+                            // outside every draw) — the right journal id
+                            // under the wrong tenant must be refused too.
+                            JournalKey::new(TenantId(u64::MAX), journal.journal)
                         }
                     } else {
-                        journal.0
+                        journal
                     };
                     let op_id = next_op;
                     next_op += 1;
@@ -1907,7 +1993,12 @@ impl Workload for ChainWorkload {
                     let truncation = async {
                         if racing && !reader && config.compaction {
                             assert_reachable!("chain: a truncation races a reader's cursor");
-                            truncate_traced(nodes.leader().unwrap_or(target), race_up_to).await;
+                            let _ = truncate_traced(
+                                nodes.leader().unwrap_or(target),
+                                race_fence,
+                                race_up_to,
+                            )
+                            .await;
                         }
                     };
                     let (answer, ()) = futures::join!(read, truncation);
@@ -1975,7 +2066,7 @@ impl Workload for ChainWorkload {
                             let call = read_once(
                                 &readers,
                                 (drawn + k) % span.max(1),
-                                journal.0,
+                                journal,
                                 resume_at,
                                 config.read_limit,
                                 0,
@@ -2024,7 +2115,7 @@ impl Workload for ChainWorkload {
                     // request refused (`unchanged`, `unknown_member`) — an
                     // operating condition, never a wrong state.
                     let probe_target = nodes.leader().unwrap_or(target);
-                    let in_force = nodes.inspect(probe_target, journal.0).await.map(|reply| {
+                    let in_force = nodes.inspect(probe_target, journal).await.map(|reply| {
                         let wire = WireQuorumSystem {
                             quorum_system: reply.quorum_system,
                             phase1_quorum: reply.phase1_quorum,
@@ -2317,7 +2408,7 @@ impl Workload for ChainWorkload {
                     // only makes the handover superseded or refused — an
                     // operating condition, never a wrong state.
                     let current: Option<(u64, Vec<u64>)> = nodes
-                        .inspect(target, journal.0)
+                        .inspect(target, journal)
                         .await
                         .map(|reply| (reply.matchmaker_generation, reply.matchmakers));
                     let drawn_slot = weighted_index(&config.matchmaker_shape_weights, raw_class);
@@ -2423,7 +2514,7 @@ impl Workload for ChainWorkload {
                     // outside C_b", and the node itself refuses the request
                     // unless the watermark proves every configuration it was
                     // a member of is forgotten (#123).
-                    let inspected = nodes.inspect(probe_target, journal.0).await;
+                    let inspected = nodes.inspect(probe_target, journal).await;
                     let (retirable, in_force, gc_watermark) = inspected
                         .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
                         .unwrap_or_default();
@@ -2454,7 +2545,7 @@ impl Workload for ChainWorkload {
                         );
                         let candidates: Vec<usize> = in_force.iter().filter_map(live).collect();
                         let beliefs =
-                            join_all(candidates.iter().map(|i| nodes.inspect(*i, journal.0))).await;
+                            join_all(candidates.iter().map(|i| nodes.inspect(*i, journal))).await;
                         stale_member = candidates.iter().zip(beliefs).find_map(|(i, reply)| {
                             let own = u64::try_from(*i).unwrap_or(u64::MAX);
                             reply
@@ -2586,7 +2677,7 @@ impl Workload for ChainWorkload {
                     reconfigure_next = system_ops
                         .registry_step(ctx, &nodes, None, raw_payload)
                         .await
-                        && journal == JournalId::default()
+                        && journal == JournalKey::default()
                         && operations.contains(&RECONFIGURE);
                 }
                 DRAIN_NODE => {
@@ -2739,7 +2830,7 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == JournalId::default() && client_id == 0)
+        let held_replica = (journal == JournalKey::default() && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))
@@ -2784,7 +2875,10 @@ impl Workload for ChainWorkload {
             {
                 fold.read_to_tail(ctx, &audit, &readers, target, client_id, config.read_limit)
                     .await;
-                truncate_traced(target, writer.next_seq().max(fold.cursor())).await;
+                let outcome =
+                    truncate_traced(target, fence(&writer), writer.next_seq().max(fold.cursor()))
+                        .await;
+                absorb_truncate(&mut writer, outcome.as_ref());
             }
             let raw = ctx.random().random::<u64>();
             let mut acknowledged = false;
@@ -2978,7 +3072,7 @@ impl Workload for ChainWorkload {
             for &node in &live {
                 // `readers` holds the nodes, then the replicas: index `node`.
                 let end = readers
-                    .inspect(node, journal.0)
+                    .inspect(node, journal)
                     .await
                     .map(|reply| reply.chosen_index.map_or(0, |c| c + 1));
                 let Some(end) = end else {
@@ -3034,7 +3128,7 @@ impl Workload for ChainWorkload {
         // siblings — a client whose journal is quiet keeps the run alive for
         // one still settling.
         if converged {
-            let appended_to: BTreeSet<JournalId> = self
+            let appended_to: BTreeSet<JournalKey> = self
                 .plan
                 .as_ref()
                 .map(|plan| {
@@ -3139,13 +3233,13 @@ impl Workload for ChainWorkload {
                 .unwrap_or_default();
             eprintln!(
                 "  JOURNAL {} of {journals:?} (held {:?})",
-                journal.0,
+                journal,
                 self.plan.as_ref().and_then(|plan| plan.held)
             );
             for other in &journals {
                 eprintln!(
                     "  AUDIT[{}] {}",
-                    other.0,
+                    other,
                     crate::audit::audit_world_for(ctx.state(), *other).diagnostics()
                 );
             }
@@ -3154,7 +3248,7 @@ impl Workload for ChainWorkload {
                 .flat_map(|j| servers.iter().map(move |ip| (ip, *j)))
             {
                 if let Some(probe) = crate::world::disk_probe_for(ctx.state(), disk_journal, ip) {
-                    eprint!("  [journal {}]", disk_journal.0);
+                    eprint!("  [journal {disk_journal}]");
                     eprintln!(
                         "  DISK {ip}: floor={} chosen={:?} clean_slots={}..={}",
                         probe.floor,

@@ -583,20 +583,25 @@ set) the same way. In the simulation an operator sometimes restarts a node or a
 matchmaker under an edited file, and the library has to refuse it before the
 restored file brings it back as the member it was.
 
-In production the claim is not a flag on the start. `parosd provision` formats
-every store of an identity once, as its own command, and records that it did in
-a provisioning record beside the stores; every ordinary start is an existing
-member. A start therefore never formats: a wiped volume is refused as amnesia,
-and a second `provision` is refused as already formatted. A provisioning
-interrupted between its formats and its record resumes by reading the disk, the
-rule the simulation's operator follows too.
+In production the claim is not a flag on the start. A machine mints its own
+identity, a random `node_id`, the first time it starts on an empty data
+directory, and then waits. `parosctl init` forms the cell: every seed formats the
+stores of the cell's journals once and records that it did in a provisioning
+record beside them, then commits the cell's plan in its machine record; every
+later start is an existing member. A start therefore never formats: lost stores
+under a kept identity are refused as amnesia. A wiped volume takes its identity
+with it and comes back as a new machine with a new `node_id`, which never rejoins
+as the old one. A formation interrupted between its formats and its commit
+resumes by reading the disk, the rule the simulation's operator follows too.
 
 **In the code.** `LogStorage::formatted_config`, `LogStorage::format`
 (`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,
 `BootRefusal::ConfigMismatch` (`crates/paros/src/driver/config.rs`);
-`Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`) and
-`parosd`'s `Record` (`crates/parosd/src/record.rs`). Play it:
+`Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`),
+`paros::machine::wait_for_cell` (`crates/paros/src/machine.rs`) and `parosd`'s
+`MachineRecord` and `Record` (`crates/parosd/src/machine_record.rs`,
+`crates/parosd/src/record.rs`). Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
 
 ## Many journals on one process

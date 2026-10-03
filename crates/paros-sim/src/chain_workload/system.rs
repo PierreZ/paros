@@ -1,8 +1,10 @@
 //! The chain client's **system-journal operations** (#189): the directory's
 //! `CreateJournal` / `DeleteJournal` and the node registry's
 //! `RegisterNode` / `DrainNode` / `RetireNode`, each one record written to
-//! journal 1 or 2 at a seed, and the read-back a creator does to learn what
-//! its request folded to.
+//! the directory or the registry (two tenants' control journals, #235) at a
+//! seed, and the read-back a creator does to learn what its request folded
+//! to. A create names the journal id it drew (#235) and redraws once when
+//! the directory refuses it as taken.
 //!
 //! A system journal is written like any journal (#204): a writer claims it
 //! with `SetLeader` against the generation it read, then `Write`s at the
@@ -28,7 +30,8 @@ use paros::system::{
     SystemCommand, SystemEvent,
 };
 use paros::{
-    AcceptorConfig, Command, Entry, Generation, JournalId, NodeId, QuorumSystem, Seq, Value,
+    AcceptorConfig, Command, Entry, Generation, JournalId, JournalKey, NodeId, QuorumSystem, Seq,
+    Value,
 };
 
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
@@ -37,6 +40,13 @@ use super::rpc::{read_once, set_leader_once, within, write_once};
 use crate::audit::audit_world_for;
 use crate::chain::user_command_hash;
 use crate::client::ChainClient;
+
+/// A journal id in the user range, spread from one draw (#235: ids are
+/// random, never a log position).
+fn drawn_id(draw: u64) -> JournalId {
+    let span = u64::MAX - JournalId::FIRST_USER.0;
+    JournalId(JournalId::FIRST_USER.0 + crate::chain::splitmix(draw) % span)
+}
 
 /// How many asks a system write spends before it calls the outcome
 /// ambiguous.
@@ -63,21 +73,24 @@ enum Appended {
 pub(super) struct SystemOps {
     /// The run runs the system journals.
     active: bool,
-    /// How many genesis ranks host journals 1 and 2 (the seeds).
+    /// How many genesis ranks host the system journals (the seeds).
     seeds: usize,
     /// The genesis pool size.
     pool: usize,
     /// The joiners, `(id, address)`.
     joiners: Vec<(NodeId, String)>,
-    /// The genesis journals: ids the directory never allocates.
-    genesis: Vec<JournalId>,
+    /// The genesis journals: frames the directory never allocates.
+    genesis: Vec<JournalKey>,
     /// A registered joiner joins the default journal as a spare (a seed with
     /// matchmakers and neither proxies nor replicas, `process::spare_template`),
     /// so a reconfiguration may name one.
     spares: bool,
     client_id: u64,
-    /// Journals this client created and has not asked to delete.
+    /// Journals this client created (ids in the directory's tenant) and has
+    /// not asked to delete.
     created: Vec<JournalId>,
+    /// Every id this client ever had created: a deliberate reuse names one.
+    ever_created: Vec<JournalId>,
     timeout: Duration,
 }
 
@@ -88,7 +101,7 @@ impl SystemOps {
     pub(super) fn new(
         deployment: &crate::roles::Deployment,
         active: bool,
-        genesis: Vec<JournalId>,
+        genesis: Vec<JournalKey>,
         client_id: u64,
         timeout: Duration,
     ) -> Self {
@@ -114,6 +127,7 @@ impl SystemOps {
                 && deployment.replicas().is_empty(),
             client_id,
             created: Vec::new(),
+            ever_created: Vec::new(),
             timeout,
         }
     }
@@ -124,7 +138,7 @@ impl SystemOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalId,
+        journal: JournalKey,
         command: &SystemCommand,
         draw: u64,
     ) -> Appended {
@@ -144,7 +158,7 @@ impl SystemOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalId,
+        journal: JournalKey,
         targets: &[usize],
         record: Vec<u8>,
         draw: u64,
@@ -158,7 +172,7 @@ impl SystemOps {
             let node = targets[target % targets.len()] % nodes.server_count();
             let Some((generation, position)) = claim else {
                 // Read where the journal stands, then claim it.
-                let read = read_once(nodes, node, journal.0, 0, 1, 0);
+                let read = read_once(nodes, node, journal, 0, 1, 0);
                 let answer = within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await;
                 if answer == ReadOutcome::UnknownJournal && created {
                     target += 1;
@@ -168,7 +182,7 @@ impl SystemOps {
                     assert_always!(
                         !self.active || !paros::system::is_system(journal),
                         "system: a seed serves the system journals",
-                        { "journal" => journal.0, "seed" => node }
+                        { "journal" => journal.to_string(), "seed" => node }
                     );
                     if paros::system::is_system(journal) {
                         assert_reachable!(
@@ -241,16 +255,21 @@ impl SystemOps {
         &self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalId,
+        journal: JournalKey,
         draw: u64,
     ) -> Option<(Vec<(u64, SystemEvent)>, Directory, Registry)> {
         let seed = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
-        let mut directory = Directory::new(self.genesis.iter().copied());
+        let mut directory = Directory::new(
+            self.genesis
+                .iter()
+                .filter(|key| key.tenant == DIRECTORY.tenant)
+                .map(|key| key.journal),
+        );
         let mut registry = Registry::new((0..self.pool as u64).map(NodeId));
         let mut events = Vec::new();
         let mut from = 0;
         loop {
-            let read = read_once(nodes, seed, journal.0, from, READ_RECORDS, 0);
+            let read = read_once(nodes, seed, journal, from, READ_RECORDS, 0);
             let ReadOutcome::Page { records, state, .. } =
                 within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await
             else {
@@ -317,36 +336,68 @@ impl SystemOps {
             ];
         }
         let config = AcceptorConfig::new(members, QuorumSystem::Majority);
-        let command = SystemCommand::CreateJournal {
-            name,
-            config: config.clone(),
+        // The id is the creator's to draw (#235), off the step's draws. A
+        // deliberate reuse of an id this client had created — the collision a
+        // random u64 never makes on its own — is its own location: the
+        // directory must refuse it, and the creator redraws.
+        let reuse = !self.ever_created.is_empty() && buggify_with_prob!(0.2);
+        let mut id = if reuse {
+            assert_reachable!("system: a client creates a journal under an id it already used");
+            self.ever_created[usize::try_from(class % self.ever_created.len() as u64).unwrap_or(0)]
+        } else {
+            drawn_id(payload ^ class)
         };
-        let Appended::At(position) = self.append(ctx, nodes, DIRECTORY, &command, payload).await
-        else {
-            return;
-        };
-        let Some((events, _, _)) = self.read_back(ctx, nodes, DIRECTORY, payload).await else {
-            return;
-        };
-        match events
-            .into_iter()
-            .find(|(at, _)| *at == position)
-            .map(|(_, e)| e)
-        {
-            Some(SystemEvent::Directory(DirectoryEvent::Created { id, .. })) => {
-                assert_reachable!("system: a client creates a journal and reads back its id");
-                self.created.push(id);
-                self.append_to_created(ctx, nodes, id, &config, payload)
-                    .await;
+        for attempt in 0..2_u64 {
+            let command = SystemCommand::CreateJournal {
+                id,
+                name: name.clone(),
+                config: config.clone(),
+            };
+            let Appended::At(position) =
+                self.append(ctx, nodes, DIRECTORY, &command, payload).await
+            else {
+                return;
+            };
+            let Some((events, _, _)) = self.read_back(ctx, nodes, DIRECTORY, payload).await else {
+                return;
+            };
+            match events
+                .into_iter()
+                .find(|(at, _)| *at == position)
+                .map(|(_, e)| e)
+            {
+                Some(SystemEvent::Directory(DirectoryEvent::Created { id: created, .. })) => {
+                    assert_always!(
+                        created == id,
+                        "system: a created journal takes the id its creator drew",
+                        { "asked" => id.0, "created" => created.0 }
+                    );
+                    assert_reachable!("system: a client creates a journal and reads back its id");
+                    self.created.push(id);
+                    self.ever_created.push(id);
+                    let key = JournalKey::new(DIRECTORY.tenant, id);
+                    self.append_to_created(ctx, nodes, key, &config, payload)
+                        .await;
+                    return;
+                }
+                Some(SystemEvent::Directory(DirectoryEvent::Refused(
+                    DirectoryRefusal::IdTaken { .. },
+                ))) => {
+                    assert_reachable!(
+                        "system: a client redraws an id the directory refused as taken"
+                    );
+                    id = drawn_id(payload.rotate_left(17) ^ attempt ^ class.rotate_left(29));
+                }
+                Some(SystemEvent::Directory(DirectoryEvent::Refused(
+                    DirectoryRefusal::NameTaken { .. },
+                ))) => {
+                    assert_reachable!(
+                        "system: a client reads back its create refused for a taken name"
+                    );
+                    return;
+                }
+                _ => return,
             }
-            Some(SystemEvent::Directory(DirectoryEvent::Refused(
-                DirectoryRefusal::NameTaken { .. },
-            ))) => {
-                assert_reachable!(
-                    "system: a client reads back its create refused for a taken name"
-                );
-            }
-            _ => {}
         }
     }
 
@@ -356,7 +407,7 @@ impl SystemOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalId,
+        journal: JournalKey,
         config: &AcceptorConfig,
         draw: u64,
     ) {

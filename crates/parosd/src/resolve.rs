@@ -56,6 +56,40 @@ pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("{addr:?} resolves to no address"))
 }
 
+/// Resolve `addr` (`HOST:PORT`) to **every** socket address it names, in
+/// resolution order without duplicates: a rendezvous name that stands for
+/// several machines (a Compose network alias shared by the seeds, #216)
+/// yields them all. One family only — the IPv4 addresses when there is any,
+/// else the IPv6 ones — the family [`resolve`] picks for a listen address:
+/// a name like `localhost` that resolves to `127.0.0.1` and `::1` is one
+/// machine listening on one of them, never two seeds.
+///
+/// # Errors
+///
+/// `addr` is malformed, or the name does not resolve (yet).
+pub fn resolve_all(addr: &str) -> Result<Vec<SocketAddr>, String> {
+    check_shape(addr)?;
+    if let Ok(literal) = addr.parse::<SocketAddr>() {
+        return Ok(vec![literal]);
+    }
+    let mut resolved: Vec<SocketAddr> = Vec::new();
+    for found in addr
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve {addr:?}: {e}"))?
+    {
+        if !resolved.contains(&found) {
+            resolved.push(found);
+        }
+    }
+    if resolved.iter().any(SocketAddr::is_ipv4) {
+        resolved.retain(SocketAddr::is_ipv4);
+    }
+    if resolved.is_empty() {
+        return Err(format!("{addr:?} resolves to no address"));
+    }
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +112,15 @@ mod tests {
         assert!(check_shape(":4500").is_err(), "no host");
         assert!(check_shape("node-0:http").is_err(), "a named port");
         assert!(resolve("no-such-host.invalid:4500").is_err());
+        assert_eq!(
+            resolve_all("127.0.0.1:4500"),
+            Ok(vec!["127.0.0.1:4500".parse().expect("literal")])
+        );
+        // One machine, one address: never its IPv4 and its IPv6 address both.
+        let local = resolve_all("localhost:4501").expect("localhost resolves");
+        assert_eq!(
+            local,
+            vec![resolve("localhost:4501").expect("localhost resolves")]
+        );
     }
 }

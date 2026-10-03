@@ -47,7 +47,10 @@ If `CLAUDE_CODE_ENTRYPOINT` starts with `remote` (e.g. `remote`, `remote_mobile`
 
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
-**Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries
+**Use Nix-provided software for all tooling.** The one documented exception is the image
+(`Dockerfile`, `docker-compose.yml`, #196): a plain multi-stage Rust build so a fresh clone runs
+with Docker alone; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
+`scripts/check-dockerfile-toolchain.sh`). Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
 `brew` (`nix-bin` above is the one exception). On the web the flake's inputs are GitHub tarballs
 the egress policy blocks (a 403 is org policy, not a bug to retry), so use a Nix `rustup`, which
@@ -164,7 +167,8 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 - A reconfiguration request on a deployment without matchmakers is **refused**, never honored.
 - Flexible quorums, grids, matchmakers, proxies and replicas are **configuration data**, never
   implied by code being present, and in simulation each is drawn per seed so one campaign proves
-  every mode. Every peer and client message is framed by a `JournalId`; inside that frame the
+  every mode. Every peer and client message is framed by a `JournalKey` `(TenantId, JournalId)`;
+  inside that frame the
   plain deployment exchanges the same messages and persists the same scalars.
 
 ## Matchmaking, reconfiguration, GC, generations
@@ -208,14 +212,19 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 
 - **Share processes, disks and connections, never protocol state.** Each journal has its own
   `ColocatedNode`, ballots, log and store; the one cross-journal property is non-interference.
-  The `JournalId` rides the `Deliver` envelope per message (never a fingerprint) and the driver
-  demuxes before the core; each journal has its own peer-mailbox lane. Ids: `0` unset, `1..=127`
-  system, user journals from `JournalId::FIRST_USER` (128).
+  The frame `JournalKey { tenant, journal }` (#235) rides the `Deliver` envelope per message
+  (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
+  each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
+  check them, never a log position: `TenantId` `0` unset, `1` meta, `2` the cell, `0..=255`
+  reserved; `JournalId` `0` unset, `1` every tenant's control journal, `0..=255` reserved, user
+  journals from `JournalId::FIRST_USER` (256). Stores live at `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
-- **System journals** (1 = directory, 2 = node registry) are opt-in through a `SystemPlan`
-  (`None` is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
-  journal's id is `128 +` its LSN, never reused. The core's pool grows, never shrinks
+- **System journals** (the directory = the user tenant's control journal `256/1`, the node
+  registry = the cell tenant's control journal `2/1`) are opt-in through a `SystemPlan` (`None`
+  is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
+  journal's id is drawn by its creator and checked at apply (`Reserved`, `IdTaken`: the creator
+  redraws), never reused. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
@@ -282,9 +291,11 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 
 ## Protocol invariants to remember
 
-- **Truncation is a Paxos-decided control command** (`Truncate`, proposed by the leader): the
-  fold raises `first_seq` and every node compacts lazily when its walk reaches the slot. paros
-  runs no application and takes no snapshot; record bytes are opaque.
+- **Truncation is a Paxos-decided control command** (`Truncate`, proposed by the leader), **fenced
+  by `(generation, owner)` like a `Write`** (#228): judged at apply, a stale or foreign caller is
+  refused in place; an accepted one raises `first_seq` and every node compacts lazily when its
+  walk reaches the slot. paros runs no application and takes no snapshot; record bytes are
+  opaque.
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
 - **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the
@@ -326,8 +337,10 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `default-features = false`, wasm-safe; sancov crate-under-test.
 - `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
   `prost-build`), stores, `paros::client`; wasm-safe and provider-free.
-- `parosd` — the `parosd` daemon over Tokio and `parosctl` (`src/bin/parosctl/`), the CLI over
-  `paros::client` (`publish = false`).
+- `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
+  `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
+  (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
+  Compose toy are `Dockerfile` and `docker-compose.yml` at the root.
 - `paros-sim` — the DST harness: processes, role map, fault world, workload, audit, corpus.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
@@ -335,7 +348,8 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 
 Elsewhere: `book/` (mdbook; `book/CLAUDE.md`, the `update-the-book` skill),
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`,
+`compose-smoke.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

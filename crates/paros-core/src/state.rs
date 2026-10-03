@@ -1,7 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
-use crate::types::{Ballot, JournalId, NodeId, Slot};
+use crate::types::{Ballot, JournalKey, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.
@@ -106,13 +106,13 @@ pub struct Config {
     /// carries no quorum obligation, and which process answers to a
     /// `ReplicaId` is the driver's deployment map.
     pub replica_count: usize,
-    /// The journal this node serves (#184): carried for assertions and
-    /// tracing, never read by a protocol decision — the driver routes a
-    /// message to its journal before the core sees it, and a client call
-    /// naming any other journal is refused at the wire. Defaults to the one
-    /// user journal of a single-journal deployment
-    /// ([`JournalId::FIRST_USER`]).
-    pub journal: JournalId,
+    /// The journal this node serves, framed by its tenant (#184, #235):
+    /// carried for assertions and tracing, never read by a protocol decision
+    /// — the driver routes a message to its journal before the core sees it,
+    /// and a client call naming any other journal is refused at the wire.
+    /// Defaults to the one user journal of the one user tenant of a
+    /// single-journal deployment ([`JournalKey::default`]).
+    pub journal: JournalKey,
 }
 
 impl Config {

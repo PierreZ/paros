@@ -35,6 +35,21 @@ acceptors ever choose different values.
 | [`paros-core`](crates/paros-core) | sans-IO Multi-Paxos state machine: std-only, wasm-safe, zero deps with `default-features = false` (only `tracing` spans on by default) |
 | [`paros`](crates/paros) | the provider-generic node driver, default storage, and RPC contract |
 | [`paros-sim`](crates/paros-sim) | the deterministic-simulation harness: the workload, the fault world, the audit |
+| [`parosd`](crates/parosd) | the `parosd` daemon, one uniform binary per machine, and `parosctl`, the CLI |
+
+## Run it
+
+A cell of five machines with Docker alone, from a fresh clone:
+
+```sh
+docker compose up -d --build
+docker compose run --rm init
+docker compose run --rm parosctl write 256 hello world --owner 7
+docker compose run --rm parosctl read 256
+```
+
+The walkthrough — init, write and read, kill and restart a machine, supersede a
+writer, lose a disk — is [`crates/parosd/README.md`](crates/parosd/README.md).
 
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.

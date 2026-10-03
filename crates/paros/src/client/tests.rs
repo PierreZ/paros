@@ -4,7 +4,7 @@
 //! The policy loops are judged by the simulation, which runs them.
 
 use moonpool_rpc::{ErrorReason, RpcError};
-use paros_core::{ClientId, Generation, JournalId, JournalState, ReconfigureRefusal, Seq, Value};
+use paros_core::{ClientId, Generation, JournalKey, JournalState, ReconfigureRefusal, Seq, Value};
 
 use super::outcome::{
     MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome, ReconfigureOutcome,
@@ -172,7 +172,7 @@ fn a_read_reply_is_a_page_a_truncation_or_unserved() {
 }
 
 #[test]
-fn a_truncation_is_applied_or_redirected() {
+fn a_truncation_is_applied_refused_or_redirected() {
     let s = state(None, 0, 9, 5);
     let applied = TruncateAck {
         decided: true,
@@ -190,6 +190,16 @@ fn a_truncation_is_applied_or_redirected() {
     assert_eq!(
         TruncateOutcome::judge(&Ok(redirect)),
         TruncateOutcome::Redirect { leader: Some(1) }
+    );
+    let refused = TruncateAck {
+        decided: true,
+        refused: true,
+        state: Some(journal_state_to_proto(s)),
+        ..TruncateAck::default()
+    };
+    assert_eq!(
+        TruncateOutcome::judge(&Ok(refused)),
+        TruncateOutcome::Refused { state: s }
     );
 }
 
@@ -282,7 +292,7 @@ fn every_refusal_label_the_node_sends_is_typed() {
 
 #[test]
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
-    let journal = JournalId::FIRST_USER;
+    let journal = JournalKey::default();
     let mut writer = Writer::new(journal, 7);
     assert_eq!(writer.entry(vec![Value(b"x".to_vec())]), None);
 
@@ -297,7 +307,13 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     let request = writer.request(&entry);
     assert_eq!(
         (request.journal, request.generation, request.seq),
-        (journal.0, 3, 10)
+        (journal.journal.0, 3, 10)
+    );
+    // A truncation carries the owner's own fence (#228).
+    let truncate = writer.truncate_request(5).expect("an owner truncates");
+    assert_eq!(
+        (truncate.generation, truncate.owner, truncate.up_to),
+        (3, 7, 5)
     );
 
     // A written batch moves the position past it, never back.
@@ -334,6 +350,12 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     assert_eq!(writer.entry(vec![]), None);
     assert_eq!(writer.stale_entry(vec![]).generation, Generation(3));
     assert_eq!(
+        writer.truncate_request(1),
+        None,
+        "a superseded writer truncates nothing"
+    );
+    assert_eq!(writer.stale_truncate_request(1).generation, 3);
+    assert_eq!(
         writer.learn(&state(Some(8), 4, 14, 0)),
         Learned::NotOwner,
         "superseded once, reported once"
@@ -352,7 +374,7 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
 
 #[test]
 fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
-    let journal = JournalId::FIRST_USER;
+    let journal = JournalKey::default();
     let mut reader = Reader::new(journal, 3);
     let request = reader.request(16, 50);
     assert_eq!(
@@ -362,7 +384,7 @@ fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
             request.limit,
             request.wait_ms
         ),
-        (journal.0, 3, 16, 50)
+        (journal.journal.0, 3, 16, 50)
     );
 
     let floor = state(None, 0, 20, 8);

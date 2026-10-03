@@ -44,8 +44,8 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    Ballot, Command, MustSync, NodeId, Outcome, Party, QuorumSystem, ReadState, ReplicaNode, Slot,
-    WriteOp,
+    Ballot, Command, JournalId, JournalKey, MustSync, NodeId, Outcome, Party, QuorumSystem,
+    ReadState, ReplicaNode, Slot, TenantId, WriteOp,
 };
 
 use crate::driver::log_reads::{JournalReads, refuse_journal, wait_ticks};
@@ -318,7 +318,7 @@ where
             error = edge.run() => return Err(error.into()),
             Some((to, msg)) = inbox.recv() => {
                 if to != journal {
-                    tracing::info!(node = self_id, journal = to.0, "foreign_journal_dropped");
+                    tracing::info!(node = self_id, journal = %to, "foreign_journal_dropped");
                     continue;
                 }
                 trace_received(self_id, &msg);
@@ -333,7 +333,7 @@ where
                 // once the row answered whole and this replica folded the
                 // maximum watermark. The row override is the node's hook,
                 // asked only under a grid, from the loop.
-                if refuse_journal(journal, req.journal, "read", me_id, audit) {
+                if refuse_journal(journal, JournalKey::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
                     let refused = ReadAck { unknown_journal: true, ..ReadAck::default() };
                     answer(hooks, audit, me_id, Reply::LogRead, reply, refused);
                     continue;
@@ -425,6 +425,7 @@ fn inspect(replica: &ReplicaNode) -> InspectReply {
         cols,
         folded: replica.replica().folded().0,
         journal: Some(journal_state_to_proto(replica.replica().journal())),
+        node: replica.config().id.0,
         ..InspectReply::default()
     }
 }

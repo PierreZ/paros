@@ -75,13 +75,19 @@ pub fn command_hash(command: &Command) -> u64 {
             }
             value_hash(&bytes)
         }
-        Command::Control(Control::Truncate { up_to }) => {
+        Command::Control(Control::Truncate {
+            generation,
+            owner,
+            up_to,
+        }) => {
             let mut bytes = vec![0xff_u8];
+            bytes.extend_from_slice(&generation.0.to_le_bytes());
+            bytes.extend_from_slice(&owner.0.to_le_bytes());
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
             value_hash(&bytes)
         }
         // A distinct one-byte tag: no `Truncate` encoding can collide with it (they
-        // are nine bytes and start `0xff`), and every node hashes the same no-op to
+        // are twenty-five bytes and start `0xff`), and every node hashes the same no-op to
         // the same digest, so per-slot prefix agreement stays checkable.
         Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
         Command::Control(Control::SetLeader { expected, owner }) => {

@@ -47,7 +47,7 @@
 use std::collections::BTreeMap;
 
 use crate::journal_state::{JournalState, Outcome};
-use crate::types::{Command, Control, Entry, Seq, Slot, Value};
+use crate::types::{Command, Entry, Seq, Slot, Value};
 use crate::write::WriteOp;
 
 /// Maximum slots the contiguous apply walk releases in one batch — the
@@ -552,7 +552,7 @@ impl Replica {
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             self.positions.insert(*seq, slot);
         }
-        if matches!(command, Command::Control(Control::Truncate { .. })) {
+        if matches!(outcome, Outcome::Trimmed(_)) {
             self.truncate_due = true;
         }
         if self.state != before {
@@ -773,7 +773,11 @@ mod tests {
             write(0, &[b"a"]),
             write(1, &[b"b"]),
             write(0, &[b"a"]), // a retry of position 0
-            Command::Control(Control::Truncate { up_to: Seq(1) }),
+            Command::Control(Control::Truncate {
+                generation: Generation(1),
+                owner: ClientId(1),
+                up_to: Seq(1),
+            }),
         ];
         let mut r = replica(&commands);
         assert!(matches!(
@@ -810,7 +814,11 @@ mod tests {
             claim(),
             write(0, &[b"a"]),
             write(2, &[b"c"]),
-            Command::Control(Control::Truncate { up_to: Seq(1) }),
+            Command::Control(Control::Truncate {
+                generation: Generation(1),
+                owner: ClientId(1),
+                up_to: Seq(1),
+            }),
         ];
         let mut recs = records(&commands);
         recs.retain(|slot, _| *slot >= Slot(2));
@@ -857,7 +865,11 @@ mod tests {
             claim(),
             write(0, &[b"a"]),
             write(1, &[b"b"]),
-            Command::Control(Control::Truncate { up_to: Seq(1) }),
+            Command::Control(Control::Truncate {
+                generation: Generation(1),
+                owner: ClientId(1),
+                up_to: Seq(1),
+            }),
         ]);
         let p = page(r.read(Seq(2), 64, 64));
         assert!(p.records.is_empty());
@@ -872,7 +884,11 @@ mod tests {
             claim(),
             write(0, &[b"a"]),
             write(1, &[b"b", b"c"]),
-            Command::Control(Control::Truncate { up_to: Seq(2) }),
+            Command::Control(Control::Truncate {
+                generation: Generation(1),
+                owner: ClientId(1),
+                up_to: Seq(2),
+            }),
         ]);
         // Slot 2 holds position 2: everything below it may go.
         assert_eq!(r.compaction_target(), Some(Slot(1)));

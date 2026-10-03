@@ -31,7 +31,7 @@ use std::sync::Arc;
 use moonpool_core::{Providers, SimulationError, SimulationResult};
 use moonpool_rpc::{RpcDriver, RpcHandle};
 use paros_core::{
-    GcAck, GcRequest, JournalId, MatchReply, MatchRequest, Message, Party, ReconfigureReply,
+    GcAck, GcRequest, JournalKey, MatchReply, MatchRequest, Message, Party, ReconfigureReply,
     ReconfigureRequest,
 };
 use tokio::sync::mpsc;
@@ -123,7 +123,7 @@ pub(crate) struct NodeInbox {
     pub(crate) reconfigure_matchmakers: Plain<ReconfigureMatchmakersRpc>,
     pub(crate) inspect: Plain<InspectRpc>,
     pub(crate) retire: Plain<RetireRpc>,
-    pub(crate) deliver: mpsc::Receiver<(JournalId, Message)>,
+    pub(crate) deliver: mpsc::Receiver<(JournalKey, Message)>,
 }
 
 impl NodeInbox {
@@ -171,7 +171,7 @@ impl NodeInbox {
 pub(crate) struct ReplicaInbox {
     pub(crate) inspect: Plain<InspectRpc>,
     pub(crate) log_read: Plain<ReadRpc>,
-    pub(crate) deliver: mpsc::Receiver<(JournalId, Message)>,
+    pub(crate) deliver: mpsc::Receiver<(JournalKey, Message)>,
 }
 
 impl ReplicaInbox {

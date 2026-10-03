@@ -20,7 +20,7 @@ use paros::client::{
     Answered, Attempted, CallObserver, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
     WriteOutcome, write_request,
 };
-use paros::{Entry, JournalId, Read};
+use paros::{Entry, JournalKey, Read};
 
 use crate::audit::{Attempt, Call, Seen};
 use crate::chain::user_command_hash;
@@ -45,7 +45,7 @@ use crate::client::ChainClient;
 /// where it is caught.
 #[derive(Clone)]
 pub(crate) struct CallLog {
-    journal: u64,
+    journal: JournalKey,
     client: u64,
     time: SimTimeProvider,
     attempts: Arc<Mutex<Vec<Attempt>>>,
@@ -60,9 +60,9 @@ struct Retries {
 }
 
 impl CallLog {
-    pub(crate) fn new(journal: JournalId, client: u64, time: SimTimeProvider) -> Self {
+    pub(crate) fn new(journal: JournalKey, client: u64, time: SimTimeProvider) -> Self {
         Self {
-            journal: journal.0,
+            journal,
             client,
             time,
             attempts: Arc::default(),
@@ -132,7 +132,11 @@ impl CallObserver for CallLog {
                 from: r.from_seq,
                 limit: r.limit,
             },
-            Attempted::Truncate(t) => Call::Truncate { up_to: t.up_to },
+            Attempted::Truncate(t) => Call::Truncate {
+                generation: t.generation,
+                owner: t.owner,
+                up_to: t.up_to,
+            },
         };
         if matches!(call, Call::Write { .. }) {
             self.judge_retry(&call);
@@ -186,6 +190,9 @@ fn seen(answer: Answered<'_>) -> Option<Seen> {
         }),
         Answered::Read(ReadOutcome::Truncated { state }) => Some(Seen::ReadTruncated(*state)),
         Answered::Truncate(TruncateOutcome::Applied { state }) => Some(Seen::Trimmed(*state)),
+        Answered::Truncate(TruncateOutcome::Refused { state }) => {
+            Some(Seen::TruncateRefused(*state))
+        }
         _ => None,
     }
 }
@@ -268,7 +275,7 @@ pub(super) async fn within<T>(
 /// [`judged_write`].
 pub(super) fn write_once(
     nodes: &ChainClient,
-    journal: JournalId,
+    journal: JournalKey,
     target: usize,
     entry: &Entry,
     abandon: bool,
@@ -283,7 +290,7 @@ pub(super) fn write_once(
 /// for [`judged_write`].
 pub(super) fn set_leader_once(
     nodes: &ChainClient,
-    journal: JournalId,
+    journal: JournalKey,
     target: usize,
     (expected, owner): (u64, u64),
     created: bool,
@@ -296,7 +303,7 @@ pub(super) fn set_leader_once(
 pub(super) fn read_once(
     client: &ChainClient,
     target: usize,
-    journal: u64,
+    journal: JournalKey,
     from: u64,
     limit: u64,
     wait_ms: u64,
@@ -304,7 +311,8 @@ pub(super) fn read_once(
     client.read_attempt(
         target,
         Read {
-            journal,
+            journal: journal.journal.0,
+            tenant: journal.tenant.0,
             from_seq: from,
             limit,
             wait_ms,

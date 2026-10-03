@@ -36,7 +36,7 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
-use paros::{DriverTunables, JournalId, JournalStoreConfig, QuorumSystem};
+use paros::{DriverTunables, JournalId, JournalKey, JournalStoreConfig, QuorumSystem, TenantId};
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -516,14 +516,14 @@ struct Registry {
 /// non-interference stall), if the seed drew one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct JournalPlan {
-    pub(crate) ids: Vec<JournalId>,
-    pub(crate) held: Option<JournalId>,
+    pub(crate) ids: Vec<JournalKey>,
+    pub(crate) held: Option<JournalKey>,
 }
 
 impl JournalPlan {
     /// The journal client `client` appends to: clients are spread over the
     /// journals round-robin.
-    pub(crate) fn for_client(&self, client: usize) -> JournalId {
+    pub(crate) fn for_client(&self, client: usize) -> JournalKey {
         self.ids
             .get(client % self.ids.len().max(1))
             .copied()
@@ -654,9 +654,32 @@ pub(crate) fn journals(state: &StateHandle, matchmakers: bool, perturb: bool) ->
             } else {
                 1
             };
-            let ids: Vec<JournalId> = (0..count)
-                .map(|k| JournalId(JournalId::FIRST_USER.0 + k))
-                .collect();
+            // The first journal is the default frame (the deployment's);
+            // every other one's frame is drawn (#235): a random journal id,
+            // in the default tenant or a random one — and, in another
+            // tenant, sometimes the very journal id of the first, so the
+            // demux is proven to key on both halves of the frame.
+            let mut ids = vec![JournalKey::default()];
+            while ids.len() < usize::try_from(count).unwrap_or(1) {
+                let user = JournalId::FIRST_USER.0..u64::MAX;
+                let tenant = if moonpool_sim::sim_random_bool(0.5) {
+                    TenantId::default()
+                } else {
+                    TenantId(moonpool_sim::sim_random_range(user.clone()))
+                };
+                let journal = if tenant != TenantId::default() && moonpool_sim::sim_random_bool(0.5)
+                {
+                    assert_reachable!("journal: two tenants serve the same journal id");
+                    JournalKey::default().journal
+                } else {
+                    JournalId(moonpool_sim::sim_random_range(user))
+                };
+                let key = JournalKey::new(tenant, journal);
+                if !ids.contains(&key) {
+                    ids.push(key);
+                }
+            }
+            ids.sort_unstable();
             if ids.len() < 2 {
                 return JournalPlan { ids, held: None };
             }

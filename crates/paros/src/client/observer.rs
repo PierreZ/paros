@@ -8,6 +8,7 @@
 
 use super::outcome::{ReadOutcome, SetLeaderOutcome, TruncateOutcome, WriteOutcome};
 use crate::rpc::{Read, SetLeader, Truncate, Write};
+use paros_core::{JournalId, JournalKey, TenantId};
 
 /// An attempt, as it leaves the client.
 #[derive(Clone, Copy, Debug)]
@@ -25,13 +26,14 @@ pub enum Attempted<'a> {
 impl Attempted<'_> {
     /// The journal the attempt names.
     #[must_use]
-    pub fn journal(&self) -> u64 {
-        match self {
-            Self::Write(w) => w.journal,
-            Self::SetLeader(s) => s.journal,
-            Self::Read(r) => r.journal,
-            Self::Truncate(t) => t.journal,
-        }
+    pub fn journal(&self) -> JournalKey {
+        let (tenant, journal) = match self {
+            Self::Write(w) => (w.tenant, w.journal),
+            Self::SetLeader(s) => (s.tenant, s.journal),
+            Self::Read(r) => (r.tenant, r.journal),
+            Self::Truncate(t) => (t.tenant, t.journal),
+        };
+        JournalKey::new(TenantId(tenant), JournalId(journal))
     }
 }
 

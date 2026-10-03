@@ -18,6 +18,7 @@ use super::{
     ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader,
     SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
+use paros_core::JournalKey;
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
 /// reach whichever incarnation is serving that address.
@@ -147,17 +148,25 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn inspect(&self) -> Result<InspectReply, RpcError> {
-        self.inspect_journal(0).await
+        self.inspect
+            .try_get_reply(&InspectRequest {
+                journal: 0,
+                tenant: 0,
+            })
+            .await
     }
 
-    /// Inspect `journal` on the node (#188; `0` names its first journal).
+    /// Inspect `journal` on the node (#188, #235).
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn inspect_journal(&self, journal: u64) -> Result<InspectReply, RpcError> {
+    pub async fn inspect_journal(&self, journal: JournalKey) -> Result<InspectReply, RpcError> {
         self.inspect
-            .try_get_reply(&InspectRequest { journal })
+            .try_get_reply(&InspectRequest {
+                journal: journal.journal.0,
+                tenant: journal.tenant.0,
+            })
             .await
     }
 

@@ -1,5 +1,6 @@
-//! The **system journals** (#189): the directory (journal 1) and the node
-//! registry (journal 2). A service must create and delete journals, and add
+//! The **system journals** (#189): the directory (the user tenant's control
+//! journal) and the node registry (the cell tenant's control journal, #235).
+//! A service must create and delete journals, and add
 //! and retire nodes, while it runs; paros already has the right tool for
 //! both — a replicated log — so both lists are journals of their own, and
 //! every node learns them by reading them.
@@ -16,16 +17,18 @@
 //! plane, like the matchmaker registry; the core keeps their entries as
 //! opaque as any other, and only this module and the driver read them.
 //!
-//! - **Directory.** A created journal's id is `128 + the position of its
-//!   CreateJournal record` ([`JournalId::FIRST_USER`] plus the position,
-//!   #204): the log order is the allocator, so there is no counter and no
-//!   race, and an id is never reused (every position is used once; a deleted
-//!   journal leaves a tombstone). Of two creates with one name the lower
-//!   position wins; the other
-//!   folds to [`DirectoryRefusal::NameTaken`], which its creator reads back.
-//!   A position whose id lands on a journal the deployment was booted with (its
-//!   *genesis* journals) folds to [`DirectoryRefusal::Reserved`]. Names are
-//!   opaque bytes.
+//! - **Directory.** A created journal's id is random (#226, #235): its
+//!   creator draws it from the user range ([`JournalId::FIRST_USER`] and up)
+//!   and this fold, the tenant's single writer of journal ids, checks it at
+//!   apply. An id outside the user range or naming a journal the deployment
+//!   was booted with (its *genesis* journals) folds to
+//!   [`DirectoryRefusal::Reserved`]; an id the directory already created —
+//!   deleted or not, ids are never reused — folds to
+//!   [`DirectoryRefusal::IdTaken`], and the creator redraws. Never a log
+//!   position: an id must not change when its tenant moves. Of two creates
+//!   with one name the lower position wins; the other folds to
+//!   [`DirectoryRefusal::NameTaken`], which its creator reads back. Names
+//!   are opaque bytes.
 //! - **Registry.** The node pool is the genesis pool plus every registered
 //!   node not yet retired ([`Registry::pool`]). A node is registered once
 //!   (an id is never reused, a retired one included), drained, then retired.
@@ -37,29 +40,37 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{AcceptorConfig, JournalId, NodeId};
+use paros_core::{AcceptorConfig, JournalId, JournalKey, NodeId, TenantId};
 use prost::Message as _;
 
 use crate::rpc::system as wire;
 use crate::rpc::{config_from_proto, config_to_proto};
 
-/// The directory: the journals created and deleted at runtime.
-pub const DIRECTORY: JournalId = JournalId(1);
+/// The directory: the journals created and deleted at runtime — the user
+/// tenant's own control journal, which holds its journal names (#235,
+/// `docs/architecture.md` §3.1). One user tenant today ([`TenantId::default`]);
+/// tenant creation is #210.
+pub const DIRECTORY: JournalKey = JournalKey::control(TenantId::FIRST_USER);
 
-/// The node registry: the nodes registered, drained and retired at runtime.
-pub const REGISTRY: JournalId = JournalId(2);
+/// The node registry: the nodes registered, drained and retired at runtime —
+/// the cell tenant's control journal (#235, §3.1).
+pub const REGISTRY: JournalKey = JournalKey::control(TenantId::CELL);
 
 /// Whether `journal` is one of the two system journals.
 #[must_use]
-pub fn is_system(journal: JournalId) -> bool {
+pub fn is_system(journal: JournalKey) -> bool {
     journal == DIRECTORY || journal == REGISTRY
 }
 
 /// One system-journal entry, as a client appends it and a fold reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemCommand {
-    /// Create a journal named `name` over the static configuration `config`.
+    /// Create journal `id` named `name` over the static configuration
+    /// `config`.
     CreateJournal {
+        /// The id its creator drew (user range); refused at apply when
+        /// reserved or taken.
+        id: JournalId,
         /// Opaque bytes; paros never interprets them.
         name: Vec<u8>,
         /// The journal's static acceptor configuration.
@@ -97,10 +108,11 @@ impl SystemCommand {
     pub fn encode(&self) -> Vec<u8> {
         use wire::system_entry::Kind;
         let kind = match self {
-            SystemCommand::CreateJournal { name, config } => {
+            SystemCommand::CreateJournal { id, name, config } => {
                 Kind::CreateJournal(wire::CreateJournal {
                     name: name.clone(),
                     config: Some(config_to_proto(config)),
+                    id: id.0,
                 })
             }
             SystemCommand::DeleteJournal { id } => {
@@ -132,6 +144,7 @@ impl SystemCommand {
         let entry = wire::SystemEntry::decode(record).map_err(|_| "not a system entry")?;
         Ok(match entry.kind.ok_or("a system entry names no kind")? {
             Kind::CreateJournal(create) => SystemCommand::CreateJournal {
+                id: JournalId(create.id),
                 name: create.name,
                 config: config_from_proto(create.config)?
                     .ok_or("a created journal names no configuration")?,
@@ -170,7 +183,7 @@ pub struct CreatedJournal {
 pub enum DirectoryEvent {
     /// A journal was created with this id.
     Created {
-        /// `128 + the position`.
+        /// The id its creator drew.
         id: JournalId,
         /// Its name.
         name: Vec<u8>,
@@ -191,9 +204,15 @@ pub enum DirectoryEvent {
 pub enum DirectoryRefusal {
     /// Not exactly one decodable directory entry.
     Malformed,
-    /// The id this position allocates is a genesis journal's.
+    /// The id is outside the user range, or a genesis journal's.
     Reserved {
-        /// The id the position would have allocated.
+        /// The id asked for.
+        id: JournalId,
+    },
+    /// The directory already created this id (ids are never reused, a
+    /// deleted one included): the creator redraws.
+    IdTaken {
+        /// The id asked for.
         id: JournalId,
     },
     /// A live journal already holds the name: the lower position won.
@@ -236,7 +255,7 @@ impl Directory {
         self.next_seq
     }
 
-    /// Fold the record at position `seq` of journal 1 (in position order;
+    /// Fold the record at position `seq` of the directory (in position order;
     /// a gap is simply skipped).
     ///
     /// # Panics
@@ -250,20 +269,16 @@ impl Directory {
         );
         self.next_seq = seq + 1;
         match SystemCommand::decode(record).ok() {
-            Some(SystemCommand::CreateJournal { name, config }) => {
-                let Some(id) = JournalId::FIRST_USER.0.checked_add(seq).map(JournalId) else {
-                    return DirectoryEvent::Refused(DirectoryRefusal::Malformed);
-                };
-                if self.genesis.contains(&id) {
+            Some(SystemCommand::CreateJournal { id, name, config }) => {
+                if !id.is_user() || self.genesis.contains(&id) {
                     return DirectoryEvent::Refused(DirectoryRefusal::Reserved { id });
+                }
+                if self.journals.contains_key(&id) {
+                    return DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id });
                 }
                 if let Some(&winner) = self.names.get(&name) {
                     return DirectoryEvent::Refused(DirectoryRefusal::NameTaken { winner });
                 }
-                assert!(
-                    !self.journals.contains_key(&id),
-                    "a position allocates an id no earlier position did"
-                );
                 self.names.insert(name.clone(), id);
                 self.journals.insert(
                     id,
@@ -509,8 +524,9 @@ mod tests {
         )
     }
 
-    fn create(name: &[u8], members: &[u64]) -> Vec<u8> {
+    fn create(id: u64, name: &[u8], members: &[u64]) -> Vec<u8> {
         SystemCommand::CreateJournal {
+            id: JournalId(id),
             name: name.to_vec(),
             config: config(members),
         }
@@ -525,6 +541,7 @@ mod tests {
     fn every_command_round_trips() {
         let commands = [
             SystemCommand::CreateJournal {
+                id: JournalId(0x9e37_79b9),
                 name: b"orders".to_vec(),
                 config: config(&[0, 1, 2]),
             },
@@ -544,62 +561,64 @@ mod tests {
     }
 
     #[test]
-    fn a_created_journal_is_named_by_its_position_and_never_reused() {
-        let mut dir = Directory::new([JournalId(128)]);
-        // Position 0 would allocate 128, a genesis journal.
+    fn a_created_journal_takes_its_drawn_id_and_an_id_is_never_reused() {
+        let genesis = JournalId::FIRST_USER;
+        let mut dir = Directory::new([genesis]);
+        // A genesis id and an id in the reserved range are refused.
         assert_eq!(
-            dir.fold(0, &create(b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: JournalId(128) })
+            dir.fold(0, &create(genesis.0, b"a", &[0, 1, 2])),
+            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: genesis })
         );
-        // Position 3 (1 and 2 are skipped) allocates 131.
+        assert_eq!(
+            dir.fold(1, &create(1, b"a", &[0, 1, 2])),
+            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: JournalId(1) })
+        );
+        let drawn = JournalId(0xdead_beef);
         assert!(matches!(
-            dir.fold(3, &create(b"a", &[0, 1, 2])),
-            DirectoryEvent::Created {
-                id: JournalId(131),
-                ..
-            }
+            dir.fold(3, &create(drawn.0, b"a", &[0, 1, 2])),
+            DirectoryEvent::Created { id, .. } if id == drawn
         ));
+        // A second create of the same id is refused: the creator redraws.
         assert_eq!(
-            dir.fold(
-                4,
-                &one(&SystemCommand::DeleteJournal { id: JournalId(131) })
-            ),
-            DirectoryEvent::Deleted { id: JournalId(131) }
+            dir.fold(4, &create(drawn.0, b"b", &[0, 1, 2])),
+            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: drawn })
         );
-        assert!(dir.is_deleted(JournalId(131)));
-        // A deleted journal is not deleted twice, and its name frees up for a
-        // new journal under a new id.
         assert_eq!(
-            dir.fold(
-                5,
-                &one(&SystemCommand::DeleteJournal { id: JournalId(131) })
-            ),
-            DirectoryEvent::Refused(DirectoryRefusal::UnknownJournal { id: JournalId(131) })
+            dir.fold(5, &one(&SystemCommand::DeleteJournal { id: drawn })),
+            DirectoryEvent::Deleted { id: drawn }
+        );
+        assert!(dir.is_deleted(drawn));
+        // A deleted journal is not deleted twice, its id is never reused,
+        // and its name frees up for a new journal under a new id.
+        assert_eq!(
+            dir.fold(6, &one(&SystemCommand::DeleteJournal { id: drawn })),
+            DirectoryEvent::Refused(DirectoryRefusal::UnknownJournal { id: drawn })
+        );
+        assert_eq!(
+            dir.fold(7, &create(drawn.0, b"a", &[0, 1, 2])),
+            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: drawn })
         );
         assert!(matches!(
-            dir.fold(6, &create(b"a", &[0, 1, 2])),
-            DirectoryEvent::Created {
-                id: JournalId(134),
-                ..
-            }
+            dir.fold(8, &create(drawn.0 + 1, b"a", &[0, 1, 2])),
+            DirectoryEvent::Created { id, .. } if id.0 == drawn.0 + 1
         ));
-        assert!(dir.is_deleted(JournalId(131)), "the tombstone stays");
+        assert!(dir.is_deleted(drawn), "the tombstone stays");
     }
 
     #[test]
     fn a_name_race_is_decided_by_position_order() {
         let mut dir = Directory::new([]);
         assert!(matches!(
-            dir.fold(0, &create(b"x", &[0])),
+            dir.fold(0, &create(300, b"x", &[0])),
             DirectoryEvent::Created {
-                id: JournalId(128),
+                id: JournalId(300),
                 ..
             }
         ));
         assert_eq!(
-            dir.fold(1, &create(b"x", &[1])),
+            dir.fold(1, &create(301, b"x", &[1])),
             DirectoryEvent::Refused(DirectoryRefusal::NameTaken {
-                winner: JournalId(128)
+                winner: JournalId(300)
             })
         );
     }
@@ -624,6 +643,7 @@ mod tests {
         let bad = wire::SystemEntry {
             kind: Some(wire::system_entry::Kind::CreateJournal(
                 wire::CreateJournal {
+                    id: 300,
                     name: b"g".to_vec(),
                     config: Some(crate::rpc::common::AcceptorConfig {
                         members: vec![0, 1, 2],

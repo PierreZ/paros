@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package paros.machine.v1;
+
+// The machine contract (#196, #216): what an uninitialized `parosd` serves
+// while it waits for `parosctl init`. A machine starts with an identity
+// minted at format (`node_id`, #225) and its rendezvous join list, and never
+// forms a cell on its own: one `Init`, sent to a seed every seed's join list
+// names, forms the cell. The `service` block documents the method set; each
+// method's id lives in `src/rpc/methods.rs`.
+service Machine {
+  // Who this machine is: its identity and whether it is a seed.
+  rpc Identify(.paros.machine.v1.Identify) returns (.paros.machine.v1.IdentifyAck);
+  // Join the cell `plan` names: record it durably, format its journals, and
+  // start serving them. Idempotent for the same plan.
+  rpc FormCell(.paros.machine.v1.FormCell) returns (.paros.machine.v1.FormCellAck);
+  // Form the cell over the seeds: identify every seed, mint the cell's id,
+  // and form every seed (this one last). Resumable: a plan this seed
+  // recorded before a crash is resumed, never redrawn.
+  rpc Init(.paros.machine.v1.Init) returns (.paros.machine.v1.InitAck);
+}
+
+message Identify {}
+
+message IdentifyAck {
+  uint64 node_id = 1;
+  // `storage` or `stateless`.
+  string class = 2;
+  uint64 capacity = 3;
+  string failure_domain = 4;
+  // The address this machine serves at.
+  string addr = 5;
+  // Whether its own address is in its rendezvous join list.
+  bool seed = 6;
+}
+
+// One member of a cell's bootstrap: its identity and address.
+message Member {
+  uint64 node_id = 1;
+  string addr = 2;
+}
+
+// A journal's frame (#235).
+message Frame {
+  uint64 tenant = 1;
+  uint64 journal = 2;
+}
+
+message FormCell {
+  uint64 cell_id = 1;
+  repeated Member members = 2;
+  // The journals every member serves from its formation: the cell control
+  // journal and the static assignment that stands in for placement until
+  // M9 (#212).
+  repeated Frame journals = 3;
+}
+
+message FormCellAck {
+  bool formed = 1;
+  // Why not, when not: "not_a_member", "other_cell", "malformed",
+  // "stateless", "storage".
+  string refusal = 2;
+}
+
+message Init {}
+
+message InitAck {
+  bool initialized = 1;
+  // Why not, when not: "not_a_seed", "seed_unreachable", "other_cell",
+  // "cell_exists", "storage", "stateless_seed".
+  string refusal = 2;
+  uint64 cell_id = 3;
+  repeated Member members = 4;
+  repeated Frame journals = 5;
+  // The first cell coordinator (#225), which claims the cell control
+  // journal with `SetLeader(expected_gen = 0)`.
+  uint64 coordinator = 6;
+}

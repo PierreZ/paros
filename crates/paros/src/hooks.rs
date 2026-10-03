@@ -18,7 +18,7 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
-use paros_core::{JournalId, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
+use paros_core::{JournalKey, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,7 +209,7 @@ pub trait DriverHooks {
     /// is a slow, partitioned journal, and its siblings on the same node must
     /// not notice (the non-interference claim). Always safe: a slow node and
     /// a lossy network are both within the model.
-    fn hold_journal(&self, _journal: JournalId) -> bool {
+    fn hold_journal(&self, _journal: JournalKey) -> bool {
         false
     }
 

@@ -4,13 +4,14 @@
 //!
 //! ```text
 //! <data-dir>/
-//!   journals/<journal-id>/    one moonpool-journal per journal a node serves
-//!   matchmaker/               a matchmaker's registry
-//!   replica/                  a replica's chosen log
+//!   machine                       the machine's identity and cell (#196)
+//!   provisioned                   the journal stores it formatted (#208)
+//!   journals/<tenant>/<journal>/  one moonpool-journal per journal a node
+//!                                 serves, by its frame (#235)
 //! ```
 //!
 //! Every ordinary start is an existing member's (#208): the stores were
-//! formatted by `parosd provision`, never by a start. A journal the
+//! formatted when the machine formed its cell, never by a start. A journal the
 //! directory creates (#189) is the one store a running node formats: it is
 //! a first boot until its store has booted once, then the provisioning
 //! record ([`Record`]) names it and every later open is an existing
@@ -29,28 +30,19 @@ use std::path::{Path, PathBuf};
 
 use moonpool_core::TokioStorageProvider;
 use paros::{
-    BootKind, Config, JournalId, JournalStorage, JournalStoreConfig, JournalStores, LogStorage,
+    BootKind, Config, JournalKey, JournalStorage, JournalStoreConfig, JournalStores, LogStorage,
     NoAudit,
 };
 
-use crate::record::Record;
+use crate::record::{Record, parse_key};
 
 /// The directory of `journal`'s store under `data_dir`.
 #[must_use]
-pub fn journal_dir(data_dir: &Path, journal: JournalId) -> PathBuf {
-    data_dir.join("journals").join(journal.0.to_string())
-}
-
-/// The directory of a matchmaker's registry under `data_dir`.
-#[must_use]
-pub fn matchmaker_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("matchmaker")
-}
-
-/// The directory of a replica's log under `data_dir`.
-#[must_use]
-pub fn replica_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("replica")
+pub fn journal_dir(data_dir: &Path, journal: JournalKey) -> PathBuf {
+    data_dir
+        .join("journals")
+        .join(journal.tenant.0.to_string())
+        .join(journal.journal.0.to_string())
 }
 
 /// A path the storage provider takes (it speaks `&str`).
@@ -65,12 +57,12 @@ pub struct DirStores {
     data_dir: PathBuf,
     layout: JournalStoreConfig,
     /// The genesis journals and their configurations, in id order.
-    genesis: BTreeMap<JournalId, Config>,
+    genesis: BTreeMap<JournalKey, Config>,
     /// The provisioning record: the journals whose stores are formatted.
     record: Record,
     /// Journals the directory created naming this node (#189), with their
     /// configuration.
-    created: BTreeMap<JournalId, Config>,
+    created: BTreeMap<JournalKey, Config>,
 }
 
 impl DirStores {
@@ -86,7 +78,7 @@ impl DirStores {
         id: u64,
         data_dir: PathBuf,
         layout: JournalStoreConfig,
-        genesis: BTreeMap<JournalId, Config>,
+        genesis: BTreeMap<JournalKey, Config>,
     ) -> Result<Self, String> {
         let read = Record::read(&data_dir).map_err(|e| format!("provisioning record: {e}"))?;
         if read.is_none() {
@@ -95,7 +87,7 @@ impl DirStores {
         let mut stores = Self {
             provider: TokioStorageProvider::new(),
             record: read.unwrap_or_else(|| Record {
-                role: "node".into(),
+                role: crate::machine_record::ROLE.into(),
                 id,
                 journals: BTreeSet::new(),
             }),
@@ -104,7 +96,7 @@ impl DirStores {
             genesis,
             created: BTreeMap::new(),
         };
-        stores.record.check("node", id)?;
+        stores.record.check(crate::machine_record::ROLE, id)?;
         stores.resolve_created().await?;
         Ok(stores)
     }
@@ -119,13 +111,25 @@ impl DirStores {
             Err(error) => return Err(format!("{}: {error}", journals.display())),
         };
         let mut found = Vec::new();
-        for entry in entries.flatten() {
-            let Some(journal) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+        for tenant in entries.flatten() {
+            let Some(tenant_name) = tenant.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            let journal = JournalId(journal);
-            if !self.genesis.contains_key(&journal) && !self.record.journals.contains(&journal) {
-                found.push(journal);
+            let Ok(inner) = std::fs::read_dir(tenant.path()) else {
+                continue;
+            };
+            for entry in inner.flatten() {
+                let Some(journal) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| parse_key(&format!("{tenant_name}/{name}")))
+                else {
+                    continue;
+                };
+                if !self.genesis.contains_key(&journal) && !self.record.journals.contains(&journal)
+                {
+                    found.push(journal);
+                }
             }
         }
         found.sort_unstable();
@@ -137,7 +141,7 @@ impl DirStores {
             };
             let mut store = self.store(journal, probe);
             if store.boot_scan().await.is_ok() && store.is_formatted() {
-                tracing::info!(journal = journal.0, "created_journal_resolved");
+                tracing::info!(journal = %journal, "created_journal_resolved");
                 self.record.journals.insert(journal);
                 resolved = true;
             }
@@ -150,7 +154,7 @@ impl DirStores {
         Ok(())
     }
 
-    fn store(&self, journal: JournalId, config: Config) -> JournalStorage<TokioStorageProvider> {
+    fn store(&self, journal: JournalKey, config: Config) -> JournalStorage<TokioStorageProvider> {
         JournalStorage::new(
             self.provider.clone(),
             path_str(&journal_dir(&self.data_dir, journal)),
@@ -160,7 +164,7 @@ impl DirStores {
     }
 
     /// The claim a created journal's store opens with.
-    fn created_claim(&self, journal: JournalId) -> BootKind {
+    fn created_claim(&self, journal: JournalKey) -> BootKind {
         if self.record.journals.contains(&journal) {
             BootKind::ExistingMember
         } else {
@@ -173,11 +177,11 @@ impl JournalStores for DirStores {
     type Store = JournalStorage<TokioStorageProvider>;
     type Audit = NoAudit;
 
-    fn journals(&self) -> Vec<JournalId> {
+    fn journals(&self) -> Vec<JournalKey> {
         self.genesis.keys().copied().collect()
     }
 
-    fn open(&mut self, journal: JournalId) -> Option<(Self::Store, BootKind)> {
+    fn open(&mut self, journal: JournalKey) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal) {
             return Some((
                 self.store(journal, config.clone()),
@@ -189,7 +193,7 @@ impl JournalStores for DirStores {
         Some((self.store(journal, config), claim))
     }
 
-    fn opened(&mut self, journal: JournalId) {
+    fn opened(&mut self, journal: JournalKey) {
         if !self.created.contains_key(&journal) || !self.record.journals.insert(journal) {
             return;
         }
@@ -197,51 +201,52 @@ impl JournalStores for DirStores {
         // member's. A failed write is resolved from the disk at the next
         // start.
         match self.record.write(&self.data_dir) {
-            Ok(()) => tracing::info!(journal = journal.0, "journal_provisioned"),
+            Ok(()) => tracing::info!(journal = %journal, "journal_provisioned"),
             Err(error) => {
-                tracing::error!(journal = journal.0, %error, "provisioning_record_failed");
+                tracing::error!(journal = %journal, %error, "provisioning_record_failed");
             }
         }
     }
 
-    fn audit(&self, _journal: JournalId) -> NoAudit {
+    fn audit(&self, _journal: JournalKey) -> NoAudit {
         NoAudit
     }
 
-    fn create(&mut self, journal: JournalId, config: Config) -> bool {
+    fn create(&mut self, journal: JournalKey, config: Config) -> bool {
         if self.genesis.contains_key(&journal) {
             return true;
         }
         if !self.created.contains_key(&journal) {
             let dir = journal_dir(&self.data_dir, journal);
             if let Err(error) = std::fs::create_dir_all(&dir) {
-                tracing::error!(journal = journal.0, %error, "journal_create_failed");
+                tracing::error!(journal = %journal, %error, "journal_create_failed");
                 return false;
             }
             let boot = self.created_claim(journal);
-            tracing::info!(journal = journal.0, ?boot, "journal_created");
+            tracing::info!(journal = %journal, ?boot, "journal_created");
             self.created.insert(journal, config);
         }
         true
     }
 
-    fn quarantined(&mut self, journal: JournalId) {
-        tracing::warn!(journal = journal.0, "journal_quarantined");
+    fn quarantined(&mut self, journal: JournalKey) {
+        tracing::warn!(journal = %journal, "journal_quarantined");
     }
 
-    fn delete(&mut self, journal: JournalId) {
+    fn delete(&mut self, journal: JournalKey) {
         // The store is kept on disk: a tombstoned journal is never opened
         // again, and reclaiming its space is an operator's act.
         self.created.remove(&journal);
-        tracing::info!(journal = journal.0, "journal_deleted");
+        tracing::info!(journal = %journal, "journal_deleted");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paros::{JournalId, TenantId};
 
-    fn config(journal: JournalId) -> Config {
+    fn config(journal: JournalKey) -> Config {
         Config {
             journal,
             ..Config::default()
@@ -262,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn a_created_journal_is_a_first_boot_until_its_store_has_booted() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let journal = JournalId(300);
+        let journal = JournalKey::new(TenantId::default(), JournalId(300));
         let mut stores = load(dir.path()).await;
         assert!(stores.create(journal, config(journal)));
         let (_, boot) = stores.open(journal).expect("open");
@@ -284,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn a_format_the_record_missed_is_found_on_the_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let journal = JournalId(300);
+        let journal = JournalKey::new(TenantId::default(), JournalId(300));
         let mut stores = load(dir.path()).await;
         assert!(stores.create(journal, config(journal)));
         let (mut store, _) = stores.open(journal).expect("open");
@@ -300,7 +305,7 @@ mod tests {
         assert_eq!(boot, BootKind::ExistingMember);
         // A created journal whose store never got its marker is a first
         // boot again.
-        let other = JournalId(301);
+        let other = JournalKey::new(TenantId::default(), JournalId(301));
         std::fs::create_dir_all(journal_dir(dir.path(), other)).expect("mkdir");
         let mut restarted = load(dir.path()).await;
         assert!(restarted.create(other, config(other)));
