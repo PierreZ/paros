@@ -1725,8 +1725,9 @@ fn replica_config(
 /// A replica (#144): the provider-generic replica driver inside the same
 /// crash/recovery loop as a node — a seam crash unwinds `run_replica`, the
 /// volatile `ReplicaNode` is dropped, and the next incarnation rebuilds it
-/// from the durable world. Its disk is its own slice of the world under its
-/// IP, registered outside the copy budget and fault-free: the budget defends
+/// from its journal store. Its store is registered outside the copy budget
+/// and no fault is injected into it — only the simulated disk's own I/O
+/// faults reach it, and it restarts on them like a node: the budget defends
 /// the acceptors' copies, and a replica's records are never one. A replica
 /// holds no promise, so a lost disk would only mean a first boot that
 /// relearns the log; the world never takes one away.

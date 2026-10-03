@@ -25,9 +25,11 @@
 //! The decision and its ledger entry are made under the world lock in one
 //! step (the budget is cluster-wide and every node boots concurrently); the
 //! damage lands after, through the node's own disk, and is marked
-//! [`landed`](super::CorruptionInjection::landed) once synced. A kill in
-//! between leaves the injection unconfirmed, and the next boot's scan says
-//! whether it happened (`StorageWorld::resolve_boot`).
+//! [`landed`](super::CorruptionInjection::landed) once synced; a crash
+//! family's park is reserved under the dead-node budget at the decision and
+//! made only once its damage lands. A kill in between leaves the injection
+//! unconfirmed, and the next boot's scan says whether it happened
+//! (`StorageWorld::resolve_boot`).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -120,16 +122,18 @@ pub(crate) struct Target<'a> {
 /// One planned write of damage, carried out after the world lock is gone.
 enum Planned {
     /// Damage the entries of `slot` (every live copy, the newest one with
-    /// `newest`'s damage instead).
+    /// `newest`'s damage instead); `parks` once landed when the damage is a
+    /// crash verdict.
     Slot {
         slot: Slot,
         kind: CorruptionKind,
         damage: Damage,
         newest: Damage,
+        parks: bool,
     },
-    /// Garble metadata copy `copy`.
-    Meta { copy: u64 },
-    /// Grow the newest segment.
+    /// Garble metadata copy `copy`; `parks` once landed (both copies).
+    Meta { copy: u64, parks: bool },
+    /// Grow the newest segment, parking the node once landed.
     Resize,
 }
 
@@ -261,11 +265,14 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
                         } else {
                             Damage::RotEntry
                         },
+                        parks: slot == primary && id_faulty,
                     });
                 }
                 if id_faulty {
-                    // Unidentifiable record: the scan can only crash, for good.
-                    world.park(key, node);
+                    // Unidentifiable record: the scan can only crash, for
+                    // good. The park is reserved now, under the budget, and
+                    // made once the damage lands.
+                    world.reserve_park(key);
                 }
             }
         }
@@ -281,12 +288,15 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
                     kind: CorruptionKind::LostWrite,
                     damage: Damage::LoseEntry,
                     newest: Damage::LoseEntry,
+                    parks: false,
                 });
             }
         }
         // A misdirected write: a checksummed record of another index where
         // this one should be — the identity check catches it. Recoverable.
-        if misdirect {
+        // The misdirected bytes come from another slot's entry: a log
+        // holding only one slot's records has none to misdirect.
+        if misdirect && copies.len() > 1 {
             let permitted = candidates(world);
             if !permitted.is_empty() {
                 let slot = pick(&permitted);
@@ -296,6 +306,7 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
                     kind: CorruptionKind::Misdirected,
                     damage: Damage::Misdirect,
                     newest: Damage::Misdirect,
+                    parks: false,
                 });
             }
         }
@@ -307,7 +318,7 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
             let both = sim_random::<f64>() < 0.25;
             if both {
                 if world.may_park(key) {
-                    world.park(key, node);
+                    world.reserve_park(key);
                     for copy in 0..2 {
                         world.note_corruption(CorruptionInjection::dormant(
                             node,
@@ -315,7 +326,7 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
                             CorruptionKind::PromiseCopy,
                         ));
                         world.meta_rotted.insert((key.to_string(), copy));
-                        planned.push(Planned::Meta { copy });
+                        planned.push(Planned::Meta { copy, parks: true });
                     }
                 }
             } else {
@@ -330,14 +341,14 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
                         CorruptionKind::PromiseCopy,
                     ));
                     world.meta_rotted.insert((key.to_string(), copy));
-                    planned.push(Planned::Meta { copy });
+                    planned.push(Planned::Meta { copy, parks: false });
                 }
             }
         }
         // A file-granularity metadata fault: reliably crash, never recover —
         // the whole store is the record.
         if meta && world.has_disk(key) && world.may_park(key) {
-            world.park(key, node);
+            world.reserve_park(key);
             world.note_corruption(CorruptionInjection::dormant(
                 node,
                 StorageRecord::Store,
@@ -348,7 +359,9 @@ pub(crate) async fn roll(world: &Mutex<StorageWorld>, target: &Target<'_>) {
         // A transient read EIO: collapses into the corruption channel, crashes
         // the node once, and the retry — the next boot — reads clean. The
         // only family with no availability cost and nothing on the disk.
-        if read_eio && world.has_disk(key) {
+        // One armed at a time: a boot a kill cut before its scan still
+        // carries the earlier one.
+        if read_eio && world.has_disk(key) && !world.read_eio.contains_key(key) {
             let slots = world.clean_slots(key);
             let record = match sim_random::<u64>() % 4 {
                 0 => StorageRecord::ChosenIndex,
@@ -377,23 +390,25 @@ async fn land(
     planned: Vec<Planned>,
 ) {
     for plan in planned {
-        let (record, kind, landed) = match plan {
+        let (record, kind, landed, parks) = match plan {
             Planned::Slot {
                 slot,
                 kind,
                 damage,
                 newest,
+                parks,
             } => {
                 let live = copies.get(&slot.0).map_or(&[][..], Vec::as_slice);
                 let mut landed = !live.is_empty();
                 for (at, entry) in live.iter().enumerate() {
                     let is_newest = at + 1 == live.len();
-                    // A misdirected write's source: any other entry of the
-                    // log (the copy before, or after for the first).
+                    // A misdirected write's source: an entry of another
+                    // slot (its header names another index).
                     let from = copies
-                        .values()
-                        .flatten()
-                        .find(|other| other.index != entry.index);
+                        .iter()
+                        .filter(|(other, _)| **other != slot.0)
+                        .flat_map(|(_, entries)| entries)
+                        .next();
                     let applied = journal_files::damage(
                         target.provider,
                         entry,
@@ -403,26 +418,32 @@ async fn land(
                     .await;
                     landed &= applied.is_ok();
                 }
-                (StorageRecord::Accepted(slot), kind, landed)
+                (StorageRecord::Accepted(slot), kind, landed, parks)
             }
-            Planned::Meta { copy } => {
+            Planned::Meta { copy, parks } => {
                 let landed = journal_files::rot_meta(target.provider, target.dir, copy)
                     .await
                     .unwrap_or(false);
-                (StorageRecord::Promise, CorruptionKind::PromiseCopy, landed)
+                (
+                    StorageRecord::Promise,
+                    CorruptionKind::PromiseCopy,
+                    landed,
+                    parks,
+                )
             }
             Planned::Resize => {
                 let landed = journal_files::resize_segment(target.provider, target.dir)
                     .await
                     .unwrap_or(false);
-                (StorageRecord::Store, CorruptionKind::Metadata, landed)
+                (StorageRecord::Store, CorruptionKind::Metadata, landed, true)
             }
         };
         if landed {
-            world
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .note_landed(target.node, record, kind);
+            let mut world = world.lock().unwrap_or_else(PoisonError::into_inner);
+            world.note_landed(target.node, record, kind);
+            if parks {
+                world.park_landed(target.key, target.node);
+            }
         }
     }
 }
@@ -459,6 +480,7 @@ pub(crate) async fn apply_pending(world: &Mutex<StorageWorld>, target: &Target<'
             kind: CorruptionKind::BitFlip,
             damage: Damage::RotEntry,
             newest: Damage::RotEntry,
+            parks: false,
         });
     }
     land(world, target, &copies, planned).await;

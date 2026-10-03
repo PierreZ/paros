@@ -281,6 +281,12 @@ pub(crate) struct StorageWorld {
     /// slots to rot on a node's journal at its next boot, before the scan
     /// reads them back.
     pending_rot: BTreeMap<String, BTreeSet<u64>>,
+    /// Identities a latent fault will park once its damage lands (#176): a
+    /// park reserved under the dead-node budget at the decision, made real
+    /// by [`StorageWorld::park_landed`] — so a kill that cuts the damage
+    /// never leaves a healthy store parked — and released when the next
+    /// boot reads the store clean.
+    pending_parks: BTreeSet<String>,
     /// Metadata copies (`(node, copy)`) a latent fault damaged that no boot
     /// has repaired yet: the single-copy leg never assembles the both-lost
     /// shape outside its park-guarded branch.
@@ -338,8 +344,8 @@ pub(crate) struct StorageWorld {
     /// The replica tier's disks (#144), by IP: learners that are not
     /// acceptors. Their records are never a *copy* the budget defends — a
     /// replica answers no Phase 1 — so the copy count never looks at them,
-    /// and their disks run fault-free (the replica's own write path is not
-    /// what the budget protects).
+    /// and no fault is injected into their stores (the replica's own write
+    /// path is not what the budget protects).
     replicas: BTreeSet<String>,
     /// Matchmakers whose registry was wiped (#125, #183): the library
     /// refuses to boot them again, and the replacement is a matchmaker-set
@@ -869,6 +875,25 @@ impl StorageWorld {
             .values()
             .filter(|reason| **reason != ParkReason::Retired)
             .count()
+            + self
+                .pending_parks
+                .iter()
+                .filter(|key| !self.parked.contains_key(*key))
+                .count()
+    }
+
+    /// Reserve a park of `key` for a crash-family latent fault whose
+    /// damage has yet to land (see `pending_parks`).
+    pub(crate) fn reserve_park(&mut self, key: &str) {
+        self.pending_parks.insert(key.to_string());
+    }
+
+    /// A crash-family latent fault's damage landed: the reserved park of
+    /// `key` is real.
+    pub(crate) fn park_landed(&mut self, key: &str, node: u64) {
+        if self.pending_parks.remove(key) {
+            self.park(key, node);
+        }
     }
 
     /// Identities the operator retired (the losses [`StorageWorld::retire_budget`] bounds).
@@ -900,7 +925,7 @@ impl StorageWorld {
         if self.cluster_size == 0 {
             return false;
         }
-        if self.parked.contains_key(node_key) {
+        if self.parked.contains_key(node_key) || self.pending_parks.contains(node_key) {
             return true;
         }
         if self.detected_parks() + 1 > self.dead_budget() {
@@ -1069,7 +1094,13 @@ impl StorageWorld {
     pub(crate) fn take_read_eio(&mut self, key: &str, node: u64) -> Option<StorageRecord> {
         let record = self.read_eio.remove(key)?;
         self.s7.read_eio_detected = true;
-        self.resolve_corruption(node, record, CorruptionOutcome::Crashed);
+        if let Some(injection) = self.corruptions.iter_mut().find(|i| {
+            i.node == node
+                && i.kind == CorruptionKind::ReadEio
+                && i.outcome == CorruptionOutcome::Dormant
+        }) {
+            injection.outcome = CorruptionOutcome::Crashed;
+        }
         Some(record)
     }
 
@@ -1126,6 +1157,15 @@ impl StorageWorld {
     /// [`StorageWorld::resolve_boot`]'s refused leg: one crash decision
     /// covers every injection the scan read.
     fn resolve_refused(&mut self, key: &str, node: u64, dormant: &[usize], double_fault: bool) {
+        // A refusal is the outcome of a crash family the dead-node budget
+        // admitted (a park reserved or made at its decision), never of a
+        // recoverable one escaping that budget.
+        assert_always!(
+            self.parked.contains_key(key) || self.pending_parks.contains(key),
+            "storage: a refused scan is explained by a budgeted crash fault",
+            { "node" => node }
+        );
+        self.pending_parks.remove(key);
         for (n, at) in dormant.iter().enumerate() {
             let injection = &mut self.corruptions[*at];
             injection.outcome = if n == 0 {
@@ -1235,6 +1275,9 @@ impl StorageWorld {
             }
         }
         self.meta_rotted.retain(|(k, _)| k != key);
+        // The store booted: a park reserved for damage that never landed is
+        // released.
+        self.pending_parks.remove(key);
         for at in retracted.into_iter().rev() {
             let injection = self.corruptions.remove(at);
             if let StorageRecord::Accepted(slot) = injection.record
@@ -1244,27 +1287,6 @@ impl StorageWorld {
             }
         }
         reported
-    }
-
-    /// Resolve the dormant ledger entries matching `(node, record)` — the boot
-    /// scan read them back. The first match takes `outcome`; when `outcome` is
-    /// [`CorruptionOutcome::Crashed`], further matches co-resolve (one crash
-    /// decision covers the whole scan).
-    fn resolve_corruption(&mut self, node: u64, record: StorageRecord, outcome: CorruptionOutcome) {
-        let mut first = true;
-        for injection in &mut self.corruptions {
-            if injection.node == node
-                && injection.record == record
-                && injection.outcome == CorruptionOutcome::Dormant
-            {
-                injection.outcome = if first {
-                    outcome
-                } else {
-                    CorruptionOutcome::CoDetected
-                };
-                first = false;
-            }
-        }
     }
 
     /// Decide one injection under the budget. `accepted_slots` are the

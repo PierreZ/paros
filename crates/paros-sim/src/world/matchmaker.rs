@@ -24,7 +24,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError, Weak};
 
-use moonpool_sim::{SimStorageProvider, SimTimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    SimStorageProvider, SimTimeProvider, assert_always, assert_reachable, buggify_with_prob,
+};
 use paros::{
     Ballot, JournalMatchmakerStorage, JournalStoreConfig, MatchmakerConfig, MatchmakerHardState,
     MatchmakerStorage, Registration, RegistryStorage, StorageError, StorageRecord, WriteOutcome,
@@ -77,12 +79,11 @@ impl SimRegistry {
             .map(|world| f(&mut world.lock().unwrap_or_else(PoisonError::into_inner)))
     }
 
-    /// Count an I/O fault the simulated disk handed back (see
-    /// `node_store::SimJournal::ledger`).
+    /// Note a write the store took. A fault the simulated disk handed back
+    /// is not counted in the nodes' one-crash-per-fault ledger: a
+    /// matchmaker's crash decision is the matchmaker audit's, and the
+    /// driver fail-stops on it either way.
     fn ledger<T>(&mut self, result: Result<T, StorageError>) -> Result<T, StorageError> {
-        if let Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. }) = &result {
-            self.with_world(StorageWorld::note_disk_fault);
-        }
         self.dirty |= result.is_ok();
         result
     }
@@ -152,6 +153,24 @@ impl MatchmakerStorage for SimRegistry {
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
+        // Write-once, seen from the disk: a re-write of a durably registered
+        // ballot carries the same bytes (the core never re-registers).
+        let key = self.key.clone();
+        let durable = self
+            .with_world(|world| {
+                world
+                    .matchmakers
+                    .get(&key)
+                    .and_then(|registry| registry.get(&ballot).cloned())
+            })
+            .flatten();
+        if let Some(previous) = durable {
+            assert_always!(
+                previous == *registration,
+                "matchmaker: a durable registration is never overwritten with different bytes",
+                { "round" => ballot.round, "bnode" => ballot.node.0 }
+            );
+        }
         let result = self.inner.register(ballot, registration).await;
         self.ledger(result)
     }
