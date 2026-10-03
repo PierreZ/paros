@@ -57,9 +57,12 @@ pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
 }
 
 /// Resolve `addr` (`HOST:PORT`) to **every** socket address it names, in
-/// resolution order without duplicates, IPv4 first: a rendezvous name that
-/// stands for several machines (a Compose network alias shared by the
-/// seeds, #216) yields them all.
+/// resolution order without duplicates: a rendezvous name that stands for
+/// several machines (a Compose network alias shared by the seeds, #216)
+/// yields them all. One family only — the IPv4 addresses when there is any,
+/// else the IPv6 ones — the family [`resolve`] picks for a listen address:
+/// a name like `localhost` that resolves to `127.0.0.1` and `::1` is one
+/// machine listening on one of them, never two seeds.
 ///
 /// # Errors
 ///
@@ -78,7 +81,9 @@ pub fn resolve_all(addr: &str) -> Result<Vec<SocketAddr>, String> {
             resolved.push(found);
         }
     }
-    resolved.sort_by_key(|a| !a.is_ipv4());
+    if resolved.iter().any(SocketAddr::is_ipv4) {
+        resolved.retain(SocketAddr::is_ipv4);
+    }
     if resolved.is_empty() {
         return Err(format!("{addr:?} resolves to no address"));
     }
@@ -111,6 +116,11 @@ mod tests {
             resolve_all("127.0.0.1:4500"),
             Ok(vec!["127.0.0.1:4500".parse().expect("literal")])
         );
-        assert!(resolve_all("localhost:4501").is_ok_and(|all| !all.is_empty()));
+        // One machine, one address: never its IPv4 and its IPv6 address both.
+        let local = resolve_all("localhost:4501").expect("localhost resolves");
+        assert_eq!(
+            local,
+            vec![resolve("localhost:4501").expect("localhost resolves")]
+        );
     }
 }
