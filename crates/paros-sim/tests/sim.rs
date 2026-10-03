@@ -27,9 +27,8 @@ fn chain_single_seed_converges() {
     );
 }
 
-/// The world-backed sim storage passes the same behavioral contract suite
-/// `MemStorage` passes as a `paros` unit test, so the fake can never drift from
-/// the `LogStorage` trait contract.
+/// The journal stores the campaign runs on pass the same behavioral contract
+/// suites `MemStorage` passes as a `paros` unit test, on the simulated disk.
 #[test]
 fn sim_storage_passes_the_contract_suite() {
     let report = paros_sim::run_storage_contract_suite();

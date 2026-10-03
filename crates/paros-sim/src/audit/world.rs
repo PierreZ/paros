@@ -38,16 +38,6 @@ pub(crate) struct AuditWorld {
 }
 
 impl AuditWorld {
-    /// A private checker for a run with **no client** at all (the storage
-    /// contract suite drives the world-backed storage directly): every
-    /// per-transition check still runs, except the "applied command was
-    /// proposed" claim, which has no client to be proposed by.
-    pub(crate) fn client_free() -> Self {
-        let world = Self::default();
-        world.lock().client_free = true;
-        world
-    }
-
     pub(super) fn lock(&self) -> MutexGuard<'_, AuditState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -111,7 +101,7 @@ impl AuditWorld {
         );
         st.fold_agreed |= met;
         assert_always!(
-            st.client_free || st.submitted.contains(&cmd_hash),
+            st.submitted.contains(&cmd_hash),
             "chain: applied command was proposed",
             { "client" => client, "lsn" => lsn, "command" => cmd_hash }
         );

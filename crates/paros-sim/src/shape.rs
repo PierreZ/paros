@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
-use crate::world::storage::WritePathRates;
+use crate::world::faults::WritePathRates;
 use paros::{DriverTunables, JournalId, JournalKey, JournalStoreConfig, QuorumSystem, TenantId};
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
@@ -502,9 +502,6 @@ struct Registry {
     /// Run-level: the journals every node serves and the one held for the
     /// chaos window (see [`journals`]), fixed by the first caller.
     journals: Option<JournalPlan>,
-    /// Run-level: whether the nodes run on the journal store, and its
-    /// layout (see [`journal_store`]), fixed by the first caller.
-    journal_store: Option<StoreDraw>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -536,43 +533,16 @@ impl JournalPlan {
     }
 }
 
-/// Whether the run's acceptors store on the library's `JournalStorage` over
-/// the simulated disk instead of the world-backed store (#187), and with
-/// which layout — drawn once per seed, a seeded coin on a perturbed seed
-/// without matchmakers (the only seeds that may): the world store's copy budget and fault ledger
-/// exist because the world injects disk corruption, and a journal seed
-/// injects none (no rot, no write-path coin, no wipe — a plain seed never
-/// wipes); matchmaker seeds and the corpus stay on the world store until
-/// #176. The draw is paired with a `reachable`; the layout is the library's
-/// `JournalStoreConfig::small()`. A tighter geometry (16-slot segments, a
-/// checkpoint every append) is not a knob: moonpool's `BuggifyKnobs` also
-/// slows the simulated disk (IOPS, bandwidth, stalls), and the two together
-/// held every node's sync past the end of the run (witness
-/// 2281271371631374953) — a permanent partition wearing a knob's clothes.
-#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
-pub(crate) fn journal_store(
-    state: &StateHandle,
-    matchmakers: bool,
-    perturb: bool,
-) -> Option<JournalStoreConfig> {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    let draw = *guard.journal_store.get_or_insert_with(|| {
-        // Deployment shape, like the process groups' counts: a seeded coin,
-        // not a knob's extreme — half the plain seeds keep the world store,
-        // whose corruption coins and budget are the plain deployment's
-        // CTRL coverage.
-        if !perturb || matchmakers || !moonpool_sim::sim_random_bool(0.5) {
-            return StoreDraw::World;
-        }
-        // BUGGIFY pairing: a seed genuinely runs its nodes on the journal.
-        assert_reachable!("journal store: a seed runs its nodes on JournalStorage");
-        StoreDraw::Journal(JournalStoreConfig::small())
-    });
-    match draw {
-        StoreDraw::World => None,
-        StoreDraw::Journal(layout) => Some(layout),
-    }
+/// The layout every journal store of the run uses (#176): the library's
+/// `JournalStoreConfig::small()` — 256-slot segments and a checkpoint every
+/// 256 entries, so segment rollover and checkpoint-truncated prefixes
+/// happen inside a run. A tighter geometry (16-slot segments, a checkpoint
+/// every append) is not a knob: moonpool's `BuggifyKnobs` also slows the
+/// simulated disk (IOPS, bandwidth, stalls), and the two together held every
+/// node's sync past the end of the run (witness 2281271371631374953) — a
+/// permanent partition wearing a knob's clothes.
+pub(crate) fn journal_layout() -> JournalStoreConfig {
+    JournalStoreConfig::small()
 }
 
 /// How many genesis nodes host the system journals (#189) — the seeds,
@@ -597,8 +567,8 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// Whether the run runs the **system journals** (#189) — the directory and
 /// the node registry on the seeds, every node following them, and the
 /// joiners joining the pool through the registry — drawn once per seed: a
-/// seeded coin on a perturbed seed. Deployment shape, like
-/// [`journal_store`]: half the seeds keep #188's static deployment. On a
+/// seeded coin on a perturbed seed. Deployment shape: half the seeds keep
+/// #188's static deployment. On a
 /// seed with matchmakers a joiner the registry admits joins the default
 /// journal as a spare a reconfiguration may pull in.
 #[tracing::instrument(level = "debug", skip(state), fields(perturb))]
@@ -614,15 +584,6 @@ pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
         assert_reachable!("system: a seed runs the system journals");
         true
     })
-}
-
-/// The run's store draw (see [`journal_store`]).
-#[derive(Clone, Copy, Debug)]
-enum StoreDraw {
-    /// The world-backed store.
-    World,
-    /// The journal store, with its layout.
-    Journal(JournalStoreConfig),
 }
 
 /// The run's journals (#188), drawn once per seed by whoever asks first — a

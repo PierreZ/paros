@@ -1,26 +1,30 @@
-//! The fake disk: every node's durable records, the fault ledgers, and the
-//! budgets that keep a run winnable.
+//! The storage world: every node's fault ledgers, the budgets that keep a
+//! run winnable, and the operators' provisioning and reconfiguration
+//! ledgers.
 //!
-//! The [`StorageWorld`] is **protocol-blind** — it stores records, never knowing
-//! what is committed — and outlives process crashes (owned by the `StateHandle`),
-//! so a write that reached it before a crash is read back on restart, exactly
-//! like a real disk. Each node reaches it through a [`storage::DurableStorage`]
-//! handle; the boot-rot sites live in [`rot`].
+//! Every node runs the store `parosd` ships — `paros::JournalStorage` and
+//! `paros::JournalMatchmakerStorage` on the simulated disk (#176) — and the
+//! [`StorageWorld`] stays **protocol-blind**: it never holds a record, only
+//! a shadow of what each store durably holds ([`NodeDisk`], refreshed from
+//! the store itself), the ground truth of every fault the harness injected,
+//! and the decisions that bound them. It outlives process crashes (owned by
+//! the `StateHandle`), like the disks. Each node reaches it through a
+//! [`node_store::SimJournal`]; the write-path rates are [`faults`], the
+//! latent faults a boot reads back are [`latent`], and where they land on
+//! the journal's files is [`journal_files`].
 
+pub(crate) mod faults;
+pub(crate) mod journal_files;
+pub(crate) mod latent;
 pub(crate) mod matchmaker;
 pub(crate) mod node_store;
-pub(crate) mod rot;
-pub(crate) mod storage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
-use paros::{
-    Ballot, Command, Config, HardState, IntegrityFault, MetadataFault, Slot, StorageRecord,
-    WitnessStatus,
-};
+use paros::{Ballot, Registration, Slot, StorageRecord};
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
@@ -46,94 +50,21 @@ pub(crate) fn storage_world_for(
     )
 }
 
-/// Semantic health of one durable record — the world stores **records, not
-/// bytes** (#20 fixed decision), so every corruption-family member is modeled
-/// as a first-class read outcome the boot scan classifies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(super) enum RecordHealth {
-    /// The record verifies.
-    #[default]
-    Clean,
-    /// The bytes fail their checksum (bit flip, latent sector error, torn
-    /// write).
-    Faulty,
-    /// The checksum passes but the identity inside the checksummed region
-    /// names a different record (misdirected write).
-    Misdirected,
-    /// The bytes are absent where the identifier / reserved-record contract
-    /// says they must exist (lost write).
-    Lost,
-}
-
-impl RecordHealth {
-    fn integrity_fault(self) -> Option<IntegrityFault> {
-        match self {
-            RecordHealth::Clean => None,
-            RecordHealth::Faulty => Some(IntegrityFault::ChecksumMismatch),
-            RecordHealth::Misdirected => Some(IntegrityFault::Misdirected),
-            RecordHealth::Lost => Some(IntegrityFault::LostWrite),
-        }
-    }
-}
-
-/// One accepted entry's record + persist-witness health.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct SlotHealth {
-    entry: RecordHealth,
-    id: WitnessStatus,
-}
-
-impl Default for SlotHealth {
-    fn default() -> Self {
-        Self {
-            entry: RecordHealth::Clean,
-            id: WitnessStatus::Present,
-        }
-    }
-}
-
-impl SlotHealth {
-    fn clean(self) -> bool {
-        self.entry == RecordHealth::Clean && self.id == WitnessStatus::Present
-    }
-}
-
-/// One node's durable records: the scalars, the per-slot accepted log, and the
-/// compaction floor. The [`StorageWorld`] owns one of these per node IP.
+/// What one node durably holds, as the [`StorageWorld`] tracks it: a
+/// **shadow** of its journal store's image, refreshed from the store itself
+/// after every boot scan and every flush that returned (#176). The copy
+/// budget and the corpus probes read it; the bytes are the store's, on the
+/// simulated disk.
 #[derive(Default)]
 pub(super) struct NodeDisk {
-    hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Command)>,
+    /// Every retained slot the store holds a vote for, with the ballot of
+    /// its latest record — a faulty one included (its identity survived;
+    /// [`StorageWorld::marks`] says it is unclean).
+    accepted: BTreeMap<Slot, Ballot>,
     /// The first slot still retained. Everything below it has been truncated.
     first_slot: Slot,
-    /// The journal state sealed at the floor (#204): read back on boot so a
-    /// restart folds the retained log from it like every peer.
-    sealed: paros::JournalState,
-    /// Health of the accepted-entry records; a slot absent from this map is
-    /// clean and witnessed.
-    entry_health: BTreeMap<Slot, SlotHealth>,
-    /// The two checksummed `HardState` copies (CTRL metainfo doctrine): one
-    /// bad ⇒ repair from the twin, both bad ⇒ crash.
-    promise_health: [RecordHealth; 2],
-    chosen_health: RecordHealth,
-    truncation_health: RecordHealth,
-    /// A file-granularity FS-metadata fault on the whole store.
-    meta_fault: Option<MetadataFault>,
-    /// One pending transient read-`EIO` target, cleared when it surfaces (the
-    /// retry — the next boot — reads clean).
-    read_eio: Option<StorageRecord>,
-    /// The format marker (#147) and the configuration it was written under
-    /// (#207): written by the driver on the identity's first boot, never
-    /// cleared or edited — gone only with the whole disk (a wipe).
-    formatted: Option<Config>,
-}
-
-impl NodeDisk {
-    /// Health of the accepted record at `slot` (clean + witnessed when
-    /// untracked).
-    fn slot_health(&self, slot: Slot) -> SlotHealth {
-        self.entry_health.get(&slot).copied().unwrap_or_default()
-    }
+    /// The durable chosen index.
+    chosen_index: Option<Slot>,
 }
 
 /// One injected storage fault: the **ground truth** the oracles compare
@@ -218,6 +149,10 @@ pub(crate) struct CorruptionInjection {
     /// Part of a multi-record block fault (a contiguous run of entries).
     pub(crate) block: bool,
     pub(crate) outcome: CorruptionOutcome,
+    /// The damage is durably on the disk (#176): written and synced. An
+    /// injection a process kill cut before its sync may or may not have
+    /// landed, and the next boot's scan says which.
+    pub(crate) landed: bool,
 }
 
 impl CorruptionInjection {
@@ -230,6 +165,7 @@ impl CorruptionInjection {
             kind,
             block: false,
             outcome: CorruptionOutcome::Dormant,
+            landed: false,
         }
     }
 }
@@ -302,6 +238,30 @@ pub(crate) enum ParkReason {
     Retired,
 }
 
+/// What a store's boot scan read back, as [`StorageWorld::resolve_boot`]
+/// resolves the ledger against it (#176).
+pub(crate) enum BootRead<'a> {
+    /// The scan refused to start: a crash verdict. `double_fault` says an
+    /// entry and its identifier were both damaged.
+    Refused {
+        /// The journal met an entry and its identifier both damaged.
+        double_fault: bool,
+    },
+    /// The scan booted.
+    Booted {
+        /// The slots the store reports faulty.
+        faulty: &'a BTreeSet<u64>,
+        /// A torn tail was discarded.
+        torn_tail: bool,
+        /// A damaged entry was kept before the last batch.
+        below_tail: bool,
+        /// A damaged entry of the last batch was kept, ambiguous.
+        ambiguous: bool,
+        /// A metadata copy was repaired from its twin.
+        meta_repaired: bool,
+    },
+}
+
 /// One entry of the operators' reconfiguration ledger (#198).
 struct RequestedConfiguration {
     /// The acceptor set asked for.
@@ -314,9 +274,20 @@ struct RequestedConfiguration {
 #[derive(Default)]
 pub(crate) struct StorageWorld {
     disks: BTreeMap<String, NodeDisk>,
-    /// The matchmakers' durable registries, keyed by IP (see
-    /// [`matchmaker::DurableMatchmakerStorage`]); empty on a plain seed.
-    matchmakers: BTreeMap<String, matchmaker::MatchmakerDisk>,
+    /// A shadow of every matchmaker's durable registry, keyed by IP (see
+    /// [`matchmaker::SimRegistry`]); empty on a plain seed.
+    matchmakers: BTreeMap<String, BTreeMap<Ballot, Registration>>,
+    /// Targeted latent faults a corpus mask placed (#113): the accepted
+    /// slots to rot on a node's journal at its next boot, before the scan
+    /// reads them back.
+    pending_rot: BTreeMap<String, BTreeSet<u64>>,
+    /// Metadata copies (`(node, copy)`) a latent fault damaged that no boot
+    /// has repaired yet: the single-copy leg never assembles the both-lost
+    /// shape outside its park-guarded branch.
+    meta_rotted: BTreeSet<(String, u64)>,
+    /// A transient read `EIO` armed for a node's next boot scan, and the
+    /// record it names; cleared when it surfaces (the retry reads clean).
+    read_eio: BTreeMap<String, StorageRecord>,
     /// Full cluster membership size, for the quorum bound (set once at boot;
     /// zero refuses every injection). This is the run's *configuration floor*
     /// (`crate::shape::config_floor`), not the pool.
@@ -681,6 +652,124 @@ impl StorageWorld {
         self.disks.entry(key.to_string()).or_default()
     }
 
+    /// Whether `key` durably holds a clean copy of `slot`: a retained vote
+    /// with no fault mark on it.
+    fn holds_clean(&self, key: &str, slot: Slot) -> bool {
+        self.disks
+            .get(key)
+            .is_some_and(|disk| disk.accepted.contains_key(&slot))
+            && !self
+                .marks
+                .get(key)
+                .is_some_and(|marks| marks.contains(&slot.0))
+    }
+
+    /// The retained slots `key` durably holds a clean copy of, in order.
+    pub(crate) fn clean_slots(&self, key: &str) -> Vec<Slot> {
+        self.disks.get(key).map_or_else(Vec::new, |disk| {
+            disk.accepted
+                .keys()
+                .copied()
+                .filter(|slot| self.holds_clean(key, *slot))
+                .collect()
+        })
+    }
+
+    /// Whether the world has seen `key`'s disk at all (a boot or a flush).
+    pub(crate) fn has_disk(&self, key: &str) -> bool {
+        self.disks.contains_key(key)
+    }
+
+    /// `key`'s store booted: its shadow is what the store's image now holds
+    /// — `accepted` and `faulty` its retained votes, `first` its floor,
+    /// `chosen` its chosen index. Every faulty slot is marked unclean (a
+    /// fault the world injected, or an ambiguous last batch the journal
+    /// kept on its own: both cost the record a clean copy), and a mark the
+    /// floor dropped goes with the prefix.
+    pub(crate) fn note_booted(
+        &mut self,
+        key: &str,
+        accepted: BTreeMap<Slot, Ballot>,
+        faulty: &[(Slot, Ballot)],
+        first: Slot,
+        chosen: Option<Slot>,
+    ) {
+        let mut held = accepted;
+        held.extend(faulty.iter().copied());
+        let disk = self.disk_mut(key);
+        disk.accepted = held;
+        disk.first_slot = first;
+        disk.chosen_index = chosen;
+        let marks = self.marks.entry(key.to_string()).or_default();
+        marks.extend(faulty.iter().map(|(slot, _)| slot.0));
+        marks.retain(|slot| *slot >= first.0);
+    }
+
+    /// One flush of `key` (node `node`) returned: `accepted` reached the
+    /// disk, the chosen index rose to `chosen`, the floor to `floor` (a
+    /// trim-point jump's chosen index rises to `landing`). Clean re-writes
+    /// clear their fault marks and resolve the reports they repaired, and
+    /// a floor raise retires the marks and reports of the prefix it drops —
+    /// recovery doing its job, never the world healing anything.
+    pub(crate) fn note_flushed(
+        &mut self,
+        key: &str,
+        node: u64,
+        accepted: &[(Slot, Ballot)],
+        chosen: Option<Slot>,
+        floor: Option<Slot>,
+        landing: Option<Slot>,
+    ) {
+        let mut healed: Vec<Slot> = Vec::new();
+        let marked = self.marks.entry(key.to_string()).or_default();
+        for (slot, _) in accepted {
+            if marked.remove(&slot.0) {
+                healed.push(*slot);
+            }
+        }
+        let disk = self.disk_mut(key);
+        for (slot, ballot) in accepted {
+            disk.accepted.insert(*slot, *ballot);
+        }
+        if let Some(chosen) = chosen {
+            disk.chosen_index = Some(chosen);
+        }
+        if let Some(landing) = landing
+            && disk.chosen_index.is_none_or(|ci| ci < landing)
+        {
+            disk.chosen_index = Some(landing);
+        }
+        if let Some(floor) = floor {
+            disk.first_slot = disk.first_slot.max(floor);
+            let first = disk.first_slot;
+            disk.accepted.retain(|slot, _| *slot >= first);
+        }
+        let first = disk.first_slot;
+        // Write-side check of the flush ordering: the floor is applied
+        // behind the chosen index it sits under, so no flush ever leaves a
+        // durable floor above the durable chosen index.
+        assert_always!(
+            first.0 == 0 || disk.chosen_index.is_some_and(|ci| first.0 <= ci.0 + 1),
+            "a flushed floor never outruns the flushed chosen index",
+            {
+                "floor" => first.0,
+                "chosen" => disk.chosen_index.map_or(0, |c| c.0)
+            }
+        );
+        if let Some(marks) = self.marks.get_mut(key) {
+            healed.extend(marks.range(..first.0).map(|slot| Slot(*slot)));
+            marks.retain(|slot| *slot >= first.0);
+        }
+        if let Some(pending) = self.pending_rot.get_mut(key) {
+            for slot in &healed {
+                pending.remove(&slot.0);
+            }
+        }
+        for slot in healed {
+            self.note_recovered(node, StorageRecord::Accepted(slot));
+        }
+    }
+
     /// Declare the unbudgeted (corpus) mode: masks may exceed the per-record
     /// budget, and every injection records the unrecoverable ground truth.
     pub(crate) fn set_unbudgeted(&mut self) {
@@ -916,7 +1005,7 @@ impl StorageWorld {
             if disk.first_slot.0 > slot {
                 return false;
             }
-            if disk.accepted.contains_key(&Slot(slot)) && disk.slot_health(Slot(slot)).clean() {
+            if self.holds_clean(key, Slot(slot)) {
                 return false;
             }
         }
@@ -961,6 +1050,202 @@ impl StorageWorld {
         self.corruptions.push(injection);
     }
 
+    /// The damage of `node`'s dormant `kind` injection on `record` is on the
+    /// disk, synced (#176).
+    pub(crate) fn note_landed(&mut self, node: u64, record: StorageRecord, kind: CorruptionKind) {
+        for injection in &mut self.corruptions {
+            if injection.node == node
+                && injection.record == record
+                && injection.kind == kind
+                && injection.outcome == CorruptionOutcome::Dormant
+            {
+                injection.landed = true;
+            }
+        }
+    }
+
+    /// The transient read `EIO` armed for `key`'s boot, if any, taken: the
+    /// scan fails once on it, and the retry reads clean.
+    pub(crate) fn take_read_eio(&mut self, key: &str, node: u64) -> Option<StorageRecord> {
+        let record = self.read_eio.remove(key)?;
+        self.s7.read_eio_detected = true;
+        self.resolve_corruption(node, record, CorruptionOutcome::Crashed);
+        Some(record)
+    }
+
+    /// Resolve every dormant injection on `node` (`key`) against what its
+    /// store's boot scan read back (#176): the store's own report is the
+    /// ground truth's other half. `read` is the scan's outcome.
+    ///
+    /// - The scan refused to start: one crash decision covers every
+    ///   injection it read (the first resolves `Crashed`, the rest
+    ///   `CoDetected`), and the node is down for good — restarting cannot
+    ///   help a store whose bytes genuinely rotted.
+    /// - The scan booted: a rotted slot must come back faulty (reported, the
+    ///   node keeps serving), a rotted promise copy repaired, a torn tail
+    ///   discarded or kept ambiguous. An injection a kill cut before its
+    ///   damage was synced and that the scan did not see never happened,
+    ///   and leaves the ledger.
+    pub(crate) fn resolve_boot(&mut self, key: &str, node: u64, read: &BootRead) {
+        let dormant: Vec<usize> = self
+            .corruptions
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.node == node && i.outcome == CorruptionOutcome::Dormant)
+            .map(|(at, _)| at)
+            .collect();
+        if dormant.is_empty() {
+            return;
+        }
+        match read {
+            BootRead::Refused { double_fault } => {
+                self.resolve_refused(key, node, &dormant, *double_fault);
+            }
+            BootRead::Booted {
+                faulty,
+                torn_tail,
+                below_tail,
+                ambiguous,
+                meta_repaired,
+            } => {
+                let reported =
+                    self.resolve_booted(key, node, dormant, faulty, *torn_tail, *meta_repaired);
+                if reported {
+                    self.s7.faulty_reported = true;
+                    if *below_tail {
+                        self.s7.corruption_below_tail = true;
+                    }
+                    if *ambiguous {
+                        self.s7.last_entry_ambiguity = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`StorageWorld::resolve_boot`]'s refused leg: one crash decision
+    /// covers every injection the scan read.
+    fn resolve_refused(&mut self, key: &str, node: u64, dormant: &[usize], double_fault: bool) {
+        for (n, at) in dormant.iter().enumerate() {
+            let injection = &mut self.corruptions[*at];
+            injection.outcome = if n == 0 {
+                CorruptionOutcome::Crashed
+            } else {
+                CorruptionOutcome::CoDetected
+            };
+            match injection.kind {
+                CorruptionKind::BitFlip => self.s7.bitflip_detected = true,
+                CorruptionKind::LostWrite => self.s7.lost_write_detected = true,
+                CorruptionKind::Misdirected => self.s7.misdirected_detected = true,
+                CorruptionKind::Metadata => self.s7.metadata_crashed = true,
+                CorruptionKind::PromiseCopy => {
+                    assert_reachable!(
+                        "storage: both promise copies are lost (crash: unknowable promise)"
+                    );
+                }
+                CorruptionKind::ReadEio | CorruptionKind::TornTail => {}
+            }
+        }
+        if double_fault {
+            self.s7.identifier_lost = true;
+        }
+        self.park(key, node);
+    }
+
+    /// [`StorageWorld::resolve_boot`]'s booted leg; returns whether an
+    /// injection was reported faulty.
+    fn resolve_booted(
+        &mut self,
+        key: &str,
+        node: u64,
+        dormant: Vec<usize>,
+        faulty: &BTreeSet<u64>,
+        torn_tail: bool,
+        meta_repaired: bool,
+    ) -> bool {
+        let mut retracted: Vec<usize> = Vec::new();
+        let mut reported = false;
+        for at in dormant {
+            let injection = self.corruptions[at];
+            let outcome = match (injection.kind, injection.record) {
+                (
+                    CorruptionKind::BitFlip
+                    | CorruptionKind::LostWrite
+                    | CorruptionKind::Misdirected,
+                    StorageRecord::Accepted(slot),
+                ) if faulty.contains(&slot.0) => {
+                    match injection.kind {
+                        CorruptionKind::BitFlip => self.s7.bitflip_detected = true,
+                        CorruptionKind::LostWrite => self.s7.lost_write_detected = true,
+                        _ => self.s7.misdirected_detected = true,
+                    }
+                    // A resolved member of a multi-record block
+                    // fault proves the contiguous-run family was
+                    // read back. A reachable anchor, NOT a
+                    // sometimes: the composition needs a log still
+                    // holding a contiguous clean run when the site
+                    // fires, and truncation-heavy runs keep logs
+                    // short — CI's coverage-guided schedule starved a
+                    // per-sweep gate on it (0/452 checks, run
+                    // 33117691030) while every other family fired.
+                    if injection.block {
+                        assert_reachable!(
+                            "storage: a block fault corrupts a contiguous run of entries"
+                        );
+                    }
+                    Some(CorruptionOutcome::Reported)
+                }
+                (CorruptionKind::TornTail, StorageRecord::Accepted(slot))
+                    if faulty.contains(&slot.0) =>
+                {
+                    Some(CorruptionOutcome::Reported)
+                }
+                (CorruptionKind::TornTail, StorageRecord::Accepted(slot)) if torn_tail => {
+                    self.s7.torn_tail_discarded = true;
+                    if let Some(marks) = self.marks.get_mut(key) {
+                        marks.remove(&slot.0);
+                    }
+                    Some(CorruptionOutcome::DiscardedTail)
+                }
+                (CorruptionKind::PromiseCopy, _) if meta_repaired => {
+                    self.s7.promise_repaired = true;
+                    Some(CorruptionOutcome::Repaired)
+                }
+                _ => None,
+            };
+            match outcome {
+                Some(outcome) => {
+                    reported |= outcome == CorruptionOutcome::Reported;
+                    self.corruptions[at].outcome = outcome;
+                }
+                None if !injection.landed => retracted.push(at),
+                None => {
+                    // The harness aimed a fault the store's scan did
+                    // not read as the table says it must.
+                    assert_always!(
+                        false,
+                        "storage: a landed latent fault is read back as its family's verdict",
+                        {
+                            "node" => node,
+                            "record" => injection.record.to_string(),
+                            "kind" => format!("{:?}", injection.kind)
+                        }
+                    );
+                }
+            }
+        }
+        self.meta_rotted.retain(|(k, _)| k != key);
+        for at in retracted.into_iter().rev() {
+            let injection = self.corruptions.remove(at);
+            if let StorageRecord::Accepted(slot) = injection.record
+                && let Some(marks) = self.marks.get_mut(key)
+            {
+                marks.remove(&slot.0);
+            }
+        }
+        reported
+    }
+
     /// Resolve the dormant ledger entries matching `(node, record)` — the boot
     /// scan read them back. The first match takes `outcome`; when `outcome` is
     /// [`CorruptionOutcome::Crashed`], further matches co-resolve (one crash
@@ -978,21 +1263,6 @@ impl StorageWorld {
                     CorruptionOutcome::CoDetected
                 };
                 first = false;
-                // A resolved member of a multi-record block fault proves the
-                // contiguous-run family was genuinely read back and detected.
-                // A reachable anchor, NOT a sometimes: the composition needs a
-                // log still holding a contiguous clean run when the rot site
-                // fires, and truncation-heavy runs keep logs short — CI's
-                // coverage-guided schedule starved a per-sweep gate on it
-                // (0/452 checks, run 33117691030) even after the sub-roll was
-                // widened, while every other family gate fired. Per the
-                // assertion doctrine, a leg the sweep is not *certain* to
-                // reach anchors exploration when hit and never fails coverage.
-                if injection.block {
-                    assert_reachable!(
-                        "storage: a block fault corrupts a contiguous run of entries"
-                    );
-                }
             }
         }
     }
@@ -1086,17 +1356,6 @@ impl StorageWorld {
             );
         }
         true
-    }
-
-    /// A clean flush re-wrote these accepted records on `node`: their lost-leg
-    /// marks clear (the copy is durably real again). This is recovery doing
-    /// its job, not the world healing anything.
-    fn clear_marks(&mut self, node_key: &str, accepted_slots: impl Iterator<Item = u64>) {
-        if let Some(marks) = self.marks.get_mut(node_key) {
-            for slot in accepted_slots {
-                marks.remove(&slot);
-            }
-        }
     }
 }
 
@@ -1233,8 +1492,8 @@ pub(crate) struct CorpusDiskProbe {
 pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: u64) -> bool {
     let world = storage_world(handle);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.matchmakers.get(ip).is_some_and(|disk| {
-        disk.registry
+    guard.matchmakers.get(ip).is_some_and(|registry| {
+        registry
             .values()
             .any(|registration| registration.config.contains(paros::NodeId(node)))
     })
@@ -1253,39 +1512,34 @@ pub(crate) fn disk_probe_for(
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.disks.get(ip).map(|disk| CorpusDiskProbe {
-        clean_slots: disk
-            .accepted
-            .keys()
-            .filter(|slot| disk.slot_health(**slot).clean())
+        clean_slots: guard
+            .clean_slots(ip)
+            .into_iter()
             .map(|slot| slot.0)
             .collect(),
         floor: disk.first_slot.0,
-        chosen_index: disk.hard_state.chosen_index.map(|slot| slot.0),
+        chosen_index: disk.chosen_index.map(|slot| slot.0),
     })
 }
 
 /// Targeted E1 mask corruption of one accepted record — value lost, identity
 /// preserved (the recoverable class). Deliberately unbudgeted: the world
 /// records the unrecoverable ground truth the analytic mask derivation
-/// cross-checks. Returns whether a clean record was
-/// there to corrupt.
+/// cross-checks. The bytes rot at the node's next boot, before its scan
+/// reads them back (`latent::apply_pending`). Returns whether a clean
+/// record was there to corrupt.
 #[tracing::instrument(level = "debug", skip(handle), fields(ip = %ip, node, slot))]
 pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, slot: u64) -> bool {
     let world = storage_world(handle);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(disk) = guard.disks.get_mut(ip) else {
-        return false;
-    };
-    if !disk.accepted.contains_key(&Slot(slot)) || !disk.slot_health(Slot(slot)).clean() {
+    if !guard.holds_clean(ip, Slot(slot)) {
         return false;
     }
-    disk.entry_health.insert(
-        Slot(slot),
-        SlotHealth {
-            entry: RecordHealth::Faulty,
-            id: WitnessStatus::Present,
-        },
-    );
+    guard
+        .pending_rot
+        .entry(ip.to_string())
+        .or_default()
+        .insert(slot);
     guard.marks.entry(ip.to_string()).or_default().insert(slot);
     guard.note_corruption(CorruptionInjection::dormant(
         node,
@@ -1332,6 +1586,7 @@ pub(crate) fn corruption_stats(
             // ended before rebooting through.
             CorruptionOutcome::Dormant => {
                 let legal = injection.kind == CorruptionKind::TornTail
+                    || !injection.landed
                     || guard.parked_ids.contains(&injection.node);
                 if !legal {
                     accounted = false;

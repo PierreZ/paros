@@ -4,7 +4,8 @@
 //! The node driver itself lives in `paros` (provider-generic, runs in production
 //! *or* simulation). This crate adapts it to a moonpool [`Process`] under
 //! `SimProviders`, drives it with one randomized client workload, perturbs it
-//! through the driver's hooks and a budgeted fake disk, and judges it from two
+//! through the driver's hooks and a budgeted storage-fault world over the
+//! journal stores `parosd` ships (#176), and judges it from two
 //! perspectives only: the client's own history and the audit's fold of every
 //! driver transition.
 //!
@@ -222,9 +223,10 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// delegated to it stalls until the leader runs it colocated, and a proxy
 /// killed at the chaos cutoff stays down for the whole recovery tail.
 /// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
-/// wipes its own storage provider, which paros does not use (the fake disk is
-/// the `StorageWorld`), so the amnesia fault is the world's own coin, drawn at
-/// a restart in `crate::process` (#124) and answered by replacement through
+/// wipes the machine's whole disk at once, every journal's store with it and
+/// outside any budget, so the amnesia fault is the world's own coin — per
+/// journal, budgeted — drawn at a restart in `crate::process` (#124), landed
+/// by deleting the journal's files, and answered by replacement through
 /// reconfiguration, never by a rejoin. The recovery window is
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
@@ -403,12 +405,12 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
         .run_configured()
 }
 
-/// Run the shared `LogStorage` behavioral contract suite against the
-/// simulation's world-backed storage, inside one quiet iteration. `MemStorage`
-/// runs the identical suite as a `paros` unit test; together they keep the fake
-/// and the trait contract from drifting apart. The same iteration runs both
-/// suites against the library's journal stores (`paros::journal`) on the
-/// simulation's own disk.
+/// Run the shared `LogStorage` behavioral contract suite and its matchmaker
+/// twin against the library's journal stores (`paros::journal`) on the
+/// simulation's own disk — the stores every campaign runs on (#176) —
+/// inside one quiet iteration. `MemStorage` runs the identical suites as a
+/// `paros` unit test; together they keep both stores and the trait
+/// contract from drifting apart.
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_storage_contract_suite() -> SimulationReport {

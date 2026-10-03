@@ -1,5 +1,5 @@
 //! The behavioral contract suite every [`LogStorage`] implementation must
-//! pass, shared by the in-memory store and the simulation's world-backed one.
+//! pass, shared by the in-memory store and the journal store.
 
 use std::future::Future;
 
@@ -9,8 +9,8 @@ use super::LogStorage;
 
 /// The behavioral **contract suite** every [`LogStorage`] implementation must
 /// pass (issue #21 item F): one suite, run against both [`MemStorage`] (in this crate)
-/// and the simulation's world-backed storage (in `paros-sim`), so a fake can
-/// never drift from the trait contract. The Stage-6/7 fault-budget logic stays
+/// and [`JournalStorage`](crate::JournalStorage) (here and on the simulated
+/// disk in `paros-sim`), so no store can drift from the trait contract. The Stage-6/7 fault-budget logic stays
 /// *outside* this contract (#70): from the trait's point of view both
 /// implementations behave identically on the clean path this suite drives.
 ///
@@ -20,8 +20,8 @@ use super::LogStorage;
 /// scans its records on the way up: the reads
 /// the suite asserts are the *recovery port's* (the core reads durable state
 /// once, at construction), so every read-back goes through a reopen — an
-/// in-memory implementation may return the same handle, a world-backed one
-/// re-restores from its durable records.
+/// in-memory implementation may return the same handle, a disk-backed one
+/// re-opens and re-scans.
 ///
 /// # Panics
 ///

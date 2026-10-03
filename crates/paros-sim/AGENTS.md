@@ -21,9 +21,9 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
 - `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21 and their read-back.
-- `world/mod.rs` → `StorageWorld`, `storage_world_for` → fake disk, copy budget, parked ids, provisioning ledger, reconfiguration ledger.
-- `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
-- `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
+- `world/mod.rs` → `StorageWorld`, `storage_world_for` → the shadow of every store (`NodeDisk`), fault ledgers, copy budget, parked ids, provisioning ledger, reconfiguration ledger; `resolve_boot` judges the ledger against what a store's scan read back.
+- `world/node_store.rs` → `SimJournal`: `paros::JournalStorage` on `SimStorageProvider` with the write-path sites (write `EIO`, fsync, forced torn tail) at its seam (#176) · `world/matchmaker.rs` → `SimRegistry` on `JournalMatchmakerStorage` (fsync failure only).
+- `world/latent.rs` → the boot-time latent-fault sites (rot, block, identifier lost, lost write, misdirect, promise copies, fs metadata, read `EIO`) · `world/journal_files.rs` → where an entry lives in `moonpool-journal`'s on-disk format, and the damage written there · `world/faults.rs` → `StorageFaults`, `WritePathRates`.
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
 - `audit/client.rs` → `ClientHistory` · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
@@ -56,8 +56,8 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `journals` → `JournalPlan`: 1–3 journals (one on a matchmaker seed), one held for the chaos
   window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
-  id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
-  injected corruption. `system_journals` → the directory and the registry on half the seeds, on `SEED_COUNT`
+  id under another tenant). Every store is `JournalStorage` /
+  `JournalMatchmakerStorage` in `journal_layout()` (#176). `system_journals` → the directory and the registry on half the seeds, on `SEED_COUNT`
   (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
@@ -127,7 +127,7 @@ it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=1
 (`:161`), `CHAOS_DURATION_MS = 4_000` (`:197`); `pub`: `SMOKE_ITERATIONS = 50` (`:165`),
 `COVERAGE_ITERATIONS = 1024` (`:168`), `CORPUS_CI_ITERATIONS = 64` (`:170`),
 `EXPLORATION_TIMELINES_PER_SEED = 8` (`:172`). `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`),
-`SEED_COUNT = 1` (`:574`), `MIN_BOOTSTRAP = 3` (`:753`). `chaos_surfaces()` = `Network(Swarm)` +
+`SEED_COUNT = 1`, `MIN_BOOTSTRAP = 3`; `journal_layout()` is `JournalStoreConfig::small()`. `chaos_surfaces()` = `Network(Swarm)` +
 four per-group attritions + `BuggifyKnobs`; `BitFlip` masked; `prob_wipe = 0`.
 Deps: `paros`, `moonpool-sim` (`exploration`, `Cargo.toml:20`), `moonpool-rpc` (`:29`) — pin
 shared with `paros` and `parosd`.

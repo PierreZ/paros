@@ -3,20 +3,22 @@
 //! under `SimProviders`.
 //!
 //! All the driver logic lives in `paros`; this bridges the sim boundary. Each
-//! role is its own moonpool process group (`crate::roles`): a [`NodeProcess`]
-//! — an **acceptor** — wires the node to a per-node handle on the shared
-//! [`StorageWorld`] (the sim's stand-in for durable disk) and runs the same
-//! `run_node` a production `tokio::main` would; a [`MatchmakerProcess`] runs
-//! `run_matchmaker` over its own slice of the same world; a [`ProxyProcess`]
-//! runs `run_proxy` (#142) with no slice at all — a proxy leader holds
-//! nothing durable, so a kill simply reboots it empty; a [`ReplicaProcess`]
-//! runs `run_replica` (#144) over its own fault-free disk in the same world,
-//! outside the copy budget — a replica is not an acceptor. Every role with a
-//! disk sits inside a recovery loop that turns a `buggify`-injected seam crash into a real
+//! role is its own moonpool process group (`crate::roles`), and every role
+//! with a disk runs the store `parosd` ships on the simulated disk (#176): a
+//! [`NodeProcess`] — an **acceptor** — runs the same `run_journals` a
+//! production `tokio::main` would over one `paros::JournalStorage` per
+//! journal, each behind the harness's fault seam and ledgers in the shared
+//! [`StorageWorld`]; a [`MatchmakerProcess`] runs `run_matchmaker` over
+//! `paros::JournalMatchmakerStorage`; a [`ProxyProcess`] runs `run_proxy`
+//! (#142) with no disk at all — a proxy leader holds nothing durable, so a
+//! kill simply reboots it empty; a [`ReplicaProcess`] runs `run_replica`
+//! (#144) over its own fault-free journal, outside the copy budget — a
+//! replica is not an acceptor. Every role with a disk sits inside a recovery
+//! loop that turns a `buggify`-injected seam crash into a real
 //! crash+restart: the driver unwinds, the volatile core is dropped, and the
-//! next iteration rebuilds it from the durable [`StorageWorld`]. A process kill
-//! — moonpool attrition on the main campaign, the scripted lifecycle on the
-//! corpus — aborts the task outright; the next incarnation restores the same
+//! next iteration reopens its stores from the disk. A process kill —
+//! moonpool attrition on the main campaign, the scripted lifecycle on the
+//! corpus — aborts the task outright; the next incarnation reopens the same
 //! way.
 //!
 //! [`StorageWorld`]: crate::world::StorageWorld
@@ -37,9 +39,10 @@ use crate::hooks::BuggifyHooks;
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
-use crate::world::matchmaker::DurableMatchmakerStorage;
-use crate::world::node_store::{LedgeredJournal, NodeStore};
-use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
+use crate::world::faults::{StorageFaults, WritePathRates};
+use crate::world::journal_files;
+use crate::world::matchmaker::{REGISTRY_DIR, SimRegistry};
+use crate::world::node_store::SimJournal;
 use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
     AcceptorConfig, BootKind, BootRefusal, Config, JournalStorage, JournalStoreConfig,
@@ -380,7 +383,7 @@ async fn run_joiner(
             ip: my_ip,
             rank: id.0,
             faults: &faults,
-            journal_store: None,
+            layout: crate::shape::journal_layout(),
             system: Some(board.clone()),
         };
         match Box::pin(run_journals(
@@ -647,9 +650,9 @@ async fn run_acceptor(
     // default journal alone unless the deployment is plain and the seed drew
     // more — and the one held on every node for the chaos window, if any.
     let plan = crate::shape::journals(ctx.state(), !matchmakers.is_empty(), perturb);
-    // The store (#187): the world-backed store, or — on a plain seed that
-    // drew it — the library's `JournalStorage` on the simulated disk.
-    let journal_store = crate::shape::journal_store(ctx.state(), !matchmakers.is_empty(), perturb);
+    // The store (#176): the library's `JournalStorage` on the simulated
+    // disk, in the run's layout.
+    let layout = crate::shape::journal_layout();
     let board = journal_board(ctx.state());
     board_lock(&board).arm(&plan);
 
@@ -765,10 +768,11 @@ async fn run_acceptor(
             );
         }
         // The disk's wipe coin (#124): a restart that comes back on an empty
-        // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
-        // which paros does not use (the fake disk is the world), so the
-        // amnesia fault is the world's, drawn here at the one place a lost
-        // disk shows — a reboot. What happens next is the **library's**
+        // disk. Moonpool's own `prob_wipe` would wipe the whole machine's
+        // disk, every journal's store and every role's at once, so the
+        // amnesia fault is the world's, budgeted and per journal, drawn here
+        // at the one place a lost disk shows — a reboot — and landed by
+        // deleting the journal's files (#176). What happens next is the **library's**
         // call (#147): the identity boots below as an existing member on an
         // empty store, and `run_node` refuses the amnesiac store. A wiped
         // node is replaced through an acceptor reconfiguration, never
@@ -788,6 +792,9 @@ async fn run_acceptor(
                 .unwrap_or_else(PoisonError::into_inner)
                 .wipe(my_ip, self_rank.0)
         {
+            // The disk goes: every file of the journal's store, its format
+            // marker with them.
+            let _ = journal_files::wipe(ctx.storage(), &journal_dir(seats[0].journal)).await;
             // BUGGIFY pairing: the wipe coin fired within the budget.
             assert_reachable!("storage: a restarted node's disk is wiped and the identity retired");
             tracing::info!(node = self_rank.0, "storage_wiped");
@@ -824,9 +831,7 @@ async fn run_acceptor(
     // exits cleanly: it stays down. A **wiped** identity (#124) is not on
     // that list: it boots, and the library refuses it (#147, below).
     loop {
-        if journal_store.is_some() {
-            resolve_provisioning(ctx, &seats, my_ip, journal_store).await;
-        }
+        resolve_provisioning(ctx, &seats, my_ip, layout).await;
         let provisioned = seats[0]
             .world
             .lock()
@@ -845,7 +850,7 @@ async fn run_acceptor(
             ip: my_ip,
             rank: self_rank.0,
             faults: &faults,
-            journal_store: journal_store.map(|layout| (ctx.storage().clone(), layout)),
+            layout,
             system: system.as_ref().map(|(_, board)| board.clone()),
         };
         // Boxed: the node loop's future is large (every arm's state lives
@@ -1031,9 +1036,9 @@ struct Seat {
     /// numbers its storage world was sized by).
     floor: usize,
     clean_copies: usize,
-    /// A system journal or a journal the directory created (#189): stored on
-    /// a fault-free world-backed disk, outside the copy budget — the storage
-    /// fault model is the genesis journals' business.
+    /// A system journal or a journal the directory created (#189): a
+    /// journal store no fault is injected into, outside the copy budget —
+    /// the storage fault model is the genesis journals' business.
     quiet: bool,
     /// Created at runtime by the directory (#189): opened only when the
     /// directory names it, never at boot.
@@ -1043,6 +1048,28 @@ struct Seat {
 }
 
 impl Seat {
+    /// A replica's one seat (#144), for its provisioning probe: the default
+    /// journal's world, outside the copy budget.
+    fn replica(
+        ctx: &SimContext,
+        world: &Arc<Mutex<StorageWorld>>,
+        checker: &Arc<AuditWorld>,
+        config: &Config,
+    ) -> Self {
+        Self {
+            journal: paros::JournalKey::default(),
+            config: config.clone(),
+            world: world.clone(),
+            checker: checker.clone(),
+            audit: NodeAudit::new(ctx.time().clone(), checker.clone()),
+            floor: 0,
+            clean_copies: 0,
+            quiet: true,
+            created: false,
+            deleted: false,
+        }
+    }
+
     /// A fault-free seat for a system journal or a created one (#189): its
     /// own storage world (unbudgeted, nothing is injected into it) and its
     /// own audit world and port, reporting to the system board too.
@@ -1083,9 +1110,10 @@ impl Seat {
     }
 }
 
-/// The acceptor's journal stores (#188): each journal's world-backed disk,
-/// opened as a process restart finds it (`DurableStorage::restore`), with the
-/// operator's boot claim read off the journal's provisioning ledger (#147).
+/// The acceptor's journal stores (#188): each journal's `JournalStorage` on
+/// the node's simulated disk behind the harness's fault seam (#176), opened
+/// as a process restart finds it, with the operator's boot claim read off
+/// the journal's provisioning ledger (#147).
 /// A journal down for good on this node — retired, or parked by a detected
 /// corruption — is declined, and its audit is told it stays down.
 struct SimStores<'a> {
@@ -1094,21 +1122,20 @@ struct SimStores<'a> {
     ip: &'a str,
     rank: u64,
     faults: &'a StorageFaults<SimTimeProvider>,
-    /// The simulated disk and the journal layout, on a journal-store seed
-    /// (#187).
-    journal_store: Option<(SimStorageProvider, JournalStoreConfig)>,
+    /// The journal layout (#176).
+    layout: JournalStoreConfig,
     /// The system board, on a seed that runs the system journals (#189):
     /// the directory's created journals get seats here at runtime.
     system: Option<Arc<Mutex<crate::audit::system::SystemBoard>>>,
 }
 
 /// The directory a journal's store lives in on a node's simulated disk
-/// (#187, #188: one directory per journal, by its frame, #235).
+/// (#188: one directory per journal, by its frame, #235).
 fn journal_dir(journal: paros::JournalKey) -> String {
     format!("paros/journals/{}/{}", journal.tenant.0, journal.journal.0)
 }
 
-/// Resolve an interrupted provisioning before a boot (#187): a journal
+/// Resolve an interrupted provisioning before a boot (#176): a journal
 /// store's format marker lands only with the sync after the format, and a
 /// process killed in between leaves the operator's ledger saying "begun"
 /// and nothing else. The operator does what an operator would: looks at the
@@ -1119,11 +1146,8 @@ async fn resolve_provisioning(
     ctx: &SimContext,
     seats: &[Seat],
     ip: &str,
-    journal_store: Option<JournalStoreConfig>,
+    layout: JournalStoreConfig,
 ) {
-    let Some(layout) = journal_store else {
-        return;
-    };
     for seat in seats {
         let ambiguous = seat
             .world
@@ -1151,6 +1175,34 @@ async fn resolve_provisioning(
     }
 }
 
+/// [`resolve_provisioning`] for a matchmaker's registry (#176): its format
+/// marker lands with the sync after the format too.
+#[tracing::instrument(level = "debug", skip_all, fields(ip = %ip))]
+async fn resolve_registry_provisioning(ctx: &SimContext, world: &Mutex<StorageWorld>, ip: &str) {
+    use paros::{JournalMatchmakerStorage, MatchmakerStorage};
+    let ambiguous = world
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .provisioning_ambiguous(ip);
+    if !ambiguous {
+        return;
+    }
+    let mut probe = JournalMatchmakerStorage::new(
+        ctx.storage().clone(),
+        REGISTRY_DIR,
+        crate::shape::journal_layout(),
+    );
+    let formatted = probe.boot_scan().await.is_ok() && probe.formatted_config().is_some();
+    drop(probe);
+    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
+    if formatted {
+        guard.note_provisioned(ip);
+    } else {
+        guard.abandon_provisioning(ip);
+    }
+    assert_reachable!("journal store: an interrupted provisioning is resolved from the disk");
+}
+
 impl SimStores<'_> {
     fn seat(&self, journal: paros::JournalKey) -> Option<&Seat> {
         self.seats.iter().find(|seat| seat.journal == journal)
@@ -1158,7 +1210,7 @@ impl SimStores<'_> {
 }
 
 impl JournalStores for SimStores<'_> {
-    type Store = NodeStore;
+    type Store = SimJournal;
     type Audit = NodeAudit<SimTimeProvider>;
 
     fn journals(&self) -> Vec<paros::JournalKey> {
@@ -1197,39 +1249,25 @@ impl JournalStores for SimStores<'_> {
             }
             Some(ParkReason::Wiped) | None => {}
         }
-        if seat.quiet {
-            // A system or created journal (#189): the world store, and no
-            // fault is ever injected into it.
-            let storage = DurableStorage::restore(
-                seat.config.clone(),
-                Arc::downgrade(&seat.world),
-                self.ip.to_string(),
-                self.rank,
-                quiet_faults(self.ctx),
-                seat.checker.clone(),
-            );
-            return Some((NodeStore::World(storage), boot));
-        }
-        if let Some((provider, layout)) = &self.journal_store {
-            let journal = JournalStorage::new(
-                provider.clone(),
-                journal_dir(journal),
-                seat.config.clone(),
-                *layout,
-            );
-            let store =
-                LedgeredJournal::new(journal, Arc::downgrade(&seat.world), self.ip.to_string());
-            return Some((NodeStore::Journal(store), boot));
-        }
-        let storage = DurableStorage::restore(
+        // A system or created journal (#189) is a quiet seat: no fault is
+        // ever injected into it.
+        let quiet = quiet_faults(self.ctx);
+        let store = SimJournal::new(
+            self.ctx.storage().clone(),
+            journal_dir(journal),
             seat.config.clone(),
+            self.layout,
             Arc::downgrade(&seat.world),
             self.ip.to_string(),
             self.rank,
-            self.faults.clone(),
+            if seat.quiet {
+                quiet
+            } else {
+                self.faults.clone()
+            },
             seat.checker.clone(),
         );
-        Some((NodeStore::World(storage), boot))
+        Some((store, boot))
     }
 
     fn audit(&self, journal: paros::JournalKey) -> Self::Audit {
@@ -1465,7 +1503,9 @@ async fn run_matchmaker_role(
         // matchmaker boots below as an existing member on an empty store, and
         // `run_matchmaker` refuses the amnesiac registry. There is no
         // in-place repair — the surviving quorum reconstructs a successor
-        // set without it. BUGGIFY pairing: the coin fired within the budget.
+        // set without it. The disk goes: every file of the registry's store.
+        let _ = journal_files::wipe(ctx.storage(), REGISTRY_DIR).await;
+        // BUGGIFY pairing: the coin fired within the budget.
         assert_reachable!("matchmaker: a restarted matchmaker's registry is lost for good");
         tracing::info!(matchmaker = id.0, "matchmaker_wiped");
     }
@@ -1482,6 +1522,7 @@ async fn run_matchmaker_role(
             && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
     );
     loop {
+        resolve_registry_provisioning(ctx, &world, my_ip).await;
         // The operator's claim is the provisioning ledger (#183), kept
         // outside the disks: a wipe erases the marker, never the memory of
         // having provisioned the matchmaker.
@@ -1501,7 +1542,9 @@ async fn run_matchmaker_role(
             assert_reachable!("operator: a matchmaker restarts under an edited configuration");
             tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
         }
-        let storage = DurableMatchmakerStorage::restore(
+        let storage = SimRegistry::new(
+            ctx.storage().clone(),
+            crate::shape::journal_layout(),
             Arc::downgrade(&world),
             my_ip.to_string(),
             registry_faults.clone(),
@@ -1709,13 +1752,16 @@ async fn run_replica_role(
         let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
         guard.note_replica(my_ip);
     }
-    let faults = StorageFaults::new(
-        ctx.time().clone(),
-        Duration::ZERO,
-        false,
-        WritePathRates::default(),
-    );
+    let faults = quiet_faults(ctx);
+    let dir = journal_dir(paros::JournalKey::default());
     loop {
+        resolve_provisioning(
+            ctx,
+            std::slice::from_ref(&Seat::replica(ctx, &world, &checker, &config)),
+            my_ip,
+            crate::shape::journal_layout(),
+        )
+        .await;
         let boot = if world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1725,8 +1771,11 @@ async fn run_replica_role(
         } else {
             BootKind::FirstBoot
         };
-        let storage = DurableStorage::restore(
+        let storage = SimJournal::new(
+            ctx.storage().clone(),
+            dir.clone(),
             config.clone(),
+            crate::shape::journal_layout(),
             Arc::downgrade(&world),
             my_ip.to_string(),
             id.0,
@@ -1752,18 +1801,23 @@ async fn run_replica_role(
                     "a seam-crashed replica restarts after a buggified delay"
                 );
             }
-            // A fault-free disk never fails a write; one showing up is a
-            // harness bug, recorded and refused.
+            // The world injects nothing into a replica's disk: what fails
+            // is the simulated disk's own I/O (an operation a shutdown cut),
+            // never a corruption — and the replica restarts on it like a
+            // node.
             Err(RunError::Storage(e)) => {
                 assert_always!(
-                    false,
-                    "replica: a fault-free replica disk never fails",
+                    matches!(
+                        e,
+                        paros::StorageError::Io { .. } | paros::StorageError::FsyncFailed { .. }
+                    ),
+                    "replica: a replica's disk fails only with an I/O fault",
                     { "replica" => id.0, "error" => e.to_string() }
                 );
-                return Err(SimulationError::InvalidState(format!(
-                    "replica {} storage fault: {e}",
-                    id.0
-                )));
+                restart_delay!(
+                    ctx,
+                    "a seam-crashed replica restarts after a buggified delay"
+                );
             }
             // The world never wipes a replica and the provisioning ledger
             // records its format, so its claim always matches its disk.
@@ -1852,11 +1906,12 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
 }
 
 /// The **contract-suite workload** (issue #21 item F): runs the shared
-/// [`paros::storage_contract_suite`] against the world-backed [`DurableStorage`]
-/// inside one quiet simulation iteration, so the sim's storage fake can never
-/// drift from the trait contract [`paros::MemStorage`] pins. Faults are off —
-/// the suite drives the clean path both implementations must share; the budget
-/// logic stays outside the contract (#70).
+/// [`paros::storage_contract_suite`] and its matchmaker twin against the
+/// stores the campaign runs on — the library's journal stores over this
+/// simulation's own disk (#176) — inside one quiet simulation iteration, so
+/// the store under the protocol can never drift from the trait contract
+/// [`paros::MemStorage`] pins. Faults are off: the suite drives the clean
+/// path every implementation must share.
 pub(crate) struct ContractSuiteWorkload;
 
 #[async_trait]
@@ -1867,79 +1922,6 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let world = storage_world(ctx.state());
-        {
-            let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.set_budget(1, 1);
-            guard.set_pool_size(1);
-        }
-        let faults = StorageFaults::new(
-            ctx.time().clone(),
-            Duration::ZERO,
-            false,
-            WritePathRates::default(),
-        );
-        let config = Config {
-            id: NodeId(0),
-            peers: vec![NodeId(0)],
-            ..Config::default()
-        };
-        let mut instance = 0_u64;
-        // No client, no protocol: each fresh store is its own one-node
-        // "cluster" with a private checker that still runs every
-        // per-transition storage check.
-        let fresh = || {
-            instance += 1;
-            std::future::ready(DurableStorage::restore(
-                config.clone(),
-                Arc::downgrade(&world),
-                format!("10.9.9.{instance}"),
-                100 + instance,
-                faults.clone(),
-                Arc::new(AuditWorld::client_free()),
-            ))
-        };
-        // A reopen is a clean reboot of the same store: drop the handle and
-        // re-restore from the world's durable records under the same key, and
-        // under the same checker (the boot replay re-walks its applied prefix).
-        let reopen = |old: DurableStorage<_>| {
-            let (key, node_id, checker) = (old.key.clone(), old.node_id, old.checker.clone());
-            drop(old);
-            std::future::ready(DurableStorage::restore(
-                config.clone(),
-                Arc::downgrade(&world),
-                key,
-                node_id,
-                faults.clone(),
-                checker,
-            ))
-        };
-        Box::pin(paros::storage_contract_suite(fresh, reopen)).await;
-        // The matchmaker registry's contract, against its world-backed store.
-        let mut registry_instance = 0_u64;
-        let fresh_registry = || {
-            registry_instance += 1;
-            std::future::ready(DurableMatchmakerStorage::restore(
-                Arc::downgrade(&world),
-                format!("10.9.8.{registry_instance}"),
-                faults.clone(),
-                0,
-            ))
-        };
-        let reopen_registry = |old: DurableMatchmakerStorage<_>| {
-            let key = old.key().to_string();
-            drop(old);
-            std::future::ready(DurableMatchmakerStorage::restore(
-                Arc::downgrade(&world),
-                key,
-                faults.clone(),
-                0,
-            ))
-        };
-        paros::matchmaker_storage_contract_suite(fresh_registry, reopen_registry).await;
-        // The durable stores the library ships (`paros::journal`), over this
-        // simulation's own disk: the same two suites, reopened through a
-        // real journal open and boot scan.
         Box::pin(journal_contract_suites(ctx.storage().clone())).await;
         // The crash half the shared suite cannot express (an in-memory store
         // has no un-synced stage): a registration or a watermark raise that
@@ -1948,7 +1930,8 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
         // the driver's persist-before-reply ordering.
         {
             use paros::{
-                AcceptorConfig, Ballot, MatchmakerStorage, NodeId, Registration, RegistryStorage,
+                AcceptorConfig, Ballot, JournalMatchmakerStorage, MatchmakerStorage, NodeId,
+                Registration, RegistryStorage,
             };
             let config = Registration::belief(AcceptorConfig::new(
                 vec![NodeId(0)],
@@ -1958,13 +1941,10 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 round,
                 node: NodeId(1),
             };
-            let key = "10.9.7.1".to_string();
-            let mut store = DurableMatchmakerStorage::restore(
-                Arc::downgrade(&world),
-                key.clone(),
-                faults.clone(),
-                0,
-            );
+            let dir = "journal-contract/mm-crash";
+            let layout = crate::shape::journal_layout();
+            let mut store = JournalMatchmakerStorage::new(ctx.storage().clone(), dir, layout);
+            store.boot_scan().await.expect("a clean registry boots");
             store
                 .register(ballot(1), &config)
                 .await
@@ -1979,8 +1959,11 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 .await
                 .expect("raise (never synced)");
             drop(store);
-            let rebooted =
-                DurableMatchmakerStorage::restore(Arc::downgrade(&world), key, faults.clone(), 0);
+            let mut rebooted = JournalMatchmakerStorage::new(ctx.storage().clone(), dir, layout);
+            rebooted
+                .boot_scan()
+                .await
+                .expect("a clean registry reboots");
             assert_always!(
                 rebooted.registered_ballots() == vec![ballot(1)]
                     && rebooted.registration(ballot(2)).is_none(),

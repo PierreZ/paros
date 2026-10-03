@@ -84,6 +84,12 @@ pub struct JournalBootFacts {
     pub ambiguous_kept: usize,
     /// A torn tail (never acknowledged) was discarded.
     pub torn_tail: bool,
+    /// Damaged entries before the last batch whose identifier survived:
+    /// durable records rot explains, never a crash.
+    pub corrupt: usize,
+    /// One copy of the metadata (the promise and the format marker) was
+    /// damaged or behind, and was rewritten from its twin.
+    pub meta_repaired: bool,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
@@ -132,6 +138,15 @@ impl<P: StorageProvider> JournalStorage<P> {
         &self.dir
     }
 
+    /// The journal's live indexes, `start..next`, once the boot scan has
+    /// opened it (observation only, like [`boot_facts`](Self::boot_facts)).
+    #[must_use]
+    pub fn log_range(&self) -> Option<std::ops::Range<u64>> {
+        self.journal
+            .as_ref()
+            .map(|journal| journal.start_index()..journal.next_index())
+    }
+
     /// Stage one write: fold it into the image now, append it at the next
     /// sync.
     fn stage(&mut self, record: NodeRecord) {
@@ -160,6 +175,8 @@ impl<P: StorageProvider> JournalStorage<P> {
             checkpoint_truncated: journal.start_index() != GENESIS,
             ambiguous_kept: recovery.ambiguous_batch.len(),
             torn_tail: recovery.torn_tail,
+            corrupt: recovery.corrupt.len(),
+            meta_repaired: recovery.meta_repaired,
         };
         self.meta = match journal.meta() {
             None => NodeMeta::default(),

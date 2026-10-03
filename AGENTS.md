@@ -229,7 +229,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are
-  `paros::journal` on `moonpool-journal`: a log of write operations folded at boot.
+  `paros::journal` on `moonpool-journal`: a log of write operations folded at boot. The
+  simulation runs the same stores on its simulated disk (#176); its storage faults land on
+  their bytes at the seam (`paros_sim::world`), never inside them.
 - **Boot safety is the library's job.** Every store carries a format marker; `run_node` /
   `run_matchmaker` take the operator's `BootKind` as data and refuse `Amnesia` (an existing member
   with no marker), `AlreadyFormatted` and `ConfigMismatch` (the marker records the `Config`; the
