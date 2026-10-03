@@ -53,7 +53,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `config_floor` → `MIN_BOOTSTRAP` on a matchmaker seed, the whole pool otherwise.
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
-- `journals` → `JournalPlan`: 1–3 journals (one on a matchmaker seed), one held for the chaos
+- `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
   window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no

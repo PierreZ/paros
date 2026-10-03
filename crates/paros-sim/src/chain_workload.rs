@@ -1033,7 +1033,13 @@ impl Workload for ChainWorkload {
         let has_matchmakers = !crate::roles::deployment(ctx.topology())
             .matchmakers()
             .is_empty();
-        let plan = crate::shape::journals(ctx.state(), has_matchmakers, true);
+        let plan = crate::shape::journals(ctx.state(), true);
+        if has_matchmakers && plan.ids.len() > 1 {
+            // #201: several journals beside the matchmaker plane, the
+            // composition PR #199 had withheld (a cause; the outcomes are
+            // the journal board's gates).
+            assert_reachable!("journal: a matchmaker seed runs more than one journal");
+        }
         self.client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         self.journal = plan.for_client(ctx.client_id());
         self.plan = Some(plan);
@@ -1348,12 +1354,6 @@ impl Workload for ChainWorkload {
             let op = if journal != JournalKey::default()
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
-                PAUSE
-            } else if has_matchmakers && op == CREATE_JOURNAL {
-                // A created journal is one more journal's beats on every
-                // link of its members: a matchmaker seed runs none (its
-                // two-round-trip campaigns livelocked once under extra load,
-                // `crate::shape::journals`).
                 PAUSE
             } else if reader
                 && matches!(
