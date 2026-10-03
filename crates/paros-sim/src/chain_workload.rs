@@ -128,7 +128,15 @@ const RETIRE_NODE: u8 = 21;
 /// Claim the journal (#204): read where it stands and `SetLeader` against
 /// its generation — the compare-and-swap that fences every other owner.
 const SET_LEADER: u8 = 22;
-const OP_COUNT: u8 = 23;
+/// Checkpoint the **node registry** (#230) with the library's
+/// `Checkpointer`: claim it, fold it to the tail (restarting from the
+/// checkpoint at its floor), and — when the policy finds one due — write a
+/// checkpoint and truncate to it.
+const CHECKPOINT: u8 = 23;
+/// Book a slot of a registered joiner in the **node registry**, or release
+/// one (#211): what the cell coordinator writes.
+const BOOK_CAPACITY: u8 = 24;
+const OP_COUNT: u8 = 25;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -302,6 +310,8 @@ struct ChainConfig {
     checkpoint_factor: u32,
     /// ... or once this long has passed since it opened
     /// (`ClientTunables::checkpoint_interval`). Floor 0: due after any entry.
+    /// The `CHECKPOINT` step opens a fresh owner each time, so this leg fires
+    /// only near the floor; the factor carries the rest of the range.
     checkpoint_interval_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
@@ -365,7 +375,7 @@ impl ChainConfig {
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
-            // RETIRE_NODE, SET_LEADER
+            // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -411,6 +421,12 @@ impl ChainConfig {
                 // ceiling is a client that spends its run fighting for the
                 // journal, still a valid (slow) writer.
                 buggify_knob!(5_u64, 0_u64..21_u64),
+                // A checkpoint claims the registry, folds it and may write
+                // and truncate; the ceiling is an owner that checkpoints
+                // more often than anyone registers.
+                buggify_knob!(4_u64, 0_u64..21_u64),
+                // A booking is one append and one read-back.
+                buggify_knob!(4_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -1231,6 +1247,7 @@ impl Workload for ChainWorkload {
                 .as_ref()
                 .map(|plan| plan.ids.clone())
                 .unwrap_or_default(),
+            &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             client_id,
             request_timeout,
         );
@@ -2712,6 +2729,17 @@ impl Workload for ChainWorkload {
                         )
                         .await;
                 }
+                CHECKPOINT => {
+                    system_ops
+                        .checkpoint(
+                            ctx,
+                            &nodes,
+                            config.tunables().checkpoint_policy(),
+                            raw_payload,
+                        )
+                        .await;
+                }
+                BOOK_CAPACITY => system_ops.book(ctx, &nodes, raw_payload).await,
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }

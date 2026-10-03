@@ -508,7 +508,19 @@ struct Registry {
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
+    /// Run-level: each joiner's class and capacity (see
+    /// [`joiner_machines`]), fixed by the first caller.
+    machines: Option<Vec<JoinerMachine>>,
     nodes: BTreeMap<String, Entry>,
+}
+
+/// What a joiner registers as (#211): its class and its capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct JoinerMachine {
+    /// Its class.
+    pub(crate) class: paros::system::Class,
+    /// The role slots of its class it advertises.
+    pub(crate) capacity: u64,
 }
 
 /// The run's journals (#188): the static list every node serves, in id
@@ -614,6 +626,37 @@ pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
         assert_reachable!("system: a seed runs the system journals");
         true
     })
+}
+
+/// The run's joiners' machines (#211), drawn once per seed by whoever asks
+/// first, for `count` joiners in rank order. The role map's class draw: the
+/// first joiner is a `storage` machine — a spare a reconfiguration may name
+/// (the system board's joiner gates need one) — and every other one is
+/// `storage` or `stateless` on a coin. The capacity is one `buggify_knob!`
+/// for the run (default 2, extreme 1..=4; floor 1: a machine with no slot is
+/// one the cell coordinator can never book, a registration that means
+/// nothing).
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMachine> {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .machines
+        .get_or_insert_with(|| {
+            let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
+            (0..count)
+                .map(|rank| {
+                    let class = if rank > 0 && moonpool_sim::sim_random_bool(0.5) {
+                        assert_reachable!("registry: a joiner is a stateless machine");
+                        paros::system::Class::Stateless
+                    } else {
+                        paros::system::Class::Storage
+                    };
+                    JoinerMachine { class, capacity }
+                })
+                .collect()
+        })
+        .clone()
 }
 
 /// The run's store draw (see [`journal_store`]).

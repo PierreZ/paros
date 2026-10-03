@@ -1350,15 +1350,29 @@ fn system_plan(
         .collect();
     let board = crate::audit::system::system_board(ctx.state());
     let spares = spare_template(ctx, deployment);
+    let machines = crate::shape::joiner_machines(ctx.state(), deployment.joiners().len());
     crate::audit::system::lock(&board).arm(
         plan.ids.iter().copied(),
         members.iter().map(|(id, _)| id.0),
         !deployment.joiners().is_empty(),
         spares.is_some() && !deployment.joiners().is_empty(),
+        machines.iter().enumerate().map(|(rank, machine)| {
+            (
+                crate::roles::joiner_node_id(rank).0,
+                (machine.class, machine.capacity),
+            )
+        }),
     );
+    // A joiner's class is its machine's (#211); a genesis node is storage.
+    let class = machines
+        .iter()
+        .enumerate()
+        .find(|(rank, _)| crate::roles::joiner_node_id(*rank) == self_id)
+        .map_or(paros::system::Class::Storage, |(_, machine)| machine.class);
     (
         SystemPlan {
             self_id,
+            class,
             seeds: members
                 .iter()
                 .filter(|(id, _)| seeds.contains(id))
