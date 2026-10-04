@@ -38,6 +38,14 @@ cells and a separate router are M12 (section 3.7). The test for every design unt
 a second cell adds an entry to the fleet directory and a routing choice, never a protocol or
 data-model change.
 
+**Every tenant can be transferred** (decided on 2026-10-04): the design must be able to move any
+tenant to another cell, the fleet tenant and its fleet coordinator included, with no protocol or
+data-model change and without stopping the tenants that do not move. Nothing may assume a tenant
+stays in the cell it was born in. `pinned` (section 3.7) is a policy a creator records, refused
+when a move is asked, never a limit of the mechanism; the one tenant that never moves is a cell's
+own cell tenant, because it is that cell. The moves themselves are M12; M9 carries what they need
+(section 3.7).
+
 Compaction and snapshots are the user's business: paros owns the log, never the state.
 `paros-core` never compacts, snapshots or verifies anything. The control plane is a tenant and
 obeys the same rule: it compacts its own control journals the way any user would, using only
