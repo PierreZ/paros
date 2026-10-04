@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
-use moonpool_rpc::ServiceClient;
+use moonpool_rpc::{RpcHandle, ServiceClient};
 use paros_core::{Audience, JournalKey, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
@@ -19,17 +19,10 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::Audit;
 use crate::hooks::DriverHooks;
 use crate::rpc::methods::DeliverRpc;
-use crate::rpc::{internal, message_to_proto};
+use crate::rpc::{internal, message_to_proto, well_known};
 
 use super::config::{DELIVERY_BATCH, DELIVERY_BATCH_BYTES, DriverTunables};
 use super::events::{command_hash, message_kind, message_route, proto_message_kind};
-
-/// One peer's outbound mailbox. Since #186 nothing bulky travels between
-/// peers (a laggard below the trim point gets a `TrimmedTo`, never bytes),
-/// so the snapshot lane is gone and one lane carries every class.
-pub(crate) struct PeerQueues {
-    pub(crate) regular: PeerMailbox,
-}
 
 /// One peer's bounded, lossy, **keep-newest** outbound mailbox (the etcd
 /// stream-mailbox shape). The consensus driver never waits for network I/O:
@@ -245,11 +238,13 @@ impl PeerMailbox {
 /// [`run_proxy`](crate::run_proxy), which sends through exactly this handle.
 /// Bundled so `drain_ready` takes one handle.
 pub(crate) struct Outbound {
-    /// Every peer's lanes, by node. Behind a lock only so a lane can be added
-    /// while the loop holds the handle shared (#189: a node the registry
-    /// admits at runtime); the loop is the only writer and never holds it
-    /// across an await.
-    peer_queues: Mutex<BTreeMap<NodeId, PeerQueues>>,
+    /// Every peer's lane, by node: one lane carries every class, since
+    /// nothing bulky travels between peers (#186: a laggard below the trim
+    /// point gets a `TrimmedTo`, never bytes). Behind a lock only so a lane
+    /// can be added while the loop holds the handle shared (#189: a node the
+    /// registry admits at runtime); the loop is the only writer and never
+    /// holds it across an await.
+    peer_queues: Mutex<BTreeMap<NodeId, PeerMailbox>>,
     /// The proxy leaders' mailboxes: a node delegates through them.
     pub(crate) proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
     /// The deployment's replicas (#144): learners that are not in the node
@@ -266,7 +261,7 @@ pub(crate) struct Outbound {
 impl Outbound {
     /// A handle over `peer_queues`, sending as `sender`.
     pub(crate) fn new(
-        peer_queues: BTreeMap<NodeId, PeerQueues>,
+        peer_queues: BTreeMap<NodeId, PeerMailbox>,
         proxy_queues: BTreeMap<ProxyId, PeerMailbox>,
         learners: Vec<NodeId>,
         sender: Party,
@@ -286,11 +281,11 @@ impl Outbound {
 
     /// Add a lane to `node` (#189: a node the registry admitted at runtime).
     /// A node already reachable keeps its lane.
-    pub(crate) fn add_peer(&self, node: NodeId, queues: PeerQueues) {
-        self.peers().entry(node).or_insert(queues);
+    pub(crate) fn add_peer(&self, node: NodeId, lane: PeerMailbox) {
+        self.peers().entry(node).or_insert(lane);
     }
 
-    fn peers(&self) -> std::sync::MutexGuard<'_, BTreeMap<NodeId, PeerQueues>> {
+    fn peers(&self) -> std::sync::MutexGuard<'_, BTreeMap<NodeId, PeerMailbox>> {
         self.peer_queues
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -345,7 +340,7 @@ impl Outbound {
     /// names `to` at all.
     fn mailbox_for(&self, to: Party) -> Option<PeerMailbox> {
         match to {
-            Party::Node(node) => self.peers().get(&node).map(|queues| queues.regular.clone()),
+            Party::Node(node) => self.peers().get(&node).cloned(),
             Party::Proxy(proxy) => self.proxy_queues.get(&proxy).cloned(),
         }
     }
@@ -491,18 +486,19 @@ pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
 }
 
 impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A> {
-    /// Open one outbound lane toward `to`: a bounded keep-newest mailbox of
-    /// `capacity`, drained by a detached delivery task (named `task`) over
-    /// `client`'s reconnecting channel until the incarnation's shutdown
-    /// fires.
+    /// Open one outbound lane toward `to` at `addr`: a bounded keep-newest
+    /// mailbox of the tunables' `peer_queue_capacity`, drained by a detached
+    /// delivery task (named `task`) over a reconnecting channel on `rpc`
+    /// until the incarnation's shutdown fires.
     pub(crate) fn open(
         &self,
+        rpc: &RpcHandle<P>,
         task: &'static str,
-        client: ServiceClient<P, DeliverRpc>,
+        addr: SocketAddr,
         to: Party,
-        capacity: usize,
     ) -> PeerMailbox {
-        let mailbox = PeerMailbox::new(capacity);
+        let client: ServiceClient<P, DeliverRpc> = well_known(rpc, addr);
+        let mailbox = PeerMailbox::new(self.tunables.peer_queue_capacity);
         self.providers
             .task()
             .spawn_task(
@@ -520,6 +516,22 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
             )
             .detach();
         mailbox
+    }
+
+    /// Open one lane per `(id, address)` of `peers` ([`LaneOpener::open`]),
+    /// each addressed as `party(id)` — the per-peer lanes a driver builds at
+    /// boot. An address that does not parse fails the whole set.
+    pub(crate) fn open_all<I: Copy + Ord>(
+        &self,
+        rpc: &RpcHandle<P>,
+        task: &'static str,
+        peers: impl IntoIterator<Item = (I, String)>,
+        party: impl Fn(I) -> Party,
+    ) -> SimulationResult<BTreeMap<I, PeerMailbox>> {
+        peers
+            .into_iter()
+            .map(|(id, addr)| Ok((id, self.open(rpc, task, peer_address(&addr)?, party(id)))))
+            .collect()
     }
 }
 

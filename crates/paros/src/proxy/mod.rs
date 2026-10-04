@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_core::{Providers, SimulationResult, TimeProvider};
+use moonpool_core::{Providers, TimeProvider};
 use paros_core::{
     AcceptorConfig, Audience, Ballot, JournalKey, Message, NodeId, Party, ProxyId, ProxyLeader,
     Slot,
@@ -41,10 +41,10 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::{Audit, DelegationOutcome};
 use crate::driver::edge::{RpcEdge, edge_reporter};
 use crate::driver::events::{command_hash, message_kind, message_route};
-use crate::driver::transport::{LaneOpener, Outbound, PeerQueues, peer_address, send_messages};
+use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{DriverTunables, RunError};
 use crate::hooks::DriverHooks;
-use crate::rpc::{serve_deliveries, well_known};
+use crate::rpc::serve_deliveries;
 
 /// A proxy leader's deployment data: its identity in the proxy namespace and
 /// the bootstrap acceptor configuration it fans out to until a delegation
@@ -327,20 +327,12 @@ where
         audit,
         from: me,
     };
-    let peer_queues = members
-        .into_iter()
-        .chain(replicas)
-        .map(|(node, addr)| {
-            let client = well_known(edge.handle(), peer_address(&addr)?);
-            let regular = lanes.open(
-                "paros-proxy-fanout",
-                client,
-                Party::Node(node),
-                tunables.peer_queue_capacity,
-            );
-            Ok((node, PeerQueues { regular }))
-        })
-        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    let peer_queues = lanes.open_all(
+        edge.handle(),
+        "paros-proxy-fanout",
+        members.into_iter().chain(replicas),
+        Party::Node,
+    )?;
     let out = Outbound::new(peer_queues, BTreeMap::new(), learners, me);
 
     let time = providers.time().clone();
