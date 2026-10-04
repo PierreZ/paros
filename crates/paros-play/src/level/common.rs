@@ -6,8 +6,9 @@ use paros_core::{Command, Config, NodeId, QuorumSystem};
 
 use crate::action::Action;
 use crate::auto::AutomationFlag;
-use crate::level::WorldKind;
+use crate::level::{GoalStatus, WorldKind};
 use crate::view::{MessageView, show_command};
+use crate::world::decree::DecreeWorld;
 use crate::world::{Disk, World};
 
 /// The client every log-world level gives the player.
@@ -27,31 +28,27 @@ pub(super) const REPLIES_AND_BEATS: &[AutomationFlag] = &[
     AutomationFlag::DeliverHeartbeats,
 ];
 
-/// `all` without `taught`, in `all`'s order: every role answered for the
-/// player but the ones a level teaches. `M` is the length that leaves, so a
-/// `taught` flag missing from `all` is a compile error, not a silent no-op.
-pub(super) const fn all_but<const M: usize>(
-    all: &[AutomationFlag],
-    taught: &[AutomationFlag],
-) -> [AutomationFlag; M] {
-    let mut out = [AutomationFlag::AcceptorReplies; M];
-    let mut kept = 0;
-    let mut i = 0;
-    while i < all.len() {
-        let mut j = 0;
-        let mut dropped = false;
-        while j < taught.len() {
-            dropped |= all[i] as u8 == taught[j] as u8;
-            j += 1;
-        }
-        if !dropped {
-            out[kept] = all[i];
-            kept += 1;
-        }
-        i += 1;
-    }
-    assert!(kept == M, "every taught flag is one of the roles");
-    out
+// ---- goals ------------------------------------------------------------------
+
+/// Judge a log-world level's `goal` over its world. A level's own `setup`
+/// builds the world its goal reads, so the other arm only answers a caller
+/// that handed the goal the wrong world.
+pub(super) fn on_log(world: &WorldKind, goal: impl FnOnce(&World) -> GoalStatus) -> GoalStatus {
+    world.log().map_or_else(
+        || GoalStatus::Open("This level runs in the replicated-log world.".to_string()),
+        goal,
+    )
+}
+
+/// [`on_log`]'s twin for a single-decree level.
+pub(super) fn on_decree(
+    world: &WorldKind,
+    goal: impl FnOnce(&DecreeWorld) -> GoalStatus,
+) -> GoalStatus {
+    world.decree().map_or_else(
+        || GoalStatus::Open("This level runs in the single-decree world.".to_string()),
+        goal,
+    )
 }
 
 // ---- worlds -----------------------------------------------------------------
