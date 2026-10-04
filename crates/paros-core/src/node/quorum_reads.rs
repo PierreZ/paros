@@ -143,20 +143,13 @@ impl ColocatedNode {
         watermark: Option<Slot>,
         config_since: Option<Ballot>,
     ) {
-        // Wire hygiene, then the row guard: the tally counts only the
-        // addressees of the read's row, over the configuration the read was
-        // opened against (a stray answer from outside it is never folded —
-        // the mirror of `on_accepted`'s column guard).
+        // Wire hygiene; the row guard is the tally's own (`QuorumReads::fold`
+        // ignores an answer from outside the read's row, the mirror of
+        // `on_accepted`'s column guard).
         if !self.in_pool(from) {
             return;
         }
         self.fill_to_watermark(watermark);
-        let Some(read) = self.quorum_reads.get(ctx) else {
-            return;
-        };
-        if !read.config().is_phase1_addressee(from, read.row()) {
-            return;
-        }
         match self.quorum_reads.fold(ctx, from, watermark, config_since) {
             PreReadFold::Ignored | PreReadFold::Superseded => {}
             PreReadFold::Counted => self.serve_quorum_reads(),
