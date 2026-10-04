@@ -39,20 +39,21 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/outcome.rs` → `WriteOutcome`, `ReadOutcome`, … → every reply judged once.
 - `client/writer.rs` → `Writer` (`truncate` carries the owner's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
+- `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
 - `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `TOY_JOURNAL` → `parosctl init`'s calls and server ids learned from `Inspect.node` (#196).
-- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (`DIRECTORY`, `REGISTRY`: two tenants' control journals, #235); a create carries its drawn id.
+- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (`DIRECTORY`, `REGISTRY`: two tenants' control journals, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230).
 - `corruption.rs` → `classify_log` → CTRL record classification.
 - `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.
 - `journal/{frame,plan,node_image}.rs` → record ↔ entry codec, boot fold start, node records + per-kind corruption table.
 - `journal/tests.rs` → both contract suites, targeted damage, crash loop under two fault models on `SimStorageProvider`.
-- `proto/{common,paros,internal,matchmaker,system,machine}.proto` → compiled by `build.rs` with `prost-build`.
+- `proto/{common,paros,internal,matchmaker,system,machine,checkpoint}.proto` → compiled by `build.rs` with `prost-build`.
 
 ## Public surface
 
 `run_node`, `run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`; `provision_store`,
 `provision_matchmaker_store`; `paros::client`;
-`paros::system`; `paros::journal`; `paros::machine`; `paros::wire::{methods, common, public,
-internal, matchmaker, system, machine}`; the RPC request/ack types (`lib.rs`).
+`paros::system`; `paros::journal`; `paros::machine`; `paros::wire::{methods, checkpoint, common,
+public, internal, matchmaker, system, machine}`; the RPC request/ack types (`lib.rs`).
 
 ## Local rules
 

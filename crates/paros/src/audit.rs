@@ -202,6 +202,19 @@ pub trait Audit {
     ) {
     }
 
+    /// This node folded a checkpoint record (#230) at position `seq` of
+    /// system journal `journal`: `verified` is `Some(equal)` when its fold
+    /// already held every position below and compared its own state with
+    /// the checkpoint's, `None` when it restored from it.
+    fn checkpoint_folded(
+        &self,
+        node: NodeId,
+        journal: JournalKey,
+        seq: u64,
+        verified: Option<bool>,
+    ) {
+    }
+
     /// This node started serving `journal`, a journal the directory created
     /// naming it (#189).
     fn journal_started(&self, node: NodeId, journal: JournalKey) {}

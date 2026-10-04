@@ -64,7 +64,7 @@ pub use rpc::{
 /// generated protobuf bodies.
 pub mod wire {
     pub use crate::rpc::methods;
-    pub use crate::rpc::{common, internal, machine, matchmaker, public, system};
+    pub use crate::rpc::{checkpoint, common, internal, machine, matchmaker, public, system};
 }
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

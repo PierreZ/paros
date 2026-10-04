@@ -14,9 +14,14 @@ import "common.proto";
 // from the user range (`>= 256`) and checked here at apply: a reserved or
 // already used id is refused and the creator redraws. An id is never reused.
 //
-// The **node registry**, the cell tenant's control journal: `RegisterNode`,
-// `DrainNode`, `RetireNode`. The node pool is the genesis pool plus every
-// registered node not yet retired.
+// The **node registry**, the cell tenant's control journal (#211): keyed by
+// `node_id` (random, minted at format), `RegisterNode` (a first registration,
+// or a re-registration of the same node: a reboot), `DrainNode`,
+// `RetireNode`, and the capacity bookings `BookCapacity` / `ReleaseCapacity`
+// the cell coordinator writes. The node pool is the genesis pool plus every
+// registered node not yet retired. The registry is checkpointed with
+// `paros::client::checkpoint` (#230): `RegistryState` is the checkpoint's
+// state, the latest entry per `node_id` and every live booking.
 message SystemEntry {
   oneof kind {
     CreateJournal create_journal = 1;
@@ -24,6 +29,8 @@ message SystemEntry {
     RegisterNode register_node = 3;
     DrainNode drain_node = 4;
     RetireNode retire_node = 5;
+    BookCapacity book_capacity = 6;
+    ReleaseCapacity release_capacity = 7;
   }
 }
 
@@ -41,11 +48,16 @@ message DeleteJournal {
   uint64 id = 1;
 }
 
-// Add node `id`, reachable at `addr`, to the pool.
+// Add node `id`, reachable at `addr`, to the pool, as a machine of `class`
+// (`storage` or `stateless`) advertising `capacity` role slots of it. A
+// registered node registering again (a reboot) updates its address and
+// capacity; its class never changes.
 message RegisterNode {
   uint64 id = 1;
   string addr = 2;
   string failure_domain = 3;
+  string class = 4;
+  uint64 capacity = 5;
 }
 
 // Stop placing new work on node `id` (it stays in the pool).
@@ -53,7 +65,52 @@ message DrainNode {
   uint64 id = 1;
 }
 
-// Remove a drained node `id` from the pool for good.
+// Remove a drained node `id` from the pool for good (its live bookings are
+// released with it).
 message RetireNode {
   uint64 id = 1;
+}
+
+// Book one `class` role slot of node `node` for the journal
+// `(tenant, journal)`, under the booking id `booking` its writer drew. Refused
+// at apply when the id names a live booking, the node is not registered (or is
+// draining), is of another class, or has no slot left.
+message BookCapacity {
+  uint64 booking = 1;
+  uint64 node = 2;
+  string class = 3;
+  uint64 tenant = 4;
+  uint64 journal = 5;
+}
+
+// Release booking `booking`: its slot is free again.
+message ReleaseCapacity {
+  uint64 booking = 1;
+}
+
+// The registry's checkpoint state (#230): every node registered at runtime,
+// by id, and every live booking, by id — both in id order, so equal states
+// encode to equal bytes.
+message RegistryState {
+  repeated RegisteredNodeState nodes = 1;
+  repeated BookingState bookings = 2;
+}
+
+message RegisteredNodeState {
+  uint64 id = 1;
+  string addr = 2;
+  string failure_domain = 3;
+  string class = 4;
+  uint64 capacity = 5;
+  // 0 registered, 1 draining, 2 retired.
+  uint32 standing = 6;
+  uint64 registrations = 7;
+}
+
+message BookingState {
+  uint64 booking = 1;
+  uint64 node = 2;
+  string class = 3;
+  uint64 tenant = 4;
+  uint64 journal = 5;
 }

@@ -128,7 +128,15 @@ const RETIRE_NODE: u8 = 21;
 /// Claim the journal (#204): read where it stands and `SetLeader` against
 /// its generation — the compare-and-swap that fences every other owner.
 const SET_LEADER: u8 = 22;
-const OP_COUNT: u8 = 23;
+/// Checkpoint the **node registry** (#230) with the library's
+/// `Checkpointer`: claim it, fold it to the tail (restarting from the
+/// checkpoint at its floor), and — when the policy finds one due — write a
+/// checkpoint and truncate to it.
+const CHECKPOINT: u8 = 23;
+/// Book a slot of a registered joiner in the **node registry**, or release
+/// one (#211): what the cell coordinator writes.
+const BOOK_CAPACITY: u8 = 24;
+const OP_COUNT: u8 = 25;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -295,6 +303,16 @@ struct ChainConfig {
     /// may still land, re-claims, and retries it across the ownership
     /// change. Floor 1 ms: an attempt abandoned at once, still sent.
     ack_race_timeout_ms: u64,
+    /// A registry owner checkpoints once the log since its last checkpoint
+    /// reaches this many times the registry's size
+    /// (`ClientTunables::checkpoint_factor`). Floor 1: a checkpoint per
+    /// registry's worth of entries, every write still costing at most one.
+    checkpoint_factor: u32,
+    /// ... or once this long has passed since it opened
+    /// (`ClientTunables::checkpoint_interval`). Floor 0: due after any entry.
+    /// The `CHECKPOINT` step opens a fresh owner each time, so this leg fires
+    /// only near the floor; the factor carries the rest of the range.
+    checkpoint_interval_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -350,12 +368,14 @@ impl ChainConfig {
             burst_claim_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             burst_spacing_ms: buggify_knob!(60_u64, 0_u64..121_u64),
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
+            checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
+            checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
-            // RETIRE_NODE, SET_LEADER
+            // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -401,6 +421,12 @@ impl ChainConfig {
                 // ceiling is a client that spends its run fighting for the
                 // journal, still a valid (slow) writer.
                 buggify_knob!(5_u64, 0_u64..21_u64),
+                // A checkpoint claims the registry, folds it and may write
+                // and truncate; the ceiling is an owner that checkpoints
+                // more often than anyone registers.
+                buggify_knob!(4_u64, 0_u64..21_u64),
+                // A booking is one append and one read-back.
+                buggify_knob!(4_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -432,6 +458,8 @@ impl ChainConfig {
             retry_backoff: Duration::from_millis(self.retry_backoff_ms),
             page_size: self.read_limit,
             wait_ms: self.read_wait_ms,
+            checkpoint_factor: self.checkpoint_factor,
+            checkpoint_interval: Duration::from_millis(self.checkpoint_interval_ms),
         }
     }
 
@@ -1033,7 +1061,13 @@ impl Workload for ChainWorkload {
         let has_matchmakers = !crate::roles::deployment(ctx.topology())
             .matchmakers()
             .is_empty();
-        let plan = crate::shape::journals(ctx.state(), has_matchmakers, true);
+        let plan = crate::shape::journals(ctx.state(), true);
+        if has_matchmakers && plan.ids.len() > 1 {
+            // #201: several journals beside the matchmaker plane, the
+            // composition PR #199 had withheld (a cause; the outcomes are
+            // the journal board's gates).
+            assert_reachable!("journal: a matchmaker seed runs more than one journal");
+        }
         self.client_id = u64::try_from(ctx.client_id()).unwrap_or(0);
         self.journal = plan.for_client(ctx.client_id());
         self.plan = Some(plan);
@@ -1213,6 +1247,7 @@ impl Workload for ChainWorkload {
                 .as_ref()
                 .map(|plan| plan.ids.clone())
                 .unwrap_or_default(),
+            &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             client_id,
             request_timeout,
         );
@@ -1348,12 +1383,6 @@ impl Workload for ChainWorkload {
             let op = if journal != JournalKey::default()
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
-                PAUSE
-            } else if has_matchmakers && op == CREATE_JOURNAL {
-                // A created journal is one more journal's beats on every
-                // link of its members: a matchmaker seed runs none (its
-                // two-round-trip campaigns livelocked once under extra load,
-                // `crate::shape::journals`).
                 PAUSE
             } else if reader
                 && matches!(
@@ -2700,6 +2729,17 @@ impl Workload for ChainWorkload {
                         )
                         .await;
                 }
+                CHECKPOINT => {
+                    system_ops
+                        .checkpoint(
+                            ctx,
+                            &nodes,
+                            config.tunables().checkpoint_policy(),
+                            raw_payload,
+                        )
+                        .await;
+                }
+                BOOK_CAPACITY => system_ops.book(ctx, &nodes, raw_payload).await,
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }

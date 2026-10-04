@@ -15,7 +15,14 @@
 //!   (#235), in the user range, never a genesis journal's and never one
 //!   created before;
 //! - **tombstones** — a node that folded a journal's tombstone acknowledges
-//!   no append to it afterwards.
+//!   no append to it afterwards;
+//! - **checkpoints** (#230) — a node whose fold held the registry's whole
+//!   prefix finds every checkpoint equal to its own state (folding from a
+//!   checkpoint yields what folding the full history does);
+//! - **classes and capacity** (#211) — a `stateless` machine never starts a
+//!   journal, a booking takes a slot of its node's own class, and a node is
+//!   never booked past its capacity (judged on the registry's events in
+//!   position order, while the board has seen every position).
 //!
 //! The gates are outcomes the run must be proven to reach: a name race
 //! decided by slot order, a joiner that learned the system journals before
@@ -27,7 +34,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-use paros::system::{DIRECTORY, DirectoryEvent, DirectoryRefusal, SystemEvent};
+use paros::system::{
+    Class, DIRECTORY, DirectoryEvent, DirectoryRefusal, RegistryEvent, RegistryRefusal, SystemEvent,
+};
 use paros::{JournalId, JournalKey, NodeId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
@@ -72,6 +81,19 @@ pub(crate) struct SystemBoard {
     /// A leadership ran under a configuration naming a joiner: a node the
     /// registry admitted at runtime joined a journal through `Reconfigure`.
     joined_through_reconfigure: bool,
+    /// Each joiner's class and capacity, as the role map drew them (#211).
+    machines: BTreeMap<u64, (Class, u64)>,
+    /// The registry's events in position order, as first folded anywhere:
+    /// the next position the model expects, `None` once a position was
+    /// first seen out of order (no node folded the ones before it, so the
+    /// model no longer knows the bookings).
+    registry_next: Option<u64>,
+    /// The live bookings the model knows, to their node.
+    bookings: BTreeMap<u64, u64>,
+    /// An owner truncated the registry to a checkpoint (#230).
+    truncated: bool,
+    /// A fold — a node's or a client's — restarted from a checkpoint.
+    restarted: bool,
 }
 
 /// The run's [`SystemBoard`] (`crate::state::published`).
@@ -100,7 +122,12 @@ impl SystemBoard {
         pool: impl IntoIterator<Item = u64>,
         joiners: bool,
         spares: bool,
+        machines: impl IntoIterator<Item = (u64, (Class, u64))>,
     ) {
+        self.machines = machines.into_iter().collect();
+        if !self.armed {
+            self.registry_next = Some(0);
+        }
         self.armed = true;
         self.joiners = joiners;
         self.spares = spares;
@@ -138,6 +165,11 @@ impl SystemBoard {
             }
             self.learned_before_pool = true;
         }
+        if let SystemEvent::Registry(event) = event
+            && known == digest
+        {
+            self.model_registry(lsn, event);
+        }
         match event {
             SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
                 let at = *self.created.entry(*id).or_insert(lsn);
@@ -170,6 +202,86 @@ impl SystemBoard {
         }
     }
 
+    /// Advance the registry model by the event first folded at `lsn` (#211).
+    fn model_registry(&mut self, lsn: u64, event: &RegistryEvent) {
+        let Some(next) = self.registry_next else {
+            return;
+        };
+        if lsn < next {
+            return;
+        }
+        if lsn > next {
+            // No node folded the positions in between (a truncation took
+            // them first): the model stops here.
+            self.registry_next = None;
+            return;
+        }
+        self.registry_next = Some(lsn + 1);
+        match event {
+            RegistryEvent::Booked {
+                booking,
+                node,
+                class,
+            } => {
+                let machine = self.machines.get(&node.0).copied();
+                assert_always!(
+                    machine.is_none_or(|(drawn, _)| drawn == *class),
+                    "registry: a booking takes a slot of the node's own class",
+                    { "node" => node.0, "lsn" => lsn }
+                );
+                let held = self.bookings.values().filter(|n| **n == node.0).count() as u64;
+                assert_always!(
+                    machine.is_none_or(|(_, capacity)| held < capacity),
+                    "registry: a node is never booked past its capacity",
+                    { "node" => node.0, "lsn" => lsn, "held" => held }
+                );
+                self.bookings.insert(*booking, node.0);
+            }
+            RegistryEvent::Released { booking, .. } => {
+                self.bookings.remove(booking);
+            }
+            RegistryEvent::Retired { id } => {
+                self.bookings.retain(|_, node| *node != id.0);
+            }
+            RegistryEvent::Reregistered { .. } => {
+                assert_reachable!("registry: a registered node registers again");
+            }
+            RegistryEvent::Refused(RegistryRefusal::NoCapacity { .. }) => {
+                assert_reachable!("registry: a booking is refused at apply for want of capacity");
+            }
+            RegistryEvent::Refused(RegistryRefusal::WrongClass { .. }) => {
+                assert_reachable!("registry: a booking of the other class is refused at apply");
+            }
+            RegistryEvent::Refused(RegistryRefusal::ClassChanged { .. }) => {
+                assert_reachable!("registry: a re-registration under another class is refused");
+            }
+            _ => {}
+        }
+    }
+
+    /// `node` folded a registry checkpoint at `seq` (#230): `verified` as
+    /// [`paros::Audit::checkpoint_folded`] reports it.
+    pub(crate) fn checkpoint_folded(&mut self, node: NodeId, seq: u64, verified: Option<bool>) {
+        assert_always!(
+            verified != Some(false),
+            "checkpoint: a checkpoint is the state its whole prefix folds to",
+            { "node" => node.0, "seq" => seq }
+        );
+        if verified.is_none() {
+            self.reader_restarted();
+        }
+    }
+
+    /// A fold restarted from a checkpoint (#230).
+    pub(crate) fn reader_restarted(&mut self) {
+        self.restarted = true;
+    }
+
+    /// An owner truncated the registry to its checkpoint (#230).
+    pub(crate) fn truncated_to_checkpoint(&mut self) {
+        self.truncated = true;
+    }
+
     /// `node` acknowledged an append to `journal`: never after it folded the
     /// journal's tombstone.
     pub(crate) fn acked(&self, node: NodeId, journal: JournalKey) {
@@ -180,8 +292,16 @@ impl SystemBoard {
         );
     }
 
-    /// `node` started `journal`, a journal the directory created naming it.
+    /// `node` started `journal`, a journal the directory created naming it
+    /// (or a spare's): never a `stateless` machine (#211).
     pub(crate) fn started(&mut self, node: NodeId) {
+        assert_always!(
+            self.machines
+                .get(&node.0)
+                .is_none_or(|(class, _)| *class == Class::Storage),
+            "registry: a stateless machine never serves a journal",
+            { "node" => node.0 }
+        );
         if !self.genesis_pool.contains(&node.0) {
             if !self.joiner_started {
                 assert_reachable!("system: a joiner serves a journal the directory created");
@@ -228,6 +348,12 @@ impl SystemBoard {
             self.id_taken,
             "system: a create naming a taken id is refused"
         );
+        if self.truncated {
+            assert_sometimes!(
+                self.restarted,
+                "checkpoint: a fold restarts from the registry's checkpoint"
+            );
+        }
         if !self.joiners {
             return;
         }

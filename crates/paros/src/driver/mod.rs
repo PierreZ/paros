@@ -84,7 +84,7 @@ use crate::rpc::{
     WriteAck, well_known,
 };
 use crate::storage::LogStorage;
-use crate::system::{DirectoryEvent, RegistryEvent, SystemEvent};
+use crate::system::{DirectoryEvent, NodeStanding, REGISTRY, RegistryEvent, SystemEvent};
 
 use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
@@ -1364,8 +1364,9 @@ where
                 let Some(f) = follower.as_mut() else { continue };
                 let journal = answer.journal();
                 let events = f.fold_remote(answer);
+                let checkpoints = if journal == REGISTRY { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                sys.apply(f, journal, events).await;
+                sys.apply(f, journal, events, checkpoints).await;
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 // Pacing, not a protocol bound: every timeout the core owns is
@@ -1422,8 +1423,9 @@ where
                 // open against a seed for the ones it does not run.
                 if let Some(f) = follower.as_mut() {
                     for (journal, events) in follow_local(f, &journals) {
+                        let checkpoints = if journal == REGISTRY { f.take_checkpoints() } else { Vec::new() };
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
-                        sys.apply(f, journal, events).await;
+                        sys.apply(f, journal, events, checkpoints).await;
                     }
                     f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
                 }
@@ -1462,8 +1464,13 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         follower: &SystemFollower<P>,
         journal: JournalKey,
         events: Vec<(u64, SystemEvent)>,
+        checkpoints: Vec<(u64, Option<bool>)>,
     ) {
         let me = follower.self_id();
+        for (seq, verified) in checkpoints {
+            self.audit.checkpoint_folded(me, journal, seq, verified);
+            tracing::info!(node = me.0, journal = %journal, seq, ?verified, "checkpoint_folded");
+        }
         // Whether the pool moved or a journal opened: every live journal
         // then admits the registry's pool (`ColocatedNode::extend_pool`,
         // refused on a journal that cannot reconfigure).
@@ -1476,9 +1483,12 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     // A created journal lives in the directory's tenant
                     // (#235): the directory is that tenant's control journal.
                     let id = JournalKey::new(journal.tenant, id);
+                    // A stateless machine never takes acceptor work (#211):
+                    // a configuration naming one runs without it.
                     if !config.members().contains(&me)
                         || follower.is_tombstoned(id)
                         || self.journals.serves(id)
+                        || !follower.takes_storage_work()
                     {
                         continue;
                     }
@@ -1517,45 +1527,40 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     }
                     self.stores.delete(id);
                 }
-                SystemEvent::Registry(RegistryEvent::Registered { id, .. }) if id == me => {
+                SystemEvent::Registry(
+                    RegistryEvent::Registered { id, .. } | RegistryEvent::Reregistered { id, .. },
+                ) if id == me => {
                     self.join_spares(follower).await;
                     admit = true;
                 }
-                SystemEvent::Registry(RegistryEvent::Registered { id, addr }) => {
-                    if !self.out.has_peer(id) {
-                        match peer_address(&addr) {
-                            Ok(addr) => {
-                                let client = well_known(self.rpc, addr);
-                                let regular = self.lanes.open(
-                                    "paros-peer-delivery",
-                                    client,
-                                    Party::Node(id),
-                                    self.tunables.peer_queue_capacity,
-                                );
-                                self.out.add_peer(id, PeerQueues { regular });
-                            }
-                            Err(error) => {
-                                tracing::warn!(node = me.0, admitted = id.0, %error, "registered_address_unusable");
-                            }
-                        }
-                    }
-                    self.audit.pool_admitted(me, id);
-                    tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
+                SystemEvent::Registry(
+                    RegistryEvent::Registered { id, addr, .. }
+                    | RegistryEvent::Reregistered { id, addr, .. },
+                ) => {
+                    self.admit_peer(me, id, &addr);
                     admit = true;
                 }
                 SystemEvent::Registry(RegistryEvent::Retired { id }) if id == me => {
-                    let served: Vec<JournalKey> = self
-                        .journals
-                        .live
-                        .keys()
-                        .copied()
-                        .filter(|journal| journal.is_user())
-                        .collect();
-                    for journal in served {
-                        self.journals.park(journal, None);
-                        self.audit.journal_stopped(me, journal);
-                        tracing::info!(node = me.0, journal = %journal, "journal_stopped");
+                    self.retire_self(me);
+                }
+                // A checkpoint (#230): the fold holds the registry it names,
+                // restored or verified. Everything it says is applied again —
+                // a fold restored from it never saw the entries below it.
+                SystemEvent::Registry(RegistryEvent::Checkpoint { .. }) => {
+                    let registry = follower.registry().clone();
+                    for (id, node) in registry.nodes() {
+                        match node.standing {
+                            NodeStanding::Retired if id == me => self.retire_self(me),
+                            NodeStanding::Retired => {}
+                            // A draining node takes no new work.
+                            NodeStanding::Registered if id == me => {
+                                self.join_spares(follower).await;
+                            }
+                            NodeStanding::Draining if id == me => {}
+                            _ => self.admit_peer(me, id, &node.addr),
+                        }
                     }
+                    admit = true;
                 }
                 _ => {}
             }
@@ -1567,11 +1572,54 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
 }
 
 impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+    /// Node `id`, registered at `addr`, is in the pool: open its peer lane
+    /// (once) and report the admission.
+    fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str) {
+        if !self.out.has_peer(id) {
+            match peer_address(addr) {
+                Ok(addr) => {
+                    let client = well_known(self.rpc, addr);
+                    let regular = self.lanes.open(
+                        "paros-peer-delivery",
+                        client,
+                        Party::Node(id),
+                        self.tunables.peer_queue_capacity,
+                    );
+                    self.out.add_peer(id, PeerQueues { regular });
+                }
+                Err(error) => {
+                    tracing::warn!(node = me.0, admitted = id.0, %error, "registered_address_unusable");
+                }
+            }
+        }
+        self.audit.pool_admitted(me, id);
+        tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
+    }
+
+    /// This node's own retirement: every user journal it serves stops.
+    fn retire_self(&mut self, me: NodeId) {
+        let served: Vec<JournalKey> = self
+            .journals
+            .live
+            .keys()
+            .copied()
+            .filter(|journal| journal.is_user())
+            .collect();
+        for journal in served {
+            self.journals.park(journal, None);
+            self.audit.journal_stopped(me, journal);
+            tracing::info!(node = me.0, journal = %journal, "journal_stopped");
+        }
+    }
+
     /// This node is in the pool now (#189): it joins every journal a
     /// reconfiguration may pull it into, as a spare — its own identity, the
     /// pool the registry has admitted.
     async fn join_spares(&mut self, follower: &SystemFollower<P>) {
         let me = follower.self_id();
+        if !follower.takes_storage_work() {
+            return;
+        }
         for template in follower.spares() {
             let journal = template.journal;
             if self.journals.serves(journal) {
