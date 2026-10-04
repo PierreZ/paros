@@ -143,8 +143,9 @@ pub enum FleetRefusal {
         /// Its state.
         state: TenantState,
     },
-    /// The tenant being created was removed meanwhile: the cell dropped it,
-    /// and never hosts it again.
+    /// The tenant being created was removed meanwhile: a removal overtook
+    /// the creation (meta holds it `REMOVING`, or the cell dropped it, and
+    /// never hosts it again).
     Removed {
         /// The tenant.
         tenant: TenantId,
@@ -428,6 +429,8 @@ impl FleetSession {
                 };
             }
             TenantState::Registering => entry.cell_id,
+            // This creation's own tenant, which a removal overtook.
+            TenantState::Removing => return Step::Refused(FleetRefusal::Removed { tenant }),
             state => return Step::Refused(FleetRefusal::NameTaken { tenant, state }),
         };
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {

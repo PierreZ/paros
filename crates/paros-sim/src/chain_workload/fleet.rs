@@ -382,7 +382,11 @@ impl FleetOps {
                 assert_always!(
                     holder == Some(tenant) && draws.iter().all(|d| d.tenant != tenant),
                     "fleet: a second creation of a name is refused for another frame",
-                    { "tenant" => tenant.0 }
+                    {
+                        "tenant" => tenant.0,
+                        "holder" => holder.map_or(0, |t| t.0),
+                        "own_draw" => draws.iter().any(|d| d.tenant == tenant)
+                    }
                 );
                 assert_reachable!("fleet: a second creation of a name is refused");
                 true
