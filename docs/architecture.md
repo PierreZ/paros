@@ -228,7 +228,9 @@ cluster and must target a node every join list names. Redpanda recommends disabl
 **Every journal is born with its matchmaker set** (decided on 2026-10-04). The cell control
 journal and meta's control journal are placed on the seeds and born with a matchmaker set that
 `init` starts there; every tenant journal is born with its tenant's set. There is no
-plain-to-matchmaker transition anywhere, so there is nothing to migrate: the cell's control
+plain-to-matchmaker transition anywhere, so there is nothing to migrate. **Matchmakers are
+mandatory everywhere in the service**, because reconfiguration needs them and reconfiguration is
+how everything heals and moves: the cell's control
 journals are reconfigured like any tenant's from their first entry, and healing works in
 production from the first boot. The matchmaker-free plain deployment stays what AGENTS.md says it
 is, a permanent library-level configuration; `parosd` never runs it.
@@ -327,7 +329,8 @@ the only fence (section 2.3), so two actors that both believe they lead can neve
 winning, an actor folds its journal to the tail before its first control write and finishes every
 operation the journal holds in flight (`REGISTERING`, `REMOVING`); on its first refused write it
 stops. Hand-off is `SetLeader(successor, me)`. An election journal is low-throughput, so it always uses
-a redundancy mode (a plain majority, section 3.4), never grid (decided on 2026-10-04).
+a redundancy mode (majority Multi-Paxos, section 3.4), never grid, and like every journal it
+has its tenant's matchmaker set (decided on 2026-10-04).
 
 **Where candidates run** (decided on 2026-10-04). The cell and meta coordinators campaign on the
 seeds until a `stateless` machine registers, then move there; the cell coordinator places tenant
