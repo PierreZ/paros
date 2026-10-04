@@ -162,6 +162,17 @@ fn residue(value: u64, modulus: usize) -> usize {
     usize::try_from(value % modulus).unwrap_or(0)
 }
 
+/// The rank owning `slot` among `count` peers of one tier (a proxy leader,
+/// a replica): `slot % count`, `None` when the tier is absent (`count` 0).
+fn slot_rank(slot: Slot, count: usize) -> Option<u64> {
+    (count != 0).then(|| slot.0 % u64::try_from(count).unwrap_or(u64::MAX))
+}
+
+/// Whether `rank` names one of `count` peers of a tier.
+fn rank_is_in(rank: u64, count: usize) -> bool {
+    u64::try_from(count).is_ok_and(|count| rank < count)
+}
+
 /// Whether every member of `cell` voted.
 fn all_voted<'a, I: Ord + 'a>(cell: impl IntoIterator<Item = &'a I>, voters: &BTreeSet<I>) -> bool {
     cell.into_iter().all(|m| voters.contains(m))
@@ -878,17 +889,13 @@ impl ProxyId {
     /// zero — the plain deployment, whose Phase 2 stays colocated.
     #[must_use]
     pub fn of(slot: Slot, proxy_count: usize) -> Option<Self> {
-        if proxy_count == 0 {
-            return None;
-        }
-        let count = u64::try_from(proxy_count).unwrap_or(u64::MAX);
-        Some(Self(slot.0 % count))
+        slot_rank(slot, proxy_count).map(Self)
     }
 
     /// Whether this id names a proxy of a deployment of `proxy_count`.
     #[must_use]
     pub fn is_in(self, proxy_count: usize) -> bool {
-        u64::try_from(proxy_count).is_ok_and(|count| self.0 < count)
+        rank_is_in(self.0, proxy_count)
     }
 }
 
@@ -915,17 +922,13 @@ impl ReplicaId {
     /// count is zero — the plain deployment, where the node asked replies.
     #[must_use]
     pub fn of(slot: Slot, replica_count: usize) -> Option<Self> {
-        if replica_count == 0 {
-            return None;
-        }
-        let count = u64::try_from(replica_count).unwrap_or(u64::MAX);
-        Some(Self(slot.0 % count))
+        slot_rank(slot, replica_count).map(Self)
     }
 
     /// Whether this id names a replica of a deployment of `replica_count`.
     #[must_use]
     pub fn is_in(self, replica_count: usize) -> bool {
-        u64::try_from(replica_count).is_ok_and(|count| self.0 < count)
+        rank_is_in(self.0, replica_count)
     }
 }
 

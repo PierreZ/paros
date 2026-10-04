@@ -658,12 +658,7 @@ impl Replica {
             "a truncation never drops a retained record"
         );
         let base = self.state_at(first);
-        self.base = base;
-        self.floor = first;
-        self.chosen = self.chosen.split_off(&first);
-        self.history = self.history.split_off(&first);
-        self.outcomes = self.outcomes.split_off(&first);
-        self.positions.retain(|_, slot| *slot >= first);
+        self.drop_prefix(first, base);
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
         base
     }
@@ -696,15 +691,31 @@ impl Replica {
             self.folded = point;
             sealed
         };
-        self.base = base;
-        self.floor = point;
-        self.chosen = self.chosen.split_off(&point);
-        self.history = self.history.split_off(&point);
-        self.outcomes = self.outcomes.split_off(&point);
-        self.positions.retain(|_, slot| *slot >= point);
+        self.drop_prefix(point, base);
         self.refold();
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
         base
+    }
+
+    /// The prefix drop [`Replica::truncate`] and [`Replica::trim_to`] share:
+    /// `first` becomes the floor with `base` the journal state there, and
+    /// every chosen value, history entry, outcome and position below it
+    /// goes.
+    fn drop_prefix(&mut self, first: Slot, base: JournalState) {
+        self.base = base;
+        self.floor = first;
+        self.chosen = self.chosen.split_off(&first);
+        self.history = self.history.split_off(&first);
+        self.outcomes = self.outcomes.split_off(&first);
+        self.positions.retain(|_, slot| *slot >= first);
+        assert!(
+            self.chosen.keys().next().is_none_or(|s| *s >= first),
+            "no chosen value survives below the floor"
+        );
+        assert!(
+            self.positions.values().all(|s| *s >= first),
+            "no position survives below the floor"
+        );
     }
 }
 

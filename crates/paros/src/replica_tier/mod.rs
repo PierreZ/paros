@@ -114,11 +114,7 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
 
     // A replica holds no promise; the ballot the persist report is handed
     // only ever labels an accepted record, which a replica never writes.
-    let must_sync = if writes.iter().any(WriteOp::needs_sync) {
-        MustSync::Sync
-    } else {
-        MustSync::Relaxed
-    };
+    let must_sync = MustSync::for_batch(&writes);
     persist_writes(
         storage,
         &writes,

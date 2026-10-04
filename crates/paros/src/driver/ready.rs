@@ -152,11 +152,7 @@ where
     // prefix, and there is none (#186) — a floor only ever moves inside the
     // durable chosen prefix, which the same flush carries.
     let writes: Vec<WriteOp> = ready.writes().to_vec();
-    let must_sync = if writes.iter().any(WriteOp::needs_sync) {
-        paros_core::MustSync::Sync
-    } else {
-        paros_core::MustSync::Relaxed
-    };
+    let must_sync = paros_core::MustSync::for_batch(&writes);
     // The deployment map, applied: the core hands out audiences (one entry
     // per fan-out), the driver turns each into the parties its own map
     // names — the node ids of the pool, or the one proxy leader a
