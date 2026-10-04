@@ -850,6 +850,15 @@ impl<P: Providers> Client<P> {
         }
     }
 
+    /// Where `journal` stands, read from server `first` on
+    /// ([`Client::read_any`]): its state, `None` when no server served it.
+    pub async fn journal_state(&self, journal: JournalKey, first: usize) -> Option<JournalState> {
+        self.read_any(&state_read(journal), first)
+            .await
+            .outcome
+            .state()
+    }
+
     /// Claim `journal` for `owner` (#204): read where it stands — from
     /// server `first` on, see [`Client::read_any`] — then `SetLeader`
     /// against the generation read, asked of `first`.
@@ -866,14 +875,7 @@ impl<P: Providers> Client<P> {
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
-        let read = Read {
-            journal: journal.journal.0,
-            tenant: journal.tenant.0,
-            from_seq: 0,
-            limit: 1,
-            wait_ms: 0,
-        };
-        let state = match self.read_any(&read, first).await.outcome {
+        let state = match self.read_any(&state_read(journal), first).await.outcome {
             ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } => state,
             ReadOutcome::UnknownJournal => return ClaimOutcome::UnknownJournal,
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
@@ -1091,5 +1093,17 @@ impl<P: Providers> Client<P> {
             attempt,
         )
         .await
+    }
+}
+
+/// The read that asks where `journal` stands: one record from position 0,
+/// no wait — answered with the journal state whatever the log holds.
+fn state_read(journal: JournalKey) -> Read {
+    Read {
+        journal: journal.journal.0,
+        tenant: journal.tenant.0,
+        from_seq: 0,
+        limit: 1,
+        wait_ms: 0,
     }
 }

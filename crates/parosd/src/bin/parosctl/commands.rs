@@ -12,9 +12,8 @@ use paros::client::{
 };
 use paros::wire::common::Ballot;
 use paros::{
-    ClientId, Generation, InspectReply, JournalKey, JournalState, QuorumSystem, Read,
-    RetireRequest, Seq, Value, WireQuorumSystem, journal_state_from_proto,
-    quorum_system_from_proto,
+    ClientId, Generation, InspectReply, JournalKey, JournalState, QuorumSystem, RetireRequest, Seq,
+    Value, WireQuorumSystem, journal_state_from_proto, quorum_system_from_proto,
 };
 use serde_json::{Value as Json, json};
 
@@ -49,14 +48,7 @@ pub struct WriteArgs {
 
 /// Where `journal` stands, read from any server.
 async fn journal_state(client: &ParosClient, journal: JournalKey) -> Option<JournalState> {
-    let read = Read {
-        journal: journal.journal.0,
-        tenant: journal.tenant.0,
-        from_seq: 0,
-        limit: 1,
-        wait_ms: 0,
-    };
-    client.read_any(&read, start(client)).await.outcome.state()
+    client.journal_state(journal, start(client)).await
 }
 
 /// Who a writing command acts as: the journal, the owner id, and the

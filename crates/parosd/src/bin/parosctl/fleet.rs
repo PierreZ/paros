@@ -26,7 +26,7 @@ use paros::client::fleet::{
 };
 use paros::meta::{Placement, TenantState};
 use paros::system::Registry;
-use paros::{JournalId, JournalKey, NodeId, Read, TenantId};
+use paros::{JournalId, JournalKey, NodeId, TenantId};
 use serde_json::json;
 
 use crate::Ending;
@@ -84,14 +84,7 @@ pub fn nonzero(providers: &TokioProviders) -> u64 {
 
 /// The cell coordinator: the owner of the cell control journal.
 pub async fn coordinator(client: &ParosClient, frames: &FleetFrames) -> Option<NodeId> {
-    let read = Read {
-        journal: frames.cell.journal.0,
-        tenant: frames.cell.tenant.0,
-        from_seq: 0,
-        limit: 1,
-        wait_ms: 0,
-    };
-    let state = client.read_any(&read, 0).await.outcome.state()?;
+    let state = client.journal_state(frames.cell, 0).await?;
     state.owner.map(|owner| NodeId(owner.0))
 }
 
