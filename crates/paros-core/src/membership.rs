@@ -854,7 +854,16 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// learns, registers or is asked to run — one naming a node outside the
     /// pool is not one it can address.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// If `pool` is not sorted and deduplicated (a programmer error: every
+    /// pool is normalized where it is built).
     pub fn is_drawn_from(&self, pool: &[Id]) -> bool {
+        assert!(
+            pool.windows(2).all(|w| w[0] < w[1]),
+            "a pool is sorted and deduplicated"
+        );
         self.members.iter().all(|m| pool.binary_search(m).is_ok())
     }
 }
@@ -1074,12 +1083,21 @@ impl MatchmakerSet {
     }
 
     /// How many more answers a tally holding `voters` still waits for — the
-    /// one thing a predicate cannot report, and the only place a matchmaker
-    /// quorum is ever spelled as a number. Zero once [`Self::has_quorum`]
+    /// one thing a predicate cannot report. Every tally over a voter set asks
+    /// here; the reconfigurer's stop phase, which keys its acks by matchmaker,
+    /// spells the same subtraction itself. Zero once [`Self::has_quorum`]
     /// holds over voters drawn from this set.
+    ///
+    /// # Panics
+    ///
+    /// If the set is not well formed ([`Self::quorum_size`]).
     #[must_use]
     pub fn remaining(&self, voters: &BTreeSet<MatchmakerId>) -> usize {
-        self.quorum_size().saturating_sub(voters.len())
+        let remaining = self.quorum_size().saturating_sub(voters.len());
+        if self.has_quorum(voters) {
+            assert!(remaining == 0, "a held quorum waits for nothing more");
+        }
+        remaining
     }
 
     /// The members not among `voters`, in id order — whom a tally's re-send

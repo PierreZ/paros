@@ -274,7 +274,7 @@ pub struct ResolveReport {
     pub by_read_back: bool,
 }
 
-/// What [`Client::read_until`] and [`Client::read_any`] came back with.
+/// What [`Client::read_any`] came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadReport {
     /// The outcome of the last attempt.

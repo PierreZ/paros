@@ -475,8 +475,9 @@ pub(crate) fn peer_address(addr: &str) -> SimulationResult<SocketAddr> {
 /// What every outbound lane a driver opens shares: the providers it spawns
 /// on, the tunables that shape it, the incarnation's shutdown, the audit the
 /// delivery task reports drops to, and who is sending. Shared by the node
-/// driver (two lanes per peer, one per proxy) and the proxy driver (one per
-/// acceptor): the lane is the same whoever sends through it.
+/// driver (one lane per peer and per proxy), the proxy driver (one per
+/// acceptor and replica) and the replica driver (one per acceptor): the lane
+/// is the same whoever sends through it.
 pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
     pub(crate) providers: &'a P,
     pub(crate) tunables: DriverTunables,

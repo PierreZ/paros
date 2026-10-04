@@ -243,12 +243,6 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         addressees
     }
 
-    /// The read open at `ctx`, if any.
-    #[must_use]
-    pub fn get(&self, ctx: u64) -> Option<&QuorumRead<Id>> {
-        self.reads.iter().find(|r| r.ctx == ctx)
-    }
-
     /// Fold `from`'s watermark into the read at `ctx`. The row guard is the
     /// tally's own, as the Phase-2 column guard is
     /// ([`crate::proposer::Proposer::fold_accepted_in`]): an answer from
@@ -303,8 +297,9 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// # Panics
     ///
     /// If a vote behind a confirmation came from outside the read's row:
-    /// the caller's guard refuses any other sender, restated here so the
-    /// quorum predicate is never fed an id that is not one of the row's.
+    /// [`QuorumReads::fold`]'s row guard refuses any other sender, restated
+    /// here so the quorum predicate is never fed an id that is not one of
+    /// the row's.
     pub fn serve(&mut self, covered: impl Fn(Option<Slot>) -> bool) -> Vec<(u64, Option<Slot>)> {
         let mut served = Vec::new();
         self.reads.retain_mut(|read| {
@@ -382,7 +377,7 @@ mod tests {
             Some((NodeId(5), Some(Slot(2)))),
         );
         assert_eq!(addressees, vec![NodeId(4), NodeId(6)]);
-        assert_eq!(reads.get(1).map(QuorumRead::row), Some(Some(1)));
+        assert_eq!(reads.pending()[0].row(), Some(1));
         assert!(reads.serve(|_| true).is_empty(), "one answer is no row");
         assert_eq!(
             reads.fold(1, NodeId(4), Some(Slot(3)), None),
