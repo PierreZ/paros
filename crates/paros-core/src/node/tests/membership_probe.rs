@@ -43,7 +43,11 @@ fn a_node_outside_its_bootstrap_belief_probes_instead_of_skipping() {
     let promised = n.hard_state().max_promised_ballot;
     fire_election(&mut n);
     assert_eq!(n.role(), NodeRole::Follower, "a probe is not a campaign");
-    assert_eq!(n.membership_counters().0, 0, "nothing was skipped");
+    assert_eq!(
+        n.membership_counters().campaigns_skipped,
+        0,
+        "nothing was skipped"
+    );
     let (msgs, (requests, writes)) = drain_with(&mut n, |ready| {
         (ready.match_requests().to_vec(), ready.writes().to_vec())
     });
@@ -138,7 +142,11 @@ fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
     assert_eq!(n.belief_source(), BeliefSource::Heard);
     assert_eq!(n.role(), NodeRole::Follower);
     fire_election(&mut n);
-    assert_eq!(n.membership_counters().0, 1, "the settled spare skips");
+    assert_eq!(
+        n.membership_counters().campaigns_skipped,
+        1,
+        "the settled spare skips"
+    );
     assert!(
         drain_match_requests(&mut n).is_empty(),
         "and probes no more"

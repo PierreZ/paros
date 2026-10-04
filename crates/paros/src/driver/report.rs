@@ -3,7 +3,10 @@
 //! the held-reply bookkeeping a step-down performs.
 
 use moonpool_core::{Providers, RandomProvider};
-use paros_core::{Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole};
+use paros_core::{
+    Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, MembershipCounters, NodeId, NodeRole,
+    RepairCounters,
+};
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, HandoffContext};
@@ -133,9 +136,9 @@ pub(crate) struct Deltas {
     pub(crate) role: NodeRole,
     pub(crate) quorum_lost: u64,
     pub(crate) watermark_fills: u64,
-    pub(crate) repair: (u64, u64, u64, u64),
+    pub(crate) repair: RepairCounters,
     pub(crate) handoff: HandoffCounters,
-    pub(crate) membership: (u64, u64),
+    pub(crate) membership: MembershipCounters,
     pub(crate) matchmaking: Option<Ballot>,
     pub(crate) matchmaking_timeouts: u64,
     pub(crate) matchmaker_generation: u64,
@@ -205,24 +208,24 @@ impl Cadence {
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn report_membership<A: Audit>(
     node: &ColocatedNode,
-    last_membership: &mut (u64, u64),
+    last_membership: &mut MembershipCounters,
     self_id: u64,
     audit: &A,
 ) {
     let membership = node.membership_counters();
-    if membership.0 != last_membership.0 {
-        audit.campaign_skipped_non_member(NodeId(self_id), membership.0);
+    if membership.campaigns_skipped != last_membership.campaigns_skipped {
+        audit.campaign_skipped_non_member(NodeId(self_id), membership.campaigns_skipped);
         tracing::info!(
             node = self_id,
-            count = membership.0,
+            count = membership.campaigns_skipped,
             "campaign_skipped_non_member"
         );
     }
-    if membership.1 != last_membership.1 {
-        audit.non_member_leader_resigned(NodeId(self_id), membership.1);
+    if membership.step_downs != last_membership.step_downs {
+        audit.non_member_leader_resigned(NodeId(self_id), membership.step_downs);
         tracing::info!(
             node = self_id,
-            count = membership.1,
+            count = membership.step_downs,
             "non_member_leader_resigned"
         );
     }
@@ -298,7 +301,12 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
     let repair = node.repair_counters();
     if repair != *last_repair {
         *last_repair = repair;
-        let (repaired, case1, case2, step_downs) = repair;
+        let RepairCounters {
+            repaired,
+            case1,
+            case2,
+            step_downs,
+        } = repair;
         audit.repair_progress(NodeId(self_id), repaired, case1, case2, step_downs);
         tracing::info!(
             node = self_id,
