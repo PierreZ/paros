@@ -18,12 +18,11 @@
 //! opaque as any other, and only this module and the driver read them.
 //!
 //! - **Directory.** A created journal's id is random (#226, #235): its
-//!   creator draws it from the user range ([`JournalId::FIRST_USER`] and up)
-//!   and this fold, the tenant's single writer of journal ids, checks it at
-//!   apply. An id outside the user range or naming a journal the deployment
-//!   was booted with (its *genesis* journals) folds to
-//!   [`DirectoryRefusal::Reserved`]; an id the directory already created —
-//!   deleted or not, ids are never reused — folds to
+//!   creator draws it and this fold, the tenant's single writer of journal
+//!   ids, checks it at apply. There is no reserved range (no id is fixed,
+//!   `docs/architecture.md` §3.8): an unset id is malformed, and an id the
+//!   deployment was booted with (its *genesis* journals) or the directory
+//!   already created — deleted or not, ids are never reused — folds to
 //!   [`DirectoryRefusal::IdTaken`], and the creator redraws. Never a log
 //!   position: an id must not change when its tenant moves. Of two creates
 //!   with one name the lower position wins; the other folds to
@@ -39,7 +38,15 @@
 //!   by the cell coordinator) are judged at apply: a slot of the node's own
 //!   class only, never past its capacity. The registry is checkpointed with
 //!   `paros::client::checkpoint` (#230): its state is the latest entry per
-//!   `node_id` and the live bookings.
+//!   `node_id`, the live bookings and the cell's side of the fleet.
+//!
+//!   The cell's side of the fleet (#229, §3.7): `JoinFleet` records, once,
+//!   the fleet this cell belongs to and its own `cell_id` (`init` step 3),
+//!   and `HostTenant` / `DropTenant` the tenants it hosts — the cell's
+//!   tenant list, which meta's directory ([`crate::meta`]) must equal.
+//!   Every one names its fleet, and an entry naming another fleet than the
+//!   one the cell joined is refused; a repeat folds to
+//!   [`RegistryEvent::Unchanged`], so a re-run step is harmless.
 //!
 //!   Not yet (follow-ups of #211): a machine registering itself at start
 //!   and on a cadence (it needs the cell coordinator of #225 as the
@@ -62,21 +69,8 @@ pub use crate::machine::Class;
 use crate::rpc::system as wire;
 use crate::rpc::{config_from_proto, config_to_proto};
 
-/// The directory: the journals created and deleted at runtime — the user
-/// tenant's own control journal, which holds its journal names (#235,
-/// `docs/architecture.md` §3.1). One user tenant today ([`TenantId::default`]);
-/// tenant creation is #210.
-pub const DIRECTORY: JournalKey = JournalKey::control(TenantId::FIRST_USER);
-
-/// The node registry: the nodes registered, drained and retired at runtime —
-/// the cell tenant's control journal (#235, §3.1).
-pub const REGISTRY: JournalKey = JournalKey::control(TenantId::CELL);
-
-/// Whether `journal` is one of the two system journals.
-#[must_use]
-pub fn is_system(journal: JournalKey) -> bool {
-    journal == DIRECTORY || journal == REGISTRY
-}
+// The two system journals have no fixed frame (§3.8): a deployment draws
+// both and hands them to whoever folds them (`crate::SystemPlan`).
 
 /// One system-journal entry, as a client appends it and a fold reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +133,30 @@ pub enum SystemCommand {
         /// The booking.
         booking: u64,
     },
+    /// The cell side of the fleet's registration (#229): this cell is
+    /// `cell_id` in fleet `fleet_id`, speaking metadata `version`.
+    JoinFleet {
+        /// The fleet.
+        fleet_id: u64,
+        /// This cell's id.
+        cell_id: u64,
+        /// The metadata version.
+        version: u32,
+    },
+    /// Tenant creation's cell step (#229): the cell hosts `tenant`.
+    HostTenant {
+        /// The fleet the writer believes the cell belongs to.
+        fleet_id: u64,
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// Tenant removal's cell step (#229): the cell forgets `tenant`.
+    DropTenant {
+        /// The fleet the writer believes the cell belongs to.
+        fleet_id: u64,
+        /// The tenant.
+        tenant: TenantId,
+    },
 }
 
 impl SystemCommand {
@@ -187,6 +205,23 @@ impl SystemCommand {
             SystemCommand::ReleaseCapacity { booking } => {
                 Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
             }
+            SystemCommand::JoinFleet {
+                fleet_id,
+                cell_id,
+                version,
+            } => Kind::JoinFleet(wire::JoinFleet {
+                fleet_id: *fleet_id,
+                cell_id: *cell_id,
+                version: *version,
+            }),
+            SystemCommand::HostTenant { fleet_id, tenant } => Kind::HostTenant(wire::HostTenant {
+                fleet_id: *fleet_id,
+                tenant: tenant.0,
+            }),
+            SystemCommand::DropTenant { fleet_id, tenant } => Kind::DropTenant(wire::DropTenant {
+                fleet_id: *fleet_id,
+                tenant: tenant.0,
+            }),
         };
         wire::SystemEntry { kind: Some(kind) }.encode_to_vec()
     }
@@ -232,6 +267,19 @@ impl SystemCommand {
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
             },
+            Kind::JoinFleet(join) => SystemCommand::JoinFleet {
+                fleet_id: join.fleet_id,
+                cell_id: join.cell_id,
+                version: join.version,
+            },
+            Kind::HostTenant(host) => SystemCommand::HostTenant {
+                fleet_id: host.fleet_id,
+                tenant: TenantId(host.tenant),
+            },
+            Kind::DropTenant(drop) => SystemCommand::DropTenant {
+                fleet_id: drop.fleet_id,
+                tenant: TenantId(drop.tenant),
+            },
         })
     }
 }
@@ -271,15 +319,10 @@ pub enum DirectoryEvent {
 /// Why a directory entry changed nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryRefusal {
-    /// Not exactly one decodable directory entry.
+    /// Not exactly one decodable directory entry, or an unset id.
     Malformed,
-    /// The id is outside the user range, or a genesis journal's.
-    Reserved {
-        /// The id asked for.
-        id: JournalId,
-    },
-    /// The directory already created this id (ids are never reused, a
-    /// deleted one included): the creator redraws.
+    /// A genesis journal holds this id, or the directory already created it
+    /// (ids are never reused, a deleted one included): the creator redraws.
     IdTaken {
         /// The id asked for.
         id: JournalId,
@@ -339,10 +382,10 @@ impl Directory {
         self.next_seq = seq + 1;
         match SystemCommand::decode(record).ok() {
             Some(SystemCommand::CreateJournal { id, name, config }) => {
-                if !id.is_user() || self.genesis.contains(&id) {
-                    return DirectoryEvent::Refused(DirectoryRefusal::Reserved { id });
+                if !id.is_set() {
+                    return DirectoryEvent::Refused(DirectoryRefusal::Malformed);
                 }
-                if self.journals.contains_key(&id) {
+                if self.genesis.contains(&id) || self.journals.contains_key(&id) {
                     return DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id });
                 }
                 if let Some(&winner) = self.names.get(&name) {
@@ -504,6 +547,26 @@ pub enum RegistryEvent {
         /// The node whose slot it freed.
         node: NodeId,
     },
+    /// The cell joined a fleet (#229).
+    JoinedFleet {
+        /// The fleet.
+        fleet_id: u64,
+        /// This cell's id.
+        cell_id: u64,
+    },
+    /// The cell hosts a tenant (#229).
+    TenantHosted {
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The cell forgot a tenant (#229).
+    TenantDropped {
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The entry asked for what the cell already records: a re-run step of
+    /// a fleet operation (#229).
+    Unchanged,
     /// A checkpoint (#230): every position below `covers_up_to` is in the
     /// state this fold now holds — restored from it, or verified against it
     /// (the fold reports which through its audit, not here, so every fold
@@ -565,6 +628,22 @@ pub enum RegistryRefusal {
         /// The id named.
         booking: u64,
     },
+    /// A fleet entry naming another fleet (or cell) than the one the cell
+    /// joined, or a tenant entry before the cell joined any (#229): a step
+    /// of a fleet operation that talks to another fleet changes nothing.
+    OtherFleet {
+        /// The fleet the entry names.
+        fleet_id: u64,
+    },
+    /// A fleet registration at a metadata version this fold does not
+    /// understand (#229).
+    Unsupported,
+    /// A `HostTenant` of a tenant the cell dropped (#229): a dropped tenant
+    /// is never hosted again.
+    TenantDropped {
+        /// The tenant named.
+        tenant: TenantId,
+    },
 }
 
 /// The registry's fold (#189, #211): the genesis pool the deployment was
@@ -582,7 +661,27 @@ pub struct Registry {
     genesis: BTreeSet<NodeId>,
     nodes: BTreeMap<NodeId, RegisteredNode>,
     bookings: BTreeMap<u64, Booking>,
+    /// The fleet registration (#229): `(fleet_id, cell_id, version)`.
+    fleet: Option<FleetRegistration>,
+    /// The tenants the cell hosts (#229).
+    hosted: BTreeSet<TenantId>,
+    /// The tenants the cell dropped (#229): never hosted again, so a stale
+    /// `HostTenant` — decided by an operator from a meta fold another
+    /// operator's removal has since overtaken — is refused here, where the
+    /// cell's single writer judges it.
+    dropped: BTreeSet<TenantId>,
     next_seq: u64,
+}
+
+/// The cell side of the fleet's registration (#229, §3.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FleetRegistration {
+    /// The fleet.
+    pub fleet_id: u64,
+    /// This cell's id.
+    pub cell_id: u64,
+    /// The metadata version.
+    pub version: u32,
 }
 
 impl Registry {
@@ -649,6 +748,21 @@ impl Registry {
                     None => RegistryEvent::Refused(RegistryRefusal::UnknownBooking { booking }),
                 }
             }
+            Some(SystemCommand::JoinFleet {
+                fleet_id,
+                cell_id,
+                version,
+            }) => self.join_fleet(FleetRegistration {
+                fleet_id,
+                cell_id,
+                version,
+            }),
+            Some(SystemCommand::HostTenant { fleet_id, tenant }) => {
+                self.host(fleet_id, tenant, true)
+            }
+            Some(SystemCommand::DropTenant { fleet_id, tenant }) => {
+                self.host(fleet_id, tenant, false)
+            }
             _ => RegistryEvent::Refused(RegistryRefusal::Malformed),
         }
     }
@@ -698,6 +812,83 @@ impl Registry {
                 }
             }
         }
+    }
+
+    fn join_fleet(&mut self, joined: FleetRegistration) -> RegistryEvent {
+        if joined.fleet_id == 0 || joined.cell_id == 0 {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
+        }
+        if joined.version == 0 || joined.version > crate::meta::METADATA_VERSION {
+            return RegistryEvent::Refused(RegistryRefusal::Unsupported);
+        }
+        match self.fleet {
+            None => {
+                self.fleet = Some(joined);
+                RegistryEvent::JoinedFleet {
+                    fleet_id: joined.fleet_id,
+                    cell_id: joined.cell_id,
+                }
+            }
+            Some(fleet) if fleet.fleet_id == joined.fleet_id && fleet.cell_id == joined.cell_id => {
+                RegistryEvent::Unchanged
+            }
+            Some(_) => RegistryEvent::Refused(RegistryRefusal::OtherFleet {
+                fleet_id: joined.fleet_id,
+            }),
+        }
+    }
+
+    /// Host (`host`) or drop `tenant` for fleet `fleet_id`: idempotent, and
+    /// refused unless the cell joined that fleet. A drop is a tombstone,
+    /// written whether the tenant was hosted or not: a dropped tenant is
+    /// never hosted again ([`RegistryRefusal::TenantDropped`]).
+    fn host(&mut self, fleet_id: u64, tenant: TenantId, host: bool) -> RegistryEvent {
+        if self.fleet.is_none_or(|fleet| fleet.fleet_id != fleet_id) {
+            return RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id });
+        }
+        if !tenant.is_set() {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
+        }
+        if host {
+            if self.dropped.contains(&tenant) {
+                return RegistryEvent::Refused(RegistryRefusal::TenantDropped { tenant });
+            }
+            return if self.hosted.insert(tenant) {
+                RegistryEvent::TenantHosted { tenant }
+            } else {
+                RegistryEvent::Unchanged
+            };
+        }
+        self.hosted.remove(&tenant);
+        if self.dropped.insert(tenant) {
+            RegistryEvent::TenantDropped { tenant }
+        } else {
+            RegistryEvent::Unchanged
+        }
+    }
+
+    /// Whether the cell dropped `tenant`: it never hosts it again (#229).
+    #[must_use]
+    pub fn dropped(&self, tenant: TenantId) -> bool {
+        self.dropped.contains(&tenant)
+    }
+
+    /// The cell side of the fleet's registration, once `init` wrote it
+    /// (#229).
+    #[must_use]
+    pub fn fleet(&self) -> Option<FleetRegistration> {
+        self.fleet
+    }
+
+    /// Whether the cell hosts `tenant` (#229).
+    #[must_use]
+    pub fn hosts(&self, tenant: TenantId) -> bool {
+        self.hosted.contains(&tenant)
+    }
+
+    /// The tenants the cell hosts, in id order (#229).
+    pub fn hosted(&self) -> impl Iterator<Item = TenantId> + '_ {
+        self.hosted.iter().copied()
     }
 
     fn book(
@@ -828,6 +1019,11 @@ impl Registry {
                     journal: b.journal.journal.0,
                 })
                 .collect(),
+            fleet_id: self.fleet.map_or(0, |f| f.fleet_id),
+            cell_id: self.fleet.map_or(0, |f| f.cell_id),
+            version: self.fleet.map_or(0, |f| f.version),
+            tenants: self.hosted.iter().map(|t| t.0).collect(),
+            dropped: self.dropped.iter().map(|t| t.0).collect(),
         }
     }
 }
@@ -875,8 +1071,28 @@ impl Checkpointable for Registry {
                 },
             );
         }
+        let fleet = match (state.fleet_id, state.cell_id) {
+            (0, 0) => None,
+            (0, _) | (_, 0) => return Err("a registry state names half a fleet registration"),
+            (fleet_id, cell_id) => Some(FleetRegistration {
+                fleet_id,
+                cell_id,
+                version: state.version,
+            }),
+        };
+        let hosted: BTreeSet<TenantId> = state.tenants.into_iter().map(TenantId).collect();
+        let dropped: BTreeSet<TenantId> = state.dropped.into_iter().map(TenantId).collect();
+        if hosted.iter().chain(&dropped).any(|t| !t.is_set())
+            || hosted.iter().any(|t| dropped.contains(t))
+            || (fleet.is_none() && !(hosted.is_empty() && dropped.is_empty()))
+        {
+            return Err("a registry state hosts a tenant it cannot");
+        }
         self.nodes = nodes;
         self.bookings = bookings;
+        self.fleet = fleet;
+        self.hosted = hosted;
+        self.dropped = dropped;
         self.next_seq = covers_up_to + 1;
         Ok(())
     }
@@ -955,6 +1171,19 @@ mod tests {
                 journal: JournalKey::new(TenantId(300), JournalId(400)),
             },
             SystemCommand::ReleaseCapacity { booking: 7 },
+            SystemCommand::JoinFleet {
+                fleet_id: 11,
+                cell_id: 12,
+                version: 1,
+            },
+            SystemCommand::HostTenant {
+                fleet_id: 11,
+                tenant: TenantId(300),
+            },
+            SystemCommand::DropTenant {
+                fleet_id: 11,
+                tenant: TenantId(300),
+            },
         ];
         for command in commands {
             assert_eq!(SystemCommand::decode(&command.encode()), Ok(command));
@@ -964,17 +1193,25 @@ mod tests {
 
     #[test]
     fn a_created_journal_takes_its_drawn_id_and_an_id_is_never_reused() {
-        let genesis = JournalId::FIRST_USER;
+        let genesis = JournalId(0x6e5e);
         let mut dir = Directory::new([genesis]);
-        // A genesis id and an id in the reserved range are refused.
+        // A genesis id is taken; an unset id is malformed. No range is
+        // reserved: a small id is as good as any.
         assert_eq!(
             dir.fold(0, &create(genesis.0, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: genesis })
+            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: genesis })
         );
         assert_eq!(
-            dir.fold(1, &create(1, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: JournalId(1) })
+            dir.fold(1, &create(0, b"a", &[0, 1, 2])),
+            DirectoryEvent::Refused(DirectoryRefusal::Malformed)
         );
+        assert!(matches!(
+            dir.fold(2, &create(7, b"seven", &[0, 1, 2])),
+            DirectoryEvent::Created {
+                id: JournalId(7),
+                ..
+            }
+        ));
         let drawn = JournalId(0xdead_beef);
         assert!(matches!(
             dir.fold(3, &create(drawn.0, b"a", &[0, 1, 2])),
@@ -1256,5 +1493,113 @@ mod tests {
         let next = register(300, Class::Storage, 1);
         assert_eq!(whole.fold(at + 1, &next), restored.fold(at + 1, &next));
         assert_eq!(restored.state(), whole.state());
+    }
+
+    #[test]
+    fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
+        let fleet = 0xf1ee7;
+        let cell = 0xce11;
+        let join = |fleet_id, cell_id, version| {
+            one(&SystemCommand::JoinFleet {
+                fleet_id,
+                cell_id,
+                version,
+            })
+        };
+        let host = |fleet_id, tenant| {
+            one(&SystemCommand::HostTenant {
+                fleet_id,
+                tenant: TenantId(tenant),
+            })
+        };
+        let drop = |fleet_id, tenant| {
+            one(&SystemCommand::DropTenant {
+                fleet_id,
+                tenant: TenantId(tenant),
+            })
+        };
+        let mut registry = Registry::new([NodeId(0)]);
+        // Nothing is hosted before the cell joins a fleet.
+        assert_eq!(
+            registry.fold(0, &host(fleet, 300)),
+            RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
+        );
+        assert_eq!(
+            registry.fold(1, &join(fleet, cell, crate::meta::METADATA_VERSION + 1)),
+            RegistryEvent::Refused(RegistryRefusal::Unsupported)
+        );
+        assert_eq!(
+            registry.fold(2, &join(fleet, cell, 1)),
+            RegistryEvent::JoinedFleet {
+                fleet_id: fleet,
+                cell_id: cell
+            }
+        );
+        assert_eq!(
+            registry.fold(3, &join(fleet, cell, 1)),
+            RegistryEvent::Unchanged
+        );
+        assert_eq!(
+            registry.fold(4, &join(fleet, cell + 1, 1)),
+            RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
+        );
+        assert_eq!(
+            registry.fold(5, &host(fleet, 300)),
+            RegistryEvent::TenantHosted {
+                tenant: TenantId(300)
+            }
+        );
+        assert_eq!(
+            registry.fold(6, &host(fleet, 300)),
+            RegistryEvent::Unchanged
+        );
+        assert_eq!(
+            registry.fold(7, &host(fleet + 1, 301)),
+            RegistryEvent::Refused(RegistryRefusal::OtherFleet {
+                fleet_id: fleet + 1
+            })
+        );
+        assert_eq!(
+            registry.fold(8, &host(fleet, 0)),
+            RegistryEvent::Refused(RegistryRefusal::Malformed)
+        );
+        assert!(registry.hosts(TenantId(300)));
+        // The checkpoint carries the registration and the tenant list.
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(8, &registry.checkpoint())
+            .expect("restores");
+        assert_eq!(restored, registry);
+        assert_eq!(
+            registry.fold(9, &drop(fleet, 300)),
+            RegistryEvent::TenantDropped {
+                tenant: TenantId(300)
+            }
+        );
+        assert_eq!(
+            registry.fold(10, &drop(fleet, 300)),
+            RegistryEvent::Unchanged
+        );
+        assert_eq!(registry.hosted().count(), 0);
+        // A dropped tenant is never hosted again: a stale host is refused.
+        assert_eq!(
+            registry.fold(11, &host(fleet, 300)),
+            RegistryEvent::Refused(RegistryRefusal::TenantDropped {
+                tenant: TenantId(300)
+            })
+        );
+        // A drop of a tenant never hosted still tombstones it.
+        assert_eq!(
+            registry.fold(12, &drop(fleet, 301)),
+            RegistryEvent::TenantDropped {
+                tenant: TenantId(301)
+            }
+        );
+        assert!(registry.dropped(TenantId(301)));
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(12, &registry.checkpoint())
+            .expect("restores");
+        assert_eq!(restored, registry);
     }
 }

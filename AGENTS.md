@@ -49,7 +49,8 @@ Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix deve
 
 **Use Nix-provided software for all tooling.** The one documented exception is the image
 (`Dockerfile`, `docker-compose.yml`, #196): a plain multi-stage Rust build so a fresh clone runs
-with Docker alone; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
+with Docker alone. It is the user's demo, never a test: no smoke script, no test that spawns
+`parosd` processes (behaviour is proved in simulation); CI only builds the image; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
 `scripts/check-dockerfile-toolchain.sh`). Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
 `brew` (`nix-bin` above is the one exception). On the web the flake's inputs are GitHub tarballs
@@ -64,6 +65,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Workflow rules
 
+- **Record what the user decides, in the same session.** A design decision or preference the
+  user states (what paros is, how it behaves) goes into `docs/architecture.md`, dated and with its
+  issue; a preference about how to work goes into this file. Amend the section it touches, never
+  only a chat, a commit message or an issue comment, and correct a recorded decision the user
+  later overturns rather than adding a second one.
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly three issues;
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
@@ -215,20 +221,32 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   The frame `JournalKey { tenant, journal }` (#235) rides the `Deliver` envelope per message
   (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
   each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
-  check them, never a log position: `TenantId` `0` unset, `1` meta, `2` the cell, `0..=255`
-  reserved; `JournalId` `0` unset, `1` every tenant's control journal, `0..=255` reserved, user
-  journals from `JournalId::FIRST_USER` (256). Stores live at `journals/<tenant>/<journal>/`.
+  check them, never a log position. **No id is fixed and none has a default**
+  (`docs/architecture.md` §3.8): `0` is unset and the only value with a meaning, there is no
+  reserved range and no well-known tenant or journal; the control journals' frames are drawn at
+  `init`, recorded in the cell plan and learned through `Inspect` (`CellFrames`, `FleetFrames`);
+  the sim draws every frame per seed (`paros_sim::shape::Frames`). Stores live at
+  `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
-- **System journals** (the directory = the user tenant's control journal `256/1`, the node
-  registry = the cell tenant's control journal `2/1`) are opt-in through a `SystemPlan` (`None`
-  is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
-  journal's id is drawn by its creator and checked at apply (`Reserved`, `IdTaken`: the creator
+- **System journals** (the directory = a user tenant's control journal, the node registry = the
+  cell tenant's control journal, both frames in the `SystemPlan`) are opt-in through a
+  `SystemPlan` (`None` is the static deployment), folded by `paros::system::{Directory,
+  Registry}`; a created journal's id is drawn by its creator and checked at apply (`IdTaken`: the creator
   redraws), never reused. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
+- **Meta** (`paros::meta`, #229) is the fleet's directory: tenant → cell plus the cell entries,
+  hosted by the fleet's one cell. Every tenant has a group (`internal`: meta and the cell tenants,
+  created only by `init`/adding a cell; `users`: the tenant API's) and a placement (`movable` or
+  `pinned`, the creator's choice). Fleet operations (`init`'s fleet half, tenant create
+  and remove) are idempotent state machines over meta and the cell control journal
+  (`paros::client::fleet`): one write per step, every entry fenced by its fleet id, resumed from
+  what the journals hold. A tenant is created once: a creation is named by its drawn frame, and
+  any other creation of a held name is refused (`NameTaken`); finishing an interrupted one is the
+  coordinator's job (#225), never another client's.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are
@@ -343,7 +361,7 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
   `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
   (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
-  Compose toy are `Dockerfile` and `docker-compose.yml` at the root.
+  Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
 - `paros-sim` — the DST harness: processes, role map, fault world, workload, audit, corpus.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
@@ -351,8 +369,7 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 
 Elsewhere: `book/` (mdbook; `book/CLAUDE.md`, the `update-the-book` skill),
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`,
-`compose-smoke.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

@@ -99,9 +99,5 @@ arguments (clap).
   the safety oracles quickly, then `cargo xtask sim run paros-chain` to
   saturate the new gate (`/sim-sweep`); the retry-identity oracle and the
   linearizability search judge every attempt.
-- `crates/parosd/tests/deploy.rs`: a real one-node, one-matchmaker,
-  one-replica deployment over Tokio, driven by `parosctl --json`, checking
-  outputs and exit codes (`CTL_REFUSED = 3`, `CTL_UNREACHABLE = 5`). A new
-  command or exit path gets a step there.
 - Then the full gate (`/validate`): clippy `--all-targets`, nextest, and the
   wasm check of `paros`.

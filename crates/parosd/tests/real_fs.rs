@@ -28,9 +28,8 @@ fn runtime() -> tokio::runtime::Runtime {
 
 fn config() -> Config {
     Config {
-        id: NodeId(0),
         peers: vec![NodeId(0)],
-        ..Config::default()
+        ..Config::new(NodeId(0), paros::JournalKey::UNSET)
     }
 }
 

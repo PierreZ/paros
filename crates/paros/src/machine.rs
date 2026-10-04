@@ -28,7 +28,10 @@
 //!
 //! The plan is a [`CellPlan`]: the cell's id, its bootstrap members (every
 //! seed, by id and address) and the journals they serve from formation —
-//! the cell control journal ([`CELL_CONTROL`]) and the static assignment
+//! the cell tenant's control journal ([`CellPlan::control`]), meta's control
+//! journal ([`CellPlan::meta`]: the fleet's one cell hosts meta in M9, #226)
+//! and the static assignment, every frame drawn at `init` (no frame is
+//! fixed, `docs/architecture.md` §3.8)
 //! that stands in for placement until M9 (#212). Its first coordinator, the
 //! one that claims the cell control journal, is the lowest member id
 //! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
@@ -50,13 +53,34 @@ use tokio_util::sync::CancellationToken;
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{FormCellRpc, IdentifyRpc, InitRpc, ReadRpc};
-use crate::rpc::{Inbound, Read, serve_well_known, well_known};
+use crate::rpc::methods::{FormCellRpc, IdentifyRpc, InitRpc, InspectRpc};
+use crate::rpc::{Inbound, InspectRequest, serve_well_known, well_known};
 
-/// The cell tenant's control journal (`2/1`): the machine registry and the
-/// capacity bookings (`docs/architecture.md` §3.1), claimed by the first
-/// cell coordinator at `init`.
-pub const CELL_CONTROL: JournalKey = JournalKey::control(TenantId::CELL);
+/// A random frame: a random tenant and a random journal, both set (no id
+/// is fixed, `docs/architecture.md` §3.8).
+fn draw_frame<P: Providers>(providers: &P) -> JournalKey {
+    let draw = || loop {
+        let id: u64 = providers.random().random();
+        if id != 0 {
+            break id;
+        }
+    };
+    JournalKey::new(TenantId(draw()), JournalId(draw()))
+}
+
+/// What a formed cell's machines know of its frames (§3.2, §3.8), handed
+/// to the driver: no control journal has a fixed id, so the driver is told
+/// which journals are control journals (they serve no user plane and outlive
+/// a node's retirement), and `Inspect` answers every client with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellFrames {
+    /// The cell's id.
+    pub cell_id: u64,
+    /// The cell tenant's control journal: the registry and the capacity.
+    pub control: JournalKey,
+    /// Meta's control journal, when this cell hosts meta.
+    pub meta: Option<JournalKey>,
+}
 
 /// How long a waiting machine keeps its listener up after the answer that
 /// ends its wait, so the answer leaves before the listener closes.
@@ -137,7 +161,13 @@ pub struct CellPlan {
     pub cell_id: u64,
     /// The bootstrap members — every seed — by id and address, in id order.
     pub members: Vec<(NodeId, SocketAddr)>,
-    /// The journals every member serves from formation, in frame order.
+    /// The cell tenant's control journal, its frame drawn at `init`.
+    pub control: JournalKey,
+    /// Meta's control journal when this cell hosts meta (the fleet's first
+    /// cell does, #226), its frame drawn at `init`.
+    pub meta: Option<JournalKey>,
+    /// The journals every member serves from formation, in frame order:
+    /// [`CellPlan::control`], [`CellPlan::meta`] and the static assignment.
     pub journals: Vec<JournalKey>,
 }
 
@@ -180,10 +210,25 @@ impl CellPlan {
         if frames.len() != self.journals.len() || self.journals.iter().any(|j| !j.is_set()) {
             return Err("a cell's journals are set and unique");
         }
-        if !frames.contains(&CELL_CONTROL) {
+        if !self.control.is_set() || !frames.contains(&self.control) {
             return Err("a cell serves its control journal");
         }
+        if let Some(meta) = self.meta
+            && (!frames.contains(&meta) || meta.tenant == self.control.tenant)
+        {
+            return Err("meta is served, under a tenant of its own");
+        }
         Ok(())
+    }
+
+    /// The frames the cell's machines know (see [`CellFrames`]).
+    #[must_use]
+    pub fn frames(&self) -> CellFrames {
+        CellFrames {
+            cell_id: self.cell_id,
+            control: self.control,
+            meta: self.meta,
+        }
     }
 
     fn members_to_wire(&self) -> Vec<wire::Member> {
@@ -206,18 +251,51 @@ impl CellPlan {
             .collect()
     }
 
-    /// The plan a `FormCell` carries, normalized (members by id, journals
-    /// by frame) and checked.
+    /// The plan a `FormCell` carries, normalized and checked.
+    ///
+    /// # Errors
+    ///
+    /// See [`CellPlan::from_wire`].
+    pub fn from_form(form: &wire::FormCell) -> Result<Self, &'static str> {
+        Self::from_wire(
+            form.cell_id,
+            &form.members,
+            form.control.as_ref(),
+            form.meta.as_ref(),
+            &form.journals,
+        )
+    }
+
+    /// The plan an `InitAck` carries, normalized and checked.
+    ///
+    /// # Errors
+    ///
+    /// See [`CellPlan::from_wire`].
+    pub fn from_init_ack(ack: &wire::InitAck) -> Result<Self, &'static str> {
+        Self::from_wire(
+            ack.cell_id,
+            &ack.members,
+            ack.control.as_ref(),
+            ack.meta.as_ref(),
+            &ack.journals,
+        )
+    }
+
+    /// A plan from its wire parts, normalized (members by id, journals by
+    /// frame) and checked.
     ///
     /// # Errors
     ///
     /// An address that does not parse, or a plan [`CellPlan::check`]
     /// refuses.
-    pub fn from_wire(
+    fn from_wire(
         cell_id: u64,
         members: &[wire::Member],
+        control: Option<&wire::Frame>,
+        meta: Option<&wire::Frame>,
         journals: &[wire::Frame],
     ) -> Result<Self, &'static str> {
+        let frame = |f: &wire::Frame| JournalKey::new(TenantId(f.tenant), JournalId(f.journal));
         let mut members = members
             .iter()
             .map(|m| {
@@ -236,10 +314,19 @@ impl CellPlan {
         let plan = Self {
             cell_id,
             members,
+            control: control.map_or(JournalKey::UNSET, frame),
+            meta: meta.map(frame).filter(|meta| meta.is_set()),
             journals,
         };
         plan.check()?;
         Ok(plan)
+    }
+
+    fn frame_to_wire(key: JournalKey) -> wire::Frame {
+        wire::Frame {
+            tenant: key.tenant.0,
+            journal: key.journal.0,
+        }
     }
 
     fn form_request(&self) -> wire::FormCell {
@@ -247,6 +334,8 @@ impl CellPlan {
             cell_id: self.cell_id,
             members: self.members_to_wire(),
             journals: self.journals_to_wire(),
+            control: Some(Self::frame_to_wire(self.control)),
+            meta: self.meta.map(Self::frame_to_wire),
         }
     }
 
@@ -258,6 +347,8 @@ impl CellPlan {
             members: self.members_to_wire(),
             journals: self.journals_to_wire(),
             coordinator: self.coordinator().0,
+            control: Some(Self::frame_to_wire(self.control)),
+            meta: self.meta.map(Self::frame_to_wire),
         }
     }
 }
@@ -290,8 +381,9 @@ pub trait CellLedger {
 /// Wait for a cell: serve the machine contract at `facts.addr` until a
 /// `FormCell` (from a seed running `Init`) or an `Init` (from `parosctl`)
 /// forms this machine, and return the plan it formed — or `None` on
-/// `shutdown`. `assignment` is the journals a cell this machine initializes
-/// serves beside its control journal (the static assignment, until #212).
+/// `shutdown`. `assignment` is how many user journals a cell this machine
+/// initializes serves beside its control journals — the static assignment,
+/// until #212 — each under a frame `init` draws.
 ///
 /// # Errors
 ///
@@ -301,7 +393,7 @@ pub trait CellLedger {
 pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     providers: P,
     facts: &MachineFacts,
-    assignment: &[JournalKey],
+    assignment: usize,
     ledger: &mut L,
     tunables: &DriverTunables,
     shutdown: CancellationToken,
@@ -392,7 +484,7 @@ async fn form_cell<L: CellLedger>(
     if facts.class != Class::Storage {
         return refuse("stateless");
     }
-    let Ok(plan) = CellPlan::from_wire(request.cell_id, &request.members, &request.journals) else {
+    let Ok(plan) = CellPlan::from_form(request) else {
         return refuse("malformed");
     };
     if !plan.members.contains(&(facts.node_id, facts.addr)) {
@@ -424,7 +516,7 @@ async fn run_init<P: Providers, L: CellLedger>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
-    assignment: &[JournalKey],
+    assignment: usize,
     ledger: &mut L,
     tunables: &DriverTunables,
 ) -> Result<CellPlan, &'static str> {
@@ -470,18 +562,22 @@ async fn run_init<P: Providers, L: CellLedger>(
                 break id;
             }
         };
-        let mut journals: Vec<JournalKey> = assignment
-            .iter()
-            .copied()
-            .chain(std::iter::once(CELL_CONTROL))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        journals.sort_unstable();
+        // Every frame is drawn (§3.8): the cell tenant's control journal,
+        // meta's (this cell hosts it: the fleet's first), and the static
+        // user journals under one drawn user tenant.
+        let control = draw_frame(providers);
+        let meta = draw_frame(providers);
+        let users = draw_frame(providers).tenant;
+        let mut journals: BTreeSet<JournalKey> = [control, meta].into_iter().collect();
+        while journals.len() < 2 + assignment {
+            journals.insert(JournalKey::new(users, draw_frame(providers).journal));
+        }
         let plan = CellPlan {
             cell_id,
             members,
-            journals,
+            control,
+            meta: Some(meta),
+            journals: journals.into_iter().collect(),
         };
         plan.check().map_err(|_| "malformed")?;
         ledger.record_pending(&plan).map_err(|error| {
@@ -518,24 +614,24 @@ async fn run_init<P: Providers, L: CellLedger>(
     Ok(plan)
 }
 
-/// Whether the machine at `seed` serves the cell control journal.
+/// Whether the machine at `seed` serves a cell: it answers an unframed
+/// `Inspect` (a waiting machine has no journal to answer it from) naming a
+/// cell. A machine that has no plan cannot know any frame to ask for: no
+/// frame is fixed (§3.8).
 async fn serves_cell<P: Providers>(
     time: &P::Time,
     rpc: &RpcHandle<P>,
     seed: SocketAddr,
     patience: Duration,
 ) -> bool {
-    let client = well_known::<P, ReadRpc>(rpc, seed);
-    let read = Read {
-        journal: CELL_CONTROL.journal.0,
-        tenant: CELL_CONTROL.tenant.0,
-        from_seq: 0,
-        limit: 1,
-        wait_ms: 0,
+    let client = well_known::<P, InspectRpc>(rpc, seed);
+    let request = InspectRequest {
+        journal: JournalKey::UNSET.journal.0,
+        tenant: JournalKey::UNSET.tenant.0,
     };
     matches!(
-        time.timeout(patience, client.try_get_reply(&read)).await,
-        Ok(Ok(ack)) if !ack.unknown_journal
+        time.timeout(patience, client.try_get_reply(&request)).await,
+        Ok(Ok(reply)) if reply.cell_id != 0
     )
 }
 
@@ -547,11 +643,17 @@ mod tests {
         SocketAddr::from(([10, 0, 0, 1], port))
     }
 
+    fn frame(tenant: u64, journal: u64) -> JournalKey {
+        JournalKey::new(TenantId(tenant), JournalId(journal))
+    }
+
     fn plan() -> CellPlan {
         CellPlan {
             cell_id: 7,
             members: vec![(NodeId(9), addr(1)), (NodeId(3), addr(2))],
-            journals: vec![CELL_CONTROL, JournalKey::default()],
+            control: frame(0x51, 0x52),
+            meta: Some(frame(0x61, 0x62)),
+            journals: vec![frame(0x51, 0x52), frame(0x61, 0x62), frame(0x71, 0x72)],
         }
     }
 
@@ -560,14 +662,14 @@ mod tests {
         let plan = plan();
         assert_eq!(plan.check(), Ok(()));
         assert_eq!(plan.coordinator(), NodeId(3));
-        let wire = plan.form_request();
-        let back = CellPlan::from_wire(wire.cell_id, &wire.members, &wire.journals)
-            .expect("a checked plan decodes");
+        let back = CellPlan::from_form(&plan.form_request()).expect("a checked plan decodes");
         assert_eq!(
             back.members,
             vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))]
         );
-        assert_eq!(back.journals, vec![CELL_CONTROL, JournalKey::default()]);
+        assert_eq!(back.journals, plan.journals);
+        assert_eq!(back.frames(), plan.frames());
+        assert_eq!(CellPlan::from_init_ack(&plan.init_ack()), Ok(back));
     }
 
     #[test]
@@ -579,8 +681,15 @@ mod tests {
         twice.members.push((NodeId(9), addr(3)));
         assert!(twice.check().is_err());
         let mut no_control = plan();
-        no_control.journals = vec![JournalKey::default()];
+        no_control.journals.remove(0);
         assert!(no_control.check().is_err());
+        let mut unset = plan();
+        unset.control = JournalKey::UNSET;
+        assert!(unset.check().is_err());
+        let mut shared = plan();
+        shared.meta = Some(frame(0x51, 0x99));
+        shared.journals.push(frame(0x51, 0x99));
+        assert!(shared.check().is_err(), "meta has a tenant of its own");
         assert!("cloud".parse::<Class>().is_err());
         assert_eq!("storage".parse::<Class>(), Ok(Class::Storage));
     }

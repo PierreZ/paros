@@ -193,17 +193,41 @@ pub(crate) struct Journals<S, A> {
     /// The fault that ended the most recent incarnation, the node's exit
     /// when nothing is left.
     last_fault: Option<RunError>,
+    /// The control journals among the ones served (the cell's, meta's, a
+    /// tenant's directory): no frame is fixed (§3.8), so the deployment says
+    /// which they are. They serve no user plane and outlive a retirement.
+    control: BTreeSet<JournalKey>,
+    /// The journal whose configuration carries the deployment (matchmakers,
+    /// proxy leaders, replicas), once one booted here: the plane, whether it
+    /// is live now or not.
+    deployed: Option<JournalKey>,
+    /// Every journal that booted in this incarnation: the ones whose
+    /// configuration this node has read.
+    booted: BTreeSet<JournalKey>,
 }
 
 impl<S, A> Journals<S, A> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(control: BTreeSet<JournalKey>) -> Self {
         Self {
+            control,
             live: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             down: BTreeSet::new(),
             newly_quarantined: Vec::new(),
             last_fault: None,
+            deployed: None,
+            booted: BTreeSet::new(),
         }
+    }
+
+    /// `journal` booted: it is live, and its configuration is known.
+    pub(crate) fn insert(&mut self, journal: JournalKey, rt: JournalRt<S, A>) {
+        let config = rt.node.config();
+        if config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0 {
+            self.deployed.get_or_insert(journal);
+        }
+        self.booted.insert(journal);
+        self.live.insert(journal, rt);
     }
 
     /// Whether `journal` is one this node serves at all (live, quarantined
@@ -214,16 +238,44 @@ impl<S, A> Journals<S, A> {
             || self.down.contains(&journal)
     }
 
-    /// The node's first live **user** journal (the target of a journal-less
-    /// call and of the single-journal planes: matchmaking, retirement). The
-    /// system journals (#189) sort first and serve no plane.
+    /// The node's **plane** journal (the target of a journal-less call and
+    /// of the single-journal planes: matchmaking, retirement): the
+    /// deployment's journal — the one whose configuration names its
+    /// matchmakers, proxies or replicas, which only one journal of a process
+    /// may (#188) — or else the first live user journal. No frame is fixed
+    /// (§3.8), so id order says nothing; the control journals serve no
+    /// plane.
     pub(crate) fn first(&mut self) -> Option<(&JournalKey, &mut JournalRt<S, A>)> {
-        self.live.iter_mut().find(|(journal, _)| journal.is_user())
+        let key = *self.plane()?.0;
+        self.live.iter_mut().find(|(journal, _)| **journal == key)
     }
 
-    /// [`Journals::first`], read-only.
+    /// [`Journals::first`], read-only: the journal that carries the
+    /// deployment, or, on a node with none, its first user journal. `None`
+    /// while the plane is not live here, or while a journal that never
+    /// booted could be it: answering from another journal would be a lie
+    /// (a `no_matchmakers` refusal from a plain journal while the
+    /// matchmaker journal is quarantined).
     pub(crate) fn plane(&self) -> Option<(&JournalKey, &JournalRt<S, A>)> {
-        self.live.iter().find(|(journal, _)| journal.is_user())
+        if let Some(key) = self.deployed {
+            return self.live.get_key_value(&key);
+        }
+        let unknown = self
+            .quarantined
+            .keys()
+            .chain(&self.down)
+            .any(|journal| !self.booted.contains(journal) && !self.control.contains(journal));
+        if unknown {
+            return None;
+        }
+        self.live
+            .iter()
+            .find(|(journal, _)| !self.control.contains(journal))
+    }
+
+    /// Whether `journal` is one of the deployment's control journals.
+    pub(crate) fn is_control(&self, journal: JournalKey) -> bool {
+        self.control.contains(&journal)
     }
 
     /// Whether the node has nothing left to serve **because of a fault**: no

@@ -33,6 +33,7 @@ use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
 use crate::chain::{hash_text, trace_truncate, user_command_hash};
 use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
+mod fleet;
 mod fold;
 mod races;
 mod rpc;
@@ -136,7 +137,15 @@ const CHECKPOINT: u8 = 23;
 /// Book a slot of a registered joiner in the **node registry**, or release
 /// one (#211): what the cell coordinator writes.
 const BOOK_CAPACITY: u8 = 24;
-const OP_COUNT: u8 = 25;
+/// Run `init`'s fleet half (#229) through `paros::client::fleet`: the cell
+/// joins the fleet on its side, meta records the fleet and the cell
+/// `READY` — or resume a fleet operation this client stopped in the middle
+/// of.
+const FLEET_INIT: u8 = 25;
+/// Create or remove a tenant through meta's directory and the cell (#229),
+/// or resume one this client stopped in the middle of.
+const TENANT: u8 = 26;
+const OP_COUNT: u8 = 27;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -375,7 +384,8 @@ impl ChainConfig {
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
-            // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY
+            // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
+            // TENANT
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -426,6 +436,13 @@ impl ChainConfig {
                 // more often than anyone registers.
                 buggify_knob!(4_u64, 0_u64..21_u64),
                 // A booking is one append and one read-back.
+                buggify_knob!(4_u64, 0_u64..21_u64),
+                // An init is at most four writes, then nothing to do; the
+                // ceiling is an operator re-running init all run long.
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // A tenant operation claims meta and the cell's journal and
+                // writes up to three steps; the ceiling is a client that
+                // mostly manages tenants, fencing every other operator.
                 buggify_knob!(4_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
@@ -887,7 +904,7 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
-            journal: JournalKey::default(),
+            journal: JournalKey::UNSET,
             plan: None,
             client_id: 0,
             calls: None,
@@ -1165,7 +1182,8 @@ impl Workload for ChainWorkload {
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let replica_ips: Vec<(u64, String)> = if self.journal == JournalKey::default() {
+        let main = crate::shape::frames(ctx.state()).main;
+        let replica_ips: Vec<(u64, String)> = if self.journal == main {
             deployment
                 .replicas()
                 .iter()
@@ -1240,8 +1258,16 @@ impl Workload for ChainWorkload {
         let mut writer = Writer::new(journal, client_id);
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
+        // The fleet operations (#229): meta and the cell's tenant list.
+        let mut fleet_ops = fleet::FleetOps::new(
+            &deployment,
+            crate::shape::frames(ctx.state()),
+            crate::shape::system_journals(ctx.state(), true),
+            client_id,
+        );
         let mut system_ops = system::SystemOps::new(
             &deployment,
+            crate::shape::frames(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             self.plan
                 .as_ref()
@@ -1380,7 +1406,7 @@ impl Workload for ChainWorkload {
             // The matchmaker plane — an acceptor or matchmaker
             // reconfiguration, a retirement — belongs to the default journal
             // (#188): a client of another journal pauses instead.
-            let op = if journal != JournalKey::default()
+            let op = if journal != main
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
                 PAUSE
@@ -2706,7 +2732,7 @@ impl Workload for ChainWorkload {
                     reconfigure_next = system_ops
                         .registry_step(ctx, &nodes, None, raw_payload)
                         .await
-                        && journal == JournalKey::default()
+                        && journal == main
                         && operations.contains(&RECONFIGURE);
                 }
                 DRAIN_NODE => {
@@ -2740,6 +2766,26 @@ impl Workload for ChainWorkload {
                         .await;
                 }
                 BOOK_CAPACITY => system_ops.book(ctx, &nodes, raw_payload).await,
+                FLEET_INIT => {
+                    fleet_ops
+                        .init(
+                            ctx,
+                            &nodes,
+                            config.tunables().checkpoint_policy(),
+                            raw_payload,
+                        )
+                        .await;
+                }
+                TENANT => {
+                    fleet_ops
+                        .tenant(
+                            ctx,
+                            &nodes,
+                            config.tunables().checkpoint_policy(),
+                            (raw_class, raw_payload),
+                        )
+                        .await;
+                }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }
@@ -2870,7 +2916,7 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == JournalKey::default() && client_id == 0)
+        let held_replica = (journal == crate::shape::frames(ctx.state()).main && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))

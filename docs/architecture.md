@@ -160,10 +160,13 @@ tenant's name and desired state, its journal names and its placement, so every i
 - The seeds start with the same rendezvous name or short join list and wait.
 - `parosctl init` is sent to one of them, which every seed's join list must name. It is refused
   if the cell is already initialized. In order:
-  1. **forms the cell**: mints `cell_id`, writes it into the durable `Config` (#207), and the
-     first cell coordinator claims the cell control journal with `SetLeader(expected_gen = 0, me)`;
+  1. **forms the cell**: mints `cell_id` and the cell tenant's frame (its random `TenantId` and
+     the random `JournalId` of its control journal, section 3.8), writes them into every seed's
+     durable cell plan, and the first cell coordinator claims the cell control journal with
+     `SetLeader(expected_gen = 0, me)`;
   2. **creates the meta tenant** inside that cell (meta is a tenant, so the cell must exist first
-     to grant it capacity), and mints `fleet_id`;
+     to grant it capacity): mints `fleet_id` and meta's frame, both random, recorded in the cell
+     plan of the cell that hosts meta;
   3. **registers the cell** as the first entry in meta's directory, and writes the matching
      registration on the cell side (section 3.7).
 - Each step is idempotent and is a step of the fleet's operation state machine (section 3.7):
@@ -223,6 +226,14 @@ the cell's are the same name.
 - The durable cached registry fold plays the role CockroachDB gives gossip (node addresses off the
   consensus path): it lets machines find each other while the registry is unavailable. It is a
   static-stability requirement, not an optimisation.
+- **No journal is found by convention** (decided on 2026-10-04, section 3.8): there is no
+  well-known tenant or journal id. Every machine of a formed cell answers `Inspect` (and, later,
+  the rendezvous call) with its `cell_id`, the cell tenant's control frame and, on the cell that
+  hosts it, meta's frame, all read from its durable cell plan. A client or an operator handed
+  only addresses learns the control frames from any machine, then resolves everything else
+  through them: meta's directory gives a tenant's cell and the frame of its control journal, and
+  that control journal gives the tenant's journals. A re-run of `init` learns the cell's ids the
+  same way.
 - `cell_id` and `fleet_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad seed configuration.
@@ -346,7 +357,13 @@ tenant's directory entry carries a state: `REGISTERING`, `READY`, `REMOVING`,
 writes it into meta's directory in `REGISTERING` with a cell assignment (always the one cell
 today), creates the tenant in its cell, then marks it `READY`. If an operation fails partway,
 re-running the same operation is allowed and resumes where it stopped; on success the tenant
-returns to `READY`. A tenant in any state may be removed; only a `READY` or
+returns to `READY`. **A tenant is created once** (decided on 2026-10-04): a creation is named by
+the tenant id its creator drew, so only a re-run carrying that id resumes it; any other creation
+of a name meta holds, in any state and whatever its placement, is refused (`NameTaken`), never
+merged into the first. Until #225 the client drives the steps, so an interrupted creation stays
+`REGISTERING` until it is deleted; with #225 the coordinator that owns the control journal
+finishes every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is
+the work order, no client resumes another's creation). A tenant in any state may be removed; only a `READY` or
 `UPDATING_CONFIGURATION` tenant may be reconfigured. `init` follows the same rule. Cell entries
 carry a state too: `REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a `READY` cell
 receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `init`, and
@@ -364,23 +381,48 @@ metadata version lets a reader refuse a format it does not understand.
 - `Hello` carries `cell_id` and `fleet_id`.
 - The rendezvous call is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state).
-- Meta's tenant entries carry the fleet-unique `TenantId`, the cell assignment, the state, a
-  configuration sequence number and an optional `tenant_group`; meta's cell entries carry the
-  cell id, the state and the metadata version.
+- Meta's tenant entries carry the fleet-unique `TenantId`, the frame of the tenant's control
+  journal, the cell assignment, the state, a configuration sequence number, the tenant's
+  **group** and its **placement** (`movable` or `pinned`); meta's cell entries carry the cell id, the cell tenant's frame, the state and
+  the metadata version. No id is well known (section 3.8): a second cell learns meta's frame
+  when it joins the fleet, from the cell that hosts meta.
 - Every peer and client message is framed by `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through meta's directory.
 
-`tenant_group` is reserved and unused in M9: in FDB the unit of placement and capacity was a group
-of tenants that must share a cluster. Cheap now, hard to add later.
+**Tenant groups and placement** (decided on 2026-10-04). Two attributes of every tenant, both
+recorded in meta's tenant entry when the tenant is registered and never changed afterwards:
 
-**Moving a tenant (M12)** reconfigures its journals and matchmaker set onto the target cell, then
+- **Group: `internal` or `users`, and nothing else.** The group only separates the tenants paros
+  needs to administrate itself from the tenants it serves. `internal` tenants are created by
+  paros's own operations: `init` creates meta and the first cell tenant, and adding a cell (M12)
+  creates its cell tenant. The tenant API (`parosctl tenant create`, the front door) creates
+  `users` tenants only, and meta refuses an `internal` registration from it. A front door serves
+  `users` tenants only.
+- **Placement: `movable` or `pinned`, the creator's choice.** It is independent of the group: an
+  `internal` tenant may move (meta's journal moves to a dedicated cell, M12), and a `users`
+  tenant may be pinned. `parosctl tenant create` registers a tenant `movable` unless told
+  `--pinned`. `init` registers a cell's cell tenant `pinned`, since it is that cell's registry
+  and capacity and lives and dies with it, and meta `movable`. Meta refuses a move of a `pinned`
+  tenant when it applies the move's first entry, so no step of the move runs.
+
+**Moving a tenant (M12)**, never a `pinned` one, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
 never the authority: if it disagrees with the control journal's generation, the generation wins.
 Meta moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
+
+**Open for M12: the cell inside the configuration.** Today a matchmaker's registry binds an
+acceptor set and its quorum system to a ballot, and names no cell. Node ids are fleet-unique, so a
+reconfiguration onto another cell's machines already moves a journal's data. If a configuration
+also carried its `cell_id`, the move would itself be decided by Paxos: the effective
+configuration (the highest-ballot reconfiguration a matchmaker quorum holds) would name the cell
+that owns the journal, the directory would become a cache of that fact, and a reconfiguration
+naming another cell for a `pinned` tenant's journal could be refused where it is registered. The
+cost is one field in `AcceptorConfig` that the core never decides on, and every node knowing its
+own cell. Recorded on #232.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
 tombstone set so it cannot silently rejoin), moving tenants between cells, moving meta, a separate
@@ -394,21 +436,33 @@ make a tenant read-only during a move.
 
 Every identifier is random or minted by the one writer that can check it, never derived from a
 cell's log position, so nothing is renumbered when cells are added, removed or restored (decided
-on 2026-10-02, #226).
+on 2026-10-02, #226). **No identifier is fixed** (decided on 2026-10-04): there is no well-known
+tenant, no well-known journal and no reserved range. `0` means unset in every id space, and that
+is the only value with a meaning. **No id has a default** either: an id is drawn or read, never
+assumed, and unset is a state to refuse, not a value to fall back on.
 
 - `node_id`, `cell_id`, `fleet_id`: random, minted at format, `init` and `init` respectively, and
   stored in `Config`. They are written once, unset → set, and a later mismatch is refused at boot
   like any `Config` mismatch.
 - `TenantId(u64)`: random, drawn by the creator and recorded by meta in the `REGISTERING` step;
   meta refuses a duplicate at apply and the creator redraws. It is fleet-unique, so moving a
-  tenant between cells never needs a new id. `0` is unset; `1` is the meta tenant (one per fleet,
-  keeping its id when it moves); `2` is the cell tenant, one per cell and never leaving it, so
-  unique within its cell; `0..=255` are reserved for system tenants. FDB gave each metacluster an
-  id prefix for the same goal; a random draw checked by meta needs no prefix.
+  tenant between cells never needs a new id. The system tenants are no exception: each cell's
+  cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
+  meta tenant gets one when `init` creates the fleet, kept when meta moves. Meta records both
+  (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
+  covers them too. Meta records each tenant's group (`internal` or `users`) and its placement
+  (`movable` or `pinned`) beside its id (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
+  checked by meta needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
   coordinator, the single writer of the tenant's control journal; a duplicate is refused and the
-  creator redraws. Journal `1` of every tenant is its control journal; `0..=255` are reserved in
-  every tenant. A journal's id never changes when its tenant moves.
+  creator redraws. A tenant's **control journal** has a random id too, drawn with the tenant and
+  recorded where the tenant is recorded: in meta's tenant entry, and for the two system tenants
+  in the cell plan. A journal's id never changes when its tenant moves; a control journal that
+  recovery rebuilds (section 3.10) gets a new one, so the old and the new can never be mistaken
+  for each other.
+- **Discovery replaces convention.** The only fixed starting points are a machine's addresses:
+  the frames of the cell's and meta's control journals are learned from any machine of the cell
+  (section 3.2), and everything below them through their folds.
 - **Every peer and client message is framed by `(TenantId, JournalId)`**, riding the `Deliver`
   envelope where `JournalId` alone rides it today, so uniqueness is only ever needed where it can
   be checked. A tenant's matchmaker set is named by its `TenantId`.
@@ -462,8 +516,8 @@ Losing a control quorum is recoverable without unsafe Paxos surgery, at both lev
 control journals are rebuilt from below (decided on 2026-10-02, #225, #231). User data is never
 touched: the tenants' journals have their own quorums.
 
-- **Cell.** `parosctl init --recover` starts a fresh cell control journal under a new recovery
-  generation; live machines re-register; tenant coordinators re-report from their own control
+- **Cell.** `parosctl init --recover` starts a fresh cell control journal, under a new random
+  `JournalId` recorded in the cell plan, and a new recovery generation; live machines re-register; tenant coordinators re-report from their own control
   journals; any node still holding the old configuration is refused.
 - **Fleet.** Meta's directory is rebuilt from the cells' tenant lists, the way FDB's metacluster
   could rebuild a lost management cluster from its data clusters.
@@ -529,7 +583,8 @@ Simulation is the investment. Every milestone lands with its share of:
   other bytes, `Truncate` monotone and `first_seq` never above a served cursor, a `Truncate`
   accepted only from the current owner, a `SetLeader` winning at most once per `expected_gen`, a
   capacity slot booked at most once, a tenant never reaching a journal outside its own
-  `TenantId`.
+  `TenantId`, no component reaching a journal by an id it did not learn (the simulation draws
+  every frame, the system tenants' included, per seed).
 - Control-plane invariants: a child keeps serving through its parent's outage; folding from a
   checkpoint yields the same state as folding the full history; meta's directory equals the union
   of the cells' tenant lists (assignments and counts), checked even with one cell (FDB's
@@ -562,8 +617,9 @@ stay as they are.
 - The `(client, seq)` at-most-once session ledger goes away; the log is the deduplication table.
 - The read-index path retires; the leaderless read serves `Read`.
 - Journal ids stop being `128 +` a directory LSN, and the `1..=127` system range goes: a journal
-  is named by `(TenantId, JournalId)`, both random u64 with a reserved low range, and that pair
-  frames every message (section 3.8).
+  is named by `(TenantId, JournalId)`, both random u64 with no reserved range and no well-known
+  value (`0` is unset), and that pair frames every message (section 3.8). The fixed ids of
+  2026-10-02 (meta `1`, cell `2`, control journal `1`, `0..=255` reserved) go with them.
 - The system journals dissolve into the four levels: the admin tenant becomes the cell tenant
   and its coordinator the cell coordinator; the meta tenant exists from day one; tenant names and
   desired state move into each tenant's control journal; capacity is owned by the cell
@@ -594,7 +650,12 @@ Verification is not a milestone: every milestone carries its own share of sectio
 
 ## 9. The toy, done means
 
-From a fresh clone: `docker compose up`, then `parosctl init` against one seed, which creates the
+The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
+(decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
+simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
+`front1`); the rendezvous list that names the first three is the `seeds` alias.
+
+From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 fleet, its one cell and the meta tenant. Create a tenant through meta and mint its JWT. Create a
 journal. `write`, `read` and `tail` from `parosctl`. `set-leader` to a second client and see the
 first one refused, for a `write` and for a `truncate`. Kill one `storage` and one `stateless`
@@ -734,3 +795,10 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   changes `paros-core`'s read semantics; the decision is #227.
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
   the front door as the rendezvous: #216.
+- **Well-known system ids** (meta tenant `1`, cell tenant `2`, every control journal `1`,
+  `0..=255` reserved; decided on 2026-10-02, reversed on 2026-10-04). They let a component find a
+  control journal without asking, but every component must then agree on the convention forever,
+  the cell tenant's id repeats in every cell (unique only within its cell), a rebuilt control
+  journal reuses its predecessor's id, and the reserved range is a second id space every check has
+  to special-case. Random ids recorded where they are created, and learned from any machine of
+  the cell, cost one `Inspect` at bootstrap.

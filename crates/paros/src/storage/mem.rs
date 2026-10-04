@@ -15,7 +15,7 @@ use super::{LogStorage, StorageError};
 /// The crash-testable faulty store (fail-stop, corruption, protocol-aware
 /// recovery) is the harness's world-backed disk in `paros-sim`; the driver is
 /// generic over [`LogStorage`], so it swaps in without touching the loop.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MemStorage {
     hard_state: HardState,
     accepted: BTreeMap<Slot, (Ballot, Command)>,
@@ -179,9 +179,8 @@ mod tests {
         futures::executor::block_on(storage_contract_suite(
             || {
                 std::future::ready(MemStorage::new(Config {
-                    id: NodeId(0),
                     peers: vec![NodeId(0)],
-                    ..Config::default()
+                    ..Config::new(NodeId(0), paros_core::JournalKey::UNSET)
                 }))
             },
             // In-memory writes are immediately visible: a reboot is the same

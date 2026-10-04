@@ -358,4 +358,14 @@ message InspectReply {
   // The answering node's own id (#196): node ids are random (#225), so a
   // client given addresses alone learns each server's id here.
   uint64 node = 18;
+  // The answering node's cell (#229, `docs/architecture.md` §3.2): no frame
+  // is fixed (§3.8), so a client handed only addresses learns the control
+  // journals here. `0` when the node knows no cell (a deployment without a
+  // cell plan); the frames are unset when unknown, meta's when this cell
+  // hosts no meta.
+  uint64 cell_id = 19;
+  uint64 control_tenant = 20;
+  uint64 control_journal = 21;
+  uint64 meta_tenant = 22;
+  uint64 meta_journal = 23;
 }

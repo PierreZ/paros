@@ -15,14 +15,16 @@ are all the library's. The split follows etcd's (`etcd`, `etcdctl`,
 
 ## The toy: a cell with Docker Compose
 
+The copy-paste version, with Docker or without, is [`DEMO.md`](../../DEMO.md).
+
 From a fresh clone, Docker alone (the image is a plain multi-stage Rust build,
 the one build outside Nix):
 
 ```sh
 docker compose up -d --build        # five machines; each formats and waits
-docker compose run --rm init        # forms the cell over the three seeds
-docker compose run --rm parosctl write 256 hello world --owner 7
-docker compose run --rm parosctl read 256
+docker compose run --rm init        # forms the cell; prints journals=T/J
+docker compose run --rm parosctl write T/J hello world --owner 7
+docker compose run --rm parosctl read T/J
 ```
 
 `docker-compose.yml` runs one cell of five `parosd` machines over three failure
@@ -30,7 +32,7 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 
 | machine | class | failure domain | role today |
 |---|---|---|---|
-| `seed1`, `seed2`, `seed3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
+| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
 | `front1` | `stateless` | `zone-b` | waits for placement (M9) |
 
@@ -40,30 +42,47 @@ rendezvous — here `seeds:4500`, which resolves to the three seeds. On its firs
 start it **mints its `node_id`** at random and records it in its data directory
 (there is no `PAROS_ID`), then waits. A machine never forms a cell on its own.
 
-**Init.** `parosctl init` goes to one seed (`seed1`, which every seed's join
+**Init.** `parosctl init` goes to one seed (`node1`, which every seed's join
 list names). That seed identifies every seed, mints the cell's id, records the
 plan, forms every other seed and then itself; every seed then serves the **cell
-control journal** (`2/1`) and the toy's journal (`256/256`, the static
-assignment that stands in for placement until M9), plain Multi-Paxos over the
-seeds. Last, the first cell coordinator — the lowest seed id, until the
-coordinator election of #225 — claims the cell control journal with
-`SetLeader(expected_gen = 0)`. Re-running `init` resumes an interrupted one; on
-an initialized cell it is refused (`already_initialized`). The fleet steps of
-`init` — the meta tenant and the cell's registration in its directory — are
-#229.
+control journal**, **meta's control journal** (the fleet's directory: the
+fleet's one cell hosts it) and the toy's journal (the static assignment that
+stands in for placement until M9), plain Multi-Paxos over the seeds. **No
+frame is fixed**: `init` draws every one, records them in the cell plan, and
+prints them (`control=`, `meta=`, `journals=`); afterwards any machine's
+`Inspect` names the cell's control journal and meta's, which is how
+`parosctl tenant` finds them. Then the first cell coordinator — the lowest seed
+id, until the coordinator election of #225 — claims the cell control journal
+with `SetLeader(expected_gen = 0)`. Last come the **fleet steps** (#229): the
+cell records the fleet's id (minted by `init`) on its side, and meta records
+the fleet and adds the cell, `READY`. Every step is idempotent: re-running
+`init` resumes an interrupted one, and on an initialized fleet it is refused
+(`already_initialized`).
+
+**Tenants.** `parosctl tenant create acme [--pinned]` registers a `users`
+tenant in meta (`REGISTERING`, under a random id and a random control journal,
+movable unless `--pinned`), has the cell host it, then marks it `READY`; the
+CLI never creates an `internal` tenant (meta and the cell tenant, which `init`
+registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
+it, then removes it; `parosctl tenant list` prints meta. An interrupted
+delete is resumed by running it again. A tenant is created once: a second
+`create` of a name meta holds is refused (`name_taken`), and an interrupted
+creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
+finish it). A tenant's footprint and its
+own control journal are not created yet (#210, #225).
 
 **Write and read.** `parosctl` is handed addresses only: `--servers seeds:4500`
 stands for every seed, and each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
 generation it read), then writes at the tail.
 
-**Kill and restart.** `docker compose kill seed2` (a storage machine) and
+**Kill and restart.** `docker compose kill node2` (a storage machine) and
 `docker compose kill front1` (a stateless one): the journal keeps a majority and
-keeps taking writes. `docker compose start seed2` brings the machine back as an
+keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
-**Supersede a writer.** `parosctl set-leader 256 --owner 8` takes the journal;
+**Supersede a writer.** `parosctl set-leader T/J --owner 8` takes the journal;
 the first owner's writes and truncations are refused from then on
 (`superseded`, exit 3), and the new owner's `truncate --up-to N --owner 8`
 applies.
@@ -71,24 +90,23 @@ applies.
 **Lose a disk.** Two ways, both refused:
 
 - *the stores, not the identity* (`docker compose run --rm --entrypoint sh
-  seed2 -c 'rm -rf /var/lib/paros/journals'` while `seed2` is stopped): the next
+  node2 -c 'rm -rf /var/lib/paros/journals'` while `node2` is stopped): the next
   start finds stores without their format marker and stops with **amnesia**
   (exit 78). Losing one journal's store alone parks that journal on the machine
   and keeps serving the others.
-- *the whole volume* (`docker compose rm -sf seed2 && docker volume rm
-  paros_seed2 && docker compose up -d seed2`): the machine comes back as a **new
+- *the whole volume* (`docker compose rm -sf node2 && docker volume rm
+  paros_node2 && docker compose up -d node2`): the machine comes back as a **new
   machine** with a new `node_id`, and waits. It never rejoins as the old one: an
   `init` sent to it (`docker compose run --rm --entrypoint parosctl parosctl
-  --servers seed2:4500 init`) is refused (`cell_exists`), since the other seeds
+  --servers node2:4500 init`) is refused (`cell_exists`), since the other seeds
   serve the cell. Healing the cell around it is reconfiguration onto another machine,
   driven by the tenant coordinator in M9.
 
 **What is not proven in simulation yet.** The journals' protocol, the driver
 and the stores are the code the deterministic simulation runs. The machine
 phase — formatting an identity, waiting, `init` and `FormCell` — and the
-uniform start are not in the simulation yet (#216); the deploy test
-(`tests/deploy.rs`) runs them on a laptop, and CI runs the Compose smoke test
-(`scripts/compose-smoke.sh`).
+uniform start are not in the simulation yet (#216). This toy is a demo to run
+by hand: no test runs it, and CI only builds its image.
 
 ## Without Docker
 
@@ -102,9 +120,9 @@ for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=seed$i parosd &
 done
 export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
-parosctl --servers 127.0.0.1:4501 init
-parosctl write 256 hello world --owner 7
-parosctl read 256
+parosctl --servers 127.0.0.1:4501 init      # prints journals=T/J
+parosctl write T/J hello world --owner 7
+parosctl read T/J
 ```
 
 ## Configuration
@@ -199,12 +217,14 @@ A refusal is one of:
 The servers come from `--servers HOST:PORT,…` (or `PAROSCTL_SERVERS`): a name
 that resolves to several machines stands for them all, and each server's node
 id — the one a leader hint names it by — is learned from its own `Inspect`
-(`ID=HOST:PORT` names it outright). A journal is `[TENANT/]JOURNAL`, a bare id
-in the default tenant `256` (#235).
+(`ID=HOST:PORT` names it outright). A journal is `TENANT/JOURNAL`, both random
+and both required: there is no default tenant and no fixed id (#235,
+`docs/architecture.md` §3.8).
 
 | command | what it does |
 |---|---|
-| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, then claims the cell control journal; resumes an interrupted init, refused on an initialized cell |
+| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in meta (#229); resumes an interrupted init, refused on an initialized fleet |
+| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through meta's directory and the cell; lists meta's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |

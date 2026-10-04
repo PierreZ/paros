@@ -82,10 +82,9 @@ impl Storage for FreshStore {
 /// replica count.
 fn config(id: u64) -> Config {
     Config {
-        id: NodeId(id),
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::default()
+        ..Config::new(NodeId(id), paros_core::JournalKey::UNSET)
     }
 }
 

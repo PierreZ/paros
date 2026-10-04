@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::system::{
-    Class, DIRECTORY, DirectoryEvent, DirectoryRefusal, RegistryEvent, RegistryRefusal, SystemEvent,
+    Class, DirectoryEvent, DirectoryRefusal, RegistryEvent, RegistryRefusal, SystemEvent,
 };
 use paros::{JournalId, JournalKey, NodeId};
 
@@ -146,7 +146,7 @@ impl SystemBoard {
     ) {
         let digest = digest(event);
         let known = *self.folded.entry((journal, lsn)).or_insert(digest);
-        if journal == DIRECTORY {
+        if let SystemEvent::Directory(_) = event {
             assert_always!(
                 known == digest,
                 "system: every node folds the directory to the same event at every lsn",
@@ -174,7 +174,7 @@ impl SystemBoard {
             SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
                 let at = *self.created.entry(*id).or_insert(lsn);
                 assert_always!(
-                    id.is_user()
+                    id.is_set()
                         && at == lsn
                         && !self.genesis.contains(&JournalKey::new(journal.tenant, *id)),
                     "system: a created journal takes a drawn user id, never reused",

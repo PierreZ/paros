@@ -355,14 +355,13 @@ impl World {
 
     fn node_config(&self, id: NodeId) -> Config {
         Config {
-            id,
             peers: self.pool.clone(),
             quorum_system: self.config.quorum_system(),
             nodes: Vec::new(),
             matchmakers: Vec::new(),
             matchmaker_pool: Vec::new(),
             proxy_count: PROXIES,
-            ..Config::default()
+            ..Config::new(id, crate::JournalKey::UNSET)
         }
     }
 

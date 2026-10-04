@@ -292,7 +292,7 @@ fn every_refusal_label_the_node_sends_is_typed() {
 
 #[test]
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
-    let journal = JournalKey::default();
+    let journal = JournalKey::new(paros_core::TenantId(7), paros_core::JournalId(9));
     let mut writer = Writer::new(journal, 7);
     assert_eq!(writer.entry(vec![Value(b"x".to_vec())]), None);
 
@@ -374,7 +374,7 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
 
 #[test]
 fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
-    let journal = JournalKey::default();
+    let journal = JournalKey::new(paros_core::TenantId(7), paros_core::JournalId(9));
     let mut reader = Reader::new(journal, 3);
     let request = reader.request(16, 50);
     assert_eq!(

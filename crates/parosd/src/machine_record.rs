@@ -22,8 +22,11 @@
 //! rendezvous seeds:4500
 //! plan formed 912873
 //! member 6150928431937019931 10.0.0.2:4500
-//! journal 2/1
-//! journal 256/256
+//! control 11986532017395081213/5302873011246751929
+//! meta 7240096361733624127/14183513009914637262
+//! journal 11986532017395081213/5302873011246751929
+//! journal 7240096361733624127/14183513009914637262
+//! journal 2965734451981346203/9861377130450924019
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,6 +127,10 @@ impl MachineRecord {
             for (id, addr) in &plan.members {
                 let _ = writeln!(text, "member {} {addr}", id.0);
             }
+            let _ = writeln!(text, "control {}", plan.control);
+            if let Some(meta) = plan.meta {
+                let _ = writeln!(text, "meta {meta}");
+            }
             for journal in &plan.journals {
                 let _ = writeln!(text, "journal {journal}");
             }
@@ -136,6 +143,8 @@ impl MachineRecord {
         let mut plan: Option<(PlanState, u64)> = None;
         let mut members = Vec::new();
         let mut journals = Vec::new();
+        let mut control = None;
+        let mut meta = None;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
@@ -168,6 +177,13 @@ impl MachineRecord {
                     journals
                         .push(parse_key(value).ok_or_else(|| format!("bad journal {value:?}"))?);
                 }
+                "control" => {
+                    control =
+                        Some(parse_key(value).ok_or_else(|| format!("bad control {value:?}"))?);
+                }
+                "meta" => {
+                    meta = Some(parse_key(value).ok_or_else(|| format!("bad meta {value:?}"))?);
+                }
                 _ => return Err(format!("unknown machine record key {key:?}")),
             }
         }
@@ -182,6 +198,8 @@ impl MachineRecord {
                 let plan = CellPlan {
                     cell_id,
                     members,
+                    control: control.ok_or("the machine record's plan names no control journal")?,
+                    meta,
                     journals,
                 };
                 plan.check()?;
@@ -213,12 +231,10 @@ impl MachineRecord {
 pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalKey) -> Config {
     let members: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     Config {
-        journal,
-        id: node_id,
         peers: members.clone(),
         nodes: members,
         quorum_system: QuorumSystem::Majority,
-        ..Config::default()
+        ..Config::new(node_id, journal)
     }
 }
 
@@ -287,6 +303,7 @@ impl CellLedger for DirLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paros::{JournalId, TenantId};
 
     fn record(plan: Option<(PlanState, CellPlan)>) -> MachineRecord {
         MachineRecord {
@@ -309,10 +326,13 @@ mod tests {
             MachineRecord::read(dir.path()).expect("readable"),
             Some(bare)
         );
+        let key = |tenant, journal| JournalKey::new(TenantId(tenant), JournalId(journal));
         let plan = CellPlan {
             cell_id: 912_873,
             members: vec![(NodeId(5), "10.0.0.2:4500".parse().expect("an address"))],
-            journals: vec![paros::machine::CELL_CONTROL, JournalKey::default()],
+            control: key(0x51, 0x52),
+            meta: Some(key(0x61, 0x62)),
+            journals: vec![key(0x51, 0x52), key(0x61, 0x62), key(0x71, 0x72)],
         };
         let formed = record(Some((PlanState::Formed, plan.clone())));
         formed.write(dir.path()).expect("written");

@@ -64,10 +64,9 @@ pub(super) fn peers(size: u64) -> Vec<NodeId> {
 /// The configuration of node `id` in a `size`-node cluster under `system`.
 pub(super) fn config(id: NodeId, size: u64, system: QuorumSystem) -> Config {
     Config {
-        id,
         peers: peers(size),
         quorum_system: system,
-        ..Config::default()
+        ..Config::new(id, paros_core::JournalKey::UNSET)
     }
 }
 

@@ -958,12 +958,22 @@ mod tests {
         };
         // The toy state is every entry's bytes, so the log since the start
         // is exactly the state's size.
-        let mut lazy = Checkpointer::new(JournalKey::default(), 1, Log::default(), policy(2));
+        let mut lazy = Checkpointer::new(
+            JournalKey::new(paros_core::TenantId(7), paros_core::JournalId(9)),
+            1,
+            Log::default(),
+            policy(2),
+        );
         assert!(!lazy.due(Duration::from_secs(100)), "nothing since");
         lazy.folder.fold(0, b"abcd");
         assert!(!lazy.due(Duration::from_secs(1)), "4 bytes against 2 × 4");
         assert!(lazy.due(Duration::from_secs(10)), "the clock says");
-        let mut eager = Checkpointer::new(JournalKey::default(), 1, Log::default(), policy(1));
+        let mut eager = Checkpointer::new(
+            JournalKey::new(paros_core::TenantId(7), paros_core::JournalId(9)),
+            1,
+            Log::default(),
+            policy(1),
+        );
         eager.folder.fold(0, b"abcd");
         assert!(eager.due(Duration::from_secs(1)), "4 bytes against 1 × 4");
         // A checkpoint resets the count.

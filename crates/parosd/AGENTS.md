@@ -27,17 +27,16 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209).
 - `src/bin/parosctl/main.rs` → `parosctl` → global options, server ids discovered from
   `Inspect`, `init` vs the cell commands, exit codes.
-- `src/bin/parosctl/init.rs` → `parosctl init` over `paros::client::bootstrap`.
+- `src/bin/parosctl/init.rs` → `parosctl init` over `paros::client::bootstrap`, then its fleet
+  steps over `paros::client::fleet` (#229).
+- `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete|list` over
+  `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
 - `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`);
   diagnostics to stderr.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
   reopens with every acked write.
-- `tests/deploy.rs` → three seeds and a stateless machine on a laptop: `init` (refused off a
-  seed and on an initialized cell), write, read, restart, a superseded writer and truncation,
-  the refusals (unknown variable, tunable floor, class change, amnesia, lost identity, a wiped
-  volume never forming a second cell), `SIGTERM`.
 
 ## Entry points
 
@@ -59,8 +58,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Local rules
 
-- **Interim (M8 → M9)**: the cell's journals are the cell control journal plus the static
-  assignment `TOY_JOURNAL` (`256/256`), plain Multi-Paxos over the seeds; a non-seed machine
+- **Interim (M8 → M9)**: the cell's journals are the cell control journal, meta's, plus one
+  static user journal (every frame drawn at `init` and printed), plain Multi-Paxos over the seeds; a non-seed machine
   and every `stateless` one wait for placement (#211, #212); the first cell coordinator is the
   lowest seed id (#225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.
@@ -76,10 +75,11 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Tests & gates
 
-- `cargo nextest run -p parosd` (`tests/deploy.rs` uses `CARGO_BIN_EXE_parosd` / `_parosctl`).
+- `cargo nextest run -p parosd`: unit tests and `tests/real_fs.rs`. No test spawns `parosd`
+  processes: behaviour is proved in simulation.
 - `cargo build -p parosd` is the shipped build (see the feature note below).
-- CI's `image` job: `scripts/check-dockerfile-toolchain.sh`, `docker compose build`,
-  `scripts/compose-smoke.sh` (up, init, one write, one read).
+- CI's `image` job: `scripts/check-dockerfile-toolchain.sh`, `docker compose build`. The
+  Compose toy is the user's demo, run by hand, never a test.
 
 ## Deps & pins (`Cargo.toml`)
 

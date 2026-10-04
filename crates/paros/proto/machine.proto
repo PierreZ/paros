@@ -50,9 +50,14 @@ message FormCell {
   uint64 cell_id = 1;
   repeated Member members = 2;
   // The journals every member serves from its formation: the cell control
-  // journal and the static assignment that stands in for placement until
-  // M9 (#212).
+  // journal, meta's when this cell hosts it, and the static assignment that
+  // stands in for placement until M9 (#212). No frame is fixed: every one is
+  // drawn at `init` (`docs/architecture.md` §3.8).
   repeated Frame journals = 3;
+  // The cell tenant's control journal.
+  Frame control = 4;
+  // Meta's control journal, when this cell hosts meta (unset otherwise).
+  Frame meta = 5;
 }
 
 message FormCellAck {
@@ -75,4 +80,7 @@ message InitAck {
   // The first cell coordinator (#225), which claims the cell control
   // journal with `SetLeader(expected_gen = 0)`.
   uint64 coordinator = 6;
+  // The cell tenant's control journal, and meta's (see `FormCell`).
+  Frame control = 7;
+  Frame meta = 8;
 }

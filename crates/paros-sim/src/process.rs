@@ -391,6 +391,7 @@ async fn run_joiner(
             Vec::new(),
             Vec::new(),
             Some(system_plan.clone()),
+            Some(cell_frames(ctx)),
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -632,7 +633,7 @@ async fn run_acceptor(
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len(), perturb);
     let quorum_system = policy.system(bootstrap.len());
     let config = Config {
-        journal: paros::JournalKey::default(),
+        journal: crate::shape::frames(ctx.state()).main,
         id: self_rank,
         peers: bootstrap,
         quorum_system,
@@ -691,7 +692,7 @@ async fn run_acceptor(
         .ids
         .iter()
         .map(|&journal| {
-            let config = if journal == paros::JournalKey::default() {
+            let config = if journal == plan.main {
                 config.clone()
             } else {
                 Config {
@@ -861,6 +862,7 @@ async fn run_acceptor(
             proxies.clone(),
             replicas.clone(),
             system.as_ref().map(|(plan, _)| plan.clone()),
+            system.as_ref().map(|_| cell_frames(ctx)),
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -1059,7 +1061,7 @@ impl Seat {
         // budget; a joiner's seat on a genesis journal (#189, a spare) shares
         // that journal's world and leaves its budget as the genesis nodes
         // sized it — a fault-free copy only ever adds to what it defends.
-        if journal != paros::JournalKey::default() {
+        if journal != crate::shape::frames(ctx.state()).main {
             world
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1238,7 +1240,13 @@ impl JournalStores for SimStores<'_> {
         self.seat(journal).map_or_else(
             || {
                 // A node that serves no seat for `journal` — a joiner's
-                // node-level port (#189): the default journal's world.
+                // node-level port (#189), asked for the unset frame when it
+                // serves no journal yet: the main journal's world.
+                let journal = if journal.is_set() {
+                    journal
+                } else {
+                    crate::shape::frames(self.ctx.state()).main
+                };
                 let audit = NodeAudit::new(
                     self.ctx.time().clone(),
                     audit_world_for(self.ctx.state(), journal),
@@ -1294,6 +1302,19 @@ impl JournalStores for SimStores<'_> {
     }
 }
 
+/// The cell's frames as the driver learns them (§3.2, §3.8): the run's
+/// drawn cell id, the registry as the cell tenant's control journal, and
+/// meta's — so the driver knows its control journals and `Inspect` names
+/// them.
+fn cell_frames(ctx: &SimContext) -> paros::machine::CellFrames {
+    let frames = crate::shape::frames(ctx.state());
+    paros::machine::CellFrames {
+        cell_id: frames.cell_id,
+        control: frames.registry,
+        meta: Some(frames.meta),
+    }
+}
+
 /// The write-path fault layer of a quiet seat (#189): never active.
 fn quiet_faults(ctx: &SimContext) -> StorageFaults<SimTimeProvider> {
     StorageFaults::new(
@@ -1305,7 +1326,7 @@ fn quiet_faults(ctx: &SimContext) -> StorageFaults<SimTimeProvider> {
 }
 
 /// Arm the system journals on a genesis node (#189): the board, the seats of
-/// the system journals on a seed, every seat's port reporting to the board, and
+/// the system journals (and meta's, #229) on a seed, every seat's port reporting to the board, and
 /// the plan the driver follows them by.
 fn system_rig(
     ctx: &SimContext,
@@ -1321,13 +1342,13 @@ fn system_rig(
         seat.audit = seat.audit.clone().with_system(board.clone());
     }
     if seeds.contains(&self_rank) {
-        for journal in [paros::system::DIRECTORY, paros::system::REGISTRY] {
+        // Meta (#229) lives beside them: the fleet's one cell hosts it.
+        let frames = crate::shape::frames(ctx.state());
+        for journal in [frames.directory, frames.registry, frames.meta] {
             let config = Config {
-                journal,
-                id: self_rank,
                 peers: seeds.clone(),
                 quorum_system: paros::QuorumSystem::Majority,
-                ..Config::default()
+                ..Config::new(self_rank, journal)
             };
             seats.push(Seat::quiet(ctx, journal, config, &board));
         }
@@ -1344,6 +1365,7 @@ fn system_plan(
     plan: &crate::shape::JournalPlan,
     self_id: NodeId,
 ) -> (SystemPlan, Vec<NodeId>) {
+    let frames = crate::shape::frames(ctx.state());
     let seeds: Vec<NodeId> = crate::shape::seed_ranks(members.len())
         .into_iter()
         .map(NodeId)
@@ -1381,6 +1403,8 @@ fn system_plan(
             genesis_pool: members.iter().map(|(id, _)| *id).collect(),
             genesis_journals: plan.ids.clone(),
             spares: spares.into_iter().collect(),
+            directory: frames.directory,
+            registry: frames.registry,
         },
         seeds,
     )
@@ -1414,7 +1438,7 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
             .collect();
     let policy = crate::shape::quorum_policy(ctx.state(), pool_len, true);
     Some(Config {
-        journal: paros::JournalKey::default(),
+        journal: crate::shape::frames(ctx.state()).main,
         id: NodeId(0),
         quorum_system: policy.system(bootstrap.len()),
         peers: bootstrap,
@@ -1629,7 +1653,7 @@ async fn run_proxy_role(
     let config = ProxyConfig {
         id,
         acceptors: bootstrap_config(ctx, members.len(), has_matchmakers, perturb),
-        journal: paros::JournalKey::default(),
+        journal: crate::shape::frames(ctx.state()).main,
     };
     // A proxy has a shape too — its tick cadence and transport tunables —
     // drawn once per seed like a node's and kept across its reboots.
@@ -1684,14 +1708,13 @@ fn replica_config(
             .map(MatchmakerId)
             .collect();
     Config {
-        id,
         peers: bootstrap.members().to_vec(),
         quorum_system: bootstrap.quorum_system(),
         nodes: members.iter().map(|(node, _)| *node).collect(),
         matchmakers,
         matchmaker_pool,
         replica_count: deployment.replica_count(),
-        ..Config::default()
+        ..Config::new(id, crate::shape::frames(ctx.state()).main)
     }
 }
 
@@ -1811,9 +1834,8 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
         JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, LogStorage, MatchmakerStorage,
     };
     let config = Config {
-        id: NodeId(0),
         peers: vec![NodeId(0)],
-        ..Config::default()
+        ..Config::new(NodeId(0), paros::JournalKey::UNSET)
     };
     let store = JournalStoreConfig {
         checkpoint_after: 4,
@@ -1896,9 +1918,8 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             WritePathRates::default(),
         );
         let config = Config {
-            id: NodeId(0),
             peers: vec![NodeId(0)],
-            ..Config::default()
+            ..Config::new(NodeId(0), paros::JournalKey::UNSET)
         };
         let mut instance = 0_u64;
         // No client, no protocol: each fresh store is its own one-node

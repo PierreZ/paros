@@ -104,10 +104,9 @@ mod tests {
 
     fn config(peers: &[u64]) -> Config {
         Config {
-            id: NodeId(0),
             peers: peers.iter().copied().map(NodeId).collect(),
             nodes: peers.iter().copied().map(NodeId).collect(),
-            ..Config::default()
+            ..Config::new(NodeId(0), paros_core::JournalKey::UNSET)
         }
     }
 
