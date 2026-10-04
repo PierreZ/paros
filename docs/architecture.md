@@ -376,18 +376,38 @@ metadata version lets a reader refuse a format it does not understand.
 - The rendezvous call is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state).
 - Meta's tenant entries carry the fleet-unique `TenantId`, the frame of the tenant's control
-  journal, the cell assignment, the state, a configuration sequence number and an optional
-  `tenant_group`; meta's cell entries carry the cell id, the cell tenant's frame, the state and
+  journal, the cell assignment, the state, a configuration sequence number, the tenant's
+  **group** and whether it is **pinned**; meta's cell entries carry the cell id, the cell tenant's frame, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns meta's frame
   when it joins the fleet, from the cell that hosts meta.
 - Every peer and client message is framed by `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through meta's directory.
 
-`tenant_group` is reserved and unused in M9: in FDB the unit of placement and capacity was a group
-of tenants that must share a cluster. Cheap now, hard to add later.
+**Tenant groups and pinning** (decided on 2026-10-04). Every tenant belongs to exactly one
+**group**, fixed when it is created, and is either **movable** or **pinned** to its cell, also
+fixed at creation:
 
-**Moving a tenant (M12)** reconfigures its journals and matchmaker set onto the target cell, then
+| Tenant | Group | Movable |
+|---|---|---|
+| a cell's cell tenant | `internal` | **pinned**: it *is* its cell's registry and capacity, and lives and dies with the cell |
+| the meta tenant | `internal` | movable, like any tenant (to a dedicated cell, M12) |
+| a user tenant | `users` | movable |
+
+- There are exactly two groups for now, `internal` and `users`. A group is a closed set the
+  fleet defines, never a tenant-supplied name; a third group is a metadata-version change.
+- `parosctl tenant create` makes `users` tenants only. `internal` tenants are created by `init`
+  (meta, the first cell tenant) and by adding a cell (its cell tenant, M12), never through the
+  tenant API; meta refuses an `internal` registration outside those operations, and refuses to
+  remove an `internal` tenant while its cell or the fleet is not being removed.
+- A move of a pinned tenant is refused at apply in meta, before any step runs; meta knows the
+  flag, so no cell is asked. Pinning is a property of the tenant, not of its group: meta is
+  `internal` and movable.
+- Groups are also the unit of placement and capacity policy once cells differ (FDB's tenant
+  groups were the unit that must share a cluster): placement and quotas may treat `internal`
+  and `users` apart, and a front door serves `users` tenants only.
+
+**Moving a tenant (M12)**, never a pinned one, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
@@ -409,7 +429,8 @@ Every identifier is random or minted by the one writer that can check it, never 
 cell's log position, so nothing is renumbered when cells are added, removed or restored (decided
 on 2026-10-02, #226). **No identifier is fixed** (decided on 2026-10-04): there is no well-known
 tenant, no well-known journal and no reserved range. `0` means unset in every id space, and that
-is the only value with a meaning.
+is the only value with a meaning. **No id has a default** either: an id is drawn or read, never
+assumed, and unset is a state to refuse, not a value to fall back on.
 
 - `node_id`, `cell_id`, `fleet_id`: random, minted at format, `init` and `init` respectively, and
   stored in `Config`. They are written once, unset → set, and a later mismatch is refused at boot
@@ -420,7 +441,8 @@ is the only value with a meaning.
   cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
   meta tenant gets one when `init` creates the fleet, kept when meta moves. Meta records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
-  covers them too. FDB gave each metacluster an id prefix for the same goal; a random draw
+  covers them too. Meta records each tenant's group (`internal` or `users`) and whether it is
+  pinned to its cell beside its id (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
   checked by meta needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
   coordinator, the single writer of the tenant's control journal; a duplicate is refused and the
