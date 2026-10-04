@@ -11,6 +11,7 @@
 //! single node does with the answers.
 
 use super::*;
+use crate::types::JournalKey;
 
 /// Registries that hold `{3, 4, 5}` as the effective configuration: a
 /// leader at ballot `(2, 2)` registered the rotation with each of them.
@@ -20,7 +21,13 @@ fn rotated_registries() -> Vec<Matchmaker> {
         .map(|m| {
             (
                 MatchmakerId(m),
-                MatchRequest::reconfigure(NodeId(2), ballot(2, 2), cfg(&[3, 4, 5]), G0),
+                MatchRequest::reconfigure(
+                    NodeId(2),
+                    JournalKey::default(),
+                    ballot(2, 2),
+                    cfg(&[3, 4, 5]),
+                    G0,
+                ),
             )
         })
         .collect();
@@ -81,6 +88,7 @@ fn a_probe_registers_nothing_at_the_matchmakers() {
         // registration above it sees only the rotation.
         mm.step(MatchRequest::new(
             NodeId(4),
+            JournalKey::default(),
             ballot(90, 4),
             cfg(&[3, 4, 5]),
             G0,
@@ -196,7 +204,13 @@ fn a_member_of_its_default_probes_and_registers_only_what_it_heard() {
         .map(|m| {
             (
                 MatchmakerId(m),
-                MatchRequest::reconfigure(NodeId(3), ballot(16, 3), cfg(&[0, 2, 4]), G0),
+                MatchRequest::reconfigure(
+                    NodeId(3),
+                    JournalKey::default(),
+                    ballot(16, 3),
+                    cfg(&[0, 2, 4]),
+                    G0,
+                ),
             )
         })
         .collect();

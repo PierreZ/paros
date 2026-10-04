@@ -1545,8 +1545,7 @@ impl World {
         } else {
             journal(1 + self.rng.below(JOURNALS - 1))
         };
-        let request =
-            MatchRequest::for_kind(kind, node, ballot, config, believed.generation).in_journal(j);
+        let request = MatchRequest::for_kind(kind, node, j, ballot, config, believed.generation);
         self.node(node).campaign = Some(Campaign {
             tally: Matchmaking::new(ballot, request.config.clone(), kind),
             generation: believed.generation,
@@ -1573,8 +1572,7 @@ impl World {
             vec![NodeId(0), NodeId(1), NodeId(2)],
             QuorumSystem::Majority,
         );
-        let request =
-            MatchRequest::new(node, ballot, config, believed.generation).in_journal(journal(0));
+        let request = MatchRequest::new(node, journal(0), ballot, config, believed.generation);
         for m in (0..POOL).map(MatchmakerId) {
             if believed.contains(m) {
                 continue;
@@ -2254,15 +2252,15 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
     // Different histories at A and B: two registrations that each reached
     // only one of them (a lost message each).
     let cfg = |n: u64| AcceptorConfig::new(vec![NodeId(n), NodeId(n + 1)], QuorumSystem::Majority);
-    let g0 = MatchmakerGeneration(0);
-    world.deliver(Envelope::Register {
-        to: a,
-        request: MatchRequest::new(node, Ballot { round: 1, node }, cfg(0), g0),
-    });
-    world.deliver(Envelope::Register {
-        to: b,
-        request: MatchRequest::new(node, Ballot { round: 2, node }, cfg(1), g0),
-    });
+    let (j, g0) = (JournalKey::default(), MatchmakerGeneration(0));
+    let register =
+        |round: u64| MatchRequest::new(node, j, Ballot { round, node }, cfg(round - 1), g0);
+    for (to, round) in [(a, 1), (b, 2)] {
+        world.deliver(Envelope::Register {
+            to,
+            request: register(round),
+        });
+    }
     world.network.clear();
     // The original reconfigurer freezes A and B, then dies.
     let believed = world.node(node).believed.clone();
@@ -2507,6 +2505,7 @@ fn every_quorum_registration_survives_every_stop_quorum() {
                         world.chaos = false;
                         let request = MatchRequest::new(
                             node,
+                            JournalKey::default(),
                             registered,
                             cfg.clone(),
                             MatchmakerGeneration(0),

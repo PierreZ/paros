@@ -864,6 +864,22 @@ where
             "only a node's first journal may name proxies or replicas, and only a user journal matchmakers".into(),
         )));
     }
+    // One handover per node drives the set, and every journal it serves
+    // learns its successor: so the journals naming matchmakers must be one
+    // tenant's and name one set (#190). Two tenants' sets on one node would
+    // share the handover and adopt each other's successor.
+    let matchmaking = journals.matchmaking();
+    let one_set = matchmaking.windows(2).all(|pair| {
+        let (a, b) = (&journals.live[&pair[0]], &journals.live[&pair[1]]);
+        pair[0].tenant == pair[1].tenant
+            && a.node.config().matchmakers == b.node.config().matchmakers
+            && a.node.config().matchmaker_pool == b.node.config().matchmaker_pool
+    });
+    if !one_set {
+        return Err(RunError::Infra(SimulationError::InvalidState(
+            "the journals naming matchmakers on a node are one tenant's, under one set".into(),
+        )));
+    }
     let self_id = match &system {
         Some(plan) => plan.self_id.0,
         None => journals

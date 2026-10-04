@@ -157,7 +157,8 @@ matchmakers are idle whenever a leader is stable. paros restates it as follows.
 | set `M_g` | `MatchmakerSet { generation, members }` | matchmaker configuration |
 | phase | `Fresh`, `Inactive` (a spare), `Active`, `Stopped` (frozen) | — |
 | successor link | `MatchmakerHardState::successor` | — |
-| pending bootstrap | `PendingBootstrap { set, gc_watermark, history, effective }` | bootstrapped state |
+| registry scalars | `RegistryScalars { gc_watermark, effective }`, per `JournalKey` (#190) | — |
+| pending bootstrap | `PendingBootstrap { set, registries }`, one `RegistrySnapshot` per journal | bootstrapped state |
 
 ### Fencing
 
@@ -170,6 +171,28 @@ from its current set and generation, and learns a newer set from any refusal tha
 (`MatchStep::Superseded`), re-campaigning under it. A frozen matchmaker stays alive: it keeps
 answering `Stop`, votes in the decree, and points late proposers at its successor —
 "stopped" is a protocol freeze, not a process death.
+
+### One set, one registry per journal (#190)
+
+A set serves every journal of its tenant. The generation state (phase, members, successor,
+decree) is the set's; each journal has its own registry, GC watermark and effective
+configuration (`MatchmakerHardState::registries`), because each journal has its own leader and
+its own floor. Every `MatchRequest`, `MatchReply`, `GcRequest` and `GcAck` names its journal,
+and a node folds only its own journal's replies.
+
+The handover moves every registry at once. `Stop` carries a `(JournalKey, Ballot)` cursor and
+`Stopped` answers one page (`registry_page`, `REGISTRY_PAGE` registrations); the reconfigurer
+takes a member's pages in cursor order and counts the member only once its last page folded —
+a frozen registry is immutable, so every page at one cursor is the same page. The
+reconstruction is the per-journal union above each journal's maximum watermark
+(`RegistrySnapshot::merge`), sent as bootstrap pages that each carry their range. A member
+merges each page into its pending bootstrap (`PendingBootstrap::merge`) and acknowledges the
+page and range it merged. Two reconstructions of one proposal merge into the reconstruction
+over a superset of a quorum, which is still complete; where two disagree on one ballot the
+first stays, and the write-once ledger makes that impossible. Activation takes, per journal,
+the maximum of the local and the reconstructed watermark and effective configuration. The
+model checker judges completeness per journal, and a bootstrap page that loses one journal's
+registry turns it red.
 
 ### The handover, as an explicit state machine
 

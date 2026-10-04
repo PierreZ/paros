@@ -11,8 +11,8 @@
 //! Three gates live here because they are cross-journal by nature: a
 //! handover that carried more than one journal's registry, a campaign that
 //! completed in one journal while another of the same node was still
-//! matchmaking, and one journal's floor raised to a height another journal's
-//! does not share.
+//! matchmaking, and one journal's floor raised above another journal's
+//! already-raised floor at the same matchmaker.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -93,12 +93,13 @@ pub(crate) fn lock(board: &Mutex<SetBoard>) -> std::sync::MutexGuard<'_, SetBoar
 }
 
 /// One journal's registry out of a per-journal map (empty when the journal
-/// holds none here).
+/// holds none here), borrowed: a fan-out never copies a registry.
 pub(crate) fn registry_of(
     registries: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     journal: JournalKey,
-) -> BTreeMap<Ballot, Registration> {
-    registries.get(&journal).cloned().unwrap_or_default()
+) -> &BTreeMap<Ballot, Registration> {
+    static EMPTY: BTreeMap<Ballot, Registration> = BTreeMap::new();
+    registries.get(&journal).unwrap_or(&EMPTY)
 }
 
 /// The activation gate: a handover carried more than one journal's
@@ -117,8 +118,9 @@ pub(crate) fn activation_gate(
 }
 
 /// The floor gate: `matchmaker` raised `journal`'s watermark to
-/// `watermark`, and another journal of the set holds a different floor
-/// there — each journal's leader raises its own.
+/// `watermark` while another journal of the set already held a raised
+/// floor strictly below it there — each journal's leader raises its own,
+/// and one journal's GC never drags another's floor along.
 pub(crate) fn watermark_gate(
     worlds: &[(JournalKey, Arc<AuditWorld>)],
     matchmaker: MatchmakerId,
@@ -129,7 +131,10 @@ pub(crate) fn watermark_gate(
         let independent = worlds
             .iter()
             .filter(|(other, _)| *other != journal)
-            .any(|(_, world)| world.matchmaker_watermark(matchmaker) != watermark);
+            .any(|(_, world)| {
+                let floor = world.matchmaker_watermark(matchmaker);
+                floor > Ballot::zero() && floor < watermark
+            });
         assert_sometimes!(
             independent,
             "gc: one journal's watermark rises without another's"

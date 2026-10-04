@@ -305,11 +305,29 @@ fn matchmaker_contract_round_trips() {
         )
     };
     for request in [
-        MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
-        MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
-        MatchRequest::probe(NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
+        MatchRequest::new(
+            NodeId(4),
+            JournalKey::default(),
+            ballot(7, 4),
+            config(&[0, 1, 2]),
+            g(0),
+        ),
+        MatchRequest::reconfigure(
+            NodeId(4),
+            JournalKey::default(),
+            ballot(8, 4),
+            config(&[1, 2, 3]),
+            g(3),
+        ),
+        MatchRequest::probe(
+            NodeId(5),
+            JournalKey::default(),
+            ballot(9, 5),
+            config(&[0, 1, 2]),
+            g(1),
+        ),
         // #190: another journal's registry of the same set.
-        MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)).in_journal(other),
+        MatchRequest::new(NodeId(4), other, ballot(7, 4), config(&[0, 1, 2]), g(0)),
     ] {
         let wire = super::matchmaker_codec::wire_match_request(&request);
         let bytes = wire.encode_to_vec();

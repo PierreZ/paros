@@ -231,8 +231,14 @@ fn phase_request(
     m: &Matchmaking,
     generation: MatchmakerGeneration,
 ) -> MatchRequest {
-    MatchRequest::for_kind(m.kind(), me, m.ballot(), m.config().clone(), generation)
-        .in_journal(journal)
+    MatchRequest::for_kind(
+        m.kind(),
+        me,
+        journal,
+        m.ballot(),
+        m.config().clone(),
+        generation,
+    )
 }
 
 impl ColocatedNode {
@@ -302,11 +308,11 @@ impl ColocatedNode {
         let matchmakers = self.deployment_matchmakers();
         let request = MatchRequest::probe(
             self.config.id,
+            self.config.journal,
             probe.ballot(),
             probe.believed().clone(),
             matchmakers.generation,
-        )
-        .in_journal(self.config.journal);
+        );
         for matchmaker in probe.unanswered(matchmakers) {
             self.pending_match_requests
                 .push((matchmaker, request.clone()));

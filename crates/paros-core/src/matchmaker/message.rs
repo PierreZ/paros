@@ -59,13 +59,14 @@ impl MatchRequest {
     #[must_use]
     pub fn new(
         from: NodeId,
+        journal: JournalKey,
         ballot: Ballot,
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
         Self {
             from,
-            journal: JournalKey::default(),
+            journal,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Belief),
@@ -79,13 +80,14 @@ impl MatchRequest {
     #[must_use]
     pub fn reconfigure(
         from: NodeId,
+        journal: JournalKey,
         ballot: Ballot,
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
         Self {
             from,
-            journal: JournalKey::default(),
+            journal,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Reconfiguration),
@@ -103,14 +105,15 @@ impl MatchRequest {
     pub fn for_kind(
         kind: RegistrationKind,
         from: NodeId,
+        journal: JournalKey,
         ballot: Ballot,
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
         match kind {
-            RegistrationKind::Belief => Self::new(from, ballot, config, generation),
+            RegistrationKind::Belief => Self::new(from, journal, ballot, config, generation),
             RegistrationKind::Reconfiguration => {
-                Self::reconfigure(from, ballot, config, generation)
+                Self::reconfigure(from, journal, ballot, config, generation)
             }
         }
     }
@@ -124,27 +127,20 @@ impl MatchRequest {
     #[must_use]
     pub fn probe(
         from: NodeId,
+        journal: JournalKey,
         ballot: Ballot,
         believed: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
         Self {
             from,
-            journal: JournalKey::default(),
+            journal,
             ballot,
             config: believed,
             purpose: MatchPurpose::Probe,
             generation,
             from_ballot: None,
         }
-    }
-
-    /// The same request, for `journal`'s registry (the constructors address
-    /// the default journal's).
-    #[must_use]
-    pub fn in_journal(mut self, journal: JournalKey) -> Self {
-        self.journal = journal;
-        self
     }
 
     /// The same request, asking for the page that starts at `from`: what a

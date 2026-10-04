@@ -713,8 +713,12 @@ fn phase2(
 fn part_first_leader(acceptors: &mut [AcceptorNode], matchmakers: &mut [MatchmakerNode]) {
     println!("== 1. the first leader: the matchmakers say nothing came before ==");
     let b1 = ballot(1, N1);
-    let phase = matchmake(matchmakers, &m_0(), &MatchRequest::new(N1, b1, c0(), G0))
-        .expect("nothing refuses a first registration");
+    let phase = matchmake(
+        matchmakers,
+        &m_0(),
+        &MatchRequest::new(N1, JournalKey::default(), b1, c0(), G0),
+    )
+    .expect("nothing refuses a first registration");
     assert!(
         phase.prior().is_empty(),
         "no configuration was ever registered below 1.1"
@@ -756,7 +760,7 @@ fn part_first_leader(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmak
 fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     println!("== 2. a reboot: the registration survives because the disk holds it ==");
     let b1 = ballot(1, N1);
-    let request = MatchRequest::new(N1, b1, c0(), G0);
+    let request = MatchRequest::new(N1, JournalKey::default(), b1, c0(), G0);
     // The record is on m0's disk *now*, before any reboot, because the
     // reply that acknowledged it in part 1 left only after the write.
     let m0 = matchmaker(matchmakers, M0);
@@ -820,7 +824,7 @@ fn part_reconfigure(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmake
     let phase = matchmake(
         matchmakers,
         &m_0(),
-        &MatchRequest::reconfigure(N1, b2, c1(), G0),
+        &MatchRequest::reconfigure(N1, JournalKey::default(), b2, c1(), G0),
     )
     .expect("registered");
     // The matchmakers answering here were all rebooted in part 2: the
@@ -892,8 +896,12 @@ fn part_cover_every_configuration(
     // reconfiguration at 2.1 and a real node would abandon the campaign and
     // adopt `C1` (`MatchStep::StaleConfiguration`).
     let b3 = ballot(3, N3);
-    let phase =
-        matchmake(matchmakers, &m_0(), &MatchRequest::new(N3, b3, c1(), G0)).expect("registered");
+    let phase = matchmake(
+        matchmakers,
+        &m_0(),
+        &MatchRequest::new(N3, JournalKey::default(), b3, c1(), G0),
+    )
+    .expect("registered");
     assert_eq!(phase.prior(), vec![c0(), c1()]);
     assert_eq!(phase.effective(), Some(&(ballot(2, N1), c1())));
     assert_eq!(
@@ -1441,7 +1449,7 @@ fn part_handover(matchmakers: &mut [MatchmakerNode]) {
 fn part_after_handover(matchmakers: &mut [MatchmakerNode]) {
     println!("== 7. a late proposer discovers the new generation and loses nothing ==");
     let b4 = ballot(4, N4);
-    let request = MatchRequest::new(N4, b4, c1(), G0);
+    let request = MatchRequest::new(N4, JournalKey::default(), b4, c1(), G0);
     // Every member of the replaced generation answers a stale proposer with
     // the chosen successor — in one of two shapes. A member that moved on
     // into `M_1` is *active* for generation 1 and says so; a member left
@@ -1461,8 +1469,12 @@ fn part_after_handover(matchmakers: &mut [MatchmakerNode]) {
         }
     );
     println!("  both refusals name M_1: the proposer adopts it and asks again");
-    let phase = matchmake(matchmakers, &m_1(), &MatchRequest::new(N4, b4, c1(), G1))
-        .expect("generation 1 serves");
+    let phase = matchmake(
+        matchmakers,
+        &m_1(),
+        &MatchRequest::new(N4, JournalKey::default(), b4, c1(), G1),
+    )
+    .expect("generation 1 serves");
     // The reconstruction carried every registration of generation 0 — the
     // spare m3 answers from a registry it was bootstrapped with — so `H_b`
     // still names both configurations, and the effective one survived too.

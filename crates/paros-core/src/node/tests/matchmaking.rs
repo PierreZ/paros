@@ -203,6 +203,7 @@ fn a_refused_registration_never_becomes_a_leadership() {
     // Another proposer is already registered above us everywhere.
     let above = MatchRequest::new(
         NodeId(1),
+        JournalKey::default(),
         ballot(7, 1),
         cfg(&[0, 1, 2]),
         MatchmakerGeneration(0),
@@ -1003,6 +1004,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     for round in 1..=page + 1 {
         mm.step(MatchRequest::new(
             NodeId(1),
+            JournalKey::default(),
             ballot(round as u64, 1),
             cfg(&[0, 1, 2]),
             MatchmakerGeneration(0),
@@ -1012,6 +1014,7 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     let top = ballot(page as u64 + 5, 1);
     mm.step(MatchRequest::new(
         NodeId(1),
+        JournalKey::default(),
         top,
         cfg(&[0, 1, 2]),
         MatchmakerGeneration(0),
@@ -1034,8 +1037,14 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
     // The cursor request re-answers idempotently, from where the first page
     // stopped, and registers nothing.
     mm.step(
-        MatchRequest::new(NodeId(1), top, cfg(&[0, 1, 2]), MatchmakerGeneration(0))
-            .from_page(next_from_ballot.expect("a cursor")),
+        MatchRequest::new(
+            NodeId(1),
+            JournalKey::default(),
+            top,
+            cfg(&[0, 1, 2]),
+            MatchmakerGeneration(0),
+        )
+        .from_page(next_from_ballot.expect("a cursor")),
     );
     let ready = mm.ready();
     assert!(ready.writes().is_empty(), "a cursor request writes nothing");
@@ -1125,6 +1134,7 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
     for round in 1..=page + 1 {
         mms[0].step(MatchRequest::new(
             NodeId(1),
+            JournalKey::default(),
             ballot(round, 1),
             cfg(&[0, 1, 2]),
             MatchmakerGeneration(0),

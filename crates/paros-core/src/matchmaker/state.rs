@@ -104,10 +104,12 @@ pub struct RegistrySnapshot {
 
 impl RegistrySnapshot {
     /// Fold `other` into this snapshot — the reconstruction's rule (§5),
-    /// commutative and idempotent: the maximum watermark, the union of the
-    /// histories at or above it, the highest effective configuration.
-    /// Returns how many ballots the two held with *different* registrations
-    /// (the first one kept stays).
+    /// idempotent, and commutative up to disagreements: the maximum
+    /// watermark, the union of the histories at or above it, the highest
+    /// effective configuration. Where the two hold one ballot with
+    /// *different* registrations the one already held stays, so the order
+    /// decides which; the count of such ballots is returned (the write-once
+    /// ledger makes it zero, and the audit says so).
     pub fn merge(&mut self, other: RegistrySnapshot) -> u64 {
         let mut disagreements = 0;
         self.gc_watermark = self.gc_watermark.max(other.gc_watermark);
@@ -221,7 +223,9 @@ pub struct PendingBootstrap {
 
 impl PendingBootstrap {
     /// Fold another page (or another reconstruction) of the same proposed
-    /// set in. Safe across reconfigurers: every reconstruction is the union
+    /// set in, journal by journal ([`RegistrySnapshot::merge`]: commutative
+    /// up to disagreements, which the write-once ledger rules out). Safe
+    /// across reconfigurers: every reconstruction is the union
     /// of a frozen quorum's registries above the maximum watermark, so the
     /// merge of two is the reconstruction over a superset of a quorum —
     /// still complete for every registration that reached a quorum.

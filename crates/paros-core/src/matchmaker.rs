@@ -823,6 +823,7 @@ mod tests {
         for round in 1..=6 {
             mm.step(MatchRequest::new(
                 NodeId(1),
+                J,
                 ballot(round, 1),
                 cfg(round),
                 G0,
@@ -949,7 +950,7 @@ mod tests {
     }
 
     fn request(from: u64, ballot: Ballot, members: &[u64]) -> MatchRequest {
-        MatchRequest::new(NodeId(from), ballot, config(members), G0)
+        MatchRequest::new(NodeId(from), J, ballot, config(members), G0)
     }
 
     fn drain(mm: &mut Matchmaker) -> (Vec<MatchmakerWriteOp>, Vec<MatchReply>) {
@@ -1419,6 +1420,7 @@ mod tests {
         let mut mm = fresh(0);
         mm.step(MatchRequest::new(
             NodeId(1),
+            J,
             ballot(1, 1),
             config(&[0, 1, 2]),
             MatchmakerGeneration(3),
@@ -1557,6 +1559,7 @@ mod tests {
         // Still frozen at generation 0: generation 1 is not served yet.
         mm.step(MatchRequest::new(
             NodeId(1),
+            J,
             ballot(5, 1),
             config(&[0, 1, 2]),
             MatchmakerGeneration(1),
@@ -1629,6 +1632,7 @@ mod tests {
         // the chain link is gone from here (this matchmaker moved on).
         mm.step(MatchRequest::new(
             NodeId(1),
+            J,
             ballot(5, 1),
             config(&[0, 1, 2]),
             MatchmakerGeneration(1),

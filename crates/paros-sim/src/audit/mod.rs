@@ -1814,7 +1814,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 matchmaker,
                 set,
                 phase,
-                &set::registry_of(registries, journal),
+                set::registry_of(registries, journal),
                 scalars.gc_watermark(journal),
             );
         });
@@ -1865,7 +1865,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 set,
                 scalars.gc_watermark(journal),
                 scalars.effective(journal),
-                &set::registry_of(registries, journal),
+                set::registry_of(registries, journal),
             );
         });
     }

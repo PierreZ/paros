@@ -184,11 +184,10 @@ pub(crate) fn match_request_from_wire(
     let journal = journal_from_wire(request.tenant, request.journal)?;
     let base = match (request.probe, request.reconfiguration) {
         (true, true) => return Err("a probe registers no reconfiguration"),
-        (true, false) => MatchRequest::probe(from, ballot, config, generation),
-        (false, true) => MatchRequest::reconfigure(from, ballot, config, generation),
-        (false, false) => MatchRequest::new(from, ballot, config, generation),
-    }
-    .in_journal(journal);
+        (true, false) => MatchRequest::probe(from, journal, ballot, config, generation),
+        (false, true) => MatchRequest::reconfigure(from, journal, ballot, config, generation),
+        (false, false) => MatchRequest::new(from, journal, ballot, config, generation),
+    };
     Ok(match request.from_ballot {
         Some(cursor) => base.from_page(cursor.into()),
         None => base,

@@ -1322,10 +1322,13 @@ mod tests {
                         round,
                         node: NodeId(9),
                     };
-                    mm.step(
-                        MatchRequest::new(NodeId(9), b, cfg.clone(), MatchmakerGeneration(0))
-                            .in_journal(*journal),
-                    );
+                    mm.step(MatchRequest::new(
+                        NodeId(9),
+                        *journal,
+                        b,
+                        cfg.clone(),
+                        MatchmakerGeneration(0),
+                    ));
                     mm.ready().advance();
                 }
             }
@@ -1416,6 +1419,7 @@ mod tests {
         for (i, members) in [0_u64, 5].into_iter().enumerate() {
             disagreeing[i].step(MatchRequest::new(
                 NodeId(9),
+                JournalKey::default(),
                 b,
                 cfg(members),
                 MatchmakerGeneration(0),
@@ -1439,6 +1443,7 @@ mod tests {
         for mm in &mut agreeing[..2] {
             mm.step(MatchRequest::new(
                 NodeId(9),
+                JournalKey::default(),
                 b,
                 cfg(0),
                 MatchmakerGeneration(0),
