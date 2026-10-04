@@ -64,6 +64,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Workflow rules
 
+- **Record what the user decides, in the same session.** A design decision or preference the
+  user states (what paros is, how it behaves) goes into `docs/architecture.md`, dated and with its
+  issue; a preference about how to work goes into this file. Amend the section it touches, never
+  only a chat, a commit message or an issue comment, and correct a recorded decision the user
+  later overturns rather than adding a second one.
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly three issues;
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
