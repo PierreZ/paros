@@ -11,7 +11,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 
 - `driver/mod.rs` → `run_node`, `run_journals`, `RunError`, `BootKind` → the node loop; one journal or a static list (#188).
 - `driver/journals.rs` → `JournalStores` (`opened`: a store passed its boot, #208), `SingleStore` → per-journal runtime and quarantine (`quarantine_ticks`).
-- `driver/system.rs` → `SystemPlan` (`cell_id`, reported by `Inspect`) → system-journal follower; applies directory/registry folds, folds meta (#189, #229).
+- `driver/system.rs` → `SystemPlan` (`cell_id`, reported by `Inspect`) → system-journal follower; folds the registry, meta and every hosted tenant's control journal (#189, #229, #210); a hosted tenant's control journal and its created journals start on the nodes they name, an unhosted tenant's stop.
 - `provision.rs` → `provision_store`, `provision_matchmaker_store`, `Provisioned` → format a store ahead of its first start; an interrupted run resumes from the disk (#208).
 - `driver/{boot,ready,report}.rs` → format-marker check, the `Ready` I/O side in persist-before-send order, boot report.
 - `driver/transport.rs` → `PeerMailbox`, `LaneOpener`, `peer_address` → keep-newest lanes per journal, round-robin.
@@ -41,9 +41,10 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
 - `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `register_fleet`, `TOY_JOURNAL` → `parosctl init`'s calls (the cell, then the fleet steps, #229) and server ids learned from `Inspect.node` (#196).
-- `client/fleet.rs` → `CellRegistration`, `TenantCreation`, `TenantRemoval`, `FleetStep`, `load_meta` → the fleet's resumable operations over meta and the cell control journal, one entry per step (#229).
+- `client/fleet.rs` → `CellRegistration`, `TenantCreation`, `TenantRemoval`, `FleetStep`, `load_meta` → the fleet's resumable operations over meta and the cell control journal (and the tenant's control journal it describes, #210), one entry per step (#229).
+- `client/tenant.rs` → `create_journal`, `delete_journal`, `load_directory`, `resolve_tenant` → a tenant's journals through its control journal (#210).
 - `system/mod.rs` → `DIRECTORY`, `REGISTRY`, `META`, `SystemEvent` · `system/command.rs` → `SystemCommand`, `FleetContext` → one record per position.
-- `system/directory.rs` → `Directory` → a tenant's journal names; a create carries its drawn id (#235).
+- `system/directory.rs` → `Directory` → a tenant's control journal (`tenant/1`): its description (`DescribeTenant`) and its journals; a create carries its drawn id (#235); `Checkpointable` (#210).
 - `system/registry/mod.rs` → `Registry` → the cell control journal: nodes by `node_id` with class, capacity and bookings (#211); `Checkpointable` (#230) · `system/registry/fleet.rs` → `FleetRegistration`, `HostedTenant` → its fleet half: the cell's registration and hosted tenants (#229).
 - `system/meta.rs` → `Meta`, `TenantState`, `CellState`, `METADATA_VERSION` → the fleet's directory (`1/1`): cells and tenants with their states (#229); `Checkpointable`.
 - `corruption.rs` → `classify_log` → CTRL record classification.

@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
-use paros::TenantId;
 use paros::client::Client;
 use paros::client::fleet::{self, FleetStep, TenantCreation, TenantRemoval};
 use paros::system::TenantState;
+use paros::{AcceptorConfig, NodeId, QuorumSystem, TenantId};
 use serde_json::json;
 
 use crate::Ending;
@@ -99,40 +99,7 @@ pub async fn run(
     command: TenantCommand,
 ) -> Ending {
     match command {
-        TenantCommand::Create(args) => {
-            let patience = Duration::from_millis(args.operation.patience_ms);
-            let mut creation = TenantCreation::new(
-                args.operation.owner,
-                args.name.into_bytes(),
-                draw(providers),
-            );
-            let step = creation.run(client, 0, patience, || draw(providers)).await;
-            match (step, creation.tenant()) {
-                (FleetStep::Done(context), Some(tenant)) => {
-                    out.emit(
-                        || {
-                            format!(
-                                "tenant {} ready in cell {}{}",
-                                tenant.0,
-                                context.cell_id,
-                                if creation.adopted() { " (resumed)" } else { "" }
-                            )
-                        },
-                        || {
-                            json!({
-                                "outcome": "ready",
-                                "tenant": tenant.0,
-                                "cell": context.cell_id,
-                                "fleet": context.fleet_id,
-                                "resumed": creation.adopted(),
-                            })
-                        },
-                    );
-                    Ending::Success
-                }
-                (step, _) => unfinished(out, "create", &step),
-            }
-        }
+        TenantCommand::Create(args) => create(providers, client, out, args).await,
         TenantCommand::Delete(args) => {
             let patience = Duration::from_millis(args.operation.patience_ms);
             let mut removal = TenantRemoval::new(args.operation.owner, args.name.into_bytes());
@@ -148,51 +115,106 @@ pub async fn run(
                 step => unfinished(out, "delete", &step),
             }
         }
-        TenantCommand::List => {
-            let Some(meta) = fleet::load_meta(client, 0).await else {
-                note("no server served meta");
-                return Ending::Unreachable;
-            };
+        TenantCommand::List => list(client, out).await,
+    }
+}
+
+/// `parosctl tenant create`: the tenant's control journal on the servers this command talks to (the
+/// seeds), until the cell coordinator places it (#212).
+async fn create(
+    providers: &TokioProviders,
+    client: &Client<TokioProviders>,
+    out: &Printer,
+    args: CreateArgs,
+) -> Ending {
+    let patience = Duration::from_millis(args.operation.patience_ms);
+    // The tenant's control journal runs on the servers this command
+    // talks to — the seeds — until the cell coordinator places it
+    // (#212).
+    let mut members: Vec<NodeId> = (0..client.server_count())
+        .map(|i| NodeId(client.id_of(i)))
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+    let control = AcceptorConfig::new(members, QuorumSystem::Majority);
+    let mut creation = TenantCreation::new(
+        args.operation.owner,
+        args.name.into_bytes(),
+        draw(providers),
+        control,
+    );
+    let step = creation.run(client, 0, patience, || draw(providers)).await;
+    match (step, creation.tenant()) {
+        (FleetStep::Done(context), Some(tenant)) => {
             out.emit(
                 || {
-                    let mut lines = vec![format!(
-                        "fleet {}",
-                        meta.fleet_id().map_or_else(|| "-".into(), |f| f.to_string())
-                    )];
-                    for (cell, entry) in meta.cells() {
-                        lines.push(format!("cell {cell} {:?}", entry.state));
-                    }
-                    for (tenant, entry) in meta.tenants() {
-                        lines.push(format!(
-                            "tenant {} name={} cell={} state={}",
-                            tenant.0,
-                            String::from_utf8_lossy(&entry.name),
-                            entry.cell_id,
-                            state_name(entry.state)
-                        ));
-                    }
-                    lines.join("\n")
+                    format!(
+                        "tenant {} ready in cell {}{}",
+                        tenant.0,
+                        context.cell_id,
+                        if creation.adopted() { " (resumed)" } else { "" }
+                    )
                 },
                 || {
                     json!({
-                        "fleet": meta.fleet_id(),
-                        "cells": meta
-                            .cells()
-                            .map(|(cell, entry)| json!({ "cell": cell, "state": format!("{:?}", entry.state) }))
-                            .collect::<Vec<_>>(),
-                        "tenants": meta
-                            .tenants()
-                            .map(|(tenant, entry)| json!({
-                                "tenant": tenant.0,
-                                "name": String::from_utf8_lossy(&entry.name),
-                                "cell": entry.cell_id,
-                                "state": state_name(entry.state),
-                            }))
-                            .collect::<Vec<_>>(),
+                        "outcome": "ready",
+                        "tenant": tenant.0,
+                        "cell": context.cell_id,
+                        "fleet": context.fleet_id,
+                        "resumed": creation.adopted(),
                     })
                 },
             );
             Ending::Success
         }
+        (step, _) => unfinished(out, "create", &step),
     }
+}
+
+/// `parosctl tenant list`: the fleet, its cells and its tenants, as meta records them.
+async fn list(client: &Client<TokioProviders>, out: &Printer) -> Ending {
+    let Some(meta) = fleet::load_meta(client, 0).await else {
+        note("no server served meta");
+        return Ending::Unreachable;
+    };
+    out.emit(
+        || {
+            let mut lines = vec![format!(
+                "fleet {}",
+                meta.fleet_id().map_or_else(|| "-".into(), |f| f.to_string())
+            )];
+            for (cell, entry) in meta.cells() {
+                lines.push(format!("cell {cell} {:?}", entry.state));
+            }
+            for (tenant, entry) in meta.tenants() {
+                lines.push(format!(
+                    "tenant {} name={} cell={} state={}",
+                    tenant.0,
+                    String::from_utf8_lossy(&entry.name),
+                    entry.cell_id,
+                    state_name(entry.state)
+                ));
+            }
+            lines.join("\n")
+        },
+        || {
+            json!({
+                "fleet": meta.fleet_id(),
+                "cells": meta
+                    .cells()
+                    .map(|(cell, entry)| json!({ "cell": cell, "state": format!("{:?}", entry.state) }))
+                    .collect::<Vec<_>>(),
+                "tenants": meta
+                    .tenants()
+                    .map(|(tenant, entry)| json!({
+                        "tenant": tenant.0,
+                        "name": String::from_utf8_lossy(&entry.name),
+                        "cell": entry.cell_id,
+                        "state": state_name(entry.state),
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        },
+    );
+    Ending::Success
 }

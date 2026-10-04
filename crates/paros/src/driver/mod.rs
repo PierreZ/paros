@@ -1096,14 +1096,12 @@ where
                     continue;
                 };
                 let up_to = Seq(req.up_to);
-                // The directory is never truncated: its fold cannot jump a
-                // floor yet. The registry and meta are, but only to a
-                // checkpoint (#230): every node's fold restarts from the
-                // record at the floor, and a floor that is no checkpoint
-                // would leave every fold that jumps to it blind.
-                if journal == crate::system::DIRECTORY
-                    || (crate::system::is_system(journal) && !checkpoint_at(&rt.node, up_to))
-                {
+                // A control journal (the registry, meta, every tenant's,
+                // #210) is truncated only to a checkpoint (#230): every
+                // node's fold restarts from the record at the floor, and a
+                // floor that is no checkpoint would leave every fold that
+                // jumps to it blind.
+                if crate::system::is_control(journal) && !checkpoint_at(&rt.node, up_to) {
                     tracing::info!(node = self_id, journal = %journal, up_to = up_to.0, "system_truncate_refused");
                     shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
                     continue;
@@ -1491,40 +1489,38 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     // A created journal lives in the directory's tenant
                     // (#235): the directory is that tenant's control journal.
                     let id = JournalKey::new(journal.tenant, id);
-                    // A stateless machine never takes acceptor work (#211):
-                    // a configuration naming one runs without it.
-                    if !config.members().contains(&me)
-                        || follower.is_tombstoned(id)
-                        || self.journals.serves(id)
-                        || !follower.takes_storage_work()
-                    {
-                        continue;
+                    admit |= self.start(follower, id, &config).await;
+                }
+                // A restored directory (#230) names every journal its tenant
+                // created: each live one naming this node starts here.
+                SystemEvent::Directory(DirectoryEvent::Checkpoint { .. }) => {
+                    let created: Vec<(JournalKey, paros_core::AcceptorConfig)> = follower
+                        .directory(journal.tenant)
+                        .map(|directory| {
+                            directory
+                                .journals()
+                                .filter(|(_, j)| j.deleted_at.is_none())
+                                .map(|(id, j)| {
+                                    (JournalKey::new(journal.tenant, id), j.config.clone())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for (id, config) in created {
+                        admit |= self.start(follower, id, &config).await;
                     }
-                    let journal_config = paros_core::Config {
-                        journal: id,
-                        id: me,
-                        peers: config.members().to_vec(),
-                        quorum_system: config.quorum_system(),
-                        ..paros_core::Config::default()
-                    };
-                    if !self.stores.create(id, journal_config) {
-                        continue;
-                    }
-                    open_journal(
-                        self.lanes.providers,
-                        self.stores,
-                        self.journals,
-                        id,
-                        self.now,
-                        self.tunables,
-                        self.hooks,
-                    )
-                    .await;
-                    if self.journals.live.contains_key(&id) {
-                        self.audit.journal_started(me, id);
-                        tracing::info!(node = me.0, journal = %id, "journal_started");
-                        admit = true;
-                    }
+                }
+                // A tenant the cell hosts (#210): its control journal starts
+                // on every node its configuration names.
+                SystemEvent::Registry(RegistryEvent::TenantHosted {
+                    tenant, control, ..
+                }) => {
+                    admit |= self
+                        .start(follower, JournalKey::control(tenant), &control)
+                        .await;
+                }
+                SystemEvent::Registry(RegistryEvent::TenantUnhosted { tenant }) => {
+                    self.stop_tenant(me, tenant);
                 }
                 SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
                     let id = JournalKey::new(journal.tenant, id);
@@ -1556,6 +1552,17 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                 // a fold restored from it never saw the entries below it.
                 SystemEvent::Registry(RegistryEvent::Checkpoint { .. }) => {
                     let registry = follower.registry().clone();
+                    for (tenant, hosted) in registry.tenants() {
+                        self.start(follower, JournalKey::control(tenant), &hosted.control)
+                            .await;
+                    }
+                    let served: Vec<TenantId> =
+                        self.journals.live.keys().map(|k| k.tenant).collect();
+                    for tenant in served {
+                        if registry.is_unhosted(tenant) {
+                            self.stop_tenant(me, tenant);
+                        }
+                    }
                     for (id, node) in registry.nodes() {
                         match node.standing {
                             NodeStanding::Retired if id == me => self.retire_self(me),
@@ -1602,6 +1609,69 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         }
         self.audit.pool_admitted(me, id);
         tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
+    }
+
+    /// Start `id` over `config` on this node if `config` names it: never on a
+    /// `stateless` machine (#211), never a journal tombstoned or served
+    /// already. Whether it started.
+    async fn start(
+        &mut self,
+        follower: &SystemFollower<P>,
+        id: JournalKey,
+        config: &paros_core::AcceptorConfig,
+    ) -> bool {
+        let me = follower.self_id();
+        if !config.members().contains(&me)
+            || follower.is_tombstoned(id)
+            || self.journals.serves(id)
+            || !follower.takes_storage_work()
+        {
+            return false;
+        }
+        let journal_config = paros_core::Config {
+            journal: id,
+            id: me,
+            peers: config.members().to_vec(),
+            quorum_system: config.quorum_system(),
+            ..paros_core::Config::default()
+        };
+        if !self.stores.create(id, journal_config) {
+            return false;
+        }
+        open_journal(
+            self.lanes.providers,
+            self.stores,
+            self.journals,
+            id,
+            self.now,
+            self.tunables,
+            self.hooks,
+        )
+        .await;
+        if !self.journals.live.contains_key(&id) {
+            return false;
+        }
+        self.audit.journal_started(me, id);
+        tracing::info!(node = me.0, journal = %id, "journal_started");
+        true
+    }
+
+    /// `tenant` was unhosted (#210): every journal of it stops here for
+    /// good, its control journal included, and its stores go.
+    fn stop_tenant(&mut self, me: NodeId, tenant: TenantId) {
+        let served: Vec<JournalKey> = self
+            .journals
+            .live
+            .keys()
+            .copied()
+            .filter(|journal| journal.tenant == tenant)
+            .collect();
+        for journal in served {
+            self.journals.park(journal, None);
+            self.audit.journal_stopped(me, journal);
+            tracing::info!(node = me.0, journal = %journal, "journal_stopped");
+            self.stores.delete(journal);
+        }
     }
 
     /// This node's own retirement: every user journal it serves stops.

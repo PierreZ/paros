@@ -1083,9 +1083,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn journal_started(&self, node: NodeId, _journal: JournalKey) {
+    fn journal_started(&self, node: NodeId, journal: JournalKey) {
         if let Some(mut board) = self.system_board() {
-            board.started(node);
+            board.started(node, journal);
         }
     }
 

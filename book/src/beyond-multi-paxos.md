@@ -609,6 +609,14 @@ running it again. A removal unhosts the tenant's id even when the cell never
 hosted it, so a slow creator's late "host" is refused instead of resurrecting a
 tenant meta has forgotten.
 
+A tenant owns a **control journal** of its own (`tenant/1`). The cell's "host"
+entry names where it runs, and every node follows it the way it follows the
+registry: a journal it creates starts on the nodes its configuration names, inside
+that tenant only, and a tenant the cell unhosts takes all its journals with it.
+Before a tenant becomes ready, its creator writes the tenant's name into that
+journal, so the journal describes its own tenant and meta's directory could be
+rebuilt from the tenants below it.
+
 **In the code.** `LogStorage::formatted_config`, `LogStorage::format`
 (`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,

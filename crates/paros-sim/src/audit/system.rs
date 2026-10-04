@@ -38,10 +38,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::system::{
-    Class, DIRECTORY, DirectoryEvent, DirectoryRefusal, META, MetaEvent, MetaRefusal,
-    RegistryEvent, RegistryRefusal, SystemEvent,
+    Class, DirectoryEvent, DirectoryRefusal, META, MetaEvent, MetaRefusal, REGISTRY, RegistryEvent,
+    RegistryRefusal, SystemEvent,
 };
-use paros::{JournalId, JournalKey, NodeId, TenantId};
+use paros::{JournalKey, NodeId, TenantId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
 
@@ -63,8 +63,16 @@ pub(crate) struct SystemBoard {
     /// Per `(journal, lsn)`: the digest of the event the first node to fold
     /// it folded it to.
     folded: BTreeMap<(JournalKey, u64), u64>,
-    /// Every id the directory created, with the LSN that created it.
-    created: BTreeMap<JournalId, u64>,
+    /// Every journal a tenant's directory created (#210: keyed by its
+    /// tenant), with the LSN that created it.
+    created: BTreeMap<JournalKey, u64>,
+    /// Every tenant the registry hosted (#210): its control journal is one
+    /// a node may serve.
+    hosted: BTreeSet<TenantId>,
+    /// Per tenant directory, as `registry_next` is the registry's: the next
+    /// position the board expects, `None` once one was first seen out of
+    /// order (a checkpoint restore hid the positions before it).
+    directory_next: BTreeMap<TenantId, Option<u64>>,
     /// Every tenant id meta registered, with the LSN that registered it.
     tenants: BTreeMap<TenantId, u64>,
     /// Meta's events in position order, as first folded anywhere: the next
@@ -158,22 +166,23 @@ impl SystemBoard {
     ) {
         let digest = digest(event);
         let known = *self.folded.entry((journal, lsn)).or_insert(digest);
-        if journal == DIRECTORY {
-            assert_always!(
-                known == digest,
-                "system: every node folds the directory to the same event at every lsn",
-                { "node" => node.0, "lsn" => lsn }
-            );
-        } else if journal == META {
+        if journal == META {
             assert_always!(
                 known == digest,
                 "system: every node folds meta to the same event at every lsn",
                 { "node" => node.0, "lsn" => lsn }
             );
-        } else {
+        } else if journal == REGISTRY {
             assert_always!(
                 known == digest,
                 "system: every node folds the registry to the same event at every lsn",
+                { "node" => node.0, "lsn" => lsn }
+            );
+        } else {
+            // Every tenant's directory (#210), the genesis one included.
+            assert_always!(
+                known == digest,
+                "system: every node folds the directory to the same event at every lsn",
                 { "node" => node.0, "lsn" => lsn }
             );
         }
@@ -193,16 +202,26 @@ impl SystemBoard {
         {
             self.model_meta(lsn, event);
         }
+        if let SystemEvent::Directory(_) = event {
+            let next = self.directory_next.entry(journal.tenant).or_insert(Some(0));
+            *next = match *next {
+                Some(expected) if lsn == expected => Some(lsn + 1),
+                Some(expected) if lsn < expected => Some(expected),
+                _ => None,
+            };
+        }
         match event {
             SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
-                let at = *self.created.entry(*id).or_insert(lsn);
+                let key = JournalKey::new(journal.tenant, *id);
+                let at = *self.created.entry(key).or_insert(lsn);
                 assert_always!(
-                    id.is_user()
-                        && at == lsn
-                        && !self.genesis.contains(&JournalKey::new(journal.tenant, *id)),
+                    id.is_user() && at == lsn && !self.genesis.contains(&key),
                     "system: a created journal takes a drawn user id, never reused",
                     { "id" => id.0, "lsn" => lsn, "first" => at }
                 );
+            }
+            SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, .. }) => {
+                self.hosted.insert(*tenant);
             }
             SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
                 self.tombstoned
@@ -210,12 +229,18 @@ impl SystemBoard {
             }
             SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::NameTaken {
                 winner,
-            })) if self.created.get(winner).is_some_and(|at| *at < lsn) => {
+            })) if self
+                .created
+                .get(&JournalKey::new(journal.tenant, *winner))
+                .is_some_and(|at| *at < lsn) =>
+            {
                 self.name_race = true;
             }
             SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id })) => {
                 assert_always!(
-                    self.created.get(id).is_some_and(|at| *at < lsn),
+                    self.created
+                        .get(&JournalKey::new(journal.tenant, *id))
+                        .is_some_and(|at| *at < lsn),
                     "system: a create is refused as taken only for an id created before",
                     { "id" => id.0, "lsn" => lsn }
                 );
@@ -361,8 +386,27 @@ impl SystemBoard {
     }
 
     /// `node` started `journal`, a journal the directory created naming it
-    /// (or a spare's): never a `stateless` machine (#211).
-    pub(crate) fn started(&mut self, node: NodeId) {
+    /// (or a spare's): never a `stateless` machine (#211), and only a
+    /// journal its own tenant created, a genesis one, or the control
+    /// journal of a tenant the cell hosts (#210).
+    pub(crate) fn started(&mut self, node: NodeId, journal: JournalKey) {
+        // Judged only on what the board has seen whole: a journal whose
+        // creation (or hosting) a checkpoint restore hid is not known here.
+        let control = journal == JournalKey::control(journal.tenant);
+        let known = if control {
+            self.registry_next.is_none() || self.hosted.contains(&journal.tenant)
+        } else {
+            self.created.contains_key(&journal)
+                || !matches!(self.directory_next.get(&journal.tenant), Some(Some(_)))
+        };
+        assert_always!(
+            self.genesis.contains(&journal) || known,
+            "tenant: a node serves only a journal its own tenant created",
+            { "node" => node.0, "journal" => journal.to_string() }
+        );
+        if journal == JournalKey::control(journal.tenant) && self.hosted.contains(&journal.tenant) {
+            assert_reachable!("tenant: a node starts the control journal of a hosted tenant");
+        }
         assert_always!(
             self.machines
                 .get(&node.0)

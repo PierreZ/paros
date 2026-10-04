@@ -69,7 +69,7 @@ position per verdict) · `TRUNCATE_STORM=7` · `READ_INDEX=8` retired · `MATCHM
 `MATCH_GC=10` retired · `RECONFIGURE=11` (compose from the live pool; refused on a plain seed)
 · `RECONFIGURE_MATCHMAKERS=12` · `RETIRE=13` · `QUORUM_READ=14` retired · `READ=15` (judged as
 it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=18`,
-`REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to the directory or the registry; a create draws its id and redraws on `IdTaken`; refused
+`REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to a tenant's control journal — the genesis user tenant's or one the cell hosts, #210 — or the registry; a create draws its id and redraws on `IdTaken`; refused
 `unknown_journal` without system journals; a register carries the joiner's drawn class and
 capacity, and a registered joiner registering again is a reboot, #211) · `SET_LEADER=22` (CAS on
 the generation) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
@@ -78,7 +78,8 @@ claim, fold to the tail, checkpoint and truncate when the policy finds it due, #
 #211) · `INIT_FLEET=25`, `CREATE_TENANT=26`, `REMOVE_TENANT=27` (#229: `paros::client::fleet`'s
 operations stepped one entry at a time, stopped between steps by one location each; a creation
 under an id it registered before must be redrawn, one resumed under a stale context must be
-refused) · `OP_COUNT=28`. `CHECKPOINT` picks the registry or meta. Retired ids are no-ops that keep their slot in the alphabet.
+refused; a tenant's control journal runs on the seeds) · `OP_COUNT=28`. `CHECKPOINT` picks the
+registry, meta or the genesis tenant's control journal. Retired ids are no-ops that keep their slot in the alphabet.
 
 - Each client is an **owner** or a **reader** for the run (knob; each journal's first client
   owns). Owners claim before writing and re-claim when superseded.
@@ -99,7 +100,8 @@ refused) · `OP_COUNT=28`. `CHECKPOINT` picks the registry or meta. Retired ids 
   held; a node keeps serving the rest while one is quarantined.
 - **System board** (`audit/system.rs`): every node folds each system journal (meta included,
   #229) alike per LSN; a registered tenant takes a drawn user id, never reused, and meta refuses
-  one as taken only when it was; a
+  one as taken only when it was; a node serves only a journal its own tenant created, a genesis
+  one or a hosted tenant's control journal (#210); a
   created journal takes its creator's drawn user id, never reused (`IdTaken` only for an id
   created before); no append acked after its tombstone; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves

@@ -27,11 +27,11 @@ use std::time::Duration;
 use moonpool_sim::{
     SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
-use paros::TenantId;
 use paros::client::fleet::{
     self, CellRegistration, FleetAction, FleetRefusal, FleetStep, TenantCreation, TenantRemoval,
 };
-use paros::system::{FleetContext, META, REGISTRY, TenantState};
+use paros::system::{FleetContext, TenantState};
+use paros::{AcceptorConfig, NodeId, QuorumSystem, TenantId};
 
 use crate::client::ChainClient;
 
@@ -62,6 +62,8 @@ pub(super) struct FleetOps {
     active: bool,
     /// How many genesis ranks host the system journals.
     seeds: usize,
+    /// The genesis pool's size.
+    pool: usize,
     client_id: u64,
     /// The run's cell id (what `init` would mint).
     cell_id: u64,
@@ -85,6 +87,7 @@ impl FleetOps {
         Self {
             active,
             seeds: crate::shape::seed_ranks(pool).len().max(1),
+            pool,
             client_id,
             cell_id: crate::shape::cell_id(ctx.state()),
             context: None,
@@ -94,7 +97,7 @@ impl FleetOps {
     }
 
     fn client(&self, ctx: &SimContext, nodes: &ChainClient) -> ChainClient {
-        super::system::seed_client(ctx, nodes, self.seeds, &[META, REGISTRY])
+        super::system::seed_client(nodes, self.seeds, super::system::Announce::controls(ctx))
     }
 
     /// The seed a step starts at.
@@ -191,7 +194,16 @@ impl FleetOps {
         } else {
             drawn_tenant(payload ^ class.rotate_left(29))
         };
-        let mut creation = TenantCreation::new(self.client_id, name, candidate);
+        // The tenant's control journal runs on the seeds, beside the other
+        // system journals (#210; placement is #212's).
+        let control = AcceptorConfig::new(
+            crate::shape::seed_ranks(self.pool)
+                .into_iter()
+                .map(NodeId)
+                .collect(),
+            QuorumSystem::Majority,
+        );
+        let mut creation = TenantCreation::new(self.client_id, name, candidate, control);
         // A resume with a context saved from another fleet (a stale record):
         // the creation must refuse it, never complete under it.
         let stale = self.context.filter(|_| buggify_with_prob!(0.1));
@@ -354,6 +366,18 @@ impl FleetOps {
                     "fleet: every ready tenant meta assigns to a cell is hosted by it",
                     { "tenant" => tenant.0 }
                 );
+                // Self-describing (#210): the tenant's control journal names
+                // it, so meta could be rebuilt from below.
+                if let Some(directory) =
+                    paros::client::tenant::load_directory(&client, tenant, 0).await
+                {
+                    assert_always!(
+                        directory.name() == Some(entry.name.as_slice()),
+                        "tenant: a ready tenant's control journal describes it by its name",
+                        { "tenant" => tenant.0 }
+                    );
+                    assert_reachable!("tenant: a ready tenant's description is read back");
+                }
             }
         }
         assert_sometimes!(

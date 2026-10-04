@@ -68,7 +68,7 @@ mod meta;
 mod registry;
 
 pub use command::{FleetContext, SystemCommand};
-pub use directory::{CreatedJournal, Directory, DirectoryEvent, DirectoryRefusal};
+pub use directory::{CreatedJournal, Directory, DirectoryEvent, DirectoryRefusal, directory_event};
 pub use meta::{
     CellEntry, CellState, METADATA_VERSION, Meta, MetaEvent, MetaRefusal, TenantEntry, TenantState,
     meta_event,
@@ -78,7 +78,7 @@ pub use registry::{
     RegistryEvent, RegistryRefusal, registry_event,
 };
 
-use paros_core::{JournalKey, TenantId};
+use paros_core::{JournalId, JournalKey, TenantId};
 
 pub use crate::machine::Class;
 
@@ -96,7 +96,15 @@ pub const REGISTRY: JournalKey = JournalKey::control(TenantId::CELL);
 /// control journal (#229, §3.7).
 pub const META: JournalKey = JournalKey::control(TenantId::META);
 
-/// Whether `journal` is one of the system journals.
+/// Whether `journal` is a tenant's control journal (`tenant/1`, #210): the
+/// registry, meta, and every tenant's own — the journals a node folds.
+#[must_use]
+pub fn is_control(journal: JournalKey) -> bool {
+    journal.journal == JournalId::CONTROL
+}
+
+/// Whether `journal` is one of the three system journals a deployment boots
+/// with (meta, the registry, the user tenant's control journal).
 #[must_use]
 pub fn is_system(journal: JournalKey) -> bool {
     journal == DIRECTORY || journal == REGISTRY || journal == META

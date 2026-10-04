@@ -34,14 +34,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+};
 use paros::client::checkpoint::{
     CheckpointOutcome, CheckpointPolicy, Checkpointable, Checkpointer, Folded, Folder, OpenOutcome,
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
     Class, DIRECTORY, Directory, DirectoryEvent, DirectoryRefusal, META, Meta, NodeStanding,
-    REGISTRY, Registry, RegistryEvent, SystemCommand, SystemEvent, registry_event,
+    REGISTRY, Registry, RegistryEvent, SystemCommand, SystemEvent, directory_event, registry_event,
 };
 use paros::{
     AcceptorConfig, Command, Entry, Generation, JournalId, JournalKey, NodeId, QuorumSystem, Seq,
@@ -65,17 +67,12 @@ fn drawn_id(draw: u64) -> JournalId {
 }
 
 /// The client of the first `seeds` servers — the nodes hosting the system
-/// journals — that announces its writes to `journals` to their audits.
-pub(super) fn seed_client(
-    ctx: &SimContext,
-    nodes: &ChainClient,
-    seeds: usize,
-    journals: &[JournalKey],
-) -> ChainClient {
+/// journals — that announces its writes to its audits with `announce`.
+pub(super) fn seed_client(nodes: &ChainClient, seeds: usize, announce: Announce) -> ChainClient {
     let seeds = seeds.min(nodes.server_count()).max(1);
     nodes
         .clone()
-        .with_observer(Arc::new(Announce::new(ctx, journals)))
+        .with_observer(Arc::new(announce))
         .rotating_over(seeds)
 }
 
@@ -117,11 +114,12 @@ pub(super) struct SystemOps {
     /// so a reconfiguration may name one.
     spares: bool,
     client_id: u64,
-    /// Journals this client created (ids in the directory's tenant) and has
-    /// not asked to delete.
-    created: Vec<JournalId>,
-    /// Every id this client ever had created: a deliberate reuse names one.
-    ever_created: Vec<JournalId>,
+    /// Journals this client created (each in its tenant, #210) and has not
+    /// asked to delete.
+    created: Vec<JournalKey>,
+    /// Every journal this client ever had created: a deliberate reuse names
+    /// one.
+    ever_created: Vec<JournalKey>,
     /// The bookings this client made and has not released.
     booked: Vec<u64>,
     timeout: Duration,
@@ -132,17 +130,34 @@ pub(super) struct SystemOps {
 /// [`Checkpointer`]'s) announces its records and its exact write before it
 /// leaves, like every hand-built system append here does.
 pub(super) struct Announce {
-    audits: Vec<(JournalKey, Arc<crate::audit::AuditWorld>)>,
+    state: moonpool_sim::StateHandle,
+    /// The journals announced: these, or — `None` — every control journal
+    /// (meta, the registry, every tenant's, #210).
+    journals: Option<Vec<JournalKey>>,
 }
 
 impl Announce {
     /// Announce the writes to each of `journals` to its audit.
     pub(super) fn new(ctx: &SimContext, journals: &[JournalKey]) -> Self {
         Self {
-            audits: journals
-                .iter()
-                .map(|journal| (*journal, audit_world_for(ctx.state(), *journal)))
-                .collect(),
+            state: ctx.state().clone(),
+            journals: Some(journals.to_vec()),
+        }
+    }
+
+    /// Announce the writes to every control journal to its audit: what a
+    /// fleet operation writes (#229, #210).
+    pub(super) fn controls(ctx: &SimContext) -> Self {
+        Self {
+            state: ctx.state().clone(),
+            journals: None,
+        }
+    }
+
+    fn announces(&self, journal: JournalKey) -> bool {
+        match &self.journals {
+            Some(journals) => journals.contains(&journal),
+            None => paros::system::is_control(journal),
         }
     }
 }
@@ -150,11 +165,9 @@ impl Announce {
 impl CallObserver for Announce {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
         if let Attempted::Write(write) = attempt
-            && let Some((_, audit)) = self
-                .audits
-                .iter()
-                .find(|(journal, _)| *journal == attempt.journal())
+            && self.announces(attempt.journal())
         {
+            let audit = audit_world_for(&self.state, attempt.journal());
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
             }
@@ -226,7 +239,7 @@ impl SystemOps {
         nodes: &ChainClient,
         journal: JournalKey,
     ) -> ChainClient {
-        seed_client(ctx, nodes, self.seeds, &[journal])
+        seed_client(nodes, self.seeds, Announce::new(ctx, &[journal]))
     }
 
     /// Write `command` to `journal` at the seeds, starting at the one
@@ -360,12 +373,14 @@ impl SystemOps {
         draw: u64,
     ) -> Option<(Vec<(u64, SystemEvent)>, Directory, Registry)> {
         let seed = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
-        let mut directory = Directory::new(
+        // A tenant's control journal (#210): the genesis user tenant's
+        // reserves its genesis journals.
+        let mut directory = Folder::new(Directory::new(
             self.genesis
                 .iter()
-                .filter(|key| key.tenant == DIRECTORY.tenant)
+                .filter(|key| key.tenant == journal.tenant)
                 .map(|key| key.journal),
-        );
+        ));
         let mut registry = Folder::new(self.empty_registry());
         let mut events = Vec::new();
         let mut from = 0;
@@ -374,12 +389,14 @@ impl SystemOps {
             let (records, state) =
                 match within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await {
                     ReadOutcome::Page { records, state, .. } => (records, state),
-                    // A truncation overtook the cursor: the registry's floor is
-                    // its owner's checkpoint, where the fold restarts.
-                    ReadOutcome::Truncated { state }
-                        if journal == REGISTRY && state.first_seq.0 > from =>
-                    {
-                        registry.jump(state.first_seq.0);
+                    // A truncation overtook the cursor: a control journal's
+                    // floor is its owner's checkpoint, where the fold restarts.
+                    ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
+                        if journal == REGISTRY {
+                            registry.jump(state.first_seq.0);
+                        } else {
+                            directory.jump(state.first_seq.0);
+                        }
                         from = state.first_seq.0;
                         continue;
                     }
@@ -387,11 +404,11 @@ impl SystemOps {
                 };
             let next = from + records.len() as u64;
             for (position, record) in (from..).zip(&records) {
-                if journal == DIRECTORY {
-                    events.push((
-                        position,
-                        SystemEvent::Directory(directory.fold(position, record)),
-                    ));
+                if journal != REGISTRY {
+                    if let Some(event) = directory.fold(position, record).and_then(directory_event)
+                    {
+                        events.push((position, SystemEvent::Directory(event)));
+                    }
                     continue;
                 }
                 let Some(folded) = registry.fold(position, record) else {
@@ -412,10 +429,10 @@ impl SystemOps {
                 }
             }
             if next <= from || next >= state.next_seq.0 {
-                if !registry.is_whole() {
+                if !registry.is_whole() || !directory.is_whole() {
                     return None;
                 }
-                return Some((events, directory, registry.state().clone()));
+                return Some((events, directory.state().clone(), registry.state().clone()));
             }
             from = next;
         }
@@ -433,9 +450,13 @@ impl SystemOps {
     ) {
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
         let mut candidates: Vec<NodeId> = (0..self.pool as u64).map(NodeId).collect();
+        // The tenant the journal is created in (#210): the genesis user
+        // tenant, or one the cell hosts — created through meta.
+        let mut tenants = vec![DIRECTORY.tenant];
         if self.active
             && let Some((_, _, registry)) = self.read_back(ctx, nodes, REGISTRY, payload).await
         {
+            tenants.extend(registry.tenants().map(|(tenant, _)| tenant));
             // A stateless machine never takes acceptor work (#211).
             candidates.extend(
                 registry
@@ -476,24 +497,28 @@ impl SystemOps {
         // random u64 never makes on its own — is its own location: the
         // directory must refuse it, and the creator redraws.
         let reuse = !self.ever_created.is_empty() && buggify_with_prob!(0.2);
-        let mut id = if reuse {
+        let (tenant, mut id) = if reuse {
             assert_reachable!("system: a client creates a journal under an id it already used");
-            self.ever_created[usize::try_from(class % self.ever_created.len() as u64).unwrap_or(0)]
+            let used = self.ever_created
+                [usize::try_from(class % self.ever_created.len() as u64).unwrap_or(0)];
+            (used.tenant, used.journal)
         } else {
-            drawn_id(payload ^ class)
+            let tenant =
+                tenants[usize::try_from((payload >> 16) % tenants.len() as u64).unwrap_or(0)];
+            (tenant, drawn_id(payload ^ class))
         };
+        let control = JournalKey::control(tenant);
         for attempt in 0..2_u64 {
             let command = SystemCommand::CreateJournal {
                 id,
                 name: name.clone(),
                 config: config.clone(),
             };
-            let Appended::At(position) =
-                self.append(ctx, nodes, DIRECTORY, &command, payload).await
+            let Appended::At(position) = self.append(ctx, nodes, control, &command, payload).await
             else {
                 return;
             };
-            let Some((events, _, _)) = self.read_back(ctx, nodes, DIRECTORY, payload).await else {
+            let Some((events, _, _)) = self.read_back(ctx, nodes, control, payload).await else {
                 return;
             };
             match events
@@ -508,9 +533,9 @@ impl SystemOps {
                         { "asked" => id.0, "created" => created.0 }
                     );
                     assert_reachable!("system: a client creates a journal and reads back its id");
-                    self.created.push(id);
-                    self.ever_created.push(id);
-                    let key = JournalKey::new(DIRECTORY.tenant, id);
+                    let key = JournalKey::new(tenant, id);
+                    self.created.push(key);
+                    self.ever_created.push(key);
                     self.append_to_created(ctx, nodes, key, &config, payload)
                         .await;
                     return;
@@ -560,22 +585,30 @@ impl SystemOps {
             .await
         {
             assert_reachable!("system: a created journal commits an append");
+            assert_sometimes!(
+                journal.tenant != DIRECTORY.tenant,
+                "tenant: a journal created inside a tenant made through meta commits an append"
+            );
         }
     }
 
     /// `DELETE_JOURNAL`: tombstone a journal this client created, then ask a
     /// genesis member for one more append to it.
     pub(super) async fn delete(&mut self, ctx: &SimContext, nodes: &ChainClient, draw: u64) {
-        let id = if self.created.is_empty() {
+        let key = if self.created.is_empty() {
             // Nothing of its own: a delete of an id nobody created, which
             // folds to a refusal.
-            JournalId(JournalId::FIRST_USER.0 + 1_000 + draw % 16)
+            JournalKey::new(
+                DIRECTORY.tenant,
+                JournalId(JournalId::FIRST_USER.0 + 1_000 + draw % 16),
+            )
         } else {
             self.created
                 .remove(usize::try_from(draw % self.created.len() as u64).unwrap_or(0))
         };
-        let command = SystemCommand::DeleteJournal { id };
-        if let Appended::At(_) = self.append(ctx, nodes, DIRECTORY, &command, draw).await {
+        let command = SystemCommand::DeleteJournal { id: key.journal };
+        let control = JournalKey::control(key.tenant);
+        if let Appended::At(_) = self.append(ctx, nodes, control, &command, draw).await {
             assert_reachable!("system: a client deletes a journal");
         }
     }
@@ -726,15 +759,16 @@ impl SystemOps {
         false
     }
 
-    /// `CHECKPOINT` (#230): open the registry — or meta (#229), as the
-    /// draw picks — as its owner with the library's [`Checkpointer`]: claim
+    /// `CHECKPOINT` (#230): open the registry — or meta (#229), or the
+    /// genesis tenant's control journal (#210), as the draw picks — as its
+    /// owner with the library's [`Checkpointer`]: claim
     /// it, fold it to the tail, restarting from the checkpoint at its floor,
     /// and, when the policy finds a checkpoint due, write one and truncate to
     /// it. Two BUGGIFY locations stop between the two steps: an owner that
     /// crashes there (the checkpoint stays mid-log, and the next one
     /// truncates past it), and an owner a rival claims the journal from
-    /// first (its truncate is refused by the fence, #228). The registry and
-    /// meta each have their own "due" and "truncated" gates.
+    /// first (its truncate is refused by the fence, #228). Each kind of
+    /// journal has its own "due" and "truncated" gates.
     pub(super) async fn checkpoint(
         &mut self,
         ctx: &SimContext,
@@ -742,13 +776,28 @@ impl SystemOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) {
-        if draw & (1 << 20) == 0 {
-            let state = self.empty_registry();
-            self.checkpoint_journal(ctx, nodes, REGISTRY, state, policy, draw)
-                .await;
-        } else {
-            self.checkpoint_journal(ctx, nodes, META, Meta::new(), policy, draw)
-                .await;
+        match (draw >> 20) % 3 {
+            0 => {
+                let state = self.empty_registry();
+                self.checkpoint_journal(ctx, nodes, REGISTRY, state, policy, draw)
+                    .await;
+            }
+            1 => {
+                self.checkpoint_journal(ctx, nodes, META, Meta::new(), policy, draw)
+                    .await;
+            }
+            // The genesis user tenant's control journal (#210): a tenant
+            // checkpoints its directory like any control journal.
+            _ => {
+                let state = Directory::new(
+                    self.genesis
+                        .iter()
+                        .filter(|key| key.tenant == DIRECTORY.tenant)
+                        .map(|key| key.journal),
+                );
+                self.checkpoint_journal(ctx, nodes, DIRECTORY, state, policy, draw)
+                    .await;
+            }
         }
     }
 
@@ -792,8 +841,10 @@ impl SystemOps {
         // outcomes are the truncation and the restarts it forces).
         if journal == REGISTRY {
             assert_reachable!("checkpoint: an owner finds a registry checkpoint due");
-        } else {
+        } else if journal == META {
             assert_reachable!("checkpoint: an owner finds a meta checkpoint due");
+        } else {
+            assert_reachable!("checkpoint: an owner finds a directory checkpoint due");
         }
         if buggify_with_prob!(0.15) {
             // A crash between the checkpoint and its truncate.
@@ -842,8 +893,10 @@ impl SystemOps {
             if journal == REGISTRY {
                 assert_reachable!("checkpoint: an owner truncates the registry to its checkpoint");
                 board_lock(&system_board(ctx.state())).truncated_to_checkpoint();
-            } else {
+            } else if journal == META {
                 assert_reachable!("checkpoint: an owner truncates meta to its checkpoint");
+            } else {
+                assert_reachable!("checkpoint: an owner truncates a directory to its checkpoint");
             }
         }
     }
@@ -879,9 +932,7 @@ impl SystemOps {
         } else {
             machine.class
         };
-        let journal = self.created.first().map_or(JournalKey::default(), |id| {
-            JournalKey::new(DIRECTORY.tenant, *id)
-        });
+        let journal = self.created.first().copied().unwrap_or_default();
         let booking = crate::chain::splitmix(draw ^ self.client_id.rotate_left(32));
         let command = SystemCommand::BookCapacity {
             booking,

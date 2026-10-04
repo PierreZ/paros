@@ -3,7 +3,7 @@
 //! `UnhostTenant`). Folded by the same [`Registry`] — one journal, one fold —
 //! but a concern of its own beside the node pool and the bookings.
 
-use paros_core::TenantId;
+use paros_core::{AcceptorConfig, TenantId};
 
 use super::{Registry, RegistryEvent, RegistryRefusal};
 use crate::system::{FleetContext, METADATA_VERSION};
@@ -22,6 +22,8 @@ pub struct FleetRegistration {
 pub struct HostedTenant {
     /// Its name.
     pub name: Vec<u8>,
+    /// The static configuration of its control journal (`tenant/1`, #210).
+    pub control: AcceptorConfig,
 }
 
 impl Registry {
@@ -61,6 +63,7 @@ impl Registry {
         context: FleetContext,
         tenant: TenantId,
         name: Vec<u8>,
+        control: AcceptorConfig,
     ) -> RegistryEvent {
         if let Err(refusal) = self.check_context(context) {
             return RegistryEvent::Refused(refusal);
@@ -74,9 +77,18 @@ impl Registry {
         if self.unhosted.contains(&tenant) {
             return RegistryEvent::Refused(RegistryRefusal::TenantGone { tenant });
         }
-        self.tenants
-            .insert(tenant, HostedTenant { name: name.clone() });
-        RegistryEvent::TenantHosted { tenant, name }
+        self.tenants.insert(
+            tenant,
+            HostedTenant {
+                name: name.clone(),
+                control: control.clone(),
+            },
+        );
+        RegistryEvent::TenantHosted {
+            tenant,
+            name,
+            control,
+        }
     }
 
     /// The cell's half of its fleet registration, once written.
@@ -128,6 +140,10 @@ mod tests {
         command.encode()
     }
 
+    fn control() -> AcceptorConfig {
+        AcceptorConfig::new(vec![NodeId(0)], paros_core::QuorumSystem::Majority)
+    }
+
     #[test]
     fn a_cell_registers_once_and_hosts_tenants_only_for_its_own_fleet() {
         let here = FleetContext {
@@ -143,6 +159,7 @@ mod tests {
                 context,
                 tenant: TenantId(tenant),
                 name: format!("t{tenant}").into_bytes(),
+                control: control(),
             })
         };
         let unhost = |context, tenant: u64| {
@@ -225,6 +242,7 @@ mod tests {
                 context: here,
                 tenant: TenantId(tenant),
                 name: format!("t{tenant}").into_bytes(),
+                control: control(),
             })
         };
         let unhost = |tenant: u64| {

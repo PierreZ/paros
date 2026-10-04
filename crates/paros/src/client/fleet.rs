@@ -16,7 +16,8 @@
 //!   (`RegisterFleet`), meta marks the cell `READY`.
 //! - **Tenant creation** ([`TenantCreation`]): meta records the tenant
 //!   `REGISTERING` under the id the caller drew, assigned to the `READY`
-//!   cell; the cell hosts it; meta marks it `READY`. A name already
+//!   cell; the cell hosts it (naming where its control journal runs, #210);
+//!   its control journal describes it; meta marks it `READY`. A name already
 //!   `REGISTERING` is resumed, whoever started it.
 //! - **Tenant removal** ([`TenantRemoval`]): meta marks the tenant
 //!   `REMOVING`, the cell unhosts it (a fence: the cell never hosts that id
@@ -37,13 +38,14 @@
 use std::time::Duration;
 
 use moonpool_core::Providers;
-use paros_core::{JournalKey, TenantId};
+use paros_core::{AcceptorConfig, JournalKey, TenantId};
 
 use super::Client;
 use super::checkpoint::{Applied, Checkpointable, Checkpointer, Folder, LoadOutcome, OpenOutcome};
 use crate::system::{
-    CellState, FleetContext, META, METADATA_VERSION, Meta, MetaEvent, MetaRefusal, REGISTRY,
-    Registry, RegistryEvent, RegistryRefusal, SystemCommand, TenantState,
+    CellState, Directory, DirectoryEvent, DirectoryRefusal, FleetContext, META, METADATA_VERSION,
+    Meta, MetaEvent, MetaRefusal, REGISTRY, Registry, RegistryEvent, RegistryRefusal,
+    SystemCommand, TenantState,
 };
 
 /// The entry a step wrote.
@@ -59,6 +61,8 @@ pub enum FleetAction {
     RegisterTenant,
     /// Cell: `HostTenant`.
     HostTenant,
+    /// The tenant's control journal: `DescribeTenant` (#210).
+    DescribeTenant,
     /// Meta: `TenantReady`.
     TenantReady,
     /// Meta: `RemoveTenant`.
@@ -93,6 +97,8 @@ pub enum FleetRefusal {
     Meta(MetaRefusal),
     /// The cell control journal refused the step's entry.
     Cell(RegistryRefusal),
+    /// The tenant's control journal refused the step's entry (#210).
+    Control(DirectoryRefusal),
 }
 
 /// What one step came back with.
@@ -173,6 +179,23 @@ fn cell_verdict(event: &RegistryEvent) -> Verdict {
     }
 }
 
+fn control_verdict(event: &DirectoryEvent) -> Verdict {
+    match event {
+        DirectoryEvent::Refused(refusal) => {
+            Verdict::Refused(FleetRefusal::Control(refusal.clone()))
+        }
+        _ => Verdict::Applied,
+    }
+}
+
+/// What a step decides on: meta, the cell control journal, and — when the
+/// operation needs it — the tenant's control journal (#210).
+struct View<'a> {
+    meta: &'a Meta,
+    cell: &'a Registry,
+    control: Option<&'a Directory>,
+}
+
 /// What one step saw and did.
 struct StepReport {
     outcome: FleetStep,
@@ -192,15 +215,17 @@ impl StepReport {
     }
 }
 
-/// Run one step: read both journals, decide with `decide`, and write the
-/// entry it names to the journal it names — claimed as `owner`, folded to
+/// Run one step: read meta and the cell control journal — and the tenant
+/// control journal `wants` names, if any — decide with `decide`, and write
+/// the entry it names to the journal it names: claimed as `owner`, folded to
 /// its tail, and decided again on what that fold holds, so the entry is
 /// judged against exactly the state it was decided on.
 async fn step<P: Providers>(
     client: &Client<P>,
     owner: u64,
     first: usize,
-    decide: impl Fn(&Meta, &Registry) -> Result<Next, FleetRefusal>,
+    wants: impl Fn(&Meta, &Registry) -> Option<JournalKey>,
+    decide: impl Fn(&View<'_>) -> Result<Next, FleetRefusal>,
 ) -> StepReport {
     let Some(meta) = read(client, META, Meta::new(), first).await else {
         return StepReport::of(FleetStep::Unavailable, None);
@@ -208,7 +233,22 @@ async fn step<P: Providers>(
     let Some(cell) = read(client, REGISTRY, Registry::new([]), first).await else {
         return StepReport::of(FleetStep::Unavailable, Some(meta));
     };
-    let journal = match decide(&meta, &cell) {
+    let wanted = wants(&meta, &cell);
+    let control = match wanted {
+        Some(key) => match read(client, key, Directory::new([]), first).await {
+            Some(directory) => Some(directory),
+            // Not started yet where the step asked (its nodes fold the
+            // hosting first): a later step reads it.
+            None => return StepReport::of(FleetStep::Unavailable, Some(meta)),
+        },
+        None => None,
+    };
+    let view = View {
+        meta: &meta,
+        cell: &cell,
+        control: control.as_ref(),
+    };
+    let journal = match decide(&view) {
         Err(refusal) => return StepReport::of(FleetStep::Refused(refusal), Some(meta)),
         Ok(Next::Done(context)) => return StepReport::of(FleetStep::Done(context), Some(meta)),
         Ok(Next::Write { journal, .. }) => journal,
@@ -219,21 +259,38 @@ async fn step<P: Providers>(
         if !matches!(writer.open(client, first).await, OpenOutcome::Open { .. }) {
             return StepReport::of(FleetStep::Unavailable, Some(meta));
         }
-        let next = decide(writer.state(), &cell);
+        let next = decide(&View {
+            meta: writer.state(),
+            ..view
+        });
         let outcome = written(&mut writer, client, first, journal, next, meta_verdict).await;
         StepReport {
             outcome,
-            read: Some(meta),
+            read: Some(meta.clone()),
             written: Some(writer.state().clone()),
         }
-    } else {
+    } else if journal == REGISTRY {
         let mut writer = Checkpointer::new(REGISTRY, owner, Registry::new([]), policy);
         if !matches!(writer.open(client, first).await, OpenOutcome::Open { .. }) {
             return StepReport::of(FleetStep::Unavailable, Some(meta));
         }
-        let next = decide(&meta, writer.state());
+        let next = decide(&View {
+            cell: writer.state(),
+            ..view
+        });
         let outcome = written(&mut writer, client, first, journal, next, cell_verdict).await;
-        StepReport::of(outcome, Some(meta))
+        StepReport::of(outcome, Some(meta.clone()))
+    } else {
+        let mut writer = Checkpointer::new(journal, owner, Directory::new([]), policy);
+        if !matches!(writer.open(client, first).await, OpenOutcome::Open { .. }) {
+            return StepReport::of(FleetStep::Unavailable, Some(meta));
+        }
+        let next = decide(&View {
+            control: Some(writer.state()),
+            ..view
+        });
+        let outcome = written(&mut writer, client, first, journal, next, control_verdict).await;
+        StepReport::of(outcome, Some(meta.clone()))
     }
 }
 
@@ -292,7 +349,8 @@ impl CellRegistration {
         }
     }
 
-    fn decide(&self, meta: &Meta, cell: &Registry) -> Result<Next, FleetRefusal> {
+    fn decide(&self, view: &View<'_>) -> Result<Next, FleetRefusal> {
+        let (meta, cell) = (view.meta, view.cell);
         let registered = cell.registration().map(|r| r.context);
         if registered.is_some_and(|r| r.cell_id != self.cell_id) {
             return Err(FleetRefusal::OtherCell);
@@ -344,9 +402,13 @@ impl CellRegistration {
     /// One step (see the module docs).
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.cell_id))]
     pub async fn step<P: Providers>(&mut self, client: &Client<P>, first: usize) -> FleetStep {
-        step(client, self.owner, first, |meta, cell| {
-            self.decide(meta, cell)
-        })
+        step(
+            client,
+            self.owner,
+            first,
+            |_, _| None,
+            |view| self.decide(view),
+        )
         .await
         .outcome
     }
@@ -387,6 +449,8 @@ pub struct TenantCreation {
     owner: u64,
     name: Vec<u8>,
     candidate: TenantId,
+    /// Where the tenant's control journal runs (#210).
+    control: AcceptorConfig,
     context: Option<FleetContext>,
     tenant: Option<TenantId>,
     adopted: bool,
@@ -394,13 +458,16 @@ pub struct TenantCreation {
 
 impl TenantCreation {
     /// Create the tenant `name` under the id `candidate` (the caller's draw,
-    /// from the user range), writing as client `owner`.
+    /// from the user range), its control journal over `control` (the
+    /// caller's placement, until the cell coordinator places it, #212),
+    /// writing as client `owner`.
     #[must_use]
-    pub fn new(owner: u64, name: Vec<u8>, candidate: TenantId) -> Self {
+    pub fn new(owner: u64, name: Vec<u8>, candidate: TenantId, control: AcceptorConfig) -> Self {
         Self {
             owner,
             name,
             candidate,
+            control,
             context: None,
             tenant: None,
             adopted: false,
@@ -441,7 +508,8 @@ impl TenantCreation {
         self.candidate = candidate;
     }
 
-    fn decide(&self, meta: &Meta, cell: &Registry) -> Result<Next, FleetRefusal> {
+    fn decide(&self, view: &View<'_>) -> Result<Next, FleetRefusal> {
+        let (meta, cell) = (view.meta, view.cell);
         let fleet_id = meta.fleet_id().ok_or(FleetRefusal::NoFleet)?;
         let context = match self.context {
             Some(context) => {
@@ -495,13 +563,27 @@ impl TenantCreation {
                     context,
                     tenant,
                     name: self.name.clone(),
+                    control: self.control.clone(),
                 },
             )),
-            TenantState::Registering => Ok(write(
-                META,
-                FleetAction::TenantReady,
-                SystemCommand::TenantReady { context, tenant },
-            )),
+            // Hosted: the tenant's control journal describes it before the
+            // tenant is ready, so it is self-describing from its first
+            // ready moment (#210).
+            TenantState::Registering => match view.control.and_then(Directory::name) {
+                None => Ok(write(
+                    JournalKey::control(tenant),
+                    FleetAction::DescribeTenant,
+                    SystemCommand::DescribeTenant {
+                        name: self.name.clone(),
+                    },
+                )),
+                Some(name) if name == self.name.as_slice() => Ok(write(
+                    META,
+                    FleetAction::TenantReady,
+                    SystemCommand::TenantReady { context, tenant },
+                )),
+                Some(_) => Err(FleetRefusal::Control(DirectoryRefusal::Described)),
+            },
             TenantState::Ready => Ok(Next::Done(context)),
             TenantState::Removing => Err(FleetRefusal::TenantRemoving { tenant }),
             state => Err(FleetRefusal::Meta(MetaRefusal::TenantState {
@@ -514,14 +596,30 @@ impl TenantCreation {
     /// One step (see the module docs).
     #[tracing::instrument(level = "debug", skip_all, fields(tenant = self.candidate.0))]
     pub async fn step<P: Providers>(&mut self, client: &Client<P>, first: usize) -> FleetStep {
-        let report = step(client, self.owner, first, |meta, cell| {
-            self.decide(meta, cell)
-        })
+        let report = step(
+            client,
+            self.owner,
+            first,
+            |meta, cell| self.wants(meta, cell),
+            |view| self.decide(view),
+        )
         .await;
         if let Some(meta) = report.written.as_ref().or(report.read.as_ref()) {
             self.observe(meta);
         }
         report.outcome
+    }
+
+    /// The tenant control journal a step reads: the tenant's, once its cell
+    /// hosts it and it is still registering (the describe step's input).
+    fn wants(&self, meta: &Meta, cell: &Registry) -> Option<JournalKey> {
+        let tenant = meta
+            .by_name(&self.name)
+            .filter(|t| self.tenant.is_none_or(|ours| ours == *t))?;
+        let registering = meta
+            .tenant(tenant)
+            .is_some_and(|entry| entry.state == TenantState::Registering);
+        (registering && cell.tenant(tenant).is_some()).then_some(JournalKey::control(tenant))
     }
 
     /// Learn what meta fixed: the tenant's id and the context.
@@ -606,7 +704,8 @@ impl TenantRemoval {
         self.tenant
     }
 
-    fn decide(&self, meta: &Meta, cell: &Registry) -> Result<Next, FleetRefusal> {
+    fn decide(&self, view: &View<'_>) -> Result<Next, FleetRefusal> {
+        let (meta, cell) = (view.meta, view.cell);
         let fleet_id = meta.fleet_id().ok_or(FleetRefusal::NoFleet)?;
         let found = meta
             .by_name(&self.name)
@@ -653,9 +752,13 @@ impl TenantRemoval {
     /// One step (see the module docs).
     #[tracing::instrument(level = "debug", skip_all, fields(tenant = self.tenant.map(|t| t.0)))]
     pub async fn step<P: Providers>(&mut self, client: &Client<P>, first: usize) -> FleetStep {
-        let report = step(client, self.owner, first, |meta, cell| {
-            self.decide(meta, cell)
-        })
+        let report = step(
+            client,
+            self.owner,
+            first,
+            |_, _| None,
+            |view| self.decide(view),
+        )
         .await;
         // The tenant this removal works on, from what the step read before
         // it wrote: a forget leaves nothing to learn it from afterwards.
@@ -713,11 +816,44 @@ pub async fn load_cell<P: Providers>(client: &Client<P>, first: usize) -> Option
 mod tests {
     use super::*;
 
-    /// Meta and the cell control journal, folded in memory.
+    use std::collections::BTreeMap;
+
+    /// An operation's decision, as the in-memory world drives it.
+    trait Operation {
+        fn wants(&self, _meta: &Meta, _cell: &Registry) -> Option<JournalKey> {
+            None
+        }
+        fn decide_on(&self, view: &View<'_>) -> Result<Next, FleetRefusal>;
+    }
+
+    impl Operation for CellRegistration {
+        fn decide_on(&self, view: &View<'_>) -> Result<Next, FleetRefusal> {
+            self.decide(view)
+        }
+    }
+
+    impl Operation for TenantCreation {
+        fn wants(&self, meta: &Meta, cell: &Registry) -> Option<JournalKey> {
+            TenantCreation::wants(self, meta, cell)
+        }
+        fn decide_on(&self, view: &View<'_>) -> Result<Next, FleetRefusal> {
+            self.decide(view)
+        }
+    }
+
+    impl Operation for TenantRemoval {
+        fn decide_on(&self, view: &View<'_>) -> Result<Next, FleetRefusal> {
+            self.decide(view)
+        }
+    }
+
+    /// Meta, the cell control journal and the tenant control journals,
+    /// folded in memory.
     struct World {
         meta: Meta,
         cell: Registry,
-        seq: (u64, u64),
+        controls: BTreeMap<JournalKey, Directory>,
+        seq: BTreeMap<JournalKey, u64>,
     }
 
     impl World {
@@ -725,42 +861,60 @@ mod tests {
             Self {
                 meta: Meta::new(),
                 cell: Registry::new([]),
-                seq: (0, 0),
+                controls: BTreeMap::new(),
+                seq: BTreeMap::new(),
             }
         }
 
-        /// Write what `decide` names; `None` once it is done.
-        fn step(
-            &mut self,
-            decide: impl Fn(&Meta, &Registry) -> Result<Next, FleetRefusal>,
-        ) -> Result<Option<FleetAction>, FleetRefusal> {
-            match decide(&self.meta, &self.cell)? {
+        /// What `op` would write next, decided on the world as it stands.
+        fn next(&self, op: &impl Operation) -> Result<Next, FleetRefusal> {
+            let wanted = op.wants(&self.meta, &self.cell);
+            let empty = Directory::new([]);
+            let control = wanted.map(|key| self.controls.get(&key).unwrap_or(&empty));
+            op.decide_on(&View {
+                meta: &self.meta,
+                cell: &self.cell,
+                control,
+            })
+        }
+
+        /// Fold `next`'s entry into the journal it names.
+        fn apply(&mut self, journal: JournalKey, command: &SystemCommand) {
+            let record = command.encode();
+            let seq = self.seq.entry(journal).or_default();
+            let at = *seq;
+            *seq += 1;
+            if journal == META {
+                self.meta.fold(at, &record);
+            } else if journal == REGISTRY {
+                self.cell.fold(at, &record);
+            } else {
+                self.controls
+                    .entry(journal)
+                    .or_insert_with(|| Directory::new([]))
+                    .fold(at, &record);
+            }
+        }
+
+        /// Write what `op` names; `None` once it is done.
+        fn step(&mut self, op: &impl Operation) -> Result<Option<FleetAction>, FleetRefusal> {
+            match self.next(op)? {
                 Next::Done(_) => Ok(None),
                 Next::Write {
                     journal,
                     command,
                     action,
                 } => {
-                    let record = command.encode();
-                    if journal == META {
-                        self.meta.fold(self.seq.0, &record);
-                        self.seq.0 += 1;
-                    } else {
-                        self.cell.fold(self.seq.1, &record);
-                        self.seq.1 += 1;
-                    }
+                    self.apply(journal, &command);
                     Ok(Some(action))
                 }
             }
         }
 
-        fn run(
-            &mut self,
-            decide: impl Fn(&Meta, &Registry) -> Result<Next, FleetRefusal>,
-        ) -> Result<Vec<FleetAction>, FleetRefusal> {
+        fn run(&mut self, op: &impl Operation) -> Result<Vec<FleetAction>, FleetRefusal> {
             let mut actions = Vec::new();
             for _ in 0..16 {
-                match self.step(&decide)? {
+                match self.step(op)? {
                     Some(action) => actions.push(action),
                     None => return Ok(actions),
                 }
@@ -769,11 +923,18 @@ mod tests {
         }
     }
 
+    fn control() -> AcceptorConfig {
+        AcceptorConfig::new(
+            vec![paros_core::NodeId(0)],
+            paros_core::QuorumSystem::Majority,
+        )
+    }
+
     fn registered() -> World {
         let mut world = World::new();
         let init = CellRegistration::new(1, 5, 77);
         assert_eq!(
-            world.run(|m, c| init.decide(m, c)),
+            world.run(&init),
             Ok(vec![
                 FleetAction::RegisterCell,
                 FleetAction::RegisterFleet,
@@ -790,24 +951,18 @@ mod tests {
         assert_eq!(world.meta.ready_cell(), Some(5));
         // A re-run with another draw keeps the fleet recorded.
         let again = CellRegistration::new(1, 5, 99);
-        assert_eq!(world.run(|m, c| again.decide(m, c)), Ok(vec![]));
+        assert_eq!(world.run(&again), Ok(vec![]));
         // Another cell id against this cell control journal is the wrong
         // place.
         let wrong = CellRegistration::new(1, 6, 77);
-        assert_eq!(
-            world.run(|m, c| wrong.decide(m, c)),
-            Err(FleetRefusal::OtherCell)
-        );
+        assert_eq!(world.run(&wrong), Err(FleetRefusal::OtherCell));
         // A crash after the first step resumes on the cell's half.
         let mut half = World::new();
         let init = CellRegistration::new(1, 5, 77);
-        assert_eq!(
-            half.step(|m, c| init.decide(m, c)),
-            Ok(Some(FleetAction::RegisterCell))
-        );
+        assert_eq!(half.step(&init), Ok(Some(FleetAction::RegisterCell)));
         let rerun = CellRegistration::new(1, 5, 123);
         assert_eq!(
-            half.run(|m, c| rerun.decide(m, c)),
+            half.run(&rerun),
             Ok(vec![FleetAction::RegisterFleet, FleetAction::CellReady])
         );
         assert_eq!(half.meta.fleet_id(), Some(77));
@@ -816,16 +971,17 @@ mod tests {
     #[test]
     fn a_tenant_creation_resumes_from_any_step() {
         let mut world = registered();
-        let create = TenantCreation::new(1, b"acme".to_vec(), TenantId(300));
-        assert_eq!(
-            world.step(|m, c| create.decide(m, c)),
-            Ok(Some(FleetAction::RegisterTenant))
-        );
+        let create = TenantCreation::new(1, b"acme".to_vec(), TenantId(300), control());
+        assert_eq!(world.step(&create), Ok(Some(FleetAction::RegisterTenant)));
         // Another run under another draw resumes the same tenant.
-        let rerun = TenantCreation::new(2, b"acme".to_vec(), TenantId(400));
+        let rerun = TenantCreation::new(2, b"acme".to_vec(), TenantId(400), control());
         assert_eq!(
-            world.run(|m, c| rerun.decide(m, c)),
-            Ok(vec![FleetAction::HostTenant, FleetAction::TenantReady])
+            world.run(&rerun),
+            Ok(vec![
+                FleetAction::HostTenant,
+                FleetAction::DescribeTenant,
+                FleetAction::TenantReady
+            ])
         );
         assert_eq!(
             world.meta.tenant(TenantId(300)).map(|t| t.state),
@@ -833,23 +989,22 @@ mod tests {
         );
         assert!(world.cell.tenant(TenantId(300)).is_some());
         // A resumed run whose saved context names another fleet is refused.
-        let stale = TenantCreation::new(1, b"acme".to_vec(), TenantId(300)).resume(FleetContext {
-            fleet_id: 78,
-            cell_id: 5,
-        });
-        assert_eq!(
-            world.run(|m, c| stale.decide(m, c)),
-            Err(FleetRefusal::ContextChanged)
+        let stale = TenantCreation::new(1, b"acme".to_vec(), TenantId(300), control()).resume(
+            FleetContext {
+                fleet_id: 78,
+                cell_id: 5,
+            },
         );
+        assert_eq!(world.run(&stale), Err(FleetRefusal::ContextChanged));
     }
 
     #[test]
     fn a_removal_fences_a_creation_it_overtakes() {
         let mut world = registered();
-        let create = TenantCreation::new(1, b"acme".to_vec(), TenantId(300));
-        world.step(|m, c| create.decide(m, c)).expect("registered");
+        let create = TenantCreation::new(1, b"acme".to_vec(), TenantId(300), control());
+        world.step(&create).expect("registered");
         // The creator decides to host, and stalls before writing.
-        let late = create.decide(&world.meta, &world.cell);
+        let late = world.next(&create);
         // A removal runs to the end meanwhile.
         let remove = TenantRemoval::new(2, b"acme".to_vec());
         let removal = TenantRemoval {
@@ -857,7 +1012,7 @@ mod tests {
             ..remove
         };
         assert_eq!(
-            world.run(|m, c| removal.decide(m, c)),
+            world.run(&removal),
             Ok(vec![
                 FleetAction::RemoveTenant,
                 FleetAction::UnhostTenant,
@@ -870,7 +1025,10 @@ mod tests {
             panic!("the creator was about to host");
         };
         assert_eq!(
-            world.cell.fold(world.seq.1, &command.encode()),
+            world.cell.fold(
+                world.seq.get(&REGISTRY).copied().unwrap_or(0),
+                &command.encode()
+            ),
             RegistryEvent::Refused(RegistryRefusal::TenantGone {
                 tenant: TenantId(300)
             })
@@ -882,16 +1040,10 @@ mod tests {
     #[test]
     fn a_tenant_needs_a_ready_cell() {
         let mut world = World::new();
-        let create = TenantCreation::new(1, b"acme".to_vec(), TenantId(300));
-        assert_eq!(
-            world.run(|m, c| create.decide(m, c)),
-            Err(FleetRefusal::NoFleet)
-        );
+        let create = TenantCreation::new(1, b"acme".to_vec(), TenantId(300), control());
+        assert_eq!(world.run(&create), Err(FleetRefusal::NoFleet));
         let init = CellRegistration::new(1, 5, 77);
-        world.step(|m, c| init.decide(m, c)).expect("registered");
-        assert_eq!(
-            world.run(|m, c| create.decide(m, c)),
-            Err(FleetRefusal::NoReadyCell)
-        );
+        world.step(&init).expect("registered");
+        assert_eq!(world.run(&create), Err(FleetRefusal::NoReadyCell));
     }
 }

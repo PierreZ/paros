@@ -1,11 +1,19 @@
-//! The **directory** (#189): a tenant's control journal's journal names —
-//! the journals created and deleted at runtime inside one tenant (#235).
+//! The **directory** (#189): a tenant's control journal (`tenant/1`, #210) —
+//! the journals created and deleted at runtime inside that tenant (#235),
+//! and the tenant's own description (its name, written once by its
+//! creator), so the indexes above it (the cell's hosted list, meta) can be
+//! rebuilt from it (`docs/architecture.md` §3.3). It is [`Checkpointable`]:
+//! its state is the description and every journal ever created, never the
+//! history that made them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{AcceptorConfig, JournalId};
+use prost::Message as _;
 
 use super::SystemCommand;
+use crate::client::checkpoint::{Checkpointable, Folded};
+use crate::rpc::system as wire;
 
 /// A journal the directory created.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +43,16 @@ pub enum DirectoryEvent {
         /// The deleted journal.
         id: JournalId,
     },
+    /// The tenant was described (#210).
+    Described {
+        /// Its name.
+        name: Vec<u8>,
+    },
+    /// A checkpoint (#230): see [`super::RegistryEvent::Checkpoint`].
+    Checkpoint {
+        /// The checkpoint's horizon, its own position.
+        covers_up_to: u64,
+    },
     /// The entry changed nothing.
     Refused(DirectoryRefusal),
 }
@@ -42,8 +60,11 @@ pub enum DirectoryEvent {
 /// Why a directory entry changed nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryRefusal {
-    /// Not exactly one decodable directory entry.
+    /// Not exactly one decodable directory entry (or a checkpoint this
+    /// fold cannot use).
     Malformed,
+    /// The tenant was described already: its description is written once.
+    Described,
     /// The id is outside the user range, or a genesis journal's.
     Reserved {
         /// The id asked for.
@@ -73,6 +94,8 @@ pub enum DirectoryRefusal {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Directory {
     genesis: BTreeSet<JournalId>,
+    /// The tenant's name, once described.
+    name: Option<Vec<u8>>,
     journals: BTreeMap<JournalId, CreatedJournal>,
     /// Live names, to the journal holding each.
     names: BTreeMap<Vec<u8>, JournalId>,
@@ -130,6 +153,13 @@ impl Directory {
                 );
                 DirectoryEvent::Created { id, name, config }
             }
+            Some(SystemCommand::DescribeTenant { name }) => {
+                if self.name.is_some() {
+                    return DirectoryEvent::Refused(DirectoryRefusal::Described);
+                }
+                self.name = Some(name.clone());
+                DirectoryEvent::Described { name }
+            }
             Some(SystemCommand::DeleteJournal { id }) => {
                 let Some(created) = self
                     .journals
@@ -144,6 +174,12 @@ impl Directory {
             }
             _ => DirectoryEvent::Refused(DirectoryRefusal::Malformed),
         }
+    }
+
+    /// The tenant's name, once its control journal describes it.
+    #[must_use]
+    pub fn name(&self) -> Option<&[u8]> {
+        self.name.as_deref()
     }
 
     /// The journal the directory created as `id`, deleted or not.
@@ -166,12 +202,80 @@ impl Directory {
     }
 }
 
+impl Checkpointable for Directory {
+    type Event = DirectoryEvent;
+
+    fn apply(&mut self, seq: u64, record: &[u8]) -> DirectoryEvent {
+        self.fold(seq, record)
+    }
+
+    fn checkpoint(&self) -> Vec<u8> {
+        wire::DirectoryState {
+            name: self.name.clone().unwrap_or_default(),
+            described: self.name.is_some(),
+            journals: self
+                .journals
+                .iter()
+                .map(|(id, j)| wire::CreatedJournalState {
+                    id: id.0,
+                    name: j.name.clone(),
+                    config: Some(crate::rpc::config_to_proto(&j.config)),
+                    deleted_at: j.deleted_at.map_or(0, |at| at + 1),
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str> {
+        let state =
+            wire::DirectoryState::decode(state).map_err(|_| "a directory state does not decode")?;
+        let mut journals = BTreeMap::new();
+        let mut names = BTreeMap::new();
+        for j in state.journals {
+            let id = JournalId(j.id);
+            let config = crate::rpc::config_from_proto(j.config)?
+                .ok_or("a directory state's journal names no configuration")?;
+            let deleted_at = j.deleted_at.checked_sub(1);
+            if deleted_at.is_none() && names.insert(j.name.clone(), id).is_some() {
+                return Err("a directory state names one live name twice");
+            }
+            journals.insert(
+                id,
+                CreatedJournal {
+                    name: j.name,
+                    config,
+                    deleted_at,
+                },
+            );
+        }
+        self.name = state.described.then_some(state.name);
+        self.journals = journals;
+        self.names = names;
+        self.next_seq = covers_up_to + 1;
+        Ok(())
+    }
+}
+
+/// The event a [`Folded`] directory record is reported as (see
+/// [`super::registry_event`]).
+#[must_use]
+pub fn directory_event(folded: Folded<DirectoryEvent>) -> Option<DirectoryEvent> {
+    match folded {
+        Folded::Entry(event) => Some(event),
+        Folded::Checkpoint { covers_up_to, .. } => {
+            Some(DirectoryEvent::Checkpoint { covers_up_to })
+        }
+        Folded::Unreadable(_) => Some(DirectoryEvent::Refused(DirectoryRefusal::Malformed)),
+        Folded::NeedsRef(_) | Folded::Skipped => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rpc::system as wire;
     use paros_core::{NodeId, QuorumSystem};
-    use prost::Message as _;
 
     fn config(members: &[u64]) -> AcceptorConfig {
         AcceptorConfig::new(
@@ -294,5 +398,56 @@ mod tests {
             DirectoryEvent::Refused(DirectoryRefusal::Malformed)
         );
         assert_eq!(dir.journals().count(), 0);
+    }
+
+    #[test]
+    fn a_tenant_is_described_once_and_its_directory_survives_a_checkpoint() {
+        use crate::client::checkpoint::{CheckpointRecord, Folder};
+        let describe = |name: &[u8]| {
+            SystemCommand::DescribeTenant {
+                name: name.to_vec(),
+            }
+            .encode()
+        };
+        let records = [
+            describe(b"acme"),
+            create(300, b"a", &[0, 1, 2]),
+            describe(b"other"),
+            create(301, b"b", &[0]),
+            one(&SystemCommand::DeleteJournal { id: JournalId(300) }),
+        ];
+        let mut whole = Folder::new(Directory::new([]));
+        let events: Vec<_> = (0..)
+            .zip(&records)
+            .filter_map(|(seq, r)| whole.fold(seq, r))
+            .collect();
+        assert_eq!(
+            events[2],
+            Folded::Entry(DirectoryEvent::Refused(DirectoryRefusal::Described))
+        );
+        assert_eq!(whole.state().name(), Some(&b"acme"[..]));
+        let at = records.len() as u64;
+        let checkpoint = CheckpointRecord::Inline {
+            covers_up_to: at,
+            chunks: vec![whole.state().checkpoint()],
+        }
+        .encode();
+        assert!(matches!(
+            whole.fold(at, &checkpoint),
+            Some(Folded::Checkpoint {
+                verified: Some(true),
+                ..
+            })
+        ));
+        let mut restored = Folder::new(Directory::new([]));
+        restored.jump(at);
+        restored.fold(at, &checkpoint);
+        assert_eq!(restored.state().checkpoint(), whole.state().checkpoint());
+        // The tombstoned id stays taken, its name is free.
+        let next = create(300, b"a", &[0]);
+        assert_eq!(whole.fold(at + 1, &next), restored.fold(at + 1, &next));
+        let next = create(302, b"a", &[0]);
+        assert_eq!(whole.fold(at + 2, &next), restored.fold(at + 2, &next));
+        assert_eq!(restored.state(), whole.state());
     }
 }

@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{JournalId, JournalKey, NodeId, TenantId};
+use paros_core::{AcceptorConfig, JournalId, JournalKey, NodeId, TenantId};
 use prost::Message as _;
 
 mod fleet;
@@ -136,6 +136,8 @@ pub enum RegistryEvent {
         tenant: TenantId,
         /// Its name.
         name: Vec<u8>,
+        /// Its control journal's static configuration (#210).
+        control: AcceptorConfig,
     },
     /// This cell no longer hosts a tenant, and never will again (#229): a
     /// removal's fence, whether or not it was hosted.
@@ -333,7 +335,8 @@ impl Registry {
                 context,
                 tenant,
                 name,
-            }) => self.host(context, tenant, name),
+                control,
+            }) => self.host(context, tenant, name, control),
             Some(SystemCommand::UnhostTenant { context, tenant }) => self.unhost(context, tenant),
             _ => RegistryEvent::Refused(RegistryRefusal::Malformed),
         }
@@ -525,6 +528,7 @@ impl Registry {
                 .map(|(id, t)| wire::HostedTenantState {
                     tenant: id.0,
                     name: t.name.clone(),
+                    control: Some(crate::rpc::config_to_proto(&t.control)),
                 })
                 .collect(),
             unhosted: self.unhosted.iter().map(|id| id.0).collect(),
@@ -585,11 +589,18 @@ impl Checkpointable for Registry {
         if registration.is_some_and(|r| r.metadata_version > METADATA_VERSION) {
             return Err("a registry state names a metadata version this fold does not read");
         }
-        let tenants = state
-            .tenants
-            .into_iter()
-            .map(|t| (TenantId(t.tenant), HostedTenant { name: t.name }))
-            .collect();
+        let mut tenants = BTreeMap::new();
+        for t in state.tenants {
+            let control = crate::rpc::config_from_proto(t.control)?
+                .ok_or("a hosted tenant's state names no control configuration")?;
+            tenants.insert(
+                TenantId(t.tenant),
+                HostedTenant {
+                    name: t.name,
+                    control,
+                },
+            );
+        }
         self.nodes = nodes;
         self.bookings = bookings;
         self.registration = registration;

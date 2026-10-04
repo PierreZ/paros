@@ -235,6 +235,11 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   (`paros::client::fleet`): one entry per step, decided from what the two journals hold, each
   naming the fleet and cell it believes in and refused at apply when they differ. A removal
   unhosts the id even when it was never hosted: the fence against a late creator.
+- **Tenant control journals** (#210): `HostTenant` names where a tenant's control journal
+  (`tenant/1`) runs; every node follows it, and the journals it creates (`paros::client::tenant`)
+  start on the nodes they name, inside that tenant only. It describes its tenant
+  (`DescribeTenant`, written before the tenant is ready) so meta can be rebuilt from below.
+  Every control journal is checkpointable and truncated only to a checkpoint.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are

@@ -67,6 +67,7 @@ pub mod fleet;
 mod observer;
 pub mod outcome;
 mod reader;
+pub mod tenant;
 #[cfg(test)]
 mod tests;
 mod writer;

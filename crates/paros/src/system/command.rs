@@ -132,13 +132,21 @@ pub enum SystemCommand {
         /// The metadata version the writer speaks.
         metadata_version: u32,
     },
-    /// Cell: this cell hosts tenant `tenant` named `name`.
+    /// Cell: this cell hosts tenant `tenant` named `name`, its control
+    /// journal over `control` (#210).
     HostTenant {
         /// The fleet and this cell.
         context: FleetContext,
         /// The tenant.
         tenant: TenantId,
         /// Its name.
+        name: Vec<u8>,
+        /// The static configuration of its control journal (`tenant/1`).
+        control: AcceptorConfig,
+    },
+    /// A tenant control journal's description of its tenant (#210).
+    DescribeTenant {
+        /// The tenant's name.
         name: Vec<u8>,
     },
     /// Cell: this cell no longer hosts tenant `tenant`.
@@ -258,12 +266,17 @@ impl SystemCommand {
                 context,
                 tenant,
                 name,
+                control,
             } => Kind::HostTenant(wire::HostTenant {
                 fleet_id: context.fleet_id,
                 cell_id: context.cell_id,
                 tenant: tenant.0,
                 name: name.clone(),
+                control: Some(config_to_proto(control)),
             }),
+            SystemCommand::DescribeTenant { name } => {
+                Kind::DescribeTenant(wire::DescribeTenant { name: name.clone() })
+            }
             SystemCommand::UnhostTenant { context, tenant } => {
                 Kind::UnhostTenant(wire::UnhostTenant {
                     fleet_id: context.fleet_id,
@@ -357,7 +370,10 @@ impl SystemCommand {
                 context: context(t.fleet_id, t.cell_id),
                 tenant: TenantId(t.tenant),
                 name: t.name,
+                control: config_from_proto(t.control)?
+                    .ok_or("a hosted tenant names no control configuration")?,
             },
+            Kind::DescribeTenant(d) => SystemCommand::DescribeTenant { name: d.name },
             Kind::UnhostTenant(t) => SystemCommand::UnhostTenant {
                 context: context(t.fleet_id, t.cell_id),
                 tenant: TenantId(t.tenant),
@@ -432,6 +448,10 @@ mod tests {
             SystemCommand::HostTenant {
                 context,
                 tenant: TenantId(0xabc),
+                name: b"acme".to_vec(),
+                control: AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority),
+            },
+            SystemCommand::DescribeTenant {
                 name: b"acme".to_vec(),
             },
             SystemCommand::UnhostTenant {

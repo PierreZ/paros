@@ -29,6 +29,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `Inspect`, `init` vs the cell commands, exit codes.
 - `src/bin/parosctl/init.rs` → `parosctl init` over `paros::client::bootstrap` (the cell, then the fleet steps, #229).
 - `src/bin/parosctl/tenant.rs` → `parosctl tenant create|delete|list` over `paros::client::fleet` (#229).
+- `src/bin/parosctl/journal.rs` → `parosctl journal create|delete|list --tenant` over `paros::client::tenant` (#210).
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
 - `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`);
@@ -37,7 +38,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   reopens with every acked write.
 - `tests/deploy.rs` → three seeds and a stateless machine on a laptop: `init` (refused off a
   seed and on an initialized cell, registering the fleet), a tenant created, re-found, listed
-  and removed, write, read, restart, a superseded writer and truncation,
+  and removed, a journal created inside it (a taken name refused) and written and read, then
+  write, read, restart, a superseded writer and truncation,
   the refusals (unknown variable, tunable floor, class change, amnesia, lost identity, a wiped
   volume never forming a second cell), `SIGTERM`.
 

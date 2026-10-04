@@ -50,6 +50,7 @@ message SystemEntry {
     RegisterFleet register_fleet = 14;
     HostTenant host_tenant = 15;
     UnhostTenant unhost_tenant = 16;
+    DescribeTenant describe_tenant = 17;
   }
 }
 
@@ -60,6 +61,13 @@ message CreateJournal {
   bytes name = 1;
   paros.common.v1.AcceptorConfig config = 2;
   uint64 id = 3;
+}
+
+// A tenant's control journal describes its tenant (#210): its name, written
+// once by the tenant's creator, so every index above it — the cell's hosted
+// list, meta's directory — can be rebuilt from it.
+message DescribeTenant {
+  bytes name = 1;
 }
 
 // Delete journal `id`: a tombstone, never a reuse.
@@ -160,12 +168,15 @@ message RegisterFleet {
   uint32 metadata_version = 3;
 }
 
-// Cell: this cell hosts tenant `tenant` named `name`.
+// Cell: this cell hosts tenant `tenant` named `name`, whose control journal
+// (`tenant/1`, #210) runs over `control` — placed by the creator until the
+// cell coordinator places it (#212). Every machine `control` names starts it.
 message HostTenant {
   uint64 fleet_id = 1;
   uint64 cell_id = 2;
   uint64 tenant = 3;
   bytes name = 4;
+  paros.common.v1.AcceptorConfig control = 5;
 }
 
 // Cell: this cell no longer hosts tenant `tenant`; its id is never hosted
@@ -198,6 +209,24 @@ message FleetRegistration {
 message HostedTenantState {
   uint64 tenant = 1;
   bytes name = 2;
+  paros.common.v1.AcceptorConfig control = 3;
+}
+
+// A tenant control journal's checkpoint state (#210): the tenant's name, every
+// journal it created (in id order, a deleted one with its tombstone's
+// position, 0 for a live one plus one), so equal states encode to equal bytes.
+message DirectoryState {
+  bytes name = 1;
+  bool described = 2;
+  repeated CreatedJournalState journals = 3;
+}
+
+message CreatedJournalState {
+  uint64 id = 1;
+  bytes name = 2;
+  paros.common.v1.AcceptorConfig config = 3;
+  // The tombstone's position plus one; 0: live.
+  uint64 deleted_at = 4;
 }
 
 // Meta's checkpoint state (#229): the fleet id, every cell and every

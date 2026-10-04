@@ -19,6 +19,7 @@
 
 mod commands;
 mod init;
+mod journal;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
@@ -149,6 +150,9 @@ enum CellCommand {
     /// The fleet's tenants, through meta (#229).
     #[command(subcommand)]
     Tenant(tenant::TenantCommand),
+    /// A tenant's journals, through its control journal (#210).
+    #[command(subcommand)]
+    Journal(journal::JournalCommand),
 }
 
 /// How a command ended, as an exit code.
@@ -286,6 +290,9 @@ async fn main() -> ExitCode {
         CellCommand::Retire(args) => commands::retire(&client, &out, args).await,
         CellCommand::Tenant(command) => {
             tenant::run(&runtime.providers, &client, &out, command).await
+        }
+        CellCommand::Journal(command) => {
+            journal::run(&runtime.providers, &client, &out, command).await
         }
     };
     ending.into()

@@ -50,13 +50,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::checkpoint::{Folded, Folder};
 use crate::rpc::{NodeClient, Read, ReadAck};
-use crate::system::{
-    DIRECTORY, Directory, DirectoryEvent, META, Meta, REGISTRY, Registry, SystemEvent, meta_event,
-    registry_event,
-};
+use paros_core::TenantId;
 
-/// Every system journal a node follows, in the order it folds them.
-const FOLLOWED: [JournalKey; 3] = [DIRECTORY, REGISTRY, META];
+use crate::system::{
+    DIRECTORY, Directory, DirectoryEvent, META, Meta, REGISTRY, Registry, RegistryEvent,
+    SystemEvent, directory_event, meta_event, registry_event,
+};
 
 use super::config::DriverTunables;
 use super::journals::Journals;
@@ -115,7 +114,11 @@ pub(crate) struct SystemFollower<P: Providers> {
     /// Senders every node accepts whatever the registry says: the genesis
     /// pool and the deployment's static address book (replicas included).
     fixed: BTreeSet<NodeId>,
-    directory: Directory,
+    /// Every tenant control journal followed (#210), by tenant: the genesis
+    /// user tenant's, and every tenant the registry hosts.
+    controls: BTreeMap<TenantId, Folder<Directory>>,
+    /// Tenants the registry unhosted: every journal of theirs is gone here.
+    gone: BTreeSet<TenantId>,
     registry: Folder<Registry>,
     meta: Folder<Meta>,
     /// Checkpoints the registry's and meta's folds met since the driver last
@@ -174,14 +177,19 @@ impl<P: Providers> SystemFollower<P> {
                 class: plan.class,
                 seeds,
                 fixed,
-                // The directory allocates inside its own tenant (#235): only
+                // A directory allocates inside its own tenant (#235): only
                 // that tenant's genesis journals are reserved there.
-                directory: Directory::new(
-                    plan.genesis_journals
-                        .iter()
-                        .filter(|key| key.tenant == DIRECTORY.tenant)
-                        .map(|key| key.journal),
-                ),
+                controls: std::iter::once((
+                    DIRECTORY.tenant,
+                    Folder::new(Directory::new(
+                        plan.genesis_journals
+                            .iter()
+                            .filter(|key| key.tenant == DIRECTORY.tenant)
+                            .map(|key| key.journal),
+                    )),
+                ))
+                .collect(),
+                gone: BTreeSet::new(),
                 registry: Folder::new(Registry::new(plan.genesis_pool.iter().copied())),
                 meta: Folder::new(Meta::new()),
                 checkpoints: BTreeMap::new(),
@@ -245,9 +253,77 @@ impl<P: Providers> SystemFollower<P> {
         &self.spares
     }
 
-    /// Whether `journal` was tombstoned in the directory fold.
+    /// Whether `journal` was tombstoned in its tenant's directory fold, or
+    /// its tenant was unhosted.
     pub(crate) fn is_tombstoned(&self, journal: JournalKey) -> bool {
-        self.tombstones.contains(&journal)
+        self.tombstones.contains(&journal) || self.gone.contains(&journal.tenant)
+    }
+
+    /// The tenant control journal folded for `tenant`, if followed.
+    pub(crate) fn directory(&self, tenant: TenantId) -> Option<&Directory> {
+        self.controls.get(&tenant).map(Folder::state)
+    }
+
+    /// Every system journal this node follows, in the order it folds them:
+    /// the registry, meta, then every tenant control journal (#210).
+    pub(crate) fn followed(&self) -> Vec<JournalKey> {
+        [REGISTRY, META]
+            .into_iter()
+            .chain(
+                self.controls
+                    .keys()
+                    .map(|tenant| JournalKey::control(*tenant)),
+            )
+            .collect()
+    }
+
+    /// The tenant whose control journal `journal` is, when followed.
+    fn control_of(&self, journal: JournalKey) -> Option<TenantId> {
+        (journal.journal == JournalKey::control(journal.tenant).journal
+            && self.controls.contains_key(&journal.tenant))
+        .then_some(journal.tenant)
+    }
+
+    /// Follow (or stop following) the tenants the registry fold hosts (or
+    /// unhosted), after `event`: a hosted tenant's control journal is
+    /// followed from its first position, an unhosted one never again.
+    fn track_tenants(&mut self, event: &RegistryEvent) {
+        match event {
+            RegistryEvent::TenantHosted { tenant, .. } if !self.gone.contains(tenant) => {
+                self.controls
+                    .entry(*tenant)
+                    .or_insert_with(|| Folder::new(Directory::new([])));
+            }
+            RegistryEvent::TenantUnhosted { tenant } => {
+                self.controls.remove(tenant);
+                self.gone.insert(*tenant);
+            }
+            // A restored registry names every hosted tenant and every
+            // unhosted one again.
+            RegistryEvent::Checkpoint { .. } => {
+                let hosted: Vec<TenantId> =
+                    self.registry.state().tenants().map(|(t, _)| t).collect();
+                for tenant in hosted {
+                    if self.registry.state().is_unhosted(tenant) {
+                        continue;
+                    }
+                    self.controls
+                        .entry(tenant)
+                        .or_insert_with(|| Folder::new(Directory::new([])));
+                }
+                let gone: Vec<TenantId> = self
+                    .controls
+                    .keys()
+                    .copied()
+                    .filter(|t| self.registry.state().is_unhosted(*t))
+                    .collect();
+                for tenant in gone {
+                    self.controls.remove(&tenant);
+                    self.gone.insert(tenant);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Fold one page of `journal` read from this node's own journal fold.
@@ -265,18 +341,27 @@ impl<P: Providers> SystemFollower<P> {
         match journal {
             REGISTRY => self.registry.next_seq(),
             META => self.meta.next_seq(),
-            _ => self.cursors.get(&journal).copied().unwrap_or(0),
+            _ => match self.control_of(journal) {
+                Some(tenant) => self.controls[&tenant].next_seq(),
+                None => self.cursors.get(&journal).copied().unwrap_or(0),
+            },
         }
     }
 
     /// `journal`'s positions below `floor` are gone (a read answered
-    /// `truncated`): the registry's or meta's fold jumps there, to restore
-    /// from the checkpoint at the floor. The directory is never truncated.
+    /// `truncated`): its fold jumps there, to restore from the checkpoint
+    /// at the floor (#230).
     pub(crate) fn jump(&mut self, journal: JournalKey, floor: u64) {
         match journal {
             REGISTRY => self.registry.jump(floor),
             META => self.meta.jump(floor),
-            _ => {}
+            _ => {
+                if let Some(tenant) = self.control_of(journal)
+                    && let Some(folder) = self.controls.get_mut(&tenant)
+                {
+                    folder.jump(floor);
+                }
+            }
         }
     }
 
@@ -308,14 +393,6 @@ impl<P: Providers> SystemFollower<P> {
         let next = from + records.len() as u64;
         for (seq, record) in (from..).zip(records) {
             let event = match journal {
-                DIRECTORY if seq >= self.directory.next_seq() => {
-                    let event = self.directory.fold(seq, &record);
-                    if let DirectoryEvent::Deleted { id } = &event {
-                        self.tombstones
-                            .insert(JournalKey::new(DIRECTORY.tenant, *id));
-                    }
-                    SystemEvent::Directory(event)
-                }
                 REGISTRY => {
                     let Some(folded) = self.registry.fold(seq, &record) else {
                         continue;
@@ -327,6 +404,7 @@ impl<P: Providers> SystemFollower<P> {
                     let Some(event) = registry_event(folded) else {
                         continue;
                     };
+                    self.track_tenants(&event);
                     SystemEvent::Registry(event)
                 }
                 META => {
@@ -342,7 +420,40 @@ impl<P: Providers> SystemFollower<P> {
                     };
                     SystemEvent::Meta(event)
                 }
-                _ => continue,
+                _ => {
+                    let Some(tenant) = self.control_of(journal) else {
+                        continue;
+                    };
+                    let Some(directory) = self.controls.get_mut(&tenant) else {
+                        continue;
+                    };
+                    let Some(folded) = directory.fold(seq, &record) else {
+                        continue;
+                    };
+                    let Some(folded) = self.noted(journal, seq, folded) else {
+                        if let Some(directory) = self.controls.get_mut(&tenant) {
+                            directory.skip(seq);
+                        }
+                        continue;
+                    };
+                    let Some(event) = directory_event(folded) else {
+                        continue;
+                    };
+                    if let DirectoryEvent::Deleted { id } = &event {
+                        self.tombstones.insert(JournalKey::new(tenant, *id));
+                    }
+                    // A restored directory names every tombstone again.
+                    if let DirectoryEvent::Checkpoint { .. } = &event {
+                        let deleted: Vec<JournalKey> = self.controls[&tenant]
+                            .state()
+                            .journals()
+                            .filter(|(_, j)| j.deleted_at.is_some())
+                            .map(|(id, _)| JournalKey::new(tenant, id))
+                            .collect();
+                        self.tombstones.extend(deleted);
+                    }
+                    SystemEvent::Directory(event)
+                }
             };
             events.push((seq, event));
         }
@@ -379,7 +490,7 @@ impl<P: Providers> SystemFollower<P> {
     /// node does not run and that has none in flight, each to the next seed
     /// in turn.
     pub(crate) fn poll_remote(&mut self, providers: &P, local: impl Fn(JournalKey) -> bool) {
-        for journal in FOLLOWED {
+        for journal in self.followed() {
             if local(journal) || self.outstanding.contains(&journal) {
                 continue;
             }
@@ -443,7 +554,7 @@ pub(crate) fn follow_local<P: Providers, S, A>(
 ) -> Vec<(JournalKey, Vec<(u64, SystemEvent)>)> {
     let page_records = usize::try_from(FOLLOW_READ_RECORDS).unwrap_or(usize::MAX);
     let mut moved = Vec::new();
-    for journal in FOLLOWED {
+    for journal in follower.followed() {
         let Some(rt) = journals.live.get(&journal) else {
             continue;
         };

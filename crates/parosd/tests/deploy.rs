@@ -6,7 +6,9 @@
 //! to one seed, forms the cell over the seeds, claims its control journal
 //! and registers the cell in the fleet's meta (#229) — refused on a machine
 //! that is not a seed, and on a cell already initialized. A tenant is
-//! created through meta (a re-run finds it ready), listed and removed. Then a journal is claimed and written without a hand-carried
+//! created through meta (a re-run finds it ready), a journal created inside
+//! it (#210: a taken name refused), written, read and listed, and the tenant
+//! listed and removed. Then a journal is claimed and written without a hand-carried
 //! generation or position (server ids learned from the servers themselves),
 //! every machine is killed and restarted as an existing member, a second
 //! owner supersedes the first — for a write and for a truncation (#228) — and
@@ -193,6 +195,28 @@ fn until_code(servers: &str, args: &[&str], code: i32) -> serde_json::Value {
     }
 }
 
+/// Run `args` until it succeeds, retrying while the journal it names is not
+/// served yet (a created journal starts once its nodes fold its creation)
+/// or nothing was decided; its JSON answer.
+fn until_served(servers: &str, args: &[&str]) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let output = ctl(servers, args);
+        if output.status.success() {
+            return json(&output);
+        }
+        assert!(
+            matches!(output.status.code(), Some(CTL_UNREACHABLE | CTL_REFUSED))
+                && Instant::now() < deadline,
+            "parosctl {args:?} failed ({:?}): {} {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Read journal 256 from 0 through `servers` until it holds `count`
 /// records: the records and the gaps reported.
 fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value>) {
@@ -215,6 +239,62 @@ fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value
 
 fn exists(path: &Path) -> bool {
     path.try_exists().unwrap_or(false)
+}
+
+/// The fleet's tenant flow (#229, #210): a tenant created through meta in
+/// the one cell (a second create of the name finds it ready), a journal
+/// created inside it (a taken name refused), written, read and listed, then
+/// the tenant removed and its journals unknown.
+fn tenant_and_journal(servers: &str, initialized: &serde_json::Value) {
+    // A tenant, created through meta in the one cell; a second create of
+    // the same name finds it ready. Listed, then removed.
+    let created = until_ok(servers, &["tenant", "create", "acme"]);
+    assert_eq!(created["outcome"], "ready", "{created}");
+    assert_eq!(created["cell"], initialized["cell"], "{created}");
+    let again = until_ok(servers, &["tenant", "create", "acme"]);
+    assert_eq!(again["tenant"], created["tenant"], "{again}");
+    assert_eq!(again["resumed"], true, "{again}");
+    let listed = until_ok(servers, &["tenant", "list"]);
+    assert_eq!(listed["fleet"], initialized["fleet"], "{listed}");
+    assert_eq!(listed["tenants"][0]["name"], "acme", "{listed}");
+    assert_eq!(listed["tenants"][0]["state"], "ready", "{listed}");
+    // A journal of the tenant (#210), created through its control journal:
+    // a second create of the name is refused; it is written and read under
+    // its `(tenant, journal)` frame, and listed.
+    let journal = until_ok(
+        servers,
+        &["journal", "create", "orders", "--tenant", "acme"],
+    );
+    assert_eq!(journal["outcome"], "created", "{journal}");
+    assert_eq!(journal["tenant"], created["tenant"], "{journal}");
+    let taken = until_code(
+        servers,
+        &["journal", "create", "orders", "--tenant", "acme"],
+        CTL_REFUSED,
+    );
+    assert_eq!(taken["refusal"], "name_taken", "{taken}");
+    let frame = format!("{}/{}", journal["tenant"], journal["journal"]);
+    let wrote = until_served(servers, &["write", &frame, "first", "--owner", "9"]);
+    assert_eq!(wrote["seq"], 0, "{wrote}");
+    let read = until_ok(servers, &["read", &frame, "--from", "0"]);
+    assert_eq!(read["records"][0]["data"], "first", "{read}");
+    let listed = until_ok(servers, &["journal", "list", "--tenant", "acme"]);
+    assert_eq!(listed["name"], "acme", "{listed}");
+    assert_eq!(listed["journals"][0]["name"], "orders", "{listed}");
+    let removed = until_ok(servers, &["tenant", "delete", "acme"]);
+    assert_eq!(removed["tenant"], created["tenant"], "{removed}");
+    let listed = until_ok(servers, &["tenant", "list"]);
+    assert_eq!(
+        listed["tenants"].as_array().map(Vec::len),
+        Some(0),
+        "{listed}"
+    );
+    let gone = until_code(
+        servers,
+        &["journal", "list", "--tenant", "acme"],
+        CTL_REFUSED,
+    );
+    assert_eq!(gone["refusal"], "unknown_tenant", "{gone}");
 }
 
 #[test]
@@ -248,26 +328,7 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
         assert!(exists(&dir.join("journals").join("256").join("256")));
     }
 
-    // A tenant, created through meta in the one cell; a second create of
-    // the same name finds it ready. Listed, then removed.
-    let created = until_ok(&servers, &["tenant", "create", "acme"]);
-    assert_eq!(created["outcome"], "ready", "{created}");
-    assert_eq!(created["cell"], initialized["cell"], "{created}");
-    let again = until_ok(&servers, &["tenant", "create", "acme"]);
-    assert_eq!(again["tenant"], created["tenant"], "{again}");
-    assert_eq!(again["resumed"], true, "{again}");
-    let listed = until_ok(&servers, &["tenant", "list"]);
-    assert_eq!(listed["fleet"], initialized["fleet"], "{listed}");
-    assert_eq!(listed["tenants"][0]["name"], "acme", "{listed}");
-    assert_eq!(listed["tenants"][0]["state"], "ready", "{listed}");
-    let removed = until_ok(&servers, &["tenant", "delete", "acme"]);
-    assert_eq!(removed["tenant"], created["tenant"], "{removed}");
-    let listed = until_ok(&servers, &["tenant", "list"]);
-    assert_eq!(
-        listed["tenants"].as_array().map(Vec::len),
-        Some(0),
-        "{listed}"
-    );
+    tenant_and_journal(&servers, &initialized);
 
     // The writer claims journal 256 on its way, and writes at the tail;
     // the servers' ids are learned from the servers.

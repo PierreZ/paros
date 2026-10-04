@@ -55,7 +55,10 @@ interrupted one; on an initialized cell it is refused (`already_initialized`).
 
 **Tenants.** `parosctl tenant create acme` registers a tenant in meta, has the
 cell host it and marks it ready; `tenant list` shows meta; `tenant delete acme`
-removes it. An interrupted create or delete resumes when run again.
+removes it. An interrupted create or delete resumes when run again. A tenant's
+control journal (`tenant/1`) runs on the seeds; `parosctl journal create orders
+--tenant acme` creates a journal inside it, which every seed starts, addressed
+as `TENANT/JOURNAL` by `write`, `read` and the rest.
 
 **Write and read.** `parosctl` is handed addresses only: `--servers seeds:4500`
 stands for every seed, and each server's node id is learned from its own
@@ -213,6 +216,9 @@ in the default tenant `256` (#235).
 | `parosctl tenant create <name>` | creates a tenant through meta (registered, hosted by the cell, ready); resumes an interrupted creation; `--owner`, `--patience-ms` |
 | `parosctl tenant delete <name>` | removes a tenant (removing, unhosted, forgotten); resumes an interrupted removal |
 | `parosctl tenant list` | the fleet, its cells and its tenants as meta records them |
+| `parosctl journal create <name> --tenant T` | creates a journal in tenant `T` (a name through meta, or an id) through its control journal; a taken name is refused |
+| `parosctl journal delete <name> --tenant T` | tombstones the tenant's journal |
+| `parosctl journal list --tenant T` | the tenant's name and live journals, as its control journal records them |
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
