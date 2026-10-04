@@ -132,7 +132,10 @@ fn write(journal: JournalKey, action: FleetAction, command: SystemCommand) -> Ne
     }
 }
 
-/// Read `journal` from its floor to its tail into `state`.
+/// Read `journal` from its floor to its tail into `state`: only a whole
+/// fold (from position 0, or restored from the checkpoint at the floor)
+/// comes back — `load` reports a fold a non-checkpoint floor left blind as
+/// `Unhealed`, and a step never decides on one.
 async fn read<P: Providers, S: Checkpointable + Clone>(
     client: &Client<P>,
     journal: JournalKey,
@@ -150,7 +153,6 @@ async fn read<P: Providers, S: Checkpointable + Clone>(
 enum Verdict {
     Applied,
     IdTaken,
-    NameTaken,
     Refused(FleetRefusal),
 }
 
@@ -159,7 +161,6 @@ fn meta_verdict(event: &MetaEvent) -> Verdict {
         MetaEvent::Refused(MetaRefusal::IdTaken { .. } | MetaRefusal::Reserved { .. }) => {
             Verdict::IdTaken
         }
-        MetaEvent::Refused(MetaRefusal::NameTaken { .. }) => Verdict::NameTaken,
         MetaEvent::Refused(refusal) => Verdict::Refused(FleetRefusal::Meta(refusal.clone())),
         _ => Verdict::Applied,
     }
@@ -172,45 +173,67 @@ fn cell_verdict(event: &RegistryEvent) -> Verdict {
     }
 }
 
+/// What one step saw and did.
+struct StepReport {
+    outcome: FleetStep,
+    /// Meta as the step first read it.
+    read: Option<Meta>,
+    /// Meta after the step's own write, when it wrote meta.
+    written: Option<Meta>,
+}
+
+impl StepReport {
+    fn of(outcome: FleetStep, read: Option<Meta>) -> Self {
+        Self {
+            outcome,
+            read,
+            written: None,
+        }
+    }
+}
+
 /// Run one step: read both journals, decide with `decide`, and write the
 /// entry it names to the journal it names — claimed as `owner`, folded to
 /// its tail, and decided again on what that fold holds, so the entry is
-/// judged against exactly the state it was decided on. Returns the outcome
-/// and the freshest meta the step folded.
+/// judged against exactly the state it was decided on.
 async fn step<P: Providers>(
     client: &Client<P>,
     owner: u64,
     first: usize,
     decide: impl Fn(&Meta, &Registry) -> Result<Next, FleetRefusal>,
-) -> (FleetStep, Option<Meta>) {
+) -> StepReport {
     let Some(meta) = read(client, META, Meta::new(), first).await else {
-        return (FleetStep::Unavailable, None);
+        return StepReport::of(FleetStep::Unavailable, None);
     };
     let Some(cell) = read(client, REGISTRY, Registry::new([]), first).await else {
-        return (FleetStep::Unavailable, Some(meta));
+        return StepReport::of(FleetStep::Unavailable, Some(meta));
     };
     let journal = match decide(&meta, &cell) {
-        Err(refusal) => return (FleetStep::Refused(refusal), Some(meta)),
-        Ok(Next::Done(context)) => return (FleetStep::Done(context), Some(meta)),
+        Err(refusal) => return StepReport::of(FleetStep::Refused(refusal), Some(meta)),
+        Ok(Next::Done(context)) => return StepReport::of(FleetStep::Done(context), Some(meta)),
         Ok(Next::Write { journal, .. }) => journal,
     };
     let policy = client.tunables().checkpoint_policy();
     if journal == META {
         let mut writer = Checkpointer::new(META, owner, Meta::new(), policy);
         if !matches!(writer.open(client, first).await, OpenOutcome::Open { .. }) {
-            return (FleetStep::Unavailable, Some(meta));
+            return StepReport::of(FleetStep::Unavailable, Some(meta));
         }
         let next = decide(writer.state(), &cell);
         let outcome = written(&mut writer, client, first, journal, next, meta_verdict).await;
-        (outcome, Some(writer.state().clone()))
+        StepReport {
+            outcome,
+            read: Some(meta),
+            written: Some(writer.state().clone()),
+        }
     } else {
         let mut writer = Checkpointer::new(REGISTRY, owner, Registry::new([]), policy);
         if !matches!(writer.open(client, first).await, OpenOutcome::Open { .. }) {
-            return (FleetStep::Unavailable, Some(meta));
+            return StepReport::of(FleetStep::Unavailable, Some(meta));
         }
         let next = decide(&meta, writer.state());
         let outcome = written(&mut writer, client, first, journal, next, cell_verdict).await;
-        (outcome, Some(meta))
+        StepReport::of(outcome, Some(meta))
     }
 }
 
@@ -235,8 +258,6 @@ async fn written<P: Providers, S: Checkpointable>(
             Applied::Folded(event) => match verdict(&event) {
                 Verdict::Applied => FleetStep::Stepped(Some(action)),
                 Verdict::IdTaken => FleetStep::IdTaken,
-                // A rival creator holds the name: the next step adopts it.
-                Verdict::NameTaken => FleetStep::Stepped(None),
                 Verdict::Refused(refusal) => FleetStep::Refused(refusal),
             },
             Applied::NotFolded(_) => FleetStep::Unavailable,
@@ -327,11 +348,12 @@ impl CellRegistration {
             self.decide(meta, cell)
         })
         .await
-        .0
+        .outcome
     }
 
     /// Step until the cell is registered or refused, retrying an
     /// unavailable step for up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all, fields(cell = self.cell_id))]
     pub async fn run<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -428,9 +450,14 @@ impl TenantCreation {
                 }
                 context
             }
+            // A name already registered runs in its own cell; a new one is
+            // assigned the ready cell.
             None => FleetContext {
                 fleet_id,
-                cell_id: meta.ready_cell().ok_or(FleetRefusal::NoReadyCell)?,
+                cell_id: match meta.by_name(&self.name).and_then(|t| meta.tenant(t)) {
+                    Some(entry) => entry.cell_id,
+                    None => meta.ready_cell().ok_or(FleetRefusal::NoReadyCell)?,
+                },
             },
         };
         // The cell control journal read is this context's cell's.
@@ -487,14 +514,14 @@ impl TenantCreation {
     /// One step (see the module docs).
     #[tracing::instrument(level = "debug", skip_all, fields(tenant = self.candidate.0))]
     pub async fn step<P: Providers>(&mut self, client: &Client<P>, first: usize) -> FleetStep {
-        let (outcome, meta) = step(client, self.owner, first, |meta, cell| {
+        let report = step(client, self.owner, first, |meta, cell| {
             self.decide(meta, cell)
         })
         .await;
-        if let Some(meta) = meta {
-            self.observe(&meta);
+        if let Some(meta) = report.written.as_ref().or(report.read.as_ref()) {
+            self.observe(meta);
         }
-        outcome
+        report.outcome
     }
 
     /// Learn what meta fixed: the tenant's id and the context.
@@ -505,7 +532,11 @@ impl TenantCreation {
         let Some(entry) = meta.tenant(tenant) else {
             return;
         };
-        if self.tenant.is_none() {
+        // Only a tenant this creation may finish: registering or ready (a
+        // rival's tenant being removed is not one).
+        if self.tenant.is_none()
+            && matches!(entry.state, TenantState::Registering | TenantState::Ready)
+        {
             self.adopted = tenant != self.candidate || entry.state != TenantState::Registering;
             self.tenant = Some(tenant);
         }
@@ -520,6 +551,7 @@ impl TenantCreation {
     /// Step until the tenant is `READY` or refused, retrying an
     /// unavailable step for up to `patience`; a taken id is redrawn through
     /// `redraw`.
+    #[tracing::instrument(level = "debug", skip_all, fields(tenant = self.candidate.0))]
     pub async fn run<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -619,22 +651,25 @@ impl TenantRemoval {
     }
 
     /// One step (see the module docs).
-    #[tracing::instrument(level = "debug", skip_all)]
+    #[tracing::instrument(level = "debug", skip_all, fields(tenant = self.tenant.map(|t| t.0)))]
     pub async fn step<P: Providers>(&mut self, client: &Client<P>, first: usize) -> FleetStep {
+        let report = step(client, self.owner, first, |meta, cell| {
+            self.decide(meta, cell)
+        })
+        .await;
+        // The tenant this removal works on, from what the step read before
+        // it wrote: a forget leaves nothing to learn it from afterwards.
         if self.tenant.is_none()
-            && let Some(meta) = read(client, META, Meta::new(), first).await
+            && let Some(meta) = &report.read
         {
             self.tenant = meta.by_name(&self.name);
         }
-        step(client, self.owner, first, |meta, cell| {
-            self.decide(meta, cell)
-        })
-        .await
-        .0
+        report.outcome
     }
 
     /// Step until the tenant is forgotten or refused, retrying an
     /// unavailable step for up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn run<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -663,11 +698,13 @@ impl TenantRemoval {
 
 /// Meta, read from its floor to its tail (`parosctl tenant list`); `None`
 /// when no server served it.
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn load_meta<P: Providers>(client: &Client<P>, first: usize) -> Option<Meta> {
     read(client, META, Meta::new(), first).await
 }
 
 /// The cell control journal's fold, read from its floor to its tail.
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn load_cell<P: Providers>(client: &Client<P>, first: usize) -> Option<Registry> {
     read(client, REGISTRY, Registry::new([]), first).await
 }

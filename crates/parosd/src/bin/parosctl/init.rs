@@ -110,12 +110,9 @@ pub async fn run(
     };
     let client = connect(&servers);
     let claimed = match bootstrap::claim_cell(&client, coordinator, patience).await {
-        ClaimCellOutcome::Claimed { generation } => generation,
-        // The coordinator's own claim from an earlier run: resume the fleet
-        // steps.
-        ClaimCellOutcome::AlreadyInitialized { owner, generation }
-            if owner == Some(coordinator.0) =>
-        {
+        // Claimed now, or by the coordinator in an earlier run: the fleet
+        // steps run (or resume).
+        ClaimCellOutcome::Claimed { generation } | ClaimCellOutcome::Owned { generation } => {
             generation
         }
         ClaimCellOutcome::AlreadyInitialized { owner, generation } => {

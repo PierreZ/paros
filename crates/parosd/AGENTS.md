@@ -27,7 +27,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209).
 - `src/bin/parosctl/main.rs` → `parosctl` → global options, server ids discovered from
   `Inspect`, `init` vs the cell commands, exit codes.
-- `src/bin/parosctl/init.rs` → `parosctl init` over `paros::client::bootstrap`.
+- `src/bin/parosctl/init.rs` → `parosctl init` over `paros::client::bootstrap` (the cell, then the fleet steps, #229).
+- `src/bin/parosctl/tenant.rs` → `parosctl tenant create|delete|list` over `paros::client::fleet` (#229).
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
 - `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`);
@@ -35,7 +36,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
   reopens with every acked write.
 - `tests/deploy.rs` → three seeds and a stateless machine on a laptop: `init` (refused off a
-  seed and on an initialized cell), write, read, restart, a superseded writer and truncation,
+  seed and on an initialized cell, registering the fleet), a tenant created, re-found, listed
+  and removed, write, read, restart, a superseded writer and truncation,
   the refusals (unknown variable, tunable floor, class change, amnesia, lost identity, a wiped
   volume never forming a second cell), `SIGTERM`.
 
@@ -59,8 +61,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Local rules
 
-- **Interim (M8 → M9)**: the cell's journals are the cell control journal plus the static
-  assignment `TOY_JOURNAL` (`256/256`), plain Multi-Paxos over the seeds; a non-seed machine
+- **Interim (M8 → M9)**: the cell's journals are the cell control journal, meta (`1/1`), the
+  user tenant's control journal (`256/1`) and the static assignment `TOY_JOURNAL` (`256/256`),
+  plain Multi-Paxos over the seeds, every machine following them through a `SystemPlan`; a non-seed machine
   and every `stateless` one wait for placement (#211, #212); the first cell coordinator is the
   lowest seed id (#225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.

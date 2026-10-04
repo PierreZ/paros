@@ -606,6 +606,7 @@ impl<S: Checkpointable> Checkpointer<S> {
     /// [`Checkpointer::append`], returning what the entry folded to: an
     /// owner that writes a command learns its verdict from its own fold —
     /// the same verdict every reader folds at that position.
+    #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal(), seq = self.writer.next_seq()))]
     pub async fn apply<P: Providers>(
         &mut self,
         client: &Client<P>,

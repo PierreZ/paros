@@ -1095,14 +1095,19 @@ where
                     }
                     continue;
                 };
+                let up_to = Seq(req.up_to);
                 // The directory is never truncated: its fold cannot jump a
-                // floor yet. The registry and meta are, to their owners'
-                // checkpoints (#230): their folds restart from the floor.
-                if journal == crate::system::DIRECTORY {
+                // floor yet. The registry and meta are, but only to a
+                // checkpoint (#230): every node's fold restarts from the
+                // record at the floor, and a floor that is no checkpoint
+                // would leave every fold that jumps to it blind.
+                if journal == crate::system::DIRECTORY
+                    || (crate::system::is_system(journal) && !checkpoint_at(&rt.node, up_to))
+                {
+                    tracing::info!(node = self_id, journal = %journal, up_to = up_to.0, "system_truncate_refused");
                     shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
                     continue;
                 }
-                let up_to = Seq(req.up_to);
                 let generation = Generation(req.generation);
                 let owner = ClientId(req.owner);
                 let delegation = delegation_choice(&rt.node, hooks);
@@ -1696,6 +1701,21 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     audit.journal_refused(NodeId(self_id), journal, call);
     tracing::info!(node = self_id, journal = %journal, call, "journal_refused");
     true
+}
+
+/// Whether `node`'s journal fold holds a checkpoint record (#230) at
+/// position `at`: the only floor a system journal is truncated to.
+fn checkpoint_at(node: &ColocatedNode, at: Seq) -> bool {
+    match node.read_log(at, 1, log_reads::READ_PAGE_BYTES) {
+        paros_core::LogRead::Page(page) => {
+            page.from == at
+                && page
+                    .records
+                    .first()
+                    .is_some_and(|record| crate::client::checkpoint::is_checkpoint(&record.0))
+        }
+        paros_core::LogRead::Truncated(_) => false,
+    }
 }
 
 /// Open `journal`'s store and boot it into `journals` (at boot, or when its

@@ -57,8 +57,8 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
   window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
-  injected corruption. `system_journals` → the directory and the registry on half the seeds, on `SEED_COUNT`
-  (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
+  injected corruption. `system_journals` → the directory, the registry and meta on half the seeds, on `SEED_COUNT`
+  (1) seed ranks; `cell_id` → the run's cell id, what `init` would mint (#229). `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
 

@@ -44,7 +44,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/fleet.rs` → `CellRegistration`, `TenantCreation`, `TenantRemoval`, `FleetStep`, `load_meta` → the fleet's resumable operations over meta and the cell control journal, one entry per step (#229).
 - `system/mod.rs` → `DIRECTORY`, `REGISTRY`, `META`, `SystemEvent` · `system/command.rs` → `SystemCommand`, `FleetContext` → one record per position.
 - `system/directory.rs` → `Directory` → a tenant's journal names; a create carries its drawn id (#235).
-- `system/registry.rs` → `Registry` → the cell control journal: nodes by `node_id` with class, capacity and bookings (#211), the cell's fleet registration and hosted tenants (#229); `Checkpointable` (#230).
+- `system/registry/mod.rs` → `Registry` → the cell control journal: nodes by `node_id` with class, capacity and bookings (#211); `Checkpointable` (#230) · `system/registry/fleet.rs` → `FleetRegistration`, `HostedTenant` → its fleet half: the cell's registration and hosted tenants (#229).
 - `system/meta.rs` → `Meta`, `TenantState`, `CellState`, `METADATA_VERSION` → the fleet's directory (`1/1`): cells and tenants with their states (#229); `Checkpointable`.
 - `corruption.rs` → `classify_log` → CTRL record classification.
 - `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.

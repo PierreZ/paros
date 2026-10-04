@@ -733,8 +733,8 @@ impl SystemOps {
     /// it. Two BUGGIFY locations stop between the two steps: an owner that
     /// crashes there (the checkpoint stays mid-log, and the next one
     /// truncates past it), and an owner a rival claims the journal from
-    /// first (its truncate is refused by the fence, #228). The gates' "the
-    /// registry" covers meta's checkpoints too.
+    /// first (its truncate is refused by the fence, #228). The registry and
+    /// meta each have their own "due" and "truncated" gates.
     pub(super) async fn checkpoint(
         &mut self,
         ctx: &SimContext,
@@ -779,7 +779,7 @@ impl SystemOps {
                     "checkpoint: an owner's load finds each checkpoint its prefix's state",
                     { "journal" => journal.to_string(), "seq" => diverged.unwrap_or_default() }
                 );
-                if restarted {
+                if restarted && journal == REGISTRY {
                     board_lock(&system_board(ctx.state())).reader_restarted();
                 }
             }
@@ -790,7 +790,11 @@ impl SystemOps {
         }
         // BUGGIFY pairing: the policy's decision is reached (a cause; the
         // outcomes are the truncation and the restarts it forces).
-        assert_reachable!("checkpoint: an owner finds a registry checkpoint due");
+        if journal == REGISTRY {
+            assert_reachable!("checkpoint: an owner finds a registry checkpoint due");
+        } else {
+            assert_reachable!("checkpoint: an owner finds a meta checkpoint due");
+        }
         if buggify_with_prob!(0.15) {
             // A crash between the checkpoint and its truncate.
             if owner.write_checkpoint(&client, first).await.is_ok() {
@@ -835,8 +839,12 @@ impl SystemOps {
                 "checkpoint: a truncate to a checkpoint raises the floor to it",
                 { "seq" => seq, "first" => state.first_seq.0 }
             );
-            assert_reachable!("checkpoint: an owner truncates the registry to its checkpoint");
-            board_lock(&system_board(ctx.state())).truncated_to_checkpoint();
+            if journal == REGISTRY {
+                assert_reachable!("checkpoint: an owner truncates the registry to its checkpoint");
+                board_lock(&system_board(ctx.state())).truncated_to_checkpoint();
+            } else {
+                assert_reachable!("checkpoint: an owner truncates meta to its checkpoint");
+            }
         }
     }
 

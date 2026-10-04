@@ -67,6 +67,11 @@ pub(crate) struct SystemBoard {
     created: BTreeMap<JournalId, u64>,
     /// Every tenant id meta registered, with the LSN that registered it.
     tenants: BTreeMap<TenantId, u64>,
+    /// Meta's events in position order, as first folded anywhere: the next
+    /// position the model expects, `None` once a position was first seen
+    /// out of order (a truncation took the ones before it first, so the
+    /// model no longer knows every registered id).
+    meta_next: Option<u64>,
     /// `(node, journal)`: the node folded the journal's tombstone.
     tombstoned: BTreeSet<(u64, JournalKey)>,
     /// Joiners some node has admitted to its pool.
@@ -133,6 +138,7 @@ impl SystemBoard {
         self.machines = machines.into_iter().collect();
         if !self.armed {
             self.registry_next = Some(0);
+            self.meta_next = Some(0);
         }
         self.armed = true;
         self.joiners = joiners;
@@ -182,6 +188,11 @@ impl SystemBoard {
         {
             self.model_registry(lsn, event);
         }
+        if let SystemEvent::Meta(event) = event
+            && known == digest
+        {
+            self.model_meta(lsn, event);
+        }
         match event {
             SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
                 let at = *self.created.entry(*id).or_insert(lsn);
@@ -202,25 +213,6 @@ impl SystemBoard {
             })) if self.created.get(winner).is_some_and(|at| *at < lsn) => {
                 self.name_race = true;
             }
-            SystemEvent::Meta(MetaEvent::TenantRegistered { tenant, .. }) => {
-                let at = *self.tenants.entry(*tenant).or_insert(lsn);
-                assert_always!(
-                    tenant.is_user() && at == lsn,
-                    "fleet: a registered tenant takes a drawn user id, never reused",
-                    { "tenant" => tenant.0, "lsn" => lsn, "first" => at }
-                );
-            }
-            SystemEvent::Meta(MetaEvent::Refused(MetaRefusal::IdTaken { tenant })) => {
-                assert_always!(
-                    self.tenants.get(tenant).is_some_and(|at| *at < lsn),
-                    "fleet: meta refuses a tenant id as taken only when it was registered",
-                    { "tenant" => tenant.0, "lsn" => lsn }
-                );
-                assert_reachable!("fleet: meta refuses a tenant id registered before");
-            }
-            SystemEvent::Meta(MetaEvent::Refused(MetaRefusal::NameTaken { .. })) => {
-                assert_reachable!("fleet: two creations race for one tenant name");
-            }
             SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id })) => {
                 assert_always!(
                     self.created.get(id).is_some_and(|at| *at < lsn),
@@ -228,6 +220,43 @@ impl SystemBoard {
                     { "id" => id.0, "lsn" => lsn }
                 );
                 self.id_taken = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Advance the meta model by the event first folded at `lsn` (#229):
+    /// judged only while the board has seen every position, since a
+    /// registration a truncation took before any node folded it is one the
+    /// model cannot know.
+    fn model_meta(&mut self, lsn: u64, event: &MetaEvent) {
+        let Some(next) = self.meta_next else {
+            return;
+        };
+        if lsn < next {
+            return;
+        }
+        if lsn > next {
+            self.meta_next = None;
+            return;
+        }
+        self.meta_next = Some(lsn + 1);
+        match event {
+            MetaEvent::TenantRegistered { tenant, .. } => {
+                let known = self.tenants.insert(*tenant, lsn);
+                assert_always!(
+                    tenant.is_user() && known.is_none(),
+                    "fleet: a registered tenant takes a drawn user id, never reused",
+                    { "tenant" => tenant.0, "lsn" => lsn }
+                );
+            }
+            MetaEvent::Refused(MetaRefusal::IdTaken { tenant }) => {
+                assert_always!(
+                    self.tenants.contains_key(tenant),
+                    "fleet: meta refuses a tenant id as taken only when it was registered",
+                    { "tenant" => tenant.0, "lsn" => lsn }
+                );
+                assert_reachable!("fleet: meta refuses a tenant id registered before");
             }
             _ => {}
         }
@@ -290,15 +319,23 @@ impl SystemBoard {
         }
     }
 
-    /// `node` folded a registry checkpoint at `seq` (#230): `verified` as
+    /// `node` folded a checkpoint of `journal` at `seq` (#230): `verified` as
     /// [`paros::Audit::checkpoint_folded`] reports it.
-    pub(crate) fn checkpoint_folded(&mut self, node: NodeId, seq: u64, verified: Option<bool>) {
+    pub(crate) fn checkpoint_folded(
+        &mut self,
+        node: NodeId,
+        journal: JournalKey,
+        seq: u64,
+        verified: Option<bool>,
+    ) {
         assert_always!(
             verified != Some(false),
             "checkpoint: a checkpoint is the state its whole prefix folds to",
             { "node" => node.0, "seq" => seq }
         );
-        if verified.is_none() {
+        // The restart gate is the registry's (its messages say so); meta's
+        // checkpoints are judged by the same oracle above.
+        if verified.is_none() && journal == paros::system::REGISTRY {
             self.reader_restarted();
         }
     }

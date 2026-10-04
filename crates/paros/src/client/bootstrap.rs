@@ -128,7 +128,14 @@ pub enum ClaimCellOutcome {
         /// The generation it owns.
         generation: u64,
     },
-    /// The cell control journal already has an owner: the cell was
+    /// The coordinator itself owns the cell control journal already: an
+    /// earlier run of `init` claimed it, and this one resumes the fleet
+    /// steps.
+    Owned {
+        /// The generation it owns.
+        generation: u64,
+    },
+    /// The cell control journal already has another owner: the cell was
     /// initialized before.
     AlreadyInitialized {
         /// Its owner.
@@ -180,6 +187,11 @@ async fn claim_cell_once<P: Providers>(
     let Some(state) = client.read_any(&read, 0).await.outcome.state() else {
         return ClaimCellOutcome::Unavailable;
     };
+    if state.generation.0 > 0 && state.owner.is_some_and(|o| o.0 == coordinator.0) {
+        return ClaimCellOutcome::Owned {
+            generation: state.generation.0,
+        };
+    }
     if state.generation.0 > 0 {
         return ClaimCellOutcome::AlreadyInitialized {
             owner: state.owner.map(|o| o.0),
@@ -232,6 +244,7 @@ pub enum RegisterFleetOutcome {
 /// [`CellRegistration`]). A re-run resumes; one that finds every step done
 /// reports [`RegisterFleetOutcome::AlreadyRegistered`]. An unavailable step
 /// (a freshly formed cell still electing) is retried for up to `patience`.
+#[tracing::instrument(level = "debug", skip_all, fields(coordinator = coordinator.0, cell = cell_id))]
 pub async fn register_fleet<P: Providers>(
     client: &Client<P>,
     coordinator: NodeId,
@@ -241,15 +254,14 @@ pub async fn register_fleet<P: Providers>(
 ) -> RegisterFleetOutcome {
     let mut registration = CellRegistration::new(coordinator.0, cell_id, fleet_draw);
     let deadline = client.time.now() + patience;
-    let mut wrote = false;
+    // Whether the fleet was initialized before is what the first step finds,
+    // never what this run believes it wrote: a write whose answer was lost
+    // is still this run's.
     loop {
         match registration.step(client, 0).await {
-            FleetStep::Stepped(action) => wrote |= action.is_some(),
-            FleetStep::Done(context) if wrote => {
-                return RegisterFleetOutcome::Registered { context };
-            }
             FleetStep::Done(context) => return RegisterFleetOutcome::AlreadyRegistered { context },
             FleetStep::Refused(refusal) => return RegisterFleetOutcome::Refused(refusal),
+            FleetStep::Stepped(_) => break,
             FleetStep::IdTaken | FleetStep::Unavailable => {
                 if client.time.now() >= deadline
                     || !client.pause(client.tunables.retry_backoff).await
@@ -257,6 +269,14 @@ pub async fn register_fleet<P: Providers>(
                     return RegisterFleetOutcome::Unavailable;
                 }
             }
+        }
+    }
+    let remaining = deadline.saturating_sub(client.time.now());
+    match registration.run(client, 0, remaining).await {
+        FleetStep::Done(context) => RegisterFleetOutcome::Registered { context },
+        FleetStep::Refused(refusal) => RegisterFleetOutcome::Refused(refusal),
+        FleetStep::Stepped(_) | FleetStep::IdTaken | FleetStep::Unavailable => {
+            RegisterFleetOutcome::Unavailable
         }
     }
 }

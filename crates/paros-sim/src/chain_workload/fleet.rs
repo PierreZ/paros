@@ -44,7 +44,9 @@ const TENANT_NAMES: [&[u8]; 4] = [b"acme", b"globex", b"initech", b"umbrella"];
 const MAX_STEPS: usize = 12;
 
 /// The most unavailable steps one operation absorbs before its client moves
-/// on (the operation resumes on a later step).
+/// on (the operation resumes on a later step). A schedule ceiling, like
+/// `system::APPEND_ATTEMPTS`, not a tunable: how long an unavailable step
+/// waits is the `pause_ms` knob.
 const UNAVAILABLE_STEPS: usize = 3;
 
 /// A tenant id in the user range, spread from one draw (random, never a
@@ -217,7 +219,8 @@ impl FleetOps {
                 FleetStep::Done(context) => {
                     assert_always!(
                         stale.is_none(),
-                        "fleet: a creation resumed with a stale context never completes"
+                        "fleet: a creation resumed with a stale context never completes",
+                        { "cell" => context.cell_id, "tenant" => creation.tenant().map_or(0, |t| t.0) }
                     );
                     self.context = Some(context);
                     assert_sometimes!(true, "fleet: a tenant becomes ready");
