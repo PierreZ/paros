@@ -81,8 +81,8 @@ use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
 use crate::machine::CellFrames;
 use crate::rpc::{
-    MatchmakerClient, ReadAck, ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck,
-    WriteAck, well_known,
+    MatchmakerClient, MatchmakersRefusal, ReadAck, ReconfigureMatchmakersAck, ReplySender,
+    SetLeaderAck, TruncateAck, WriteAck, well_known,
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
@@ -1314,22 +1314,25 @@ where
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, &mut handover, &target, |m| {
                     links.clients.contains_key(m)
-                });
+                })
+                .err();
+                let accepted = refusal.is_none();
                 let generation = rt.node.matchmaker_set().map_or(0, |set| set.generation.0);
                 if let Some(current) = rt.node.matchmaker_set()
-                    && refusal.is_empty()
+                    && accepted
                 {
                     lp.start_reconfigurer(&mut handover, current, &target, false);
                 }
                 rt.audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
-                tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
+                let label = refusal.map_or("", MatchmakersRefusal::label);
+                tracing::info!(node = self_id, accepted, refusal = label, "reconfigure_matchmakers_acked");
                 lp.answer(
                     Reply::ReconfigureMatchmakers,
                     reply,
                     ReconfigureMatchmakersAck {
-                        accepted: refusal.is_empty(),
-                        refusal: refusal.to_string(),
-                        generation: refusal.is_empty().then_some(generation),
+                        accepted,
+                        refusal: label.to_string(),
+                        generation: accepted.then_some(generation),
                     },
                 );
             }

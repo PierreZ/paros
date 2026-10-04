@@ -70,6 +70,7 @@ mod consensus;
 mod inbound;
 mod matchmaker_codec;
 pub mod methods;
+mod refusal;
 #[cfg(test)]
 mod tests;
 
@@ -89,6 +90,7 @@ pub use public::{
     Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck,
     SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck, WriteOutcome,
 };
+pub use refusal::{MatchmakersRefusal, RetireRefusal};
 
 pub use codec::{
     WireQuorumSystem, journal_state_from_proto, journal_state_to_proto, quorum_system_from_proto,

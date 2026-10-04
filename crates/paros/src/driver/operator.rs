@@ -14,8 +14,9 @@ use paros_core::{
 use crate::audit::Audit;
 use crate::machine::CellFrames;
 use crate::rpc::{
-    InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest, WireQuorumSystem, common,
-    journal_state_to_proto, quorum_system_from_proto, quorum_system_to_proto,
+    InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
+    RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,
+    quorum_system_to_proto,
 };
 
 use super::events::reconfigure_outcome;
@@ -84,51 +85,67 @@ pub(crate) fn retire<A: Audit>(
     req: &RetireRequest,
 ) -> RetireAck {
     let watermark = req.gc_watermark.map(Ballot::from);
-    let accepted = watermark.is_some_and(|w| node.may_retire(w));
-    let refusal = if accepted {
-        ""
-    } else if !node.config().has_matchmakers() {
-        "plain"
+    let refusal = retire_refusal(node, watermark);
+    assert!(
+        refusal.is_none() == watermark.is_some_and(|w| node.may_retire(w)),
+        "a retirement is refused exactly when the core does not admit it"
+    );
+    audit.retire_acked(NodeId(self_id), refusal);
+    let accepted = refusal.is_none();
+    let label = refusal.map_or("", RetireRefusal::label);
+    tracing::info!(node = self_id, accepted, refusal = label, "retire_acked");
+    RetireAck {
+        accepted,
+        refusal: label.to_string(),
+    }
+}
+
+/// Which leg refuses a retirement at `watermark` (`None`: the core admits
+/// it, [`ColocatedNode::may_retire`]). The legs after the first are only
+/// the operator's diagnosis; the decision is the core's.
+fn retire_refusal(node: &ColocatedNode, watermark: Option<Ballot>) -> Option<RetireRefusal> {
+    if watermark.is_some_and(|w| node.may_retire(w)) {
+        return None;
+    }
+    Some(if !node.config().has_matchmakers() {
+        RetireRefusal::Plain
     } else if node.is_leader() {
-        "leader"
+        RetireRefusal::Leader
     } else if node.is_acceptor() {
-        "member"
+        RetireRefusal::Member
     } else if watermark
         .is_some_and(|w| node.acceptors_since() != w && w > node.last_member_ballot())
     {
-        "stale"
+        RetireRefusal::Stale
     } else {
-        "not_collected"
-    };
-    audit.retire_acked(NodeId(self_id), accepted, refusal);
-    tracing::info!(node = self_id, accepted, refusal, "retire_acked");
-    RetireAck {
-        accepted,
-        refusal: refusal.to_string(),
-    }
+        RetireRefusal::NotCollected
+    })
 }
 
 /// A matchmaker-set reconfiguration request (#125): any node may drive it.
 /// Refusable like every operator request — a plain deployment, an empty
 /// target, a matchmaker this node has no link to, or a handover already in
-/// flight; otherwise the handover starts and the refusal is empty. The loop
-/// reports the start and puts its requests on the wire.
+/// flight; otherwise the handover starts. The loop reports the start and
+/// puts its requests on the wire.
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
 pub(crate) fn reconfigure_matchmakers(
     node: &ColocatedNode,
     handover: &mut HandoverDriver,
     target: &[MatchmakerId],
     is_known: impl Fn(&MatchmakerId) -> bool,
-) -> &'static str {
+) -> Result<(), MatchmakersRefusal> {
     match node.matchmaker_set() {
-        None => "no_matchmakers",
-        Some(_) if target.is_empty() => "empty",
-        Some(_) if !target.iter().all(is_known) => "unknown_matchmaker",
-        Some(current) => match handover.start(current, target.to_vec()) {
-            Ok(()) => "",
-            Err(StartRefusal::Busy) => "busy",
-            Err(StartRefusal::Empty) => "empty",
-        },
+        None => Err(MatchmakersRefusal::NoMatchmakers),
+        Some(_) if target.is_empty() => Err(MatchmakersRefusal::Empty),
+        Some(_) if !target.iter().all(is_known) => Err(MatchmakersRefusal::UnknownMatchmaker),
+        Some(current) => {
+            handover
+                .start(current, target.to_vec())
+                .map_err(|refusal| match refusal {
+                    StartRefusal::Busy => MatchmakersRefusal::Busy,
+                    StartRefusal::Empty => MatchmakersRefusal::Empty,
+                })
+        }
     }
 }
 

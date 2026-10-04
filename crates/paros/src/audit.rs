@@ -28,7 +28,7 @@ use paros_core::{
 
 use crate::driver::BootRefusal;
 use crate::hooks::Seam;
-use crate::rpc::EdgeRejection;
+use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
 
 /// The driver's reaction to a [`StorageError`]. Stage 6 has exactly one honest
@@ -813,8 +813,8 @@ pub trait Audit {
     fn reconfigurer_started(&self, node: NodeId, old: &MatchmakerSet, target: &[MatchmakerId]) {}
 
     /// This node answered a client `ReconfigureMatchmakers` request: started
-    /// (`refusal` empty) or refused for `refusal`.
-    fn reconfigure_matchmakers_acked(&self, node: NodeId, refusal: &'static str) {}
+    /// (`refusal` `None`) or refused for `refusal`.
+    fn reconfigure_matchmakers_acked(&self, node: NodeId, refusal: Option<MatchmakersRefusal>) {}
 
     /// This node's reconfigurer handed `request` to the transport, addressed
     /// to `matchmaker` (the first send or a re-send).
@@ -861,15 +861,11 @@ pub trait Audit {
     ) {
     }
 
-    /// This node answered an operator `Retire` request: accepted (the node
-    /// shuts down for good at its next tick) or refused, with `refusal`
-    /// naming the leg that refused it — `"plain"`, `"leader"`, `"member"`,
-    /// `"stale"` (the configuration this node believes in force is bound
-    /// below the watermark, so it cannot tell whether the configuration the
-    /// floor kept names it, #165), or `"not_collected"` (the request carried
-    /// no GC watermark above this node's membership fence, so nothing proves
-    /// the cluster is done with it). Empty when accepted.
-    fn retire_acked(&self, node: NodeId, accepted: bool, refusal: &str) {}
+    /// This node answered an operator `Retire` request: accepted
+    /// (`refusal` `None`: the node shuts down for good at its next tick) or
+    /// refused, with `refusal` naming the leg that refused it
+    /// ([`RetireRefusal`]; `Stale` is #165's freshness leg).
+    fn retire_acked(&self, node: NodeId, refusal: Option<RetireRefusal>) {}
 
     /// This node is shutting down for good, retired by its operator after a
     /// leader's garbage collection named it retirable.
