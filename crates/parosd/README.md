@@ -15,6 +15,8 @@ are all the library's. The split follows etcd's (`etcd`, `etcdctl`,
 
 ## The toy: a cell with Docker Compose
 
+The copy-paste version, with Docker or without, is [`DEMO.md`](../../DEMO.md).
+
 From a fresh clone, Docker alone (the image is a plain multi-stage Rust build,
 the one build outside Nix):
 

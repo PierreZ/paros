@@ -6,7 +6,8 @@
 #   docker compose run --rm parosctl write T/J hello world --owner 7
 #   docker compose run --rm parosctl read T/J
 #
-# The walkthrough is crates/parosd/README.md. A machine mints its node id on
+# The copy-paste demo is DEMO.md; the walkthrough is crates/parosd/README.md.
+# A machine mints its node id on
 # its first start and waits; `init`, sent to node1, forms the cell over the
 # three nodes the `seeds` alias resolves to (the rendezvous) and claims its control
 # journal. `storage4` and `front1` wait for placement, which is M9 (#211,

@@ -361,7 +361,7 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
   `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
   (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
-  Compose toy are `Dockerfile` and `docker-compose.yml` at the root.
+  Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
 - `paros-sim` — the DST harness: processes, role map, fault world, workload, audit, corpus.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.

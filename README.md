@@ -48,8 +48,10 @@ docker compose run --rm parosctl write T/J hello world --owner 7
 docker compose run --rm parosctl read T/J
 ```
 
-The walkthrough — init, write and read, kill and restart a machine, supersede a
-writer, lose a disk — is [`crates/parosd/README.md`](crates/parosd/README.md).
+The copy-paste demo, with Docker Compose or three local processes, is
+[`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
+machine, supersede a writer, lose a disk — is
+[`crates/parosd/README.md`](crates/parosd/README.md).
 
 Roadmap (filed as GitHub issues): **M1** safety kernel, **M2** Multi-Paxos, **M3**
 storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and hardening.
