@@ -387,7 +387,9 @@ retirements wait for the GC watermark (`may_retire`).
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
 default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
 five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
-(`proxy_leaders=`, `replicas=`, `batchers=`). Flexible `{q1, q2}` quorums stay a library capability and
+(`proxy_leaders=`, `replicas=`, `batchers=`). These roles are per journal or per tenant
+logically, and their processes are shared across tenants and demuxed by frame, like matchmaker
+sets (#193); proxies are not a tenant setting, they belong to the cell (section 3.5). Flexible `{q1, q2}` quorums stay a library capability and
 are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
 coordinator picks them, inside its granted slots, and applies every change through
 reconfiguration. A journal's writer mode (section 2) is chosen when it is created and never
@@ -407,7 +409,10 @@ footprint it cannot book.
 
 ### 3.5 The proxy
 
-A stateless process in front of the machines. It authorizes the caller through an `Authz` trait
+A stateless process in front of the machines. **Proxies are cell-wide** (decided on
+2026-10-04): one shared pool per cell, serving every `users` tenant and the administration calls,
+scaled with the cell rather than per tenant; the rendezvous call answers with the cell's
+proxies. The cost, a proxy shared across tenants, is guarded by the quotas of M10. It authorizes the caller through an `Authz` trait
 whose implementation verifies a Biscuit token (below), and it routes
 each call to the machine serving the journal, so a client never knows placement. It forwards
 calls and their answers rather than redirecting the client (decided on 2026-10-04): clients only
@@ -725,7 +730,7 @@ scalable independently per tenant by its coordinator:
 | Batcher | stateless | to build; multi-writer journals only (section 2.4) |
 | Unbatcher | stateless | to build; multi-writer journals only |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
-| Proxy (the entry role) | stateless | to build: routes each call to the role that serves it (section 3.5) |
+| Proxy (the entry role) | stateless | to build: one pool per cell, routes each call to the role that serves it (section 3.5) |
 | Coordinator (fleet, cell, tenant) | stateless, or a seed at bootstrap | to build: the election library over a multi-writer journal (#240) |
 
 ### 4.1 How the pieces fit
