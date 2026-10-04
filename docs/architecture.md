@@ -387,15 +387,20 @@ retirements wait for the GC watermark (`may_retire`).
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
 default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
 five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
-(`proxies=`, `proxy_leaders=`, `replicas=`, `batchers=`). **How roles are sized** (decided on 2026-10-04). Stateless roles — proxies, proxy leaders,
+(`proxies=`, `proxy_leaders=` and `batchers=` per tenant, `replicas=` per journal).
+
+**How roles are sized** (decided on 2026-10-04). Stateless roles — proxies, proxy leaders,
 batchers — are **per-tenant pools**: one pool per role, shared by all the tenant's journals and
 keyed by `JournalIdentifier` inside, so a hot journal uses every instance and a quiet one none
 (#193). Storage roles — acceptors, replicas — are **per journal**, because they hold that
 journal's data; matchmakers are one set per tenant. **Placement spreads load across the cell**
 (#212): every role's instances go to the eligible machines of its class, least-loaded slots
-first, and one journal's storage instances never share a machine. With six machines available, a
-tenant with three journals of two replicas each gets its six replicas on six machines, and a pool
-of six proxy leaders spreads over the same six, each one serving all three journals. Flexible `{q1, q2}` quorums stay a library capability and
+first, and one journal's storage instances never share a machine. With six `storage` machines
+available, a tenant with three journals of two replicas each gets its six replicas on six
+machines; its pool of proxy leaders spreads the same way over the `stateless` machines, each
+instance serving all three journals.
+
+Flexible `{q1, q2}` quorums stay a library capability and
 are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
 coordinator picks them, inside its granted slots, and applies every change through
 reconfiguration. A journal's writer mode (section 2) is chosen when it is created and never
