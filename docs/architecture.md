@@ -707,6 +707,70 @@ scalable independently per tenant by its coordinator:
 | Front door | stateless | to build |
 | Coordinator (fleet, cell, tenant) | stateless, or a seed at bootstrap | to build: the election library over a multi-writer journal (#240) |
 
+### 4.1 How the pieces fit
+
+Two papers, one per concern, both in `docs/references/papers/`. **Compartmentalized Paxos**
+(Whittaker et al.) splits the leader's work into roles that scale on their own; **Matchmaker
+Paxos** (Whittaker et al.) lets the acceptor set change without stopping. paros runs both per
+journal, and the journal's leader-uuid rules (section 2) sit on top, judged at apply.
+
+**The write path.** The leader only *sequences*: it gives each command a slot and hands it off.
+A proxy leader does the Phase-2 work for that slot, so the leader's CPU and network stop being the
+bottleneck. Acceptors may form a grid, so a Phase-2 quorum is one column and not a majority.
+Replicas learn chosen slots, walk the contiguous prefix and apply them; that apply is where the
+journal state machine judges each `Write`, `Truncate` and `SetLeader`. Batchers and unbatchers
+(multi-writer journals only, section 2.4) group many clients' writes into one slot and fan the
+answers back out.
+
+```
+ clients ──► batchers ──► LEADER ──────► proxy leaders ──► acceptors (grid)
+   ▲         (opt-in)    (Proposer:      (Phase 2a for      ┌────┬────┬────┐
+   │                      slot = next)    one slot)         │ a1 │ a2 │ a3 │  Phase 2 quorum
+   │                                         ▲              ├────┼────┼────┤  = one column
+   │                                         │ 2b acks      │ a4 │ a5 │ a6 │  Phase 1 quorum
+   │                                         └──────────────└────┴────┴────┘  = one row
+   │                                         │ chosen(slot)
+   │                                         ▼
+   └──── unbatchers ◄──── replicas: walk the chosen prefix, apply in slot order
+          (opt-in)        (journal state machine: leader uuid, expected_seq, first_seq)
+```
+
+**The read path.** A read never touches the leader (Compartmentalized Paxos §3.4, paros's
+`QuorumRead`). The server holding the journal's replica state asks one Phase-1 quorum (a row) for
+the highest slot each acceptor has voted in. Any chosen slot was voted by some acceptor in every
+row, so the maximum covers everything chosen. The server waits until its applied prefix reaches
+that maximum, then answers.
+
+```
+ client ──Read──► replica ──"highest vote?"──► one row of acceptors
+                     │    ◄── max watermark w ──┘
+                     │  wait until applied prefix ≥ w
+ client ◄──records───┘
+```
+
+**Matchmaking, then Phase 1.** A new leader (or a reconfiguration, which is just a new ballot)
+first registers its ballot `b` and the configuration `C_b` it will use at a quorum of the
+tenant's matchmakers. They answer with the earlier configurations still in force, `H_b`. The
+leader then runs Phase 1 against a quorum of **every** configuration in `H_b`, because any of them
+may hold a chosen value, and Phase 2 against `C_b` alone. Once no future leader can need an old
+configuration, the matchmakers garbage-collect it, and its acceptors can retire (`may_retire`).
+
+```
+ candidate (ballot b, config C_b)
+   │ 1. MatchA(b, C_b) ─────────────► matchmakers (majority of the tenant's set)
+   │ ◄──────────── H_b = { C_x, C_y }  configurations of lower ballots, not yet GC'd
+   │ 2. Phase 1a(b) ────────────────► a quorum of C_x  AND  a quorum of C_y
+   │ ◄──────────── promises + votes    (adopt the highest-ballot vote per slot)
+   │ 3. Phase 2a(b) ────────────────► C_b only, slot by slot (through proxy leaders)
+   ▼
+ leading in C_b.  Reconfigure = steps 1–3 again with C_new at a higher ballot.
+ GC: when every slot below a floor is chosen in C_b, older configs are forgotten.
+```
+
+Matchmakers are mandatory in the service (section 3.1): every journal has its tenant's set,
+because reconfiguration is how a dead disk is replaced, a machine drained, a journal moved and a
+quorum system changed.
+
 ## 5. Failure model and zones
 
 The service survives disk loss and machine loss in one region: a corrupted record is CTRL's
@@ -826,14 +890,16 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | Milestone | Name | Content |
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
-| M8 | parosd deployable (#206 to #209, #221, #220, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router question |
 
-Verification is not a milestone: every milestone carries its own share of section 6, and storage
-chaos on the shipped stores (#176, #202) runs alongside M9. Recovery (#231, section 3.10) is
+Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
+with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
+(#176, #202), three seeds (#213), the `parosd` machine lifecycle simulated as shipped (#246), the
+control-plane oracle debt (#247) and TigerStyle assertions (#248) rank ahead of M9's features. Recovery (#231, section 3.10) is
 deferred and carries no milestone yet. The interactive game and the lessons (`track:play`, #162,
 #163) run outside the milestones, behind the service.
 
