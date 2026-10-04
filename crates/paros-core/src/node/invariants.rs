@@ -104,7 +104,7 @@ impl ColocatedNode {
             );
         }
         assert!(
-            self.acceptors.members().iter().all(|m| self.in_pool(*m)),
+            self.acceptors.is_drawn_from(&self.pool),
             "the active configuration is drawn from the node pool"
         );
         // The retirement fence (#123): `last_member_ballot` is the highest

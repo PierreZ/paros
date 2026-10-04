@@ -86,7 +86,7 @@ impl ColocatedNode {
         }
         // Wire hygiene: a configuration naming a node outside the pool is not
         // one this deployment can run; ignore it whole.
-        if !config.members().iter().all(|m| self.in_pool(*m)) {
+        if !config.is_drawn_from(&self.pool) {
             return;
         }
         self.adopt_configuration(config, ballot);

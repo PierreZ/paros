@@ -430,7 +430,7 @@ impl ReplicaNode {
         if !self.config.has_matchmakers() || ballot <= self.acceptors_since {
             return;
         }
-        if !config.members().iter().all(|m| self.in_pool(*m)) {
+        if !config.is_drawn_from(self.config.pool()) {
             return;
         }
         self.acceptors = config;

@@ -837,6 +837,15 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     pub fn contains(&self, node: Id) -> bool {
         self.members.binary_search(&node).is_ok()
     }
+
+    /// Whether every member is in `pool` (sorted and deduplicated): the
+    /// wire-hygiene question every deployment asks of a configuration it
+    /// learns, registers or is asked to run — one naming a node outside the
+    /// pool is not one it can address.
+    #[must_use]
+    pub fn is_drawn_from(&self, pool: &[Id]) -> bool {
+        self.members.iter().all(|m| pool.binary_search(m).is_ok())
+    }
 }
 
 /// Stable identity of a matchmaker within the matchmaker pool. A distinct
