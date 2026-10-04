@@ -226,7 +226,7 @@ use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
     AcceptorConfig, AcceptorWrite, Ballot, ClientId, Command, Entry, Fingerprint, Generation,
-    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
+    JournalKey, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
     MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
     MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
     ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq,
@@ -761,7 +761,7 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     // reply that acknowledged it in part 1 left only after the write.
     let m0 = matchmaker(matchmakers, M0);
     assert_eq!(
-        m0.disk.store.registration(b1),
+        m0.disk.store.registration(JournalKey::default(), b1),
         Some(Registration::belief(c0())),
         "the disk holds what the reply promised"
     );
@@ -772,7 +772,11 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     }
     let m0 = matchmaker(matchmakers, M0);
     assert_eq!(
-        m0.role.registry(),
+        &m0.role
+            .registry()
+            .iter()
+            .map(|(b, r)| ((JournalKey::default(), *b), r.clone()))
+            .collect::<BTreeMap<_, _>>(),
         m0.disk.store.registrations(),
         "the rebooted role is exactly what the disk described"
     );
@@ -783,7 +787,7 @@ fn part_reboot(matchmakers: &mut [MatchmakerNode]) {
     let (reply, writes) = m0.deliver_match(request.clone());
     assert!(matches!(reply.outcome, MatchOutcome::Registered { .. }));
     assert_eq!(writes, 0, "a re-answer registers nothing");
-    assert_eq!(m0.role.highest(), Some(b1));
+    assert_eq!(m0.role.highest(JournalKey::default()), Some(b1));
     println!(
         "  every matchmaker crashed and rebooted from its disk; m0 still holds ballot 1.1 -> C0, and answers the same request again without a new write"
     );
@@ -1116,7 +1120,11 @@ fn describe_request(request: &ReconfigureRequest) -> String {
             "Bootstrap(g{} = {}, {} registrations)",
             bootstrap.set.generation.0,
             show_set(bootstrap.set.members()),
-            bootstrap.history.len()
+            bootstrap
+                .registries
+                .values()
+                .map(|r| r.history.len())
+                .sum::<usize>()
         ),
         ReconfigureRequest::DecreePrepare { ballot, .. } => {
             format!("DecreePrepare(ballot {})", show_ballot(*ballot))
@@ -1139,12 +1147,12 @@ fn describe_request(request: &ReconfigureRequest) -> String {
 fn describe_reply(reply: &ReconfigureReply) -> String {
     match reply {
         ReconfigureReply::Stopped {
-            history,
+            registries,
             decree_promised,
             ..
         } => format!(
             "Stopped: frozen for good, handing over its {} registration(s); its decree promise so far is {}",
-            history.len(),
+            registries.values().map(|r| r.history.len()).sum::<usize>(),
             show_ballot(*decree_promised)
         ),
         ReconfigureReply::Bootstrapped { .. } => "Bootstrapped: held pending, not live".to_string(),
@@ -1251,8 +1259,19 @@ fn beat(
     if let Some(reconstruction) = reconfigurer.close_stop() {
         println!(
             "  freeze closed: the successor will be bootstrapped from the union of the frozen registries — {} registrations above watermark {}",
-            reconstruction.bootstrap.history.len(),
-            show_ballot(reconstruction.bootstrap.gc_watermark)
+            reconstruction
+                .bootstrap
+                .registries
+                .values()
+                .map(|r| r.history.len())
+                .sum::<usize>(),
+            show_ballot(
+                reconstruction
+                    .bootstrap
+                    .registries
+                    .get(&JournalKey::default())
+                    .map_or(Ballot::zero(), |r| r.gc_watermark)
+            )
         );
     }
     if let ReconfigurerPhase::Deciding { decree, .. } = reconfigurer.phase() {

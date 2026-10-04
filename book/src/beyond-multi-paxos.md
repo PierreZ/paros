@@ -494,6 +494,18 @@ The checker asserts three things after each step. At most one set is authoritati
 per generation. A chosen set is what a majority durably voted at one ballot. And
 every activated registry carries the complete reconstruction.
 
+One set serves **every journal of its tenant** (#190), with one registry per
+journal. The generation belongs to the set. The watermark and the effective
+configuration belong to each journal. Each journal has its own leader and its own
+floor.
+
+A handover moves the registry of every journal at once. The freeze answers in
+pages of `REGISTRY_PAGE` registrations, in `(journal, ballot)` cursor order. The
+bootstrap also goes out in pages, and each member merges them. The reconstruction
+is the union above the maximum watermark of each journal. The checker judges
+completeness for each journal. A mutation that drops the page of one journal from
+a bootstrap makes the checker fail.
+
 It bites. Publishing the bootstrapped proposal without the decree is red on its
 first seed. The checker also found that a rebooted node's reconfigurer reused the
 decree rounds of its earlier incarnation. That is why a `Stopped` reply carries

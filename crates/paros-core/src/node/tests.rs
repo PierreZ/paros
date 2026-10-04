@@ -149,6 +149,7 @@ fn campaign(n: &mut ColocatedNode) {
     for matchmaker in set.members() {
         n.on_match_reply(MatchReply {
             matchmaker: *matchmaker,
+            journal: n.config().journal,
             to: n.config().id,
             ballot: tag,
             generation: set.generation,

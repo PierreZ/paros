@@ -53,11 +53,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::decree::{AcceptFold, Decree, DecreePromise};
 use super::{
-    MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply, ReconfigureRequest,
-    Registration, raise_effective,
+    MatchmakerId, MatchmakerSet, PendingBootstrap, REGISTRY_PAGE, ReconfigureReply,
+    ReconfigureRequest, RegistryCursor, RegistrySnapshot, registry_page,
 };
-use crate::membership::AcceptorConfig;
-use crate::types::{Ballot, NodeId};
+use crate::types::{Ballot, JournalKey, NodeId};
+
+/// One journal-ordered set of registries: what a frozen member reports and
+/// a reconstruction carries (#190).
+type Registries = BTreeMap<JournalKey, RegistrySnapshot>;
+
+/// A bootstrap page's range: from a cursor (`None`: the start) to the next
+/// page's (`None`: the end).
+type PageRange = (Option<RegistryCursor>, Option<RegistryCursor>);
 
 /// Why [`MatchmakerReconfigurer::start`] refused a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,16 +87,15 @@ pub enum ReconfigurerPhase {
         /// The proposed successor membership; `None` for a *finish*, which
         /// proposes the members that answered the freeze.
         target: Option<Vec<MatchmakerId>>,
-        /// The frozen registries collected so far.
-        acks: BTreeMap<MatchmakerId, (Ballot, BTreeMap<Ballot, Registration>)>,
+        /// The frozen registries of every member that reported all of them.
+        acks: BTreeMap<MatchmakerId, Registries>,
+        /// Members whose registries arrive in pages (#190): what came so far
+        /// and the cursor the next page starts at.
+        partial: BTreeMap<MatchmakerId, (Registries, RegistryCursor)>,
         /// The highest decree ballot any frozen member reported promised:
         /// the decree opens strictly above it (see `decree_promised` on
         /// [`ReconfigureReply::Stopped`]).
         decree_floor: Ballot,
-        /// The highest **effective configuration** any frozen member
-        /// reported: the reconstruction carries the maximum, exactly as it
-        /// carries the maximum watermark.
-        effective: Option<(Ballot, AcceptorConfig)>,
     },
     /// Handing the reconstruction to the proposed successor's members.
     Bootstrapping {
@@ -97,8 +103,10 @@ pub enum ReconfigurerPhase {
         old: MatchmakerSet,
         /// The reconstruction, addressed to every member of the proposed set.
         bootstrap: PendingBootstrap,
-        /// Members that durably hold it.
-        acks: BTreeSet<MatchmakerId>,
+        /// The reconstruction in pages (#190), with the range each covers.
+        pages: Vec<(PendingBootstrap, PageRange)>,
+        /// Per member, the pages it durably holds.
+        acks: BTreeMap<MatchmakerId, BTreeSet<u32>>,
         /// The stop quorum's decree floor, carried to the decree.
         decree_floor: Ballot,
     },
@@ -238,6 +246,57 @@ impl ReconfigurerReady<'_> {
     }
 }
 
+/// A reconstruction in pages (#190): each at most [`REGISTRY_PAGE`]
+/// registrations, with the range it covers. Never empty: an empty
+/// reconstruction is one page with nothing in it.
+fn bootstrap_pages(bootstrap: &PendingBootstrap) -> Vec<(PendingBootstrap, PageRange)> {
+    let mut pages = Vec::new();
+    let mut cursor = None;
+    loop {
+        let (registries, next) = registry_page(&bootstrap.registries, cursor, REGISTRY_PAGE);
+        pages.push((
+            PendingBootstrap {
+                set: bootstrap.set.clone(),
+                registries,
+            },
+            (cursor, next),
+        ));
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return pages,
+        }
+    }
+}
+
+/// Every bootstrap page some member of `set` does not durably hold yet,
+/// addressed to that member.
+fn bootstrap_requests(
+    me: NodeId,
+    set: &MatchmakerSet,
+    pages: &[(PendingBootstrap, PageRange)],
+    acks: &BTreeMap<MatchmakerId, BTreeSet<u32>>,
+) -> Vec<(MatchmakerId, ReconfigureRequest)> {
+    let mut queue = Vec::new();
+    for m in set.members() {
+        let held = acks.get(m);
+        for (index, (page, range)) in (0_u32..).zip(pages) {
+            if held.is_some_and(|held| held.contains(&index)) {
+                continue;
+            }
+            queue.push((
+                *m,
+                ReconfigureRequest::Bootstrap {
+                    from: me,
+                    bootstrap: page.clone(),
+                    page: index,
+                    range: *range,
+                },
+            ));
+        }
+    }
+    queue
+}
+
 /// What [`MatchmakerReconfigurer::close_stop`] produced: the successor's
 /// initial state, and how many ballots the frozen registries disagreed on
 /// while it was unioned.
@@ -375,8 +434,8 @@ impl MatchmakerReconfigurer {
             old: current.clone(),
             target,
             acks: BTreeMap::new(),
+            partial: BTreeMap::new(),
             decree_floor: Ballot::zero(),
-            effective: None,
         };
         self.elapsed = 0;
         self.resend();
@@ -466,7 +525,7 @@ impl MatchmakerReconfigurer {
             target,
             acks,
             decree_floor,
-            effective,
+            ..
         } = &mut self.phase
         else {
             return None;
@@ -474,34 +533,23 @@ impl MatchmakerReconfigurer {
         if !old.has_quorum(&acks.keys().copied().collect()) {
             return None;
         }
-        // The reconstruction (§5): the maximum watermark, and the union of
-        // every frozen registry at or above it. A ballot reported twice
-        // carries one registration (the write-once ledger); the first seen
-        // is kept.
-        let gc_watermark = acks.values().map(|(w, _)| *w).max().unwrap_or_default();
-        let mut history: BTreeMap<Ballot, Registration> = BTreeMap::new();
+        // The reconstruction (§5), per journal (#190): the maximum
+        // watermark, the union of every frozen registry at or above it, the
+        // maximum effective configuration. A ballot reported twice carries
+        // one registration (the write-once ledger); the first seen is kept,
+        // and a disagreement is counted rather than dropped silently: the
+        // successor durably narrows the ledger, and the leader's own union
+        // keeps both (review finding S2c).
+        let mut registries: Registries = BTreeMap::new();
         let mut disagreements: u64 = 0;
-        for (_, registry) in acks.values() {
-            for (ballot, registration) in registry {
-                if *ballot >= gc_watermark {
-                    match history.entry(*ballot) {
-                        std::collections::btree_map::Entry::Vacant(slot) => {
-                            slot.insert(registration.clone());
-                        }
-                        std::collections::btree_map::Entry::Occupied(slot) => {
-                            if slot.get() != registration {
-                                // Two frozen registries hold one ballot with
-                                // different bytes. The successor generation
-                                // can only carry one, so the first seen
-                                // stays — but that *durably* narrows the
-                                // ledger, and the leader's own union keeps
-                                // both, so the count is reported rather than
-                                // dropped (review finding S2c).
-                                disagreements = disagreements.saturating_add(1);
-                            }
-                        }
-                    }
-                }
+        for reported in acks.values() {
+            for (journal, snapshot) in reported {
+                disagreements = disagreements.saturating_add(
+                    registries
+                        .entry(*journal)
+                        .or_default()
+                        .merge(snapshot.clone()),
+                );
             }
         }
         // A finish proposes every member that answered the freeze.
@@ -510,21 +558,21 @@ impl MatchmakerReconfigurer {
             .unwrap_or_else(|| acks.keys().copied().collect());
         let bootstrap = PendingBootstrap {
             set: MatchmakerSet::new(old.generation.next(), target),
-            gc_watermark,
-            history,
-            effective: effective.clone(),
+            registries,
         };
         assert!(
             bootstrap
-                .history
-                .keys()
-                .all(|b| *b >= bootstrap.gc_watermark),
+                .registries
+                .values()
+                .all(|r| r.history.keys().all(|b| *b >= r.gc_watermark)),
             "a reconstruction holds nothing below its watermark"
         );
+        let pages = bootstrap_pages(&bootstrap);
         self.phase = ReconfigurerPhase::Bootstrapping {
             old: old.clone(),
             bootstrap: bootstrap.clone(),
-            acks: BTreeSet::new(),
+            pages,
+            acks: BTreeMap::new(),
             decree_floor: *decree_floor,
         };
         self.elapsed = 0;
@@ -545,30 +593,26 @@ impl MatchmakerReconfigurer {
         let mut queue: Vec<(MatchmakerId, ReconfigureRequest)> = Vec::new();
         match &mut self.phase {
             ReconfigurerPhase::Idle => {}
-            ReconfigurerPhase::Stopping { old, acks, .. } => {
+            ReconfigurerPhase::Stopping {
+                old, acks, partial, ..
+            } => {
                 for m in old.members().iter().filter(|m| !acks.contains_key(m)) {
                     queue.push((
                         *m,
                         ReconfigureRequest::Stop {
                             from: me,
                             generation: old.generation,
+                            cursor: partial.get(m).map(|(_, cursor)| *cursor),
                         },
                     ));
                 }
             }
             ReconfigurerPhase::Bootstrapping {
-                bootstrap, acks, ..
-            } => {
-                for m in bootstrap.set.members().iter().filter(|m| !acks.contains(m)) {
-                    queue.push((
-                        *m,
-                        ReconfigureRequest::Bootstrap {
-                            from: me,
-                            bootstrap: bootstrap.clone(),
-                        },
-                    ));
-                }
-            }
+                bootstrap,
+                pages,
+                acks,
+                ..
+            } => queue.extend(bootstrap_requests(me, &bootstrap.set, pages, acks)),
             ReconfigurerPhase::Deciding {
                 old,
                 bootstrap,
@@ -682,15 +726,15 @@ impl MatchmakerReconfigurer {
             ReconfigurerPhase::Stopping {
                 old,
                 acks,
+                partial,
                 decree_floor,
-                effective,
                 ..
             } => {
                 let ReconfigureReply::Stopped {
                     generation,
-                    gc_watermark,
-                    history,
-                    effective: reported,
+                    cursor,
+                    registries,
+                    next,
                     successor,
                     decree_promised,
                     ..
@@ -705,22 +749,41 @@ impl MatchmakerReconfigurer {
                     self.abort();
                     return ReconfigurerStep::Superseded { successor };
                 }
-                if acks.insert(from, (gc_watermark, history)).is_some() {
-                    // A member that already answered: the freeze is
-                    // idempotent, so a re-sent `Stop` is answered again and
-                    // the second copy moves nothing. Reporting it as
-                    // progress reset the stall clock, which is how a phase
-                    // whose remaining members were all dead stayed alive
-                    // for the rest of a run.
+                // A member that already reported every page: the freeze is
+                // idempotent, so a re-sent `Stop` is answered again and the
+                // second copy moves nothing. Reporting it as progress reset
+                // the stall clock, which is how a phase whose remaining
+                // members were all dead stayed alive for the rest of a run.
+                // A page at a cursor other than the one this member's next
+                // page starts at is a duplicate or a stale one: pages fold
+                // in order, so a member counts only once every page of its
+                // frozen registries did (#190).
+                if acks.contains_key(&from)
+                    || cursor != partial.get(&from).map(|(_, expected)| *expected)
+                {
                     return ReconfigurerStep::Ignored;
                 }
                 *decree_floor = (*decree_floor).max(decree_promised);
-                // The effective configuration is a monotone scalar, not a
-                // record: the maximum over the frozen members carries the
-                // acceptor set in force into the successor generation even
-                // when its own registration was collected long ago.
-                if let Some((ballot, config)) = &reported {
-                    raise_effective(effective, *ballot, config);
+                let mut held = partial
+                    .remove(&from)
+                    .map(|(held, _)| held)
+                    .unwrap_or_default();
+                for (journal, snapshot) in registries {
+                    held.entry(journal).or_default().merge(snapshot);
+                }
+                if let Some(next) = next {
+                    // More to come: ask for the next page at once.
+                    partial.insert(from, (held, next));
+                    self.pending.push((
+                        from,
+                        ReconfigureRequest::Stop {
+                            from: self.node,
+                            generation: old.generation,
+                            cursor: Some(next),
+                        },
+                    ));
+                } else {
+                    acks.insert(from, held);
                 }
                 // The freeze does **not** close here. A quorum is what the
                 // reconstruction *needs*, never what it should settle for:
@@ -740,16 +803,35 @@ impl MatchmakerReconfigurer {
             ReconfigurerPhase::Bootstrapping {
                 old,
                 bootstrap,
+                pages,
                 acks,
                 decree_floor,
             } => {
-                let ReconfigureReply::Bootstrapped { set, .. } = reply else {
+                let ReconfigureReply::Bootstrapped {
+                    set, page, range, ..
+                } = reply
+                else {
                     return ReconfigurerStep::Ignored;
                 };
-                if set != bootstrap.set || !set.contains(from) || !acks.insert(from) {
+                // A page counts only for the range it was sent for in this
+                // reconstruction's partition (#190).
+                let sent = usize::try_from(page)
+                    .ok()
+                    .and_then(|index| pages.get(index))
+                    .is_some_and(|(_, sent)| *sent == range);
+                if set != bootstrap.set
+                    || !set.contains(from)
+                    || !sent
+                    || !acks.entry(from).or_default().insert(page)
+                {
                     return ReconfigurerStep::Ignored;
                 }
-                let remaining = bootstrap.set.members().len() - acks.len();
+                let remaining = bootstrap
+                    .set
+                    .members()
+                    .iter()
+                    .filter(|m| acks.get(m).is_none_or(|held| held.len() < pages.len()))
+                    .count();
                 if remaining > 0 {
                     return ReconfigurerStep::Bootstrapped { remaining };
                 }
@@ -1151,9 +1233,9 @@ mod tests {
         r.on_reply(ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(0),
             generation: MatchmakerGeneration(0),
-            gc_watermark: Ballot::zero(),
-            history: BTreeMap::new(),
-            effective: None,
+            cursor: None,
+            registries: BTreeMap::new(),
+            next: None,
             successor: None,
             decree_promised: Ballot::zero(),
         });
@@ -1215,6 +1297,105 @@ mod tests {
         );
     }
 
+    /// #190: one set serves many journals, and a freeze holding more
+    /// registrations than one page is paged out and paged in — `Stopped`
+    /// pages are taken in cursor order, a stale page is `Ignored`, the
+    /// bootstrap goes out in pages, and every journal's registry arrives
+    /// whole at the successor, each with its own watermark.
+    #[test]
+    fn a_handover_pages_every_journal_registry_through() {
+        let journals: Vec<JournalKey> = (0..3)
+            .map(|i| {
+                JournalKey::new(
+                    crate::types::TenantId(300),
+                    crate::types::JournalId(300 + i),
+                )
+            })
+            .collect();
+        let per_journal = u64::try_from(REGISTRY_PAGE).expect("fits");
+        let mut pool = pool(4, &[0, 1, 2]);
+        let cfg = AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority);
+        for mm in &mut pool[..3] {
+            for journal in &journals {
+                for round in 1..=per_journal {
+                    let b = Ballot {
+                        round,
+                        node: NodeId(9),
+                    };
+                    mm.step(
+                        MatchRequest::new(NodeId(9), b, cfg.clone(), MatchmakerGeneration(0))
+                            .in_journal(*journal),
+                    );
+                    mm.ready().advance();
+                }
+            }
+            // Each journal's floor is its own.
+            mm.advance_gc_watermark(
+                journals[1],
+                MatchmakerGeneration(0),
+                Ballot {
+                    round: 10,
+                    node: NodeId(9),
+                },
+            );
+            mm.ready().advance();
+        }
+        let mut r = MatchmakerReconfigurer::new(NodeId(7));
+        r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+            .expect("start");
+        // The first page of member 0's freeze, then a stale replay of it.
+        pool[0].step_reconfigure(ReconfigureRequest::Stop {
+            from: NodeId(7),
+            generation: MatchmakerGeneration(0),
+            cursor: None,
+        });
+        let first = pool[0].ready().reconfigure_replies().to_vec();
+        pool[0].ready().advance();
+        let ReconfigureReply::Stopped { next, .. } = &first[0] else {
+            panic!("expected Stopped, got {first:?}");
+        };
+        assert!(
+            next.is_some(),
+            "three journals of a page each take more than one page"
+        );
+        assert!(!matches!(
+            r.on_reply(first[0].clone()),
+            ReconfigurerStep::Ignored
+        ));
+        assert_eq!(
+            r.on_reply(first[0].clone()),
+            ReconfigurerStep::Ignored,
+            "a page at a cursor already taken is a duplicate"
+        );
+        let mut paged_bootstrap = false;
+        for _ in 0..64 {
+            if !r.is_busy() {
+                break;
+            }
+            if let ReconfigurerPhase::Bootstrapping { pages, .. } = r.phase() {
+                paged_bootstrap |= pages.len() > 1;
+            }
+            exchange(&mut r, &mut pool, &[]);
+        }
+        assert!(!r.is_busy(), "the handover finished: {:?}", r.phase());
+        assert!(paged_bootstrap, "the reconstruction went out in pages");
+        let successor = &pool[3];
+        assert_eq!(*successor.set(), set(1, &[0, 1, 3]));
+        for (i, journal) in journals.iter().enumerate() {
+            let floor = if i == 1 { 10 } else { 0 };
+            assert_eq!(
+                successor.registry_of(*journal).len(),
+                usize::try_from(per_journal - floor.max(1) + 1).expect("fits"),
+                "journal {journal}'s registry arrived whole above its own floor"
+            );
+            assert_eq!(
+                successor.hard_state().gc_watermark(*journal).round,
+                floor,
+                "journal {journal} keeps its own watermark"
+            );
+        }
+    }
+
     /// Review finding S2c: the reconstruction counts the ballots two frozen
     /// registries disagreed on. The union must pick one and the successor
     /// generation then holds it durably, so a silent pick would narrow the
@@ -1247,7 +1428,12 @@ mod tests {
         deliver(&mut r, &mut disagreeing, &[2]);
         let reconstruction = r.close_stop().expect("the quorum closes");
         assert_eq!(reconstruction.disagreements, 1);
-        assert_eq!(reconstruction.bootstrap.history.len(), 1);
+        assert_eq!(
+            reconstruction.bootstrap.registries[&JournalKey::default()]
+                .history
+                .len(),
+            1
+        );
         // A quorum that agrees counts nothing.
         let mut agreeing = pool(3, &[0, 1, 2]);
         for mm in &mut agreeing[..2] {

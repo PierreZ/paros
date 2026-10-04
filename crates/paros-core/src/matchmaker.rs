@@ -138,14 +138,15 @@ pub use self::reconfigurer::{
 };
 pub use self::state::{
     DecreeRecord, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, PendingBootstrap,
-    Registration, RegistrationKind,
+    Registration, RegistrationKind, RegistryCursor, RegistryScalars, RegistrySnapshot,
+    registry_page,
 };
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
 pub use self::write::{MatchmakerReady, MatchmakerWriteOp};
 use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use crate::retained::RetainedWindow;
-use crate::types::{Ballot, NodeId};
+use crate::types::{Ballot, JournalKey, NodeId};
 
 /// The most registrations one `MatchB` page carries
 /// ([`MatchOutcome::Registered`]). A registry retains one record per ballot
@@ -184,12 +185,13 @@ pub struct Matchmaker {
     /// port that changes the shipped program. Kept in step by
     /// `refresh_set`, and `assert_invariants` says so.
     set: MatchmakerSet,
-    /// Every registered `ballot -> registration` retained above the GC
-    /// watermark, strictly increasing in ballot order (the window keeps the
-    /// order and the floor; the state machine keeps the "only ever appended
-    /// above the highest" discipline). The floor is a copy of the durable
-    /// `gc_watermark`, and `assert_invariants` says so.
-    registry: RetainedWindow<Ballot, Registration>,
+    /// Per journal (#190): every registered `ballot -> registration`
+    /// retained above that journal's GC watermark, strictly increasing in
+    /// ballot order (the window keeps the order and the floor; the state
+    /// machine keeps the "only ever appended above the highest"
+    /// discipline). Each floor is a copy of the journal's durable
+    /// watermark, and `assert_invariants` says so.
+    registries: BTreeMap<JournalKey, RetainedWindow<Ballot, Registration>>,
     pending_writes: Vec<MatchmakerWriteOp>,
     pending_replies: Vec<MatchReply>,
     pending_reconfigure_replies: Vec<ReconfigureReply>,
@@ -215,28 +217,43 @@ impl Matchmaker {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = config.id.0)))]
     pub fn new<S: RegistryStorage>(config: &MatchmakerConfig, storage: &S) -> Self {
         let hard_state = storage.initial_state();
-        let hard_state_watermark = hard_state.gc_watermark;
-        let mut registry = BTreeMap::new();
-        for ballot in storage.registered_ballots() {
+        let mut records: BTreeMap<JournalKey, BTreeMap<Ballot, Registration>> = BTreeMap::new();
+        for (journal, ballot) in storage.registered_ballots() {
             let registration = storage
-                .registration(ballot)
+                .registration(journal, ballot)
                 .expect("every registered ballot the walk names has a readable record");
-            let previous = registry.insert(ballot, registration);
+            let previous = records
+                .entry(journal)
+                .or_default()
+                .insert(ballot, registration);
             assert!(
                 previous.is_none(),
                 "the registry walk names each ballot once"
             );
         }
-        // The window the registry lives in enforces its own floor, so this
-        // says the same thing in the *registry's* words, at the boot seam
-        // where a corrupt store is what breaks it.
-        assert!(
-            registry
-                .keys()
-                .next()
-                .is_none_or(|lowest| *lowest >= hard_state_watermark),
-            "no registration survives below the gc watermark"
-        );
+        // Each window enforces its own floor, so this says the same thing in
+        // the *registry's* words, at the boot seam where a corrupt store is
+        // what breaks it.
+        for (journal, registry) in &records {
+            assert!(
+                registry
+                    .keys()
+                    .next()
+                    .is_none_or(|lowest| *lowest >= hard_state.gc_watermark(*journal)),
+                "no registration survives below the gc watermark"
+            );
+        }
+        let mut journals: std::collections::BTreeSet<JournalKey> =
+            records.keys().copied().collect();
+        journals.extend(hard_state.registries.keys().copied());
+        let registries = journals
+            .into_iter()
+            .map(|journal| {
+                let floor = hard_state.gc_watermark(journal);
+                let held = records.remove(&journal).unwrap_or_default();
+                (journal, RetainedWindow::new(held, floor))
+            })
+            .collect();
         let mut bootstrap = config.bootstrap.clone();
         bootstrap.sort_unstable();
         bootstrap.dedup();
@@ -252,7 +269,7 @@ impl Matchmaker {
             },
             hard_state,
             set,
-            registry: RetainedWindow::new(registry, hard_state_watermark),
+            registries,
             pending_writes: Vec::new(),
             pending_replies: Vec::new(),
             pending_reconfigure_replies: Vec::new(),
@@ -275,17 +292,44 @@ impl Matchmaker {
         &self.hard_state
     }
 
-    /// The registry as it stands, in ballot order (same caveat as
-    /// [`Self::hard_state`]).
+    /// The default journal's registry as it stands, in ballot order (same
+    /// caveat as [`Self::hard_state`]): a single-journal deployment's one
+    /// registry. See [`Self::registry_of`].
     #[must_use]
     pub fn registry(&self) -> &BTreeMap<Ballot, Registration> {
-        self.registry.entries()
+        self.registry_of(JournalKey::default())
     }
 
-    /// The highest registered ballot, or `None` on an empty registry.
+    /// `journal`'s registry as it stands, in ballot order (#190; empty for a
+    /// journal never registered here).
     #[must_use]
-    pub fn highest(&self) -> Option<Ballot> {
-        self.registry.last_key()
+    pub fn registry_of(&self, journal: JournalKey) -> &BTreeMap<Ballot, Registration> {
+        static EMPTY: BTreeMap<Ballot, Registration> = BTreeMap::new();
+        self.registries
+            .get(&journal)
+            .map_or(&EMPTY, RetainedWindow::entries)
+    }
+
+    /// Every journal this matchmaker holds a registry for, in order.
+    pub fn journals(&self) -> impl Iterator<Item = JournalKey> + '_ {
+        self.registries.keys().copied()
+    }
+
+    /// `journal`'s highest registered ballot, or `None` on an empty registry.
+    #[must_use]
+    pub fn highest(&self, journal: JournalKey) -> Option<Ballot> {
+        self.registries
+            .get(&journal)
+            .and_then(RetainedWindow::last_key)
+    }
+
+    /// `journal`'s window, created empty at its durable watermark on first
+    /// use.
+    fn window(&mut self, journal: JournalKey) -> &mut RetainedWindow<Ballot, Registration> {
+        let floor = self.hard_state.gc_watermark(journal);
+        self.registries
+            .entry(journal)
+            .or_insert_with(|| RetainedWindow::new(BTreeMap::new(), floor))
     }
 
     /// Where this matchmaker stands, with a fresh store resolved against the
@@ -354,6 +398,7 @@ impl Matchmaker {
         self.assert_invariants();
         let MatchRequest {
             from,
+            journal,
             ballot,
             config,
             purpose,
@@ -363,53 +408,28 @@ impl Matchmaker {
         let kind = match purpose {
             MatchPurpose::Register(kind) => kind,
             MatchPurpose::Probe => {
-                self.answer_probe(from, ballot, generation);
+                self.answer_probe(from, journal, ballot, generation);
                 return;
             }
         };
         let registration = Registration { config, kind };
+        let watermark = self.hard_state.gc_watermark(journal);
         let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
-        } else if self.registry.below_floor(ballot) {
-            MatchOutcome::Refused(MatchRefusal::BelowWatermark {
-                watermark: self.hard_state.gc_watermark,
-            })
-        } else if let Some(highest) = self.highest().filter(|highest| ballot <= *highest) {
-            match self.registry.get(ballot) {
+        } else if ballot < watermark {
+            MatchOutcome::Refused(MatchRefusal::BelowWatermark { watermark })
+        } else if let Some(highest) = self.highest(journal).filter(|highest| ballot <= *highest) {
+            match self.registry_of(journal).get(&ballot) {
                 // The same request again: answered from the retained history
                 // (which GC may have shrunk since the first answer),
                 // registered once.
-                Some(registered) if *registered == registration => self.page(from_ballot, ballot),
+                Some(registered) if *registered == registration => {
+                    self.page(journal, from_ballot, ballot)
+                }
                 _ => MatchOutcome::Refused(MatchRefusal::Stale { highest }),
             }
         } else {
-            // Compute the page *before* registering, so the request's own
-            // configuration never appears in its own answer.
-            let page = self.page(from_ballot, ballot);
-            let previous = self.registry.insert(ballot, registration.clone());
-            assert!(
-                previous.is_none(),
-                "a fresh registration lands on an unregistered ballot"
-            );
-            assert!(
-                self.highest() == Some(ballot),
-                "a fresh registration becomes the registry's highest ballot"
-            );
-            // A *reconfiguration* registration also raises the effective
-            // configuration — the monotone scalar GC never collects (see
-            // `MatchmakerHardState::effective`). Staged in the same batch as
-            // the record, so the reply that reports it never escapes a
-            // non-durable scalar.
-            if registration.kind.is_reconfiguration()
-                && raise_effective(&mut self.hard_state.effective, ballot, &registration.config)
-            {
-                self.stage_scalars();
-            }
-            self.pending_writes.push(MatchmakerWriteOp::Register {
-                ballot,
-                registration,
-            });
-            page
+            self.register(journal, from_ballot, ballot, registration)
         };
         if let MatchOutcome::Registered {
             from_ballot,
@@ -422,7 +442,7 @@ impl Matchmaker {
             // the history is exactly the window below it, and only an active
             // matchmaker of the addressed generation ever registers.
             assert!(
-                self.registry.contains_key(ballot),
+                self.registry_of(journal).contains_key(&ballot),
                 "a Registered reply names a registered ballot"
             );
             assert!(
@@ -430,7 +450,9 @@ impl Matchmaker {
                 "a history stays strictly below the ballot it answers"
             );
             assert!(
-                history.keys().all(|b| *b >= self.hard_state.gc_watermark),
+                history
+                    .keys()
+                    .all(|b| *b >= self.hard_state.gc_watermark(journal)),
                 "a history never reaches below the watermark"
             );
             assert!(
@@ -453,6 +475,7 @@ impl Matchmaker {
         }
         self.pending_replies.push(MatchReply {
             matchmaker: self.config.id,
+            journal,
             to: from,
             ballot,
             generation,
@@ -461,19 +484,75 @@ impl Matchmaker {
         self.assert_invariants();
     }
 
+    /// Register `registration` under `ballot` in `journal`'s registry — a
+    /// ballot strictly above everything it holds — staging the record (and
+    /// a raised effective configuration) and answering with the page below
+    /// it.
+    fn register(
+        &mut self,
+        journal: JournalKey,
+        from_ballot: Option<Ballot>,
+        ballot: Ballot,
+        registration: Registration,
+    ) -> MatchOutcome {
+        // Compute the page *before* registering, so the request's own
+        // configuration never appears in its own answer.
+        let page = self.page(journal, from_ballot, ballot);
+        let previous = self.window(journal).insert(ballot, registration.clone());
+        assert!(
+            previous.is_none(),
+            "a fresh registration lands on an unregistered ballot"
+        );
+        assert!(
+            self.highest(journal) == Some(ballot),
+            "a fresh registration becomes the registry's highest ballot"
+        );
+        // A *reconfiguration* registration also raises the journal's
+        // effective configuration — the monotone scalar GC never
+        // collects (see `RegistryScalars::effective`). Staged in the
+        // same batch as the record, so the reply that reports it never
+        // escapes a non-durable scalar.
+        if registration.kind.is_reconfiguration()
+            && raise_effective(
+                &mut self
+                    .hard_state
+                    .registries
+                    .entry(journal)
+                    .or_default()
+                    .effective,
+                ballot,
+                &registration.config,
+            )
+        {
+            self.stage_scalars();
+        }
+        self.pending_writes.push(MatchmakerWriteOp::Register {
+            journal,
+            ballot,
+            registration,
+        });
+        page
+    }
+
     /// Answer a membership probe (#173): the effective configuration this
     /// matchmaker durably holds, fenced by generation exactly as a
     /// registration is, and **nothing registered** — no record, no raised
     /// highest ballot, no write. A probe below the watermark or at a stale
     /// ballot is answered all the same: it asks for a fact, not a slot in
     /// the ledger.
-    fn answer_probe(&mut self, from: NodeId, ballot: Ballot, generation: MatchmakerGeneration) {
+    fn answer_probe(
+        &mut self,
+        from: NodeId,
+        journal: JournalKey,
+        ballot: Ballot,
+        generation: MatchmakerGeneration,
+    ) {
         let writes = self.pending_writes.len();
-        let registered = self.registry.contains_key(ballot);
+        let registered = self.registry_of(journal).contains_key(&ballot);
         let outcome = match self.generation_refusal(generation) {
             Some(refusal) => MatchOutcome::Refused(refusal),
             None => MatchOutcome::Probed {
-                effective: self.hard_state.effective.clone(),
+                effective: self.hard_state.effective(journal).cloned(),
             },
         };
         // A probe leaves the matchmaker exactly as it found it.
@@ -482,11 +561,12 @@ impl Matchmaker {
             "a membership probe stages no write"
         );
         assert!(
-            self.registry.contains_key(ballot) == registered,
+            self.registry_of(journal).contains_key(&ballot) == registered,
             "a membership probe registers nothing"
         );
         self.pending_replies.push(MatchReply {
             matchmaker: self.config.id,
+            journal,
             to: from,
             ballot,
             generation,
@@ -535,9 +615,10 @@ impl Matchmaker {
         }
     }
 
-    /// Advance the GC watermark to `watermark` (§3.4: `w = max(w, i)`) for
-    /// `generation`, dropping every registration below it, and stage the
-    /// durable write. A request at or below the current floor is a no-op
+    /// Advance `journal`'s GC watermark to `watermark` (§3.4: `w = max(w,
+    /// i)`) for `generation`, dropping every registration of it below it,
+    /// and stage the durable write. Each journal's leader raises its own
+    /// journal's floor (#190), never the whole set's. A request at or below the current floor is a no-op
     /// (monotone by construction, never an error); one addressing a
     /// generation this matchmaker is not active for is refused.
     ///
@@ -567,6 +648,7 @@ impl Matchmaker {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, round = watermark.round)))]
     pub fn advance_gc_watermark(
         &mut self,
+        journal: JournalKey,
         generation: MatchmakerGeneration,
         watermark: Ballot,
     ) -> GcOutcome {
@@ -574,13 +656,17 @@ impl Matchmaker {
         if self.generation_refusal(generation).is_some() {
             return GcOutcome::Refused;
         }
-        if watermark <= self.hard_state.gc_watermark {
+        if watermark <= self.hard_state.gc_watermark(journal) {
             return GcOutcome::Unchanged;
         }
-        self.hard_state.gc_watermark = watermark;
-        self.registry.raise_floor(watermark);
+        self.hard_state
+            .registries
+            .entry(journal)
+            .or_default()
+            .gc_watermark = watermark;
+        self.window(journal).raise_floor(watermark);
         self.pending_writes
-            .push(MatchmakerWriteOp::SetGcWatermark(watermark));
+            .push(MatchmakerWriteOp::SetGcWatermark { journal, watermark });
         self.assert_invariants();
         GcOutcome::Raised
     }
@@ -597,28 +683,47 @@ impl Matchmaker {
     /// `max(cursor, watermark)` up to (but not including) `ballot`, in
     /// ballot order, with the cursor the next page starts at when the
     /// window did not fit.
-    fn page(&self, cursor: Option<Ballot>, ballot: Ballot) -> MatchOutcome {
-        let from_ballot = cursor
-            .unwrap_or(self.hard_state.gc_watermark)
-            .max(self.hard_state.gc_watermark);
+    fn page(&self, journal: JournalKey, cursor: Option<Ballot>, ballot: Ballot) -> MatchOutcome {
+        let watermark = self.hard_state.gc_watermark(journal);
+        let from_ballot = cursor.unwrap_or(watermark).max(watermark);
         // The window's own bounded page: at most `REGISTRY_PAGE` records
         // below `ballot`, and the cursor the candidate re-asks with (`None`
         // means the answer is complete).
-        let (history, next_from_ballot) = self.registry.page(from_ballot, ballot, REGISTRY_PAGE);
+        let (history, next_from_ballot) = self
+            .registries
+            .get(&journal)
+            .map_or((BTreeMap::new(), None), |window| {
+                window.page(from_ballot, ballot, REGISTRY_PAGE)
+            });
         MatchOutcome::Registered {
             from_ballot,
             history,
             next_from_ballot,
-            gc_watermark: self.hard_state.gc_watermark,
-            effective: self.hard_state.effective.clone(),
+            gc_watermark: watermark,
+            effective: self.hard_state.effective(journal).cloned(),
         }
     }
 
-    /// Every registration this matchmaker retains — everything at or above the
-    /// watermark, with no upper bound — the whole frozen registry a `StopB`
-    /// hands the reconstruction.
-    pub(super) fn history_from_watermark(&self) -> BTreeMap<Ballot, Registration> {
-        self.registry.entries().clone()
+    /// Every journal's registry as this matchmaker retains it — its
+    /// scalars and everything at or above its watermark — the whole frozen
+    /// state a `StopB` pages out to the reconstruction (#190).
+    pub(super) fn snapshots(&self) -> BTreeMap<JournalKey, RegistrySnapshot> {
+        let mut journals: std::collections::BTreeSet<JournalKey> =
+            self.registries.keys().copied().collect();
+        journals.extend(self.hard_state.registries.keys().copied());
+        journals
+            .into_iter()
+            .map(|journal| {
+                (
+                    journal,
+                    RegistrySnapshot {
+                        gc_watermark: self.hard_state.gc_watermark(journal),
+                        history: self.registry_of(journal).clone(),
+                        effective: self.hard_state.effective(journal).cloned(),
+                    },
+                )
+            })
+            .collect()
     }
 
     /// The cross-field checker, called at boot and at every public mutating
@@ -628,16 +733,17 @@ impl Matchmaker {
     /// already settled. (A registration's configuration is well-formed by
     /// construction: [`AcceptorConfig::new`](crate::membership::AcceptorConfig::new) is its only constructor.)
     fn assert_invariants(&self) {
-        assert!(
-            self.registry
-                .first_key()
-                .is_none_or(|lowest| lowest >= self.hard_state.gc_watermark),
-            "no registration survives below the gc watermark"
-        );
-        assert!(
-            self.registry.floor() == self.hard_state.gc_watermark,
-            "the registry's floor is the durable gc watermark"
-        );
+        for (journal, window) in &self.registries {
+            let watermark = self.hard_state.gc_watermark(*journal);
+            assert!(
+                window.first_key().is_none_or(|lowest| lowest >= watermark),
+                "no registration survives below the gc watermark"
+            );
+            assert!(
+                window.floor() == watermark,
+                "the registry's floor is the durable gc watermark"
+            );
+        }
         if self.hard_state.generation > MatchmakerGeneration(0) {
             assert!(
                 !self.hard_state.members.is_empty(),
@@ -680,13 +786,15 @@ impl Matchmaker {
         // The effective configuration is a *scalar*, not a record: it may
         // legitimately sit below the watermark (its record was collected),
         // but it never disagrees with a record the registry still holds.
-        if let Some((ballot, config)) = &self.hard_state.effective {
-            assert!(
-                self.registry
-                    .get(*ballot)
-                    .is_none_or(|r| r.kind.is_reconfiguration() && r.config == *config),
-                "the effective configuration agrees with its own retained record"
-            );
+        for journal in self.hard_state.registries.keys() {
+            if let Some((ballot, config)) = self.hard_state.effective(*journal) {
+                assert!(
+                    self.registry_of(*journal)
+                        .get(ballot)
+                        .is_none_or(|r| r.kind.is_reconfiguration() && r.config == *config),
+                    "the effective configuration agrees with its own retained record"
+                );
+            }
         }
     }
 }
@@ -695,7 +803,11 @@ impl Matchmaker {
 mod tests {
     use super::*;
     use crate::membership::{AcceptorConfig, QuorumSystem};
-    use crate::types::NodeId;
+    use crate::types::{JournalId, NodeId, TenantId};
+
+    /// The journal every test registers in: a single-journal set's one
+    /// (`JournalKey::default()`).
+    const J: JournalKey = JournalKey::new(TenantId::FIRST_USER, JournalId::FIRST_USER);
 
     /// Review 3 of #133: a member whose own GC floor sits *above* the
     /// reconstructed one activates with the higher floor, and its registry is
@@ -717,7 +829,10 @@ mod tests {
             ));
             mm.ready().advance();
         }
-        assert_eq!(mm.advance_gc_watermark(G0, ballot(5, 1)), GcOutcome::Raised);
+        assert_eq!(
+            mm.advance_gc_watermark(J, G0, ballot(5, 1)),
+            GcOutcome::Raised
+        );
         mm.ready().advance();
         assert_eq!(
             mm.registry().len(),
@@ -737,10 +852,17 @@ mod tests {
             from: NodeId(9),
             bootstrap: PendingBootstrap {
                 set: successor.clone(),
-                gc_watermark: ballot(2, 1),
-                history,
-                effective: None,
+                registries: BTreeMap::from([(
+                    J,
+                    RegistrySnapshot {
+                        gc_watermark: ballot(2, 1),
+                        history,
+                        effective: None,
+                    },
+                )]),
             },
+            page: 0,
+            range: (None, None),
         });
         mm.ready().advance();
         mm.step_reconfigure(ReconfigureRequest::Chosen {
@@ -753,7 +875,7 @@ mod tests {
             MatchmakerWriteOp::InstallRegistry {
                 scalars,
                 registrations,
-            } => Some((scalars.gc_watermark, registrations.clone())),
+            } => Some((scalars.gc_watermark(J), registrations[&J].clone())),
             _ => None,
         });
         ready.advance();
@@ -762,7 +884,7 @@ mod tests {
         let expected: Vec<Ballot> = vec![ballot(5, 1), ballot(6, 1)];
         assert_eq!(*mm.set(), successor);
         assert_eq!(
-            mm.hard_state().gc_watermark,
+            mm.hard_state().gc_watermark(J),
             ballot(5, 1),
             "the higher floor wins"
         );
@@ -775,7 +897,7 @@ mod tests {
         // The restart reads back exactly that.
         let rebooted = Matchmaker::new(&mmconfig(0, &[0, 1, 2]), &image(&mm));
         assert_eq!(*rebooted.set(), successor);
-        assert_eq!(rebooted.hard_state().gc_watermark, ballot(5, 1));
+        assert_eq!(rebooted.hard_state().gc_watermark(J), ballot(5, 1));
         assert_eq!(
             rebooted.registry().keys().copied().collect::<Vec<_>>(),
             expected
@@ -788,7 +910,15 @@ mod tests {
     /// it decides it, so after `advance` the live state *is* the durable
     /// state).
     fn image(mm: &Matchmaker) -> MemRegistry {
-        MemRegistry::new(mm.hard_state().clone(), mm.registry().clone())
+        let records = mm
+            .journals()
+            .flat_map(|journal| {
+                mm.registry_of(journal)
+                    .iter()
+                    .map(move |(ballot, r)| ((journal, *ballot), r.clone()))
+            })
+            .collect();
+        MemRegistry::new(mm.hard_state().clone(), records)
     }
 
     const G0: MatchmakerGeneration = MatchmakerGeneration(0);
@@ -927,10 +1057,17 @@ mod tests {
             from: NodeId(5),
             bootstrap: PendingBootstrap {
                 set: losing.clone(),
-                gc_watermark: Ballot::zero(),
-                history: history.clone(),
-                effective: None,
+                registries: BTreeMap::from([(
+                    J,
+                    RegistrySnapshot {
+                        gc_watermark: Ballot::zero(),
+                        history: history.clone(),
+                        effective: None,
+                    },
+                )]),
             },
+            page: 0,
+            range: (None, None),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert_eq!(writes.len(), 1, "the pending bootstrap is durable");
@@ -967,10 +1104,17 @@ mod tests {
             from: NodeId(5),
             bootstrap: PendingBootstrap {
                 set: set(1, &[0, 1, 3]),
-                gc_watermark: Ballot::zero(),
-                history,
-                effective: None,
+                registries: BTreeMap::from([(
+                    J,
+                    RegistrySnapshot {
+                        gc_watermark: Ballot::zero(),
+                        history,
+                        effective: None,
+                    },
+                )]),
             },
+            page: 0,
+            range: (None, None),
         });
         let (writes, replies) = drain_reconfigure(&mut member);
         assert!(matches!(&replies[0], ReconfigureReply::Refused { .. }));
@@ -986,6 +1130,7 @@ mod tests {
         assert_eq!(
             writes,
             vec![MatchmakerWriteOp::Register {
+                journal: J,
                 ballot: ballot(1, 1),
                 registration: Registration::belief(config(&[0, 1, 2])),
             }]
@@ -1006,7 +1151,7 @@ mod tests {
             vec![ballot(1, 1)]
         );
         assert_eq!(history[&ballot(1, 1)].config, config(&[0, 1, 2]));
-        assert_eq!(mm.highest(), Some(ballot(3, 2)));
+        assert_eq!(mm.highest(J), Some(ballot(3, 2)));
     }
 
     #[test]
@@ -1073,26 +1218,32 @@ mod tests {
             mm.step(request(1, ballot(round, 1), &[0, 1, 2]));
         }
         drain(&mut mm);
-        assert_eq!(mm.advance_gc_watermark(G0, ballot(3, 1)), GcOutcome::Raised);
         assert_eq!(
-            mm.advance_gc_watermark(G0, ballot(2, 1)),
+            mm.advance_gc_watermark(J, G0, ballot(3, 1)),
+            GcOutcome::Raised
+        );
+        assert_eq!(
+            mm.advance_gc_watermark(J, G0, ballot(2, 1)),
             GcOutcome::Unchanged,
             "the floor never lowers"
         );
         assert_eq!(
-            mm.advance_gc_watermark(G0, ballot(3, 1)),
+            mm.advance_gc_watermark(J, G0, ballot(3, 1)),
             GcOutcome::Unchanged,
             "re-raising is a no-op"
         );
         assert_eq!(
-            mm.advance_gc_watermark(MatchmakerGeneration(1), ballot(9, 1)),
+            mm.advance_gc_watermark(J, MatchmakerGeneration(1), ballot(9, 1)),
             GcOutcome::Refused,
             "another generation's floor is refused"
         );
         let (writes, _) = drain(&mut mm);
         assert_eq!(
             writes,
-            vec![MatchmakerWriteOp::SetGcWatermark(ballot(3, 1))]
+            vec![MatchmakerWriteOp::SetGcWatermark {
+                journal: J,
+                watermark: ballot(3, 1)
+            }]
         );
         assert_eq!(
             mm.registry().keys().copied().collect::<Vec<_>>(),
@@ -1135,7 +1286,10 @@ mod tests {
         assert_eq!(watermark, Ballot::zero());
 
         // The first reply is lost; GC moves the floor; the client retries.
-        assert_eq!(mm.advance_gc_watermark(G0, ballot(2, 1)), GcOutcome::Raised);
+        assert_eq!(
+            mm.advance_gc_watermark(J, G0, ballot(2, 1)),
+            GcOutcome::Raised
+        );
         drain(&mut mm);
         mm.step(request(1, ballot(3, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut mm);
@@ -1208,12 +1362,18 @@ mod tests {
     #[should_panic(expected = "no registration survives below the gc watermark")]
     fn a_registry_below_its_watermark_refuses_to_boot() {
         let scalars = MatchmakerHardState {
-            gc_watermark: ballot(2, 0),
+            registries: BTreeMap::from([(
+                J,
+                RegistryScalars {
+                    gc_watermark: ballot(2, 0),
+                    effective: None,
+                },
+            )]),
             ..Default::default()
         };
         let store = MemRegistry::new(
             scalars,
-            BTreeMap::from([(ballot(1, 1), Registration::belief(config(&[0])))]),
+            BTreeMap::from([((J, ballot(1, 1)), Registration::belief(config(&[0])))]),
         );
         let _ = Matchmaker::new(&mmconfig(0, &[0]), &store);
     }
@@ -1284,6 +1444,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(5),
             generation: G0,
+            cursor: None,
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert!(
@@ -1291,7 +1452,8 @@ mod tests {
         );
         let ReconfigureReply::Stopped {
             generation,
-            history,
+            registries,
+            next,
             successor,
             ..
         } = &replies[0]
@@ -1299,12 +1461,14 @@ mod tests {
             panic!("expected Stopped, got {:?}", replies[0]);
         };
         assert_eq!(*generation, G0);
-        assert_eq!(history.len(), 1);
+        assert_eq!(registries[&J].history.len(), 1);
+        assert!(next.is_none(), "one registration fits one page");
         assert!(successor.is_none());
         // Idempotent: no second write.
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(6),
             generation: G0,
+            cursor: None,
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert!(writes.is_empty(), "a re-sent stop writes nothing");
@@ -1326,6 +1490,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(5),
             generation: MatchmakerGeneration(4),
+            cursor: None,
         });
         let (_, replies) = drain_reconfigure(&mut mm);
         assert!(matches!(
@@ -1347,6 +1512,7 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Stop {
             from: NodeId(5),
             generation: G0,
+            cursor: None,
         });
         drain_reconfigure(&mut mm);
         let successor = set(1, &[0, 3, 4]);
@@ -1355,9 +1521,14 @@ mod tests {
         history.insert(ballot(2, 2), Registration::belief(config(&[1, 2, 3])));
         let bootstrap = PendingBootstrap {
             set: successor.clone(),
-            gc_watermark: ballot(1, 1),
-            history,
-            effective: None,
+            registries: BTreeMap::from([(
+                J,
+                RegistrySnapshot {
+                    gc_watermark: ballot(1, 1),
+                    history,
+                    effective: None,
+                },
+            )]),
         };
         // A bootstrap for a set this matchmaker is not in is refused.
         mm.step_reconfigure(ReconfigureRequest::Bootstrap {
@@ -1366,6 +1537,8 @@ mod tests {
                 set: set(1, &[3, 4, 5]),
                 ..bootstrap.clone()
             },
+            page: 0,
+            range: (None, None),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert!(writes.is_empty());
@@ -1373,6 +1546,8 @@ mod tests {
         mm.step_reconfigure(ReconfigureRequest::Bootstrap {
             from: NodeId(5),
             bootstrap: bootstrap.clone(),
+            page: 0,
+            range: (None, None),
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
         assert_eq!(writes.len(), 1, "the pending bootstrap is durable");
@@ -1443,11 +1618,11 @@ mod tests {
             }
         ));
         assert!(
-            matches!(writes.last(), Some(MatchmakerWriteOp::InstallRegistry { scalars, registrations }) if scalars.generation == MatchmakerGeneration(1) && registrations.len() == 2)
+            matches!(writes.last(), Some(MatchmakerWriteOp::InstallRegistry { scalars, registrations }) if scalars.generation == MatchmakerGeneration(1) && registrations[&J].len() == 2)
         );
         assert_eq!(mm.phase(), MatchmakerPhase::Active);
         assert_eq!(*mm.set(), successor);
-        assert_eq!(mm.hard_state().gc_watermark, ballot(1, 1));
+        assert_eq!(mm.hard_state().gc_watermark(J), ballot(1, 1));
         assert!(mm.successor().is_none());
         assert_eq!(mm.hard_state().decree, DecreeRecord::default());
         // Generation 1 serves from the reconstruction; generation 0 is told

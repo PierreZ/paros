@@ -2,13 +2,16 @@
 //! [`MatchmakerStorage`](crate::MatchmakerStorage) on `moonpool-journal`.
 //!
 //! The registry rides the same log-of-writes shape as the node store: a
-//! `Register` entry per registration (its ballot in the tag), a `Scalars`
+//! `Register` entry per registration (its journal in the payload, its
+//! ballot in the tag — one store holds every journal's registry of the set,
+//! #190), a `Scalars`
 //! entry carrying the whole durable image after every scalar write (so a
 //! watermark raise is one too), an `Install .. End` bracket per successor
 //! activation, and `Begin .. End` checkpoints.
 //!
 //! **A damaged record is a crash verdict**, unless nothing it said still
-//! matters: a registration below the durable watermark (collected anyway),
+//! matters: a registration below every journal's durable watermark
+//! (collected anyway, whichever journal it was in: the tag names no journal),
 //! or any record a later intact `Scalars`, `Install` or checkpoint wholly
 //! replaced. There is no repair in place for a registry — a matchmaker
 //! whose durable state is unusable is *replaced* through a matchmaker-set
@@ -27,7 +30,8 @@ use std::collections::BTreeMap;
 use moonpool_core::StorageProvider;
 use moonpool_journal::{EntryId, Journal, Record, Tag};
 use paros_core::{
-    Ballot, MatchmakerConfig, MatchmakerHardState, NodeId, Registration, RegistryStorage,
+    Ballot, JournalKey, MatchmakerConfig, MatchmakerHardState, MatchmakerWriteOp, MemRegistry,
+    NodeId, Registration, RegistryStorage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +45,9 @@ use crate::storage::{StorageError, StorageRecord};
 /// One durable write of the matchmaker store, as one journal entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum MatchRecord {
-    /// `registration` under `ballot`.
+    /// `registration` under `ballot` in `journal`'s registry.
     Register {
+        journal: JournalKey,
         ballot: Ballot,
         registration: Registration,
     },
@@ -127,48 +132,79 @@ impl MatchMeta {
     }
 }
 
-/// The registry's durable state, as the records fold it.
+/// The registry's durable state, as the records fold it: the core's
+/// reference registry, so a replay lands every write with the semantics the
+/// matchmaker staged it under.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct MatchImage {
-    hard_state: MatchmakerHardState,
-    registry: BTreeMap<Ballot, Registration>,
+    registry: MemRegistry,
 }
 
 impl MatchImage {
     /// Fold one intact record — the live write and the replay alike, with
-    /// [`MemMatchmakerStorage`](crate::MemMatchmakerStorage)'s semantics.
+    /// [`MemRegistry`]'s semantics.
     fn apply(&mut self, record: &MatchRecord) {
-        match record {
+        let op = match record {
             MatchRecord::Register {
+                journal,
                 ballot,
                 registration,
-            } => {
-                self.registry.insert(*ballot, registration.clone());
-            }
-            MatchRecord::Scalars(scalars) => {
-                let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
-                self.hard_state = scalars.clone();
-                self.hard_state.gc_watermark = watermark;
-                self.registry = self.registry.split_off(&watermark);
-            }
+            } => MatchmakerWriteOp::Register {
+                journal: *journal,
+                ballot: *ballot,
+                registration: registration.clone(),
+            },
+            MatchRecord::Scalars(scalars) => MatchmakerWriteOp::SetScalars(scalars.clone()),
             MatchRecord::Install(scalars) | MatchRecord::Begin(scalars) => {
-                self.hard_state = scalars.clone();
-                self.registry.clear();
+                MatchmakerWriteOp::InstallRegistry {
+                    scalars: scalars.clone(),
+                    registrations: BTreeMap::new(),
+                }
             }
-            MatchRecord::End => {}
+            MatchRecord::End => return,
+        };
+        self.registry.apply(&op);
+    }
+
+    fn hard_state(&self) -> &MatchmakerHardState {
+        self.registry.hard_state()
+    }
+
+    /// `scalars` with every journal's watermark raised to the image's where
+    /// the image's is higher: what a `Scalars` record carries, so a later
+    /// scalar write alone restates every floor whole.
+    fn restated(&self, scalars: &MatchmakerHardState) -> MatchmakerHardState {
+        let mut scalars = scalars.clone();
+        for (journal, held) in &self.hard_state().registries {
+            let now = scalars.registries.entry(*journal).or_default();
+            now.gc_watermark = now.gc_watermark.max(held.gc_watermark);
         }
+        scalars
+    }
+
+    /// The lowest durable watermark over every journal the image knows: a
+    /// damaged registration below it is collected whichever journal it was
+    /// in (zero when the image knows no journal).
+    fn lowest_watermark(&self) -> Ballot {
+        let state = self.hard_state();
+        state
+            .registries
+            .keys()
+            .chain(self.registry.registrations().keys().map(|(j, _)| j))
+            .map(|journal| state.gc_watermark(*journal))
+            .min()
+            .unwrap_or_default()
     }
 
     fn checkpoint(&self) -> Vec<MatchRecord> {
-        let mut records = vec![MatchRecord::Begin(self.hard_state.clone())];
-        records.extend(
-            self.registry
-                .iter()
-                .map(|(ballot, registration)| MatchRecord::Register {
-                    ballot: *ballot,
-                    registration: registration.clone(),
-                }),
-        );
+        let mut records = vec![MatchRecord::Begin(self.hard_state().clone())];
+        records.extend(self.registry.registrations().iter().map(
+            |((journal, ballot), registration)| MatchRecord::Register {
+                journal: *journal,
+                ballot: *ballot,
+                registration: registration.clone(),
+            },
+        ));
         records.push(MatchRecord::End);
         records
     }
@@ -178,7 +214,7 @@ impl MatchImage {
 /// [`StorageProvider`]. The [`journal` docs](super) hold the shared shape.
 ///
 /// **A damaged record is a crash verdict**, unless nothing it said still
-/// matters: a registration below the durable watermark, or a record a later
+/// matters: a registration below every journal's durable watermark, or a record a later
 /// intact scalar write, install or checkpoint wholly replaced. A registry is
 /// never repaired in place — a matchmaker whose durable state is unusable is
 /// replaced (#125) — so detection is the whole job; damage in the last
@@ -322,9 +358,9 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 record,
             });
         }
-        // A damaged registration below the durable watermark was collected
-        // anyway.
-        let watermark = image.hard_state.gc_watermark;
+        // A damaged registration below every journal's durable watermark was
+        // collected anyway (its tag names its ballot, not its journal).
+        let watermark = image.lowest_watermark();
         pending.retain(|p| !matches!(p.record, StorageRecord::Registration(b) if b < watermark));
         if let Some(first) = pending.first() {
             // The journal says which damage sits in the last append batch:
@@ -391,15 +427,15 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
 
 impl<P: StorageProvider> RegistryStorage for JournalMatchmakerStorage<P> {
     fn initial_state(&self) -> MatchmakerHardState {
-        self.image.hard_state.clone()
+        self.image.hard_state().clone()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.image.registry.get(&ballot).cloned()
+    fn registration(&self, journal: JournalKey, ballot: Ballot) -> Option<Registration> {
+        self.image.registry.registration(journal, ballot)
     }
 
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        self.image.registry.keys().copied().collect()
+    fn registered_ballots(&self) -> Vec<(JournalKey, Ballot)> {
+        self.image.registry.registered_ballots()
     }
 }
 
@@ -425,11 +461,13 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
+        journal: JournalKey,
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
         self.opened().await?;
         self.stage(MatchRecord::Register {
+            journal,
             ballot,
             registration: registration.clone(),
         });
@@ -437,11 +475,15 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
+    async fn set_gc_watermark(
+        &mut self,
+        journal: JournalKey,
+        watermark: Ballot,
+    ) -> Result<(), StorageError> {
         self.opened().await?;
-        if watermark > self.image.hard_state.gc_watermark {
-            let mut scalars = self.image.hard_state.clone();
-            scalars.gc_watermark = watermark;
+        if watermark > self.image.hard_state().gc_watermark(journal) {
+            let mut scalars = self.image.hard_state().clone();
+            scalars.registries.entry(journal).or_default().gc_watermark = watermark;
             self.stage(MatchRecord::Scalars(scalars));
         }
         Ok(())
@@ -450,10 +492,9 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
     async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
         self.opened().await?;
-        // The record carries the image's watermark (the max with the
-        // durable one), so a later scalar write alone restates it whole.
-        let mut scalars = scalars.clone();
-        scalars.gc_watermark = scalars.gc_watermark.max(self.image.hard_state.gc_watermark);
+        // The record carries the image's watermarks (the max with the
+        // durable ones), so a later scalar write alone restates them whole.
+        let scalars = self.image.restated(scalars);
         self.stage(MatchRecord::Scalars(scalars));
         Ok(())
     }
@@ -462,15 +503,18 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
+        registrations: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     ) -> Result<(), StorageError> {
         self.opened().await?;
         self.stage(MatchRecord::Install(scalars.clone()));
-        for (ballot, registration) in registrations.range(scalars.gc_watermark..) {
-            self.stage(MatchRecord::Register {
-                ballot: *ballot,
-                registration: registration.clone(),
-            });
+        for (journal, records) in registrations {
+            for (ballot, registration) in records.range(scalars.gc_watermark(*journal)..) {
+                self.stage(MatchRecord::Register {
+                    journal: *journal,
+                    ballot: *ballot,
+                    registration: registration.clone(),
+                });
+            }
         }
         self.stage(MatchRecord::End);
         Ok(())

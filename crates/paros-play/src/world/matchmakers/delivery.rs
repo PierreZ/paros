@@ -73,7 +73,15 @@ impl World {
                  generation. Any two quorums share a matchmaker, so nothing can be missing from \
                  that union.",
                 who(id),
-                many(reconstruction.bootstrap.history.len(), "registration")
+                many(
+                    reconstruction
+                        .bootstrap
+                        .registries
+                        .values()
+                        .map(|r| r.history.len())
+                        .sum(),
+                    "registration"
+                )
             ),
         );
     }
@@ -436,12 +444,15 @@ impl World {
 
     fn narrate_handover_reply(&mut self, id: MatchmakerId, reply: &ReconfigureReply) {
         let text = match reply {
-            ReconfigureReply::Stopped { history, .. } => format!(
+            ReconfigureReply::Stopped { registries, .. } => format!(
                 "{} freezes, durably, and hands over its {}. It registers nothing for this \
                  generation ever again. It stays alive: it still votes in the decree, and it \
                  still points a late candidate at the successor.",
                 which(id),
-                many(history.len(), "registration")
+                many(
+                    registries.values().map(|r| r.history.len()).sum(),
+                    "registration"
+                )
             ),
             ReconfigureReply::Bootstrapped { set, .. } => format!(
                 "{} holds the proposed generation {} on its disk, marked pending. It does not \

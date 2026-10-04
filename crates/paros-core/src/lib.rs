@@ -92,8 +92,8 @@ pub use matchmaker::{
     MatchReply, MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
     MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap,
     REGISTRY_PAGE, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady,
-    ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryStorage,
-    StartRefusal,
+    ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryCursor,
+    RegistryScalars, RegistrySnapshot, RegistryStorage, StartRefusal, registry_page,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,

@@ -1,6 +1,13 @@
 //! The matchmaker oracles: the registry side (#119) and the leader-side
 //! matchmaking phase (#120), one incremental fold each.
 //!
+//! One fold lives in each journal's audit world and sees the matchmaker set
+//! **through that journal** (#190): every matchmaker's registry here is the
+//! journal's, and the set-level facts (a generation's scalars, an
+//! activation, a freeze page, a reconstruction) arrive projected onto it by
+//! the fan-out in `audit/set.rs`. Every claim below is therefore judged per
+//! journal, across every journal the set serves.
+//!
 //! Every check is O(1) in the size of the run (a map probe over a registry of
 //! a handful of ballots), fed by the driver's typed reports at the instant
 //! each fact becomes true: a registration at its fsync, a reply as it leaves,
@@ -89,9 +96,9 @@ use std::ops::Bound;
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{
-    AcceptorConfig, Ballot, GcAck, GcStep, HistoryPage, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, Seam, Slot,
+    AcceptorConfig, Ballot, GcAck, GcStep, HistoryPage, JournalKey, MatchRefusal,
+    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, REGISTRY_PAGE,
+    ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, RegistryCursor, Seam, Slot,
     StorageFaultDecision,
 };
 
@@ -128,8 +135,9 @@ type ReplyCopy = (
     Ballot,
     Option<(Ballot, AcceptorConfig)>,
 );
-/// A frozen registry as a `Stopped` reply carried it: `(watermark, history)`.
-type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>);
+/// A frozen registry as a member's `Stopped` pages carried it (#190):
+/// `(watermark, history, complete)` — complete once its last page folded.
+type FrozenRegistry = (Ballot, Vec<(Ballot, Registration)>, bool);
 
 /// One reconstruction a handover bootstrapped: its watermark and the registry
 /// above it.
@@ -534,6 +542,64 @@ fn check_effective_survives(matchmaker: MatchmakerId, entry: &Registry) {
     );
 }
 
+/// One journal's slice of a frozen registry: `(watermark, history)`.
+type Slice = (Ballot, Vec<(Ballot, Registration)>);
+
+/// One journal's slice of a `Stopped` page (#190), as reported and as the
+/// folded durable registry says it must be: `(watermark, history)` over the
+/// page's range — from its cursor (or the journal's watermark) up to its
+/// continuation (or the end). A journal the page leaves out must be outside
+/// that range, or hold nothing at all here.
+fn frozen_slice(
+    entry: &Registry,
+    journal: JournalKey,
+    page: Option<&paros::RegistrySnapshot>,
+    cursor: Option<RegistryCursor>,
+    next: Option<RegistryCursor>,
+) -> (Slice, Slice) {
+    let Some(page) = page else {
+        let outside = cursor.is_some_and(|(first, _)| journal < first)
+            || next.is_some_and(|(last, _)| journal >= last);
+        let reported = (entry.watermark, Vec::new());
+        let expected = if outside {
+            reported.clone()
+        } else {
+            (
+                Ballot::zero(),
+                entry
+                    .registered
+                    .iter()
+                    .map(|(b, r)| (*b, r.clone()))
+                    .collect(),
+            )
+        };
+        return (reported, expected);
+    };
+    let low = match cursor {
+        Some((first, ballot)) if first == journal => ballot.max(entry.watermark),
+        _ => entry.watermark,
+    };
+    let window: Vec<(Ballot, Registration)> = match next {
+        Some((last, ballot)) if last == journal => entry
+            .registered
+            .range(low..ballot)
+            .map(|(b, r)| (*b, r.clone()))
+            .collect(),
+        _ => entry
+            .registered
+            .range(low..)
+            .map(|(b, r)| (*b, r.clone()))
+            .collect(),
+    };
+    (
+        (
+            page.gc_watermark,
+            page.history.iter().map(|(b, r)| (*b, r.clone())).collect(),
+        ),
+        (entry.watermark, window),
+    )
+}
+
 /// A phase, for the detail maps.
 fn phase_name(phase: MatchmakerPhase) -> &'static str {
     match phase {
@@ -577,6 +643,14 @@ impl MatchmakerAudit {
             self.deployed = true;
             self.sets.entry(0).or_insert(ids);
         }
+    }
+
+    /// `matchmaker`'s folded watermark in this journal ([`Ballot::zero`]
+    /// before any).
+    pub(super) fn watermark_of(&self, matchmaker: MatchmakerId) -> Ballot {
+        self.registries
+            .get(&matchmaker.0)
+            .map_or(Ballot::zero(), |entry| entry.watermark)
     }
 
     /// Whether the deployment names matchmakers at all.
@@ -1990,6 +2064,7 @@ impl MatchmakerAudit {
     #[allow(clippy::too_many_lines)]
     pub(super) fn reconfigurer_step(
         &mut self,
+        journal: JournalKey,
         node: NodeId,
         matchmaker: MatchmakerId,
         reply: &ReconfigureReply,
@@ -2012,18 +2087,32 @@ impl MatchmakerAudit {
         }
         if let ReconfigureReply::Stopped {
             generation,
-            gc_watermark,
-            history,
+            cursor,
+            registries,
+            next,
             ..
         } = reply
             && matches!(step, ReconfigurerStep::Stopped { .. })
         {
-            let snapshot: Vec<(Ballot, Registration)> =
-                history.iter().map(|(b, r)| (*b, r.clone())).collect();
-            self.stop_acks
+            // A counted page (#190): the reconfigurer takes a member's pages
+            // in cursor order, so this journal's slice of each is appended
+            // in order, and the member's frozen registry counts once its
+            // last page did. A first page starts the member's walk afresh.
+            let held = self
+                .stop_acks
                 .entry((node.0, generation.0))
                 .or_default()
-                .insert(matchmaker.0, (*gc_watermark, snapshot));
+                .entry(matchmaker.0)
+                .or_insert_with(|| (Ballot::zero(), Vec::new(), false));
+            if cursor.is_none() {
+                *held = (Ballot::zero(), Vec::new(), false);
+            }
+            if let Some(page) = registries.get(&journal) {
+                held.0 = page.gc_watermark;
+                held.1
+                    .extend(page.history.iter().map(|(b, r)| (*b, r.clone())));
+            }
+            held.2 = next.is_none();
         }
         match step {
             // The counted-but-short folds: progress the driver's stall
@@ -2174,7 +2263,8 @@ impl MatchmakerAudit {
         &mut self,
         node: NodeId,
         old: u64,
-        bootstrap: &PendingBootstrap,
+        set: &MatchmakerSet,
+        (gc_watermark, history): (Ballot, &BTreeMap<Ballot, Registration>),
         disagreements: u64,
     ) {
         // The write-once ledger says no two matchmakers ever register one
@@ -2192,10 +2282,15 @@ impl MatchmakerAudit {
         // quorum's durable registries above their maximum watermark
         // — and every completed registration of the replaced
         // generation above that watermark is in it.
-        let folded = self
+        let folded: BTreeMap<u64, FrozenRegistry> = self
             .stop_acks
             .get(&(node.0, old))
-            .cloned()
+            .map(|acks| {
+                acks.iter()
+                    .filter(|(_, (_, _, complete))| *complete)
+                    .map(|(m, frozen)| (*m, frozen.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         let quorum = self.quorum(old);
         assert_always!(
@@ -2203,9 +2298,13 @@ impl MatchmakerAudit {
             "generation: a reconstruction rests on a frozen matchmaker quorum",
             { "node" => node.0, "generation" => old, "folded" => folded.len(), "quorum" => quorum }
         );
-        let max_watermark = folded.values().map(|(w, _)| *w).max().unwrap_or_default();
+        let max_watermark = folded
+            .values()
+            .map(|(w, _, _)| *w)
+            .max()
+            .unwrap_or_default();
         let mut expected: BTreeMap<Ballot, Registration> = BTreeMap::new();
-        for (_, registry) in folded.values() {
+        for (_, registry, _) in folded.values() {
             for (b, r) in registry {
                 if *b >= max_watermark {
                     expected.entry(*b).or_insert_with(|| r.clone());
@@ -2214,14 +2313,14 @@ impl MatchmakerAudit {
         }
         let folded_ids: Vec<String> = folded.keys().map(ToString::to_string).collect();
         assert_always!(
-            bootstrap.gc_watermark == max_watermark && bootstrap.history == expected,
+            gc_watermark == max_watermark && *history == expected,
             "generation: a reconstruction is the union of the frozen quorum above its maximum watermark",
             {
                 "node" => node.0,
                 "generation" => old,
-                "reported" => bootstrap.history.len(),
+                "reported" => history.len(),
                 "expected" => expected.len(),
-                "reported_round" => bootstrap.gc_watermark.round,
+                "reported_round" => gc_watermark.round,
                 "max_round" => max_watermark.round,
                 "folded" => folded_ids.join(",")
             }
@@ -2231,10 +2330,8 @@ impl MatchmakerAudit {
             .get(&old)
             .and_then(|completed| {
                 completed
-                    .range(bootstrap.gc_watermark..)
-                    .find(|(b, config)| {
-                        bootstrap.history.get(b).map(|r| &r.config) != config.as_ref()
-                    })
+                    .range(gc_watermark..)
+                    .find(|(b, config)| history.get(b).map(|r| &r.config) != config.as_ref())
                     .map(|(b, _)| b.round)
             });
         assert_always!(
@@ -2248,16 +2345,16 @@ impl MatchmakerAudit {
         // matchmaker reported, so a truncated activated copy would
         // otherwise be invisible and every later check would compare
         // against the corrupted state.
-        let proposed: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
+        let proposed: Vec<u64> = set.members().iter().map(|m| m.0).collect();
         let candidates = self
             .bootstrap_histories
-            .entry((bootstrap.set.generation.0, proposed))
+            .entry((set.generation.0, proposed))
             .or_default();
-        let candidate = (bootstrap.gc_watermark, bootstrap.history.clone());
+        let candidate = (gc_watermark, history.clone());
         if !candidates.contains(&candidate) {
             candidates.push(candidate);
         }
-        if !bootstrap.history.is_empty() {
+        if !history.is_empty() {
             reach_once!(
                 self.handover_with_prior_registrations,
                 "generation: a handover carries prior registrations forward"
@@ -2276,6 +2373,7 @@ impl MatchmakerAudit {
     /// A matchmaker durably persisted its generation scalars.
     pub(super) fn scalars_persisted(
         &mut self,
+        journal: JournalKey,
         matchmaker: MatchmakerId,
         scalars: &MatchmakerHardState,
     ) {
@@ -2335,7 +2433,7 @@ impl MatchmakerAudit {
             );
         }
         entry.generation = Some((generation, scalars.phase));
-        entry.effective = scalars.effective.as_ref().map(|(ballot, _)| *ballot);
+        entry.effective = scalars.effective(journal).map(|(ballot, _)| *ballot);
         check_effective_survives(matchmaker, entry);
         if !scalars.pending.is_empty() {
             reach_once!(
@@ -2466,6 +2564,7 @@ impl MatchmakerAudit {
     /// A matchmaker answered a handover request.
     pub(super) fn reconfigure_replied(
         &mut self,
+        journal: JournalKey,
         matchmaker: MatchmakerId,
         reply: &ReconfigureReply,
     ) {
@@ -2473,28 +2572,25 @@ impl MatchmakerAudit {
         match reply {
             ReconfigureReply::Stopped {
                 generation,
-                gc_watermark,
-                history,
+                cursor,
+                registries,
+                next,
                 ..
             } => {
                 // The freeze is durable before the answer, and the answer is
-                // the durable registry above the durable watermark.
+                // the durable registry above the durable watermark — this
+                // journal's slice of the page (#190).
                 assert_always!(
                     entry.generation == Some((generation.0, MatchmakerPhase::Stopped)),
                     "generation: a stop is answered only once the freeze is durable",
                     { "matchmaker" => matchmaker.0, "generation" => generation.0 }
                 );
-                let expected: Vec<(Ballot, Registration)> = entry
-                    .registered
-                    .range(entry.watermark..)
-                    .map(|(b, r)| (*b, r.clone()))
-                    .collect();
-                let reported: Vec<(Ballot, Registration)> =
-                    history.iter().map(|(b, r)| (*b, r.clone())).collect();
+                let (reported, expected) =
+                    frozen_slice(entry, journal, registries.get(&journal), *cursor, *next);
                 assert_always!(
-                    *gc_watermark == entry.watermark && reported == expected,
+                    reported == expected,
                     "generation: a frozen registry is answered as the durable one",
-                    { "matchmaker" => matchmaker.0, "reported" => reported.len(), "expected" => expected.len() }
+                    { "matchmaker" => matchmaker.0, "reported" => reported.1.len(), "expected" => expected.1.len() }
                 );
             }
             ReconfigureReply::Bootstrapped { set, .. } => {

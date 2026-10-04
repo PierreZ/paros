@@ -25,10 +25,10 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold` → the leaderless read tally (#143).
 - `membership.rs` → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing.
 - `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the boot probe (#173).
-- `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).
+- `matchmaker.rs` → `Matchmaker` → one registry per `JournalKey` of the set's tenant (#190) and the set's generations (re-exports the submodules below).
 - `matchmaker/{generation,reconfigurer,decree}.rs` → the generation machine, `MatchmakerReconfigurer`, the successor decree over the shared roles at slot zero.
-- `matchmaker/{message,state,storage,write}.rs` → wire contract, durable state, `RegistryStorage` + `MemRegistry` (the reference registry), `MatchmakerWriteOp` + `MatchmakerReady`.
-- `matchmaker/handover_model.rs` → the handover model checker (test-only).
+- `matchmaker/{message,state,storage,write}.rs` → wire contract (`Stop`/`Bootstrap` paged by a `RegistryCursor`), durable state (`RegistryScalars` per journal, `RegistrySnapshot`, `registry_page`, `PendingBootstrap::merge`), `RegistryStorage` + `MemRegistry` (the reference registry, keyed by `(JournalKey, Ballot)`), `MatchmakerWriteOp` + `MatchmakerReady`.
+- `matchmaker/handover_model.rs` → the handover model checker (test-only), over several journals; a dropped bootstrap page must turn it red.
 - `proxy_model.rs` → the proxy-leader model checker (test-only); `model_support.rs` → seeded RNG + lossy mailbox both share.
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 - `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`, `quorum_read`).

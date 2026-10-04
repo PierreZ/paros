@@ -125,6 +125,7 @@ use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
 use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
 use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use crate::types::JournalKey;
 
 /// What one matchmaker reply did to an open campaign, returned by
 /// [`super::ColocatedNode::on_match_reply`] so the driver can report the transition
@@ -224,8 +225,14 @@ fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, Answer) {
 /// The open phase's `MatchRequest` from `me`: its kind, ballot and
 /// configuration, fenced by `generation`, asked from the start of the
 /// history (a paged answer continues it with `MatchRequest::from_page`).
-fn phase_request(me: NodeId, m: &Matchmaking, generation: MatchmakerGeneration) -> MatchRequest {
+fn phase_request(
+    me: NodeId,
+    journal: JournalKey,
+    m: &Matchmaking,
+    generation: MatchmakerGeneration,
+) -> MatchRequest {
     MatchRequest::for_kind(m.kind(), me, m.ballot(), m.config().clone(), generation)
+        .in_journal(journal)
 }
 
 impl ColocatedNode {
@@ -266,7 +273,12 @@ impl ColocatedNode {
             return;
         };
         let matchmakers = self.deployment_matchmakers();
-        let request = phase_request(self.config.id, m, matchmakers.generation);
+        let request = phase_request(
+            self.config.id,
+            self.config.journal,
+            m,
+            matchmakers.generation,
+        );
         let unanswered = m.unanswered(matchmakers);
         for (matchmaker, cursor) in unanswered {
             // A matchmaker mid-answer is re-asked from where its last page
@@ -293,7 +305,8 @@ impl ColocatedNode {
             probe.ballot(),
             probe.believed().clone(),
             matchmakers.generation,
-        );
+        )
+        .in_journal(self.config.journal);
         for matchmaker in probe.unanswered(matchmakers) {
             self.pending_match_requests
                 .push((matchmaker, request.clone()));
@@ -391,6 +404,11 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, matchmaker = reply.matchmaker.0, round = reply.ballot.round)))]
     pub fn on_match_reply(&mut self, reply: MatchReply) -> MatchStep {
+        // A set serves every journal of its tenant (#190): another journal's
+        // answer is not this node's to fold.
+        if reply.journal != self.config.journal {
+            return MatchStep::Ignored;
+        }
         let generation = reply.generation;
         let (matchmaker, to, ballot, answer) = split_reply(reply);
         let Some(matchmakers) = self.matchmakers.as_ref() else {
@@ -491,7 +509,12 @@ impl ColocatedNode {
         if let Some(next) = next {
             // The answer is still paged: ask this matchmaker for the rest.
             // Nothing counts toward the quorum until its last page lands.
-            let request = phase_request(self.config.id, m, matchmakers.generation);
+            let request = phase_request(
+                self.config.id,
+                self.config.journal,
+                m,
+                matchmakers.generation,
+            );
             self.pending_match_requests
                 .push((matchmaker, request.from_page(next)));
             return MatchStep::Paged { next };

@@ -328,8 +328,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                 node = self_id,
                 generation = generation.0,
                 members = bootstrap.set.members().len() as u64,
-                registrations = bootstrap.history.len() as u64,
-                watermark_round = bootstrap.gc_watermark.round,
+                journals = bootstrap.registries.len() as u64,
+                registrations = bootstrap
+                    .registries
+                    .values()
+                    .map(|r| r.history.len() as u64)
+                    .sum::<u64>(),
                 disagreements = reconstruction.disagreements,
                 "reconfigurer_reconstructed"
             );
@@ -447,7 +451,7 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
     async fn beat<S: LogStorage, A: Audit>(
         &self,
         rt: &mut JournalRt<S, A>,
-        handover: &mut HandoverDriver,
+        handover: Option<&mut HandoverDriver>,
         ticks: u64,
     ) -> Result<(), RunError> {
         let (hooks, self_id, tunables) = (self.hooks, self.self_id, self.tunables);
@@ -511,9 +515,12 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
                 node.resend_gc();
             }
         }
-        // The handover belongs to the matchmaker plane, which serves a
-        // deployment's one journal; on a plain deployment it stays idle.
-        if node.config().has_matchmakers() {
+        // The handover belongs to the matchmaker set, which serves every
+        // journal of its tenant (#190): one journal paces it (`handover` is
+        // that journal's alone); on a plain deployment it stays idle.
+        if let Some(handover) = handover
+            && node.config().has_matchmakers()
+        {
             lp.pace_handover(node, handover);
         }
         lp.offer_handoff(node);
@@ -750,9 +757,12 @@ where
 /// [`run_node`]'s fail-stop crash. A seam crash is the process dying, for
 /// every journal.
 ///
-/// Several journals run only on a plain deployment: no matchmakers, proxies
-/// or replicas (the matchmaker plane, the proxy leaders and the replica tier
-/// each serve one journal; journal-tagged proxies are #193).
+/// The proxy leaders and the replica tier serve one journal, the node's
+/// first user journal (journal-tagged proxies are #193). A matchmaker set
+/// serves every user journal that names it (#190): one registry per
+/// journal, every matchmaking and GC message routed by the journal it names,
+/// and one handover per node for the set, paced by the first such journal,
+/// whose learned successor reaches every one of them.
 ///
 /// `system` opts the node into the **system journals** (#189,
 /// [`SystemPlan`]): it follows the directory and the node registry (from its
@@ -837,22 +847,21 @@ where
     if journals.exhausted() && (!follows || journals.stranded()) {
         return journals.exit();
     }
-    // The matchmaker plane, the proxy leaders and the replica tier serve one
-    // journal each — the node's first user journal — so every other journal,
-    // the system journals included, must be a plain Multi-Paxos journal
-    // (#188; journal-tagged proxies are #193).
+    // The proxy leaders and the replica tier serve one journal each — the
+    // node's first user journal — so every other journal must run without
+    // them (#188; journal-tagged proxies are #193). A matchmaker set serves
+    // every journal of its tenant (#190): any user journal may name it, and
+    // every message it exchanges names its journal; the system journals
+    // stay plain Multi-Paxos.
     let plane = journals.plane().map(|(journal, _)| *journal);
-    let planed = journals
-        .live
-        .iter()
-        .filter(|(journal, _)| Some(**journal) != plane)
-        .any(|(_, rt)| {
-            let config = rt.node.config();
-            config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0
-        });
+    let planed = journals.live.iter().any(|(journal, rt)| {
+        let config = rt.node.config();
+        (Some(*journal) != plane && (config.proxy_count > 0 || config.replica_count > 0))
+            || (!journal.is_user() && config.has_matchmakers())
+    });
     if planed {
         return Err(RunError::Infra(SimulationError::InvalidState(
-            "only a node's first journal may name matchmakers, proxies or replicas".into(),
+            "only a node's first journal may name proxies or replicas, and only a user journal matchmakers".into(),
         )));
     }
     let self_id = match &system {
@@ -1207,9 +1216,18 @@ where
             Some(reply) = match_replies.recv() => {
                 // A matchmaker's answer to this candidate's registration (#120):
                 // fold it into the open matchmaking phase; a quorum closes the
-                // phase and opens Phase 1 in the same step. A matchmaker
-                // deployment runs one journal.
-                let Some((&journal, rt)) = journals.first() else { continue };
+                // phase and opens Phase 1 in the same step. Routed to the
+                // journal the answer names (#190); one not live here is lost.
+                let journal = reply.journal;
+                // The handover it may start is the set's, reported where
+                // every other handover report goes: the pacing journal.
+                let set_audit = journals
+                    .matchmaking()
+                    .first()
+                    .and_then(|pacer| journals.live.get(pacer))
+                    .map(|rt| rt.audit.clone());
+                let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                let set_audit = set_audit.unwrap_or_else(|| rt.audit.clone());
                 let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
                 // The duplicate seam (the mirror of the matchmaker driver's
                 // `drop_client_reply`): what it tests is the idempotency the
@@ -1226,15 +1244,17 @@ where
                 let folded = folded_answer(&reply);
                 let step = rt.node.on_match_reply(reply);
                 report_match_step(&rt.node, &rt.audit, self_id, matchmaker, ballot, folded, &step);
-                shared.with(&rt.audit).on_match_refusal(&rt.node, &mut handover, matchmaker, &step);
+                shared.with(&set_audit).on_match_refusal(&rt.node, &mut handover, matchmaker, &step);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some(ack) = gc_acks.recv() => {
                 // A matchmaker's answer to this leader's GC request (#123):
                 // fold it; a quorum makes the floor effective and names the
-                // retirable acceptors (reported in the step).
-                let Some((&journal, rt)) = journals.first() else { continue };
+                // retirable acceptors (reported in the step). Routed to the
+                // journal the ack names (#190).
+                let journal = ack.journal;
+                let Some(rt) = journals.live.get_mut(&journal) else { continue };
                 maybe_duplicate(hooks, &rt.audit, NodeId(self_id), Reply::GcAck, &links.gc_acks, &ack);
                 let step = rt.node.on_gc_ack(&ack);
                 rt.audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
@@ -1251,8 +1271,11 @@ where
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some(reply) = reconfigure_replies.recv() => {
-                // A matchmaker's answer to this node's handover step (#125).
-                let Some((&journal, rt)) = journals.first() else { continue };
+                // A matchmaker's answer to this node's handover step (#125):
+                // the set's, so reported to the journal that paces it.
+                let matchmaking = journals.matchmaking();
+                let Some(&journal) = matchmaking.first() else { continue };
+                let Some(rt) = journals.live.get_mut(&journal) else { continue };
                 let matchmaker = reply.matchmaker();
                 maybe_duplicate(
                     hooks,
@@ -1271,14 +1294,6 @@ where
                     step = ?step,
                     "reconfigurer_step"
                 );
-                // The chosen set is authoritative the instant it is chosen —
-                // this node adopts it before its publication completes.
-                if let ReconfigurerStep::Chosen { successor }
-                | ReconfigurerStep::Done { successor }
-                | ReconfigurerStep::Superseded { successor } = &step
-                {
-                    rt.node.learn_matchmakers(successor);
-                }
                 if let ReconfigurerStep::Preempted { .. } = &step {
                     let ticks = providers
                         .random()
@@ -1288,8 +1303,23 @@ where
                     tracing::info!(node = self_id, ticks, "reconfigurer_backoff");
                 }
                 shared.with(&rt.audit).send_reconfigure(handover.take_requests());
-                let outcome = shared.settle(rt).await;
-                journals.fold(journal, outcome, ticks, self_id)?;
+                // The chosen set is authoritative the instant it is chosen —
+                // this node adopts it before its publication completes, in
+                // every journal the set serves (#190).
+                let learned = match &step {
+                    ReconfigurerStep::Chosen { successor }
+                    | ReconfigurerStep::Done { successor }
+                    | ReconfigurerStep::Superseded { successor } => Some(successor.clone()),
+                    _ => None,
+                };
+                for journal in matchmaking {
+                    let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                    if let Some(successor) = &learned {
+                        rt.node.learn_matchmakers(successor);
+                    }
+                    let outcome = shared.settle(rt).await;
+                    journals.fold(journal, outcome, ticks, self_id)?;
+                }
             }
             Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
                 // No settle tail: this arm drives the reconfigurer, never the
@@ -1297,7 +1327,14 @@ where
                 // A matchmaker-set reconfiguration (#125): any node may drive
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
-                let Some((_, rt)) = journals.first() else { continue };
+                // The set's pacing journal, or a plain deployment's first
+                // journal (which refuses: `no_matchmakers`).
+                let pacer = journals.matchmaking().first().copied();
+                let rt = match pacer {
+                    Some(journal) => journals.live.get_mut(&journal),
+                    None => journals.first().map(|(_, rt)| rt),
+                };
+                let Some(rt) = rt else { continue };
                 let lp = shared.with(&rt.audit);
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, &mut handover, &target, |m| {
@@ -1413,15 +1450,18 @@ where
                 if let Some(f) = follower.as_ref().filter(|_| !due.is_empty()) {
                     admit_pool(&mut journals, f);
                 }
-                // Every live journal's beat, in id order.
+                // Every live journal's beat, in id order. The matchmaker
+                // set's handover is paced once, by its first journal.
                 let live: Vec<JournalKey> = journals.live.keys().copied().collect();
+                let handover_journal = journals.matchmaking().first().copied();
                 for journal in live {
                     if multi && hooks.hold_journal(journal) {
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
                         continue;
                     }
                     let Some(rt) = journals.live.get_mut(&journal) else { continue };
-                    let outcome = shared.beat(rt, &mut handover, ticks).await;
+                    let paced = (Some(journal) == handover_journal).then_some(&mut handover);
+                    let outcome = shared.beat(rt, paced, ticks).await;
                     journals.fold(journal, outcome, ticks, self_id)?;
                 }
                 // The system journals (#189): fold what this node's own

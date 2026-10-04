@@ -25,7 +25,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
 - `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
-- `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
+- `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit` (one per journal world: the set seen through that journal) · `audit/set.rs` → the set's fan-out (#190): a journal's report to its world, a set-level report to every journal's, projected; the cross-journal gates.
 - `audit/client.rs` → `ClientHistory` · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, generation chain, monotone `first_seq`).
 - `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
@@ -56,7 +56,8 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
   window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
-  id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
+  id under another tenant). On a matchmaker seed every default-tenant journal shares the set,
+  one registry each (#190). `journal_store` → `JournalStorage` on half the plain seeds, no
   injected corruption. `system_journals` → the directory, the registry and meta on half the seeds, on `SEED_COUNT`
   (1) seed ranks; `cell_id` → the run's cell id, what `init` would mint (#229). `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 

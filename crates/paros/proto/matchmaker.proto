@@ -27,6 +27,11 @@ service ParosMatchmaker {
   rpc Reconfigure(.paros.matchmaker.v1.ReconfigureRequest) returns (.paros.matchmaker.v1.ReconfigureReply);
 }
 
+// One set serves every journal of its tenant, one registry per journal
+// (#190): every matchmaking and GC message names its journal by the frame
+// `(tenant, journal)`, and the handover moves every journal's registry,
+// paged.
+
 // A matchmaker set bound to its generation.
 message MatchmakerSet {
   uint64 generation = 1;
@@ -49,6 +54,9 @@ message MatchRequest {
   // A membership probe (#173): register nothing, answer with the effective
   // configuration alone. `reconfiguration` is false on a probe.
   bool probe = 7;
+  // The journal whose registry the request is for (#190).
+  uint64 journal = 8;
+  uint64 tenant = 9;
 }
 
 message Registration {
@@ -119,12 +127,18 @@ message MatchReply {
   }
   // The request's generation, echoed.
   uint64 generation = 6;
+  // The request's journal, echoed (#190).
+  uint64 journal = 8;
+  uint64 tenant = 9;
 }
 
 message GarbageCollect {
   uint64 from = 1;
   .paros.common.v1.Ballot watermark = 2;
   uint64 generation = 3;
+  // The journal whose watermark is raised (#190).
+  uint64 journal = 4;
+  uint64 tenant = 5;
 }
 
 message GarbageCollectAck {
@@ -135,22 +149,49 @@ message GarbageCollectAck {
   uint64 generation = 3;
   // Whether the request was applied at that generation.
   bool applied = 4;
+  // The request's journal, echoed (#190).
+  uint64 journal = 5;
+  uint64 tenant = 6;
 }
 
 // ---- matchmaker-set reconfiguration (#125) ----------------------------------
 
+// Where a paged registry transfer resumes: a journal, and the first ballot
+// of it not transferred yet (#190).
+message RegistryCursor {
+  uint64 journal = 1;
+  uint64 tenant = 2;
+  .paros.common.v1.Ballot ballot = 3;
+}
+
+// One journal's registry, or the part of it one page carries: its
+// watermark, its registrations at or above it, and its effective
+// configuration (the scalar the watermark never collects).
+message JournalRegistry {
+  uint64 journal = 1;
+  uint64 tenant = 2;
+  .paros.common.v1.Ballot gc_watermark = 3;
+  repeated Registration history = 4;
+  optional EffectiveConfiguration effective = 5;
+}
+
 message Stop {
   uint64 generation = 1;
+  // The page asked for; absent asks for the first.
+  optional RegistryCursor cursor = 2;
 }
 
 message Bootstrap {
+  // was the single registry (`gc_watermark`, `history`, `effective`):
+  // replaced by one entry per journal, paged (#190).
+  reserved 2, 3, 4;
   MatchmakerSet set = 1;
-  .paros.common.v1.Ballot gc_watermark = 2;
-  repeated Registration history = 3;
-  // The reconstructed effective configuration (the maximum over the stop
-  // quorum), carried beside the registry the GC watermark may have collected
-  // it from.
-  optional EffectiveConfiguration effective = 4;
+  // One page of the reconstruction, one entry per journal it covers.
+  repeated JournalRegistry registries = 5;
+  // The page's index in the reconstruction, and the range it covers.
+  uint32 page = 6;
+  optional RegistryCursor range_from = 7;
+  optional RegistryCursor range_to = 8;
 }
 
 message DecreePrepare {
@@ -181,21 +222,30 @@ message ReconfigureRequest {
 }
 
 message StopAck {
+  // was the single registry (`gc_watermark`, `history`, `effective`):
+  // replaced by one page of every journal's (#190).
+  reserved 2, 3, 6;
   uint64 generation = 1;
-  .paros.common.v1.Ballot gc_watermark = 2;
-  repeated Registration history = 3;
   optional MatchmakerSet successor = 4;
   // The highest decree ballot promised for the frozen generation: the
   // reconfigurer opens its decree strictly above the maximum over its stop
   // quorum, so a rebooted node never reuses a ballot of its earlier
   // incarnation.
   .paros.common.v1.Ballot decree_promised = 5;
-  // The effective configuration this matchmaker durably holds.
-  optional EffectiveConfiguration effective = 6;
+  // The cursor this page starts at, echoed.
+  optional RegistryCursor cursor = 7;
+  // One page of the frozen registries.
+  repeated JournalRegistry registries = 8;
+  // Where the next page starts; absent: this page completes them.
+  optional RegistryCursor next = 9;
 }
 
 message BootstrapAck {
   MatchmakerSet set = 1;
+  // The page merged and the range it covered, echoed (#190).
+  uint32 page = 2;
+  optional RegistryCursor range_from = 3;
+  optional RegistryCursor range_to = 4;
 }
 
 message DecreeVote {

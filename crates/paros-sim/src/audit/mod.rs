@@ -40,6 +40,7 @@ mod journal_model;
 pub(crate) mod journals;
 mod linearizability;
 mod matchmaker;
+pub(crate) mod set;
 mod state;
 pub(crate) mod system;
 mod world;
@@ -81,6 +82,11 @@ pub(crate) struct NodeAudit<T> {
     /// The run's system-journal board (#189), on a node that follows the
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
+    /// Every journal the matchmaker set serves, with its world, and the
+    /// run's cross-journal matchmaking board (#190): where a set-level
+    /// report fans out to. Empty off a matchmaker deployment.
+    set: set::SetWorlds,
+    set_board: Option<Arc<Mutex<set::SetBoard>>>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -124,7 +130,60 @@ impl<T: TimeProvider> NodeAudit<T> {
             world,
             journal: None,
             system: None,
+            set: Arc::from([]),
+            set_board: None,
         }
+    }
+
+    /// This port reports for a matchmaker set serving `worlds`' journals
+    /// (#190): its set-level reports fan out to every one of them, a
+    /// journal's own to that journal's world.
+    pub(crate) fn serving_set(
+        mut self,
+        worlds: set::SetWorlds,
+        board: Arc<Mutex<set::SetBoard>>,
+    ) -> Self {
+        self.set = worlds;
+        self.set_board = Some(board);
+        self
+    }
+
+    /// Every journal the set serves with its world — this port's own world
+    /// alone off a matchmaker deployment.
+    fn set_worlds(&self) -> Vec<(JournalKey, Arc<AuditWorld>)> {
+        if self.set.is_empty() {
+            vec![(
+                self.journal
+                    .as_ref()
+                    .map_or_else(JournalKey::default, |(j, _)| *j),
+                self.world.clone(),
+            )]
+        } else {
+            self.set.to_vec()
+        }
+    }
+
+    /// The world `journal`'s registry reports to.
+    fn world_of(&self, journal: JournalKey) -> Arc<AuditWorld> {
+        self.set
+            .iter()
+            .find(|(j, _)| *j == journal)
+            .map_or_else(|| self.world.clone(), |(_, world)| world.clone())
+    }
+
+    /// Run `f` on every set journal's matchmaker fold, one lock at a time.
+    fn each_set_fold(&self, mut f: impl FnMut(JournalKey, &mut matchmaker::MatchmakerAudit)) {
+        for (journal, world) in self.set_worlds() {
+            f(journal, &mut world.lock().matchmaker);
+        }
+    }
+
+    /// The journal this port's node reports for (the default one off the
+    /// journal plane).
+    fn own_journal(&self) -> JournalKey {
+        self.journal
+            .as_ref()
+            .map_or_else(JournalKey::default, |(journal, _)| *journal)
     }
 
     /// This port also reports the system journals' folds and their effects
@@ -1167,6 +1226,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Some((journal, board)) = &self.journal {
             journals::lock(board).reopened(node.0, *journal);
         }
+        // A boot opens no campaign: whatever this journal had open died
+        // with the incarnation.
+        if let Some(board) = &self.set_board {
+            set::lock(board).closed(node, self.own_journal());
+        }
         let mut st = self.state();
         st.booted.insert(node.0);
         // One shared deployment per run: every node's durable configuration
@@ -1742,12 +1806,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &BTreeMap<Ballot, Registration>,
-        gc_watermark: Ballot,
+        registries: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
+        scalars: &MatchmakerHardState,
     ) {
-        self.state()
-            .matchmaker
-            .recovered(matchmaker, set, phase, registry, gc_watermark);
+        self.each_set_fold(|journal, fold| {
+            fold.recovered(
+                matchmaker,
+                set,
+                phase,
+                &set::registry_of(registries, journal),
+                scalars.gc_watermark(journal),
+            );
+        });
     }
 
     fn matchmaker_scalars_persisted(
@@ -1755,9 +1825,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         matchmaker: MatchmakerId,
         scalars: &MatchmakerHardState,
     ) {
-        self.state()
-            .matchmaker
-            .scalars_persisted(matchmaker, scalars);
+        self.each_set_fold(|journal, fold| fold.scalars_persisted(journal, matchmaker, scalars));
     }
 
     fn reconfigurer_reconstructed(
@@ -1767,22 +1835,39 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         bootstrap: &PendingBootstrap,
         disagreements: u64,
     ) {
-        self.state()
-            .matchmaker
-            .reconstructed(node, generation, bootstrap, disagreements);
+        self.each_set_fold(|journal, fold| {
+            let registry = bootstrap
+                .registries
+                .get(&journal)
+                .cloned()
+                .unwrap_or_default();
+            fold.reconstructed(
+                node,
+                generation,
+                &bootstrap.set,
+                (registry.gc_watermark, &registry.history),
+                disagreements,
+            );
+        });
     }
 
     fn matchmaker_activated(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
-        gc_watermark: Ballot,
-        effective: Option<&(Ballot, AcceptorConfig)>,
-        registry: &BTreeMap<Ballot, Registration>,
+        scalars: &MatchmakerHardState,
+        registries: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     ) {
-        self.state()
-            .matchmaker
-            .activated(matchmaker, set, gc_watermark, effective, registry);
+        set::activation_gate(registries, self.set.len());
+        self.each_set_fold(|journal, fold| {
+            fold.activated(
+                matchmaker,
+                set,
+                scalars.gc_watermark(journal),
+                scalars.effective(journal),
+                &set::registry_of(registries, journal),
+            );
+        });
     }
 
     fn matchmaker_reconfigure_replied(
@@ -1791,22 +1876,25 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _request: &ReconfigureRequest,
         reply: &ReconfigureReply,
     ) {
-        self.state()
-            .matchmaker
-            .reconfigure_replied(matchmaker, reply);
+        self.each_set_fold(|journal, fold| fold.reconfigure_replied(journal, matchmaker, reply));
     }
 
     fn matchmaker_gc_replied(&self, matchmaker: MatchmakerId, ack: &GcAck) {
-        self.state().matchmaker.gc_replied(matchmaker, ack);
+        self.world_of(ack.journal)
+            .lock()
+            .matchmaker
+            .gc_replied(matchmaker, ack);
     }
 
     fn match_registered(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         ballot: Ballot,
         registration: &Registration,
     ) {
-        let mut st = self.state();
+        let world = self.world_of(journal);
+        let mut st = world.lock();
         st.matchmaker.registered(matchmaker, ballot, registration);
         let config = &registration.config;
         // The per-ballot configuration the quorum oracles count over: bound
@@ -1814,8 +1902,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.bind_config(ballot, config);
     }
 
-    fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {
-        self.state()
+    fn gc_watermark_raised(
+        &self,
+        matchmaker: MatchmakerId,
+        journal: JournalKey,
+        watermark: Ballot,
+    ) {
+        set::watermark_gate(&self.set, matchmaker, journal, watermark);
+        self.world_of(journal)
+            .lock()
             .matchmaker
             .watermark_raised(matchmaker, watermark);
     }
@@ -1823,12 +1918,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn match_replied(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         to: NodeId,
         ballot: Ballot,
         generation: u64,
         page: &HistoryPage<'_>,
     ) {
-        self.state()
+        self.world_of(journal)
+            .lock()
             .matchmaker
             .replied(matchmaker, to, ballot, generation, page);
     }
@@ -1843,6 +1940,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         kind: RegistrationKind,
         generation: u64,
     ) {
+        if let Some(board) = &self.set_board {
+            set::lock(board).opened(node, self.own_journal());
+        }
         self.state()
             .matchmaker
             .campaign_started(node, ballot, config, kind, generation);
@@ -1933,17 +2033,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn reconfigurer_started(&self, node: NodeId, old: &MatchmakerSet, target: &[MatchmakerId]) {
-        self.state()
-            .matchmaker
-            .reconfigurer_started(node, old, target);
+        self.each_set_fold(|_, fold| fold.reconfigurer_started(node, old, target));
     }
 
     fn reconfigurer_aborted(&self, node: NodeId) {
-        self.state().matchmaker.reconfigurer_aborted(node);
+        self.each_set_fold(|_, fold| fold.reconfigurer_aborted(node));
     }
 
     fn reconfigurer_backoff(&self, _node: NodeId, _ticks: u64) {
-        self.state().matchmaker.reconfigurer_backoff();
+        self.each_set_fold(|_, fold| fold.reconfigurer_backoff());
     }
 
     fn reconfigure_matchmakers_acked(&self, _node: NodeId, refusal: &'static str) {
@@ -1962,7 +2060,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn reconfigurer_resend_skipped(&self, _node: NodeId) {
-        self.state().matchmaker.reconfigurer_resend_skipped();
+        self.each_set_fold(|_, fold| fold.reconfigurer_resend_skipped());
     }
 
     fn reconfigurer_step(
@@ -1972,9 +2070,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reply: &ReconfigureReply,
         step: &ReconfigurerStep,
     ) {
-        self.state()
-            .matchmaker
-            .reconfigurer_step(node, matchmaker, reply, step);
+        self.each_set_fold(|journal, fold| {
+            fold.reconfigurer_step(journal, node, matchmaker, reply, step);
+        });
     }
 
     fn successor_republished(
@@ -1983,9 +2081,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _matchmaker: MatchmakerId,
         successor: &MatchmakerSet,
     ) {
-        self.state()
-            .matchmaker
-            .successor_republished(node, successor);
+        self.each_set_fold(|_, fold| fold.successor_republished(node, successor));
     }
 
     fn retire_acked(&self, _node: NodeId, accepted: bool, refusal: &str) {
@@ -2056,6 +2152,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn matchmaking_stale_configuration(&self, node: NodeId, ballot: Ballot, newest: Ballot) {
+        if let Some(board) = &self.set_board {
+            set::lock(board).closed(node, self.own_journal());
+        }
         self.state().matchmaker.campaign_stale(node, ballot, newest);
     }
 
@@ -2109,6 +2208,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         registered_by: usize,
         disagreements: u64,
     ) {
+        if let Some(board) = &self.set_board {
+            set::lock(board).completed(node, self.own_journal(), self.set.len());
+        }
         let mut st = self.state();
         st.matchmaker
             .completed(node, ballot, prior, watermark, registered_by, disagreements);
@@ -2122,6 +2224,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         ballot: Ballot,
         refusal: MatchRefusal,
     ) {
+        if let Some(board) = &self.set_board {
+            set::lock(board).closed(node, self.own_journal());
+        }
         self.state()
             .matchmaker
             .campaign_refused(node, ballot, &refusal);
@@ -2169,22 +2274,26 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn match_refused(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         _to: NodeId,
         ballot: Ballot,
         refusal: MatchRefusal,
     ) {
-        self.state().matchmaker.refused(matchmaker, ballot, refusal);
+        self.world_of(journal)
+            .lock()
+            .matchmaker
+            .refused(matchmaker, ballot, refusal);
     }
 
     fn matchmaker_crashed(&self, _matchmaker: MatchmakerId, seam: Seam) {
-        self.state().matchmaker.crashed(seam);
+        self.each_set_fold(|_, fold| fold.crashed(seam));
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0, refusal = ?refusal))]
     fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {
         match refusal {
             // #183: the library, not the harness, keeps a wiped registry out.
-            BootRefusal::Amnesia => self.state().matchmaker.boot_refused(matchmaker.0),
+            BootRefusal::Amnesia => self.each_set_fold(|_, fold| fold.boot_refused(matchmaker.0)),
             BootRefusal::AlreadyFormatted => {
                 assert_always!(
                     false,
@@ -2204,7 +2313,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn match_reply_dropped(&self, _matchmaker: MatchmakerId, reply: paros::Reply) {
-        self.state().matchmaker.reply_dropped(reply);
+        self.each_set_fold(|_, fold| fold.reply_dropped(reply));
     }
 
     fn matchmaker_storage_fault(
@@ -2213,7 +2322,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _error: &StorageError,
         decision: StorageFaultDecision,
     ) {
-        self.state().matchmaker.storage_fault(matchmaker, decision);
+        self.each_set_fold(|_, fold| fold.storage_fault(matchmaker, decision));
     }
 }
 

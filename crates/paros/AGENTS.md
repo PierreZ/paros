@@ -15,7 +15,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `provision.rs` → `provision_store`, `provision_matchmaker_store`, `Provisioned` → format a store ahead of its first start; an interrupted run resumes from the disk (#208).
 - `driver/{boot,ready,report}.rs` → format-marker check, the `Ready` I/O side in persist-before-send order, boot report.
 - `driver/transport.rs` → `PeerMailbox`, `LaneOpener`, `peer_address` → keep-newest lanes per journal, round-robin.
-- `driver/{matchmaking,handover,operator,events}.rs` → matchmaker wire, set handover, Reconfigure/Retire/Inspect, events.
+- `driver/{matchmaking,handover,operator,events}.rs` → matchmaker wire (replies routed by the journal they name, #190), set handover (one per node, paced by the first matchmaking journal, `Journals::matchmaking`), Reconfigure/Retire/Inspect, events.
 - `driver/edge.rs` → `RpcEdge`, `NodeInbox`, `ReplicaInbox`, `MatchmakerInbox` → the inbound edge, polled as a `select!` arm.
 - `driver/reply.rs` → `answer`, `match_answer`, `maybe_duplicate` → the one client-reply seam.
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
@@ -25,7 +25,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.
-- `matchmaker/{mod,storage}.rs` → `run_matchmaker`, `MatchmakerStorage`, `MemMatchmakerStorage`, `matchmaker_storage_contract_suite`.
+- `matchmaker/{mod,storage}.rs` → `run_matchmaker`, `MatchmakerStorage` (every write names its journal, #190), `MemMatchmakerStorage` (over the core's `MemRegistry`), `matchmaker_storage_contract_suite` (two journals in one store).
 - `proxy/mod.rs` → `run_proxy`, `ProxyConfig` → Phase-2 subset, nothing durable (#142).
 - `replica_tier/mod.rs` → `run_replica` → learner subset over a `LogStorage`; serves `Read` (#144).
 - `rpc/methods.rs` → one `RpcMethod` per call, `WellKnownMethod` ids (public `0x5041_00xx`, internal `0x5041_01xx`, matchmaker `0x5041_02xx`, machine `0x5041_03xx`; retired ids never reused).
@@ -48,7 +48,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `system/registry/mod.rs` → `Registry` → the cell control journal: nodes by `node_id` with class, capacity and bookings (#211); `Checkpointable` (#230) · `system/registry/fleet.rs` → `FleetRegistration`, `HostedTenant` → its fleet half: the cell's registration and hosted tenants (#229).
 - `system/meta.rs` → `Meta`, `TenantState`, `CellState`, `METADATA_VERSION` → the fleet's directory (`1/1`): cells and tenants with their states (#229); `Checkpointable`.
 - `corruption.rs` → `classify_log` → CTRL record classification.
-- `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.
+- `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage` (every journal's registry in one log; a damaged registration is excused only below every journal's watermark).
 - `journal/{frame,plan,node_image}.rs` → record ↔ entry codec, boot fold start, node records + per-kind corruption table.
 - `journal/tests.rs` → both contract suites, targeted damage, crash loop under two fault models on `SimStorageProvider`.
 - `proto/{common,paros,internal,matchmaker,system,machine,checkpoint}.proto` → compiled by `build.rs` with `prost-build`.

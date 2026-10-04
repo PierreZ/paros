@@ -5,6 +5,7 @@
 //! of **every** prior configuration, never of their union.
 
 use super::*;
+use crate::types::JournalKey;
 
 /// Reply to `n`'s open matchmaking from `mms`, folding every answer.
 fn run_matchmaking(n: &mut ColocatedNode, mms: &mut [Matchmaker]) -> Vec<MatchStep> {
@@ -98,6 +99,7 @@ fn registered_page(
 fn registered_reply(mm: u64, ballot: Ballot, outcome: MatchOutcome) -> MatchReply {
     MatchReply {
         matchmaker: MatchmakerId(mm),
+        journal: JournalKey::default(),
         to: ballot.node,
         ballot,
         generation: MatchmakerGeneration(0),
@@ -924,7 +926,7 @@ fn an_ordinary_registration_never_raises_the_effective_configuration() {
             MatchOutcome::Probed { .. } => panic!("expected a registration, got a probe answer"),
         }
     }
-    assert_eq!(mms[0].hard_state().effective, None);
+    assert_eq!(mms[0].hard_state().effective(JournalKey::default()), None);
 }
 
 /// A full page of beliefs at rounds `1..=REGISTRY_PAGE`, all naming
@@ -1150,7 +1152,7 @@ fn a_floor_raised_over_the_cursor_between_two_pages_still_completes_the_campaign
     let raised = ballot(page + 1, 5);
     assert!(raised > cursor && raised < b);
     assert_eq!(
-        mms[0].advance_gc_watermark(MatchmakerGeneration(0), raised),
+        mms[0].advance_gc_watermark(JournalKey::default(), MatchmakerGeneration(0), raised),
         crate::matchmaker::GcOutcome::Raised
     );
     mms[0].ready().advance();

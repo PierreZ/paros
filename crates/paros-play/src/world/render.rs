@@ -243,7 +243,7 @@ fn matchmaker_view(process: &MatchmakerProcess) -> MatchmakerView {
         alive: process.alive(),
         generation,
         phase,
-        gc_watermark: show_ballot(scalars.gc_watermark),
+        gc_watermark: show_ballot(scalars.gc_watermark(paros_core::JournalKey::default())),
         registrations: disk
             .registrations()
             .iter()

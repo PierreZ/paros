@@ -691,9 +691,11 @@ enum StoreDraw {
 /// backoff (`DriverTunables::election_backoff_doublings`) landed after it,
 /// and the 2,000-seed hunt that lifted the restriction was clean. The
 /// **default** journal is the seed's deployment — its matchmakers, proxies,
-/// replicas and bootstrap; every other journal is a plain Multi-Paxos
-/// journal over the whole pool (`crate::process`: the matchmaker plane, the
-/// proxy leaders and the replica tier serve one journal each). On a
+/// replicas and bootstrap. On a matchmaker seed every other journal of the
+/// default tenant shares the set and the bootstrap, one registry each in
+/// the set (#190); every journal of another tenant is a plain Multi-Paxos
+/// journal over the whole pool (`crate::process`: the proxy leaders and the
+/// replica tier serve one journal). On a
 /// multi-journal seed a second location draws whether one journal is
 /// **held** on every node for the chaos window (`DriverHooks::hold_journal`):
 /// its siblings must keep committing.

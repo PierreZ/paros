@@ -1235,6 +1235,7 @@ pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: 
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     guard.matchmakers.get(ip).is_some_and(|disk| {
         disk.registry
+            .registrations()
             .values()
             .any(|registration| registration.config.contains(paros::NodeId(node)))
     })

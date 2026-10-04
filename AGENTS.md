@@ -197,6 +197,11 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   `ColocatedNode::may_retire` checks five legs (matchmakers, not a member, not the leader,
   watermark above `last_member_ballot`, belief bound to exactly that watermark). The operator's
   half: retire no node a reconfiguration it asked for above the floor names.
+- **One set per tenant** (#190): a matchmaker set serves every journal of its tenant, one registry
+  per journal. The generation is the set's; the watermark and the effective configuration are each
+  journal's. Every matchmaking and GC message names its `JournalKey`; the handover freezes,
+  pages (`REGISTRY_PAGE`, a `(JournalKey, Ballot)` cursor) and reconstructs every journal's
+  registry at once, and an activated registry is judged complete per journal.
 - **Matchmaker sets are generations**: every matchmaking message is fenced by generation;
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
   `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop

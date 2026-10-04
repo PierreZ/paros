@@ -684,15 +684,31 @@ async fn run_acceptor(
     // upgraded per op), its own audit world and audit port. Nothing crosses:
     // a journal's budget, fault ledger, parked identities and oracles are
     // its own. The default journal is the seed's deployment (its
-    // matchmakers, proxies, replicas and bootstrap); every other journal is
-    // plain Multi-Paxos over the whole pool — the matchmaker plane, the
-    // proxy leaders and the replica tier each serve one journal.
+    // matchmakers, proxies, replicas and bootstrap). A matchmaker set serves
+    // every journal of its tenant (#190): every other journal of the
+    // default tenant shares the set and the bootstrap, each with its own
+    // registry in it; every journal of another tenant is plain Multi-Paxos
+    // over the whole pool — the proxy leaders and the replica tier serve one
+    // journal.
+    let set_worlds = if config.has_matchmakers() {
+        crate::audit::set::set_worlds(ctx.state(), &plan)
+    } else {
+        Arc::from([])
+    };
+    let set_board = crate::audit::set::set_board(ctx.state());
     let mut seats: Vec<Seat> = plan
         .ids
         .iter()
         .map(|&journal| {
             let config = if journal == paros::JournalKey::default() {
                 config.clone()
+            } else if config.has_matchmakers() && journal.tenant == config.journal.tenant {
+                Config {
+                    journal,
+                    proxy_count: 0,
+                    replica_count: 0,
+                    ..config.clone()
+                }
             } else {
                 Config {
                     journal,
@@ -721,6 +737,11 @@ async fn run_acceptor(
             let checker = audit_world_for(ctx.state(), journal);
             let audit = NodeAudit::new(ctx.time().clone(), checker.clone())
                 .in_journal(journal, board.clone());
+            let audit = if config.has_matchmakers() {
+                audit.serving_set(set_worlds.clone(), set_board.clone())
+            } else {
+                audit
+            };
             Seat {
                 journal,
                 config,
@@ -1468,6 +1489,14 @@ async fn run_matchmaker_role(
         checker,
         audit,
     } = arm_role(ctx, my_ip, perturb);
+    // One set, one registry per journal of its tenant (#190): a report about
+    // a journal's registry reaches that journal's audit world, a report
+    // about the set every one of them.
+    let plan = crate::shape::journals(ctx.state(), perturb);
+    let audit = audit.serving_set(
+        crate::audit::set::set_worlds(ctx.state(), &plan),
+        crate::audit::set::set_board(ctx.state()),
+    );
     let shape = incarnation.shape;
     // The registry's own write path rides the seed's node-disk profile and
     // the same chaos window (see `world::matchmaker`): the only fault it
@@ -1986,29 +2015,30 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
                 faults.clone(),
                 0,
             );
+            let journal = paros::JournalKey::default();
             store
-                .register(ballot(1), &config)
+                .register(journal, ballot(1), &config)
                 .await
                 .expect("register 1");
             store.sync().await.expect("sync 1");
             store
-                .register(ballot(2), &config)
+                .register(journal, ballot(2), &config)
                 .await
                 .expect("register 2 (never synced)");
             store
-                .set_gc_watermark(ballot(1))
+                .set_gc_watermark(journal, ballot(1))
                 .await
                 .expect("raise (never synced)");
             drop(store);
             let rebooted =
                 DurableMatchmakerStorage::restore(Arc::downgrade(&world), key, faults.clone(), 0);
             assert_always!(
-                rebooted.registered_ballots() == vec![ballot(1)]
-                    && rebooted.registration(ballot(2)).is_none(),
+                rebooted.registered_ballots() == vec![(journal, ballot(1))]
+                    && rebooted.registration(journal, ballot(2)).is_none(),
                 "matchmaker: an un-synced registration does not survive a crash"
             );
             assert_always!(
-                rebooted.initial_state().gc_watermark == Ballot::zero(),
+                rebooted.initial_state().gc_watermark(journal) == Ballot::zero(),
                 "matchmaker: an un-synced watermark raise does not survive a crash"
             );
         }

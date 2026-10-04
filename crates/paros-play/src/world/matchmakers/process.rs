@@ -11,9 +11,9 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, GcAck, GcOutcome, GcRequest, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
-    MatchmakerHardState, MatchmakerId, MemRegistry, ReconfigureReply, ReconfigureRequest,
-    Registration,
+    Ballot, GcAck, GcOutcome, GcRequest, JournalKey, MatchReply, MatchRequest, Matchmaker,
+    MatchmakerConfig, MatchmakerHardState, MatchmakerId, MemRegistry, ReconfigureReply,
+    ReconfigureRequest, Registration,
 };
 
 /// One matchmaker's disk: the library's own [`MemRegistry`], plus the two
@@ -46,10 +46,16 @@ impl RegistryDisk {
         self.store.hard_state()
     }
 
-    /// The registry records, in ballot order.
+    /// The registry records, in ballot order: the game's one journal's
+    /// (a set holds one registry per journal of its tenant, #190).
     #[must_use]
-    pub fn registrations(&self) -> &BTreeMap<Ballot, Registration> {
-        self.store.registrations()
+    pub fn registrations(&self) -> BTreeMap<Ballot, Registration> {
+        self.store
+            .registrations()
+            .iter()
+            .filter(|((journal, _), _)| *journal == JournalKey::default())
+            .map(|((_, ballot), registration)| (*ballot, registration.clone()))
+            .collect()
     }
 
     /// How many durable writes this disk has taken. One acknowledged batch
@@ -93,7 +99,13 @@ impl MatchmakerProcess {
     ) -> Self {
         let config = MatchmakerConfig { id, bootstrap };
         let disk = RegistryDisk {
-            store: MemRegistry::new(MatchmakerHardState::default(), registrations),
+            store: MemRegistry::new(
+                MatchmakerHardState::default(),
+                registrations
+                    .into_iter()
+                    .map(|(ballot, registration)| ((JournalKey::default(), ballot), registration))
+                    .collect(),
+            ),
             writes: 0,
             synced: 0,
         };
@@ -181,16 +193,18 @@ impl MatchmakerProcess {
     /// dropped instead leaves the raise pending, and the next batch applies it
     /// to the disk a second time.
     pub(super) fn deliver_gc(&mut self, request: GcRequest) -> Option<GcAck> {
-        let outcome = self
-            .role
-            .as_mut()?
-            .advance_gc_watermark(request.generation, request.watermark);
+        let outcome = self.role.as_mut()?.advance_gc_watermark(
+            request.journal,
+            request.generation,
+            request.watermark,
+        );
         self.persist();
         let role = self.role.as_mut()?;
-        let watermark = role.hard_state().gc_watermark;
+        let watermark = role.hard_state().gc_watermark(request.journal);
         role.ready().advance();
         Some(GcAck {
             matchmaker: self.config.id,
+            journal: request.journal,
             generation: request.generation,
             applied: outcome != GcOutcome::Refused,
             watermark,

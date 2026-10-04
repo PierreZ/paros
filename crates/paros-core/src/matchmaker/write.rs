@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use super::{MatchReply, Matchmaker, MatchmakerHardState, ReconfigureReply, Registration};
-use crate::types::Ballot;
+use crate::types::{Ballot, JournalKey};
 
 /// A single semantic durable write the driver must apply to stable storage
 /// and **fsync before** the batch's replies leave — every matchmaker write is
@@ -13,28 +13,38 @@ use crate::types::Ballot;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MatchmakerWriteOp {
-    /// Register `config` under `ballot`. Append-only: `ballot` is strictly
-    /// above every ballot the registry holds.
+    /// Register `config` under `ballot` in `journal`'s registry (#190).
+    /// Append-only: `ballot` is strictly above every ballot that registry
+    /// holds.
     Register {
+        /// The journal whose registry it is.
+        journal: JournalKey,
         /// The ballot registered.
         ballot: Ballot,
         /// The record registered under it.
         registration: Registration,
     },
-    /// Raise the durable GC watermark to `watermark` and drop every
-    /// registration below it. Monotone: never below the current watermark.
-    SetGcWatermark(Ballot),
-    /// Persist the durable scalars whole (the generation state and the
-    /// decree record). The watermark inside equals the durable one.
+    /// Raise `journal`'s durable GC watermark to `watermark` and drop every
+    /// registration of it below it. Monotone: never below the current one.
+    SetGcWatermark {
+        /// The journal.
+        journal: JournalKey,
+        /// The new watermark.
+        watermark: Ballot,
+    },
+    /// Persist the durable scalars whole (the generation state, the decree
+    /// record, every journal's watermark and effective configuration). The
+    /// watermarks inside equal the durable ones.
     SetScalars(MatchmakerHardState),
-    /// Replace the registry whole — the activation of a successor generation:
-    /// every record dropped, these written, and the scalars (whose watermark
-    /// is the reconstructed one) persisted in the same batch.
+    /// Replace every registry whole — the activation of a successor
+    /// generation: every record dropped, these written, and the scalars
+    /// (whose watermarks are the reconstructed ones) persisted in the same
+    /// batch.
     InstallRegistry {
         /// The scalars after activation.
         scalars: MatchmakerHardState,
-        /// The reconstructed registry.
-        registrations: BTreeMap<Ballot, Registration>,
+        /// The reconstructed registries, per journal.
+        registrations: BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     },
 }
 

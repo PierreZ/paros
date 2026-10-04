@@ -10,9 +10,12 @@
 
 use std::collections::BTreeMap;
 
-use super::{MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind};
+use super::{
+    MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind, RegistryCursor,
+    RegistrySnapshot,
+};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::{Ballot, NodeId};
+use crate::types::{Ballot, JournalKey, NodeId};
 
 /// A proposer's matchmaking request: "register `config` for `ballot`, and tell
 /// me every configuration registered below it" (the paper's `MatchA`), fenced
@@ -22,6 +25,9 @@ use crate::types::{Ballot, NodeId};
 pub struct MatchRequest {
     /// The requesting proposer.
     pub from: NodeId,
+    /// The journal whose registry the request is for (#190): a matchmaker
+    /// set holds one registry per journal of its tenant.
+    pub journal: JournalKey,
     /// The ballot to register under. One ballot has exactly one proposer, so
     /// `ballot.node` is the identity that keeps matchmakers from disagreeing.
     pub ballot: Ballot,
@@ -59,6 +65,7 @@ impl MatchRequest {
     ) -> Self {
         Self {
             from,
+            journal: JournalKey::default(),
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Belief),
@@ -78,6 +85,7 @@ impl MatchRequest {
     ) -> Self {
         Self {
             from,
+            journal: JournalKey::default(),
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Reconfiguration),
@@ -122,12 +130,21 @@ impl MatchRequest {
     ) -> Self {
         Self {
             from,
+            journal: JournalKey::default(),
             ballot,
             config: believed,
             purpose: MatchPurpose::Probe,
             generation,
             from_ballot: None,
         }
+    }
+
+    /// The same request, for `journal`'s registry (the constructors address
+    /// the default journal's).
+    #[must_use]
+    pub fn in_journal(mut self, journal: JournalKey) -> Self {
+        self.journal = journal;
+        self
     }
 
     /// The same request, asking for the page that starts at `from`: what a
@@ -268,6 +285,8 @@ pub enum MatchOutcome {
 pub struct MatchReply {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
+    /// The request's journal, echoed (#190).
+    pub journal: JournalKey,
     /// The requester the reply is addressed to.
     pub to: NodeId,
     /// The request's ballot, echoed.
@@ -285,6 +304,9 @@ pub struct MatchReply {
 pub struct GcRequest {
     /// The requesting leader.
     pub from: NodeId,
+    /// The journal whose watermark is raised (#190): each journal's leader
+    /// raises its own, never once for the whole set.
+    pub journal: JournalKey,
     /// The generation addressed.
     pub generation: MatchmakerGeneration,
     /// The floor to raise to — the leader's own ballot.
@@ -297,6 +319,8 @@ pub struct GcRequest {
 pub struct GcAck {
     /// The answering matchmaker.
     pub matchmaker: MatchmakerId,
+    /// The request's journal, echoed (#190).
+    pub journal: JournalKey,
     /// The request's generation, echoed.
     pub generation: MatchmakerGeneration,
     /// Whether the request was applied at that generation (a matchmaker not
@@ -311,19 +335,30 @@ pub struct GcAck {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureRequest {
-    /// Freeze `generation` and report its registry (`StopA`).
+    /// Freeze `generation` — every journal's registry together — and report
+    /// the frozen registries (`StopA`), one page at a time (#190).
     Stop {
         /// The requesting node.
         from: NodeId,
         /// The generation to freeze.
         generation: MatchmakerGeneration,
+        /// Where the page asked for starts (`None`: the first page).
+        cursor: Option<RegistryCursor>,
     },
-    /// Hand a proposed successor's initial state to one of its members.
+    /// Hand one page of a proposed successor's initial state to one of its
+    /// members, which merges it into what it holds for that set.
     Bootstrap {
         /// The requesting node.
         from: NodeId,
-        /// The proposed set, its reconstructed watermark and registry.
+        /// The proposed set, and the page of its reconstructed registries.
         bootstrap: PendingBootstrap,
+        /// The page's index in the reconfigurer's reconstruction.
+        page: u32,
+        /// The range the page covers: from this cursor (`None`: the start)
+        /// to `next` (`None`: the end). Echoed, so an acknowledgement counts
+        /// only for the range it was sent for — a stale one from another
+        /// reconstruction's partition never covers a range it did not carry.
+        range: (Option<RegistryCursor>, Option<RegistryCursor>),
     },
     /// Phase 1a of the successor decree over `generation`'s matchmakers.
     DecreePrepare {
@@ -394,24 +429,31 @@ impl ReconfigureRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReconfigureReply {
-    /// `generation` is frozen here (`StopB`): its durable registry, watermark,
-    /// and the successor if already learned.
+    /// `generation` is frozen here (`StopB`): one page of its durable
+    /// registries (#190) and the successor if already learned.
     Stopped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The frozen generation.
         generation: MatchmakerGeneration,
-        /// The durable watermark.
-        gc_watermark: Ballot,
-        /// The durable registry at or above the watermark.
-        history: BTreeMap<Ballot, Registration>,
-        /// The **effective configuration** this matchmaker durably holds
-        /// (see [`super::MatchmakerHardState::effective`]). The
-        /// reconstruction takes the maximum over its stop quorum, exactly as
-        /// it takes the maximum watermark, so a successor generation
-        /// inherits the acceptor set in force even when the record it came
-        /// from was collected long ago.
-        effective: Option<(Ballot, AcceptorConfig)>,
+        /// The cursor the page starts at, echoed: a reconfigurer takes a
+        /// page only at the cursor it expects next, so a member's pages are
+        /// folded in order and its registries count as complete only once
+        /// every page of them was (a frozen registry is immutable, so every
+        /// page at one cursor is the same page).
+        cursor: Option<RegistryCursor>,
+        /// One page of the frozen registries: each journal's watermark,
+        /// registrations at or above it, and **effective configuration**
+        /// (see [`super::RegistryScalars::effective`]). The reconstruction
+        /// takes the maximum effective configuration over its stop quorum,
+        /// exactly as it takes the maximum watermark, so a successor
+        /// generation inherits the acceptor set in force even when the
+        /// record it came from was collected long ago.
+        registries: BTreeMap<JournalKey, RegistrySnapshot>,
+        /// Where the next page starts; `None`: this page completes the
+        /// frozen registries, and only then does the answer count toward
+        /// the stop quorum.
+        next: Option<RegistryCursor>,
         /// The chosen successor, if learned.
         successor: Option<MatchmakerSet>,
         /// The highest decree ballot this matchmaker has promised for the
@@ -425,12 +467,16 @@ pub enum ReconfigureReply {
         /// model checker's finding, seed 103).
         decree_promised: Ballot,
     },
-    /// The bootstrap for `set` is durably pending here.
+    /// One page of the bootstrap for `set` is durably pending here.
     Bootstrapped {
         /// The answering matchmaker.
         matchmaker: MatchmakerId,
         /// The proposed set the bootstrap was for.
         set: MatchmakerSet,
+        /// The page merged, and the range it covered, echoed.
+        page: u32,
+        /// See [`ReconfigureRequest::Bootstrap`]'s `range`.
+        range: (Option<RegistryCursor>, Option<RegistryCursor>),
     },
     /// Phase 1b: promised `ballot`, reporting the vote held.
     Promised {

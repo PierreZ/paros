@@ -17,10 +17,10 @@
 //! this node does not run is dropped and the sender's re-send repairs it.
 //! The id is never folded into a command fingerprint instead: that would
 //! protect only `Accepted`'s vhash, while `Prepare`, `Promise`, `Commit`,
-//! `Heartbeat` and catch-up would still cross journals. The matchmaker
-//! plane, the proxy leaders and the replica tier serve one journal each —
-//! the node's first user journal (asserted at boot); every other journal is
-//! plain Multi-Paxos over the whole pool.
+//! `Heartbeat` and catch-up would still cross journals. The proxy leaders
+//! and the replica tier serve one journal each — the node's first user
+//! journal (asserted at boot); a matchmaker set serves every user journal
+//! that names it, one registry each (#190, [`Journals::matchmaking`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -224,6 +224,17 @@ impl<S, A> Journals<S, A> {
     /// [`Journals::first`], read-only.
     pub(crate) fn plane(&self) -> Option<(&JournalKey, &JournalRt<S, A>)> {
         self.live.iter().find(|(journal, _)| journal.is_user())
+    }
+
+    /// Every live journal that names the matchmaker set, in id order
+    /// (#190: the set serves every user journal of its tenant). The first
+    /// paces the set's handover and hears its replies.
+    pub(crate) fn matchmaking(&self) -> Vec<JournalKey> {
+        self.live
+            .iter()
+            .filter(|(journal, rt)| journal.is_user() && rt.node.config().has_matchmakers())
+            .map(|(journal, _)| *journal)
+            .collect()
     }
 
     /// Whether the node has nothing left to serve **because of a fault**: no

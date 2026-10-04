@@ -14,8 +14,8 @@ use std::net::IpAddr;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, Command, Config, Entry, Generation, JournalState, MustSync,
-    NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
+    AcceptorConfig, Ballot, ClientId, Command, Config, Entry, Generation, JournalKey, JournalState,
+    MustSync, NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
 };
 
 use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
@@ -332,17 +332,17 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
             };
             let mut registry = open_registry(provider.clone(), "m").await.expect("open");
             registry
-                .register(ballot(1), &belief(0xC100))
+                .register(JournalKey::default(), ballot(1), &belief(0xC100))
                 .await
                 .expect("register");
             registry.sync().await.expect("sync");
             registry
-                .register(ballot(2), &belief(0xD200))
+                .register(JournalKey::default(), ballot(2), &belief(0xD200))
                 .await
                 .expect("register");
             registry.sync().await.expect("sync");
             registry
-                .register(ballot(3), &belief(0xE300))
+                .register(JournalKey::default(), ballot(3), &belief(0xE300))
                 .await
                 .expect("register");
             registry.sync().await.expect("sync");
@@ -364,11 +364,11 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
             // Damage in the last append batch is the undecidable row: a
             // crash before its sync leaves the same shape.
             let mut last = open_registry(provider.clone(), "m3").await.expect("open");
-            last.register(ballot(1), &belief(0xC100))
+            last.register(JournalKey::default(), ballot(1), &belief(0xC100))
                 .await
                 .expect("register");
             last.sync().await.expect("sync");
-            last.register(ballot(2), &belief(0xD200))
+            last.register(JournalKey::default(), ballot(2), &belief(0xD200))
                 .await
                 .expect("register");
             last.sync().await.expect("sync");
@@ -386,16 +386,19 @@ fn a_damaged_registration_is_a_crash_and_a_collected_one_is_not() {
             // Collected below the watermark, the same damage is harmless.
             let mut other = open_registry(provider.clone(), "m2").await.expect("open");
             other
-                .register(ballot(1), &belief(0xC100))
+                .register(JournalKey::default(), ballot(1), &belief(0xC100))
                 .await
                 .expect("register");
             other.sync().await.expect("sync");
             other
-                .register(ballot(2), &belief(0xD200))
+                .register(JournalKey::default(), ballot(2), &belief(0xD200))
                 .await
                 .expect("register");
             other.sync().await.expect("sync");
-            other.set_gc_watermark(ballot(3)).await.expect("raise");
+            other
+                .set_gc_watermark(JournalKey::default(), ballot(3))
+                .await
+                .expect("raise");
             other.sync().await.expect("sync");
             drop(other);
             rot_entry(&provider, "m2", 2).await;

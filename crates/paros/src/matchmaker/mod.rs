@@ -21,10 +21,13 @@
 
 mod storage;
 
+use std::collections::BTreeMap;
+
 use moonpool_core::Providers;
 use paros_core::{
-    GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker, MatchmakerConfig,
-    MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
+    Ballot, GcAck, GcOutcome, GcRequest, JournalKey, MatchOutcome, MatchReply, Matchmaker,
+    MatchmakerConfig, MatchmakerId, MatchmakerSet, MatchmakerWriteOp, ReconfigureReply,
+    Registration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -187,11 +190,12 @@ where
     for op in &writes {
         let staged = match op {
             MatchmakerWriteOp::Register {
+                journal,
                 ballot,
                 registration,
-            } => storage.register(*ballot, registration).await,
-            MatchmakerWriteOp::SetGcWatermark(watermark) => {
-                storage.set_gc_watermark(*watermark).await
+            } => storage.register(*journal, *ballot, registration).await,
+            MatchmakerWriteOp::SetGcWatermark { journal, watermark } => {
+                storage.set_gc_watermark(*journal, *watermark).await
             }
             MatchmakerWriteOp::SetScalars(scalars) => storage.set_scalars(scalars).await,
             MatchmakerWriteOp::InstallRegistry {
@@ -237,12 +241,14 @@ fn surface_registry_writes<A: Audit>(writes: &[MatchmakerWriteOp], id: Matchmake
     for op in writes {
         match op {
             MatchmakerWriteOp::Register {
+                journal,
                 ballot,
                 registration,
             } => {
-                audit.match_registered(id, *ballot, registration);
+                audit.match_registered(id, *journal, *ballot, registration);
                 tracing::info!(
                     matchmaker = id.0,
+                    journal = %journal,
                     round = ballot.round,
                     bnode = ballot.node.0,
                     members = registration.config.members().len() as u64,
@@ -251,10 +257,11 @@ fn surface_registry_writes<A: Audit>(writes: &[MatchmakerWriteOp], id: Matchmake
                     "match_registered"
                 );
             }
-            MatchmakerWriteOp::SetGcWatermark(watermark) => {
-                audit.gc_watermark_raised(id, *watermark);
+            MatchmakerWriteOp::SetGcWatermark { journal, watermark } => {
+                audit.gc_watermark_raised(id, *journal, *watermark);
                 tracing::info!(
                     matchmaker = id.0,
+                    journal = %journal,
                     round = watermark.round,
                     bnode = watermark.node.0,
                     "gc_watermark_raised"
@@ -280,19 +287,13 @@ fn surface_registry_writes<A: Audit>(writes: &[MatchmakerWriteOp], id: Matchmake
                 // report that reads the handle would quietly start
                 // describing a later generation the moment they do not.
                 let set = MatchmakerSet::new(scalars.generation, scalars.members.clone());
-                audit.matchmaker_activated(
-                    id,
-                    &set,
-                    scalars.gc_watermark,
-                    scalars.effective.as_ref(),
-                    registrations,
-                );
+                audit.matchmaker_activated(id, &set, scalars, registrations);
                 tracing::info!(
                     matchmaker = id.0,
                     generation = set.generation.0,
                     members = set.members().len() as u64,
-                    watermark_round = scalars.gc_watermark.round,
-                    registrations = registrations.len() as u64,
+                    journals = registrations.len() as u64,
+                    registrations = registrations.values().map(|r| r.len() as u64).sum::<u64>(),
                     "matchmaker_activated"
                 );
             }
@@ -313,6 +314,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
         } => {
             audit.match_replied(
                 id,
+                reply.journal,
                 reply.to,
                 reply.ballot,
                 reply.generation.0,
@@ -326,6 +328,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
             );
             tracing::info!(
                 matchmaker = id.0,
+                journal = %reply.journal,
                 to = reply.to.0,
                 round = reply.ballot.round,
                 bnode = reply.ballot.node.0,
@@ -340,6 +343,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
         MatchOutcome::Probed { effective } => {
             audit.match_probed(
                 id,
+                reply.journal,
                 reply.to,
                 reply.ballot,
                 reply.generation.0,
@@ -356,7 +360,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
             );
         }
         MatchOutcome::Refused(refusal) => {
-            audit.match_refused(id, reply.to, reply.ballot, refusal.clone());
+            audit.match_refused(id, reply.journal, reply.to, reply.ballot, refusal.clone());
             tracing::info!(
                 matchmaker = id.0,
                 to = reply.to.0,
@@ -441,21 +445,24 @@ where
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
     let mut matchmaker = Matchmaker::new(&config, &storage);
-    let watermark = matchmaker.hard_state().gc_watermark;
     let phase = matchmaker.phase();
+    let registries: BTreeMap<JournalKey, BTreeMap<Ballot, Registration>> = matchmaker
+        .journals()
+        .map(|journal| (journal, matchmaker.registry_of(journal).clone()))
+        .collect();
     audit.matchmaker_recovered(
         id,
         matchmaker.set(),
         phase,
-        matchmaker.registry(),
-        watermark,
+        &registries,
+        matchmaker.hard_state(),
     );
     tracing::info!(
         matchmaker = id.0,
         generation = matchmaker.set().generation.0,
         phase = ?phase,
-        registrations = matchmaker.registry().len() as u64,
-        watermark_round = watermark.round,
+        journals = registries.len() as u64,
+        registrations = registries.values().map(|r| r.len() as u64).sum::<u64>(),
         "matchmaker_booted"
     );
 
@@ -487,10 +494,11 @@ where
                 // this matchmaker is not active for), persist it, and only
                 // then acknowledge with the floor in force. The leader owns
                 // the paper's §3.5 preconditions (`paros_core` `node/gc.rs`).
-                let GcRequest { from, generation, watermark } = request;
-                let outcome = matchmaker.advance_gc_watermark(generation, watermark);
+                let GcRequest { from, journal, generation, watermark } = request;
+                let outcome = matchmaker.advance_gc_watermark(journal, generation, watermark);
                 tracing::info!(
                     matchmaker = id.0,
+                    journal = %journal,
                     from = from.0,
                     generation = generation.0,
                     round = watermark.round,
@@ -504,9 +512,10 @@ where
                 );
                 let ack = GcAck {
                     matchmaker: id,
+                    journal,
                     generation,
                     applied: outcome != GcOutcome::Refused,
-                    watermark: matchmaker.hard_state().gc_watermark,
+                    watermark: matchmaker.hard_state().gc_watermark(journal),
                 };
                 audit.matchmaker_gc_replied(id, &ack);
                 match_answer(hooks, audit, id, Reply::GcAck, reply, ack);

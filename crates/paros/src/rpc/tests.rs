@@ -282,8 +282,11 @@ fn matchmaker_contract_round_trips() {
     use paros_core::{
         AcceptorConfig, GcAck, GcRequest, MatchOutcome, MatchRefusal, MatchReply, MatchRequest,
         MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerSet, PendingBootstrap,
-        QuorumSystem, ReconfigureReply, ReconfigureRequest, Registration,
+        QuorumSystem, ReconfigureReply, ReconfigureRequest, Registration, RegistrySnapshot,
     };
+    use paros_core::{JournalId, JournalKey, TenantId};
+    // A second journal of the default tenant: a set serves both (#190).
+    let other = JournalKey::new(TenantId::FIRST_USER, JournalId(JournalId::FIRST_USER.0 + 7));
     let ballot = |round: u64, node: u64| Ballot {
         round,
         node: NodeId(node),
@@ -305,6 +308,8 @@ fn matchmaker_contract_round_trips() {
         MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
         MatchRequest::reconfigure(NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
         MatchRequest::probe(NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
+        // #190: another journal's registry of the same set.
+        MatchRequest::new(NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)).in_journal(other),
     ] {
         let wire = super::matchmaker_codec::wire_match_request(&request);
         let bytes = wire.encode_to_vec();
@@ -317,6 +322,7 @@ fn matchmaker_contract_round_trips() {
 
     let reply = |matchmaker: u64, ballot: Ballot, outcome: MatchOutcome| MatchReply {
         matchmaker: MatchmakerId(matchmaker),
+        journal: other,
         to: NodeId(4),
         ballot,
         generation: g(2),
@@ -411,6 +417,7 @@ fn matchmaker_contract_round_trips() {
 
     let ack = GcAck {
         matchmaker: MatchmakerId(2),
+        journal: other,
         generation: g(1),
         applied: true,
         watermark: ballot(3, 1),
@@ -424,6 +431,7 @@ fn matchmaker_contract_round_trips() {
     );
     let gc = GcRequest {
         from: NodeId(4),
+        journal: other,
         generation: g(1),
         watermark: ballot(3, 1),
     };
@@ -436,20 +444,41 @@ fn matchmaker_contract_round_trips() {
     );
 
     // The handover contract (#125): every request and reply kind.
+    // #190: one entry per journal, paged by a `(journal, ballot)` cursor.
     let bootstrap = PendingBootstrap {
         set: set(1, &[0, 1, 3]),
-        gc_watermark: ballot(2, 1),
-        history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
-        effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+        registries: BTreeMap::from([
+            (
+                JournalKey::default(),
+                RegistrySnapshot {
+                    gc_watermark: ballot(2, 1),
+                    history: BTreeMap::from([(
+                        ballot(5, 3),
+                        Registration::belief(config(&[1, 2])),
+                    )]),
+                    effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+                },
+            ),
+            (other, RegistrySnapshot::default()),
+        ]),
     };
+    let cursor = (other, ballot(6, 1));
     for request in [
         ReconfigureRequest::Stop {
             from: NodeId(4),
             generation: g(0),
+            cursor: None,
+        },
+        ReconfigureRequest::Stop {
+            from: NodeId(4),
+            generation: g(0),
+            cursor: Some(cursor),
         },
         ReconfigureRequest::Bootstrap {
             from: NodeId(4),
             bootstrap: bootstrap.clone(),
+            page: 2,
+            range: (Some(cursor), None),
         },
         ReconfigureRequest::DecreePrepare {
             from: NodeId(4),
@@ -480,15 +509,17 @@ fn matchmaker_contract_round_trips() {
         ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(1),
             generation: g(0),
-            gc_watermark: ballot(2, 1),
-            history: bootstrap.history.clone(),
-            effective: bootstrap.effective.clone(),
+            cursor: Some(cursor),
+            registries: bootstrap.registries.clone(),
+            next: None,
             successor: Some(set(1, &[0, 1, 3])),
             decree_promised: ballot(3, 2),
         },
         ReconfigureReply::Bootstrapped {
             matchmaker: MatchmakerId(3),
             set: set(1, &[0, 1, 3]),
+            page: 1,
+            range: (None, Some(cursor)),
         },
         ReconfigureReply::Promised {
             matchmaker: MatchmakerId(1),

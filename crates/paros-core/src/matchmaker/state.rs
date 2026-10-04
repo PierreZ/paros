@@ -1,6 +1,8 @@
 //! The matchmaker's **durable state**: its generation phase, the pending
-//! bootstraps of a proposed successor, the scalars persisted whole, its static
-//! configuration, and the ledger record a registration writes.
+//! bootstraps of a proposed successor, the scalars persisted whole (the set's
+//! generation and every journal's watermark and effective configuration,
+//! #190), its static configuration, and the ledger record a registration
+//! writes.
 //!
 //! Everything here is what a reboot reads back through
 //! [`RegistryStorage`](super::RegistryStorage); nothing here decides anything.
@@ -8,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::Ballot;
+use crate::types::{Ballot, JournalKey};
 
 /// This matchmaker's durable **acceptor record** in the successor decree: the
 /// promise it made and the vote it cast, the two scalars of Paxos's acceptor
@@ -49,32 +51,190 @@ pub enum MatchmakerPhase {
     Stopped,
 }
 
+/// One journal's registry scalars (#190): its GC watermark and its effective
+/// configuration. A matchmaker set serves every journal of its tenant, one
+/// registry per journal: the generation is the set's, the watermark and the
+/// effective configuration are each journal's own — a set's journals have
+/// independent leaders and independent floors.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RegistryScalars {
+    /// The journal's GC watermark (§3.4): a monotone floor below which no
+    /// request may register and below which registrations were dropped.
+    /// Raised only by
+    /// [`Matchmaker::advance_gc_watermark`](crate::Matchmaker::advance_gc_watermark),
+    /// carried into every successor generation. [`Ballot::zero`] is the
+    /// "nothing collected" floor.
+    pub gc_watermark: Ballot,
+    /// The journal's **effective configuration** and the ballot its
+    /// reconfiguration registration was made under: the highest-ballot
+    /// flagged registration ([`RegistrationKind::Reconfiguration`]) this
+    /// matchmaker has ever accepted for the journal. Monotone in the ballot,
+    /// durable before the reply that reports it, carried into every
+    /// successor generation — and, unlike the record it is derived from,
+    /// **never collected**.
+    ///
+    /// It exists because the GC watermark and the effective configuration
+    /// answer different questions. The watermark says "no future Phase 1
+    /// needs a configuration registered below here"; the effective
+    /// configuration says "this is the acceptor set in force". A leader's
+    /// GC raises the floor to its own ballot, and an *ordinary* leader
+    /// registers only a belief, so the floor routinely rises above the last
+    /// reconfiguration record — after which, without this scalar, no
+    /// campaign's histories named a reconfiguration at all and a node that
+    /// rebooted to its bootstrap belief was elected under a superseded
+    /// configuration, rolling the whole cluster back.
+    pub effective: Option<(Ballot, AcceptorConfig)>,
+}
+
+/// One journal's registry as a frozen matchmaker reports it and a
+/// reconstruction carries it (#190): its scalars and every registration at
+/// or above its watermark (all of them, or a page of them).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RegistrySnapshot {
+    /// The journal's GC watermark.
+    pub gc_watermark: Ballot,
+    /// `ballot -> registration` at or above the watermark.
+    pub history: BTreeMap<Ballot, Registration>,
+    /// The journal's effective configuration (see
+    /// [`RegistryScalars::effective`]).
+    pub effective: Option<(Ballot, AcceptorConfig)>,
+}
+
+impl RegistrySnapshot {
+    /// Fold `other` into this snapshot — the reconstruction's rule (§5),
+    /// commutative and idempotent: the maximum watermark, the union of the
+    /// histories at or above it, the highest effective configuration.
+    /// Returns how many ballots the two held with *different* registrations
+    /// (the first one kept stays).
+    pub fn merge(&mut self, other: RegistrySnapshot) -> u64 {
+        let mut disagreements = 0;
+        self.gc_watermark = self.gc_watermark.max(other.gc_watermark);
+        for (ballot, registration) in other.history {
+            match self.history.entry(ballot) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(registration);
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    if *slot.get() != registration {
+                        disagreements += 1;
+                    }
+                }
+            }
+        }
+        let floor = self.gc_watermark;
+        self.history.retain(|ballot, _| *ballot >= floor);
+        if let Some((ballot, config)) = &other.effective {
+            raise_effective(&mut self.effective, *ballot, config);
+        }
+        disagreements
+    }
+
+    /// Its scalars.
+    #[must_use]
+    pub fn scalars(&self) -> RegistryScalars {
+        RegistryScalars {
+            gc_watermark: self.gc_watermark,
+            effective: self.effective.clone(),
+        }
+    }
+}
+
+/// Where a paged registry transfer resumes (#190): a journal, and the first
+/// ballot of it not transferred yet. Journals are walked in order, ballots
+/// in order inside each.
+pub type RegistryCursor = (JournalKey, Ballot);
+
+/// One page of `registries` starting at `from` (the start when `None`): at
+/// most `limit` registrations (a journal with none left still costs one, so
+/// its scalars ride the page), each journal in it with its scalars and the
+/// part of its history the page covers, and the cursor the next page starts
+/// at (`None`: this was the last).
+///
+/// # Panics
+///
+/// If `limit` is zero.
+#[must_use]
+pub fn registry_page(
+    registries: &BTreeMap<JournalKey, RegistrySnapshot>,
+    from: Option<RegistryCursor>,
+    limit: usize,
+) -> (
+    BTreeMap<JournalKey, RegistrySnapshot>,
+    Option<RegistryCursor>,
+) {
+    assert!(limit > 0, "a registry page carries at least one entry");
+    let mut page = BTreeMap::new();
+    let mut taken = 0;
+    for (journal, snapshot) in registries {
+        let start = match from {
+            Some((first, _)) if *journal < first => continue,
+            Some((first, ballot)) if *journal == first => ballot,
+            _ => Ballot::zero(),
+        };
+        if taken >= limit {
+            return (page, Some((*journal, start)));
+        }
+        let mut entry = RegistrySnapshot {
+            gc_watermark: snapshot.gc_watermark,
+            history: BTreeMap::new(),
+            effective: snapshot.effective.clone(),
+        };
+        let mut records = snapshot.history.range(start..).peekable();
+        if records.peek().is_none() {
+            taken += 1;
+        }
+        while let Some((ballot, registration)) = records.next() {
+            entry.history.insert(*ballot, registration.clone());
+            taken += 1;
+            if taken >= limit {
+                if let Some((next, _)) = records.peek() {
+                    page.insert(*journal, entry);
+                    return (page, Some((*journal, **next)));
+                }
+                break;
+            }
+        }
+        page.insert(*journal, entry);
+    }
+    (page, None)
+}
+
 /// A successor generation's initial state, handed to each of its members by
-/// the reconfigurer and held **pending** until the decree chooses that set.
-/// Stored as one record: it arrives in one message, is replaced whole, and
-/// becomes the per-record registry only at activation.
+/// the reconfigurer and held **pending** until the decree chooses that set:
+/// one [`RegistrySnapshot`] per journal of the set (#190). It arrives in
+/// pages, each merged in ([`PendingBootstrap::merge`]); it becomes the
+/// per-record registries only at activation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PendingBootstrap {
     /// The proposed successor set.
     pub set: MatchmakerSet,
-    /// The reconstructed GC watermark (the maximum over the frozen quorum).
-    pub gc_watermark: Ballot,
-    /// The reconstructed registry (the union over the frozen quorum, at or
-    /// above `gc_watermark`).
-    pub history: BTreeMap<Ballot, Registration>,
-    /// The reconstructed **effective configuration** (the maximum over the
-    /// frozen quorum, see [`MatchmakerHardState::effective`]). Carried
-    /// separately from `history` because it is a monotone scalar the GC
-    /// watermark never collects, while the record it was derived from may
-    /// already be below `gc_watermark` and therefore absent here.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub effective: Option<(Ballot, AcceptorConfig)>,
+    /// The reconstructed registry of every journal: the maximum watermark
+    /// over the frozen quorum, the union of the histories at or above it,
+    /// the maximum effective configuration — carried separately from the
+    /// history because it is a monotone scalar the GC watermark never
+    /// collects.
+    pub registries: BTreeMap<JournalKey, RegistrySnapshot>,
+}
+
+impl PendingBootstrap {
+    /// Fold another page (or another reconstruction) of the same proposed
+    /// set in. Safe across reconfigurers: every reconstruction is the union
+    /// of a frozen quorum's registries above the maximum watermark, so the
+    /// merge of two is the reconstruction over a superset of a quorum —
+    /// still complete for every registration that reached a quorum.
+    pub fn merge(&mut self, page: PendingBootstrap) {
+        for (journal, snapshot) in page.registries {
+            self.registries.entry(journal).or_default().merge(snapshot);
+        }
+    }
 }
 
 /// The small, persisted-whole durable scalars of a matchmaker — the
-/// registry's [`crate::HardState`]: the GC watermark, the generation state,
-/// and the successor decree's acceptor record. `#[non_exhaustive]` and built
+/// registry's [`crate::HardState`]: the generation state, the successor
+/// decree's acceptor record, and every journal's [`RegistryScalars`]. `#[non_exhaustive]` and built
 /// through [`Default`] so a field can land without breaking every store.
 ///
 /// The per-ballot registrations are deliberately **not** here: they are
@@ -85,13 +245,6 @@ pub struct PendingBootstrap {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MatchmakerHardState {
-    /// The GC watermark (§3.4): a monotone floor below which no request may
-    /// register and below which registrations have been dropped. Raised only
-    /// by [`Matchmaker::advance_gc_watermark`](crate::Matchmaker::advance_gc_watermark) — the leader's GC protocol
-    /// (`node/gc.rs`) owns the §3.5 preconditions — and carried forward into
-    /// every successor generation. [`Ballot::zero`] is the "nothing
-    /// collected" floor.
-    pub gc_watermark: Ballot,
     /// The generation `members` and `phase` describe. Generation 0's members
     /// are the deployment's bootstrap set (configuration, never written).
     pub generation: MatchmakerGeneration,
@@ -109,28 +262,29 @@ pub struct MatchmakerHardState {
     /// Bootstraps for proposed later generations this matchmaker is a member
     /// of, keyed by the proposed set, inactive until one is chosen.
     pub pending: Vec<PendingBootstrap>,
-    /// The **effective configuration** and the ballot its reconfiguration
-    /// registration was made under: the highest-ballot flagged registration
-    /// ([`RegistrationKind::Reconfiguration`]) this matchmaker has ever
-    /// accepted. Monotone in the ballot, durable before the reply that
-    /// reports it, carried into every successor generation — and, unlike the
-    /// record it is derived from, **never collected**.
-    ///
-    /// It exists because the GC watermark and the effective configuration
-    /// answer different questions. The watermark says "no future Phase 1
-    /// needs a configuration registered below here"; the effective
-    /// configuration says "this is the acceptor set in force". A leader's
-    /// GC raises the floor to its own ballot, and an *ordinary* leader
-    /// registers only a belief, so the floor routinely rises above the last
-    /// reconfiguration record and [`Matchmaker::advance_gc_watermark`](crate::Matchmaker::advance_gc_watermark)
-    /// dropped it — after which no campaign's histories named a
-    /// reconfiguration at all, `Matchmaking::stale_belief` could never fire
-    /// again, and a node that rebooted to its bootstrap belief was elected
-    /// under a superseded configuration, rolling the whole cluster back.
-    /// Keeping the *record* would mean bounding GC by it; keeping this
-    /// scalar keeps GC unconditional and costs one configuration.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub effective: Option<(Ballot, AcceptorConfig)>,
+    /// Every journal's registry scalars (#190): its watermark and its
+    /// effective configuration. A journal never registered here is absent
+    /// (watermark zero, no effective configuration).
+    pub registries: BTreeMap<JournalKey, RegistryScalars>,
+}
+
+impl MatchmakerHardState {
+    /// `journal`'s GC watermark ([`Ballot::zero`] for a journal never
+    /// registered here).
+    #[must_use]
+    pub fn gc_watermark(&self, journal: JournalKey) -> Ballot {
+        self.registries
+            .get(&journal)
+            .map_or(Ballot::zero(), |r| r.gc_watermark)
+    }
+
+    /// `journal`'s effective configuration, if any.
+    #[must_use]
+    pub fn effective(&self, journal: JournalKey) -> Option<&(Ballot, AcceptorConfig)> {
+        self.registries
+            .get(&journal)
+            .and_then(|r| r.effective.as_ref())
+    }
 }
 
 /// The set `scalars` describes, resolved against the deployment's

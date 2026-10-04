@@ -877,17 +877,18 @@ pub trait Audit {
 
     // ---- the matchmaker (`run_matchmaker`), a distinct role and namespace ----
 
-    /// This matchmaker (re)booted from its durable registry: the set it is
-    /// active or frozen for and its phase, every `(ballot, configuration)` it
-    /// read back, and its watermark. Fires on the first boot (an empty
-    /// registry) and on every restart.
+    /// This matchmaker (re)booted from its durable registries: the set it
+    /// is active or frozen for and its phase, every journal's `(ballot,
+    /// configuration)` records it read back (#190), and the scalars (every
+    /// journal's watermark and effective configuration among them). Fires
+    /// on the first boot (empty registries) and on every restart.
     fn matchmaker_recovered(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
         phase: MatchmakerPhase,
-        registry: &BTreeMap<Ballot, Registration>,
-        gc_watermark: Ballot,
+        registries: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
+        scalars: &MatchmakerHardState,
     ) {
     }
 
@@ -921,17 +922,16 @@ pub trait Audit {
     }
 
     /// This matchmaker durably activated a successor generation (after the
-    /// fsync): `set` is the new set, `gc_watermark` the reconstructed floor,
-    /// `effective` the inherited effective configuration (the maximum of the
-    /// local and the reconstructed one) and `registry` the reconstructed
-    /// registry it now serves from.
+    /// fsync): `set` is the new set, `scalars` carry every journal's
+    /// reconstructed floor and inherited effective configuration (the
+    /// maximum of the local and the reconstructed one), and `registries`
+    /// every journal's reconstructed registry it now serves from (#190).
     fn matchmaker_activated(
         &self,
         matchmaker: MatchmakerId,
         set: &MatchmakerSet,
-        gc_watermark: Ballot,
-        effective: Option<&(Ballot, AcceptorConfig)>,
-        registry: &BTreeMap<Ballot, Registration>,
+        scalars: &MatchmakerHardState,
+        registries: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     ) {
     }
 
@@ -951,21 +951,28 @@ pub trait Audit {
     /// instant the ack leaves, after the raise's fsync and its report.
     fn matchmaker_gc_replied(&self, matchmaker: MatchmakerId, ack: &GcAck) {}
 
-    /// This matchmaker durably registered `config` under `ballot` (after the
-    /// fsync).
+    /// This matchmaker durably registered `config` under `ballot` in
+    /// `journal`'s registry (after the fsync).
     fn match_registered(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         ballot: Ballot,
         registration: &Registration,
     ) {
     }
 
-    /// This matchmaker durably raised its GC watermark (after the fsync),
-    /// dropping every registration below it.
-    fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {}
+    /// This matchmaker durably raised `journal`'s GC watermark (after the
+    /// fsync), dropping every registration of it below it.
+    fn gc_watermark_raised(
+        &self,
+        matchmaker: MatchmakerId,
+        journal: JournalKey,
+        watermark: Ballot,
+    ) {
+    }
 
-    /// This matchmaker is answering `to`'s request for `ballot` with a
+    /// This matchmaker is answering `to`'s request for `ballot` in `journal` with a
     /// registration: `history` is every `(ballot, registration)` the reply
     /// names, `generation` the matchmaker set the reply speaks for, and
     /// `gc_watermark` the floor it reports. Reported at the instant
@@ -975,6 +982,7 @@ pub trait Audit {
     fn match_replied(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         to: NodeId,
         ballot: Ballot,
         generation: u64,
@@ -988,6 +996,7 @@ pub trait Audit {
     fn match_probed(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         to: NodeId,
         ballot: Ballot,
         generation: u64,
@@ -995,11 +1004,12 @@ pub trait Audit {
     ) {
     }
 
-    /// This matchmaker refused `to`'s request for `ballot`; nothing was
-    /// written. Reported at the instant the refusal leaves.
+    /// This matchmaker refused `to`'s request for `ballot` in `journal`;
+    /// nothing was written. Reported at the instant the refusal leaves.
     fn match_refused(
         &self,
         matchmaker: MatchmakerId,
+        journal: JournalKey,
         to: NodeId,
         ballot: Ballot,
         refusal: MatchRefusal,

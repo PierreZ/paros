@@ -29,19 +29,22 @@ use std::sync::{Mutex, PoisonError, Weak};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable, buggify_with_prob};
 use paros::{
-    Ballot, MatchmakerConfig, MatchmakerHardState, MatchmakerStorage, Registration,
-    RegistryStorage, StorageError, StorageRecord, WriteOutcome,
+    Ballot, JournalKey, MatchmakerConfig, MatchmakerHardState, MatchmakerStorage,
+    MatchmakerWriteOp, MemRegistry, Registration, RegistryStorage, StorageError, StorageRecord,
+    WriteOutcome,
 };
 
 use super::StorageWorld;
 use super::storage::StorageFaults;
 
 /// One matchmaker's durable records, owned by the world (keyed by IP): the
-/// scalars and the per-ballot registration records, stored separately.
+/// scalars and every journal's per-ballot registration records (#190: one
+/// disk holds every registry of the set), stored separately — the core's
+/// reference [`MemRegistry`], so a flushed write lands with exactly the
+/// semantics the core staged it under.
 #[derive(Default)]
 pub(super) struct MatchmakerDisk {
-    pub(super) hard_state: MatchmakerHardState,
-    pub(super) registry: BTreeMap<Ballot, Registration>,
+    pub(super) registry: MemRegistry,
     /// The format marker (#183) and the configuration it was written under
     /// (#207): written by the driver on the matchmaker's first boot, never
     /// cleared — gone only with the whole disk (a wipe).
@@ -53,42 +56,26 @@ impl MatchmakerDisk {
     fn apply(&mut self, op: Staged) {
         match op {
             Staged::Format(config) => self.formatted = Some(config),
-            Staged::Register(ballot, registration) => {
-                // Write-once, seen from the disk: a re-write of a registered
-                // ballot carries the same bytes (the core never re-registers,
-                // and a boot replays nothing).
-                if let Some(previous) = self.registry.insert(ballot, registration.clone()) {
-                    assert_always!(
-                        previous == registration,
-                        "matchmaker: a durable registration is never overwritten with different bytes",
-                        { "round" => ballot.round, "bnode" => ballot.node.0 }
-                    );
+            Staged::Write(op) => {
+                if let MatchmakerWriteOp::Register {
+                    journal,
+                    ballot,
+                    registration,
+                } = &op
+                {
+                    // Write-once, seen from the disk: a re-write of a
+                    // registered ballot carries the same bytes (the core
+                    // never re-registers, and a boot replays nothing).
+                    if let Some(previous) = self.registry.registration(*journal, *ballot) {
+                        assert_always!(
+                            previous == *registration,
+                            "matchmaker: a durable registration is never overwritten with different bytes",
+                            { "round" => ballot.round, "bnode" => ballot.node.0 }
+                        );
+                    }
                 }
+                self.registry.apply(&op);
             }
-            Staged::Watermark(watermark) => self.raise(watermark),
-            Staged::Scalars(scalars) => {
-                // The durable watermark never lowers: a scalar write carries
-                // the core's copy, which can lag a floor already flushed.
-                let durable = self.hard_state.gc_watermark;
-                self.hard_state = scalars;
-                self.hard_state.gc_watermark = self.hard_state.gc_watermark.max(durable);
-                let floor = self.hard_state.gc_watermark;
-                self.registry = self.registry.split_off(&floor);
-            }
-            Staged::Install(scalars, registrations) => {
-                self.registry = registrations
-                    .into_iter()
-                    .filter(|(b, _)| *b >= scalars.gc_watermark)
-                    .collect();
-                self.hard_state = scalars;
-            }
-        }
-    }
-
-    fn raise(&mut self, watermark: Ballot) {
-        if watermark > self.hard_state.gc_watermark {
-            self.hard_state.gc_watermark = watermark;
-            self.registry = self.registry.split_off(&watermark);
         }
     }
 }
@@ -96,18 +83,14 @@ impl MatchmakerDisk {
 /// One staged write, replayed in order at the fsync.
 enum Staged {
     Format(MatchmakerConfig),
-    Register(Ballot, Registration),
-    Watermark(Ballot),
-    Scalars(MatchmakerHardState),
-    Install(MatchmakerHardState, BTreeMap<Ballot, Registration>),
+    Write(MatchmakerWriteOp),
 }
 
 /// A [`MatchmakerStorage`] onto one matchmaker's slice of the shared world.
 pub(crate) struct DurableMatchmakerStorage<T> {
     /// Read view: the durable scalars and records as of this boot (the core
     /// reads the port once, at construction).
-    boot_hard_state: MatchmakerHardState,
-    boot_registry: BTreeMap<Ballot, Registration>,
+    boot: MemRegistry,
     /// The format marker as of this boot, raised by a staged `format` (the
     /// driver reads it once, before the core, and formats at most once).
     formatted: Option<MatchmakerConfig>,
@@ -135,22 +118,18 @@ impl<T: TimeProvider> DurableMatchmakerStorage<T> {
         faults: StorageFaults<T>,
         bootstrap: usize,
     ) -> Self {
-        let (boot_hard_state, boot_registry, formatted) = world
+        let (boot, formatted) = world
             .upgrade()
             .and_then(|strong| {
                 let guard = strong.lock().unwrap_or_else(PoisonError::into_inner);
-                guard.matchmakers.get(&key).map(|disk| {
-                    (
-                        disk.hard_state.clone(),
-                        disk.registry.clone(),
-                        disk.formatted.clone(),
-                    )
-                })
+                guard
+                    .matchmakers
+                    .get(&key)
+                    .map(|disk| (disk.registry.clone(), disk.formatted.clone()))
             })
             .unwrap_or_default();
         Self {
-            boot_hard_state,
-            boot_registry,
+            boot,
             formatted,
             world,
             key,
@@ -177,15 +156,15 @@ impl<T: TimeProvider> DurableMatchmakerStorage<T> {
 
 impl<T: TimeProvider> RegistryStorage for DurableMatchmakerStorage<T> {
     fn initial_state(&self) -> MatchmakerHardState {
-        self.boot_hard_state.clone()
+        self.boot.initial_state()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.boot_registry.get(&ballot).cloned()
+    fn registration(&self, journal: JournalKey, ballot: Ballot) -> Option<Registration> {
+        self.boot.registration(journal, ballot)
     }
 
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        self.boot_registry.keys().copied().collect()
+    fn registered_ballots(&self) -> Vec<(JournalKey, Ballot)> {
+        self.boot.registered_ballots()
     }
 }
 
@@ -203,23 +182,38 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
+        journal: JournalKey,
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
-        self.staged
-            .push(Staged::Register(ballot, registration.clone()));
+        self.staged.push(Staged::Write(MatchmakerWriteOp::Register {
+            journal,
+            ballot,
+            registration: registration.clone(),
+        }));
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        self.staged.push(Staged::Watermark(watermark));
+    async fn set_gc_watermark(
+        &mut self,
+        journal: JournalKey,
+        watermark: Ballot,
+    ) -> Result<(), StorageError> {
+        self.staged
+            .push(Staged::Write(MatchmakerWriteOp::SetGcWatermark {
+                journal,
+                watermark,
+            }));
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
     async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
-        self.staged.push(Staged::Scalars(scalars.clone()));
+        self.staged
+            .push(Staged::Write(MatchmakerWriteOp::SetScalars(
+                scalars.clone(),
+            )));
         Ok(())
     }
 
@@ -227,10 +221,13 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
     async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
+        registrations: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     ) -> Result<(), StorageError> {
         self.staged
-            .push(Staged::Install(scalars.clone(), registrations.clone()));
+            .push(Staged::Write(MatchmakerWriteOp::InstallRegistry {
+                scalars: scalars.clone(),
+                registrations: registrations.clone(),
+            }));
         Ok(())
     }
 
@@ -264,7 +261,7 @@ impl<T: TimeProvider> MatchmakerStorage for DurableMatchmakerStorage<T> {
         let key = self.key.clone();
         let formats = staged.iter().find_map(|op| match op {
             Staged::Format(config) => Some(config.clone()),
-            _ => None,
+            Staged::Write(_) => None,
         });
         self.with_world(|w| {
             // The operator's provisioning ledger (#147, #183) records the

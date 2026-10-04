@@ -38,9 +38,9 @@
 //! more record family.
 
 use paros_core::{
-    AcceptorConfig, Ballot, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, QuorumSystem, Registration,
-    RegistryStorage,
+    AcceptorConfig, Ballot, JournalId, JournalKey, MatchmakerConfig, MatchmakerGeneration,
+    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, MatchmakerWriteOp,
+    MemRegistry, NodeId, QuorumSystem, Registration, RegistryStorage, TenantId,
 };
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -112,31 +112,36 @@ pub trait MatchmakerStorage: RegistryStorage {
         config: &MatchmakerConfig,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
-    /// Persist `registration` under `ballot` as one record. Append-only: the
-    /// core only ever registers strictly above the highest ballot it holds,
-    /// so this is never an overwrite.
+    /// Persist `registration` under `ballot` in `journal`'s registry as one
+    /// record (#190: one store holds every journal's registry of the set).
+    /// Append-only: the core only ever registers strictly above the highest
+    /// ballot that registry holds, so this is never an overwrite.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn register(
         &mut self,
+        journal: JournalKey,
         ballot: Ballot,
         registration: &Registration,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
-    /// Persist a raised GC watermark and drop every registration record below
-    /// it. Monotone: a store never lowers its watermark.
+    /// Persist `journal`'s raised GC watermark and drop every registration
+    /// record of it below it. Monotone: a store never lowers a watermark,
+    /// and one journal's never moves another's.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn set_gc_watermark(
         &mut self,
+        journal: JournalKey,
         watermark: Ballot,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Persist the durable scalars whole (#125: the generation state, the
     /// freeze, the successor link, the decree record, the pending
-    /// bootstraps). The watermark inside never sits below the durable one.
+    /// bootstraps, every journal's watermark and effective configuration).
+    /// A watermark inside never lowers the durable one of its journal.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
@@ -145,16 +150,16 @@ pub trait MatchmakerStorage: RegistryStorage {
         scalars: &MatchmakerHardState,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
-    /// Replace the registry whole — a successor generation's activation:
+    /// Replace every registry whole — a successor generation's activation:
     /// every record dropped, `registrations` written, and `scalars` (whose
-    /// watermark is the reconstructed one) persisted in the same batch.
+    /// watermarks are the reconstructed ones) persisted in the same batch.
     ///
     /// # Errors
     /// Returns [`StorageError`] if the durable write fails.
     fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
+        registrations: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 
     /// Flush this batch's writes to stable storage. Every matchmaker write is
@@ -166,12 +171,13 @@ pub trait MatchmakerStorage: RegistryStorage {
     fn sync(&mut self) -> impl Future<Output = Result<(), StorageError>> + Send;
 }
 
-/// The library's default in-memory matchmaker storage: the scalars and the
-/// per-ballot registration records stored separately (never a single blob).
+/// The library's default in-memory matchmaker storage: the core's reference
+/// [`MemRegistry`] (the scalars and the per-record registrations stored
+/// separately, never a single blob, with the library's semantics for every
+/// write) behind the fallible async seam, plus the format marker.
 #[derive(Clone, Debug, Default)]
 pub struct MemMatchmakerStorage {
-    hard_state: MatchmakerHardState,
-    registry: BTreeMap<Ballot, Registration>,
+    registry: MemRegistry,
     /// The format marker (#183) and the configuration it was written under
     /// (#207): set by [`MatchmakerStorage::format`], never cleared.
     formatted: Option<MatchmakerConfig>,
@@ -187,15 +193,15 @@ impl MemMatchmakerStorage {
 
 impl RegistryStorage for MemMatchmakerStorage {
     fn initial_state(&self) -> MatchmakerHardState {
-        self.hard_state.clone()
+        self.registry.initial_state()
     }
 
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        self.registry.get(&ballot).cloned()
+    fn registration(&self, journal: JournalKey, ballot: Ballot) -> Option<Registration> {
+        self.registry.registration(journal, ballot)
     }
 
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        self.registry.keys().copied().collect()
+    fn registered_ballots(&self) -> Vec<(JournalKey, Ballot)> {
+        self.registry.registered_ballots()
     }
 }
 
@@ -213,28 +219,33 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
     async fn register(
         &mut self,
+        journal: JournalKey,
         ballot: Ballot,
         registration: &Registration,
     ) -> Result<(), StorageError> {
-        self.registry.insert(ballot, registration.clone());
+        self.registry.apply(&MatchmakerWriteOp::Register {
+            journal,
+            ballot,
+            registration: registration.clone(),
+        });
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
-    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        if watermark > self.hard_state.gc_watermark {
-            self.hard_state.gc_watermark = watermark;
-            self.registry = self.registry.split_off(&watermark);
-        }
+    async fn set_gc_watermark(
+        &mut self,
+        journal: JournalKey,
+        watermark: Ballot,
+    ) -> Result<(), StorageError> {
+        self.registry
+            .apply(&MatchmakerWriteOp::SetGcWatermark { journal, watermark });
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(generation = scalars.generation.0))]
     async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
-        let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
-        self.hard_state = scalars.clone();
-        self.hard_state.gc_watermark = watermark;
-        self.registry = self.registry.split_off(&watermark);
+        self.registry
+            .apply(&MatchmakerWriteOp::SetScalars(scalars.clone()));
         Ok(())
     }
 
@@ -242,14 +253,12 @@ impl MatchmakerStorage for MemMatchmakerStorage {
     async fn install_registry(
         &mut self,
         scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
+        registrations: &BTreeMap<JournalKey, BTreeMap<Ballot, Registration>>,
     ) -> Result<(), StorageError> {
-        self.hard_state = scalars.clone();
-        self.registry = registrations
-            .iter()
-            .filter(|(b, _)| **b >= scalars.gc_watermark)
-            .map(|(b, r)| (*b, r.clone()))
-            .collect();
+        self.registry.apply(&MatchmakerWriteOp::InstallRegistry {
+            scalars: scalars.clone(),
+            registrations: registrations.clone(),
+        });
         Ok(())
     }
 
@@ -258,6 +267,26 @@ impl MatchmakerStorage for MemMatchmakerStorage {
         // In-memory: writes are already visible; nothing to flush.
         Ok(())
     }
+}
+
+/// The suite's first journal: the default one.
+fn suite_journal() -> JournalKey {
+    JournalKey::default()
+}
+
+/// The suite's second journal, beside the first in one store (#190).
+fn suite_other_journal() -> JournalKey {
+    JournalKey::new(TenantId::FIRST_USER, JournalId(JournalId::FIRST_USER.0 + 1))
+}
+
+/// Scalars `base` with `journal`'s watermark set to `watermark`.
+fn with_watermark(
+    mut base: MatchmakerHardState,
+    journal: JournalKey,
+    watermark: Ballot,
+) -> MatchmakerHardState {
+    base.registries.entry(journal).or_default().gc_watermark = watermark;
+    base
 }
 
 /// The suite's ballot at `round` (one proposer, node 1).
@@ -305,6 +334,8 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
     Reopened: Future<Output = S>,
 {
     use paros_core::Matchmaker;
+    let j = suite_journal();
+    let k = suite_other_journal();
     // What every reopen must satisfy: the durable records and the durable
     // scalars are mutually consistent (no record below the watermark, every
     // walked ballot readable), and — the recovery contract itself — a
@@ -317,7 +348,9 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
             "registered ballots are strictly ascending"
         );
         assert!(
-            ballots.iter().all(|b| *b >= state.gc_watermark),
+            ballots
+                .iter()
+                .all(|(journal, b)| *b >= state.gc_watermark(*journal)),
             "no registration survives below the durable watermark"
         );
         let booted = Matchmaker::new(
@@ -333,14 +366,22 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
             "a boot adopts the durable scalars"
         );
         assert_eq!(
-            booted.registry().keys().copied().collect::<Vec<_>>(),
+            booted
+                .journals()
+                .flat_map(|journal| {
+                    booted
+                        .registry_of(journal)
+                        .keys()
+                        .map(move |b| (journal, *b))
+                })
+                .collect::<Vec<_>>(),
             ballots,
             "a boot walks back every durable registration"
         );
-        for ballot in &ballots {
+        for (journal, ballot) in &ballots {
             assert_eq!(
-                booted.registry().get(ballot).cloned(),
-                s.registration(*ballot),
+                booted.registry_of(*journal).get(ballot).cloned(),
+                s.registration(*journal, *ballot),
                 "a boot reads each registration back byte for byte"
             );
         }
@@ -353,7 +394,7 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
     let s = fresh().await;
     assert!(!s.is_formatted(), "a fresh store carries no format marker");
     let mut s = fresh().await;
-    s.register(suite_ballot(1), &suite_belief(3))
+    s.register(j, suite_ballot(1), &suite_belief(3))
         .await
         .expect("register before format");
     s.sync().await.expect("sync register");
@@ -382,10 +423,10 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
         Some(&provisioned),
         "the format marker records the configuration it was written under"
     );
-    s.register(suite_ballot(2), &suite_belief(3))
+    s.register(j, suite_ballot(2), &suite_belief(3))
         .await
         .expect("register after format");
-    s.set_gc_watermark(suite_ballot(2))
+    s.set_gc_watermark(j, suite_ballot(2))
         .await
         .expect("raise after format");
     s.sync().await.expect("sync after format");
@@ -412,62 +453,85 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
     );
     consistent(&s);
     let mut s = reopen(s).await;
-    s.register(suite_ballot(1), &suite_belief(3))
+    s.register(j, suite_ballot(1), &suite_belief(3))
         .await
         .expect("register 1");
-    s.register(suite_ballot(2), &suite_belief(4))
+    s.register(j, suite_ballot(2), &suite_belief(4))
         .await
         .expect("register 2");
+    // A second journal's registry beside the first (#190): the same
+    // ballots, its own records.
+    s.register(k, suite_ballot(1), &suite_belief(5))
+        .await
+        .expect("register in the other journal");
     s.sync().await.expect("sync");
     let mut s = reopen(s).await;
     consistent(&s);
     assert_eq!(
         s.registered_ballots(),
-        vec![suite_ballot(1), suite_ballot(2)],
-        "registered ballots read back in ballot order"
+        vec![
+            (j, suite_ballot(1)),
+            (j, suite_ballot(2)),
+            (k, suite_ballot(1))
+        ],
+        "registered ballots read back in (journal, ballot) order"
     );
-    assert_eq!(s.registration(suite_ballot(1)), Some(suite_belief(3)));
-    assert_eq!(s.registration(suite_ballot(2)), Some(suite_belief(4)));
+    assert_eq!(s.registration(j, suite_ballot(1)), Some(suite_belief(3)));
+    assert_eq!(s.registration(j, suite_ballot(2)), Some(suite_belief(4)));
     assert_eq!(
-        s.registration(suite_ballot(3)),
+        s.registration(k, suite_ballot(1)),
+        Some(suite_belief(5)),
+        "one ballot in two journals is two records"
+    );
+    assert_eq!(
+        s.registration(j, suite_ballot(3)),
         None,
         "an unregistered ballot has no record"
     );
-    assert_eq!(s.initial_state().gc_watermark, Ballot::zero());
+    assert_eq!(s.initial_state().gc_watermark(j), Ballot::zero());
 
     // A raised watermark is durable and drops the collected records.
-    s.register(suite_ballot(3), &suite_belief(5))
+    s.register(j, suite_ballot(3), &suite_belief(5))
         .await
         .expect("register 3");
-    s.set_gc_watermark(suite_ballot(2)).await.expect("raise");
+    s.set_gc_watermark(j, suite_ballot(2)).await.expect("raise");
     s.sync().await.expect("sync raise");
     let mut s = reopen(s).await;
     consistent(&s);
     assert_eq!(
-        s.initial_state().gc_watermark,
+        s.initial_state().gc_watermark(j),
         suite_ballot(2),
         "the watermark round-trips"
     );
     assert_eq!(
         s.registered_ballots(),
-        vec![suite_ballot(2), suite_ballot(3)],
-        "registrations below the watermark are dropped"
+        vec![
+            (j, suite_ballot(2)),
+            (j, suite_ballot(3)),
+            (k, suite_ballot(1))
+        ],
+        "registrations below the watermark are dropped, in that journal only"
     );
     assert_eq!(
-        s.registration(suite_ballot(1)),
+        s.registration(j, suite_ballot(1)),
         None,
         "a collected record is unreadable"
     );
+    assert_eq!(
+        s.initial_state().gc_watermark(k),
+        Ballot::zero(),
+        "one journal's floor never moves another's"
+    );
 
     // The watermark never lowers.
-    s.set_gc_watermark(suite_ballot(1))
+    s.set_gc_watermark(j, suite_ballot(1))
         .await
         .expect("re-raise lower");
     s.sync().await.expect("sync no-op");
     let mut s = reopen(s).await;
     consistent(&s);
     assert_eq!(
-        s.initial_state().gc_watermark,
+        s.initial_state().gc_watermark(j),
         suite_ballot(2),
         "the watermark is monotone"
     );
@@ -481,7 +545,7 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
         MatchmakerGeneration(1),
         vec![MatchmakerId(0), MatchmakerId(1)],
     ));
-    scalars.gc_watermark = suite_ballot(1);
+    let scalars = with_watermark(scalars, j, suite_ballot(1));
     s.set_scalars(&scalars).await.expect("scalars");
     s.sync().await.expect("sync scalars");
     let mut s = reopen(s).await;
@@ -497,7 +561,7 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
         "the successor link is durable"
     );
     assert_eq!(
-        read_back.gc_watermark,
+        read_back.gc_watermark(j),
         suite_ballot(2),
         "scalars never lower the durable watermark"
     );
@@ -509,11 +573,15 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
     activated.members = vec![MatchmakerId(0), MatchmakerId(1)];
     activated.phase = MatchmakerPhase::Active;
     activated.successor = None;
-    activated.gc_watermark = suite_ballot(4);
+    let activated = with_watermark(activated, j, suite_ballot(4));
     let mut reconstructed = BTreeMap::new();
     reconstructed.insert(suite_ballot(3), suite_belief(3));
     reconstructed.insert(suite_ballot(4), suite_belief(6));
     reconstructed.insert(suite_ballot(7), suite_belief(7));
+    let reconstructed = BTreeMap::from([
+        (j, reconstructed),
+        (k, BTreeMap::from([(suite_ballot(2), suite_belief(2))])),
+    ]);
     s.install_registry(&activated, &reconstructed)
         .await
         .expect("install");
@@ -527,11 +595,15 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
     );
     assert_eq!(
         s.registered_ballots(),
-        vec![suite_ballot(4), suite_ballot(7)],
-        "the reconstructed registry replaced the old one, above its watermark"
+        vec![
+            (j, suite_ballot(4)),
+            (j, suite_ballot(7)),
+            (k, suite_ballot(2))
+        ],
+        "the reconstructed registries replaced the old ones, above their watermarks"
     );
     assert_eq!(
-        s.registration(suite_ballot(2)),
+        s.registration(k, suite_ballot(1)),
         None,
         "the replaced generation's records are gone"
     );

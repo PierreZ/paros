@@ -38,6 +38,11 @@ pub(crate) struct AuditWorld {
 }
 
 impl AuditWorld {
+    /// `matchmaker`'s folded watermark in this world's journal (#190).
+    pub(crate) fn matchmaker_watermark(&self, matchmaker: paros::MatchmakerId) -> paros::Ballot {
+        self.lock().matchmaker.watermark_of(matchmaker)
+    }
+
     /// A private checker for a run with **no client** at all (the storage
     /// contract suite drives the world-backed storage directly): every
     /// per-transition check still runs, except the "applied command was

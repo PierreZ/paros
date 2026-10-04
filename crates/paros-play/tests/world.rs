@@ -2141,7 +2141,10 @@ fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
         .disk()
         .hard_state()
         .clone();
-    assert!(before.gc_watermark > Ballot::zero(), "the floor rose");
+    assert!(
+        before.gc_watermark(paros_core::JournalKey::default()) > Ballot::zero(),
+        "the floor rose"
+    );
     world.crash_matchmaker(MatchmakerId(0)).expect("running");
     world.restart_matchmaker(MatchmakerId(0)).expect("crashed");
     let role = world
@@ -2149,7 +2152,11 @@ fn a_rebooted_matchmaker_keeps_its_watermark_and_its_generation() {
         .expect("deployed")
         .role()
         .expect("running");
-    assert_eq!(role.hard_state().gc_watermark, before.gc_watermark);
+    assert_eq!(
+        role.hard_state()
+            .gc_watermark(paros_core::JournalKey::default()),
+        before.gc_watermark(paros_core::JournalKey::default())
+    );
     assert_eq!(role.set().generation, before.generation);
 }
 
