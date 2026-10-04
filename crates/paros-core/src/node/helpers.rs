@@ -92,6 +92,23 @@ impl ColocatedNode {
         self.adopt_configuration(config, ballot);
     }
 
+    /// Follow a ballot this node accepted leader contact under — a
+    /// `Prepare` it promised, an `Accept` it admitted, a beat at or above
+    /// its promise: the operating ballot rises to it (never falls), and the
+    /// configuration it carries is learned ([`ColocatedNode::learn_config`]).
+    pub(super) fn follow_ballot(&mut self, ballot: Ballot, config: Option<AcceptorConfig>) {
+        let before = self.ballot;
+        if ballot > self.ballot {
+            self.ballot = ballot;
+        }
+        assert!(self.ballot >= before, "the operating ballot never falls");
+        assert!(
+            self.ballot >= ballot,
+            "the operating ballot reaches a followed ballot"
+        );
+        self.learn_config(ballot, config);
+    }
+
     /// **The one way the configuration in force moves**: bind `config` to
     /// `since` and record what that does to this node's membership. Every
     /// site that moves it — [`ColocatedNode::learn_config`], a won election,

@@ -90,12 +90,9 @@ impl ColocatedNode {
                     self.become_follower(None);
                 }
                 self.election_elapsed = 0;
-                if ballot > self.ballot {
-                    self.ballot = ballot;
-                }
                 // The configuration this ballot was registered with: what this
                 // node's own next campaign registers (a matchmaker deployment).
-                self.learn_config(ballot, config);
+                self.follow_ballot(ballot, config);
                 // A `Promise` claims exactly this: the promise now sits at the
                 // prepared ballot, and the operating ballot followed it up.
                 assert!(
@@ -196,13 +193,10 @@ impl ColocatedNode {
                     self.leader = Some(leader);
                     self.election_elapsed = 0;
                 }
-                if ballot > self.ballot {
-                    self.ballot = ballot;
-                }
                 // A delegation carries the configuration for its proxy; an
                 // acceptor-bound `Accept` carries none, and a plain node
                 // ignores the field either way (`learn_config`).
-                self.learn_config(ballot, config);
+                self.follow_ballot(ballot, config);
                 self.acceptor.set_promise(ballot, &mut self.pending_writes);
                 let vhash = command_fingerprint(&command);
                 // An accept landing *inside* the durable chosen prefix with no

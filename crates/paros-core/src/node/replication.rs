@@ -68,12 +68,9 @@ impl ColocatedNode {
             } else {
                 self.become_follower(Some(from));
             }
-            if ballot > self.ballot {
-                self.ballot = ballot;
-            }
             // The leader's configuration rides on its beats, so a follower
             // that missed the `Prepare` still learns the latest one.
-            self.learn_config(ballot, config);
+            self.follow_ballot(ballot, config);
             // Ack the beat, echoing `(ballot, seq)`: the leader counts these
             // toward read-index confirmation quorums. Below-promise beats fall
             // through unacked, so a deposed leader's read rounds starve instead
