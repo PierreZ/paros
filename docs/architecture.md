@@ -387,13 +387,15 @@ retirements wait for the GC watermark (`may_retire`).
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
 default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
 five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
-(`proxies=`, `proxy_leaders=`, `replicas=`, `batchers=`). **Every role is a per-tenant pool**
-(decided on 2026-10-04): one pool per tenant for each role, shared by all the tenant's journals
-and keyed by `JournalIdentifier` inside, never a pool per journal (a quiet journal would idle its own
-processes). A busy journal uses capacity a quiet one leaves, and the blast radius stops at the
-tenant (#193). A pool is logical: its size is the tenant's count, and its instances are placed in role
-slots across the cell's machines of the right class. With ten `stateless` machines, every
-tenant's proxy leaders spread over all ten, and each machine hosts many tenants' instances. Flexible `{q1, q2}` quorums stay a library capability and
+(`proxies=`, `proxy_leaders=`, `replicas=`, `batchers=`). **How roles are sized** (decided on 2026-10-04). Stateless roles — proxies, proxy leaders,
+batchers — are **per-tenant pools**: one pool per role, shared by all the tenant's journals and
+keyed by `JournalIdentifier` inside, so a hot journal uses every instance and a quiet one none
+(#193). Storage roles — acceptors, replicas — are **per journal**, because they hold that
+journal's data; matchmakers are one set per tenant. **Placement spreads load across the cell**
+(#212): every role's instances go to the eligible machines of its class, least-loaded slots
+first, and one journal's storage instances never share a machine. With six machines available, a
+tenant with three journals of two replicas each gets its six replicas on six machines, and a pool
+of six proxy leaders spreads over the same six, each one serving all three journals. Flexible `{q1, q2}` quorums stay a library capability and
 are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
 coordinator picks them, inside its granted slots, and applies every change through
 reconfiguration. A journal's writer mode (section 2) is chosen when it is created and never
