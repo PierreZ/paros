@@ -396,7 +396,7 @@ footprint it cannot book.
 ### 3.5 The front door
 
 A stateless process in front of the machines. It authorizes the caller through an `Authz` trait
-whose first implementation verifies a signed JWT carrying the tenant as a claim, and it routes
+whose implementation verifies a Biscuit token (below), and it routes
 each call to the machine serving the journal, so a client never knows placement. Quotas are M10
 (decided on 2026-10-04). Past the front door nothing knows a tenant name, only
 `(TenantId, JournalId)`.
@@ -409,19 +409,43 @@ resolves with operator rights. A name is free again once its delete completes; a
 tenant or journal draws a fresh id, so an old id never aliases a new name.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only front doors and peers reach
-a node (a separate network in the Compose toy), and nodes do no authorization. JWTs are signed
-by an external issuer with asymmetric keys; the public keys, each with a key id, are recorded in
-the fleet entry, rotation is adding a key then removing the old one, tokens are short-lived
-and there is no revocation. `parosctl` can mint a token for the toy.
+a node (a separate network in the Compose toy), and nodes do no authorization.
 
-**Roles** (decided on 2026-10-04, #245). Every token carries a role: `admin` administers the
-fleet (`init`, cells, machines, everything below), `tenant-manager` creates, deletes and lists
-`users` tenants through the fleet tenant, and a `tenant` token is scoped to one `TenantId` for its
-data plane and journals. **Creating a tenant returns a valid tenant token**, so the caller can use
-the new tenant at once; who signs it (a paros key beside the issuer's in the fleet entry, or the
-external issuer called by the front door) is open on #245. `parosctl` also works **offline**, with no running fleet
-needed: it generates signing key pairs, and it mints tokens for any role from a private key whose
-public half is recorded in the fleet entry (decided on 2026-10-04).
+**Tokens are Biscuits** (decided on 2026-10-04, #245; JWT is in section 11). paros is its own
+issuer: a root key pair, Ed25519, whose public half (with its root key id) is recorded in the
+fleet entry; rotation is adding a key then removing the old one. Tokens are short-lived and there
+is no revocation. `parosctl` works **offline**, with no running fleet: it generates root key
+pairs and mints tokens for any role.
+
+- **Roles** are facts in the authority block: `admin` administers the fleet (`init`, cells,
+  machines, everything below), `tenant-manager` creates, deletes and lists `users` tenants
+  through the fleet tenant, and a `tenant` token is scoped to one `TenantId` for its data plane
+  and journals. The front door's policies are Datalog, one per call.
+- **Creating a tenant returns a valid tenant token**: the front door *attenuates* the caller's
+  token with a block that restricts it to the new tenant. Attenuation needs no private key, so no
+  front door holds the root key.
+- **Users attenuate offline**: a tenant can narrow its own token (read-only, one journal, an
+  earlier expiry) without asking paros.
+
+**Deterministic first, fewer features** (decided on 2026-10-04). Biscuit runs only in a way the
+simulation can replay, and features that cannot are left out:
+
+- Every key and every appended block's next key comes from a seeded RNG
+  (`new_with_rng`, `build_with_rng`, `append_with_key`); the `OsRng` defaults are banned
+  (clippy `disallowed-methods`).
+- The authorizer's wall-clock budget (`RunLimits::max_time`, default 1 ms, checked against
+  `Instant::now()`) is set out of reach; evaluation is bounded by `max_iterations` and
+  `max_facts`, which count deterministically. The returned execution time is never read.
+- The current time is a `time(...)` fact the front door adds from its provider's clock, never
+  `AuthorizerBuilder::time()`, which reads `SystemTime::now()`.
+- Decisions are allow or deny; no query result is consumed, because the Datalog engine's
+  `HashMap` iteration order is per process. A refusal is judged by its kind, never by which
+  error came first.
+- Out of scope: third-party blocks, revocation ids, P-256, snapshots, extern functions and
+  Datalog queries.
+- Biscuit stays out of `paros-core` and `paros` (its wasm32 clock needs JavaScript's
+  `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
+  Biscuit implementation is its own crate, used by `parosd`, `parosctl` and `paros-sim`.
 
 **Routing goes through the fleet tenant from M9.** The front door resolves the tenant name → `TenantId` →
 cell from its fold of the fleet directory, then the journal name → `JournalId` and its placement
@@ -433,8 +457,8 @@ be the thinnest possible layer, one that keeps routing on its cached map while t
 is down; this front door also does authorization and naming, so whether M12 needs a separate
 router role or a front-door mode is open (#233).
 
-Tenants are created and administered through the same front door, with a fleet-administration
-JWT, through the fleet tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
+Tenants are created and administered through the same front door, with an `admin` or
+`tenant-manager` token, through the fleet tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
 every other call.
 
 The front door is not the batcher. The batcher is a data-plane role of Compartmentalized Paxos
@@ -803,7 +827,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with JWT `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router question |
@@ -821,7 +845,8 @@ simulation. Its machines are plain nodes (`node1`..`node3` over three failure do
 `front1`); the rendezvous list that names the first three is the `seeds` alias.
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
-fleet, its one cell and the fleet tenant. Create a tenant through the fleet tenant and mint its JWT. Create a
+fleet, its one cell and the fleet tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and
+receive its token. Create a
 journal. `write`, `read` and `tail` from `parosctl`, addressing `acme/orders`. `set-leader` to a second
 client and see the first one refused, for a `write` and for a `truncate`. Create a multi-writer
 journal and append to it from two clients at once. Kill one `storage` and one `stateless`
@@ -936,6 +961,14 @@ Zones:
   §4 object stealing; §5.3 degraded operation and reconfiguration. The printed TLA+ quorum
   definition does not intersect; only the floor form the proof uses is sound.
 
+Tokens:
+
+- Biscuit, <https://www.biscuitsec.org/>, and `biscuit-auth` 6.0.0
+  (<https://github.com/eclipse-biscuit/biscuit-rust>, read at `01778d2`): offline attenuation,
+  Datalog authorization, the seeded-RNG constructors, the wall-clock `RunLimits::max_time`
+  (`datalog/mod.rs`), `AuthorizerBuilder::time()` reading `SystemTime::now()`, and the
+  `HashMap`-backed fact and rule sets.
+
 Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
 
 ## 11. Alternatives considered
@@ -969,6 +1002,12 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
 - **A lease in the journal** (MemoryDB's lease-fenced writes). Rejected: a lease fence depends
   on clocks and pauses; the leader uuid fences without either, and the election library keeps a
   lease only as a liveness hint (section 3.3).
+- **JWT** for front-door tokens (chosen on 2026-10-04 morning, replaced the same day, #245).
+  Roles become ad-hoc claims checked by hand, a token returned at tenant creation needs a signing
+  key at the front door or a call to an external issuer, and a holder cannot narrow its own token.
+  Biscuit gives roles as Datalog facts, attenuation without the root key (tenant creation, users
+  narrowing their tokens offline) and offline minting. JWT stays the way to plug an external
+  identity provider in later, as a second `Authz` implementation or a token exchange.
 - **Well-known system ids** (fleet tenant `1`, cell tenant `2`, every control journal `1`,
   `0..=255` reserved; decided on 2026-10-02, reversed on 2026-10-04). They let a component find a
   control journal without asking, but every component must then agree on the convention forever,
