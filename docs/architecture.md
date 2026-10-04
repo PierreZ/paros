@@ -468,7 +468,8 @@ tenant is never split by journal.
 
 **Every fleet operation is an idempotent state machine** (FDB's metacluster, section 10). A
 tenant's directory entry carries a state: `REGISTERING`, `READY`, `REMOVING`,
-`UPDATING_CONFIGURATION`, `RENAMING` or `ERROR`. Creating a tenant (`parosctl tenant create`)
+`UPDATING_CONFIGURATION` or `ERROR` (`RENAMING` was dropped on 2026-10-04: no milestone renames
+a tenant, and names are the front door's). Creating a tenant (`parosctl tenant create`)
 writes it into the fleet directory in `REGISTERING` with a cell assignment (always the one cell
 today), creates the tenant in its cell, then marks it `READY`. If an operation fails partway,
 re-running the same operation is allowed and resumes where it stopped; on success the tenant
@@ -616,9 +617,6 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
   minute; both are knobs in simulation). Kafka (KIP-630) snapshots only
   after a minimum number of bytes and a minimum share of changed records, and KIP-876 added a
   time trigger; Redpanda snapshots its controller after each command or at most every 60 seconds.
-  Truncation may be delayed until known readers (machines folding the registry, front doors) have
-  passed the checkpoint, or a time bound elapses, as KIP-630 delays advancing the log start until
-  live replicas caught up or a timeout passed.
 - **Local copies of a fold are caches only**, never the only copy of anything: a coordinator's
   memory, a machine's cached registry. That is why the checkpoint lives in the journal and not in
   a local snapshot file per replica, as Kafka and Redpanda do it: coordinators are `stateless`,
@@ -764,35 +762,28 @@ stay as they are.
 
 ## 7. What changes against today
 
-- The journal API of #185 (`Append`, `Read`, `CheckTail`, `Trim`) is cut over to the four calls.
-  No compatibility layer. The chain workload's operation ids for retired calls stay reserved.
-- `Truncate` gains the fence of `Write` (#227, #228).
+Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
+ids and the frame, start-and-wait plus `init`, the uniform `parosd`) are in the history and
+AGENTS.md.
+
 - The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
   `SetLeader(new, old)`, with a hidden term counter in the core; `Write` takes an explicit
-  `expected_seq`; journals gain a writer mode, single or multi (section 2). No compatibility
+  `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow.
+- The read-index path left in `paros-core` retires, and with it every unset frame that still
+  means "the first journal" (#243).
+- The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
+  levels: tenant names and desired state move into each tenant's control journal, capacity is
+  owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).
+- `parosd` stops running the plain deployment: every journal is born with its matchmaker set, and
+  journal-tagged matchmaker planes replace "only the first journal of a process" (#190); proxies
+  and replicas follow (#193).
+- The coordinators replace the operator's client: `parosctl` stops writing as the lowest seed's
+  node id (#240, #212).
+- The meta tenant is renamed the fleet tenant in the code (#244).
 - The in-memory "world" stores of the simulation retire; every role runs on moonpool-journal
-  under at least the same chaos (section 5).
-- The "#186: paros runs no application" line becomes: paros runs no *user* application, and one
-  journal-control state machine per journal, in `paros-core`, judged at apply.
-- The `(client, seq)` at-most-once session ledger goes away; the log is the deduplication table.
-- The read-index path retires; the leaderless read serves `Read`.
-- Journal ids stop being `128 +` a directory LSN, and the `1..=127` system range goes: a journal
-  is named by `(TenantId, JournalId)`, both random u64 with no reserved range and no well-known
-  value (`0` is unset), and that pair frames every message (section 3.8). The fixed ids of
-  2026-10-02 (the fleet tenant `1`, cell `2`, control journal `1`, `0..=255` reserved) go with them.
-- The system journals dissolve into the four levels: the admin tenant becomes the cell tenant
-  and its coordinator the cell coordinator; the fleet tenant exists from day one; tenant names and
-  desired state move into each tenant's control journal; capacity is owned by the cell
-  coordinator alone.
-- `parosd provision` (#208), which names the seeds to each other, is replaced by start-and-wait
-  plus `parosctl init`, which creates the fleet (#216).
-- Only the first user journal of a process may have matchmakers, proxies or replicas today; per
-  tenant modes on many journals per process make journal-tagged planes and per-tenant matchmaker
-  sets prerequisites, not options.
-- `parosd` is uniform with a class, not one role per process.
-- The homelab is not a target; Docker Compose on one host is.
+  under at least the same chaos (section 5, #176, #202).
 
 ## 8. Milestones
 
@@ -803,7 +794,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; then #241, #240, #210, #239, #190, #212, #192, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with JWT `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with JWT `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router question |
