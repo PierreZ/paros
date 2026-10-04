@@ -556,18 +556,22 @@ metadata version lets a reader refuse a format it does not understand.
 **Tenant groups** (decided on 2026-10-04). One attribute of every tenant, recorded in the fleet
 directory's tenant entry when the tenant is registered and never changed afterwards:
 
-- **Group: `internal` or `users`, and nothing else.** The group only separates the tenants paros
-  needs to administrate itself from the tenants it serves. `internal` tenants are created by
-  paros's own operations: `init` creates the fleet tenant and the first cell tenant, and adding a cell (M12)
-  creates its cell tenant. The tenant API (`parosctl tenant create`, the front door) creates
-  `users` tenants only, and the fleet tenant refuses an `internal` registration from it. A front door serves
-  `users` tenants only.
-- **Movability follows from what a tenant is, never from a flag** (decided on 2026-10-04,
-  replacing the `movable`/`pinned` placement of the same morning). Every `users` tenant and the
-  fleet tenant move between cells; a cell tenant never does (section 1). The fleet tenant refuses
-  a move of a cell tenant when it applies the move's first entry, so no step of the move runs.
+- **Group: `cells`, `fleets` or `users`, and nothing else** (amended on 2026-10-04: the earlier
+  `internal` group is split in two; group names are plural). The group separates the tenants paros needs to administrate
+  itself from the tenants it serves, and **it alone decides whether a tenant moves**:
 
-**Moving a tenant (M12)**, any but a cell tenant, reconfigures its journals and matchmaker set onto the target cell, then
+  | Group | Who | Created by | Moves between cells |
+  |---|---|---|---|
+  | `cells` | each cell's cell tenant | `init`, or adding a cell (M12) | never: it *is* its cell (section 1) |
+  | `fleets` | the fleet tenant | `init` | yes, its coordinator with it |
+  | `users` | every served tenant | the tenant API (`parosctl tenant create`, the front door) | yes |
+
+  The tenant API creates `users` tenants only, and the fleet tenant refuses any other group from
+  it. A front door serves `users` tenants only. There is no per-tenant movability flag (a
+  `movable`/`pinned` placement was dropped the same day); the fleet tenant refuses a move of a
+  `cells` tenant when it applies the move's first entry, so no step of the move runs.
+
+**Moving a tenant (M12)**, of the `fleets` or `users` group, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
@@ -619,7 +623,7 @@ assumed, and unset is a state to refuse, not a value to fall back on.
   cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
   fleet tenant gets one when `init` creates the fleet, kept when the fleet tenant moves. The fleet tenant records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
-  covers them too. The fleet tenant records each tenant's group (`internal` or `users`) beside its id
+  covers them too. The fleet tenant records each tenant's group (`cells`, `fleets` or `users`) beside its id
   (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
   checked by the fleet tenant needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
@@ -1069,8 +1073,8 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   kept as the future answer if write amplification is ever measured as the bottleneck, since it
   changes `paros-core`'s read semantics; the decision is #227.
 - **A `pinned` flag per tenant** (2026-10-04, dropped the same day). A creator's pin would block
-  rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and that
-  follows from what it is.
+  rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and the
+  tenant group says so (section 3.7).
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
   the front door as the rendezvous: #216.
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
