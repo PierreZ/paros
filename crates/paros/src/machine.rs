@@ -28,7 +28,9 @@
 //!
 //! The plan is a [`CellPlan`]: the cell's id, its bootstrap members (every
 //! seed, by id and address) and the journals they serve from formation —
-//! the cell control journal ([`CELL_CONTROL`]) and the static assignment
+//! the cell control journal ([`CELL_CONTROL`]), meta's control journal
+//! ([`crate::meta::META`]: the fleet's one cell hosts meta in M9, #226) and
+//! the static assignment
 //! that stands in for placement until M9 (#212). Its first coordinator, the
 //! one that claims the cell control journal, is the lowest member id
 //! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
@@ -473,7 +475,7 @@ async fn run_init<P: Providers, L: CellLedger>(
         let mut journals: Vec<JournalKey> = assignment
             .iter()
             .copied()
-            .chain(std::iter::once(CELL_CONTROL))
+            .chain([CELL_CONTROL, crate::meta::META])
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();

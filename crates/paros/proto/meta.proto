@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package paros.meta.v1;
+
+// The meta tenant's control journal (`1/1`, #229): the fleet's directory,
+// tenant -> cell, plus the cell entries (`docs/architecture.md` §3.7). Each
+// entry is one record of a `Write`, written by meta's coordinator (whoever
+// claimed the journal with `SetLeader`); `paros::meta::Meta` is the one fold
+// of them. The core keeps the records as opaque as any other.
+//
+// Every entry names the fleet it was written for and the metadata version
+// its writer speaks: a step of a fleet operation that finds another fleet is
+// refused (FDB's `MetaclusterOperationContext`), and a reader refuses a
+// version it does not understand. Meta is checkpointed with
+// `paros::client::checkpoint` (#227): `MetaState` is the checkpoint's state.
+message MetaEntry {
+  uint64 fleet_id = 1;
+  uint32 version = 2;
+  oneof kind {
+    FormFleet form_fleet = 3;
+    AddCell add_cell = 4;
+    MarkCell mark_cell = 5;
+    RegisterTenant register_tenant = 6;
+    MarkTenant mark_tenant = 7;
+    RemoveTenant remove_tenant = 8;
+  }
+}
+
+// `init` step 2: meta records the fleet's id, once. A re-run with the same
+// id changes nothing; another id is refused.
+message FormFleet {}
+
+// `init` step 3: the cell `cell_id` joins the directory, `REGISTERING`.
+message AddCell {
+  uint64 cell_id = 1;
+}
+
+// Move cell `cell_id` to `state` (see `CellState` for the transitions).
+message MarkCell {
+  uint64 cell_id = 1;
+  uint32 state = 2;
+}
+
+// Tenant creation's first step: tenant `tenant` (a random id the creator
+// drew, `>= 256`) named `name`, assigned to cell `cell_id`, `REGISTERING`.
+// A taken id is refused and the creator redraws; a taken name is refused.
+message RegisterTenant {
+  uint64 tenant = 1;
+  bytes name = 2;
+  uint64 cell_id = 3;
+}
+
+// Move tenant `tenant` to `state` (see `TenantState` for the transitions).
+message MarkTenant {
+  uint64 tenant = 1;
+  uint32 state = 2;
+}
+
+// Tenant removal's last step: a `REMOVING` tenant leaves the directory. Its
+// id is never reused; its name frees up.
+message RemoveTenant {
+  uint64 tenant = 1;
+}
+
+// The checkpoint state: the fleet, every cell and tenant entry by id, and
+// every removed tenant id — in id order, so equal states encode to equal
+// bytes.
+message MetaState {
+  uint64 fleet_id = 1;
+  uint32 version = 2;
+  repeated CellEntry cells = 3;
+  repeated TenantEntry tenants = 4;
+  repeated uint64 removed = 5;
+}
+
+message CellEntry {
+  uint64 cell_id = 1;
+  uint32 state = 2;
+  uint32 version = 3;
+}
+
+message TenantEntry {
+  uint64 tenant = 1;
+  bytes name = 2;
+  uint64 cell_id = 3;
+  uint32 state = 4;
+  uint64 config_seq = 5;
+  // Reserved and unused in M9 (#226): 0 is none.
+  uint64 tenant_group = 6;
+}

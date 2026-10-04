@@ -41,19 +41,26 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
 - `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `TOY_JOURNAL` → `parosctl init`'s calls and server ids learned from `Inspect.node` (#196).
-- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (`DIRECTORY`, `REGISTRY`: two tenants' control journals, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230).
+- `meta.rs` → `META` (`1/1`), `MetaEntry`, `MetaCommand`, `Meta`, `CellState`, `TenantState` → the
+  meta tenant's pure fold (#229): the fleet, cell and tenant entries, every entry fenced by its
+  fleet id and metadata version, ids checked at apply, `Checkpointable`.
+- `client/fleet.rs` → `FleetSession`, `Step`, `Stage`, `FleetRefusal`, `read_meta` → `init`'s fleet
+  steps and tenant create/remove as idempotent state machines over meta and the cell control
+  journal, one write per step, resumed from what the journals hold (#229).
+- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (`DIRECTORY`, `REGISTRY`: two tenants' control journals, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230); the cell's side of the fleet (`JoinFleet`, `HostTenant`,
+  `DropTenant`, #229).
 - `corruption.rs` → `classify_log` → CTRL record classification.
 - `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.
 - `journal/{frame,plan,node_image}.rs` → record ↔ entry codec, boot fold start, node records + per-kind corruption table.
 - `journal/tests.rs` → both contract suites, targeted damage, crash loop under two fault models on `SimStorageProvider`.
-- `proto/{common,paros,internal,matchmaker,system,machine,checkpoint}.proto` → compiled by `build.rs` with `prost-build`.
+- `proto/{common,paros,internal,matchmaker,system,machine,checkpoint,meta}.proto` → compiled by `build.rs` with `prost-build`.
 
 ## Public surface
 
 `run_node`, `run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`; `provision_store`,
 `provision_matchmaker_store`; `paros::client`;
-`paros::system`; `paros::journal`; `paros::machine`; `paros::wire::{methods, checkpoint, common,
-public, internal, matchmaker, system, machine}`; the RPC request/ack types (`lib.rs`).
+`paros::system`; `paros::meta`; `paros::journal`; `paros::machine`; `paros::wire::{methods,
+checkpoint, common, public, internal, matchmaker, meta, system, machine}`; the RPC request/ack types (`lib.rs`).
 
 ## Local rules
 

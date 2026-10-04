@@ -18,7 +18,8 @@ import "common.proto";
 // `node_id` (random, minted at format), `RegisterNode` (a first registration,
 // or a re-registration of the same node: a reboot), `DrainNode`,
 // `RetireNode`, and the capacity bookings `BookCapacity` / `ReleaseCapacity`
-// the cell coordinator writes. The node pool is the genesis pool plus every
+// the cell coordinator writes, and the cell's side of the fleet (#229):
+// `JoinFleet`, `HostTenant` and `DropTenant`. The node pool is the genesis pool plus every
 // registered node not yet retired. The registry is checkpointed with
 // `paros::client::checkpoint` (#230): `RegistryState` is the checkpoint's
 // state, the latest entry per `node_id` and every live booking.
@@ -31,6 +32,9 @@ message SystemEntry {
     RetireNode retire_node = 5;
     BookCapacity book_capacity = 6;
     ReleaseCapacity release_capacity = 7;
+    JoinFleet join_fleet = 8;
+    HostTenant host_tenant = 9;
+    DropTenant drop_tenant = 10;
   }
 }
 
@@ -88,12 +92,42 @@ message ReleaseCapacity {
   uint64 booking = 1;
 }
 
+// The cell side of the fleet's registration (#229, `docs/architecture.md`
+// §3.7): cell `cell_id` belongs to fleet `fleet_id`, speaking metadata
+// `version`. Written once by `init` step 3; a re-run with the same pair
+// changes nothing, any other pair is refused.
+message JoinFleet {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint32 version = 3;
+}
+
+// Tenant creation's cell step: the cell hosts tenant `tenant` (#229). The
+// fleet named must be the one the cell joined. Booking the tenant's minimum
+// footprint and writing its control journal are #210 and #225.
+message HostTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+}
+
+// Tenant removal's cell step: the cell forgets tenant `tenant`.
+message DropTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+}
+
 // The registry's checkpoint state (#230): every node registered at runtime,
 // by id, and every live booking, by id — both in id order, so equal states
 // encode to equal bytes.
 message RegistryState {
   repeated RegisteredNodeState nodes = 1;
   repeated BookingState bookings = 2;
+  // The fleet registration (#229): 0 while the cell joined none.
+  uint64 fleet_id = 3;
+  uint64 cell_id = 4;
+  uint32 version = 5;
+  // The tenants the cell hosts, in id order.
+  repeated uint64 tenants = 6;
 }
 
 message RegisteredNodeState {

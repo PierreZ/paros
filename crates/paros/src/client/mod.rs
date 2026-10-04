@@ -63,6 +63,7 @@
 
 pub mod bootstrap;
 pub mod checkpoint;
+pub mod fleet;
 mod observer;
 pub mod outcome;
 mod reader;
