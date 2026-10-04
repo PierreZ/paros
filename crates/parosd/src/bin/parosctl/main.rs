@@ -18,6 +18,7 @@
 //! | 2 | bad arguments (clap's own) |
 
 mod commands;
+mod fleet;
 mod init;
 mod output;
 #[path = "../../resolve.rs"]
@@ -117,7 +118,8 @@ impl Global {
 enum Command {
     /// Form the cell over its seeds (#196, #216): sent to the first server,
     /// a waiting seed; then the first cell coordinator claims the cell
-    /// control journal. Refused on an initialized cell; a re-run resumes.
+    /// control journal, and the fleet steps register the cell in meta
+    /// (#229). Refused on an initialized fleet; a re-run resumes.
     Init(init::InitArgs),
     /// A call to a formed cell.
     #[command(flatten)]
@@ -144,6 +146,8 @@ enum CellCommand {
     Reconfigure(commands::ReconfigureArgs),
     /// Retire a node the GC floor released.
     Retire(commands::RetireArgs),
+    /// Create, delete and list tenants through meta's directory (#229).
+    Tenant(fleet::TenantArgs),
 }
 
 /// How a command ended, as an exit code.
@@ -279,6 +283,10 @@ async fn main() -> ExitCode {
         CellCommand::Inspect(args) => commands::inspect(&client, &out, args).await,
         CellCommand::Reconfigure(args) => commands::reconfigure(&client, &out, args).await,
         CellCommand::Retire(args) => commands::retire(&client, &out, args).await,
+        CellCommand::Tenant(args) => {
+            let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
+            fleet::run(&runtime.providers, &client, &ids, &out, args).await
+        }
     };
     ending.into()
 }

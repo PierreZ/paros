@@ -227,8 +227,9 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
     let not_a_seed = until_code(&cluster.stateless, &["init"], CTL_REFUSED);
     assert_eq!(not_a_seed["refusal"], "not_a_seed", "{not_a_seed}");
 
-    // Init, sent to one seed, forms the cell over the three and claims its
-    // control journal; a second init is refused.
+    // Init, sent to one seed, forms the cell over the three, claims its
+    // control journal and registers the cell in meta; a second init finds
+    // nothing left to do and is refused.
     let initialized = until_ok(&seed, &["init"]);
     assert_eq!(initialized["outcome"], "initialized", "{initialized}");
     assert_eq!(initialized["members"].as_array().map(Vec::len), Some(3));
@@ -240,6 +241,36 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
         assert!(exists(&dir.join("journals").join("2").join("1")));
         assert!(exists(&dir.join("journals").join("256").join("256")));
     }
+
+    // Init's fleet steps (#229): the cell recorded its fleet, and meta —
+    // served by the seeds as `1/1` — lists the fleet and the cell `READY`.
+    assert!(exists(
+        &cluster.data_dir("seed0").join("journals").join("1").join("1")
+    ));
+    let fleet = initialized["fleet"].as_u64().expect("a fleet id");
+    assert_ne!(fleet, 0, "{initialized}");
+    let listed = until_ok(&servers, &["tenant", "list"]);
+    assert_eq!(listed["fleet"], fleet, "{listed}");
+    assert_eq!(listed["cells"][0]["cell"], initialized["cell"], "{listed}");
+    assert_eq!(listed["cells"][0]["state"], "READY", "{listed}");
+
+    // A tenant is created through meta and hosted by the cell; a re-run
+    // changes nothing; it is removed, and a second removal finds nothing.
+    let created = until_ok(&servers, &["tenant", "create", "acme"]);
+    assert_eq!(created["outcome"], "created", "{created}");
+    let tenant = created["tenant"].as_u64().expect("a tenant id");
+    assert!(tenant >= 256, "{created}");
+    let again = until_ok(&servers, &["tenant", "create", "acme"]);
+    assert_eq!(again["outcome"], "unchanged", "{again}");
+    assert_eq!(again["tenant"], tenant);
+    let listed = until_ok(&servers, &["tenant", "list"]);
+    assert_eq!(listed["tenants"][0]["tenant"], tenant, "{listed}");
+    assert_eq!(listed["tenants"][0]["state"], "READY", "{listed}");
+    let deleted = until_ok(&servers, &["tenant", "delete", "acme"]);
+    assert_eq!(deleted["outcome"], "deleted", "{deleted}");
+    assert_eq!(deleted["tenant"], tenant);
+    let gone = until_code(&servers, &["tenant", "delete", "acme"], CTL_REFUSED);
+    assert_eq!(gone["outcome"], "not_found", "{gone}");
 
     // The writer claims journal 256 on its way, and writes at the tail;
     // the servers' ids are learned from the servers.

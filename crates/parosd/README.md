@@ -43,14 +43,23 @@ start it **mints its `node_id`** at random and records it in its data directory
 **Init.** `parosctl init` goes to one seed (`seed1`, which every seed's join
 list names). That seed identifies every seed, mints the cell's id, records the
 plan, forms every other seed and then itself; every seed then serves the **cell
-control journal** (`2/1`) and the toy's journal (`256/256`, the static
-assignment that stands in for placement until M9), plain Multi-Paxos over the
-seeds. Last, the first cell coordinator — the lowest seed id, until the
-coordinator election of #225 — claims the cell control journal with
-`SetLeader(expected_gen = 0)`. Re-running `init` resumes an interrupted one; on
-an initialized cell it is refused (`already_initialized`). The fleet steps of
-`init` — the meta tenant and the cell's registration in its directory — are
-#229.
+control journal** (`2/1`), **meta's control journal** (`1/1`, the fleet's
+directory: the fleet's one cell hosts it) and the toy's journal (`256/256`,
+the static assignment that stands in for placement until M9), plain
+Multi-Paxos over the seeds. Then the first cell coordinator — the lowest seed
+id, until the coordinator election of #225 — claims the cell control journal
+with `SetLeader(expected_gen = 0)`. Last come the **fleet steps** (#229): the
+cell records the fleet's id (minted by `init`) on its side, and meta records
+the fleet and adds the cell, `READY`. Every step is idempotent: re-running
+`init` resumes an interrupted one, and on an initialized fleet it is refused
+(`already_initialized`).
+
+**Tenants.** `parosctl tenant create acme` registers a tenant in meta
+(`REGISTERING`, under a random id), has the cell host it, then marks it
+`READY`; `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
+it, then removes it; `parosctl tenant list` prints meta. A crashed or
+interrupted one is resumed by running it again. A tenant's footprint and its
+own control journal are not created yet (#210, #225).
 
 **Write and read.** `parosctl` is handed addresses only: `--servers seeds:4500`
 stands for every seed, and each server's node id is learned from its own
@@ -204,7 +213,8 @@ in the default tenant `256` (#235).
 
 | command | what it does |
 |---|---|
-| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, then claims the cell control journal; resumes an interrupted init, refused on an initialized cell |
+| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in meta (#229); resumes an interrupted init, refused on an initialized fleet |
+| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates or removes a tenant through meta's directory and the cell, resuming an interrupted run; lists meta's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
