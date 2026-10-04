@@ -511,6 +511,8 @@ struct Registry {
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
+    /// Run-level: the cell's id (see [`cell_id`]).
+    cell_id: Option<u64>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -657,6 +659,17 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
                 .collect()
         })
         .clone()
+}
+
+/// The run's cell id (#229): what `init` would mint, drawn once per run and
+/// named in every node's `SystemPlan`. Random, never zero.
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn cell_id(state: &StateHandle) -> u64 {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .cell_id
+        .get_or_insert_with(|| moonpool_sim::sim_random_range(1..u64::MAX))
 }
 
 /// The run's store draw (see [`journal_store`]).

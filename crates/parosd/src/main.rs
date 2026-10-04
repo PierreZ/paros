@@ -16,10 +16,13 @@
 //!    class `storage`, one its own join list names — `Init` and
 //!    `FormCell`. It never forms a cell on its own (#216).
 //! 3. **Serve.** A formed machine runs `paros::run_journals` over its
-//!    cell's plan: the cell control journal and the static assignment that
-//!    stands in for placement until M9 (#212), plain Multi-Paxos over the
-//!    seeds. Every start after formation is an existing member's
-//!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
+//!    cell's plan: the cell control journal, meta's (#229), the user
+//!    tenant's control journal and the static assignment that stands in for
+//!    placement until #212, plain Multi-Paxos over the seeds. It follows the
+//!    system journals (`paros::SystemPlan`): a journal the directory creates
+//!    naming it starts here. Every start after formation is an existing
+//!    member's ([`BootKind::ExistingMember`]), so a lost store is refused as
+//!    amnesia.
 //!
 //! The drivers are the library's provider-generic ones — the same code the
 //! deterministic simulation runs — and the stores are `paros::journal`'s.
@@ -49,6 +52,7 @@ use clap::Parser;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::client::bootstrap::TOY_JOURNAL;
 use paros::machine::{CellPlan, MachineFacts};
+use paros::system::DIRECTORY;
 use paros::{BootRefusal, DriverTunables, JournalKey, NoHooks, NodeId, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -135,7 +139,7 @@ async fn run(settings: Settings) -> ExitCode {
         let waited = paros::machine::wait_for_cell(
             providers.clone(),
             &facts,
-            &[TOY_JOURNAL],
+            &[TOY_JOURNAL, DIRECTORY],
             &mut ledger,
             &tunables,
             shutdown.clone(),
@@ -302,6 +306,17 @@ async fn serve(
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
+    // Every machine of the cell follows its system journals: the seeds
+    // host them, so the seeds are the plan's members.
+    let system = paros::SystemPlan {
+        self_id: node_id,
+        cell_id: plan.cell_id,
+        class: settings.class,
+        seeds: book.clone(),
+        genesis_pool: plan.members.iter().map(|(id, _)| *id).collect(),
+        genesis_journals: plan.journals.clone(),
+        spares: Vec::new(),
+    };
     tracing::info!(node = node_id.0, cell = plan.cell_id, %addr, "parosd_serving");
     let ran = paros::run_journals(
         providers,
@@ -311,7 +326,7 @@ async fn serve(
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        None,
+        Some(system),
         tunables,
         shutdown,
         &NoHooks,

@@ -312,7 +312,11 @@ mod tests {
         let plan = CellPlan {
             cell_id: 912_873,
             members: vec![(NodeId(5), "10.0.0.2:4500".parse().expect("an address"))],
-            journals: vec![paros::machine::CELL_CONTROL, JournalKey::default()],
+            journals: vec![
+                paros::machine::CELL_CONTROL,
+                paros::machine::META_CONTROL,
+                JournalKey::default(),
+            ],
         };
         let formed = record(Some((PlanState::Formed, plan.clone())));
         formed.write(dir.path()).expect("written");

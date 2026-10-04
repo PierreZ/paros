@@ -4,7 +4,7 @@ package paros.system.v1;
 
 import "common.proto";
 
-// The entries of the two system journals (#189). Each is one record of an
+// The entries of the system journals (#189, #229). Each is one record of an
 // `Append`, and a system journal's slot holds exactly one: the slot is the
 // entry's identity. The core keeps them opaque like every user entry; only
 // `paros::system` reads them, and every node folds them the same way.
@@ -21,7 +21,17 @@ import "common.proto";
 // the cell coordinator writes. The node pool is the genesis pool plus every
 // registered node not yet retired. The registry is checkpointed with
 // `paros::client::checkpoint` (#230): `RegistryState` is the checkpoint's
-// state, the latest entry per `node_id` and every live booking.
+// state, the latest entry per `node_id` and every live booking. It also
+// holds the cell's half of the fleet registration (`RegisterFleet`) and the
+// tenants the cell hosts (`HostTenant` / `UnhostTenant`, #229).
+//
+// The **meta tenant's control journal** (`1/1`, #229): the fleet's
+// directory — every cell (`RegisterCell`, `CellReady`) and every tenant with
+// its cell assignment and state (`RegisterTenant`, `TenantReady`,
+// `RemoveTenant`, `ForgetTenant`). Every fleet step names the fleet (and the
+// cell) it believes it talks to, and is refused at apply when they are not
+// the ones recorded: the registration is verified on every step. `MetaState`
+// is its checkpoint's state.
 message SystemEntry {
   oneof kind {
     CreateJournal create_journal = 1;
@@ -31,6 +41,15 @@ message SystemEntry {
     RetireNode retire_node = 5;
     BookCapacity book_capacity = 6;
     ReleaseCapacity release_capacity = 7;
+    RegisterCell register_cell = 8;
+    CellReady cell_ready = 9;
+    RegisterTenant register_tenant = 10;
+    TenantReady tenant_ready = 11;
+    RemoveTenant remove_tenant = 12;
+    ForgetTenant forget_tenant = 13;
+    RegisterFleet register_fleet = 14;
+    HostTenant host_tenant = 15;
+    UnhostTenant unhost_tenant = 16;
   }
 }
 
@@ -88,12 +107,125 @@ message ReleaseCapacity {
   uint64 booking = 1;
 }
 
+// Meta: register cell `cell_id` in fleet `fleet_id` (the first one names
+// the fleet), state REGISTERING. `metadata_version` is the format the writer
+// speaks; a reader refuses one it does not understand.
+message RegisterCell {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint32 metadata_version = 3;
+}
+
+// Meta: cell `cell_id` is READY (from REGISTERING or RESTORING).
+message CellReady {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+}
+
+// Meta: register tenant `tenant` (random, drawn by its creator) named `name`
+// in cell `cell_id`, state REGISTERING. Refused for a reserved, taken or
+// forgotten id (the creator redraws), a taken name, or a cell not READY.
+message RegisterTenant {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint64 tenant = 3;
+  bytes name = 4;
+}
+
+// Meta: tenant `tenant`, created in cell `cell_id`, is READY.
+message TenantReady {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint64 tenant = 3;
+}
+
+// Meta: tenant `tenant` is REMOVING (from any state).
+message RemoveTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+}
+
+// Meta: a REMOVING tenant is gone; its id is never used again, its name is
+// free.
+message ForgetTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+}
+
+// Cell: this cell is `cell_id` of fleet `fleet_id` — the cell's half of the
+// registration, written once.
+message RegisterFleet {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint32 metadata_version = 3;
+}
+
+// Cell: this cell hosts tenant `tenant` named `name`.
+message HostTenant {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint64 tenant = 3;
+  bytes name = 4;
+}
+
+// Cell: this cell no longer hosts tenant `tenant`; its id is never hosted
+// again.
+message UnhostTenant {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint64 tenant = 3;
+}
+
 // The registry's checkpoint state (#230): every node registered at runtime,
 // by id, and every live booking, by id — both in id order, so equal states
 // encode to equal bytes.
 message RegistryState {
   repeated RegisteredNodeState nodes = 1;
   repeated BookingState bookings = 2;
+  // The cell's registration, if written (#229).
+  FleetRegistration registration = 3;
+  // The tenants the cell hosts, in id order, and the ids it hosted once.
+  repeated HostedTenantState tenants = 4;
+  repeated uint64 unhosted = 5;
+}
+
+message FleetRegistration {
+  uint64 fleet_id = 1;
+  uint64 cell_id = 2;
+  uint32 metadata_version = 3;
+}
+
+message HostedTenantState {
+  uint64 tenant = 1;
+  bytes name = 2;
+}
+
+// Meta's checkpoint state (#229): the fleet id, every cell and every
+// tenant in id order, and every forgotten tenant id.
+message MetaState {
+  uint64 fleet_id = 1;
+  repeated CellEntryState cells = 2;
+  repeated TenantEntryState tenants = 3;
+  repeated uint64 forgotten = 4;
+}
+
+message CellEntryState {
+  uint64 cell_id = 1;
+  // 0 registering, 1 ready, 2 removing, 3 restoring.
+  uint32 state = 2;
+  uint32 metadata_version = 3;
+}
+
+message TenantEntryState {
+  uint64 tenant = 1;
+  bytes name = 2;
+  uint64 cell_id = 3;
+  // 0 registering, 1 ready, 2 removing, 3 updating configuration,
+  // 4 renaming, 5 error.
+  uint32 state = 4;
+  uint64 config_seq = 5;
+  // 0: none (reserved, unused in M9).
+  uint64 tenant_group = 6;
 }
 
 message RegisteredNodeState {

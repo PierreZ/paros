@@ -1,5 +1,6 @@
-//! Bootstrap calls (#196, #216): forming a cell with `init`, and learning a
-//! deployment's node ids from its addresses.
+//! Bootstrap calls (#196, #216): forming a cell with `init`, registering it
+//! in the fleet (#229), and learning a deployment's node ids from its
+//! addresses.
 //!
 //! A machine's id is random, minted at format (#225), so an operator knows
 //! addresses — a rendezvous name, a join list — never ids. These calls
@@ -15,11 +16,13 @@ use moonpool_rpc::{ErrorReason, RpcHandle};
 use paros_core::{JournalId, JournalKey, NodeId, TenantId};
 
 use super::Client;
+use super::fleet::{CellRegistration, FleetRefusal, FleetStep};
 use super::outcome::SetLeaderOutcome;
 use crate::machine::{CELL_CONTROL, CellPlan};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{InitRpc, InspectRpc};
 use crate::rpc::{InspectRequest, Read, well_known};
+use crate::system::FleetContext;
 
 /// What one `Init` sent to a seed came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +201,62 @@ async fn claim_cell_once<P: Providers>(
         SetLeaderOutcome::Ambiguous | SetLeaderOutcome::Malformed => ClaimCellOutcome::Ambiguous,
         SetLeaderOutcome::Redirect { .. } | SetLeaderOutcome::UnknownJournal => {
             ClaimCellOutcome::Unavailable
+        }
+    }
+}
+
+/// What `init`'s fleet steps came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegisterFleetOutcome {
+    /// The cell is registered in meta and in itself, and `READY`: this run
+    /// wrote at least one of the steps.
+    Registered {
+        /// The fleet and the cell.
+        context: FleetContext,
+    },
+    /// Every step was there already: the fleet was initialized before.
+    AlreadyRegistered {
+        /// The fleet and the cell.
+        context: FleetContext,
+    },
+    /// A step refused to go on (another fleet, another cell).
+    Refused(FleetRefusal),
+    /// The journals did not answer within the patience: run `init` again.
+    Unavailable,
+}
+
+/// `init`'s fleet steps (`docs/architecture.md` §3.1, steps 2 and 3, #229):
+/// as the cell coordinator `coordinator`, register cell `cell_id` in meta —
+/// minting the fleet's id from `fleet_draw` (non-zero) when meta names no
+/// fleet yet — record the cell's own half, and mark the cell `READY` (see
+/// [`CellRegistration`]). A re-run resumes; one that finds every step done
+/// reports [`RegisterFleetOutcome::AlreadyRegistered`]. An unavailable step
+/// (a freshly formed cell still electing) is retried for up to `patience`.
+pub async fn register_fleet<P: Providers>(
+    client: &Client<P>,
+    coordinator: NodeId,
+    cell_id: u64,
+    fleet_draw: u64,
+    patience: Duration,
+) -> RegisterFleetOutcome {
+    let mut registration = CellRegistration::new(coordinator.0, cell_id, fleet_draw);
+    let deadline = client.time.now() + patience;
+    let mut wrote = false;
+    loop {
+        match registration.step(client, 0).await {
+            FleetStep::Stepped(action) => wrote |= action.is_some(),
+            FleetStep::Done(context) if wrote => {
+                return RegisterFleetOutcome::Registered { context };
+            }
+            FleetStep::Done(context) => return RegisterFleetOutcome::AlreadyRegistered { context },
+            FleetStep::Refused(refusal) => return RegisterFleetOutcome::Refused(refusal),
+            FleetStep::IdTaken | FleetStep::Unavailable => {
+                if client.time.now() >= deadline
+                    || !client.pause(client.tunables.retry_backoff).await
+                {
+                    return RegisterFleetOutcome::Unavailable;
+                }
+            }
         }
     }
 }

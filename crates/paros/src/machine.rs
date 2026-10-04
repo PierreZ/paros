@@ -28,8 +28,10 @@
 //!
 //! The plan is a [`CellPlan`]: the cell's id, its bootstrap members (every
 //! seed, by id and address) and the journals they serve from formation —
-//! the cell control journal ([`CELL_CONTROL`]) and the static assignment
-//! that stands in for placement until M9 (#212). Its first coordinator, the
+//! the cell control journal ([`CELL_CONTROL`]), meta's control journal
+//! ([`META_CONTROL`], #229: the fleet's directory, placed on the seeds at
+//! bootstrap, §3.1) and the static assignment that stands in for placement
+//! until #212. Its first coordinator, the
 //! one that claims the cell control journal, is the lowest member id
 //! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
 //!
@@ -57,6 +59,10 @@ use crate::rpc::{Inbound, Read, serve_well_known, well_known};
 /// capacity bookings (`docs/architecture.md` §3.1), claimed by the first
 /// cell coordinator at `init`.
 pub const CELL_CONTROL: JournalKey = JournalKey::control(TenantId::CELL);
+
+/// The meta tenant's control journal (`1/1`, #229): the fleet's directory,
+/// on the seeds from formation (`docs/architecture.md` §3.1).
+pub const META_CONTROL: JournalKey = JournalKey::control(TenantId::META);
 
 /// How long a waiting machine keeps its listener up after the answer that
 /// ends its wait, so the answer leaves before the listener closes.
@@ -159,7 +165,7 @@ impl CellPlan {
 
     /// Whether the plan is one a machine may form: a set cell id, at least
     /// one member, member ids and addresses unique, every journal frame set
-    /// and unique, the cell control journal among them.
+    /// and unique, the cell control journal and meta's among them.
     ///
     /// # Errors
     ///
@@ -180,8 +186,8 @@ impl CellPlan {
         if frames.len() != self.journals.len() || self.journals.iter().any(|j| !j.is_set()) {
             return Err("a cell's journals are set and unique");
         }
-        if !frames.contains(&CELL_CONTROL) {
-            return Err("a cell serves its control journal");
+        if !frames.contains(&CELL_CONTROL) || !frames.contains(&META_CONTROL) {
+            return Err("a cell serves its control journal and meta's");
         }
         Ok(())
     }
@@ -473,7 +479,7 @@ async fn run_init<P: Providers, L: CellLedger>(
         let mut journals: Vec<JournalKey> = assignment
             .iter()
             .copied()
-            .chain(std::iter::once(CELL_CONTROL))
+            .chain([CELL_CONTROL, META_CONTROL])
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -551,7 +557,7 @@ mod tests {
         CellPlan {
             cell_id: 7,
             members: vec![(NodeId(9), addr(1)), (NodeId(3), addr(2))],
-            journals: vec![CELL_CONTROL, JournalKey::default()],
+            journals: vec![CELL_CONTROL, META_CONTROL, JournalKey::default()],
         }
     }
 
@@ -567,7 +573,10 @@ mod tests {
             back.members,
             vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))]
         );
-        assert_eq!(back.journals, vec![CELL_CONTROL, JournalKey::default()]);
+        assert_eq!(
+            back.journals,
+            vec![META_CONTROL, CELL_CONTROL, JournalKey::default()]
+        );
     }
 
     #[test]

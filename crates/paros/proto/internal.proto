@@ -358,4 +358,8 @@ message InspectReply {
   // The answering node's own id (#196): node ids are random (#225), so a
   // client given addresses alone learns each server's id here.
   uint64 node = 18;
+  // The cell this node serves (#229), on a deployment that names one
+  // (`SystemPlan::cell_id`); 0 otherwise. What `parosctl init` resumes
+  // against when the cell it formed is already serving.
+  uint64 cell_id = 19;
 }

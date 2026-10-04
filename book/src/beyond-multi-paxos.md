@@ -594,6 +594,21 @@ with it and comes back as a new machine with a new `node_id`, which never rejoin
 as the old one. A formation interrupted between its formats and its commit
 resumes by reading the disk, the rule the simulation's operator follows too.
 
+`init` does not stop at the cell. A deployment is always a **fleet**, and its
+directory is the control journal of the meta tenant (`1/1`), which the seeds
+host from formation. After the first cell coordinator claims the cell control
+journal, `init` records the cell in meta (the first cell mints the fleet's id),
+writes the cell's own half of the registration into the cell control journal,
+and marks the cell `READY` in meta. Creating a tenant follows the same pattern:
+meta records it `REGISTERING` with its cell, the cell hosts it, and meta marks
+it `READY`. Every fleet operation is a state machine whose state is the two
+journals. Each step reads both, writes the one entry still missing, and names
+the fleet and the cell it believes it talks to; a journal that records another
+fleet refuses the entry. An operation that stopped anywhere is resumed by
+running it again. A removal unhosts the tenant's id even when the cell never
+hosted it, so a slow creator's late "host" is refused instead of resurrecting a
+tenant meta has forgotten.
+
 **In the code.** `LogStorage::formatted_config`, `LogStorage::format`
 (`crates/paros/src/storage/mod.rs`); `BootKind::FirstBoot`,
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,
@@ -601,7 +616,9 @@ resumes by reading the disk, the rule the simulation's operator follows too.
 `Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`),
 `paros::machine::wait_for_cell` (`crates/paros/src/machine.rs`) and `parosd`'s
 `MachineRecord` and `Record` (`crates/parosd/src/machine_record.rs`,
-`crates/parosd/src/record.rs`). Play it:
+`crates/parosd/src/record.rs`); the fleet's folds `Meta` and `Registry`
+(`crates/paros/src/system/`) and its operations `CellRegistration`,
+`TenantCreation`, `TenantRemoval` (`crates/paros/src/client/fleet.rs`). Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
 
 ## Many journals on one process

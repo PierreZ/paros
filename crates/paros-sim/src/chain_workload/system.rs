@@ -36,12 +36,12 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
 use paros::client::checkpoint::{
-    CheckpointOutcome, CheckpointPolicy, Checkpointer, Folded, Folder, OpenOutcome,
+    CheckpointOutcome, CheckpointPolicy, Checkpointable, Checkpointer, Folded, Folder, OpenOutcome,
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
-    Class, DIRECTORY, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, REGISTRY,
-    Registry, RegistryEvent, SystemCommand, SystemEvent, registry_event,
+    Class, DIRECTORY, Directory, DirectoryEvent, DirectoryRefusal, META, Meta, NodeStanding,
+    REGISTRY, Registry, RegistryEvent, SystemCommand, SystemEvent, registry_event,
 };
 use paros::{
     AcceptorConfig, Command, Entry, Generation, JournalId, JournalKey, NodeId, QuorumSystem, Seq,
@@ -62,6 +62,21 @@ use crate::shape::JoinerMachine;
 fn drawn_id(draw: u64) -> JournalId {
     let span = u64::MAX - JournalId::FIRST_USER.0;
     JournalId(JournalId::FIRST_USER.0 + crate::chain::splitmix(draw) % span)
+}
+
+/// The client of the first `seeds` servers — the nodes hosting the system
+/// journals — that announces its writes to `journals` to their audits.
+pub(super) fn seed_client(
+    ctx: &SimContext,
+    nodes: &ChainClient,
+    seeds: usize,
+    journals: &[JournalKey],
+) -> ChainClient {
+    let seeds = seeds.min(nodes.server_count()).max(1);
+    nodes
+        .clone()
+        .with_observer(Arc::new(Announce::new(ctx, journals)))
+        .rotating_over(seeds)
 }
 
 /// How many asks a system write spends before it calls the outcome
@@ -116,18 +131,32 @@ pub(super) struct SystemOps {
 /// [`CallObserver`]: a library call that writes to `journal` (a
 /// [`Checkpointer`]'s) announces its records and its exact write before it
 /// leaves, like every hand-built system append here does.
-struct Announce {
-    journal: JournalKey,
-    audit: Arc<crate::audit::AuditWorld>,
+pub(super) struct Announce {
+    audits: Vec<(JournalKey, Arc<crate::audit::AuditWorld>)>,
+}
+
+impl Announce {
+    /// Announce the writes to each of `journals` to its audit.
+    pub(super) fn new(ctx: &SimContext, journals: &[JournalKey]) -> Self {
+        Self {
+            audits: journals
+                .iter()
+                .map(|journal| (*journal, audit_world_for(ctx.state(), *journal)))
+                .collect(),
+        }
+    }
 }
 
 impl CallObserver for Announce {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
         if let Attempted::Write(write) = attempt
-            && attempt.journal() == self.journal
+            && let Some((_, audit)) = self
+                .audits
+                .iter()
+                .find(|(journal, _)| *journal == attempt.journal())
         {
             for record in &write.records {
-                self.audit.note_submitted(user_command_hash(record));
+                audit.note_submitted(user_command_hash(record));
             }
             let entry = Entry {
                 generation: Generation(write.generation),
@@ -135,8 +164,7 @@ impl CallObserver for Announce {
                 seq: Seq(write.seq),
                 records: write.records.iter().cloned().map(Value).collect(),
             };
-            self.audit
-                .note_appended(paros::command_hash(&Command::Write(entry)));
+            audit.note_appended(paros::command_hash(&Command::Write(entry)));
         }
         None
     }
@@ -198,14 +226,7 @@ impl SystemOps {
         nodes: &ChainClient,
         journal: JournalKey,
     ) -> ChainClient {
-        let seeds = self.seeds.min(nodes.server_count()).max(1);
-        nodes
-            .clone()
-            .with_observer(Arc::new(Announce {
-                journal,
-                audit: audit_world_for(ctx.state(), journal),
-            }))
-            .rotating_over(seeds)
+        seed_client(ctx, nodes, self.seeds, &[journal])
     }
 
     /// Write `command` to `journal` at the seeds, starting at the one
@@ -705,14 +726,15 @@ impl SystemOps {
         false
     }
 
-    /// `CHECKPOINT` (#230): open the registry as its owner with the
-    /// library's [`Checkpointer`] — claim it, fold it to the tail, restarting
-    /// from the checkpoint at its floor — and, when the policy finds a
-    /// checkpoint due, write one and truncate to it. Two BUGGIFY locations
-    /// stop between the two steps: an owner that crashes there (the
-    /// checkpoint stays mid-log, and the next one truncates past it), and an
-    /// owner a rival claims the registry from first (its truncate is
-    /// refused by the fence, #228).
+    /// `CHECKPOINT` (#230): open the registry — or meta (#229), as the
+    /// draw picks — as its owner with the library's [`Checkpointer`]: claim
+    /// it, fold it to the tail, restarting from the checkpoint at its floor,
+    /// and, when the policy finds a checkpoint due, write one and truncate to
+    /// it. Two BUGGIFY locations stop between the two steps: an owner that
+    /// crashes there (the checkpoint stays mid-log, and the next one
+    /// truncates past it), and an owner a rival claims the journal from
+    /// first (its truncate is refused by the fence, #228). The gates' "the
+    /// registry" covers meta's checkpoints too.
     pub(super) async fn checkpoint(
         &mut self,
         ctx: &SimContext,
@@ -720,12 +742,32 @@ impl SystemOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) {
+        if draw & (1 << 20) == 0 {
+            let state = self.empty_registry();
+            self.checkpoint_journal(ctx, nodes, REGISTRY, state, policy, draw)
+                .await;
+        } else {
+            self.checkpoint_journal(ctx, nodes, META, Meta::new(), policy, draw)
+                .await;
+        }
+    }
+
+    /// [`SystemOps::checkpoint`] of `journal`, folded into `state`.
+    async fn checkpoint_journal<S: Checkpointable + Clone>(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        journal: JournalKey,
+        state: S,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) {
         if !self.active {
             return;
         }
-        let client = self.seed_client(ctx, nodes, REGISTRY);
+        let client = self.seed_client(ctx, nodes, journal);
         let first = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
-        let mut owner = Checkpointer::new(REGISTRY, self.client_id, self.empty_registry(), policy);
+        let mut owner = Checkpointer::new(journal, self.client_id, state, policy);
         match owner.open(&client, first).await {
             OpenOutcome::Open {
                 restarted,
@@ -735,7 +777,7 @@ impl SystemOps {
                 assert_always!(
                     diverged.is_none(),
                     "checkpoint: an owner's load finds each checkpoint its prefix's state",
-                    { "journal" => REGISTRY.to_string(), "seq" => diverged.unwrap_or_default() }
+                    { "journal" => journal.to_string(), "seq" => diverged.unwrap_or_default() }
                 );
                 if restarted {
                     board_lock(&system_board(ctx.state())).reader_restarted();
@@ -763,7 +805,7 @@ impl SystemOps {
             let Ok(seq) = owner.write_checkpoint(&client, first).await else {
                 return;
             };
-            let mut rival = Writer::new(REGISTRY, self.client_id | 1 << 40);
+            let mut rival = Writer::new(journal, self.client_id | 1 << 40);
             if !matches!(
                 rival.claim(&client, first, true).await,
                 ClaimOutcome::Won { .. }

@@ -471,6 +471,16 @@ pub enum AppendOutcome {
     ReservedPrefix,
 }
 
+/// What [`Checkpointer::apply`] came back with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Applied<E> {
+    /// Written at the fold's next position, and folded to this event.
+    Folded(E),
+    /// Not known written at the fold's next position (see
+    /// [`AppendOutcome`]): nothing was folded.
+    NotFolded(AppendOutcome),
+}
+
 /// What [`Checkpointer::checkpoint`] came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckpointOutcome {
@@ -591,6 +601,31 @@ impl<S: Checkpointable> Checkpointer<S> {
             self.folder.fold(seq, &record);
         }
         AppendOutcome::Written(outcome)
+    }
+
+    /// [`Checkpointer::append`], returning what the entry folded to: an
+    /// owner that writes a command learns its verdict from its own fold —
+    /// the same verdict every reader folds at that position.
+    pub async fn apply<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        record: Vec<u8>,
+        first: usize,
+    ) -> Applied<S::Event> {
+        if is_checkpoint(&record) {
+            return Applied::NotFolded(AppendOutcome::ReservedPrefix);
+        }
+        let outcome = self
+            .writer
+            .write(client, vec![Value(record.clone())], first)
+            .await;
+        if let WriterOutcome::Written { seq, .. } = outcome
+            && seq == self.folder.next_seq()
+            && let Some(Folded::Entry(event)) = self.folder.fold(seq, &record)
+        {
+            return Applied::Folded(event);
+        }
+        Applied::NotFolded(AppendOutcome::Written(outcome))
     }
 
     /// Whether the policy asks for a checkpoint at `now`: the log since the

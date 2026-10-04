@@ -22,6 +22,7 @@ mod init;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
+mod tenant;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -115,9 +116,10 @@ impl Global {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Form the cell over its seeds (#196, #216): sent to the first server,
-    /// a waiting seed; then the first cell coordinator claims the cell
-    /// control journal. Refused on an initialized cell; a re-run resumes.
+    /// Form the cell over its seeds and register it in the fleet (#196,
+    /// #216, #229): sent to the first server, a waiting seed; then the first
+    /// cell coordinator claims the cell control journal and registers the
+    /// cell in meta. Refused on an initialized cell; a re-run resumes.
     Init(init::InitArgs),
     /// A call to a formed cell.
     #[command(flatten)]
@@ -144,6 +146,9 @@ enum CellCommand {
     Reconfigure(commands::ReconfigureArgs),
     /// Retire a node the GC floor released.
     Retire(commands::RetireArgs),
+    /// The fleet's tenants, through meta (#229).
+    #[command(subcommand)]
+    Tenant(tenant::TenantCommand),
 }
 
 /// How a command ended, as an exit code.
@@ -279,6 +284,9 @@ async fn main() -> ExitCode {
         CellCommand::Inspect(args) => commands::inspect(&client, &out, args).await,
         CellCommand::Reconfigure(args) => commands::reconfigure(&client, &out, args).await,
         CellCommand::Retire(args) => commands::retire(&client, &out, args).await,
+        CellCommand::Tenant(command) => {
+            tenant::run(&runtime.providers, &client, &out, command).await
+        }
     };
     ending.into()
 }

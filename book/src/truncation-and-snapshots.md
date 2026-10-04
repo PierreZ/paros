@@ -47,7 +47,7 @@ restores from the checkpoint there (`Folder`); a reader that already holds the
 whole prefix compares the checkpoint with its own state instead. An owner that
 crashes between the two steps leaves the checkpoint mid-log, where every fold
 resets on it and the next checkpoint truncates past it. The node registry, the
-cell's control journal, is the first journal kept this way.
+cell's control journal, and meta, the fleet's directory, are kept this way.
 
 ## Truncation is a decision, not a side-channel
 

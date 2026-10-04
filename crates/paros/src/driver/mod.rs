@@ -84,7 +84,7 @@ use crate::rpc::{
     WriteAck, well_known,
 };
 use crate::storage::LogStorage;
-use crate::system::{DirectoryEvent, NodeStanding, REGISTRY, RegistryEvent, SystemEvent};
+use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
 
 use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
@@ -1095,9 +1095,10 @@ where
                     }
                     continue;
                 };
-                // The system journals are never truncated (#189): every
-                // node rebuilds its folds from position 0.
-                if crate::system::is_system(journal) {
+                // The directory is never truncated: its fold cannot jump a
+                // floor yet. The registry and meta are, to their owners'
+                // checkpoints (#230): their folds restart from the floor.
+                if journal == crate::system::DIRECTORY {
                     shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
                     continue;
                 }
@@ -1354,7 +1355,9 @@ where
                     journals.plane().map(|(_, rt)| rt)
                 };
                 if let Some(rt) = rt {
-                    let _ = reply.send(operator::inspect(&rt.node));
+                    let mut answer = operator::inspect(&rt.node);
+                    answer.cell_id = follower.as_ref().map_or(0, SystemFollower::cell_id);
+                    let _ = reply.send(answer);
                 }
             }
             Some(answer) = follow_answers.recv() => {
@@ -1364,7 +1367,7 @@ where
                 let Some(f) = follower.as_mut() else { continue };
                 let journal = answer.journal();
                 let events = f.fold_remote(answer);
-                let checkpoints = if journal == REGISTRY { f.take_checkpoints() } else { Vec::new() };
+                let checkpoints = f.take_checkpoints(journal);
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                 sys.apply(f, journal, events, checkpoints).await;
             }
@@ -1423,7 +1426,7 @@ where
                 // open against a seed for the ones it does not run.
                 if let Some(f) = follower.as_mut() {
                     for (journal, events) in follow_local(f, &journals) {
-                        let checkpoints = if journal == REGISTRY { f.take_checkpoints() } else { Vec::new() };
+                        let checkpoints = f.take_checkpoints(journal);
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                         sys.apply(f, journal, events, checkpoints).await;
                     }

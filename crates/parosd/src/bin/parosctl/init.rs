@@ -1,24 +1,27 @@
-//! `parosctl init` (#196, #216): the cell step of the fleet's bootstrap.
+//! `parosctl init` (#196, #216, #229): the fleet's bootstrap.
 //!
 //! Sent to the first server — a waiting seed every seed's join list names —
 //! which identifies every seed, mints the cell's id and forms every seed
 //! (`paros::machine`); then the first cell coordinator claims the cell
 //! control journal with `SetLeader(expected_gen = 0)`
-//! (`paros::client::bootstrap::claim_cell`). A re-run resumes: a seed that
-//! already serves the cell is asked for it, and the claim is made if it is
-//! still missing. A cell whose control journal has an owner was initialized
-//! before, and `init` is refused. Creating the meta tenant and registering
-//! the cell in its directory are the fleet steps of #229.
+//! (`paros::client::bootstrap::claim_cell`), and runs the fleet steps:
+//! meta records the cell (minting the fleet's id, drawn here), the cell
+//! records its half, meta marks the cell `READY`
+//! (`paros::client::bootstrap::register_fleet`). A re-run resumes: a seed
+//! that already serves the cell is asked for it (its `Inspect` names the
+//! cell), the claim is made if it is still missing, and the fleet steps
+//! pick up where they stopped. A cell whose fleet steps are all done was
+//! initialized before, and `init` is refused.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use clap::Args;
-use moonpool_core::TokioProviders;
+use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use moonpool_rpc::RpcHandle;
 use paros::NodeId;
 use paros::client::Client;
-use paros::client::bootstrap::{self, ClaimCellOutcome, InitOutcome};
+use paros::client::bootstrap::{self, ClaimCellOutcome, InitOutcome, RegisterFleetOutcome};
 use paros::machine::CELL_CONTROL;
 use serde_json::json;
 
@@ -62,7 +65,7 @@ pub async fn run(
                 .iter()
                 .map(|(id, addr)| (id.0, *addr))
                 .collect();
-            (servers, plan.coordinator(), Some(plan.cell_id))
+            (servers, plan.coordinator(), plan.cell_id)
         }
         InitOutcome::Refused(refusal) => {
             out.emit(
@@ -98,17 +101,87 @@ pub async fn run(
                 note("the cell control journal names no member");
                 return Ending::Unreachable;
             };
-            (servers, NodeId(coordinator), None)
+            if view.cell_id == 0 {
+                note("the cell control journal's server names no cell");
+                return Ending::Unreachable;
+            }
+            (servers, NodeId(coordinator), view.cell_id)
         }
     };
     let client = connect(&servers);
-    match bootstrap::claim_cell(&client, coordinator, patience).await {
-        ClaimCellOutcome::Claimed { generation } => {
+    let claimed = match bootstrap::claim_cell(&client, coordinator, patience).await {
+        ClaimCellOutcome::Claimed { generation } => generation,
+        // The coordinator's own claim from an earlier run: resume the fleet
+        // steps.
+        ClaimCellOutcome::AlreadyInitialized { owner, generation }
+            if owner == Some(coordinator.0) =>
+        {
+            generation
+        }
+        ClaimCellOutcome::AlreadyInitialized { owner, generation } => {
+            out.emit(
+                || format!("init refused: the cell is already initialized (owner={owner:?} generation={generation})"),
+                || json!({ "outcome": "refused", "refusal": "already_initialized", "owner": owner, "generation": generation }),
+            );
+            return Ending::Refused;
+        }
+        ClaimCellOutcome::Unavailable => {
+            note("the cell did not confirm its control journal in time: run init again");
+            return Ending::Unreachable;
+        }
+        ClaimCellOutcome::Ambiguous => {
+            note("the claim's answer never came: it may have won; run init again");
+            return Ending::Ambiguous;
+        }
+    };
+    // The fleet's id, if this run is the one that mints it (non-zero).
+    let fleet_draw = loop {
+        let id: u64 = providers.random().random();
+        if id != 0 {
+            break id;
+        }
+    };
+    let claimed = Claimed {
+        coordinator,
+        cell,
+        generation: claimed,
+        fleet_draw,
+    };
+    fleet_steps(&client, out, &claimed, &servers, patience).await
+}
+
+/// The cell control journal claimed, as `init` resumes from it.
+#[derive(Clone, Copy)]
+struct Claimed {
+    coordinator: NodeId,
+    cell: u64,
+    generation: u64,
+    fleet_draw: u64,
+}
+
+/// `init`'s fleet steps, as the coordinator that claimed the cell control
+/// journal: register the cell in meta and in itself.
+async fn fleet_steps(
+    client: &Client<TokioProviders>,
+    out: &Printer,
+    claimed: &Claimed,
+    servers: &[(u64, SocketAddr)],
+    patience: Duration,
+) -> Ending {
+    let Claimed {
+        coordinator,
+        cell,
+        generation: claimed,
+        fleet_draw,
+    } = *claimed;
+    match bootstrap::register_fleet(client, coordinator, cell, fleet_draw, patience).await {
+        RegisterFleetOutcome::Registered { context } => {
             out.emit(
                 || {
                     format!(
-                        "initialized cell{} coordinator={} generation={generation} members={}",
-                        cell.map_or_else(String::new, |c| format!(" {c}")),
+                        "initialized fleet {} cell {} coordinator={} generation={claimed} members={}",
+                        context.fleet_id,
+                        context.cell_id,
                         coordinator.0,
                         servers.len()
                     )
@@ -116,9 +189,10 @@ pub async fn run(
                 || {
                     json!({
                         "outcome": "initialized",
-                        "cell": cell,
+                        "fleet": context.fleet_id,
+                        "cell": context.cell_id,
                         "coordinator": coordinator.0,
-                        "generation": generation,
+                        "generation": claimed,
                         "members": servers
                             .iter()
                             .map(|(id, addr)| json!({ "node": id, "addr": addr.to_string() }))
@@ -128,20 +202,23 @@ pub async fn run(
             );
             Ending::Success
         }
-        ClaimCellOutcome::AlreadyInitialized { owner, generation } => {
+        RegisterFleetOutcome::AlreadyRegistered { context } => {
             out.emit(
-                || format!("init refused: the cell is already initialized (owner={owner:?} generation={generation})"),
-                || json!({ "outcome": "refused", "refusal": "already_initialized", "owner": owner, "generation": generation }),
+                || format!("init refused: the cell is already initialized (fleet={} cell={})", context.fleet_id, context.cell_id),
+                || json!({ "outcome": "refused", "refusal": "already_initialized", "fleet": context.fleet_id, "cell": context.cell_id }),
             );
             Ending::Refused
         }
-        ClaimCellOutcome::Unavailable => {
-            note("the cell did not confirm its control journal in time: run init again");
-            Ending::Unreachable
+        RegisterFleetOutcome::Refused(refusal) => {
+            out.emit(
+                || format!("init refused: {refusal:?}"),
+                || json!({ "outcome": "refused", "refusal": format!("{refusal:?}") }),
+            );
+            Ending::Refused
         }
-        ClaimCellOutcome::Ambiguous => {
-            note("the claim's answer never came: it may have won; run init again");
-            Ending::Ambiguous
+        RegisterFleetOutcome::Unavailable => {
+            note("meta or the cell control journal did not answer in time: run init again");
+            Ending::Unreachable
         }
     }
 }

@@ -229,6 +229,12 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
+- **The fleet** (#229): meta (`1/1`, `paros::system::Meta`) is the fleet's directory of cells
+  and tenants, on the seeds from formation. Every fleet operation (`init`'s fleet steps, tenant
+  create and remove) is a resumable state machine over meta and the cell control journal
+  (`paros::client::fleet`): one entry per step, decided from what the two journals hold, each
+  naming the fleet and cell it believes in and refused at apply when they differ. A removal
+  unhosts the id even when it was never hosted: the fence against a late creator.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are

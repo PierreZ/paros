@@ -33,6 +33,7 @@ use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
 use crate::chain::{hash_text, trace_truncate, user_command_hash};
 use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
+mod fleet;
 mod fold;
 mod races;
 mod rpc;
@@ -136,7 +137,16 @@ const CHECKPOINT: u8 = 23;
 /// Book a slot of a registered joiner in the **node registry**, or release
 /// one (#211): what the cell coordinator writes.
 const BOOK_CAPACITY: u8 = 24;
-const OP_COUNT: u8 = 25;
+/// `init`'s fleet steps (#229): register the run's cell in meta, the cell's
+/// half of the registration, the cell `READY` — resumable, and stopped
+/// between two steps by its own BUGGIFY location.
+const INIT_FLEET: u8 = 25;
+/// Create a tenant through meta (#229): `REGISTERING`, hosted by the cell,
+/// `READY` — or resume a creation another run left half done.
+const CREATE_TENANT: u8 = 26;
+/// Remove a tenant through meta (#229): `REMOVING`, unhosted, forgotten.
+const REMOVE_TENANT: u8 = 27;
+const OP_COUNT: u8 = 28;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -375,7 +385,8 @@ impl ChainConfig {
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
-            // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY
+            // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, INIT_FLEET,
+            // CREATE_TENANT, REMOVE_TENANT
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -427,6 +438,12 @@ impl ChainConfig {
                 buggify_knob!(4_u64, 0_u64..21_u64),
                 // A booking is one append and one read-back.
                 buggify_knob!(4_u64, 0_u64..21_u64),
+                // A fleet step is two reads, a claim and one append; init
+                // is needed once per run, the ceiling an operator who keeps
+                // re-running it.
+                buggify_knob!(2_u64, 0_u64..21_u64),
+                buggify_knob!(5_u64, 0_u64..21_u64),
+                buggify_knob!(2_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -1240,6 +1257,13 @@ impl Workload for ChainWorkload {
         let mut writer = Writer::new(journal, client_id);
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
+        let mut fleet_ops = fleet::FleetOps::new(
+            ctx,
+            crate::shape::system_journals(ctx.state(), true),
+            deployment.acceptors().len(),
+            client_id,
+            Duration::from_millis(config.pause_ms),
+        );
         let mut system_ops = system::SystemOps::new(
             &deployment,
             crate::shape::system_journals(ctx.state(), true),
@@ -2740,6 +2764,15 @@ impl Workload for ChainWorkload {
                         .await;
                 }
                 BOOK_CAPACITY => system_ops.book(ctx, &nodes, raw_payload).await,
+                INIT_FLEET => {
+                    let _ = fleet_ops.init(ctx, &nodes, raw_payload).await;
+                }
+                CREATE_TENANT => {
+                    fleet_ops
+                        .create(ctx, &nodes, (raw_class, raw_payload))
+                        .await;
+                }
+                REMOVE_TENANT => fleet_ops.remove(ctx, &nodes, raw_payload).await,
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }
@@ -3308,6 +3341,11 @@ impl Workload for ChainWorkload {
             8_u64,
             "chain: applied index watermark"
         );
+        // Meta and its cell agree once the run is quiet (#229): one client
+        // reads both back.
+        if client_id == 0 && converged {
+            fleet_ops.check_consistency(ctx, &nodes).await;
+        }
         Ok(())
     }
 

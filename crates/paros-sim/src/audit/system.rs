@@ -19,6 +19,9 @@
 //! - **checkpoints** (#230) — a node whose fold held the registry's whole
 //!   prefix finds every checkpoint equal to its own state (folding from a
 //!   checkpoint yields what folding the full history does);
+//! - **meta** (#229) — every node folds meta alike too; a registered
+//!   tenant takes a drawn user id, never one registered before, and meta
+//!   refuses an id as taken only when it was;
 //! - **classes and capacity** (#211) — a `stateless` machine never starts a
 //!   journal, a booking takes a slot of its node's own class, and a node is
 //!   never booked past its capacity (judged on the registry's events in
@@ -35,9 +38,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::system::{
-    Class, DIRECTORY, DirectoryEvent, DirectoryRefusal, RegistryEvent, RegistryRefusal, SystemEvent,
+    Class, DIRECTORY, DirectoryEvent, DirectoryRefusal, META, MetaEvent, MetaRefusal,
+    RegistryEvent, RegistryRefusal, SystemEvent,
 };
-use paros::{JournalId, JournalKey, NodeId};
+use paros::{JournalId, JournalKey, NodeId, TenantId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
 
@@ -61,6 +65,8 @@ pub(crate) struct SystemBoard {
     folded: BTreeMap<(JournalKey, u64), u64>,
     /// Every id the directory created, with the LSN that created it.
     created: BTreeMap<JournalId, u64>,
+    /// Every tenant id meta registered, with the LSN that registered it.
+    tenants: BTreeMap<TenantId, u64>,
     /// `(node, journal)`: the node folded the journal's tombstone.
     tombstoned: BTreeSet<(u64, JournalKey)>,
     /// Joiners some node has admitted to its pool.
@@ -152,6 +158,12 @@ impl SystemBoard {
                 "system: every node folds the directory to the same event at every lsn",
                 { "node" => node.0, "lsn" => lsn }
             );
+        } else if journal == META {
+            assert_always!(
+                known == digest,
+                "system: every node folds meta to the same event at every lsn",
+                { "node" => node.0, "lsn" => lsn }
+            );
         } else {
             assert_always!(
                 known == digest,
@@ -189,6 +201,25 @@ impl SystemBoard {
                 winner,
             })) if self.created.get(winner).is_some_and(|at| *at < lsn) => {
                 self.name_race = true;
+            }
+            SystemEvent::Meta(MetaEvent::TenantRegistered { tenant, .. }) => {
+                let at = *self.tenants.entry(*tenant).or_insert(lsn);
+                assert_always!(
+                    tenant.is_user() && at == lsn,
+                    "fleet: a registered tenant takes a drawn user id, never reused",
+                    { "tenant" => tenant.0, "lsn" => lsn, "first" => at }
+                );
+            }
+            SystemEvent::Meta(MetaEvent::Refused(MetaRefusal::IdTaken { tenant })) => {
+                assert_always!(
+                    self.tenants.get(tenant).is_some_and(|at| *at < lsn),
+                    "fleet: meta refuses a tenant id as taken only when it was registered",
+                    { "tenant" => tenant.0, "lsn" => lsn }
+                );
+                assert_reachable!("fleet: meta refuses a tenant id registered before");
+            }
+            SystemEvent::Meta(MetaEvent::Refused(MetaRefusal::NameTaken { .. })) => {
+                assert_reachable!("fleet: two creations race for one tenant name");
             }
             SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id })) => {
                 assert_always!(

@@ -20,7 +20,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `chain_workload.rs` → `ChainWorkload`, `ChainConfig` → the op alphabet, weights, reconfiguration shape rings.
 - `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
-- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`).
+- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`) · `chain_workload/fleet.rs` → ops 25–27 (#229) and the end-of-run meta/cell consistency check.
 - `world/mod.rs` → `StorageWorld`, `storage_world_for` → fake disk, copy budget, parked ids, provisioning ledger, reconfiguration ledger.
 - `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
 - `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
@@ -75,7 +75,10 @@ capacity, and a registered joiner registering again is a reboot, #211) · `SET_L
 the generation) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
 `BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
-#211) · `OP_COUNT=25`. Retired ids are no-ops that keep their slot in the alphabet.
+#211) · `INIT_FLEET=25`, `CREATE_TENANT=26`, `REMOVE_TENANT=27` (#229: `paros::client::fleet`'s
+operations stepped one entry at a time, stopped between steps by one location each; a creation
+under an id it registered before must be redrawn, one resumed under a stale context must be
+refused) · `OP_COUNT=28`. `CHECKPOINT` picks the registry or meta. Retired ids are no-ops that keep their slot in the alphabet.
 
 - Each client is an **owner** or a **reader** for the run (knob; each journal's first client
   owns). Owners claim before writing and re-claim when superseded.
@@ -94,7 +97,9 @@ claim, fold to the tail, checkpoint and truncate when the policy finds it due, #
 - **Journal board** (`audit/journals.rs`): every slot of journal `j` applies only an identity
   appended to `j`; a quarantined journal sends nothing; a sibling keeps committing while one is
   held; a node keeps serving the rest while one is quarantined.
-- **System board** (`audit/system.rs`): every node folds each system journal alike per LSN; a
+- **System board** (`audit/system.rs`): every node folds each system journal (meta included,
+  #229) alike per LSN; a registered tenant takes a drawn user id, never reused, and meta refuses
+  one as taken only when it was; a
   created journal takes its creator's drawn user id, never reused (`IdTaken` only for an id
   created before); no append acked after its tombstone; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves

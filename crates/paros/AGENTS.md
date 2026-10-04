@@ -11,7 +11,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 
 - `driver/mod.rs` → `run_node`, `run_journals`, `RunError`, `BootKind` → the node loop; one journal or a static list (#188).
 - `driver/journals.rs` → `JournalStores` (`opened`: a store passed its boot, #208), `SingleStore` → per-journal runtime and quarantine (`quarantine_ticks`).
-- `driver/system.rs` → `SystemPlan` → system-journal follower; applies directory/registry folds (#189).
+- `driver/system.rs` → `SystemPlan` (`cell_id`, reported by `Inspect`) → system-journal follower; applies directory/registry folds, folds meta (#189, #229).
 - `provision.rs` → `provision_store`, `provision_matchmaker_store`, `Provisioned` → format a store ahead of its first start; an interrupted run resumes from the disk (#208).
 - `driver/{boot,ready,report}.rs` → format-marker check, the `Ready` I/O side in persist-before-send order, boot report.
 - `driver/transport.rs` → `PeerMailbox`, `LaneOpener`, `peer_address` → keep-newest lanes per journal, round-robin.
@@ -29,7 +29,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `proxy/mod.rs` → `run_proxy`, `ProxyConfig` → Phase-2 subset, nothing durable (#142).
 - `replica_tier/mod.rs` → `run_replica` → learner subset over a `LogStorage`; serves `Read` (#144).
 - `rpc/methods.rs` → one `RpcMethod` per call, `WellKnownMethod` ids (public `0x5041_00xx`, internal `0x5041_01xx`, matchmaker `0x5041_02xx`, machine `0x5041_03xx`; retired ids never reused).
-- `machine.rs` → `wait_for_cell`, `MachineFacts`, `CellPlan`, `CellLedger`, `Class`, `CELL_CONTROL` → the machine before its cell: `Identify`, `Init` (a seed forms the cell over the seeds, resumable), `FormCell` (#196, #216); not in the simulation yet.
+- `machine.rs` → `wait_for_cell`, `MachineFacts`, `CellPlan`, `CellLedger`, `Class`, `CELL_CONTROL`, `META_CONTROL` → the machine before its cell: `Identify`, `Init` (a seed forms the cell over the seeds, resumable), `FormCell` (#196, #216); not in the simulation yet.
 - `rpc/inbound.rs` → `Inbound`, `ReplySender`, `serve_deliveries`, `rpc_config`, `MAX_FRAME_BYTES`.
 - `rpc/client.rs` → `NodeClient` (one at-most-once attempt per call), `MatchmakerClient`.
 - `rpc/codec.rs` → shared scalar codecs (ballot, party, quorum system, config, command).
@@ -40,8 +40,12 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/writer.rs` → `Writer` (`truncate` carries the owner's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
-- `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `TOY_JOURNAL` → `parosctl init`'s calls and server ids learned from `Inspect.node` (#196).
-- `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (`DIRECTORY`, `REGISTRY`: two tenants' control journals, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230).
+- `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `register_fleet`, `TOY_JOURNAL` → `parosctl init`'s calls (the cell, then the fleet steps, #229) and server ids learned from `Inspect.node` (#196).
+- `client/fleet.rs` → `CellRegistration`, `TenantCreation`, `TenantRemoval`, `FleetStep`, `load_meta` → the fleet's resumable operations over meta and the cell control journal, one entry per step (#229).
+- `system/mod.rs` → `DIRECTORY`, `REGISTRY`, `META`, `SystemEvent` · `system/command.rs` → `SystemCommand`, `FleetContext` → one record per position.
+- `system/directory.rs` → `Directory` → a tenant's journal names; a create carries its drawn id (#235).
+- `system/registry.rs` → `Registry` → the cell control journal: nodes by `node_id` with class, capacity and bookings (#211), the cell's fleet registration and hosted tenants (#229); `Checkpointable` (#230).
+- `system/meta.rs` → `Meta`, `TenantState`, `CellState`, `METADATA_VERSION` → the fleet's directory (`1/1`): cells and tenants with their states (#229); `Checkpointable`.
 - `corruption.rs` → `classify_log` → CTRL record classification.
 - `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.
 - `journal/{frame,plan,node_image}.rs` → record ↔ entry codec, boot fold start, node records + per-kind corruption table.

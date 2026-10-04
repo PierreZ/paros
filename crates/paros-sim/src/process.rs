@@ -1321,7 +1321,11 @@ fn system_rig(
         seat.audit = seat.audit.clone().with_system(board.clone());
     }
     if seeds.contains(&self_rank) {
-        for journal in [paros::system::DIRECTORY, paros::system::REGISTRY] {
+        for journal in [
+            paros::system::DIRECTORY,
+            paros::system::REGISTRY,
+            paros::system::META,
+        ] {
             let config = Config {
                 journal,
                 id: self_rank,
@@ -1372,6 +1376,7 @@ fn system_plan(
     (
         SystemPlan {
             self_id,
+            cell_id: crate::shape::cell_id(ctx.state()),
             class,
             seeds: members
                 .iter()

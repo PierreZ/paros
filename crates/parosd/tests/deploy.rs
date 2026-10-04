@@ -3,9 +3,10 @@
 //! Tokio and real directories, driven by `parosctl` over `paros::client`.
 //!
 //! A machine mints its `node_id` at format and waits; `parosctl init`, sent
-//! to one seed, forms the cell over the seeds and claims its control
-//! journal — refused on a machine that is not a seed, and on a cell already
-//! initialized. Then a journal is claimed and written without a hand-carried
+//! to one seed, forms the cell over the seeds, claims its control journal
+//! and registers the cell in the fleet's meta (#229) — refused on a machine
+//! that is not a seed, and on a cell already initialized. A tenant is
+//! created through meta (a re-run finds it ready), listed and removed. Then a journal is claimed and written without a hand-carried
 //! generation or position (server ids learned from the servers themselves),
 //! every machine is killed and restarted as an existing member, a second
 //! owner supersedes the first — for a write and for a truncation (#228) — and
@@ -232,14 +233,41 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
     let initialized = until_ok(&seed, &["init"]);
     assert_eq!(initialized["outcome"], "initialized", "{initialized}");
     assert_eq!(initialized["members"].as_array().map(Vec::len), Some(3));
+    assert!(
+        initialized["fleet"].as_u64().is_some_and(|f| f != 0),
+        "{initialized}"
+    );
     let again = until_code(&seed, &["init"], CTL_REFUSED);
     assert_eq!(again["refusal"], "already_initialized", "{again}");
+    assert_eq!(again["fleet"], initialized["fleet"], "{again}");
     for rank in 0..3 {
         let dir = cluster.data_dir(&format!("seed{rank}"));
         assert!(exists(&dir.join("machine")));
+        assert!(exists(&dir.join("journals").join("1").join("1")));
         assert!(exists(&dir.join("journals").join("2").join("1")));
         assert!(exists(&dir.join("journals").join("256").join("256")));
     }
+
+    // A tenant, created through meta in the one cell; a second create of
+    // the same name finds it ready. Listed, then removed.
+    let created = until_ok(&servers, &["tenant", "create", "acme"]);
+    assert_eq!(created["outcome"], "ready", "{created}");
+    assert_eq!(created["cell"], initialized["cell"], "{created}");
+    let again = until_ok(&servers, &["tenant", "create", "acme"]);
+    assert_eq!(again["tenant"], created["tenant"], "{again}");
+    assert_eq!(again["resumed"], true, "{again}");
+    let listed = until_ok(&servers, &["tenant", "list"]);
+    assert_eq!(listed["fleet"], initialized["fleet"], "{listed}");
+    assert_eq!(listed["tenants"][0]["name"], "acme", "{listed}");
+    assert_eq!(listed["tenants"][0]["state"], "ready", "{listed}");
+    let removed = until_ok(&servers, &["tenant", "delete", "acme"]);
+    assert_eq!(removed["tenant"], created["tenant"], "{removed}");
+    let listed = until_ok(&servers, &["tenant", "list"]);
+    assert_eq!(
+        listed["tenants"].as_array().map(Vec::len),
+        Some(0),
+        "{listed}"
+    );
 
     // The writer claims journal 256 on its way, and writes at the tail;
     // the servers' ids are learned from the servers.
