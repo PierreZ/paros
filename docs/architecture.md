@@ -419,7 +419,9 @@ fleet (`init`, cells, machines, everything below), `tenant-manager` creates, del
 `users` tenants through the fleet tenant, and a `tenant` token is scoped to one `TenantId` for its
 data plane and journals. **Creating a tenant returns a valid tenant token**, so the caller can use
 the new tenant at once; who signs it (a paros key beside the issuer's in the fleet entry, or the
-external issuer called by the front door) is open on #245.
+external issuer called by the front door) is open on #245. `parosctl` also mints tokens **offline**, for any role,
+from a private key whose public half is recorded in the fleet entry, with no running fleet needed
+(decided on 2026-10-04).
 
 **Routing goes through the fleet tenant from M9.** The front door resolves the tenant name → `TenantId` →
 cell from its fold of the fleet directory, then the journal name → `JournalId` and its placement
