@@ -377,43 +377,46 @@ metadata version lets a reader refuse a format it does not understand.
 - Tenant control journals are self-describing (name, desired state).
 - Meta's tenant entries carry the fleet-unique `TenantId`, the frame of the tenant's control
   journal, the cell assignment, the state, a configuration sequence number, the tenant's
-  **group** and whether it is **pinned**; meta's cell entries carry the cell id, the cell tenant's frame, the state and
+  **group** and its **placement** (`movable` or `pinned`); meta's cell entries carry the cell id, the cell tenant's frame, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns meta's frame
   when it joins the fleet, from the cell that hosts meta.
 - Every peer and client message is framed by `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through meta's directory.
 
-**Tenant groups and pinning** (decided on 2026-10-04). Every tenant belongs to exactly one
-**group**, fixed when it is created, and is either **movable** or **pinned** to its cell, also
-fixed at creation:
+**Tenant groups and placement** (decided on 2026-10-04). Two attributes of every tenant, both
+recorded in meta's tenant entry when the tenant is registered and never changed afterwards:
 
-| Tenant | Group | Movable |
-|---|---|---|
-| a cell's cell tenant | `internal` | **pinned**: it *is* its cell's registry and capacity, and lives and dies with the cell |
-| the meta tenant | `internal` | movable, like any tenant (to a dedicated cell, M12) |
-| a user tenant | `users` | movable |
+- **Group: `internal` or `users`, and nothing else.** The group only separates the tenants paros
+  needs to administrate itself from the tenants it serves. `internal` tenants are created by
+  paros's own operations: `init` creates meta and the first cell tenant, and adding a cell (M12)
+  creates its cell tenant. The tenant API (`parosctl tenant create`, the front door) creates
+  `users` tenants only, and meta refuses an `internal` registration from it. A front door serves
+  `users` tenants only.
+- **Placement: `movable` or `pinned`, the creator's choice.** It is independent of the group: an
+  `internal` tenant may move (meta's journal moves to a dedicated cell, M12), and a `users`
+  tenant may be pinned. `parosctl tenant create` registers a tenant `movable` unless told
+  `--pinned`. `init` registers a cell's cell tenant `pinned`, since it is that cell's registry
+  and capacity and lives and dies with it, and meta `movable`. Meta refuses a move of a `pinned`
+  tenant when it applies the move's first entry, so no step of the move runs.
 
-- There are exactly two groups for now, `internal` and `users`. A group is a closed set the
-  fleet defines, never a tenant-supplied name; a third group is a metadata-version change.
-- `parosctl tenant create` makes `users` tenants only. `internal` tenants are created by `init`
-  (meta, the first cell tenant) and by adding a cell (its cell tenant, M12), never through the
-  tenant API; meta refuses an `internal` registration outside those operations, and refuses to
-  remove an `internal` tenant while its cell or the fleet is not being removed.
-- A move of a pinned tenant is refused at apply in meta, before any step runs; meta knows the
-  flag, so no cell is asked. Pinning is a property of the tenant, not of its group: meta is
-  `internal` and movable.
-- Groups are also the unit of placement and capacity policy once cells differ (FDB's tenant
-  groups were the unit that must share a cluster): placement and quotas may treat `internal`
-  and `users` apart, and a front door serves `users` tenants only.
-
-**Moving a tenant (M12)**, never a pinned one, reconfigures its journals and matchmaker set onto the target cell, then
+**Moving a tenant (M12)**, never a `pinned` one, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
 never the authority: if it disagrees with the control journal's generation, the generation wins.
 Meta moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
+
+**Open for M12: the cell inside the configuration.** Today a matchmaker's registry binds an
+acceptor set and its quorum system to a ballot, and names no cell. Node ids are fleet-unique, so a
+reconfiguration onto another cell's machines already moves a journal's data. If a configuration
+also carried its `cell_id`, the move would itself be decided by Paxos: the effective
+configuration (the highest-ballot reconfiguration a matchmaker quorum holds) would name the cell
+that owns the journal, the directory would become a cache of that fact, and a reconfiguration
+naming another cell for a `pinned` tenant's journal could be refused where it is registered. The
+cost is one field in `AcceptorConfig` that the core never decides on, and every node knowing its
+own cell. Recorded on #232.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
 tombstone set so it cannot silently rejoin), moving tenants between cells, moving meta, a separate
@@ -441,8 +444,8 @@ assumed, and unset is a state to refuse, not a value to fall back on.
   cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
   meta tenant gets one when `init` creates the fleet, kept when meta moves. Meta records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
-  covers them too. Meta records each tenant's group (`internal` or `users`) and whether it is
-  pinned to its cell beside its id (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
+  covers them too. Meta records each tenant's group (`internal` or `users`) and its placement
+  (`movable` or `pinned`) beside its id (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
   checked by meta needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
   coordinator, the single writer of the tenant's control journal; a duplicate is refused and the
