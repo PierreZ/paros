@@ -2,17 +2,20 @@ syntax = "proto3";
 
 package paros.meta.v1;
 
-// The meta tenant's control journal (`1/1`, #229): the fleet's directory,
-// tenant -> cell, plus the cell entries (`docs/architecture.md` §3.7). Each
-// entry is one record of a `Write`, written by meta's coordinator (whoever
-// claimed the journal with `SetLeader`); `paros::meta::Meta` is the one fold
-// of them. The core keeps the records as opaque as any other.
+// The meta tenant's control journal (#229): the fleet's directory, tenant ->
+// cell, plus the cell entries (`docs/architecture.md` §3.7). Its frame is
+// random like every frame (§3.8), drawn at `init`. Each entry is one record
+// of a `Write`, written by meta's coordinator (whoever claimed the journal
+// with `SetLeader`); `paros::meta::Meta` is the one fold of them. The core
+// keeps the records as opaque as any other.
 //
 // Every entry names the fleet it was written for and the metadata version
 // its writer speaks: a step of a fleet operation that finds another fleet is
 // refused (FDB's `MetaclusterOperationContext`), and a reader refuses a
 // version it does not understand. Meta is checkpointed with
 // `paros::client::checkpoint` (#227): `MetaState` is the checkpoint's state.
+//
+// Enums are `uint32`s whose `0` is unset and refused: nothing defaults.
 message MetaEntry {
   uint64 fleet_id = 1;
   uint32 version = 2;
@@ -26,13 +29,21 @@ message MetaEntry {
   }
 }
 
-// `init` step 2: meta records the fleet's id, once. A re-run with the same
-// id changes nothing; another id is refused.
-message FormFleet {}
+// `init`: meta records the fleet's id, once, and registers itself as the
+// fleet's first tenant (`internal`, movable) under its own frame. A re-run
+// with the same id and frame changes nothing; anything else is refused.
+message FormFleet {
+  uint64 meta_tenant = 1;
+  uint64 meta_journal = 2;
+}
 
-// `init` step 3: the cell `cell_id` joins the directory, `REGISTERING`.
+// `init` (and adding a cell, M12): the cell `cell_id` joins the directory,
+// `REGISTERING`, and its cell tenant is registered (`internal`, pinned) under
+// the frame of its control journal.
 message AddCell {
   uint64 cell_id = 1;
+  uint64 control_tenant = 2;
+  uint64 control_journal = 3;
 }
 
 // Move cell `cell_id` to `state` (see `CellState` for the transitions).
@@ -41,13 +52,17 @@ message MarkCell {
   uint32 state = 2;
 }
 
-// Tenant creation's first step: tenant `tenant` (a random id the creator
-// drew, `>= 256`) named `name`, assigned to cell `cell_id`, `REGISTERING`.
-// A taken id is refused and the creator redraws; a taken name is refused.
+// Tenant creation's first step: tenant `tenant` (a random id its creator
+// drew) named `name`, its control journal `control_journal` (random too),
+// assigned to cell `cell_id`, `REGISTERING`. Always a `users` tenant: the
+// tenant API cannot create an `internal` one. `placement` is 1 movable, 2
+// pinned. A taken id or a taken name is refused.
 message RegisterTenant {
   uint64 tenant = 1;
   bytes name = 2;
   uint64 cell_id = 3;
+  uint64 control_journal = 4;
+  uint32 placement = 5;
 }
 
 // Move tenant `tenant` to `state` (see `TenantState` for the transitions).
@@ -71,12 +86,15 @@ message MetaState {
   repeated CellEntry cells = 3;
   repeated TenantEntry tenants = 4;
   repeated uint64 removed = 5;
+  uint64 meta_tenant = 6;
+  uint64 meta_journal = 7;
 }
 
 message CellEntry {
   uint64 cell_id = 1;
   uint32 state = 2;
   uint32 version = 3;
+  uint64 control_tenant = 4;
 }
 
 message TenantEntry {
@@ -85,6 +103,10 @@ message TenantEntry {
   uint64 cell_id = 3;
   uint32 state = 4;
   uint64 config_seq = 5;
-  // Reserved and unused in M9 (#226): 0 is none.
-  uint64 tenant_group = 6;
+  reserved 6;
+  uint64 control_journal = 7;
+  // 1 internal, 2 users.
+  uint32 group = 8;
+  // 1 movable, 2 pinned.
+  uint32 placement = 9;
 }

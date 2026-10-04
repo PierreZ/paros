@@ -56,7 +56,7 @@ pub struct HardState {
 ///   in `peers` — a spare waiting to be added — and may be in `peers` and
 ///   later removed; either way it stays addressable, answers Phase 1 for the
 ///   ballots it took part in, and learns the chosen log as a replica.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Config {
     /// This node's identity.
@@ -110,12 +110,33 @@ pub struct Config {
     /// carried for assertions and tracing, never read by a protocol decision
     /// — the driver routes a message to its journal before the core sees it,
     /// and a client call naming any other journal is refused at the wire.
-    /// Defaults to the one user journal of the one user tenant of a
-    /// single-journal deployment ([`JournalKey::default`]).
+    /// A deployment draws one for every journal it serves (no id is fixed
+    /// and none has a default, `docs/architecture.md` §3.8); a node alone
+    /// that routes nothing is given [`JournalKey::UNSET`].
     pub journal: JournalKey,
 }
 
 impl Config {
+    /// Node `id` serving the journal `journal`, alone: no peers, a
+    /// majority, nothing opt-in. There is no `Config::default`: a node and
+    /// its frame are always named (no id has a default,
+    /// `docs/architecture.md` §3.8); a sans-IO caller that routes nothing
+    /// names [`JournalKey::UNSET`] outright.
+    #[must_use]
+    pub fn new(id: NodeId, journal: JournalKey) -> Self {
+        Self {
+            id,
+            peers: Vec::new(),
+            quorum_system: QuorumSystem::default(),
+            nodes: Vec::new(),
+            matchmakers: Vec::new(),
+            matchmaker_pool: Vec::new(),
+            proxy_count: 0,
+            replica_count: 0,
+            journal,
+        }
+    }
+
     /// The addressable pool: `nodes`, or `peers` when `nodes` is empty.
     #[must_use]
     pub fn pool(&self) -> &[NodeId] {

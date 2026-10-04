@@ -1,8 +1,9 @@
-//! **Fleet operations** (#229, `docs/architecture.md` §3.7): `init`'s fleet
-//! steps, and creating and removing a tenant, each an **idempotent state
-//! machine** over two control journals — meta's ([`META`], the fleet's
-//! directory) and the cell's ([`crate::machine::CELL_CONTROL`], the cell's
-//! tenant list).
+//! **Fleet operations** (#229, `docs/architecture.md` §3.1, §3.7): `init`'s
+//! fleet steps, and creating and removing a tenant, each an **idempotent
+//! state machine** over two control journals — meta's (the fleet's
+//! directory) and the cell tenant's (the cell's tenant list). No frame is
+//! fixed (§3.8): the caller hands the session both, read from the cell plan
+//! or from any machine's `Inspect` ([`FleetFrames`]).
 //!
 //! An operation is a sequence of steps, each **one** write to one of the two
 //! journals, and the next step is decided from what the journals hold, never
@@ -13,28 +14,34 @@
 //! step; [`FleetSession::init`], [`FleetSession::create_tenant`] and
 //! [`FleetSession::remove_tenant`] run steps until the operation ends.
 //!
-//! - **`init`** (steps 2 and 3 of §3.1): the cell records the fleet on its
-//!   side (`JoinFleet`), meta records the fleet's id (`FormFleet`), the cell
-//!   joins meta's directory `REGISTERING` (`AddCell`), and meta marks it
-//!   `READY`. The cell's side goes first, against the order §3.1 lists the
-//!   steps in, because it is the one place a re-run can learn the cell's id
-//!   from: a formed seed no longer answers `Init`, and `Inspect` does not
-//!   name its cell.
-//! - **Creating a tenant**: meta registers it `REGISTERING` with its cell
-//!   assignment (the one `READY` cell in M9), the cell hosts it
-//!   (`HostTenant`), meta marks it `READY`. A name meta holds in
-//!   `REGISTERING` — an earlier run's, whoever ran it — is resumed under its
-//!   id; a name held `READY` ends the operation at once. Booking the
-//!   tenant's footprint and writing its own control journal are #210 and
-//!   #225.
-//! - **Removing a tenant**: meta marks it `REMOVING`, the cell drops it,
-//!   meta removes it. Any state may be removed.
+//! - **`init`** (steps 2 and 3 of §3.1): meta records the fleet's id and
+//!   itself (`FormFleet`: meta is the fleet's first tenant, `internal` and
+//!   movable), the cell joins meta's directory `REGISTERING` with its cell
+//!   tenant (`AddCell`: `internal` and pinned), the cell records the fleet on
+//!   its side (`JoinFleet`), and meta marks the cell `READY`.
+//! - **Creating a tenant**: a `users` tenant only — the tenant API cannot
+//!   create an `internal` one. Meta registers it `REGISTERING` with its
+//!   frame, its cell assignment (the one `READY` cell in M9) and its
+//!   placement, the cell hosts it (`HostTenant`), meta marks it `READY`. A
+//!   name meta holds in `REGISTERING` — an earlier run's, whoever ran it — is
+//!   resumed under its id; a name held `READY` ends the operation at once.
+//!   Booking the tenant's footprint and writing its own control journal are
+//!   #210 and #225.
+//! - **Removing a tenant**: meta marks it `REMOVING`, the cell drops it (a
+//!   tombstone, written whether the cell hosted it or not), meta removes it.
 //!
 //! **Every step checks it still talks to the same fleet and the same cell**
 //! (FDB's `MetaclusterOperationContext`): every entry names the fleet meta
 //! formed, and both folds refuse another; before a cell step, the cell's own
 //! registration must name meta's fleet and the cell the tenant is assigned to
 //! ([`FleetRefusal::CellMismatch`]).
+//!
+//! **A cell step decided from a stale meta fold is judged by the cell.** A
+//! step reads meta, then writes the cell; between the two another operator
+//! may remove the tenant from meta (fencing this one's meta, not its claim
+//! of the cell). Such a removal always tombstones the tenant on the cell
+//! first, and the cell refuses to host a tombstoned tenant at apply, so the
+//! stale `HostTenant` changes nothing ([`FleetRefusal::Removed`]).
 //!
 //! **Who writes.** Meta is written by its coordinator — whoever claims it with
 //! `SetLeader` (the session's `operator`) — and the cell's control journal by
@@ -47,32 +54,49 @@
 //! is never checkpointed here — its owner's fold is the registry's, over a
 //! genesis pool only the deployment knows.
 //!
-//! Like the rest of the client it draws no randomness: a tenant id is the
-//! caller's draw, and an id meta holds already is a refusal the caller
-//! redraws on ([`FleetRefusal::IdTaken`]).
+//! Like the rest of the client it draws no randomness: tenant frames are the
+//! caller's draws, and [`FleetSession::create_tenant`] moves to the next one
+//! when meta holds a draw already.
+
+use std::time::Duration;
 
 use moonpool_core::Providers;
 use paros_core::{JournalKey, NodeId, TenantId};
 
 use super::Client;
 use super::checkpoint::{
-    AppendOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome,
+    AppendOutcome, CheckpointOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome,
+    OpenOutcome,
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
-use crate::machine::CELL_CONTROL;
-use crate::meta::{CellState, META, METADATA_VERSION, Meta, MetaCommand, MetaEntry, TenantState};
+use crate::meta::{
+    CellState, METADATA_VERSION, Meta, MetaCommand, MetaEntry, Placement, TenantState,
+};
 use crate::system::{FleetRegistration, Registry, SystemCommand};
+
+/// The frames a fleet operation works on: no frame is fixed (§3.8), so the
+/// caller learns them from the cell plan or from any machine's `Inspect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FleetFrames {
+    /// The cell's id.
+    pub cell_id: u64,
+    /// The cell tenant's control journal.
+    pub cell: JournalKey,
+    /// Meta's control journal.
+    pub meta: JournalKey,
+}
 
 /// One step a fleet operation wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// Meta recorded the fleet's id, and itself.
+    FormFleet,
+    /// The cell joined meta's directory, `REGISTERING`, with its cell
+    /// tenant.
+    AddCell,
     /// The cell recorded the fleet on its side.
     JoinFleet,
-    /// Meta recorded the fleet's id.
-    FormFleet,
-    /// The cell joined meta's directory, `REGISTERING`.
-    AddCell,
     /// Meta marked the cell `READY`.
     CellReady,
     /// Meta registered the tenant, `REGISTERING`.
@@ -93,27 +117,23 @@ pub enum Stage {
 /// until something else does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FleetRefusal {
-    /// `init` was asked to form a fleet, or a cell, under the id `0`.
-    NoFleetId,
-    /// `init` found the cell's side unwritten and was not told the cell's
-    /// id.
-    CellIdUnknown,
+    /// `init` was given an unset fleet id, cell id or frame.
+    Unset,
     /// Meta holds no fleet, or no `READY` cell: run `init` first.
     NotInitialized,
     /// The cell's side of the registration names another fleet or another
-    /// cell than meta, or than the tenant's assignment: this operation
-    /// talks to the wrong cell.
+    /// cell than meta, or than the tenant's assignment, or meta names
+    /// another fleet than the cell: this operation talks to the wrong cell.
     CellMismatch {
-        /// What meta expects: `(fleet_id, cell_id)`.
+        /// What the operation expected: `(fleet_id, cell_id)`.
         expected: (u64, u64),
         /// What the cell recorded, if anything.
         found: Option<FleetRegistration>,
     },
     /// Meta's entry for the cell is being removed.
     CellRemoving,
-    /// The tenant id is reserved (below 256): draw another.
-    ReservedId,
-    /// The tenant id is held by another entry, or was removed: draw another.
+    /// Every tenant frame drawn is held by an entry or was removed: draw
+    /// more.
     IdTaken,
     /// The name is held by a tenant in a state creation cannot resume.
     NameBusy {
@@ -121,6 +141,12 @@ pub enum FleetRefusal {
         tenant: TenantId,
         /// Its state.
         state: TenantState,
+    },
+    /// The tenant being created was removed meanwhile: the cell dropped it,
+    /// and never hosts it again.
+    Removed {
+        /// The tenant.
+        tenant: TenantId,
     },
 }
 
@@ -149,6 +175,12 @@ pub enum Interrupted {
         journal: JournalKey,
         /// The write's verdict.
         outcome: WriterOutcome,
+    },
+    /// The run took its step budget without ending: other operators keep
+    /// moving the journals under it.
+    GoingRound {
+        /// The steps it wrote.
+        steps: usize,
     },
 }
 
@@ -190,6 +222,7 @@ const MAX_STEPS: usize = 8;
 /// writes: meta, as `operator`, and the cell's, as its coordinator.
 #[derive(Clone, Debug)]
 pub struct FleetSession {
+    frames: FleetFrames,
     meta: Checkpointer<Meta>,
     cell: Checkpointer<Registry>,
     meta_open: bool,
@@ -197,20 +230,22 @@ pub struct FleetSession {
 }
 
 impl FleetSession {
-    /// A session writing meta as client `operator` (checkpointing it under
-    /// `policy`) and the cell's control journal as the cell coordinator
-    /// `coordinator`, folding the cell's journal into `cell` — the empty
-    /// registry over the deployment's genesis pool.
+    /// A session over `frames`, writing meta as client `operator`
+    /// (checkpointing it under `policy`) and the cell's control journal as
+    /// the cell coordinator `coordinator`, folding the cell's journal into
+    /// `cell` — the empty registry over the deployment's genesis pool.
     #[must_use]
     pub fn new(
+        frames: FleetFrames,
         operator: u64,
         coordinator: NodeId,
         cell: Registry,
         policy: CheckpointPolicy,
     ) -> Self {
         Self {
-            meta: Checkpointer::new(META, operator, Meta::default(), policy),
-            cell: Checkpointer::new(CELL_CONTROL, coordinator.0, cell, policy),
+            frames,
+            meta: Checkpointer::new(frames.meta, operator, Meta::default(), policy),
+            cell: Checkpointer::new(frames.cell, coordinator.0, cell, policy),
             meta_open: false,
             cell_open: false,
         }
@@ -235,49 +270,74 @@ impl FleetSession {
         (self.meta.writer(), self.cell.writer())
     }
 
-    /// Claim and fold both journals — the cell's, then meta — unless this
-    /// session holds them already: for a caller that reads the two folds
-    /// side by side (a consistency check).
-    ///
-    /// # Errors
-    ///
-    /// A claim or a fold that did not reach its tail.
-    pub async fn open<P: Providers>(
-        &mut self,
-        client: &Client<P>,
-        first: usize,
-    ) -> Result<(), Interrupted> {
-        self.open_cell(client, first).await?;
-        self.open_meta(client, first).await
+    /// Whether this session holds both journals, claimed and folded.
+    #[must_use]
+    pub fn holds_both(&self) -> bool {
+        self.meta_open && self.cell_open
     }
 
-    /// One step of `init`'s fleet half. The cell's side is written first
-    /// (`JoinFleet`, naming `cell_id` and the fleet `fleet_id`), so a re-run
-    /// learns both ids from the cell's own journal: `cell_id` may then be
-    /// `None`, and an id the cell recorded is kept over the ones given — a
-    /// re-run never mints a second fleet. Then meta records the fleet, adds
-    /// the cell and marks it `READY`. Ends with `(fleet_id, cell_id)`.
-    #[tracing::instrument(level = "debug", skip_all)]
+    /// One step of `init`'s fleet half. The fleet is formed under `fleet_id`
+    /// unless meta or the cell recorded one already, which is then kept — a
+    /// re-run never mints a second fleet. Ends with the fleet's id once meta
+    /// holds the cell `READY` and the cell names the fleet.
+    #[tracing::instrument(level = "trace", skip_all, fields(cell = self.frames.cell_id))]
     pub async fn init_step<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
-        cell_id: Option<u64>,
         fleet_id: u64,
-    ) -> Step<(u64, u64)> {
+    ) -> Step<u64> {
+        let FleetFrames {
+            cell_id,
+            cell: control,
+            meta: meta_frame,
+        } = self.frames;
+        if cell_id == 0 || !control.is_set() || !meta_frame.is_set() {
+            return Step::Refused(FleetRefusal::Unset);
+        }
+        if let Err(stop) = self.open_meta(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let Some(fleet) = self.meta.state().fleet() else {
+            // The cell may have joined a fleet meta lost (a recovery, #231):
+            // its id is kept.
+            if let Err(stop) = self.open_cell(client, first).await {
+                return Step::Interrupted(stop);
+            }
+            let fleet = self
+                .cell
+                .state()
+                .fleet()
+                .map_or(fleet_id, |joined| joined.fleet_id);
+            if fleet == 0 {
+                return Step::Refused(FleetRefusal::Unset);
+            }
+            let form = MetaCommand::FormFleet { meta: meta_frame };
+            return self
+                .write_meta(client, first, fleet, form, Stage::FormFleet)
+                .await;
+        };
+        let Some(cell) = self.meta.state().cell(cell_id) else {
+            // The cell tenant is meta's already, under another cell: this
+            // operation names the wrong cell (meta would refuse the entry).
+            if self.meta.state().tenant(control.tenant).is_some() {
+                return Step::Refused(FleetRefusal::CellMismatch {
+                    expected: (fleet, cell_id),
+                    found: None,
+                });
+            }
+            let add = MetaCommand::AddCell { cell_id, control };
+            return self
+                .write_meta(client, first, fleet, add, Stage::AddCell)
+                .await;
+        };
         if let Err(stop) = self.open_cell(client, first).await {
             return Step::Interrupted(stop);
         }
-        let joined = match self.cell.state().fleet() {
+        match self.cell.state().fleet() {
             None => {
-                let Some(cell_id) = cell_id else {
-                    return Step::Refused(FleetRefusal::CellIdUnknown);
-                };
-                if fleet_id == 0 || cell_id == 0 {
-                    return Step::Refused(FleetRefusal::NoFleetId);
-                }
                 let join = SystemCommand::JoinFleet {
-                    fleet_id,
+                    fleet_id: fleet,
                     cell_id,
                     version: METADATA_VERSION,
                 };
@@ -285,53 +345,17 @@ impl FleetSession {
                     .write_cell(client, first, &join, Stage::JoinFleet)
                     .await;
             }
-            Some(found) if cell_id.is_some_and(|c| c != found.cell_id) => {
+            Some(found) if (found.fleet_id, found.cell_id) != (fleet, cell_id) => {
                 return Step::Refused(FleetRefusal::CellMismatch {
-                    expected: (found.fleet_id, cell_id.unwrap_or(0)),
+                    expected: (fleet, cell_id),
                     found: Some(found),
-                });
-            }
-            Some(found) => found,
-        };
-        let (fleet, cell_id) = (joined.fleet_id, joined.cell_id);
-        if let Err(stop) = self.open_meta(client, first).await {
-            return Step::Interrupted(stop);
-        }
-        match self.meta.state().fleet() {
-            None => {
-                return self
-                    .write_meta(
-                        client,
-                        first,
-                        fleet,
-                        MetaCommand::FormFleet,
-                        Stage::FormFleet,
-                    )
-                    .await;
-            }
-            // Meta belongs to another fleet than the one this cell joined.
-            Some(other) if other != fleet => {
-                return Step::Refused(FleetRefusal::CellMismatch {
-                    expected: (other, cell_id),
-                    found: Some(joined),
                 });
             }
             Some(_) => {}
         }
-        let Some(cell) = self.meta.state().cell(cell_id) else {
-            return self
-                .write_meta(
-                    client,
-                    first,
-                    fleet,
-                    MetaCommand::AddCell { cell_id },
-                    Stage::AddCell,
-                )
-                .await;
-        };
         match cell.state {
             CellState::Ready => Step::Done {
-                result: (fleet, cell_id),
+                result: fleet,
                 last: None,
             },
             CellState::Removing => Step::Refused(FleetRefusal::CellRemoving),
@@ -340,29 +364,24 @@ impl FleetSession {
                     cell_id,
                     state: CellState::Ready,
                 };
-                self.finish_meta(
-                    client,
-                    first,
-                    fleet,
-                    ready,
-                    Stage::CellReady,
-                    (fleet, cell_id),
-                )
-                .await
+                self.finish_meta(client, first, fleet, ready, Stage::CellReady, fleet)
+                    .await
             }
         }
     }
 
-    /// One step of creating the tenant `name`, under the id `draw` unless
-    /// meta holds the name in `REGISTERING` already (whose id is resumed).
+    /// One step of creating the `users` tenant `name` with `placement`,
+    /// under the frame `draw` (its id and its control journal's) unless meta
+    /// holds the name in `REGISTERING` already (whose frame is resumed).
     /// Ends with the tenant's id once meta holds it `READY`.
-    #[tracing::instrument(level = "debug", skip_all, fields(tenant = draw.0))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tenant = draw.tenant.0))]
     pub async fn create_step<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
         name: &[u8],
-        draw: TenantId,
+        placement: Placement,
+        draw: JournalKey,
     ) -> Step<TenantId> {
         if let Err(stop) = self.open_meta(client, first).await {
             return Step::Interrupted(stop);
@@ -372,19 +391,20 @@ impl FleetSession {
             return Step::Refused(FleetRefusal::NotInitialized);
         };
         let Some((tenant, entry)) = meta.named(name) else {
-            if !draw.is_user() {
-                return Step::Refused(FleetRefusal::ReservedId);
+            if !draw.is_set() {
+                return Step::Refused(FleetRefusal::Unset);
             }
-            if meta.tenant(draw).is_some() || meta.is_removed(draw) {
+            if meta.tenant(draw.tenant).is_some() || meta.is_removed(draw.tenant) {
                 return Step::Refused(FleetRefusal::IdTaken);
             }
             let Some((cell_id, _)) = meta.cells().find(|(_, c)| c.state == CellState::Ready) else {
                 return Step::Refused(FleetRefusal::NotInitialized);
             };
             let register = MetaCommand::RegisterTenant {
-                tenant: draw,
+                control: draw,
                 name: name.to_vec(),
                 cell_id,
+                placement,
             };
             return self
                 .write_meta(client, first, fleet, register, Stage::RegisterTenant)
@@ -403,6 +423,11 @@ impl FleetSession {
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
+        if self.cell.state().dropped(tenant) {
+            // Removed under this operation: its meta fold is stale.
+            self.meta_open = false;
+            return Step::Refused(FleetRefusal::Removed { tenant });
+        }
         if !self.cell.state().hosts(tenant) {
             let host = SystemCommand::HostTenant {
                 fleet_id: fleet,
@@ -420,10 +445,10 @@ impl FleetSession {
             .await
     }
 
-    /// One step of removing the tenant `name`. Ends with its id once meta
-    /// removed it, or with `None` when meta holds no tenant by that name
-    /// (never created, or removed already).
-    #[tracing::instrument(level = "debug", skip_all)]
+    /// One step of removing the `users` tenant `name`. Ends with its id once
+    /// meta removed it, or with `None` when meta holds no tenant by that
+    /// name (never created, or removed already).
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn remove_step<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -456,7 +481,9 @@ impl FleetSession {
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;
         }
-        if self.cell.state().hosts(tenant) {
+        // The tombstone goes down whether the cell hosts the tenant or not:
+        // a creation still running from a stale meta can then never host it.
+        if !self.cell.state().dropped(tenant) {
             let drop = SystemCommand::DropTenant {
                 fleet_id: fleet,
                 tenant,
@@ -477,17 +504,24 @@ impl FleetSession {
         .await
     }
 
-    /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]).
+    /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),
+    /// taking an interrupted step again for up to `patience` (a cell still
+    /// electing its leaders, an operator racing this one).
+    #[tracing::instrument(level = "debug", skip_all, fields(cell = self.frames.cell_id))]
     pub async fn init<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
-        cell_id: Option<u64>,
         fleet_id: u64,
-    ) -> Run<(u64, u64)> {
+        patience: Duration,
+    ) -> Run<u64> {
+        let deadline = client.now() + patience;
         let mut steps = Vec::new();
-        for _ in 0..MAX_STEPS {
-            let step = self.init_step(client, first, cell_id, fleet_id).await;
+        while steps.len() < MAX_STEPS {
+            let step = self.init_step(client, first, fleet_id).await;
+            if retry(client, &step, deadline).await {
+                continue;
+            }
             if let Some(end) = settle(step, &mut steps) {
                 return end;
             }
@@ -495,18 +529,35 @@ impl FleetSession {
         going_round(steps)
     }
 
-    /// Create the tenant `name` to its end (see
-    /// [`FleetSession::create_step`]).
+    /// Create the `users` tenant `name` to its end (see
+    /// [`FleetSession::create_step`]), under the first of `draws` meta does
+    /// not hold: a draw meta holds already is skipped for the next one. An
+    /// interrupted step is taken again for up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn create_tenant<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
         name: &[u8],
-        draw: TenantId,
+        placement: Placement,
+        draws: impl IntoIterator<Item = JournalKey>,
+        patience: Duration,
     ) -> Run<TenantId> {
+        let deadline = client.now() + patience;
+        let mut draws = draws.into_iter();
+        let mut draw = draws.next().unwrap_or(JournalKey::UNSET);
         let mut steps = Vec::new();
-        for _ in 0..MAX_STEPS {
-            let step = self.create_step(client, first, name, draw).await;
+        while steps.len() < MAX_STEPS {
+            let step = self.create_step(client, first, name, placement, draw).await;
+            if step == Step::Refused(FleetRefusal::IdTaken)
+                && let Some(next) = draws.next()
+            {
+                draw = next;
+                continue;
+            }
+            if retry(client, &step, deadline).await {
+                continue;
+            }
             if let Some(end) = settle(step, &mut steps) {
                 return end;
             }
@@ -514,22 +565,46 @@ impl FleetSession {
         going_round(steps)
     }
 
-    /// Remove the tenant `name` to its end (see
-    /// [`FleetSession::remove_step`]).
+    /// Remove the `users` tenant `name` to its end (see
+    /// [`FleetSession::remove_step`]), taking an interrupted step again for
+    /// up to `patience`.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn remove_tenant<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
         name: &[u8],
+        patience: Duration,
     ) -> Run<Option<TenantId>> {
+        let deadline = client.now() + patience;
         let mut steps = Vec::new();
-        for _ in 0..MAX_STEPS {
+        while steps.len() < MAX_STEPS {
             let step = self.remove_step(client, first, name).await;
+            if retry(client, &step, deadline).await {
+                continue;
+            }
             if let Some(end) = settle(step, &mut steps) {
                 return end;
             }
         }
         going_round(steps)
+    }
+
+    /// Claim and fold both journals — the cell's, then meta — unless this
+    /// session holds them already: for a caller that reads the two folds
+    /// side by side (a consistency check).
+    ///
+    /// # Errors
+    ///
+    /// A claim or a fold that did not reach its tail.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn open<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        self.open_cell(client, first).await?;
+        self.open_meta(client, first).await
     }
 
     /// Claim meta and fold it to its tail, unless this session holds it.
@@ -631,10 +706,7 @@ impl FleetSession {
             // A checkpoint that does not land leaves the owner's belief
             // unsure: the next step opens meta afresh.
             let checkpointed = self.meta.checkpoint(client, first).await;
-            if !matches!(
-                checkpointed,
-                super::checkpoint::CheckpointOutcome::Checkpointed { .. }
-            ) {
+            if !matches!(checkpointed, CheckpointOutcome::Checkpointed { .. }) {
                 self.meta_open = false;
             }
         }
@@ -656,6 +728,16 @@ impl FleetSession {
             }
         }
     }
+}
+
+/// Whether a run takes `step` again: it was interrupted (a claim no server
+/// decided, a leader not ready yet, a write fenced by another operator) and
+/// the run's patience allows one more `retry_backoff`. The step is decided
+/// afresh from the journals, so a retry is always a resumption.
+async fn retry<P: Providers, T>(client: &Client<P>, step: &Step<T>, deadline: Duration) -> bool {
+    matches!(step, Step::Interrupted(_))
+        && client.now() < deadline
+        && client.pause(client.tunables().retry_backoff).await
 }
 
 /// Fold one step into a run: `None` to take the next, or the run's end.
@@ -682,14 +764,10 @@ fn settle<T>(step: Step<T>, steps: &mut Vec<Stage>) -> Option<Run<T>> {
     }
 }
 
-/// A run that took [`MAX_STEPS`] steps without ending: its last write is
-/// reported as not known to have settled anything.
+/// A run that took [`MAX_STEPS`] steps without ending.
 fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
     Run {
-        outcome: Step::Interrupted(Interrupted::NotWritten {
-            journal: META,
-            outcome: WriterOutcome::Ambiguous,
-        }),
+        outcome: Step::Interrupted(Interrupted::GoingRound { steps: steps.len() }),
         steps,
     }
 }
@@ -742,18 +820,20 @@ async fn append<P: Providers, S: crate::client::checkpoint::Checkpointable>(
     Ok(())
 }
 
-/// Read meta to its tail, as a reader that owns nothing (`parosctl tenant
-/// list`).
+/// Read meta (at `frame`) to its tail, as a reader that owns nothing
+/// (`parosctl tenant list`).
 ///
 /// # Errors
 ///
 /// The fold did not reach the tail (see [`LoadOutcome`]).
+#[tracing::instrument(level = "debug", skip_all, fields(meta = %frame))]
 pub async fn read_meta<P: Providers>(
     client: &Client<P>,
     first: usize,
+    frame: JournalKey,
 ) -> Result<Meta, LoadOutcome> {
     let mut folder = Folder::new(Meta::default());
-    match super::checkpoint::load(&mut folder, META, client, first, 0).await {
+    match super::checkpoint::load(&mut folder, frame, client, first, 0).await {
         LoadOutcome::Loaded { .. } => Ok(folder.state().clone()),
         outcome => Err(outcome),
     }

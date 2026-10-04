@@ -193,11 +193,16 @@ pub(crate) struct Journals<S, A> {
     /// The fault that ended the most recent incarnation, the node's exit
     /// when nothing is left.
     last_fault: Option<RunError>,
+    /// The control journals among the ones served (the cell's, meta's, a
+    /// tenant's directory): no frame is fixed (§3.8), so the deployment says
+    /// which they are. They serve no user plane and outlive a retirement.
+    control: BTreeSet<JournalKey>,
 }
 
 impl<S, A> Journals<S, A> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(control: BTreeSet<JournalKey>) -> Self {
         Self {
+            control,
             live: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             down: BTreeSet::new(),
@@ -214,16 +219,36 @@ impl<S, A> Journals<S, A> {
             || self.down.contains(&journal)
     }
 
-    /// The node's first live **user** journal (the target of a journal-less
-    /// call and of the single-journal planes: matchmaking, retirement). The
-    /// system journals (#189) sort first and serve no plane.
+    /// The node's **plane** journal (the target of a journal-less call and
+    /// of the single-journal planes: matchmaking, retirement): the
+    /// deployment's journal — the one whose configuration names its
+    /// matchmakers, proxies or replicas, which only one journal of a process
+    /// may (#188) — or else the first live user journal. No frame is fixed
+    /// (§3.8), so id order says nothing; the control journals serve no
+    /// plane.
     pub(crate) fn first(&mut self) -> Option<(&JournalKey, &mut JournalRt<S, A>)> {
-        self.live.iter_mut().find(|(journal, _)| journal.is_user())
+        let key = *self.plane()?.0;
+        self.live.iter_mut().find(|(journal, _)| **journal == key)
     }
 
     /// [`Journals::first`], read-only.
     pub(crate) fn plane(&self) -> Option<(&JournalKey, &JournalRt<S, A>)> {
-        self.live.iter().find(|(journal, _)| journal.is_user())
+        let users = || {
+            self.live
+                .iter()
+                .filter(|(journal, _)| !self.control.contains(journal))
+        };
+        users()
+            .find(|(_, rt)| {
+                let config = rt.node.config();
+                config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0
+            })
+            .or_else(|| users().next())
+    }
+
+    /// Whether `journal` is one of the deployment's control journals.
+    pub(crate) fn is_control(&self, journal: JournalKey) -> bool {
+        self.control.contains(&journal)
     }
 
     /// Whether the node has nothing left to serve **because of a fault**: no

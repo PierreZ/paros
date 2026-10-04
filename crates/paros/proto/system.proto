@@ -11,8 +11,8 @@ import "common.proto";
 //
 // The **directory**, a tenant's control journal (#235): `CreateJournal` and
 // `DeleteJournal`. A created journal's id is random, drawn by its creator
-// from the user range (`>= 256`) and checked here at apply: a reserved or
-// already used id is refused and the creator redraws. An id is never reused.
+// and checked here at apply: an id already used is refused and the creator
+// redraws. An id is never reused. No id is fixed or reserved (§3.8).
 //
 // The **node registry**, the cell tenant's control journal (#211): keyed by
 // `node_id` (random, minted at format), `RegisterNode` (a first registration,
@@ -110,7 +110,9 @@ message HostTenant {
   uint64 tenant = 2;
 }
 
-// Tenant removal's cell step: the cell forgets tenant `tenant`.
+// Tenant removal's cell step: the cell forgets tenant `tenant`, for good —
+// a tombstone, written whether it was hosted or not; a later `HostTenant`
+// of it is refused.
 message DropTenant {
   uint64 fleet_id = 1;
   uint64 tenant = 2;
@@ -128,6 +130,8 @@ message RegistryState {
   uint32 version = 5;
   // The tenants the cell hosts, in id order.
   repeated uint64 tenants = 6;
+  // The tenants the cell dropped, in id order: never hosted again.
+  repeated uint64 dropped = 7;
 }
 
 message RegisteredNodeState {

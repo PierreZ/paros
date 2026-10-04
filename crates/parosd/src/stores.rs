@@ -135,10 +135,7 @@ impl DirStores {
         found.sort_unstable();
         let mut resolved = false;
         for journal in found {
-            let probe = Config {
-                journal,
-                ..Config::default()
-            };
+            let probe = Config::new(paros::NodeId(self.record.id), journal);
             let mut store = self.store(journal, probe);
             if store.boot_scan().await.is_ok() && store.is_formatted() {
                 tracing::info!(journal = %journal, "created_journal_resolved");
@@ -247,10 +244,7 @@ mod tests {
     use paros::{JournalId, TenantId};
 
     fn config(journal: JournalKey) -> Config {
-        Config {
-            journal,
-            ..Config::default()
-        }
+        Config::new(paros::NodeId(1), journal)
     }
 
     async fn load(dir: &Path) -> DirStores {
@@ -267,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn a_created_journal_is_a_first_boot_until_its_store_has_booted() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let journal = JournalKey::new(TenantId::default(), JournalId(300));
+        let journal = JournalKey::new(TenantId(0x7e), JournalId(300));
         let mut stores = load(dir.path()).await;
         assert!(stores.create(journal, config(journal)));
         let (_, boot) = stores.open(journal).expect("open");
@@ -289,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn a_format_the_record_missed_is_found_on_the_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let journal = JournalKey::new(TenantId::default(), JournalId(300));
+        let journal = JournalKey::new(TenantId(0x7e), JournalId(300));
         let mut stores = load(dir.path()).await;
         assert!(stores.create(journal, config(journal)));
         let (mut store, _) = stores.open(journal).expect("open");
@@ -305,7 +299,7 @@ mod tests {
         assert_eq!(boot, BootKind::ExistingMember);
         // A created journal whose store never got its marker is a first
         // boot again.
-        let other = JournalKey::new(TenantId::default(), JournalId(301));
+        let other = JournalKey::new(TenantId(0x7e), JournalId(301));
         std::fs::create_dir_all(journal_dir(dir.path(), other)).expect("mkdir");
         let mut restarted = load(dir.path()).await;
         assert!(restarted.create(other, config(other)));

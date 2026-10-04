@@ -20,9 +20,9 @@ the one build outside Nix):
 
 ```sh
 docker compose up -d --build        # five machines; each formats and waits
-docker compose run --rm init        # forms the cell over the three seeds
-docker compose run --rm parosctl write 256 hello world --owner 7
-docker compose run --rm parosctl read 256
+docker compose run --rm init        # forms the cell; prints journals=T/J
+docker compose run --rm parosctl write T/J hello world --owner 7
+docker compose run --rm parosctl read T/J
 ```
 
 `docker-compose.yml` runs one cell of five `parosd` machines over three failure
@@ -43,10 +43,13 @@ start it **mints its `node_id`** at random and records it in its data directory
 **Init.** `parosctl init` goes to one seed (`seed1`, which every seed's join
 list names). That seed identifies every seed, mints the cell's id, records the
 plan, forms every other seed and then itself; every seed then serves the **cell
-control journal** (`2/1`), **meta's control journal** (`1/1`, the fleet's
-directory: the fleet's one cell hosts it) and the toy's journal (`256/256`,
-the static assignment that stands in for placement until M9), plain
-Multi-Paxos over the seeds. Then the first cell coordinator — the lowest seed
+control journal**, **meta's control journal** (the fleet's directory: the
+fleet's one cell hosts it) and the toy's journal (the static assignment that
+stands in for placement until M9), plain Multi-Paxos over the seeds. **No
+frame is fixed**: `init` draws every one, records them in the cell plan, and
+prints them (`control=`, `meta=`, `journals=`); afterwards any machine's
+`Inspect` names the cell's control journal and meta's, which is how
+`parosctl tenant` finds them. Then the first cell coordinator — the lowest seed
 id, until the coordinator election of #225 — claims the cell control journal
 with `SetLeader(expected_gen = 0)`. Last come the **fleet steps** (#229): the
 cell records the fleet's id (minted by `init`) on its side, and meta records
@@ -54,9 +57,11 @@ the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 `init` resumes an interrupted one, and on an initialized fleet it is refused
 (`already_initialized`).
 
-**Tenants.** `parosctl tenant create acme` registers a tenant in meta
-(`REGISTERING`, under a random id), has the cell host it, then marks it
-`READY`; `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
+**Tenants.** `parosctl tenant create acme [--pinned]` registers a `users`
+tenant in meta (`REGISTERING`, under a random id and a random control journal,
+movable unless `--pinned`), has the cell host it, then marks it `READY`; the
+CLI never creates an `internal` tenant (meta and the cell tenant, which `init`
+registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
 it, then removes it; `parosctl tenant list` prints meta. A crashed or
 interrupted one is resumed by running it again. A tenant's footprint and its
 own control journal are not created yet (#210, #225).
@@ -72,7 +77,7 @@ keeps taking writes. `docker compose start seed2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
-**Supersede a writer.** `parosctl set-leader 256 --owner 8` takes the journal;
+**Supersede a writer.** `parosctl set-leader T/J --owner 8` takes the journal;
 the first owner's writes and truncations are refused from then on
 (`superseded`, exit 3), and the new owner's `truncate --up-to N --owner 8`
 applies.
@@ -111,9 +116,9 @@ for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=seed$i parosd &
 done
 export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
-parosctl --servers 127.0.0.1:4501 init
-parosctl write 256 hello world --owner 7
-parosctl read 256
+parosctl --servers 127.0.0.1:4501 init      # prints journals=T/J
+parosctl write T/J hello world --owner 7
+parosctl read T/J
 ```
 
 ## Configuration
@@ -208,8 +213,9 @@ A refusal is one of:
 The servers come from `--servers HOST:PORT,…` (or `PAROSCTL_SERVERS`): a name
 that resolves to several machines stands for them all, and each server's node
 id — the one a leader hint names it by — is learned from its own `Inspect`
-(`ID=HOST:PORT` names it outright). A journal is `[TENANT/]JOURNAL`, a bare id
-in the default tenant `256` (#235).
+(`ID=HOST:PORT` names it outright). A journal is `TENANT/JOURNAL`, both random
+and both required: there is no default tenant and no fixed id (#235,
+`docs/architecture.md` §3.8).
 
 | command | what it does |
 |---|---|

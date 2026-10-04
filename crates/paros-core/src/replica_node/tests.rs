@@ -95,10 +95,9 @@ impl Storage for Disk {
 
 fn config(id: u64) -> Config {
     Config {
-        id: NodeId(id),
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::default()
+        ..Config::new(NodeId(id), crate::JournalKey::UNSET)
     }
 }
 
@@ -491,7 +490,10 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
     assert_eq!(ReplicaId::of(Slot(7), 0), None, "the plain deployment");
     assert!(ReplicaId(1).is_in(2));
     assert!(!ReplicaId(2).is_in(2));
-    assert_eq!(Config::default().reply_owner(Slot(5)), None);
+    assert_eq!(
+        Config::new(NodeId(0), crate::JournalKey::UNSET).reply_owner(Slot(5)),
+        None
+    );
 }
 
 #[test]

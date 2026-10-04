@@ -55,7 +55,9 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
 - `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
-  window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
+  window (`hold_journal`). The first is the run's main frame (`Frames::main`; `frames` draws it, the
+  directory's, the registry's, meta's and the cell id once per seed: no frame is fixed); the
+  others' frames are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
   injected corruption. `system_journals` → the directory, the registry and meta (#229) on half the seeds, on

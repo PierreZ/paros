@@ -29,7 +29,7 @@ const STORAGE_WORLD_KEY: &str = "paros-storage-world";
 /// Get-or-create the singleton [`StorageWorld`] for this iteration
 /// (`crate::state::published`).
 pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
-    storage_world_for(state, paros::JournalKey::default())
+    storage_world_for(state, crate::shape::frames(state).main)
 }
 
 /// `journal`'s own [`StorageWorld`] (#188): its disks, its copy budget, its
@@ -1241,7 +1241,7 @@ pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: 
 }
 
 pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
-    disk_probe_for(handle, paros::JournalKey::default(), ip)
+    disk_probe_for(handle, crate::shape::frames(handle).main, ip)
 }
 
 /// [`corpus_disk_probe`] of `journal`'s disk on `ip` (#188).

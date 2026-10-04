@@ -41,14 +41,13 @@ impl TestStorage {
             hard_state: HardState::default(),
             accepted: BTreeMap::new(),
             config: Config {
-                id: NodeId(id),
                 peers: members.iter().copied().map(NodeId).collect(),
                 quorum_system: crate::membership::QuorumSystem::Majority,
                 nodes: Vec::new(),
                 matchmakers: Vec::new(),
                 matchmaker_pool: Vec::new(),
                 proxy_count: 0,
-                ..Config::default()
+                ..Config::new(NodeId(id), crate::JournalKey::UNSET)
             },
             first_slot: Slot(0),
             faulty: Vec::new(),

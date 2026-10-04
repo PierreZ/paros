@@ -2,8 +2,9 @@
 
 use core::cmp::Ordering;
 
-/// Stable identity of a node in the cluster.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Stable identity of a node in the cluster. An id has no default: it is
+/// minted (random, at format, in a deployment) or named, never assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NodeId(pub u64);
 
@@ -16,11 +17,11 @@ pub struct Slot(pub u64);
 /// journals, and the first half of the frame every peer and client message
 /// carries ([`JournalKey`]).
 ///
-/// `0` means *unset* and is never served. `0..=255` are reserved for system
-/// tenants: `1` is the meta tenant (one per fleet), `2` is the cell tenant
-/// (one per cell). A user tenant's id is random, drawn by its creator and
-/// checked by meta; it is fleet-unique, so moving a tenant never renumbers
-/// it. The core never makes a protocol decision on the id.
+/// Random, drawn by whoever creates the tenant and checked where it is
+/// recorded — meta's directory for every tenant, the system ones included
+/// (`docs/architecture.md` §3.8). **No id is fixed**: there is no well-known
+/// tenant and no reserved range, and `0` means *unset* and is never
+/// served. An id has **no default**: it is drawn or read, never assumed. The core never makes a protocol decision on the id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TenantId(pub u64);
@@ -28,31 +29,11 @@ pub struct TenantId(pub u64);
 impl TenantId {
     /// The unset id: refused wherever a tenant must be named.
     pub const UNSET: Self = Self(0);
-    /// The meta tenant: the fleet's directory (`docs/architecture.md` §3.7).
-    pub const META: Self = Self(1);
-    /// The cell tenant: the cell's machine registry and capacity (§3.1).
-    pub const CELL: Self = Self(2);
-    /// The first id a user tenant may take (`0..=255` are reserved).
-    pub const FIRST_USER: Self = Self(256);
 
     /// Whether this id names a tenant at all (`0` does not).
     #[must_use]
     pub const fn is_set(self) -> bool {
         self.0 != 0
-    }
-
-    /// Whether this id is a user tenant's (`>= 256`).
-    #[must_use]
-    pub const fn is_user(self) -> bool {
-        self.0 >= Self::FIRST_USER.0
-    }
-}
-
-impl Default for TenantId {
-    /// The one user tenant of a deployment that creates none
-    /// ([`TenantId::FIRST_USER`]) — never [`TenantId::UNSET`].
-    fn default() -> Self {
-        Self::FIRST_USER
     }
 }
 
@@ -61,15 +42,14 @@ impl Default for TenantId {
 /// its own store. A journal is named by its [`JournalKey`], the pair
 /// `(TenantId, JournalId)`: a journal id is unique only within its tenant.
 ///
-/// `0` means *unset* and is never served ([`JournalId::is_set`]): a request
-/// that names no journal is refused at the wire, never routed to a default.
-/// `0..=255` are reserved in every tenant, and `1` is every tenant's
-/// **control journal** ([`JournalId::CONTROL`]); user journals take random
-/// ids from [`JournalId::FIRST_USER`], drawn by their creator and checked at
-/// apply by the tenant's control journal (never a log position). The core
-/// never makes a protocol decision on the id — a [`crate::ColocatedNode`]
-/// carries it in its [`crate::Config`] for assertions and tracing only;
-/// routing a message to its journal is the driver's envelope.
+/// Random, drawn by the journal's creator and checked at apply by the
+/// tenant's control journal — whose own id is random too, recorded where
+/// the tenant is (§3.8). **No id is fixed**: `0` — the [`Default`] — means
+/// *unset* and is never served ([`JournalId::is_set`]); a request that
+/// names no journal is refused at the wire. The core never makes a
+/// protocol decision on the id — a [`crate::ColocatedNode`] carries it in
+/// its [`crate::Config`] for assertions and tracing only; routing a message
+/// to its journal is the driver's envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalId(pub u64);
@@ -77,38 +57,20 @@ pub struct JournalId(pub u64);
 impl JournalId {
     /// The unset id: refused wherever a journal must be named.
     pub const UNSET: Self = Self(0);
-    /// Every tenant's control journal (`docs/architecture.md` §3.1).
-    pub const CONTROL: Self = Self(1);
-    /// The first id a user journal may take (`0..=255` are reserved).
-    pub const FIRST_USER: Self = Self(256);
 
     /// Whether this id names a journal at all (`0` does not).
     #[must_use]
     pub const fn is_set(self) -> bool {
         self.0 != 0
     }
-
-    /// Whether this id is a user journal's (`>= 256`).
-    #[must_use]
-    pub const fn is_user(self) -> bool {
-        self.0 >= Self::FIRST_USER.0
-    }
-}
-
-impl Default for JournalId {
-    /// The one user journal of a single-journal deployment
-    /// ([`JournalId::FIRST_USER`]) — never [`JournalId::UNSET`], so a
-    /// defaulted [`crate::Config`] serves a journal a client can name.
-    fn default() -> Self {
-        Self::FIRST_USER
-    }
 }
 
 /// The **frame** of every peer and client message (#226, #235): the tenant
 /// and the journal inside it. Uniqueness is only ever needed where it can be
 /// checked — a tenant id by meta, a journal id by its tenant's control
-/// journal — so a journal is only ever named by the pair.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// journal — so a journal is only ever named by the pair. A frame has no
+/// default: it is always drawn or read, never assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalKey {
     /// The tenant that owns the journal.
@@ -128,30 +90,11 @@ impl JournalKey {
         Self { tenant, journal }
     }
 
-    /// `tenant`'s control journal (journal `1`).
-    #[must_use]
-    pub const fn control(tenant: TenantId) -> Self {
-        Self::new(tenant, JournalId::CONTROL)
-    }
-
     /// Whether both halves are set: a frame with an unset half names
     /// nothing and is refused.
     #[must_use]
     pub const fn is_set(self) -> bool {
         self.tenant.is_set() && self.journal.is_set()
-    }
-
-    /// Whether this is a user journal (its journal id is in the user
-    /// range): not a tenant's control journal or another reserved id.
-    #[must_use]
-    pub const fn is_user(self) -> bool {
-        self.journal.is_user()
-    }
-
-    /// Whether this is a tenant's control journal.
-    #[must_use]
-    pub const fn is_control(self) -> bool {
-        self.journal.0 == JournalId::CONTROL.0
     }
 }
 
@@ -164,17 +107,13 @@ impl core::fmt::Display for JournalKey {
 impl core::str::FromStr for JournalKey {
     type Err = &'static str;
 
-    /// `<tenant>/<journal>`, the form [`JournalKey`]'s `Display` renders,
-    /// or a bare `<journal>` in the default tenant ([`TenantId::default`]).
-    /// Both halves must be set.
+    /// `<tenant>/<journal>`, the form [`JournalKey`]'s `Display` renders.
+    /// Both halves must be set: there is no default tenant.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let (tenant, journal) = match text.split_once('/') {
-            Some((tenant, journal)) => (
-                TenantId(tenant.parse().map_err(|_| "a tenant id is a u64")?),
-                journal,
-            ),
-            None => (TenantId::default(), text),
-        };
+        let (tenant, journal) = text
+            .split_once('/')
+            .ok_or("a journal frame is <tenant>/<journal>")?;
+        let tenant = TenantId(tenant.parse().map_err(|_| "a tenant id is a u64")?);
         let journal = JournalId(journal.parse().map_err(|_| "a journal id is a u64")?);
         let key = Self::new(tenant, journal);
         if key.is_set() {
@@ -412,7 +351,7 @@ impl Command {
 /// the backbone of Paxos safety — every two ballots are comparable, so an
 /// acceptor can always decide whether an incoming ballot is `>=` the one it has
 /// promised.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ballot {
     /// The round number. Higher rounds dominate.
@@ -430,6 +369,14 @@ impl Ballot {
             round: 0,
             node: NodeId(0),
         }
+    }
+}
+
+impl Default for Ballot {
+    /// [`Ballot::zero`]: the smallest ballot, the sentinel of nothing
+    /// promised — an order's minimum, not an identity.
+    fn default() -> Self {
+        Self::zero()
     }
 }
 

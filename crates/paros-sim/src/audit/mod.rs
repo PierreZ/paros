@@ -1093,10 +1093,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         assert_reachable!(
             "system: a node stops a journal the directory tombstoned or its retirement ended"
         );
-        // A joiner the registry retired leaves the default journal for good
-        // (#189): convergence excuses it, exactly like an operator
+        // A joiner the registry retired leaves the deployment's journal for
+        // good (#189): convergence excuses it, exactly like an operator
         // retirement (#123).
-        if journal == JournalKey::default() {
+        if self.world.main() == Some(journal) {
             self.world.note_left_pool(node.0);
         }
     }

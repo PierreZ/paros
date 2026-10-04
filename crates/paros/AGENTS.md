@@ -29,7 +29,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `proxy/mod.rs` → `run_proxy`, `ProxyConfig` → Phase-2 subset, nothing durable (#142).
 - `replica_tier/mod.rs` → `run_replica` → learner subset over a `LogStorage`; serves `Read` (#144).
 - `rpc/methods.rs` → one `RpcMethod` per call, `WellKnownMethod` ids (public `0x5041_00xx`, internal `0x5041_01xx`, matchmaker `0x5041_02xx`, machine `0x5041_03xx`; retired ids never reused).
-- `machine.rs` → `wait_for_cell`, `MachineFacts`, `CellPlan`, `CellLedger`, `Class`, `CELL_CONTROL` → the machine before its cell: `Identify`, `Init` (a seed forms the cell over the seeds, resumable), `FormCell` (#196, #216); not in the simulation yet.
+- `machine.rs` → `wait_for_cell`, `MachineFacts`, `CellPlan`, `CellLedger`, `Class`, `CellFrames` → the machine before its cell (every frame drawn at `init`): `Identify`, `Init` (a seed forms the cell over the seeds, resumable), `FormCell` (#196, #216); not in the simulation yet.
 - `rpc/inbound.rs` → `Inbound`, `ReplySender`, `serve_deliveries`, `rpc_config`, `MAX_FRAME_BYTES`.
 - `rpc/client.rs` → `NodeClient` (one at-most-once attempt per call), `MatchmakerClient`.
 - `rpc/codec.rs` → shared scalar codecs (ballot, party, quorum system, config, command).
@@ -40,8 +40,8 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/writer.rs` → `Writer` (`truncate` carries the owner's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
-- `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `TOY_JOURNAL` → `parosctl init`'s calls and server ids learned from `Inspect.node` (#196).
-- `meta.rs` → `META` (`1/1`), `MetaEntry`, `MetaCommand`, `Meta`, `CellState`, `TenantState` → the
+- `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `cell_frames`, `frames_of` → `parosctl init`'s calls; server ids and the cell's frames learned from `Inspect` (#196, §3.8).
+- `meta.rs` → `MetaEntry`, `MetaCommand`, `Meta`, `Group`, `Placement`, `CellState`, `TenantState` → the
   meta tenant's pure fold (#229): the fleet, cell and tenant entries, every entry fenced by its
   fleet id and metadata version, ids checked at apply, `Checkpointable`.
 - `client/fleet.rs` → `FleetSession`, `Step`, `Stage`, `FleetRefusal`, `read_meta` → `init`'s fleet

@@ -215,22 +215,27 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   The frame `JournalKey { tenant, journal }` (#235) rides the `Deliver` envelope per message
   (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
   each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
-  check them, never a log position: `TenantId` `0` unset, `1` meta, `2` the cell, `0..=255`
-  reserved; `JournalId` `0` unset, `1` every tenant's control journal, `0..=255` reserved, user
-  journals from `JournalId::FIRST_USER` (256). Stores live at `journals/<tenant>/<journal>/`.
+  check them, never a log position. **No id is fixed and none has a default**
+  (`docs/architecture.md` §3.8): `0` is unset and the only value with a meaning, there is no
+  reserved range and no well-known tenant or journal; the control journals' frames are drawn at
+  `init`, recorded in the cell plan and learned through `Inspect` (`CellFrames`, `FleetFrames`);
+  the sim draws every frame per seed (`paros_sim::shape::Frames`). Stores live at
+  `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
-- **System journals** (the directory = the user tenant's control journal `256/1`, the node
-  registry = the cell tenant's control journal `2/1`) are opt-in through a `SystemPlan` (`None`
-  is the static deployment), folded by `paros::system::{Directory, Registry}`; a created
-  journal's id is drawn by its creator and checked at apply (`Reserved`, `IdTaken`: the creator
+- **System journals** (the directory = a user tenant's control journal, the node registry = the
+  cell tenant's control journal, both frames in the `SystemPlan`) are opt-in through a
+  `SystemPlan` (`None` is the static deployment), folded by `paros::system::{Directory,
+  Registry}`; a created journal's id is drawn by its creator and checked at apply (`IdTaken`: the creator
   redraws), never reused. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
-- **Meta** (`1/1`, `paros::meta`, #229) is the fleet's directory: tenant → cell plus the cell
-  entries, hosted by the fleet's one cell. Fleet operations (`init`'s fleet half, tenant create
+- **Meta** (`paros::meta`, #229) is the fleet's directory: tenant → cell plus the cell entries,
+  hosted by the fleet's one cell. Every tenant has a group (`internal`: meta and the cell tenants,
+  created only by `init`/adding a cell; `users`: the tenant API's) and a placement (`movable` or
+  `pinned`, the creator's choice). Fleet operations (`init`'s fleet half, tenant create
   and remove) are idempotent state machines over meta and the cell control journal
   (`paros::client::fleet`): one write per step, every entry fenced by its fleet id, resumed from
   what the journals hold.

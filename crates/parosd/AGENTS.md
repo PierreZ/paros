@@ -63,8 +63,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Local rules
 
-- **Interim (M8 → M9)**: the cell's journals are the cell control journal, meta's (`1/1`), plus
-  the static assignment `TOY_JOURNAL` (`256/256`), plain Multi-Paxos over the seeds; a non-seed machine
+- **Interim (M8 → M9)**: the cell's journals are the cell control journal, meta's, plus one
+  static user journal (every frame drawn at `init` and printed), plain Multi-Paxos over the seeds; a non-seed machine
   and every `stateless` one wait for placement (#211, #212); the first cell coordinator is the
   lowest seed id (#225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.

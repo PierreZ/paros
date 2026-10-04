@@ -21,7 +21,7 @@
 //! ```text
 //! role machine
 //! id 6150928431937019931
-//! journal 256/256
+//! journal 2965734451981346203/9861377130450924019
 //! ```
 //!
 //! A journal is named by its frame `<tenant>/<journal>` (#235).
@@ -191,7 +191,7 @@ mod tests {
             role: "node".into(),
             id: 3,
             journals: [
-                JournalKey::default(),
+                JournalKey::new(TenantId(7), JournalId(9)),
                 JournalKey::new(TenantId(300), JournalId(9_000)),
             ]
             .into_iter()

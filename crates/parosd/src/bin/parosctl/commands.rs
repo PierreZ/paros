@@ -31,7 +31,7 @@ fn start(client: &ParosClient) -> usize {
 /// `parosctl write`.
 #[derive(Args, Debug)]
 pub struct WriteArgs {
-    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
     journal: JournalKey,
     /// The records, in order, each one argument.
     #[arg(required = true)]
@@ -227,7 +227,7 @@ fn unknown_journal(journal: JournalKey) -> Ending {
 /// `parosctl read`.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
-    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
     journal: JournalKey,
     /// The first position to read.
     #[arg(long, default_value = "0")]
@@ -313,7 +313,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
 /// `parosctl tail`.
 #[derive(Args, Debug)]
 pub struct TailArgs {
-    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
     journal: JournalKey,
     /// The first position to read.
     #[arg(long, default_value = "0")]
@@ -371,7 +371,7 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
 /// `parosctl truncate`.
 #[derive(Args, Debug)]
 pub struct TruncateArgs {
-    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
     journal: JournalKey,
     /// Drop every record below this position.
     #[arg(long)]
@@ -431,7 +431,7 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
 /// `parosctl set-leader`.
 #[derive(Args, Debug)]
 pub struct SetLeaderArgs {
-    /// The journal, `[TENANT/]JOURNAL` (a bare id is in the default tenant).
+    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
     journal: JournalKey,
     /// The client that should own the journal.
     #[arg(long)]
@@ -484,7 +484,7 @@ pub async fn set_leader(client: &ParosClient, out: &Printer, args: SetLeaderArgs
 /// `parosctl inspect`.
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// The journal to inspect, `[TENANT/]JOURNAL` (default: each node's
+    /// The journal to inspect, `TENANT/JOURNAL` (default: each node's
     /// first journal).
     #[arg(long)]
     journal: Option<JournalKey>,

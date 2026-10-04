@@ -30,10 +30,9 @@ fn policy(manual: &[PromptKind]) -> WorldPolicy {
 /// Node `id`'s configuration in the cluster `peers` under `system`.
 fn config(id: NodeId, peers: &[NodeId], system: QuorumSystem) -> Config {
     Config {
-        id,
         peers: peers.to_vec(),
         quorum_system: system,
-        ..Config::default()
+        ..Config::new(id, paros_core::JournalKey::UNSET)
     }
 }
 
@@ -1665,14 +1664,13 @@ fn matchmaker_cluster(
         .iter()
         .map(|id| {
             Disk::new(Config {
-                id: *id,
                 peers: peers.clone(),
                 quorum_system: QuorumSystem::Majority,
                 nodes: nodes.clone(),
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::default()
+                ..Config::new(*id, paros_core::JournalKey::UNSET)
             })
         })
         .collect();

@@ -165,14 +165,13 @@ fn deployed(
         .iter()
         .map(|id| {
             Disk::new(Config {
-                id: *id,
                 peers: members.clone(),
                 quorum_system: QuorumSystem::Majority,
                 nodes: nodes.clone(),
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::default()
+                ..Config::new(*id, paros_core::JournalKey::UNSET)
             })
         })
         .collect();

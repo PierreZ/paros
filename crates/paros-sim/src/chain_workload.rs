@@ -904,7 +904,7 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
-            journal: JournalKey::default(),
+            journal: JournalKey::UNSET,
             plan: None,
             client_id: 0,
             calls: None,
@@ -1182,7 +1182,8 @@ impl Workload for ChainWorkload {
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let replica_ips: Vec<(u64, String)> = if self.journal == JournalKey::default() {
+        let main = crate::shape::frames(ctx.state()).main;
+        let replica_ips: Vec<(u64, String)> = if self.journal == main {
             deployment
                 .replicas()
                 .iter()
@@ -1260,11 +1261,13 @@ impl Workload for ChainWorkload {
         // The fleet operations (#229): meta and the cell's tenant list.
         let mut fleet_ops = fleet::FleetOps::new(
             &deployment,
+            crate::shape::frames(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             client_id,
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
+            crate::shape::frames(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             self.plan
                 .as_ref()
@@ -1403,7 +1406,7 @@ impl Workload for ChainWorkload {
             // The matchmaker plane — an acceptor or matchmaker
             // reconfiguration, a retirement — belongs to the default journal
             // (#188): a client of another journal pauses instead.
-            let op = if journal != JournalKey::default()
+            let op = if journal != main
                 && matches!(op, RECONFIGURE | RECONFIGURE_MATCHMAKERS | RETIRE)
             {
                 PAUSE
@@ -2729,7 +2732,7 @@ impl Workload for ChainWorkload {
                     reconfigure_next = system_ops
                         .registry_step(ctx, &nodes, None, raw_payload)
                         .await
-                        && journal == JournalKey::default()
+                        && journal == main
                         && operations.contains(&RECONFIGURE);
                 }
                 DRAIN_NODE => {
@@ -2913,7 +2916,7 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == JournalKey::default() && client_id == 0)
+        let held_replica = (journal == crate::shape::frames(ctx.state()).main && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))

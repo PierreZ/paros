@@ -511,6 +511,9 @@ struct Registry {
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
+    /// Run-level: every frame the run names (see [`frames`]), fixed by the
+    /// first caller.
+    frames: Option<Frames>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -530,6 +533,67 @@ pub(crate) struct JoinerMachine {
 pub(crate) struct JournalPlan {
     pub(crate) ids: Vec<JournalKey>,
     pub(crate) held: Option<JournalKey>,
+    /// The deployment's journal ([`Frames::main`]): the one with the seed's
+    /// matchmakers, proxies, replicas and bootstrap.
+    pub(crate) main: JournalKey,
+}
+
+/// Every frame the run names (`docs/architecture.md` §3.8: no frame is
+/// fixed), drawn once per seed: the deployment's journal, the system
+/// journals (the directory — a user tenant's control journal — and the
+/// registry — the cell tenant's), meta's control journal, and the cell's
+/// id. Each a random tenant and a random journal, both set; no two share a
+/// tenant except the main journal and the directory, which belong to the
+/// one user tenant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Frames {
+    /// The deployment's journal.
+    pub(crate) main: JournalKey,
+    /// The directory: the main journal's tenant's control journal.
+    pub(crate) directory: JournalKey,
+    /// The registry: the cell tenant's control journal.
+    pub(crate) registry: JournalKey,
+    /// Meta's control journal.
+    pub(crate) meta: JournalKey,
+    /// The cell's id.
+    pub(crate) cell_id: u64,
+}
+
+/// A random set id.
+fn draw_id() -> u64 {
+    moonpool_sim::sim_random_range(1..u64::MAX)
+}
+
+/// The run's frames (see [`Frames`]), drawn once per seed by whoever asks
+/// first.
+pub(crate) fn frames(state: &StateHandle) -> Frames {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.frames.get_or_insert_with(|| {
+        let users = TenantId(draw_id());
+        let main = JournalKey::new(users, JournalId(draw_id()));
+        let mut directory = JournalKey::new(users, JournalId(draw_id()));
+        while directory == main {
+            directory = JournalKey::new(users, JournalId(draw_id()));
+        }
+        let mut tenants = vec![users];
+        let mut fresh = || loop {
+            let tenant = TenantId(draw_id());
+            if !tenants.contains(&tenant) {
+                tenants.push(tenant);
+                break JournalKey::new(tenant, JournalId(draw_id()));
+            }
+        };
+        let registry = fresh();
+        let meta = fresh();
+        Frames {
+            main,
+            directory,
+            registry,
+            meta,
+            cell_id: draw_id(),
+        }
+    })
 }
 
 impl JournalPlan {
@@ -539,7 +603,7 @@ impl JournalPlan {
         self.ids
             .get(client % self.ids.len().max(1))
             .copied()
-            .unwrap_or_default()
+            .unwrap_or(self.main)
     }
 
     /// Whether the run serves more than one journal.
@@ -686,6 +750,7 @@ enum StoreDraw {
 /// its siblings must keep committing.
 #[tracing::instrument(level = "debug", skip(state), fields(perturb))]
 pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
+    let main = frames(state).main;
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -696,25 +761,24 @@ pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
             } else {
                 1
             };
-            // The first journal is the default frame (the deployment's);
+            // The first journal is the deployment's ([`Frames::main`]);
             // every other one's frame is drawn (#235): a random journal id,
-            // in the default tenant or a random one — and, in another
+            // in the main journal's tenant or a random one — and, in another
             // tenant, sometimes the very journal id of the first, so the
-            // demux is proven to key on both halves of the frame.
-            let mut ids = vec![JournalKey::default()];
+            // demux is proven to key on both halves of the frame. No frame is
+            // fixed (§3.8).
+            let mut ids = vec![main];
             while ids.len() < usize::try_from(count).unwrap_or(1) {
-                let user = JournalId::FIRST_USER.0..u64::MAX;
                 let tenant = if moonpool_sim::sim_random_bool(0.5) {
-                    TenantId::default()
+                    main.tenant
                 } else {
-                    TenantId(moonpool_sim::sim_random_range(user.clone()))
+                    TenantId(draw_id())
                 };
-                let journal = if tenant != TenantId::default() && moonpool_sim::sim_random_bool(0.5)
-                {
+                let journal = if tenant != main.tenant && moonpool_sim::sim_random_bool(0.5) {
                     assert_reachable!("journal: two tenants serve the same journal id");
-                    JournalKey::default().journal
+                    main.journal
                 } else {
-                    JournalId(moonpool_sim::sim_random_range(user))
+                    JournalId(draw_id())
                 };
                 let key = JournalKey::new(tenant, journal);
                 if !ids.contains(&key) {
@@ -723,7 +787,11 @@ pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
             }
             ids.sort_unstable();
             if ids.len() < 2 {
-                return JournalPlan { ids, held: None };
+                return JournalPlan {
+                    ids,
+                    held: None,
+                    main,
+                };
             }
             // BUGGIFY pairing: a seed genuinely runs several journals (a
             // cause; the outcomes are the non-interference gates).
@@ -735,7 +803,7 @@ pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
                 );
                 ids[usize::try_from(count - 1).unwrap_or(0)]
             });
-            JournalPlan { ids, held }
+            JournalPlan { ids, held, main }
         })
         .clone()
 }

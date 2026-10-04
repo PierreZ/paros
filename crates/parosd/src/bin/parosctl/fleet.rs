@@ -3,22 +3,27 @@
 //! journal, and what `init` shares with them (the session, the outcomes'
 //! endings and labels).
 //!
-//! The cell coordinator is whoever owns the cell control journal (claimed
-//! at `init`), and in M9 it coordinates meta too (`docs/architecture.md`
-//! §3.7: the fleet's one cell hosts meta): every operation here writes both
-//! journals under its id. A crashed or interrupted operation is resumed by
-//! running the same command again.
+//! No frame is fixed (`docs/architecture.md` §3.8): the cell's and meta's
+//! control journals are learned from the servers' `Inspect`
+//! (`paros::client::bootstrap::cell_frames`). The cell coordinator is
+//! whoever owns the cell control journal (claimed at `init`), and in M9 it
+//! coordinates meta too (§3.7: the fleet's one cell hosts meta): every
+//! operation here writes both journals under its id. A crashed or
+//! interrupted operation is resumed by running the same command again.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
-use paros::Read;
 use paros::client::Client;
-use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, read_meta};
-use paros::machine::CELL_CONTROL;
+use paros::client::bootstrap::cell_frames;
+use paros::client::fleet::{
+    FleetFrames, FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, read_meta,
+};
+use paros::meta::Placement;
 use paros::system::Registry;
-use paros::{NodeId, TenantId};
+use paros::{JournalId, JournalKey, NodeId, Read, TenantId};
 use serde_json::json;
 
 use crate::Ending;
@@ -26,41 +31,59 @@ use crate::output::{Printer, note, record_text};
 
 type ParosClient = Client<TokioProviders>;
 
-/// How many tenant ids `tenant create` draws before it gives up on finding
-/// a free one (a collision of random 64-bit ids is all but impossible: one
-/// redraw is the realistic worst case).
+/// How many tenant frames `tenant create` hands the library to try in turn
+/// (a collision of random 64-bit ids is all but impossible: one redraw is
+/// the realistic worst case).
 const DRAWS: usize = 4;
 
 /// `parosctl tenant`.
 #[derive(Args, Debug)]
 pub struct TenantArgs {
+    /// How long a step interrupted by a moving leader is retried, in
+    /// milliseconds.
+    #[arg(long, default_value = "30000")]
+    patience_ms: u64,
     #[command(subcommand)]
     command: TenantCommand,
 }
 
 #[derive(Subcommand, Debug)]
 enum TenantCommand {
-    /// Create a tenant (`REGISTERING` in meta, hosted by the cell, then
-    /// `READY`). A re-run resumes an interrupted creation of the same name.
+    /// Create a `users` tenant (`REGISTERING` in meta, hosted by the cell,
+    /// then `READY`). A re-run resumes an interrupted creation of the same
+    /// name. The CLI never creates an `internal` tenant.
     Create {
         /// The tenant's name.
         name: String,
+        /// Pin the tenant to its cell: it is never moved (default: movable).
+        #[arg(long)]
+        pinned: bool,
     },
-    /// Remove a tenant (`REMOVING`, dropped by the cell, then removed). A
-    /// re-run resumes.
+    /// Remove a `users` tenant (`REMOVING`, dropped by the cell, then
+    /// removed). A re-run resumes.
     Delete {
         /// The tenant's name.
         name: String,
     },
-    /// List meta's tenants and cells.
+    /// List meta's fleet, cells and tenants.
     List,
 }
 
+/// A random non-zero id.
+pub fn nonzero(providers: &TokioProviders) -> u64 {
+    loop {
+        let id: u64 = providers.random().random();
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
 /// The cell coordinator: the owner of the cell control journal.
-pub async fn coordinator(client: &ParosClient) -> Option<NodeId> {
+pub async fn coordinator(client: &ParosClient, frames: &FleetFrames) -> Option<NodeId> {
     let read = Read {
-        journal: CELL_CONTROL.journal.0,
-        tenant: CELL_CONTROL.tenant.0,
+        journal: frames.cell.journal.0,
+        tenant: frames.cell.tenant.0,
         from_seq: 0,
         limit: 1,
         wait_ms: 0,
@@ -69,10 +92,16 @@ pub async fn coordinator(client: &ParosClient) -> Option<NodeId> {
     state.owner.map(|owner| NodeId(owner.0))
 }
 
-/// A fleet session writing both control journals as `coordinator`, folding
-/// the cell's journal over the genesis pool `servers`.
-pub fn session(client: &ParosClient, coordinator: NodeId, servers: &[u64]) -> FleetSession {
+/// A fleet session over `frames` writing both control journals as
+/// `coordinator`, folding the cell's journal over the genesis pool `servers`.
+pub fn session(
+    client: &ParosClient,
+    frames: FleetFrames,
+    coordinator: NodeId,
+    servers: &[u64],
+) -> FleetSession {
     FleetSession::new(
+        frames,
         coordinator.0,
         coordinator,
         Registry::new(servers.iter().copied().map(NodeId)),
@@ -83,10 +112,7 @@ pub fn session(client: &ParosClient, coordinator: NodeId, servers: &[u64]) -> Fl
 /// A refusal's label and its meaning.
 pub fn refusal_text(refusal: &FleetRefusal) -> String {
     match refusal {
-        FleetRefusal::NoFleetId => "no_fleet_id: a fleet or cell id of 0".into(),
-        FleetRefusal::CellIdUnknown => {
-            "cell_id_unknown: the cell's id is recorded nowhere yet".into()
-        }
+        FleetRefusal::Unset => "unset: an id or a frame of 0".into(),
         FleetRefusal::NotInitialized => "not_initialized: run parosctl init first".into(),
         FleetRefusal::CellMismatch { expected, found } => format!(
             "cell_mismatch: expected fleet={} cell={}, the cell records {}",
@@ -98,10 +124,15 @@ pub fn refusal_text(refusal: &FleetRefusal) -> String {
             )
         ),
         FleetRefusal::CellRemoving => "cell_removing".into(),
-        FleetRefusal::ReservedId => "reserved_id".into(),
         FleetRefusal::IdTaken => "id_taken".into(),
         FleetRefusal::NameBusy { tenant, state } => {
             format!("name_busy: tenant {} is {}", tenant.0, state.as_str())
+        }
+        FleetRefusal::Removed { tenant } => {
+            format!(
+                "removed: tenant {} was removed while being created",
+                tenant.0
+            )
         }
     }
 }
@@ -134,36 +165,42 @@ pub async fn run(
     out: &Printer,
     args: TenantArgs,
 ) -> Ending {
+    let Some(frames) = cell_frames(client).await else {
+        note("no server named its cell's frames: is the cell initialized?");
+        return Ending::Unreachable;
+    };
     if let TenantCommand::List = args.command {
-        return list(client, out).await;
+        return list(client, &frames, out).await;
     }
-    let Some(coordinator) = coordinator(client).await else {
+    let Some(coordinator) = coordinator(client, &frames).await else {
         note("the cell control journal has no owner: run parosctl init first");
         return Ending::Refused;
     };
-    let mut fleet = session(client, coordinator, servers);
+    let mut fleet = session(client, frames, coordinator, servers);
+    let patience = Duration::from_millis(args.patience_ms);
     match args.command {
-        TenantCommand::Create { name } => {
-            let mut run = None;
-            for _ in 0..DRAWS {
-                let draw = TenantId(
-                    TenantId::FIRST_USER.0
-                        + providers.random().random::<u64>() % (u64::MAX - TenantId::FIRST_USER.0),
-                );
-                let attempt = fleet.create_tenant(client, 0, name.as_bytes(), draw).await;
-                if attempt.outcome != Step::Refused(FleetRefusal::IdTaken) {
-                    run = Some(attempt);
-                    break;
-                }
-            }
-            let Some(run) = run else {
-                note("every tenant id drawn was taken");
-                return Ending::Refused;
+        TenantCommand::Create { name, pinned } => {
+            let placement = if pinned {
+                Placement::Pinned
+            } else {
+                Placement::Movable
             };
+            // Random frames, the tenant's and its control journal's; the
+            // library moves past one meta holds already.
+            let draws: Vec<JournalKey> = (0..DRAWS)
+                .map(|_| {
+                    JournalKey::new(TenantId(nonzero(providers)), JournalId(nonzero(providers)))
+                })
+                .collect();
+            let run = fleet
+                .create_tenant(client, 0, name.as_bytes(), placement, draws, patience)
+                .await;
             report(out, "created", &name, run)
         }
         TenantCommand::Delete { name } => {
-            let run = fleet.remove_tenant(client, 0, name.as_bytes()).await;
+            let run = fleet
+                .remove_tenant(client, 0, name.as_bytes(), patience)
+                .await;
             match run.outcome {
                 Step::Done { result: None, .. } => {
                     out.emit(
@@ -240,9 +277,10 @@ fn report(out: &Printer, done: &str, name: &str, run: Run<TenantId>) -> Ending {
     }
 }
 
-/// `parosctl tenant list`.
-async fn list(client: &ParosClient, out: &Printer) -> Ending {
-    let meta = match read_meta(client, 0).await {
+/// `parosctl tenant list`: meta's fleet, its cells and every tenant — the
+/// `internal` ones (meta, the cell tenants) included, by group.
+async fn list(client: &ParosClient, frames: &FleetFrames, out: &Printer) -> Ending {
+    let meta = match read_meta(client, 0, frames.meta).await {
         Ok(meta) => meta,
         Err(outcome) => {
             note(&format!("meta could not be read to its tail: {outcome:?}"));
@@ -252,9 +290,10 @@ async fn list(client: &ParosClient, out: &Printer) -> Ending {
     out.emit(
         || {
             let mut text = format!(
-                "fleet={}",
+                "fleet={} meta={}",
                 meta.fleet()
-                    .map_or_else(|| "none".to_string(), |f| f.to_string())
+                    .map_or_else(|| "none".to_string(), |f| f.to_string()),
+                frames.meta
             );
             for (cell, entry) in meta.cells() {
                 let _ = write!(text, "\ncell={cell} state={}", entry.state.as_str());
@@ -262,9 +301,12 @@ async fn list(client: &ParosClient, out: &Printer) -> Ending {
             for (tenant, entry) in meta.tenants() {
                 let _ = write!(
                     text,
-                    "\ntenant={} name={} cell={} state={}",
+                    "\ntenant={} control={} name={} group={} placement={} cell={} state={}",
                     tenant.0,
+                    JournalKey::new(tenant, entry.control),
                     record_text(&entry.name),
+                    entry.group.as_str(),
+                    entry.placement.as_str(),
                     entry.cell_id,
                     entry.state.as_str()
                 );
@@ -274,13 +316,18 @@ async fn list(client: &ParosClient, out: &Printer) -> Ending {
         || {
             json!({
                 "fleet": meta.fleet(),
+                "meta": frames.meta.to_string(),
                 "cells": meta.cells().map(|(cell, entry)| json!({
                     "cell": cell,
                     "state": entry.state.as_str(),
+                    "cell_tenant": entry.control_tenant.0,
                 })).collect::<Vec<_>>(),
                 "tenants": meta.tenants().map(|(tenant, entry)| json!({
                     "tenant": tenant.0,
+                    "control": JournalKey::new(tenant, entry.control).to_string(),
                     "name": record_text(&entry.name),
+                    "group": entry.group.as_str(),
+                    "placement": entry.placement.as_str(),
                     "cell": entry.cell_id,
                     "state": entry.state.as_str(),
                 })).collect::<Vec<_>>(),

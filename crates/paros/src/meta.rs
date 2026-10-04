@@ -1,7 +1,9 @@
 //! The **meta tenant** (#229, `docs/architecture.md` §3.7): the fleet's
-//! directory. Its control journal ([`META`], `1/1`) answers one question —
-//! which tenant lives in which cell — plus the cell entries; quotas, billing
-//! and status live elsewhere.
+//! directory. Its control journal answers one question — which tenant lives
+//! in which cell — plus the cell entries; quotas, billing and status live
+//! elsewhere. Its frame is random like every frame (§3.8): `init` draws it
+//! and records it in the cell plan, and meta records it in its own first
+//! entry.
 //!
 //! This module is the one reading of meta's entries: the typed
 //! [`MetaEntry`] a fleet operation writes (one record per position) and the
@@ -17,6 +19,16 @@
 //!   previous step did changes nothing (FDB's `MetaclusterOperationContext`).
 //!   An entry whose version this fold does not understand is refused
 //!   ([`MetaRefusal::UnknownVersion`]).
+//! - **Every tenant has a group and a placement**, fixed when it is
+//!   registered (§3.7). The group only separates the tenants paros
+//!   administrates itself with ([`Group::Internal`]: meta, registered by
+//!   `FormFleet`, and each cell's cell tenant, registered by `AddCell`) from
+//!   the ones it serves ([`Group::Users`]): `RegisterTenant` — the tenant
+//!   API's entry — cannot express another group, and an internal tenant is
+//!   never marked or removed through it ([`MetaRefusal::Internal`]). The
+//!   placement ([`Placement::Movable`] or [`Placement::Pinned`]) is the
+//!   creator's: a cell tenant is registered pinned, meta movable, a user
+//!   tenant as asked.
 //! - **Every fleet operation is an idempotent state machine.** A tenant is
 //!   written in `REGISTERING` with its cell assignment, created in the cell,
 //!   then marked `READY` ([`crate::client::fleet`]); `init` takes its cell
@@ -24,11 +36,13 @@
 //!   what the directory already holds folds to [`MetaEvent::Unchanged`], so
 //!   re-running a step after a crash is harmless. The transitions are
 //!   [`TenantState::may_become`] and [`CellState::may_become`].
-//! - **A tenant's id is random**, drawn by its creator in the user range
-//!   (`>= 256`) and checked here, the tenant ids' single writer: a reserved
-//!   id is refused, and an id the directory holds or ever removed is taken
-//!   ([`MetaRefusal::TenantIdTaken`]) — the creator redraws. A live name is
-//!   held by one tenant at a time ([`MetaRefusal::NameTaken`]).
+//! - **No id is fixed** (§3.8). A tenant's id and its control journal's are
+//!   random, drawn by its creator and checked here, the tenant ids' single
+//!   writer: an id any entry holds — meta's own and the cell tenants'
+//!   included — or that was ever removed is taken
+//!   ([`MetaRefusal::TenantIdTaken`]), and the creator redraws; an unset id
+//!   is malformed. A live name is held by one tenant at a time
+//!   ([`MetaRefusal::NameTaken`]).
 //! - **Only a `READY` cell receives new tenants.**
 //! - **The directory is a pointer, never the authority** (#225): a tenant's
 //!   control journal's generation wins over it, and the directory is
@@ -41,18 +55,88 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{JournalKey, TenantId};
+use paros_core::{JournalId, JournalKey, TenantId};
 use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
 use crate::rpc::meta as wire;
 
-/// The meta tenant's control journal (`1/1`): the fleet's directory.
-pub const META: JournalKey = JournalKey::control(TenantId::META);
-
 /// The metadata version this fold speaks: written into every entry, and
 /// into the cell's side of the registration (`crate::system`).
 pub const METADATA_VERSION: u32 = 1;
+
+/// Which tenants a tenant is with (§3.7): the ones paros administrates
+/// itself with, or the ones it serves. Fixed at registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// Meta and the cell tenants: created by `init` and by adding a cell,
+    /// never through the tenant API.
+    Internal,
+    /// Every tenant the tenant API creates.
+    Users,
+}
+
+/// Whether a tenant may move to another cell (§3.7). Fixed at
+/// registration, chosen by its creator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Placement {
+    /// It may move (M12).
+    Movable,
+    /// It lives and dies with its cell: a move is refused.
+    Pinned,
+}
+
+impl Group {
+    fn to_wire(self) -> u32 {
+        match self {
+            Group::Internal => 1,
+            Group::Users => 2,
+        }
+    }
+
+    fn from_wire(group: u32) -> Option<Self> {
+        match group {
+            1 => Some(Group::Internal),
+            2 => Some(Group::Users),
+            _ => None,
+        }
+    }
+
+    /// The group's label (`internal`, `users`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Group::Internal => "internal",
+            Group::Users => "users",
+        }
+    }
+}
+
+impl Placement {
+    fn to_wire(self) -> u32 {
+        match self {
+            Placement::Movable => 1,
+            Placement::Pinned => 2,
+        }
+    }
+
+    fn from_wire(placement: u32) -> Option<Self> {
+        match placement {
+            1 => Some(Placement::Movable),
+            2 => Some(Placement::Pinned),
+            _ => None,
+        }
+    }
+
+    /// The placement's label (`movable`, `pinned`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Placement::Movable => "movable",
+            Placement::Pinned => "pinned",
+        }
+    }
+}
 
 /// Where a cell entry stands (§3.7). Only a [`CellState::Ready`] cell
 /// receives new tenants.
@@ -197,12 +281,20 @@ impl CellState {
 /// What one meta entry asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaCommand {
-    /// `init` step 2: record the entry's fleet as meta's, once.
-    FormFleet,
-    /// `init` step 3: cell `cell_id` joins the directory, `REGISTERING`.
+    /// `init`: record the entry's fleet as meta's, once, and register meta
+    /// itself (`internal`, movable) under its own frame.
+    FormFleet {
+        /// Meta's control journal: its tenant is meta's id.
+        meta: JournalKey,
+    },
+    /// `init` (and adding a cell, M12): cell `cell_id` joins the directory,
+    /// `REGISTERING`, and its cell tenant is registered (`internal`,
+    /// pinned) under the frame of its control journal.
     AddCell {
         /// The cell's id (random, minted at `init`).
         cell_id: u64,
+        /// The cell tenant's control journal.
+        control: JournalKey,
     },
     /// Move cell `cell_id` to `state`.
     MarkCell {
@@ -211,15 +303,18 @@ pub enum MetaCommand {
         /// Its new state.
         state: CellState,
     },
-    /// Tenant creation's first step: `tenant` named `name`, assigned to
+    /// Tenant creation's first step: a `users` tenant named `name`, its
+    /// control journal `control` (both ids its creator drew), assigned to
     /// `cell_id`, `REGISTERING`.
     RegisterTenant {
-        /// The id its creator drew (`>= 256`).
-        tenant: TenantId,
+        /// The tenant's control journal: its tenant is the tenant's id.
+        control: JournalKey,
         /// Opaque bytes; paros never interprets them.
         name: Vec<u8>,
         /// The cell it is assigned to.
         cell_id: u64,
+        /// Whether it may move.
+        placement: Placement,
     },
     /// Move `tenant` to `state`.
     MarkTenant {
@@ -248,6 +343,10 @@ pub struct MetaEntry {
     pub command: MetaCommand,
 }
 
+fn frame(tenant: u64, journal: u64) -> JournalKey {
+    JournalKey::new(TenantId(tenant), JournalId(journal))
+}
+
 impl MetaEntry {
     /// `command` for fleet `fleet_id` at this fold's [`METADATA_VERSION`].
     #[must_use]
@@ -264,20 +363,30 @@ impl MetaEntry {
     pub fn encode(&self) -> Vec<u8> {
         use wire::meta_entry::Kind;
         let kind = match &self.command {
-            MetaCommand::FormFleet => Kind::FormFleet(wire::FormFleet {}),
-            MetaCommand::AddCell { cell_id } => Kind::AddCell(wire::AddCell { cell_id: *cell_id }),
+            MetaCommand::FormFleet { meta } => Kind::FormFleet(wire::FormFleet {
+                meta_tenant: meta.tenant.0,
+                meta_journal: meta.journal.0,
+            }),
+            MetaCommand::AddCell { cell_id, control } => Kind::AddCell(wire::AddCell {
+                cell_id: *cell_id,
+                control_tenant: control.tenant.0,
+                control_journal: control.journal.0,
+            }),
             MetaCommand::MarkCell { cell_id, state } => Kind::MarkCell(wire::MarkCell {
                 cell_id: *cell_id,
                 state: state.to_wire(),
             }),
             MetaCommand::RegisterTenant {
-                tenant,
+                control,
                 name,
                 cell_id,
+                placement,
             } => Kind::RegisterTenant(wire::RegisterTenant {
-                tenant: tenant.0,
+                tenant: control.tenant.0,
                 name: name.clone(),
                 cell_id: *cell_id,
+                control_journal: control.journal.0,
+                placement: placement.to_wire(),
             }),
             MetaCommand::MarkTenant { tenant, state } => Kind::MarkTenant(wire::MarkTenant {
                 tenant: tenant.0,
@@ -299,24 +408,29 @@ impl MetaEntry {
     ///
     /// # Errors
     ///
-    /// The record is not a meta entry, names no kind, or names a state no
-    /// version knows.
+    /// The record is not a meta entry, names no kind, or names a state or a
+    /// placement no version knows.
     pub fn decode(record: &[u8]) -> Result<Self, &'static str> {
         use wire::meta_entry::Kind;
         let entry = wire::MetaEntry::decode(record).map_err(|_| "not a meta entry")?;
         let command = match entry.kind.ok_or("a meta entry names no kind")? {
-            Kind::FormFleet(_) => MetaCommand::FormFleet,
+            Kind::FormFleet(form) => MetaCommand::FormFleet {
+                meta: frame(form.meta_tenant, form.meta_journal),
+            },
             Kind::AddCell(add) => MetaCommand::AddCell {
                 cell_id: add.cell_id,
+                control: frame(add.control_tenant, add.control_journal),
             },
             Kind::MarkCell(mark) => MetaCommand::MarkCell {
                 cell_id: mark.cell_id,
                 state: CellState::from_wire(mark.state).ok_or("an unknown cell state")?,
             },
             Kind::RegisterTenant(register) => MetaCommand::RegisterTenant {
-                tenant: TenantId(register.tenant),
+                control: frame(register.tenant, register.control_journal),
                 name: register.name,
                 cell_id: register.cell_id,
+                placement: Placement::from_wire(register.placement)
+                    .ok_or("an unknown placement")?,
             },
             Kind::MarkTenant(mark) => MetaCommand::MarkTenant {
                 tenant: TenantId(mark.tenant),
@@ -341,33 +455,40 @@ pub struct CellEntry {
     pub state: CellState,
     /// The metadata version it was added under.
     pub version: u32,
+    /// Its cell tenant (an `internal`, pinned tenant entry).
+    pub control_tenant: TenantId,
 }
 
 /// A tenant entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantEntry {
-    /// Its name (opaque bytes).
+    /// Its name (opaque bytes; empty for an `internal` tenant, which is
+    /// found by its frame, never by name).
     pub name: Vec<u8>,
-    /// The cell it lives in.
+    /// The cell it lives in (`0` for meta until its hosting cell is added).
     pub cell_id: u64,
+    /// Its control journal's id, inside the tenant.
+    pub control: JournalId,
     /// Where it stands.
     pub state: TenantState,
     /// Its configuration sequence number: moved each time it enters
     /// `UPDATING_CONFIGURATION`.
     pub config_seq: u64,
-    /// Reserved and unused in M9 (#226).
-    pub tenant_group: Option<u64>,
+    /// Its group.
+    pub group: Group,
+    /// Whether it may move.
+    pub placement: Placement,
 }
 
 /// What one meta record folded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaEvent {
-    /// Meta recorded its fleet.
+    /// Meta recorded its fleet, and itself as its first tenant.
     FleetFormed {
         /// The fleet's id.
         fleet_id: u64,
     },
-    /// A cell joined the directory, `REGISTERING`.
+    /// A cell joined the directory, `REGISTERING`, with its cell tenant.
     CellAdded {
         /// The cell.
         cell_id: u64,
@@ -379,7 +500,7 @@ pub enum MetaEvent {
         /// Its new state.
         state: CellState,
     },
-    /// A tenant was registered, `REGISTERING`.
+    /// A `users` tenant was registered, `REGISTERING`.
     TenantRegistered {
         /// The tenant.
         tenant: TenantId,
@@ -414,7 +535,7 @@ pub enum MetaEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetaRefusal {
     /// Not one decodable meta entry (or a checkpoint this fold cannot use),
-    /// or a fleet id of `0`.
+    /// or an unset id or frame where one must be named.
     Malformed,
     /// Written at a metadata version this fold does not understand.
     UnknownVersion {
@@ -423,13 +544,19 @@ pub enum MetaRefusal {
     },
     /// No fleet is formed yet: only `FormFleet` may come first.
     NoFleet,
-    /// The entry names another fleet than the one meta formed.
+    /// The entry names another fleet than the one meta formed (or another
+    /// frame for meta).
     OtherFleet {
         /// The fleet the entry names.
         fleet_id: u64,
     },
     /// A cell the directory does not hold.
     UnknownCell {
+        /// The cell named.
+        cell_id: u64,
+    },
+    /// The cell is in the directory under another cell tenant.
+    OtherCellTenant {
         /// The cell named.
         cell_id: u64,
     },
@@ -445,13 +572,8 @@ pub enum MetaRefusal {
         /// The cell named.
         cell_id: u64,
     },
-    /// A tenant id outside the user range.
-    Reserved {
-        /// The id asked for.
-        tenant: TenantId,
-    },
-    /// The id names another tenant entry, or one removed (ids are never
-    /// reused): the creator redraws.
+    /// The id names another tenant entry — meta, a cell tenant or a user
+    /// tenant — or one removed (ids are never reused): the creator redraws.
     TenantIdTaken {
         /// The id asked for.
         tenant: TenantId,
@@ -466,6 +588,12 @@ pub enum MetaRefusal {
         /// The tenant named.
         tenant: TenantId,
     },
+    /// An `internal` tenant is moved or removed only by the fleet
+    /// operations that created it, never through the tenant API.
+    Internal {
+        /// The tenant named.
+        tenant: TenantId,
+    },
     /// A tenant transition [`TenantState::may_become`] forbids (a removal
     /// of a tenant that is not `REMOVING` included).
     TenantTransition {
@@ -476,14 +604,22 @@ pub enum MetaRefusal {
     },
 }
 
+/// The fleet as meta recorded it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fleet {
+    id: u64,
+    version: u32,
+    /// Meta's own control journal.
+    meta: JournalKey,
+}
+
 /// Meta's fold: the fleet, its cells and its tenants.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Meta {
-    /// `(fleet_id, version)` once formed.
-    fleet: Option<(u64, u32)>,
+    fleet: Option<Fleet>,
     cells: BTreeMap<u64, CellEntry>,
     tenants: BTreeMap<TenantId, TenantEntry>,
-    /// Live names, to the tenant holding each.
+    /// Live `users` names, to the tenant holding each.
     names: BTreeMap<Vec<u8>, TenantId>,
     /// Ids removed from the directory: never reused.
     removed: BTreeSet<TenantId>,
@@ -500,7 +636,13 @@ impl Meta {
     /// The fleet's id, once formed.
     #[must_use]
     pub fn fleet(&self) -> Option<u64> {
-        self.fleet.map(|(id, _)| id)
+        self.fleet.map(|fleet| fleet.id)
+    }
+
+    /// Meta's own control journal, once the fleet is formed.
+    #[must_use]
+    pub fn meta(&self) -> Option<JournalKey> {
+        self.fleet.map(|fleet| fleet.meta)
     }
 
     /// The cell entry `cell_id`.
@@ -520,7 +662,7 @@ impl Meta {
         self.tenants.get(&tenant)
     }
 
-    /// The tenant holding `name`.
+    /// The `users` tenant holding `name`.
     #[must_use]
     pub fn named(&self, name: &[u8]) -> Option<(TenantId, &TenantEntry)> {
         let id = *self.names.get(name)?;
@@ -536,6 +678,11 @@ impl Meta {
     #[must_use]
     pub fn is_removed(&self, tenant: TenantId) -> bool {
         self.removed.contains(&tenant)
+    }
+
+    /// Whether `tenant` is held by an entry or was ever removed.
+    fn taken(&self, tenant: TenantId) -> bool {
+        self.tenants.contains_key(&tenant) || self.removed.contains(&tenant)
     }
 
     /// Fold the record at position `seq` of meta (in position order; a gap
@@ -569,23 +716,12 @@ impl Meta {
                 version: entry.version,
             });
         }
-        if let MetaCommand::FormFleet = entry.command {
-            return match self.fleet {
-                None => {
-                    self.fleet = Some((entry.fleet_id, entry.version));
-                    Ok(MetaEvent::FleetFormed {
-                        fleet_id: entry.fleet_id,
-                    })
-                }
-                Some((fleet, _)) if fleet == entry.fleet_id => Ok(MetaEvent::Unchanged),
-                Some(_) => Err(MetaRefusal::OtherFleet {
-                    fleet_id: entry.fleet_id,
-                }),
-            };
+        if let MetaCommand::FormFleet { meta } = entry.command {
+            return self.form_fleet(entry.fleet_id, entry.version, meta);
         }
         match self.fleet {
             None => return Err(MetaRefusal::NoFleet),
-            Some((fleet, _)) if fleet != entry.fleet_id => {
+            Some(fleet) if fleet.id != entry.fleet_id => {
                 return Err(MetaRefusal::OtherFleet {
                     fleet_id: entry.fleet_id,
                 });
@@ -593,34 +729,111 @@ impl Meta {
             Some(_) => {}
         }
         match &entry.command {
-            MetaCommand::FormFleet => unreachable!("judged above"),
-            MetaCommand::AddCell { cell_id } => Ok(self.add_cell(*cell_id, entry.version)),
+            MetaCommand::FormFleet { .. } => unreachable!("judged above"),
+            MetaCommand::AddCell { cell_id, control } => {
+                self.add_cell(*cell_id, *control, entry.version)
+            }
             MetaCommand::MarkCell { cell_id, state } => self.mark_cell(*cell_id, *state),
             MetaCommand::RegisterTenant {
-                tenant,
+                control,
                 name,
                 cell_id,
-            } => self.register_tenant(*tenant, name, *cell_id),
+                placement,
+            } => self.register_tenant(*control, name, *cell_id, *placement),
             MetaCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
             MetaCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
         }
     }
 
-    fn add_cell(&mut self, cell_id: u64, version: u32) -> MetaEvent {
-        if cell_id == 0 {
-            return MetaEvent::Refused(MetaRefusal::Malformed);
+    fn form_fleet(
+        &mut self,
+        fleet_id: u64,
+        version: u32,
+        meta: JournalKey,
+    ) -> Result<MetaEvent, MetaRefusal> {
+        if !meta.is_set() {
+            return Err(MetaRefusal::Malformed);
         }
-        if self.cells.contains_key(&cell_id) {
-            return MetaEvent::Unchanged;
+        match self.fleet {
+            None => {
+                self.fleet = Some(Fleet {
+                    id: fleet_id,
+                    version,
+                    meta,
+                });
+                self.tenants.insert(
+                    meta.tenant,
+                    TenantEntry {
+                        name: Vec::new(),
+                        cell_id: 0,
+                        control: meta.journal,
+                        state: TenantState::Ready,
+                        config_seq: 0,
+                        group: Group::Internal,
+                        placement: Placement::Movable,
+                    },
+                );
+                Ok(MetaEvent::FleetFormed { fleet_id })
+            }
+            Some(fleet) if fleet.id == fleet_id && fleet.meta == meta => Ok(MetaEvent::Unchanged),
+            Some(_) => Err(MetaRefusal::OtherFleet { fleet_id }),
+        }
+    }
+
+    fn add_cell(
+        &mut self,
+        cell_id: u64,
+        control: JournalKey,
+        version: u32,
+    ) -> Result<MetaEvent, MetaRefusal> {
+        if cell_id == 0 || !control.is_set() {
+            return Err(MetaRefusal::Malformed);
+        }
+        if let Some(cell) = self.cells.get(&cell_id) {
+            let same = cell.control_tenant == control.tenant
+                && self
+                    .tenants
+                    .get(&control.tenant)
+                    .is_some_and(|t| t.control == control.journal);
+            return if same {
+                Ok(MetaEvent::Unchanged)
+            } else {
+                Err(MetaRefusal::OtherCellTenant { cell_id })
+            };
+        }
+        if self.taken(control.tenant) {
+            return Err(MetaRefusal::TenantIdTaken {
+                tenant: control.tenant,
+            });
         }
         self.cells.insert(
             cell_id,
             CellEntry {
                 state: CellState::Registering,
                 version,
+                control_tenant: control.tenant,
             },
         );
-        MetaEvent::CellAdded { cell_id }
+        self.tenants.insert(
+            control.tenant,
+            TenantEntry {
+                name: Vec::new(),
+                cell_id,
+                control: control.journal,
+                state: TenantState::Ready,
+                config_seq: 0,
+                group: Group::Internal,
+                placement: Placement::Pinned,
+            },
+        );
+        // The fleet's first cell hosts meta (#226).
+        if let Some(meta) = self.fleet.map(|fleet| fleet.meta.tenant)
+            && let Some(entry) = self.tenants.get_mut(&meta)
+            && entry.cell_id == 0
+        {
+            entry.cell_id = cell_id;
+        }
+        Ok(MetaEvent::CellAdded { cell_id })
     }
 
     fn mark_cell(&mut self, cell_id: u64, state: CellState) -> Result<MetaEvent, MetaRefusal> {
@@ -643,16 +856,23 @@ impl Meta {
 
     fn register_tenant(
         &mut self,
-        tenant: TenantId,
+        control: JournalKey,
         name: &[u8],
         cell_id: u64,
+        placement: Placement,
     ) -> Result<MetaEvent, MetaRefusal> {
-        if !tenant.is_user() {
-            return Err(MetaRefusal::Reserved { tenant });
+        let tenant = control.tenant;
+        if !control.is_set() {
+            return Err(MetaRefusal::Malformed);
         }
         if let Some(existing) = self.tenants.get(&tenant) {
             // The same registration again: a re-run of the first step.
-            return if existing.name == name && existing.cell_id == cell_id {
+            let same = existing.group == Group::Users
+                && existing.name == name
+                && existing.cell_id == cell_id
+                && existing.control == control.journal
+                && existing.placement == placement;
+            return if same {
                 Ok(MetaEvent::Unchanged)
             } else {
                 Err(MetaRefusal::TenantIdTaken { tenant })
@@ -673,9 +893,11 @@ impl Meta {
             TenantEntry {
                 name: name.to_vec(),
                 cell_id,
+                control: control.journal,
                 state: TenantState::Registering,
                 config_seq: 0,
-                tenant_group: None,
+                group: Group::Users,
+                placement,
             },
         );
         Ok(MetaEvent::TenantRegistered { tenant, cell_id })
@@ -690,6 +912,9 @@ impl Meta {
             .tenants
             .get_mut(&tenant)
             .ok_or(MetaRefusal::UnknownTenant { tenant })?;
+        if entry.group == Group::Internal {
+            return Err(MetaRefusal::Internal { tenant });
+        }
         if entry.state == state {
             return Ok(MetaEvent::Unchanged);
         }
@@ -714,6 +939,9 @@ impl Meta {
             .tenants
             .get(&tenant)
             .ok_or(MetaRefusal::UnknownTenant { tenant })?;
+        if entry.group == Group::Internal {
+            return Err(MetaRefusal::Internal { tenant });
+        }
         if entry.state != TenantState::Removing {
             return Err(MetaRefusal::TenantTransition {
                 from: entry.state,
@@ -728,10 +956,12 @@ impl Meta {
     }
 
     fn state_to_wire(&self) -> wire::MetaState {
-        let (fleet_id, version) = self.fleet.unwrap_or((0, 0));
+        let fleet = self.fleet;
         wire::MetaState {
-            fleet_id,
-            version,
+            fleet_id: fleet.map_or(0, |f| f.id),
+            version: fleet.map_or(0, |f| f.version),
+            meta_tenant: fleet.map_or(0, |f| f.meta.tenant.0),
+            meta_journal: fleet.map_or(0, |f| f.meta.journal.0),
             cells: self
                 .cells
                 .iter()
@@ -739,6 +969,7 @@ impl Meta {
                     cell_id: *id,
                     state: c.state.to_wire(),
                     version: c.version,
+                    control_tenant: c.control_tenant.0,
                 })
                 .collect(),
             tenants: self
@@ -750,7 +981,9 @@ impl Meta {
                     cell_id: t.cell_id,
                     state: t.state.to_wire(),
                     config_seq: t.config_seq,
-                    tenant_group: t.tenant_group.unwrap_or(0),
+                    control_journal: t.control.0,
+                    group: t.group.to_wire(),
+                    placement: t.placement.to_wire(),
                 })
                 .collect(),
             removed: self.removed.iter().map(|id| id.0).collect(),
@@ -774,15 +1007,26 @@ impl Checkpointable for Meta {
         if state.version > METADATA_VERSION {
             return Err("a meta state of an unknown metadata version");
         }
-        let fleet = (state.fleet_id != 0).then_some((state.fleet_id, state.version));
+        let fleet = match state.fleet_id {
+            0 => None,
+            id => Some(Fleet {
+                id,
+                version: state.version,
+                meta: frame(state.meta_tenant, state.meta_journal),
+            }),
+        };
+        if fleet.is_some_and(|f| !f.meta.is_set()) {
+            return Err("a meta state names no frame for meta");
+        }
         let mut cells = BTreeMap::new();
         for c in state.cells {
-            let state = CellState::from_wire(c.state).ok_or("an unknown cell state")?;
+            let cell_state = CellState::from_wire(c.state).ok_or("an unknown cell state")?;
             cells.insert(
                 c.cell_id,
                 CellEntry {
-                    state,
+                    state: cell_state,
                     version: c.version,
+                    control_tenant: TenantId(c.control_tenant),
                 },
             );
         }
@@ -790,7 +1034,11 @@ impl Checkpointable for Meta {
         let mut names = BTreeMap::new();
         for t in state.tenants {
             let id = TenantId(t.tenant);
-            if names.insert(t.name.clone(), id).is_some() {
+            let group = Group::from_wire(t.group).ok_or("an unknown tenant group")?;
+            if !id.is_set() || t.control_journal == 0 {
+                return Err("a meta state names an unset tenant frame");
+            }
+            if group == Group::Users && names.insert(t.name.clone(), id).is_some() {
                 return Err("a meta state names one tenant name twice");
             }
             tenants.insert(
@@ -798,9 +1046,11 @@ impl Checkpointable for Meta {
                 TenantEntry {
                     name: t.name,
                     cell_id: t.cell_id,
+                    control: JournalId(t.control_journal),
                     state: TenantState::from_wire(t.state).ok_or("an unknown tenant state")?,
                     config_seq: t.config_seq,
-                    tenant_group: (t.tenant_group != 0).then_some(t.tenant_group),
+                    group,
+                    placement: Placement::from_wire(t.placement).ok_or("an unknown placement")?,
                 },
             );
         }

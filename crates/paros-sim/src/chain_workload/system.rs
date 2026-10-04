@@ -40,8 +40,8 @@ use paros::client::checkpoint::{
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
-    Class, DIRECTORY, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, REGISTRY,
-    Registry, RegistryEvent, SystemCommand, SystemEvent, registry_event,
+    Class, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, Registry, RegistryEvent,
+    SystemCommand, SystemEvent, registry_event,
 };
 use paros::{
     AcceptorConfig, Command, Entry, Generation, JournalId, JournalKey, NodeId, QuorumSystem, Seq,
@@ -57,11 +57,10 @@ use crate::chain::user_command_hash;
 use crate::client::ChainClient;
 use crate::shape::JoinerMachine;
 
-/// A journal id in the user range, spread from one draw (#235: ids are
-/// random, never a log position).
+/// A journal id spread from one draw (#235: ids are random, never a log
+/// position; no range is reserved, §3.8): any set id.
 fn drawn_id(draw: u64) -> JournalId {
-    let span = u64::MAX - JournalId::FIRST_USER.0;
-    JournalId(JournalId::FIRST_USER.0 + crate::chain::splitmix(draw) % span)
+    JournalId(crate::chain::splitmix(draw).max(1))
 }
 
 /// How many asks a system write spends before it calls the outcome
@@ -89,6 +88,12 @@ enum Appended {
 pub(super) struct SystemOps {
     /// The run runs the system journals.
     active: bool,
+    /// The directory's frame (drawn per seed: no frame is fixed, §3.8).
+    directory: JournalKey,
+    /// The registry's frame.
+    registry: JournalKey,
+    /// The deployment's journal.
+    main: JournalKey,
     /// How many genesis ranks host the system journals (the seeds).
     seeds: usize,
     /// The genesis pool size.
@@ -161,6 +166,7 @@ impl SystemOps {
     /// with.
     pub(super) fn new(
         deployment: &crate::roles::Deployment,
+        frames: crate::shape::Frames,
         active: bool,
         genesis: Vec<JournalKey>,
         machines: &[JoinerMachine],
@@ -171,6 +177,9 @@ impl SystemOps {
         let matchmakers = !deployment.matchmakers().is_empty();
         Self {
             active,
+            directory: frames.directory,
+            registry: frames.registry,
+            main: frames.main,
             seeds: crate::shape::seed_ranks(pool).len().max(1),
             pool,
             joiners: deployment
@@ -194,6 +203,11 @@ impl SystemOps {
             booked: Vec::new(),
             timeout,
         }
+    }
+
+    /// Whether `journal` is one of the two system journals.
+    fn is_system(&self, journal: JournalKey) -> bool {
+        journal == self.directory || journal == self.registry
     }
 
     /// The genesis pool's registry, empty.
@@ -247,7 +261,7 @@ impl SystemOps {
         record: Vec<u8>,
         draw: u64,
     ) -> Appended {
-        let created = !paros::system::is_system(journal);
+        let created = !self.is_system(journal);
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
@@ -264,11 +278,11 @@ impl SystemOps {
                 }
                 if answer == ReadOutcome::UnknownJournal {
                     assert_always!(
-                        !self.active || !paros::system::is_system(journal),
+                        !self.active || !self.is_system(journal),
                         "system: a seed serves the system journals",
                         { "journal" => journal.to_string(), "seed" => node }
                     );
-                    if paros::system::is_system(journal) {
+                    if self.is_system(journal) {
                         assert_reachable!(
                             "system: a system append on a seed without system journals is refused"
                         );
@@ -350,7 +364,7 @@ impl SystemOps {
         let mut directory = Directory::new(
             self.genesis
                 .iter()
-                .filter(|key| key.tenant == DIRECTORY.tenant)
+                .filter(|key| key.tenant == self.directory.tenant)
                 .map(|key| key.journal),
         );
         let mut registry = Folder::new(self.empty_registry());
@@ -364,7 +378,7 @@ impl SystemOps {
                     // A truncation overtook the cursor: the registry's floor is
                     // its owner's checkpoint, where the fold restarts.
                     ReadOutcome::Truncated { state }
-                        if journal == REGISTRY && state.first_seq.0 > from =>
+                        if journal == self.registry && state.first_seq.0 > from =>
                     {
                         registry.jump(state.first_seq.0);
                         from = state.first_seq.0;
@@ -374,7 +388,7 @@ impl SystemOps {
                 };
             let next = from + records.len() as u64;
             for (position, record) in (from..).zip(&records) {
-                if journal == DIRECTORY {
+                if journal == self.directory {
                     events.push((
                         position,
                         SystemEvent::Directory(directory.fold(position, record)),
@@ -421,7 +435,7 @@ impl SystemOps {
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
         let mut candidates: Vec<NodeId> = (0..self.pool as u64).map(NodeId).collect();
         if self.active
-            && let Some((_, _, registry)) = self.read_back(ctx, nodes, REGISTRY, payload).await
+            && let Some((_, _, registry)) = self.read_back(ctx, nodes, self.registry, payload).await
         {
             // A stateless machine never takes acceptor work (#211).
             candidates.extend(
@@ -475,12 +489,14 @@ impl SystemOps {
                 name: name.clone(),
                 config: config.clone(),
             };
-            let Appended::At(position) =
-                self.append(ctx, nodes, DIRECTORY, &command, payload).await
+            let Appended::At(position) = self
+                .append(ctx, nodes, self.directory, &command, payload)
+                .await
             else {
                 return;
             };
-            let Some((events, _, _)) = self.read_back(ctx, nodes, DIRECTORY, payload).await else {
+            let Some((events, _, _)) = self.read_back(ctx, nodes, self.directory, payload).await
+            else {
                 return;
             };
             match events
@@ -497,7 +513,7 @@ impl SystemOps {
                     assert_reachable!("system: a client creates a journal and reads back its id");
                     self.created.push(id);
                     self.ever_created.push(id);
-                    let key = JournalKey::new(DIRECTORY.tenant, id);
+                    let key = JournalKey::new(self.directory.tenant, id);
                     self.append_to_created(ctx, nodes, key, &config, payload)
                         .await;
                     return;
@@ -556,13 +572,16 @@ impl SystemOps {
         let id = if self.created.is_empty() {
             // Nothing of its own: a delete of an id nobody created, which
             // folds to a refusal.
-            JournalId(JournalId::FIRST_USER.0 + 1_000 + draw % 16)
+            drawn_id(draw ^ 0x00de_1e7e)
         } else {
             self.created
                 .remove(usize::try_from(draw % self.created.len() as u64).unwrap_or(0))
         };
         let command = SystemCommand::DeleteJournal { id };
-        if let Appended::At(_) = self.append(ctx, nodes, DIRECTORY, &command, draw).await {
+        if let Appended::At(_) = self
+            .append(ctx, nodes, self.directory, &command, draw)
+            .await
+        {
             assert_reachable!("system: a client deletes a journal");
         }
     }
@@ -582,7 +601,7 @@ impl SystemOps {
         if !self.active || !self.spares || self.joiners.is_empty() {
             return Vec::new();
         }
-        let Some((_, _, registry)) = self.read_back(ctx, nodes, REGISTRY, draw).await else {
+        let Some((_, _, registry)) = self.read_back(ctx, nodes, self.registry, draw).await else {
             return Vec::new();
         };
         let world = crate::world::storage_world(ctx.state());
@@ -629,7 +648,7 @@ impl SystemOps {
                 let mut class = machine.class;
                 if self.active && buggify_with_prob!(0.1) {
                     let registered = self
-                        .read_back(ctx, nodes, REGISTRY, draw)
+                        .read_back(ctx, nodes, self.registry, draw)
                         .await
                         .is_some_and(|(_, _, registry)| {
                             registry.get(id).is_some_and(|node| {
@@ -657,7 +676,7 @@ impl SystemOps {
             }
             Some(standing) => {
                 let registry = if self.active {
-                    self.read_back(ctx, nodes, REGISTRY, draw)
+                    self.read_back(ctx, nodes, self.registry, draw)
                         .await
                         .map(|(_, _, registry)| registry)
                 } else {
@@ -698,7 +717,7 @@ impl SystemOps {
                 }
             }
         };
-        if let Appended::At(_) = self.append(ctx, nodes, REGISTRY, &command, draw).await {
+        if let Appended::At(_) = self.append(ctx, nodes, self.registry, &command, draw).await {
             match command {
                 SystemCommand::RegisterNode { class, .. } => {
                     assert_reachable!("system: a client registers a joiner");
@@ -731,9 +750,10 @@ impl SystemOps {
         if !self.active {
             return;
         }
-        let client = self.seed_client(ctx, nodes, REGISTRY);
+        let client = self.seed_client(ctx, nodes, self.registry);
         let first = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
-        let mut owner = Checkpointer::new(REGISTRY, self.client_id, self.empty_registry(), policy);
+        let mut owner =
+            Checkpointer::new(self.registry, self.client_id, self.empty_registry(), policy);
         match owner.open(&client, first).await {
             OpenOutcome::Open {
                 restarted,
@@ -743,7 +763,7 @@ impl SystemOps {
                 assert_always!(
                     diverged.is_none(),
                     "checkpoint: an owner's load finds each checkpoint its prefix's state",
-                    { "journal" => REGISTRY.to_string(), "seq" => diverged.unwrap_or_default() }
+                    { "journal" => self.registry.to_string(), "seq" => diverged.unwrap_or_default() }
                 );
                 if restarted {
                     board_lock(&system_board(ctx.state())).reader_restarted();
@@ -771,7 +791,7 @@ impl SystemOps {
             let Ok(seq) = owner.write_checkpoint(&client, first).await else {
                 return;
             };
-            let mut rival = Writer::new(REGISTRY, self.client_id | 1 << 40);
+            let mut rival = Writer::new(self.registry, self.client_id | 1 << 40);
             if !matches!(
                 rival.claim(&client, first, true).await,
                 ClaimOutcome::Won { .. }
@@ -820,7 +840,7 @@ impl SystemOps {
                 .booked
                 .remove(usize::try_from(draw % self.booked.len() as u64).unwrap_or(0));
             let command = SystemCommand::ReleaseCapacity { booking };
-            if let Appended::At(_) = self.append(ctx, nodes, REGISTRY, &command, draw).await {
+            if let Appended::At(_) = self.append(ctx, nodes, self.registry, &command, draw).await {
                 assert_reachable!("registry: a client releases a booking");
             }
             return;
@@ -837,9 +857,10 @@ impl SystemOps {
         } else {
             machine.class
         };
-        let journal = self.created.first().map_or(JournalKey::default(), |id| {
-            JournalKey::new(DIRECTORY.tenant, *id)
-        });
+        let journal = self
+            .created
+            .first()
+            .map_or(self.main, |id| JournalKey::new(self.directory.tenant, *id));
         let booking = crate::chain::splitmix(draw ^ self.client_id.rotate_left(32));
         let command = SystemCommand::BookCapacity {
             booking,
@@ -847,10 +868,11 @@ impl SystemOps {
             class,
             journal,
         };
-        let Appended::At(position) = self.append(ctx, nodes, REGISTRY, &command, draw).await else {
+        let Appended::At(position) = self.append(ctx, nodes, self.registry, &command, draw).await
+        else {
             return;
         };
-        let Some((events, _, _)) = self.read_back(ctx, nodes, REGISTRY, draw).await else {
+        let Some((events, _, _)) = self.read_back(ctx, nodes, self.registry, draw).await else {
             return;
         };
         // The class and capacity oracles judge every booking where the

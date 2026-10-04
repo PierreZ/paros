@@ -16,8 +16,9 @@
 //!    class `storage`, one its own join list names — `Init` and
 //!    `FormCell`. It never forms a cell on its own (#216).
 //! 3. **Serve.** A formed machine runs `paros::run_journals` over its
-//!    cell's plan: the cell control journal and the static assignment that
-//!    stands in for placement until M9 (#212), plain Multi-Paxos over the
+//!    cell's plan: the cell control journal, meta's, and the static
+//!    assignment that stands in for placement until M9 (#212) — every frame
+//!    drawn at `init`, none fixed — plain Multi-Paxos over the
 //!    seeds. Every start after formation is an existing member's
 //!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
 //!
@@ -47,7 +48,6 @@ use std::time::Duration;
 
 use clap::Parser;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
-use paros::client::bootstrap::TOY_JOURNAL;
 use paros::machine::{CellPlan, MachineFacts};
 use paros::{BootRefusal, DriverTunables, JournalKey, NoHooks, NodeId, RunError};
 use tokio_util::sync::CancellationToken;
@@ -135,7 +135,7 @@ async fn run(settings: Settings) -> ExitCode {
         let waited = paros::machine::wait_for_cell(
             providers.clone(),
             &facts,
-            &[TOY_JOURNAL],
+            1,
             &mut ledger,
             &tunables,
             shutdown.clone(),
@@ -312,6 +312,7 @@ async fn serve(
         Vec::new(),
         Vec::new(),
         None,
+        Some(plan.frames()),
         tunables,
         shutdown,
         &NoHooks,

@@ -2,9 +2,9 @@
 # domains, every one the same `parosd` image configured by PAROS_* variables.
 #
 #   docker compose up -d --build
-#   docker compose run --rm init
-#   docker compose run --rm parosctl write 256 hello world --owner 7
-#   docker compose run --rm parosctl read 256
+#   docker compose run --rm init          # prints journals=T/J
+#   docker compose run --rm parosctl write T/J hello world --owner 7
+#   docker compose run --rm parosctl read T/J
 #
 # The walkthrough is crates/parosd/README.md. A machine mints its node id on
 # its first start and waits; `init`, sent to one seed, forms the cell over the

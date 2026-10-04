@@ -192,12 +192,12 @@ fn until_code(servers: &str, args: &[&str], code: i32) -> serde_json::Value {
     }
 }
 
-/// Read journal 256 from 0 through `servers` until it holds `count`
+/// Read `journal` from 0 through `servers` until it holds `count`
 /// records: the records and the gaps reported.
-fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value>) {
+fn read_back(servers: &str, journal: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value>) {
     let deadline = Instant::now() + Duration::from_mins(1);
     loop {
-        let answer = until_ok(servers, &["read", "256", "--from", "0"]);
+        let answer = until_ok(servers, &["read", journal, "--from", "0"]);
         let records: Vec<String> = answer["records"]
             .as_array()
             .expect("records")
@@ -210,6 +210,12 @@ fn read_back(servers: &str, count: usize) -> (Vec<String>, Vec<serde_json::Value
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Where `frame` (`TENANT/JOURNAL`) is stored under a data directory.
+fn frame_dir(dir: &Path, frame: &str) -> PathBuf {
+    let (tenant, journal) = frame.split_once('/').expect("a TENANT/JOURNAL frame");
+    dir.join("journals").join(tenant).join(journal)
 }
 
 fn exists(path: &Path) -> bool {
@@ -235,65 +241,50 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
     assert_eq!(initialized["members"].as_array().map(Vec::len), Some(3));
     let again = until_code(&seed, &["init"], CTL_REFUSED);
     assert_eq!(again["refusal"], "already_initialized", "{again}");
+    // No frame is fixed: init drew the cell's control journal, meta's and
+    // the static user journal, and printed them.
+    let frame = |name: &str| -> String {
+        initialized[name]
+            .as_str()
+            .unwrap_or_else(|| panic!("init names {name}: {initialized}"))
+            .to_string()
+    };
+    let (control, meta) = (frame("control"), frame("meta"));
+    let journal = initialized["journals"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("init names a user journal: {initialized}"))
+        .to_string();
     for rank in 0..3 {
         let dir = cluster.data_dir(&format!("seed{rank}"));
         assert!(exists(&dir.join("machine")));
-        assert!(exists(&dir.join("journals").join("2").join("1")));
-        assert!(exists(&dir.join("journals").join("256").join("256")));
+        for frame in [&control, &meta, &journal] {
+            assert!(exists(&frame_dir(&dir, frame)), "{frame} on seed{rank}");
+        }
     }
 
-    // Init's fleet steps (#229): the cell recorded its fleet, and meta —
-    // served by the seeds as `1/1` — lists the fleet and the cell `READY`.
-    assert!(exists(
-        &cluster
-            .data_dir("seed0")
-            .join("journals")
-            .join("1")
-            .join("1")
-    ));
-    let fleet = initialized["fleet"].as_u64().expect("a fleet id");
-    assert_ne!(fleet, 0, "{initialized}");
-    let listed = until_ok(&servers, &["tenant", "list"]);
-    assert_eq!(listed["fleet"], fleet, "{listed}");
-    assert_eq!(listed["cells"][0]["cell"], initialized["cell"], "{listed}");
-    assert_eq!(listed["cells"][0]["state"], "READY", "{listed}");
+    fleet_and_tenants(&servers, &initialized, &meta);
 
-    // A tenant is created through meta and hosted by the cell; a re-run
-    // changes nothing; it is removed, and a second removal finds nothing.
-    let created = until_ok(&servers, &["tenant", "create", "acme"]);
-    assert_eq!(created["outcome"], "created", "{created}");
-    let tenant = created["tenant"].as_u64().expect("a tenant id");
-    assert!(tenant >= 256, "{created}");
-    let again = until_ok(&servers, &["tenant", "create", "acme"]);
-    assert_eq!(again["outcome"], "unchanged", "{again}");
-    assert_eq!(again["tenant"], tenant);
-    let listed = until_ok(&servers, &["tenant", "list"]);
-    assert_eq!(listed["tenants"][0]["tenant"], tenant, "{listed}");
-    assert_eq!(listed["tenants"][0]["state"], "READY", "{listed}");
-    let deleted = until_ok(&servers, &["tenant", "delete", "acme"]);
-    assert_eq!(deleted["outcome"], "deleted", "{deleted}");
-    assert_eq!(deleted["tenant"], tenant);
-    let gone = until_code(&servers, &["tenant", "delete", "acme"], CTL_REFUSED);
-    assert_eq!(gone["outcome"], "not_found", "{gone}");
-
-    // The writer claims journal 256 on its way, and writes at the tail;
+    // The writer claims the user journal on its way, and writes at the tail;
     // the servers' ids are learned from the servers.
-    let wrote = until_ok(&servers, &["write", "256", "alpha", "beta", "--owner", "7"]);
+    let wrote = until_ok(
+        &servers,
+        &["write", &journal, "alpha", "beta", "--owner", "7"],
+    );
     assert_eq!(wrote["seq"], 0, "{wrote}");
-    assert_eq!(read_back(&servers, 2).0, vec!["alpha", "beta"]);
+    assert_eq!(read_back(&servers, &journal, 2).0, vec!["alpha", "beta"]);
 
     // Kill everything (no graceful shutdown) and restart as existing
     // members: the records are still there, and the writer goes on at the
     // tail.
     stop(children);
     let children = cluster.start();
-    assert_eq!(read_back(&servers, 2).0, vec!["alpha", "beta"]);
-    let wrote = until_ok(&servers, &["write", "256", "gamma", "--owner", "7"]);
+    assert_eq!(read_back(&servers, &journal, 2).0, vec!["alpha", "beta"]);
+    let wrote = until_ok(&servers, &["write", &journal, "gamma", "--owner", "7"]);
     assert_eq!(wrote["seq"], 2, "{wrote}");
 
     // A second owner takes the journal; the first is fenced, for a write
     // and for a truncation (#228).
-    let swapped = until_ok(&servers, &["set-leader", "256", "--owner", "8"]);
+    let swapped = until_ok(&servers, &["set-leader", &journal, "--owner", "8"]);
     assert_eq!(swapped["outcome"], "won", "{swapped}");
     let generation = swapped["state"]["generation"].as_u64().expect("generation");
     let stale = (generation - 1).to_string();
@@ -301,7 +292,7 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
         &servers,
         &[
             "write",
-            "256",
+            &journal,
             "delta",
             "--owner",
             "7",
@@ -315,7 +306,7 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
         &servers,
         &[
             "truncate",
-            "256",
+            &journal,
             "--up-to",
             "1",
             "--owner",
@@ -330,15 +321,68 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
     // The owner truncates, and a reader from 0 is told about the gap.
     let truncated = until_ok(
         &servers,
-        &["truncate", "256", "--up-to", "1", "--owner", "8"],
+        &["truncate", &journal, "--up-to", "1", "--owner", "8"],
     );
     assert_eq!(truncated["state"]["first_seq"], 1, "{truncated}");
-    let (records, gaps) = read_back(&servers, 2);
+    let (records, gaps) = read_back(&servers, &journal, 2);
     assert_eq!(records, vec!["beta", "gamma"]);
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     stop(children);
 
     refuses_what_it_must(&cluster);
+}
+
+/// Init's fleet half and the tenant calls through meta (#229), on a cell
+/// `init` answered `initialized`, whose meta is `meta`.
+fn fleet_and_tenants(servers: &str, initialized: &serde_json::Value, meta: &str) {
+    // Init's fleet steps (#229): the cell recorded its fleet, and meta —
+    // served by the seeds — lists the fleet, the cell `READY`, and meta and
+    // the cell tenant as `internal` tenants.
+    let fleet = initialized["fleet"].as_u64().expect("a fleet id");
+    assert_ne!(fleet, 0, "{initialized}");
+    let listed = until_ok(servers, &["tenant", "list"]);
+    assert_eq!(listed["fleet"], fleet, "{listed}");
+    assert_eq!(listed["cells"][0]["cell"], initialized["cell"], "{listed}");
+    assert_eq!(listed["cells"][0]["state"], "READY", "{listed}");
+
+    // A tenant is created through meta and hosted by the cell; a re-run
+    // changes nothing; it is removed, and a second removal finds nothing.
+    let created = until_ok(servers, &["tenant", "create", "acme"]);
+    assert_eq!(created["outcome"], "created", "{created}");
+    let tenant = created["tenant"].as_u64().expect("a tenant id");
+    assert_ne!(tenant, 0, "{created}");
+    let again = until_ok(servers, &["tenant", "create", "acme"]);
+    assert_eq!(again["outcome"], "unchanged", "{again}");
+    assert_eq!(again["tenant"], tenant);
+    let listed = until_ok(servers, &["tenant", "list"]);
+    let tenants = listed["tenants"].as_array().expect("tenants");
+    let entry = tenants
+        .iter()
+        .find(|t| t["tenant"] == tenant)
+        .unwrap_or_else(|| panic!("the tenant is listed: {listed}"));
+    assert_eq!(entry["state"], "READY", "{listed}");
+    assert_eq!(
+        (entry["group"].as_str(), entry["placement"].as_str()),
+        (Some("users"), Some("movable")),
+        "{listed}"
+    );
+    // Meta (movable) and the cell tenant (pinned), both internal.
+    let mut internal: Vec<&str> = tenants
+        .iter()
+        .filter(|t| t["group"] == "internal")
+        .filter_map(|t| t["placement"].as_str())
+        .collect();
+    internal.sort_unstable();
+    assert_eq!(internal, vec!["movable", "pinned"], "{listed}");
+    assert!(
+        tenants.iter().any(|t| t["control"] == meta),
+        "meta is listed under its frame: {listed}"
+    );
+    let deleted = until_ok(servers, &["tenant", "delete", "acme"]);
+    assert_eq!(deleted["outcome"], "deleted", "{deleted}");
+    assert_eq!(deleted["tenant"], tenant);
+    let gone = until_code(servers, &["tenant", "delete", "acme"], CTL_REFUSED);
+    assert_eq!(gone["outcome"], "not_found", "{gone}");
 }
 
 /// The refusals an operator meets, on a formed cell that is down.

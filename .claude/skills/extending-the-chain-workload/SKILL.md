@@ -24,7 +24,7 @@ round-robin over the seed's one to three journals): every call names
 `self.journal`, every world it reads is that journal's (`audit_world_for`,
 `storage_world_for`, the per-journal trim fence), the matchmaker-plane
 operations (`RECONFIGURE`, `RECONFIGURE_MATCHMAKERS`, `RETIRE`) run only on
-the default journal, and the run ends only once every journal a client writes
+the run's main journal (`shape::Frames::main`), and the run ends only once every journal a client writes
 to has converged (the `converged` set on the shared `Tail`). The
 system-journal operations (#189) live in `chain_workload/system.rs`; the
 three races of `docs/architecture.md` §6 (#205) in `chain_workload/races.rs`

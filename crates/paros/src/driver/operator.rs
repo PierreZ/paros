@@ -7,11 +7,12 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, ReconfigureRefusal,
+    AcceptorConfig, Ballot, ColocatedNode, JournalKey, MatchmakerId, NodeId, ReconfigureRefusal,
     ReconfigureResult, StartRefusal,
 };
 
 use crate::audit::Audit;
+use crate::machine::CellFrames;
 use crate::rpc::{
     InspectReply, Reconfigure, ReconfigureAck, RetireAck, RetireRequest, WireQuorumSystem, common,
     journal_state_to_proto, quorum_system_from_proto, quorum_system_to_proto,
@@ -134,7 +135,9 @@ pub(crate) fn reconfigure_matchmakers(
 /// A pure read of the core: what an operator (or a client's composer) sees
 /// of this node.
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
-pub(crate) fn inspect(node: &ColocatedNode) -> InspectReply {
+pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&CellFrames>) -> InspectReply {
+    let control = cell.map_or(JournalKey::UNSET, |cell| cell.control);
+    let meta = cell.and_then(|cell| cell.meta).unwrap_or(JournalKey::UNSET);
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();
     let (gc_watermark, retirable) =
@@ -172,5 +175,10 @@ pub(crate) fn inspect(node: &ColocatedNode) -> InspectReply {
         folded: node.replica().folded().0,
         journal: Some(journal_state_to_proto(node.replica().journal())),
         node: node.config().id.0,
+        cell_id: cell.map_or(0, |cell| cell.cell_id),
+        control_tenant: control.tenant.0,
+        control_journal: control.journal.0,
+        meta_tenant: meta.tenant.0,
+        meta_journal: meta.journal.0,
     }
 }

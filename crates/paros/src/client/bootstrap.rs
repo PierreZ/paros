@@ -1,5 +1,6 @@
 //! Bootstrap calls (#196, #216): forming a cell with `init`, and learning a
-//! deployment's node ids from its addresses.
+//! deployment's node ids and its control journals' frames from its
+//! addresses (no frame is fixed, `docs/architecture.md` §3.8).
 //!
 //! A machine's id is random, minted at format (#225), so an operator knows
 //! addresses — a rendezvous name, a join list — never ids. These calls
@@ -15,11 +16,12 @@ use moonpool_rpc::{ErrorReason, RpcHandle};
 use paros_core::{JournalId, JournalKey, NodeId, TenantId};
 
 use super::Client;
+use super::fleet::FleetFrames;
 use super::outcome::SetLeaderOutcome;
-use crate::machine::{CELL_CONTROL, CellPlan};
+use crate::machine::CellPlan;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{InitRpc, InspectRpc};
-use crate::rpc::{InspectRequest, Read, well_known};
+use crate::rpc::{InspectReply, InspectRequest, Read, well_known};
 
 /// What one `Init` sent to a seed came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +72,7 @@ pub async fn init<P: Providers>(
             .await;
         match reply {
             Ok(Ok(ack)) if ack.initialized => {
-                return CellPlan::from_wire(ack.cell_id, &ack.members, &ack.journals)
+                return CellPlan::from_init_ack(&ack)
                     .map_or(InitOutcome::Malformed, InitOutcome::Formed);
             }
             // Another seed is not up yet: nothing was decided, and `init`
@@ -139,8 +141,40 @@ pub enum ClaimCellOutcome {
     Ambiguous,
 }
 
+/// The frames a server's `Inspect` reports for its cell (§3.2): `None`
+/// unless it names a cell, the cell tenant's control journal and meta's.
+#[must_use]
+pub fn frames_of(reply: &InspectReply) -> Option<FleetFrames> {
+    let control = JournalKey::new(
+        TenantId(reply.control_tenant),
+        JournalId(reply.control_journal),
+    );
+    let meta = JournalKey::new(TenantId(reply.meta_tenant), JournalId(reply.meta_journal));
+    (reply.cell_id != 0 && control.is_set() && meta.is_set()).then_some(FleetFrames {
+        cell_id: reply.cell_id,
+        cell: control,
+        meta,
+    })
+}
+
+/// Learn the cell's frames from its servers (§3.2): an unframed `Inspect`
+/// of each in turn, the first that names them. `None` when none does.
+pub async fn cell_frames<P: Providers>(client: &Client<P>) -> Option<FleetFrames> {
+    for server in 0..client.server_count() {
+        if let Some(frames) = client
+            .inspect(server, JournalKey::UNSET)
+            .await
+            .as_ref()
+            .and_then(frames_of)
+        {
+            return Some(frames);
+        }
+    }
+    None
+}
+
 /// The cell step's last move (`docs/architecture.md` §3.1): the first cell
-/// coordinator `coordinator` claims the cell control journal with
+/// coordinator `coordinator` claims the cell control journal `control` with
 /// `SetLeader(expected_gen = 0)`, through `client` (the cell's members). A
 /// journal that already has an owner was initialized before. A freshly
 /// formed cell is still electing its first leader, so an attempt that finds
@@ -148,12 +182,13 @@ pub enum ClaimCellOutcome {
 /// to `patience`.
 pub async fn claim_cell<P: Providers>(
     client: &Client<P>,
+    control: JournalKey,
     coordinator: NodeId,
     patience: Duration,
 ) -> ClaimCellOutcome {
     let deadline = client.time.now() + patience;
     loop {
-        let outcome = claim_cell_once(client, coordinator).await;
+        let outcome = claim_cell_once(client, control, coordinator).await;
         if outcome != ClaimCellOutcome::Unavailable
             || client.time.now() >= deadline
             || !client.pause(client.tunables.retry_backoff).await
@@ -165,11 +200,12 @@ pub async fn claim_cell<P: Providers>(
 
 async fn claim_cell_once<P: Providers>(
     client: &Client<P>,
+    control: JournalKey,
     coordinator: NodeId,
 ) -> ClaimCellOutcome {
     let read = Read {
-        journal: CELL_CONTROL.journal.0,
-        tenant: CELL_CONTROL.tenant.0,
+        journal: control.journal.0,
+        tenant: control.tenant.0,
         from_seq: 0,
         limit: 1,
         wait_ms: 0,
@@ -184,10 +220,7 @@ async fn claim_cell_once<P: Providers>(
         };
     }
     let first = client.leader().unwrap_or(0);
-    match client
-        .set_leader(CELL_CONTROL, 0, coordinator.0, first)
-        .await
-    {
+    match client.set_leader(control, 0, coordinator.0, first).await {
         SetLeaderOutcome::Won { state } => ClaimCellOutcome::Claimed {
             generation: state.generation.0,
         },
@@ -201,7 +234,3 @@ async fn claim_cell_once<P: Providers>(
         }
     }
 }
-
-/// The default user journal a toy cell serves from formation (`256/256`):
-/// the static assignment that stands in for placement until #212.
-pub const TOY_JOURNAL: JournalKey = JournalKey::new(TenantId::FIRST_USER, JournalId::FIRST_USER);

@@ -18,12 +18,11 @@
 //! opaque as any other, and only this module and the driver read them.
 //!
 //! - **Directory.** A created journal's id is random (#226, #235): its
-//!   creator draws it from the user range ([`JournalId::FIRST_USER`] and up)
-//!   and this fold, the tenant's single writer of journal ids, checks it at
-//!   apply. An id outside the user range or naming a journal the deployment
-//!   was booted with (its *genesis* journals) folds to
-//!   [`DirectoryRefusal::Reserved`]; an id the directory already created —
-//!   deleted or not, ids are never reused — folds to
+//!   creator draws it and this fold, the tenant's single writer of journal
+//!   ids, checks it at apply. There is no reserved range (no id is fixed,
+//!   `docs/architecture.md` §3.8): an unset id is malformed, and an id the
+//!   deployment was booted with (its *genesis* journals) or the directory
+//!   already created — deleted or not, ids are never reused — folds to
 //!   [`DirectoryRefusal::IdTaken`], and the creator redraws. Never a log
 //!   position: an id must not change when its tenant moves. Of two creates
 //!   with one name the lower position wins; the other folds to
@@ -70,21 +69,8 @@ pub use crate::machine::Class;
 use crate::rpc::system as wire;
 use crate::rpc::{config_from_proto, config_to_proto};
 
-/// The directory: the journals created and deleted at runtime — the user
-/// tenant's own control journal, which holds its journal names (#235,
-/// `docs/architecture.md` §3.1). One user tenant today ([`TenantId::default`]);
-/// tenant creation is #210.
-pub const DIRECTORY: JournalKey = JournalKey::control(TenantId::FIRST_USER);
-
-/// The node registry: the nodes registered, drained and retired at runtime —
-/// the cell tenant's control journal (#235, §3.1).
-pub const REGISTRY: JournalKey = JournalKey::control(TenantId::CELL);
-
-/// Whether `journal` is one of the two system journals.
-#[must_use]
-pub fn is_system(journal: JournalKey) -> bool {
-    journal == DIRECTORY || journal == REGISTRY
-}
+// The two system journals have no fixed frame (§3.8): a deployment draws
+// both and hands them to whoever folds them (`crate::SystemPlan`).
 
 /// One system-journal entry, as a client appends it and a fold reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,15 +319,10 @@ pub enum DirectoryEvent {
 /// Why a directory entry changed nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryRefusal {
-    /// Not exactly one decodable directory entry.
+    /// Not exactly one decodable directory entry, or an unset id.
     Malformed,
-    /// The id is outside the user range, or a genesis journal's.
-    Reserved {
-        /// The id asked for.
-        id: JournalId,
-    },
-    /// The directory already created this id (ids are never reused, a
-    /// deleted one included): the creator redraws.
+    /// A genesis journal holds this id, or the directory already created it
+    /// (ids are never reused, a deleted one included): the creator redraws.
     IdTaken {
         /// The id asked for.
         id: JournalId,
@@ -401,10 +382,10 @@ impl Directory {
         self.next_seq = seq + 1;
         match SystemCommand::decode(record).ok() {
             Some(SystemCommand::CreateJournal { id, name, config }) => {
-                if !id.is_user() || self.genesis.contains(&id) {
-                    return DirectoryEvent::Refused(DirectoryRefusal::Reserved { id });
+                if !id.is_set() {
+                    return DirectoryEvent::Refused(DirectoryRefusal::Malformed);
                 }
-                if self.journals.contains_key(&id) {
+                if self.genesis.contains(&id) || self.journals.contains_key(&id) {
                     return DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id });
                 }
                 if let Some(&winner) = self.names.get(&name) {
@@ -655,8 +636,14 @@ pub enum RegistryRefusal {
         fleet_id: u64,
     },
     /// A fleet registration at a metadata version this fold does not
-    /// understand, or a tenant outside the user range (#229).
+    /// understand (#229).
     Unsupported,
+    /// A `HostTenant` of a tenant the cell dropped (#229): a dropped tenant
+    /// is never hosted again.
+    TenantDropped {
+        /// The tenant named.
+        tenant: TenantId,
+    },
 }
 
 /// The registry's fold (#189, #211): the genesis pool the deployment was
@@ -678,6 +665,11 @@ pub struct Registry {
     fleet: Option<FleetRegistration>,
     /// The tenants the cell hosts (#229).
     hosted: BTreeSet<TenantId>,
+    /// The tenants the cell dropped (#229): never hosted again, so a stale
+    /// `HostTenant` — decided by an operator from a meta fold another
+    /// operator's removal has since overtaken — is refused here, where the
+    /// cell's single writer judges it.
+    dropped: BTreeSet<TenantId>,
     next_seq: u64,
 }
 
@@ -847,24 +839,38 @@ impl Registry {
     }
 
     /// Host (`host`) or drop `tenant` for fleet `fleet_id`: idempotent, and
-    /// refused unless the cell joined that fleet.
+    /// refused unless the cell joined that fleet. A drop is a tombstone,
+    /// written whether the tenant was hosted or not: a dropped tenant is
+    /// never hosted again ([`RegistryRefusal::TenantDropped`]).
     fn host(&mut self, fleet_id: u64, tenant: TenantId, host: bool) -> RegistryEvent {
         if self.fleet.is_none_or(|fleet| fleet.fleet_id != fleet_id) {
             return RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id });
         }
-        if !tenant.is_user() {
-            return RegistryEvent::Refused(RegistryRefusal::Unsupported);
+        if !tenant.is_set() {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
-        let changed = if host {
-            self.hosted.insert(tenant)
+        if host {
+            if self.dropped.contains(&tenant) {
+                return RegistryEvent::Refused(RegistryRefusal::TenantDropped { tenant });
+            }
+            return if self.hosted.insert(tenant) {
+                RegistryEvent::TenantHosted { tenant }
+            } else {
+                RegistryEvent::Unchanged
+            };
+        }
+        self.hosted.remove(&tenant);
+        if self.dropped.insert(tenant) {
+            RegistryEvent::TenantDropped { tenant }
         } else {
-            self.hosted.remove(&tenant)
-        };
-        match (changed, host) {
-            (false, _) => RegistryEvent::Unchanged,
-            (true, true) => RegistryEvent::TenantHosted { tenant },
-            (true, false) => RegistryEvent::TenantDropped { tenant },
+            RegistryEvent::Unchanged
         }
+    }
+
+    /// Whether the cell dropped `tenant`: it never hosts it again (#229).
+    #[must_use]
+    pub fn dropped(&self, tenant: TenantId) -> bool {
+        self.dropped.contains(&tenant)
     }
 
     /// The cell side of the fleet's registration, once `init` wrote it
@@ -1017,6 +1023,7 @@ impl Registry {
             cell_id: self.fleet.map_or(0, |f| f.cell_id),
             version: self.fleet.map_or(0, |f| f.version),
             tenants: self.hosted.iter().map(|t| t.0).collect(),
+            dropped: self.dropped.iter().map(|t| t.0).collect(),
         }
     }
 }
@@ -1074,13 +1081,18 @@ impl Checkpointable for Registry {
             }),
         };
         let hosted: BTreeSet<TenantId> = state.tenants.into_iter().map(TenantId).collect();
-        if hosted.iter().any(|t| !t.is_user()) || (fleet.is_none() && !hosted.is_empty()) {
+        let dropped: BTreeSet<TenantId> = state.dropped.into_iter().map(TenantId).collect();
+        if hosted.iter().chain(&dropped).any(|t| !t.is_set())
+            || hosted.iter().any(|t| dropped.contains(t))
+            || (fleet.is_none() && !(hosted.is_empty() && dropped.is_empty()))
+        {
             return Err("a registry state hosts a tenant it cannot");
         }
         self.nodes = nodes;
         self.bookings = bookings;
         self.fleet = fleet;
         self.hosted = hosted;
+        self.dropped = dropped;
         self.next_seq = covers_up_to + 1;
         Ok(())
     }
@@ -1181,17 +1193,25 @@ mod tests {
 
     #[test]
     fn a_created_journal_takes_its_drawn_id_and_an_id_is_never_reused() {
-        let genesis = JournalId::FIRST_USER;
+        let genesis = JournalId(0x6e5e);
         let mut dir = Directory::new([genesis]);
-        // A genesis id and an id in the reserved range are refused.
+        // A genesis id is taken; an unset id is malformed. No range is
+        // reserved: a small id is as good as any.
         assert_eq!(
             dir.fold(0, &create(genesis.0, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: genesis })
+            DirectoryEvent::Refused(DirectoryRefusal::IdTaken { id: genesis })
         );
         assert_eq!(
-            dir.fold(1, &create(1, b"a", &[0, 1, 2])),
-            DirectoryEvent::Refused(DirectoryRefusal::Reserved { id: JournalId(1) })
+            dir.fold(1, &create(0, b"a", &[0, 1, 2])),
+            DirectoryEvent::Refused(DirectoryRefusal::Malformed)
         );
+        assert!(matches!(
+            dir.fold(2, &create(7, b"seven", &[0, 1, 2])),
+            DirectoryEvent::Created {
+                id: JournalId(7),
+                ..
+            }
+        ));
         let drawn = JournalId(0xdead_beef);
         assert!(matches!(
             dir.fold(3, &create(drawn.0, b"a", &[0, 1, 2])),
@@ -1540,8 +1560,8 @@ mod tests {
             })
         );
         assert_eq!(
-            registry.fold(8, &host(fleet, 1)),
-            RegistryEvent::Refused(RegistryRefusal::Unsupported)
+            registry.fold(8, &host(fleet, 0)),
+            RegistryEvent::Refused(RegistryRefusal::Malformed)
         );
         assert!(registry.hosts(TenantId(300)));
         // The checkpoint carries the registration and the tenant list.
@@ -1561,5 +1581,25 @@ mod tests {
             RegistryEvent::Unchanged
         );
         assert_eq!(registry.hosted().count(), 0);
+        // A dropped tenant is never hosted again: a stale host is refused.
+        assert_eq!(
+            registry.fold(11, &host(fleet, 300)),
+            RegistryEvent::Refused(RegistryRefusal::TenantDropped {
+                tenant: TenantId(300)
+            })
+        );
+        // A drop of a tenant never hosted still tombstones it.
+        assert_eq!(
+            registry.fold(12, &drop(fleet, 301)),
+            RegistryEvent::TenantDropped {
+                tenant: TenantId(301)
+            }
+        );
+        assert!(registry.dropped(TenantId(301)));
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(12, &registry.checkpoint())
+            .expect("restores");
+        assert_eq!(restored, registry);
     }
 }

@@ -65,7 +65,7 @@ pub use journals::JournalStores;
 pub use system::SystemPlan;
 pub use tunables::BelowFloor;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
@@ -79,12 +79,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
+use crate::machine::CellFrames;
 use crate::rpc::{
     MatchmakerClient, ReadAck, ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck,
     WriteAck, well_known,
 };
 use crate::storage::LogStorage;
-use crate::system::{DirectoryEvent, NodeStanding, REGISTRY, RegistryEvent, SystemEvent};
+use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
 
 use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
@@ -728,6 +729,7 @@ where
         proxies,
         replicas,
         None,
+        None,
         tunables,
         shutdown,
         hooks,
@@ -781,6 +783,7 @@ pub async fn run_journals<P, J, H>(
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<SystemPlan>,
+    cell: Option<CellFrames>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -800,11 +803,24 @@ where
     // rejections, a peer lane's delivery failures, a refused journal id, the
     // system journals' folds) reports to the node's first user journal —
     // the default one on a node that serves none yet.
+    // No frame is fixed (§3.8): the deployment names its control journals —
+    // the cell's and meta's from the cell plan, the system journals a
+    // `SystemPlan` follows — and every other journal is a user's.
+    let control: BTreeSet<JournalKey> = cell
+        .iter()
+        .flat_map(|cell| std::iter::once(cell.control).chain(cell.meta))
+        .chain(
+            system
+                .iter()
+                .flat_map(|plan| [plan.directory, plan.registry]),
+        )
+        .filter(|journal| journal.is_set())
+        .collect();
     let node_journal = ids
         .iter()
         .copied()
-        .find(|journal| journal.is_user())
-        .unwrap_or_default();
+        .find(|journal| !control.contains(journal))
+        .unwrap_or(JournalKey::UNSET);
     let node_audit = stores.audit(node_journal);
     // A node exits once it has nothing left to serve — on a static
     // deployment. A node that follows the system journals runs on with none
@@ -818,7 +834,7 @@ where
     // Stage 7 per journal, before the core reads a byte: the boot scan and
     // the format marker (#147). A journal that fails to boot is quarantined
     // (or down for good on a refusal); a node with none left exits.
-    let mut journals: Journals<J::Store, J::Audit> = Journals::new();
+    let mut journals: Journals<J::Store, J::Audit> = Journals::new(control);
     for &id in &ids {
         open_journal(
             &providers,
@@ -1097,7 +1113,7 @@ where
                 };
                 // The system journals are never truncated (#189): every
                 // node rebuilds its folds from position 0.
-                if crate::system::is_system(journal) {
+                if follower.as_ref().is_some_and(|f| f.is_system(journal)) {
                     shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
                     continue;
                 }
@@ -1351,10 +1367,13 @@ where
                 let rt = if journal.is_set() {
                     journals.live.get(&journal)
                 } else {
-                    journals.plane().map(|(_, rt)| rt)
+                    journals
+                        .plane()
+                        .or_else(|| journals.live.iter().next())
+                        .map(|(_, rt)| rt)
                 };
                 if let Some(rt) = rt {
-                    let _ = reply.send(operator::inspect(&rt.node));
+                    let _ = reply.send(operator::inspect(&rt.node, cell.as_ref()));
                 }
             }
             Some(answer) = follow_answers.recv() => {
@@ -1364,7 +1383,7 @@ where
                 let Some(f) = follower.as_mut() else { continue };
                 let journal = answer.journal();
                 let events = f.fold_remote(answer);
-                let checkpoints = if journal == REGISTRY { f.take_checkpoints() } else { Vec::new() };
+                let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                 let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                 sys.apply(f, journal, events, checkpoints).await;
             }
@@ -1423,7 +1442,7 @@ where
                 // open against a seed for the ones it does not run.
                 if let Some(f) = follower.as_mut() {
                     for (journal, events) in follow_local(f, &journals) {
-                        let checkpoints = if journal == REGISTRY { f.take_checkpoints() } else { Vec::new() };
+                        let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                         sys.apply(f, journal, events, checkpoints).await;
                     }
@@ -1493,11 +1512,9 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                         continue;
                     }
                     let journal_config = paros_core::Config {
-                        journal: id,
-                        id: me,
                         peers: config.members().to_vec(),
                         quorum_system: config.quorum_system(),
-                        ..paros_core::Config::default()
+                        ..paros_core::Config::new(me, id)
                     };
                     if !self.stores.create(id, journal_config) {
                         continue;
@@ -1603,7 +1620,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
             .live
             .keys()
             .copied()
-            .filter(|journal| journal.is_user())
+            .filter(|journal| !self.journals.is_control(*journal))
             .collect();
         for journal in served {
             self.journals.park(journal, None);
