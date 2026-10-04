@@ -4,8 +4,11 @@ This is the end goal. AGENTS.md describes what paros is today and the doctrine e
 follows; this document describes what paros is becoming, so that every issue, plan and session
 aims at the same target. Where the two disagree, AGENTS.md is the present and this is the
 direction. Decided on 2026-09-30; the fleet, the control hierarchy, identifiers, checkpoints,
-recovery and the fenced `Truncate` decided on 2026-10-02. The milestones at the end carry the
-issue numbers.
+recovery and the fenced `Truncate` decided on 2026-10-02; the leader-uuid API with its two
+journal modes, election over a journal, the request channel, liveness, names, trust, capacity as
+role slots, journals born with their matchmaker set, tenant modes, the data-plane limits, storage
+chaos in simulation and the deferral of recovery decided on 2026-10-04. The milestones at the end
+carry the issue numbers.
 
 ## 1. Goal
 
@@ -15,15 +18,15 @@ lost. Single region, several failure domains.
 
 The control plane is itself stored in journals and coordinated through the same election
 primitive the tenants use: paros eats its own food. It has four levels, all built the same way:
-one actor elected by `SetLeader` on a control journal, holding no state that journal does not
-hold (section 3.3).
+one actor elected over an election journal and installed as its control journal's leader with
+`SetLeader`, holding no state that journal does not hold (section 3.3).
 
 | Level | Elected actor | Its control journal holds |
 |---|---|---|
 | Fleet | the meta coordinator (the meta tenant's coordinator) | tenant → cell, cell entries |
 | Cell | the cell coordinator (the cell tenant's coordinator) | machine registry, capacity bookings |
 | Tenant | the tenant coordinator | its name and desired state, journal names, placement inside capacity granted by the cell |
-| Journal | the client writer | the data |
+| Journal | the client leader (single-writer) or any writer (multi-writer) | the data |
 
 A paros deployment is always a fleet, and the fleet runs from M9. For now it has exactly one
 cell, and that cell plays both roles: it hosts the meta tenant (the fleet level) and it is an
@@ -43,8 +46,8 @@ a tenant does not have.
 
 The model is the AWS Journal, the replicated log behind Aurora DSQL, MemoryDB and Lambda, as
 described in the public sources listed in section 10: a durable, ordered, fenced log that stores
-decided outcomes, that a single writer appends to under a generation, and that every consumer
-tails without a second protocol.
+decided outcomes, that a single leader appends to under its leader uuid (or that many writers
+append to, unfenced), and that every consumer tails without a second protocol.
 
 The first deliverable is a toy: a local Docker Compose cluster an operator can initialize, create
 a tenant on, write to, read from, break and watch heal. The homelab and anything beyond one region
@@ -52,86 +55,126 @@ are not in scope.
 
 ## 2. The data plane
 
-Every journal exposes four calls. Every rule below is judged at apply time, in slot order, by a
-small per-journal state machine `(owner, generation, next_seq, first_seq)` that lives in
-`paros-core` beside the replica's walk.
+Every journal exposes four calls, in one of two **modes** fixed when the journal is created
+(decided on 2026-10-04): **single-writer**, where one leader appends under its leader uuid, and
+**multi-writer**, where anyone with access appends. Every rule below is judged at apply time, in
+slot order, by a small per-journal state machine
+`(mode, leader_uuid, term, next_seq, first_seq)` that lives in `paros-core` beside the replica's
+walk.
 
-| Call | Meaning |
-|---|---|
-| `Write(generation, owner, seq, batch)` | Append `batch` at `seq`. Fenced by `(generation, owner)`, contiguous by `seq`, idempotent on retry, pipelineable. |
-| `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and `cur_gen`, or `Truncated` when `from_seq < first_seq`. Long-polls at the tail for `wait_ms`. |
-| `Truncate(generation, owner, up_to_seq)` | Drop every record below `up_to_seq`. Fenced by `(generation, owner)` like `Write`, monotone. The only retention API. |
-| `SetLeader(expected_gen, new_owner)` | Compare-and-swap the owner. Returns `{ generation, next_seq }`. |
+| Call | Single-writer | Multi-writer |
+|---|---|---|
+| `Write` | `Write(leader_uuid, expected_seq, batch) -> seq`: fenced by the leader uuid, contiguous by `expected_seq`, idempotent on retry, pipelineable. | `Write(batch) -> seq`: unfenced; the journal orders writes and assigns `seq` at apply. At-least-once on an ambiguous retry. |
+| `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. Long-polls at the tail for `wait_ms`. | The same. |
+| `Truncate` | `Truncate(leader_uuid, up_to_seq)`: fenced like `Write`. | `Truncate(up_to_seq)`: anyone may truncate. |
+| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns `{ old_uuid, next_seq, first_seq }`. | Refused: a multi-writer journal has no leader. |
+
+The API is Brooker's fourth MemoryDB journal API (section 10): `set_leader_uuid(new, old)`,
+`write(payload, leader_uuid)`, `read()`, plus the expected-sequence precondition of DSQL's
+adjudicator. It replaced the `(generation, owner)` pair of M7 (#204), which exposed two fields
+where one fence suffices and let a caller pick an owner id that another process could share.
 
 ### 2.1 Positions
 
 `seq` is the dense position of accepted records, assigned at apply. One `seq` per record: a
 batch of `n` records occupies `[seq, seq + n)`, in one Paxos slot, accepted or refused whole.
 Paxos slots stay internal: a `Noop` a new leader fills a hole with, a control command, a
-generation change, a refused `Write` and a `Truncate` each consume a slot and no `seq`. Readers
+leadership change, a refused `Write` and a `Truncate` each consume a slot and no `seq`. Readers
 never see a hole.
 
-### 2.2 Writes and fencing
+### 2.2 Single-writer writes and fencing
 
-A `Write` is accepted iff its `(generation, owner)` is the journal's current one and
-`seq == next_seq`. Otherwise it is refused in place, and the refusal names the current
-generation and `next_seq` so the owner can continue or learn it was superseded.
+A single-writer `Write` is accepted iff its `leader_uuid` is the journal's current one and
+`expected_seq == next_seq`. Otherwise it is refused in place, and the refusal names the current
+leader uuid and `next_seq` so the leader can continue or learn it was superseded.
 
-Retries are answered from the log itself: a `Write` with `seq < next_seq` identical to the write
-accepted at `seq` — the same generation, owner and batch — is an idempotent ack; anything else is
-refused. A retry whose
-`seq < first_seq` is answered `Truncated`, and the owner treats it as ambiguous and reads the
-tail. The log is the deduplication table: there is no per-client session ledger and nothing to
-expire.
+Retries are answered from the log itself: a `Write` with `expected_seq < next_seq` identical to
+the write accepted at that `seq` — the same leader uuid and batch — is an idempotent ack;
+anything else is refused. A retry whose `expected_seq < first_seq` is answered `Truncated`, and
+the leader treats it as ambiguous and reads the tail. The log is the deduplication table: there
+is no per-client session ledger and nothing to expire. One slot holds one single-writer `Write`;
+a single-writer journal batches in its client (`paros::client::Writer`), never in a batcher.
 
-A leader may refuse a `Write` from its own fold at propose time, so a superseded owner's
+A leader may refuse a `Write` from its own fold at propose time, so a superseded leader's
 pipelined burst does not burn slots. That is an optimisation; the apply-time check is the safety.
 
-### 2.3 Ownership
+### 2.3 Leadership
 
-Ownership is a pure compare-and-swap, no lease and no clock. `SetLeader(expected_gen, new_owner)`
-succeeds iff `expected_gen` is the current generation; the journal assigns `generation + 1`,
-records the change as an ordinary log entry, and answers `{ generation, next_seq }` so the new
-owner can continue the sequence. Every tailer learns the owner changed in-band, without a side
-channel.
+Leadership is a pure compare-and-set, no lease and no clock. `SetLeader(new_uuid, old_uuid)`
+succeeds iff `old_uuid` is the current leader (unset on a fresh journal); the journal records the
+change as an ordinary log entry and answers `{ old_uuid, next_seq, first_seq }` so the new leader
+can continue the sequence. Every tailer learns the leader changed in-band, without a side channel.
 
-A superseded owner's writes and truncations are refused at apply, which is the whole safety
-argument. What keeps a superseded owner from *serving* stale data is a rule on the owner, not on
-paros: an owner serves nothing from local state it did not read back from the journal (DSQL's
+**The leader uuid is the fence.** It is a 128-bit random value the leader draws for one
+leadership term, never per process: a process that wins again draws a new uuid, which fences its
+own older in-flight writes. It is not a secret and not an authentication token; the front door
+decides who may touch a tenant at all (section 3.5), the leader uuid decides which of the
+tenant's clients holds the pen. The core keeps a hidden term counter beside it, raised by every
+`SetLeader`, so a uuid that ever led can never lead again (no ABA through
+`SetLeader(old, current)`); the counter never leaves `paros-core`.
+
+A superseded leader's writes and truncations are refused at apply, which is the whole safety
+argument. What keeps a superseded leader from *serving* stale data is a rule on the leader, not
+on paros: a leader serves nothing from local state it did not read back from the journal (DSQL's
 adjudicator is a rebuildable cache over the log and holds no truth of its own). MemoryDB's lease
-and self-demotion are deliberately not implemented; the sources are in section 10.
+and self-demotion are deliberately not implemented in the journal: **paros enforces no lease**.
+Who becomes leader is decided outside the journal, by an election (section 3.3); the journal
+gives safety to writers, the election gives liveness (Brooker).
 
 Two fences, two layers, never confused: the Paxos ballot says which *machine* runs a journal's
-leader and is invisible to clients; the generation says which *client* may write and is
-invisible to Paxos.
+consensus leader and is invisible to clients; the leader uuid says which *client* may write and
+is invisible to Paxos.
 
-### 2.4 Reads
+### 2.4 Multi-writer journals
 
-`Read` is served by the replica tier through the leaderless read of Compartmentalized Paxos
-§3.4 (paros's `QuorumRead`): the replica asks a Phase-1 quorum of the acceptors for their vote
-watermarks, waits until its own applied prefix covers the maximum, and answers. No read goes
-through the leader, so reads scale with replicas and cost the acceptors one watermark round per
-page. The read-index path and `CheckTail` retire.
+A multi-writer journal has no leader: `Write(batch)` is accepted whenever its batch is within
+the limits (section 2.7), and the journal assigns its `seq` at apply. There is no expected
+sequence and no deduplication: an ambiguous write retried may land twice, and the writers own
+that (at-least-once). Anyone with access to the journal may `Truncate` it; `first_seq` stays
+monotone. A multi-writer journal is what many independent producers append to, and what an
+election runs over (section 3.3). Batchers (section 4) merge multi-writer writes into fewer
+slots; the unbatcher hands each write its own `seq` range.
 
-### 2.5 Truncation
+### 2.5 Reads
 
-`Truncate(generation, owner, up_to_seq)` is proposed through consensus and judged at apply in
-slot order like a `Write`: it is accepted iff `(generation, owner)` is the journal's current one,
-and it never lowers `first_seq`. A refusal names the current generation, like a refused `Write`.
-An accepted `Truncate` is applied lazily by every node when its contiguous chosen walk reaches
-it, exactly today's `Truncate` control command.
+`Read` is served by whatever holds the journal's replica state — the colocated node by default,
+the replica tier when the tenant asks for replicas — and always through the leaderless read of
+Compartmentalized Paxos §3.4 (paros's `QuorumRead`): the server asks a Phase-1 quorum of the
+acceptors for their vote watermarks, waits until its own applied prefix covers the maximum, and
+answers. No read goes through the Paxos leader, so reads scale with replicas and cost the
+acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
+`CheckTail` retire.
 
-The fence was decided on 2026-10-02 (#227, #228). Unfenced, anyone with access to the tenant
-could truncate any of its journals, so a stale or buggy caller could truncate to a position that
-is not a checkpoint and break every reader's fold. Kafka refuses client `DeleteRecords` on its
-metadata topic for the same reason (KIP-630).
+### 2.6 Truncation
 
-The owner truncates only after it has secured whatever checkpoint it needs; paros does not check
-that, does not verify checkpoints and never will. A reader below `first_seq` is told `Truncated`
-and nothing else: where it restarts is the application's contract with itself. The control
-plane's own contract is section 3.9.
+A `Truncate` is proposed through consensus and judged at apply in slot order like a `Write`: in
+a single-writer journal it is accepted iff its leader uuid is the current one, in a multi-writer
+journal always. It never lowers `first_seq`, and it is clamped to `next_seq`. A refusal names the
+current leader, like a refused `Write`. An accepted `Truncate` is applied lazily by every node
+when its contiguous chosen walk reaches it, exactly today's `Truncate` control command.
 
-### 2.6 Underneath
+The single-writer fence was decided on 2026-10-02 (#227, #228). Unfenced, anyone with access to
+the tenant could truncate any of its journals, so a stale or buggy caller could truncate to a
+position that is not a checkpoint and break every reader's fold. Kafka refuses client
+`DeleteRecords` on its metadata topic for the same reason (KIP-630). A multi-writer journal has
+no checkpoint discipline to protect, so its truncation is open (decided on 2026-10-04).
+
+The leader truncates only after it has secured whatever checkpoint it needs; paros does not
+check that, does not verify checkpoints and never will. A reader below `first_seq` is told
+`Truncated` and nothing else: where it restarts is the application's contract with itself. The
+control plane's own contract is section 3.9.
+
+### 2.7 Limits
+
+The limits are part of the API, not a driver detail (decided on 2026-10-04): a maximum batch
+(bytes and records) refused at the edge before it reaches consensus, a maximum `Read` page
+(records and bytes), and a maximum `wait_ms`. Each value is a tunable with a documented floor
+and a `buggify_knob!` in simulation; the toy's values are today's (a 256-record, 64 KiB page, a
+long-poll of a few hundred milliseconds, a batch well under the 4 MiB RPC frame). An `Inline`
+checkpoint (section 3.9) must fit one batch. Every id, `seq` and the term counter are `u64`; the
+leader uuid is 128 bits.
+
+### 2.8 Underneath
 
 Paxos is unchanged: replication, holes, gap fills, the contiguous chosen prefix, CTRL, the trim
 point, matchmaker reconfiguration. Every proof paros has holds per journal; the one new thing to
@@ -158,12 +201,13 @@ tenant's name and desired state, its journal names and its placement, so every i
 #216). There is no provisioning step that names the seeds to each other.
 
 - The seeds start with the same rendezvous name or short join list and wait.
-- `parosctl init` is sent to one of them, which every seed's join list must name. It is refused
-  if the cell is already initialized. In order:
+- `parosctl init` is sent to one of them, which every seed's join list must name. It needs every
+  seed to answer, and it is refused if the cell is already initialized. In order:
   1. **forms the cell**: mints `cell_id` and the cell tenant's frame (its random `TenantId` and
      the random `JournalId` of its control journal, section 3.8), writes them into every seed's
-     durable cell plan, and the first cell coordinator claims the cell control journal with
-     `SetLeader(expected_gen = 0, me)`;
+     durable cell plan, starts the cell's first matchmaker set on the seeds, and the first cell
+     coordinator installs itself as the cell control journal's leader with
+     `SetLeader(its fresh uuid, unset)`;
   2. **creates the meta tenant** inside that cell (meta is a tenant, so the cell must exist first
      to grant it capacity): mints `fleet_id` and meta's frame, both random, recorded in the cell
      plan of the cell that hosts meta;
@@ -181,10 +225,13 @@ one-time init sent to any of them bootstraps the cluster, init is refused on an 
 cluster and must target a node every join list names. Redpanda recommends disabling
 `empty_seed_starts_cluster` in production for the same reason paros has no implicit formation.
 
-The cell control journal starts as a plain journal over the seeds, and the meta tenant's control
-journal is placed on the same seeds. They are the one matchmaker-free exception at bootstrap: they
-run plain until the cell coordinator has enough registered machines to give each tenant its
-matchmaker set through reconfiguration, and from then on they are reconfigured like any tenant's.
+**Every journal is born with its matchmaker set** (decided on 2026-10-04). The cell control
+journal and meta's control journal are placed on the seeds and born with a matchmaker set that
+`init` starts there; every tenant journal is born with its tenant's set. There is no
+plain-to-matchmaker transition anywhere, so there is nothing to migrate: the cell's control
+journals are reconfigured like any tenant's from their first entry, and healing works in
+production from the first boot. The matchmaker-free plain deployment stays what AGENTS.md says it
+is, a permanent library-level configuration; `parosd` never runs it.
 
 ### 3.2 Machines
 
@@ -197,7 +244,8 @@ Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, 
 - `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
 
 The same `node_id` with a new incarnation is a reboot: the machine rejoins in place and keeps its
-assignments. It is re-placed only if it does not come back within a bound, so a whole cell
+assignments. It is re-placed only if it does not come back within a bound (a cell tunable, drawn
+per seed in simulation), so a whole cell
 restarting does not trigger a re-placement storm (CockroachDB saw the equivalent: after a mass
 restart, lease renewals flooded the cluster until liveness heartbeats timed out). The same
 `node_id` with a new `addr` is a machine that moved; ScyllaDB moved from IP-based to host-ID-based
@@ -214,8 +262,14 @@ request, refused with `StaleIncarnation`. That pull model is sufficient: Delos c
 their cached view only when an append fails on a sealed loglet. No push detection is asked of
 moonpool.
 
+**Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
+transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
+`Up`), so control writes stay rare (section 3.9) and the registry's "seen alive" is a fold, not a
+heartbeat log. A machine `Down` past the re-placement bound has its roles re-placed. A machine
+never heartbeats into a journal.
+
 **Finding the cell.** There is no cluster file. A machine's and a client's only static input is
-one rendezvous name or a short join list, stored durably in `Config` and re-read on every boot
+one rendezvous name or a short join list, stored durably in the machine record and re-read on every boot
 (CockroachDB stores `--join` in the data directory but still recommends passing it on every start,
 so a node can rejoin after losing its data directory). With one cell, the fleet's rendezvous and
 the cell's are the same name.
@@ -237,23 +291,54 @@ the cell's are the same name.
 - `cell_id` and `fleet_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad seed configuration.
-- Well-known endpoints stay for exactly one call, the **rendezvous call**, keyed by tenant:
-  "which references serve tenant T". Everything else is a dynamic reference.
+- **Well-known endpoints** are the bootstrap set — `Identify`, `Init`, `FormCell`, `Inspect` —
+  and the **rendezvous call**, keyed by tenant: "which references serve tenant T". Everything else
+  is a dynamic reference (amended on 2026-10-04: the bootstrap calls were well known already).
 
 The decision and its alternatives are #216. Classes are FDB's:
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
-- `stateless`: the front door, proxy leaders, batchers, unbatchers, coordinators.
+- `stateless`: the front door, proxy leaders, batchers, unbatchers, coordinators. The cell and meta
+  coordinators run on the seeds until a `stateless` machine registers (section 3.3).
 
-Scaling a role for a tenant is adding machines of the right class and raising the tenant's
-desired counts.
+**Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots of
+its class; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
+proxy, batcher or unbatcher) of one journal or tenant. A booking is keyed
+`(tenant, journal or matchmaker set, role)` and holds one slot; only the cell coordinator writes
+bookings. Bytes, IOPS and weighted roles are not modelled. Scaling a role for a tenant is adding
+machines of the right class and raising the tenant's desired counts.
 
 ### 3.3 Coordinators and placement
 
 The four levels of section 1 are built the same way (decided on 2026-10-02, #225): one actor per
-level, elected by `SetLeader` on that level's control journal, so it holds a generation and is
-fenced like any writer, and it holds no state that journal does not hold: a new one resumes from
-a fold. All four exist from M9.
+level, the leader of that level's control journal, so it is fenced by its leader uuid like any
+writer, and it holds no state that journal does not hold: a new one resumes from a fold. All four
+exist from M9.
+
+**Election over a journal** (decided on 2026-10-04, #240). Who leads is decided outside the
+journal it governs, by one library, `paros::client`'s election, used by the cell, meta and tenant
+coordinators and offered to customers. An election runs over a **multi-writer** journal
+(section 2.4): candidates append campaigns, the leader renews by appending, and every watcher
+folds the same deterministic rule. The renewals are a **lease used as a liveness hint only**:
+a watcher deems the leader gone after it has seen no renewal for a bound measured on its own
+clock, never by comparing clocks across machines, and campaigns. The winner draws a fresh leader
+uuid and installs it with `SetLeader(new, old)` on the control journal it governs; that uuid is
+the only fence (section 2.3), so two actors that both believe they lead can never both write. On
+winning, an actor folds its journal to the tail before its first control write and finishes every
+operation the journal holds in flight (`REGISTERING`, `REMOVING`); on its first refused write it
+stops. Hand-off is `SetLeader(successor, me)`. An election journal is low-throughput, so it always uses
+a redundancy mode (a plain majority, section 3.4), never grid (decided on 2026-10-04).
+
+**Where candidates run** (decided on 2026-10-04). The cell and meta coordinators campaign on the
+seeds until a `stateless` machine registers, then move there; the cell coordinator places tenant
+coordinators on `stateless` machines.
+
+**Requests to a leader** (decided on 2026-10-04). Every control journal has one writer, so
+anyone else — a tenant coordinator asking for capacity, an operator changing desired state or
+draining a machine, a user creating a journal — sends a **request RPC to the elected
+coordinator**, found through the `InterfaceRef` the coordinator publishes in its journal when it
+wins. A request carries an idempotency id; the coordinator records the outcome in its journal,
+so a retry that crosses a coordinator change finds the answer there instead of acting twice.
 
 - **Single writer per journal.** Only the cell coordinator writes capacity. A tenant coordinator
   *asks* the cell coordinator for capacity and never writes capacity itself; it then computes
@@ -271,7 +356,10 @@ a fold. All four exist from M9.
   tenant's name and desired state live in its own control journal; the cell's list of hosted
   tenants and meta's directory are rebuildable indexes. This is the pattern of DSQL's adjudicator
   (section 2.3) one level up, and what makes recovery possible without Paxos surgery
-  (section 3.10).
+  (section 3.10, deferred).
+- **Tenant birth.** When the cell applies `HostTenant`, the cell coordinator books the tenant's
+  footprint, places its matchmaker set and its coordinator, and the new tenant coordinator claims
+  the tenant's control journal; nobody else ever writes it (decided on 2026-10-04).
 - **Coordinators checkpoint their control journals** with the library of section 3.9, so a
   control journal's length is bounded by its live entities, never by its history.
 
@@ -281,37 +369,56 @@ retirements wait for the GC watermark (`may_retire`).
 
 ### 3.4 Tenant modes
 
-A tenant's desired state names, per journal or as a tenant default, its quorum system
-(majority, flexible `{q1, q2}`, grid `{rows, cols}`), its replication count and, per role, how
-many proxies, replicas and batchers it wants. This is FDB's `configure`, applied by the tenant
-coordinator through reconfiguration. "Classic Multi-Paxos" is quorum system = majority.
+A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
+default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
+five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
+(`proxies=`, `replicas=`, `batchers=`). Flexible `{q1, q2}` quorums stay a library capability and
+are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
+coordinator picks them, inside its granted slots, and applies every change through
+reconfiguration. A journal's writer mode (section 2) is chosen when it is created and never
+changes.
 
 Every tenant has one matchmaker set: per tenant, not per journal (the registry is keyed by
 journal inside the set, so a set per journal buys nothing) and not shared across tenants (a
 shared set is one role that could not scale per tenant and a blast radius across tenants). The
-set is named by the tenant's id (section 3.8). Reconfiguration is the operational primitive for
-everything, so no tenant opts out of it. The matchmaker-free plain deployment stays what
-AGENTS.md says it is: a permanent library-level configuration, not a tenant mode.
+set is named by the tenant's id (section 3.8). A set is logical: matchmaker *processes* are shared,
+each hosting many tenants' sets demuxed by frame, the way every role is journal-tagged.
+Reconfiguration is the operational primitive for everything, so no tenant opts out of it.
 
-Every tenant has a **minimum footprint**, counted against its cell's capacity when the tenant is
-created: its coordinator, its matchmaker set and one acceptor quorum. The meta tenant and the cell
-tenant count too. A cell refuses a tenant whose footprint it cannot book.
+Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
+tenant is created: one coordinator slot, its matchmaker set and one acceptor quorum of its
+redundancy mode. The meta tenant and the cell tenant count too. A cell refuses a tenant whose
+footprint it cannot book.
 
 ### 3.5 The front door
 
 A stateless process in front of the machines. It authorizes the caller through an `Authz` trait
-whose first implementation verifies a signed JWT carrying the tenant as a claim; it enforces
-quotas; and it routes each call to the machine serving the journal, so a client never knows
-placement. Past the front door nothing knows a tenant name, only `(TenantId, JournalId)`.
+whose first implementation verifies a signed JWT carrying the tenant as a claim, and it routes
+each call to the machine serving the journal, so a client never knows placement. Quotas are M10
+(decided on 2026-10-04). Past the front door nothing knows a tenant name, only
+`(TenantId, JournalId)`.
+
+**Names** (decided on 2026-10-04, #239). A user addresses `paros://<tenant>/<journal>`; the URI
+names data, not a location, and the fleet endpoint (a front door's address) is client
+configuration. **The front door alone resolves names**: clients send names and never read meta,
+so no tenant sees another tenant's names. Until the front door exists (#192), `parosctl`
+resolves with operator rights. A name is free again once its delete completes; a recreated
+tenant or journal draws a fresh id, so an old id never aliases a new name.
+
+**Trust** (decided on 2026-10-04). The boundary is the network: only front doors and peers reach
+a node (a separate network in the Compose toy), and nodes do no authorization. JWTs are signed
+by an external issuer with asymmetric keys; the public keys, each with a key id, are recorded in
+meta's fleet entry, rotation is adding a key then removing the old one, tokens are short-lived
+and there is no revocation. `parosctl` can mint a token for the toy.
 
 **Routing goes through meta from M9.** The front door resolves the tenant name → `TenantId` →
 cell from its fold of meta's directory, then the journal name → `JournalId` and its placement
 from its fold of the tenant's control journal. With one cell the first step always answers "this
 cell", and it runs anyway. A cell's front door and a future fleet router answer the same
-rendezvous call, "which references serve tenant T", so `paros://<name>/<tenant>/<journal>` never
+rendezvous call, "which references serve tenant T", so `paros://<tenant>/<journal>` never
 changes when a second cell appears. The AWS cell-based architecture guidance wants the router to
 be the thinnest possible layer, one that keeps routing on its cached map while the control plane
-is down; this front door also does authorization and quotas, so whether M12 needs a separate
+is down; this front door also does authorization and naming, so whether M12 needs a separate
 router role or a front-door mode is open (#233).
 
 Tenants are created and administered through the same front door, with a fleet-administration
@@ -319,8 +426,8 @@ JWT, through meta (section 3.7): one API, one `Authz` trait, exercised in the si
 every other call.
 
 The front door is not the batcher. The batcher is a data-plane role of Compartmentalized Paxos
-that coalesces writes before a leader; the front door is authorization, naming, quotas and
-routing.
+that coalesces multi-writer writes before a leader (section 2.4); the front door is
+authorization, naming and routing.
 
 ### 3.6 Status
 
@@ -328,8 +435,13 @@ routing.
 fleet: desired (what the tenant asked for), available (machines registered, not drained, seen
 alive) and current (what is placed and serving, with each journal's word: Healthy, Degraded,
 Unavailable). The tenant view folds the tenant's control journal, the cell view the cell control
-journal, the fleet view meta's directory with each cell entry's state. There is no separate
-monitoring store.
+journal, the fleet view meta's directory with each cell entry's state. Status is computed live
+from those folds and `Inspect`, never written back: there is no separate monitoring store.
+
+It starts small, like `fdbcli status`, and grows by views, each one an admin RPC scoped by the
+caller's authorization: **role slots** per machine (class, total, booked, and what holds each
+slot), per tenant (its slots and footprint), per cell (free and booked per class) and for the
+fleet (decided on 2026-10-04).
 
 ### 3.7 The fleet
 
@@ -370,14 +482,16 @@ receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `
 `RESTORING` during a recovery.
 
 **Registration is recorded on both sides and verified on every step.** Meta's cell entry holds the
-cell's id; the cell's `Config` holds the fleet's id; both hold a metadata version number. Every
+cell's id; the cell's durable cell plan and its control journal hold the fleet's id; both hold a
+metadata version number. Every
 multi-step operation checks, at each step, that it still talks to the same fleet and the same
 cell as on its previous step, and refuses otherwise (FDB's `MetaclusterOperationContext`). The
 metadata version lets a reader refuse a format it does not understand.
 
 **What M9 carries so that M12 adds no protocol or data-model change:**
 
-- `Config` (#207) carries `node_id`, `cell_id`, `fleet_id` and the metadata version.
+- The machine record carries `node_id`; the durable cell plan carries `cell_id`, `fleet_id` and
+  the metadata version (amended on 2026-10-04: the code keeps them in the cell plan, not `Config`).
 - `Hello` carries `cell_id` and `fleet_id`.
 - The rendezvous call is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state).
@@ -410,7 +524,7 @@ recorded in meta's tenant entry when the tenant is registered and never changed 
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
-never the authority: if it disagrees with the control journal's generation, the generation wins.
+never the authority: if it disagrees with the control journal's leader, the leader wins.
 Meta moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
 
@@ -442,8 +556,16 @@ is the only value with a meaning. **No id has a default** either: an id is drawn
 assumed, and unset is a state to refuse, not a value to fall back on.
 
 - `node_id`, `cell_id`, `fleet_id`: random, minted at format, `init` and `init` respectively, and
-  stored in `Config`. They are written once, unset → set, and a later mismatch is refused at boot
-  like any `Config` mismatch.
+  stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `fleet_id`). They
+  are written once, unset → set, and a later mismatch is refused at boot like any `Config`
+  mismatch.
+- The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the
+  leader for one term, never reused. A writer never chooses an identity that another process could
+  share.
+- **Tombstones** (removed tenant ids, dropped tenants, deleted journal ids) are kept forever, a
+  `u64` each. They are the one part of control state bounded by history rather than by live
+  entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned
+  (section 3.5).
 - `TenantId(u64)`: random, drawn by the creator and recorded by meta in the `REGISTERING` step;
   meta refuses a duplicate at apply and the creator redraws. It is fleet-unique, so moving a
   tenant between cells never needs a new id. The system tenants are no exception: each cell's
@@ -484,9 +606,11 @@ harmless: the next fold meets a checkpoint in the middle of the log and resets o
 only ever targets a checkpoint. A reader that gets `Truncated` restarts from `first_seq`.
 
 - **Control state is bounded by live entities, never by history**: the latest entry per
-  `node_id`, current assignments only. That is what keeps checkpoints small.
+  `node_id`, current assignments only. That is what keeps checkpoints small. The one exception is
+  the id tombstones (section 3.8).
 - **Trigger**: checkpoint when the log since the last checkpoint reaches `k ×` the current state
-  size, plus a time bound, which caps the extra writes at `1/k`. Kafka (KIP-630) snapshots only
+  size, plus a time bound, which caps the extra writes at `1/k` (shipped defaults: `k = 4`, one
+  minute; both are knobs in simulation). Kafka (KIP-630) snapshots only
   after a minimum number of bytes and a minimum share of changed records, and KIP-876 added a
   time trigger; Redpanda snapshots its controller after each command or at most every 60 seconds.
   Truncation may be delayed until known readers (machines folding the registry, front doors) have
@@ -510,7 +634,14 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
   it is needed when a journal's state outgrows one batch (meta in a large fleet, M12). Readers
   handle both forms from the start, so adopting `Ref` later changes only the writer.
 
-### 3.10 Recovery
+### 3.10 Recovery (deferred)
+
+**Deferred out of M9** (decided on 2026-10-04, #231): nothing of it is built, and the simulation
+cannot reach a lost control quorum while it runs one seed (#213). The design below stays the
+direction and is taken up as its own later issue. Two questions it must answer then: with meta's
+and the cell's control journals on the same seeds, recovery reads the machines' own stores
+(`journals/<tenant>/<journal>/`, their frames and assignments) to rebuild both, tombstones
+included; and a new control `JournalId` must reach machines whose cell plan is written once.
 
 Losing a control quorum is recoverable without unsafe Paxos surgery, at both levels, because
 control journals are rebuilt from below (decided on 2026-10-02, #225, #231). User data is never
@@ -536,11 +667,11 @@ scalable independently per tenant by its coordinator:
 | Proxy leader | stateless | `ProxyLeader`, `run_proxy` |
 | Acceptor, grid quorums | storage | `Acceptor`, `QuorumSystem::Grid` |
 | Replica | storage | `ReplicaNode`, `run_replica`; serves `Read` |
-| Batcher | stateless | to build |
-| Unbatcher | stateless | to build |
-| Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one set per tenant |
+| Batcher | stateless | to build; multi-writer journals only (section 2.4) |
+| Unbatcher | stateless | to build; multi-writer journals only |
+| Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
 | Front door | stateless | to build |
-| Coordinator (meta, cell, tenant) | stateless | to build |
+| Coordinator (meta, cell, tenant) | stateless, or a seed at bootstrap | to build: the election library over a multi-writer journal (#240) |
 
 ## 5. Failure model and zones
 
@@ -550,8 +681,17 @@ identity is replaced by reconfiguration, a crashed machine restarts as an existi
 machine is reconfigured out and its journals placed elsewhere. This is what the simulation
 already exercises; what changes is who drives the healing: today the harness's client composes
 the reconfigurations, in the service the tenant's coordinator does, from desired state. Losing a
-control quorum is recoverable at both the cell and the fleet level, without touching user data
-(section 3.10). Cross-region replication and witness replicas are out of scope.
+control quorum will be recoverable at both the cell and the fleet level, without touching user
+data (section 3.10, deferred). Cross-region replication and witness replicas are out of scope.
+
+**The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
+simulation must give them at least the chaos the harness's in-memory stores carry today (decided
+on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.
+Four start masked, each with an issue to lift the mask: phantom writes (a write acknowledged as
+synced that never lands loses an acknowledged vote, which no quorum survives), a hung disk (it
+needs a storage watchdog in the driver), barrier violations ("sync lies") and moonpool's
+slow-disk extremes (until a hunt shows whether paros stays live on them; if it does not, that is
+a finding, not a knob to clamp).
 
 Zones are failure domains, and a cell spans enough of them for its quorums (section 3.7). What
 the WPaxos read (section 10) established for one region with several availability zones:
@@ -562,8 +702,9 @@ the WPaxos read (section 10) established for one region with several availabilit
   is therefore not adopted.
 - paros's grid cannot express zone survival either: rows and columns are positional over sorted
   ids, and with column = zone a zone loss kills every row, with row = zone it kills every column.
-  The grid stays the throughput mode, with its cost (one dead acceptor freezes its column until
-  reconfiguration) stated to the tenant that picks it.
+  The grid stays the opt-in throughput mode (section 3.4), with its cost (one dead acceptor
+  freezes its column until reconfiguration) stated to the tenant that picks it; the redundancy
+  modes are the zone-surviving default.
 - What is adopted: zone labels live inside `AcceptorConfig`, bound to the ballot with the
   configuration, because two nodes that disagree on a member's zone evaluate different quorums
   (the registry's failure domain is the composer's input, never read live by a tally); the
@@ -578,29 +719,40 @@ the WPaxos read (section 10) established for one region with several availabilit
 
 Simulation is the investment. Every milestone lands with its share of:
 
-- Invariants in the audit, where the fact arrives: one owner per generation, generations
-  monotone and present in the log, `seq` dense per journal, a `Write` never re-accepted with
-  other bytes, `Truncate` monotone and `first_seq` never above a served cursor, a `Truncate`
-  accepted only from the current owner, a `SetLeader` winning at most once per `expected_gen`, a
-  capacity slot booked at most once, a tenant never reaching a journal outside its own
+- Invariants in the audit, where the fact arrives: a leader uuid leads at most one term and is
+  never reinstated, every leadership change present in the log, `seq` dense per journal, a
+  single-writer `Write` never re-accepted with other bytes, `Truncate` monotone and `first_seq`
+  never above a served cursor, a single-writer `Truncate` accepted only from the current leader, a
+  `SetLeader` winning at most once per `old_uuid`, a multi-writer journal never refusing an
+  in-limits write, a capacity slot booked at most once (a booking id never booked twice, across
+  checkpoints), a tenant never reaching a journal outside its own
   `TenantId`, no component reaching a journal by an id it did not learn (the simulation draws
   every frame, the system tenants' included, per seed).
 - Control-plane invariants: a child keeps serving through its parent's outage; folding from a
   checkpoint yields the same state as folding the full history; meta's directory equals the union
   of the cells' tenant lists (assignments and counts), checked even with one cell (FDB's
   metacluster consistency checker); every fleet operation resumes correctly when re-run after a
-  crash at any step; a recovery rebuild yields exactly the same tenants.
+  crash at any step; an election never has two leaders whose writes both land, and settles on one
+  leader after the chaos window (a liveness oracle in recovery mode).
 - A real linearizability checker in the workload's `check()`, over the four-call history with
-  `Ambiguous` outcomes, against the sequential model of a journal (an owner, a generation, a
-  dense log, a floor). It replaced the per-operation rules of `ClientHistory` (#205).
+  `Ambiguous` outcomes, against the sequential model of a journal (a mode, a leader, a dense log,
+  a floor). It replaced the per-operation rules of `ClientHistory` (#205).
 - The three races made likely rather than lucky, each a knob or a hook with its own BUGGIFY
   location and its reachable: a `SetLeader` drawn in the middle of a pipelined burst, a client
   timeout shorter than the ack so a retry crosses an ownership change, a `Truncate` racing a
   reader's cursor.
 - Control-plane shapes: one cell hosting meta, now; a crash at each step of `init` and of tenant
-  creation; a crash between a checkpoint's write and its truncate; a truncate refused from a
-  stale owner; meta unavailable while tenants serve; a lost cell control quorum recovered by
-  `init --recover`. In M12: a second cell, a tenant move and a meta move.
+  creation, each step with its own reachable; a crash between a checkpoint's write and its
+  truncate, for the registry and for meta; a truncate refused from a stale leader; meta
+  unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
+  it. In M12: a second cell, a tenant move and a meta move. With recovery (deferred): a lost cell
+  control quorum recovered by `init --recover`.
+- Storage chaos on the shipped stores: every node and matchmaker runs on moonpool-journal, with a
+  journal-aware injector aimed through moonpool's `JournalAtlas` under the copy budget, corpus
+  masks re-expressed as journal targets, crashes inside a sync, then moonpool's environmental
+  storage chaos with replicated fault patterns (#176, #202). Gates name journal verdicts (slot
+  rebuilt, double fault parked, meta repaired, ambiguous batch kept); the in-memory stores and
+  their gates retire.
 - New BUGGIFY sites for every new decision the driver, the front door and the coordinators take,
   and the coverage-guided sweep saturating over them.
 
@@ -611,7 +763,14 @@ stay as they are.
 
 - The journal API of #185 (`Append`, `Read`, `CheckTail`, `Trim`) is cut over to the four calls.
   No compatibility layer. The chain workload's operation ids for retired calls stay reserved.
-- `Truncate` gains the `(generation, owner)` fence of `Write` (#227, #228).
+- `Truncate` gains the fence of `Write` (#227, #228).
+- The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
+  `SetLeader(new, old)`, with a hidden term counter in the core; `Write` takes an explicit
+  `expected_seq`; journals gain a writer mode, single or multi (section 2). No compatibility
+  layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
+  linearizability model and the audit follow.
+- The in-memory "world" stores of the simulation retire; every role runs on moonpool-journal
+  under at least the same chaos (section 5).
 - The "#186: paros runs no application" line becomes: paros runs no *user* application, and one
   journal-control state machine per journal, in `paros-core`, judged at apply.
 - The `(client, seq)` at-most-once session ledger goes away; the log is the deduplication table.
@@ -641,12 +800,15 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196; #176, #201, #202 join it) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; then #228, #210, #211, #229, #190, #212, #230, #192, #191, #231, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, `init` creating the fleet, the cell tenant and its machine registry with class and capacity, the meta tenant with its directory and tenant creation state machine, the per-tenant coordinator via `SetLeader`, placement inside capacity granted by the cell, the checkpoint-and-truncate library, `init --recover`, the front door with JWT `Authz` routing through meta, per-tenant matchmaker sets, `parosctl status` |
-| M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers, tenant modes applied by the tenant coordinator, the benchmark, then scale work |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; then #241, #240, #210, #239, #190, #212, #192, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the meta tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the front door, the front door with JWT `Authz` routing through meta, per-tenant matchmaker sets, `parosctl status` |
+| M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxies and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and meta between cells, splitting meta by range, the `Ref` checkpoint writer, the router question |
 
-Verification is not a milestone: every milestone carries its own share of section 6.
+Verification is not a milestone: every milestone carries its own share of section 6, and storage
+chaos on the shipped stores (#176, #202) runs alongside M9. Recovery (#231, section 3.10) is
+deferred and carries no milestone yet. The interactive game and the lessons (`track:play`, #162,
+#163) run outside the milestones, behind the service.
 
 ## 9. The toy, done means
 
@@ -657,13 +819,14 @@ simulation. Its machines are plain nodes (`node1`..`node3` over three failure do
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 fleet, its one cell and the meta tenant. Create a tenant through meta and mint its JWT. Create a
-journal. `write`, `read` and `tail` from `parosctl`. `set-leader` to a second client and see the
-first one refused, for a `write` and for a `truncate`. Kill one `storage` and one `stateless`
+journal. `write`, `read` and `tail` from `parosctl`, addressing `acme/orders`. `set-leader` to a second
+client and see the first one refused, for a `write` and for a `truncate`. Create a multi-writer
+journal and append to it from two clients at once. Kill one `storage` and one `stateless`
 container and keep writing. Wipe one volume, see the amnesia refusal, and see the journal healed
 by reconfiguration onto another machine. Stop the meta tenant's quorum and keep writing to an
-existing tenant. Lose the cell control quorum, run `parosctl init --recover --dry-run`, then the
-recovery, and see the same tenants back. `parosctl status` shows desired, available and current,
-per tenant, per cell and for the fleet. The simulation is green in every shape and the
+existing tenant. Kill the cell coordinator's machine and see another one elected. `parosctl
+status` shows desired, available and current, and the role slots, per machine, per tenant, per
+cell and for the fleet. (Recovery of a lost cell control quorum is deferred, section 3.10.) The simulation is green in every shape and the
 coverage-guided sweep saturates.
 
 ## 10. Sources
@@ -795,6 +958,14 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   changes `paros-core`'s read semantics; the decision is #227.
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
   the front door as the rendezvous: #216.
+- **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
+  fence suffices, and an owner id the caller chose, so two processes could share it and both pass
+  the owner check once they read the public generation. A per-term random leader uuid is
+  Brooker's final MemoryDB API and cannot be shared by accident; the term counter stays, hidden
+  in the core, to rule out a reinstated uuid.
+- **A lease in the journal** (MemoryDB's lease-fenced writes). Rejected: a lease fence depends
+  on clocks and pauses; the leader uuid fences without either, and the election library keeps a
+  lease only as a liveness hint (section 3.3).
 - **Well-known system ids** (meta tenant `1`, cell tenant `2`, every control journal `1`,
   `0..=255` reserved; decided on 2026-10-02, reversed on 2026-10-04). They let a component find a
   control journal without asking, but every component must then agree on the convention forever,
