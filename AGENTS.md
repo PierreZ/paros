@@ -70,7 +70,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   issue; a preference about how to work goes into this file. Amend the section it touches, never
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
-- **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly three issues;
+- **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly ten issues (raised from three on 2026-10-04);
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
   (`moonpool-consultant` agent).
@@ -78,6 +78,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
+- **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
+  `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
+  in #69. A feature lands only on a harness that can prove it.
 - **Organize as you grow**: a module holds one concern; split a file the moment it holds a
   second. Deleting is part of every change: a superseded axis, type, flag or gate goes in the
   PR that supersedes it.
@@ -299,6 +302,14 @@ Depth: the `adding-a-buggify-site` skill, `crates/paros/src/hooks.rs`.
 - **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
   on external input (operating errors are results). `ColocatedNode::assert_invariants` runs at
   boot and every public mutating entry; public functions that assert document `# Panics`.
+- **Assertions are TigerStyle** (decided on 2026-10-04, #248): in `paros-core` and the drivers of
+  `paros`, an average of at least two assertions per function; assert preconditions,
+  postconditions and invariants; **pair** assertions (check a property where data is written and
+  again where it is read back, e.g. at persist and at boot); assert the negative space as well as
+  the positive; assert relationships between constants at compile time (`const _: () =
+  assert!(..)`); split compound conditions into one assertion each. Every assertion is a
+  simulation oracle for free. The external-input rule above still holds: a bad request is a
+  result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
 - **Sim layers use moonpool macros, never plain `assert!`**: `assert_always!` with a detail map
   (record and continue), `assert_sometimes!` for an **outcome** the run must reach,
   `reach_once!`/`assert_reachable!` for a **cause** that fired. A perturbation never gets a
