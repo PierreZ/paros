@@ -1070,6 +1070,27 @@ impl MatchmakerSet {
         QuorumSystem::is_majority(&self.members, voters)
     }
 
+    /// How many more answers a tally holding `voters` still waits for — the
+    /// one thing a predicate cannot report, and the only place a matchmaker
+    /// quorum is ever spelled as a number. Zero once [`Self::has_quorum`]
+    /// holds over voters drawn from this set.
+    #[must_use]
+    pub fn remaining(&self, voters: &BTreeSet<MatchmakerId>) -> usize {
+        self.quorum_size().saturating_sub(voters.len())
+    }
+
+    /// The members not among `voters`, in id order — whom a tally's re-send
+    /// addresses.
+    pub fn unanswered<'a>(
+        &'a self,
+        voters: &'a BTreeSet<MatchmakerId>,
+    ) -> impl Iterator<Item = MatchmakerId> + 'a {
+        self.members
+            .iter()
+            .copied()
+            .filter(|mm| !voters.contains(mm))
+    }
+
     /// Whether `id` is a member.
     #[must_use]
     pub fn contains(&self, id: MatchmakerId) -> bool {
