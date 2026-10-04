@@ -215,13 +215,13 @@ tenant's name and desired state, its journal names and its placement, so every i
 - The seeds start with the same rendezvous name or short join list and wait.
 - `parosctl init` is sent to one of them, which every seed's join list must name. It needs every
   seed to answer, and it is refused if the cell is already initialized. In order:
-  1. **forms the cell**: mints `cell_id` and the cell tenant's frame (its random `TenantId` and
+  1. **forms the cell**: mints `cell_id` and the cell tenant's journal key (its random `TenantId` and
      the random `JournalId` of its control journal, section 3.8), writes them into every seed's
      durable cell plan, starts the cell's first matchmaker set on the seeds, and the first cell
      coordinator installs itself as the cell control journal's leader with
      `SetLeader(its fresh uuid, unset)`;
   2. **creates the fleet tenant** inside that cell (the fleet tenant is a tenant, so the cell must exist first
-     to grant it capacity): mints `fleet_id` and the fleet tenant's frame, both random, recorded in the cell
+     to grant it capacity): mints `fleet_id` and the fleet tenant's journal key, both random, recorded in the cell
      plan of the cell that hosts the fleet tenant;
   3. **registers the cell** as the first entry in the fleet directory, and writes the matching
      registration on the cell side (section 3.7).
@@ -296,10 +296,10 @@ the cell's are the same name.
   static-stability requirement, not an optimisation.
 - **No journal is found by convention** (decided on 2026-10-04, section 3.8): there is no
   well-known tenant or journal id. Every machine of a formed cell answers `Inspect` (and, later,
-  the rendezvous call) with its `cell_id`, the cell tenant's control frame and, on the cell that
-  hosts it, the fleet tenant's frame, all read from its durable cell plan. A client or an operator handed
-  only addresses learns the control frames from any machine, then resolves everything else
-  through them: the fleet directory gives a tenant's cell and the frame of its control journal, and
+  the rendezvous call) with its `cell_id`, the cell tenant's control journal key and, on the cell that
+  hosts it, the fleet tenant's journal key, all read from its durable cell plan. A client or an operator handed
+  only addresses learns the control journal keys from any machine, then resolves everything else
+  through them: the fleet directory gives a tenant's cell and the journal key of its control journal, and
   that control journal gives the tenant's journals. A re-run of `init` learns the cell's ids the
   same way.
 - `cell_id` and `fleet_id` are carried in the session `Hello`; a peer with another id is refused.
@@ -387,9 +387,11 @@ retirements wait for the GC watermark (`may_retire`).
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
 default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
 five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
-(`proxy_leaders=`, `replicas=`, `batchers=`). These roles are per journal or per tenant
-logically, and their processes are shared across tenants and demuxed by frame, like matchmaker
-sets (#193); proxies are not a tenant setting, they belong to the cell (section 3.5). Flexible `{q1, q2}` quorums stay a library capability and
+(`proxies=`, `proxy_leaders=`, `replicas=`, `batchers=`). **Every role is a per-tenant pool**
+(decided on 2026-10-04): one pool per tenant for each role, shared by all the tenant's journals
+and keyed by journal key inside, never a pool per journal (a quiet journal would idle its own
+processes). A busy journal uses capacity a quiet one leaves, and the blast radius stops at the
+tenant (#193). Flexible `{q1, q2}` quorums stay a library capability and
 are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
 coordinator picks them, inside its granted slots, and applies every change through
 reconfiguration. A journal's writer mode (section 2) is chosen when it is created and never
@@ -399,7 +401,7 @@ Every tenant has one matchmaker set: per tenant, not per journal (the registry i
 journal inside the set, so a set per journal buys nothing) and not shared across tenants (a
 shared set is one role that could not scale per tenant and a blast radius across tenants). The
 set is named by the tenant's id (section 3.8). A set is logical: matchmaker *processes* are shared,
-each hosting many tenants' sets demuxed by frame, the way every role is journal-tagged.
+each hosting many tenants' sets keyed by journal key, the way every role is a per-tenant pool.
 Reconfiguration is the operational primitive for everything, so no tenant opts out of it.
 
 Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
@@ -409,10 +411,14 @@ footprint it cannot book.
 
 ### 3.5 The proxy
 
-A stateless process in front of the machines. **Proxies are cell-wide** (decided on
-2026-10-04): one shared pool per cell, serving every `users` tenant and the administration calls,
-scaled with the cell rather than per tenant; the rendezvous call answers with the cell's
-proxies. The cost, a proxy shared across tenants, is guarded by the quotas of M10. It authorizes the caller through an `Authz` trait
+A stateless process in front of the machines. **Proxies are per tenant** (decided on 2026-10-04):
+the tenant coordinator places them in role slots like any role and the tenant's mode sizes the
+pool, so a proxy folds only its own tenant's control journal and one tenant's load never reaches
+another's proxies. A client finds its tenant's proxies through the **rendezvous call**, which any
+machine of the cell answers from the cell registry it already folds (a proxy is a booked slot
+keyed by tenant); the rendezvous also resolves the tenant name to its `TenantId` through the
+fleet directory. Administration (`init`, tenant create and delete, drains) is served by the fleet
+tenant's own proxies. It authorizes the caller through an `Authz` trait
 whose implementation verifies a Biscuit token (below), and it routes
 each call to the machine serving the journal, so a client never knows placement. It forwards
 calls and their answers rather than redirecting the client (decided on 2026-10-04): clients only
@@ -554,12 +560,12 @@ metadata version lets a reader refuse a format it does not understand.
 - `Hello` carries `cell_id` and `fleet_id`.
 - The rendezvous call is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state).
-- The fleet directory's tenant entries carry the fleet-unique `TenantId`, the frame of the tenant's control
+- The fleet directory's tenant entries carry the fleet-unique `TenantId`, the journal key of the tenant's control
   journal, the cell assignment, the state, a configuration sequence number, the tenant's
-  **group**; the fleet directory's cell entries carry the cell id, the cell tenant's frame, the state and
-  the metadata version. No id is well known (section 3.8): a second cell learns the fleet tenant's frame
+  **group**; the fleet directory's cell entries carry the cell id, the cell tenant's journal key, the state and
+  the metadata version. No id is well known (section 3.8): a second cell learns the fleet tenant's journal key
   when it joins the fleet, from the cell that hosts the fleet tenant.
-- Every peer and client message is framed by `(TenantId, JournalId)` (section 3.8).
+- Every peer and client message carries its journal key `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through the fleet directory.
 
@@ -571,10 +577,10 @@ without rules, may come later (decided on 2026-10-04):
 
 | Group | Rule | Members |
 |---|---|---|
-| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; no proxy serves it | the fleet tenant, every cell tenant |
+| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; reached only for administration, through the fleet tenant's proxies | the fleet tenant, every cell tenant |
 | `cell` | **never leaves its cell**: it *is* its cell (section 1); reconfigured only within it | each cell's cell tenant |
 | `fleet` | holds the fleet directory; moves with its coordinator | the fleet tenant |
-| `users` | created by the tenant API (`parosctl tenant create`, the proxy); served by proxies | every served tenant |
+| `users` | created by the tenant API (`parosctl tenant create`, through the fleet tenant's proxies); served by its own proxies | every served tenant |
 
 So the fleet tenant is `{internal, fleet}`, a cell tenant `{internal, cell}` and a served tenant
 `{users}`. **The groups alone decide whether a tenant moves**: it moves unless one of its groups
@@ -646,9 +652,9 @@ assumed, and unset is a state to refuse, not a value to fall back on.
   recovery rebuilds (section 3.10) gets a new one, so the old and the new can never be mistaken
   for each other.
 - **Discovery replaces convention.** The only fixed starting points are a machine's addresses:
-  the frames of the cell's and the fleet tenant's control journals are learned from any machine of the cell
+  the journal keys of the cell's and the fleet tenant's control journals are learned from any machine of the cell
   (section 3.2), and everything below them through their folds.
-- **Every peer and client message is framed by `(TenantId, JournalId)`**, riding the `Deliver`
+- **Every peer and client message carries its journal key `(TenantId, JournalId)`** (`JournalKey`), riding the `Deliver`
   envelope where `JournalId` alone rides it today, so uniqueness is only ever needed where it can
   be checked. A tenant's matchmaker set is named by its `TenantId`.
 
@@ -700,7 +706,7 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
 cannot reach a lost control quorum while it runs one seed (#213). The design below stays the
 direction and is taken up as its own later issue. Two questions it must answer then: with the fleet
 tenant's and the cell's control journals on the same seeds, recovery reads the machines' own stores
-(`journals/<tenant>/<journal>/`, their frames and assignments) to rebuild both, tombstones
+(`journals/<tenant>/<journal>/`, their journal keys and assignments) to rebuild both, tombstones
 included; and a new control `JournalId` must reach machines whose cell plan is written once.
 
 Losing a control quorum is recoverable without unsafe Paxos surgery, at both levels, because
@@ -853,7 +859,7 @@ Simulation is the investment. Every milestone lands with its share of:
   in-limits write, a capacity slot booked at most once (a booking id never booked twice, across
   checkpoints), a tenant never reaching a journal outside its own
   `TenantId`, no component reaching a journal by an id it did not learn (the simulation draws
-  every frame, the system tenants' included, per seed).
+  every journal key, the system tenants' included, per seed).
 - Control-plane invariants: a child keeps serving through its parent's outage; folding from a
   checkpoint yields the same state as folding the full history; the fleet directory equals the union
   of the cells' tenant lists (assignments and counts), checked even with one cell (FDB's
@@ -888,7 +894,7 @@ stay as they are.
 ## 7. What changes against today
 
 Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
-ids and the frame, start-and-wait plus `init`, the uniform `parosd`) are in the history and
+ids and the journal key, start-and-wait plus `init`, the uniform `parosd`) are in the history and
 AGENTS.md.
 
 - The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
@@ -896,7 +902,7 @@ AGENTS.md.
   `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow.
-- The read-index path left in `paros-core` retires, and with it every unset frame that still
+- The read-index path left in `paros-core` retires, and with it every unset journal key that still
   means "the first journal" (#243).
 - The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
   levels: tenant names and desired state move into each tenant's control journal, capacity is
@@ -919,7 +925,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` frame, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the proxy, the proxy with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` journal key, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the proxy, the proxy with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router question |
