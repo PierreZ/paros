@@ -409,7 +409,9 @@ footprint it cannot book.
 
 A stateless process in front of the machines. It authorizes the caller through an `Authz` trait
 whose implementation verifies a Biscuit token (below), and it routes
-each call to the machine serving the journal, so a client never knows placement. Quotas are M10
+each call to the machine serving the journal, so a client never knows placement. It **proxies**
+calls and their answers rather than redirecting the client (decided on 2026-10-04): clients only
+ever reach front doors, which is what keeps the network the trust boundary. Quotas are M10
 (decided on 2026-10-04). Past the front door nothing knows a tenant name, only
 `(TenantId, JournalId)`.
 
@@ -555,7 +557,9 @@ metadata version lets a reader refuse a format it does not understand.
 
 **Tenant groups** (decided on 2026-10-04). A tenant belongs to a **set of groups**, recorded in
 the fleet directory's tenant entry when the tenant is registered and never changed afterwards.
-Each group carries a rule, and a tenant obeys the rules of every group it is in:
+Each group carries a rule, and a tenant obeys the rules of every group it is in. The set of
+groups is fixed by paros for now; operator-defined groups (rollout waves, co-location), as labels
+without rules, may come later (decided on 2026-10-04):
 
 | Group | Rule | Members |
 |---|---|---|
@@ -803,7 +807,9 @@ Four start masked, each with an issue to lift the mask: phantom writes (a write 
 synced that never lands loses an acknowledged vote, which no quorum survives), a hung disk (it
 needs a storage watchdog in the driver), barrier violations ("sync lies") and moonpool's
 slow-disk extremes (until a hunt shows whether paros stays live on them; if it does not, that is
-a finding, not a knob to clamp).
+a finding, not a knob to clamp). Matchmaker stores take damage too, under a minority or rolling
+pattern counted as the run's one matchmaker loss and exclusive with the matchmaker wipe, once
+matchmakers have a locality in the simulation.
 
 Zones are failure domains, and a cell spans enough of them for its quorums (section 3.7). What
 the WPaxos read (section 10) established for one region with several availability zones:
