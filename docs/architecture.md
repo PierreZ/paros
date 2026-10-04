@@ -553,25 +553,25 @@ metadata version lets a reader refuse a format it does not understand.
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through the fleet directory.
 
-**Tenant groups** (decided on 2026-10-04). One attribute of every tenant, recorded in the fleet
-directory's tenant entry when the tenant is registered and never changed afterwards:
+**Tenant groups** (decided on 2026-10-04). A tenant belongs to a **set of groups**, recorded in
+the fleet directory's tenant entry when the tenant is registered and never changed afterwards.
+Each group carries a rule, and a tenant obeys the rules of every group it is in:
 
-- **Group: `cells`, `fleets` or `users`, and nothing else** (amended on 2026-10-04: the earlier
-  `internal` group is split in two; group names are plural). The group separates the tenants paros needs to administrate
-  itself from the tenants it serves, and **it alone decides whether a tenant moves**:
+| Group | Rule | Members |
+|---|---|---|
+| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; no front door serves it | the fleet tenant, every cell tenant |
+| `cell` | **never leaves its cell**: it *is* its cell (section 1); reconfigured only within it | each cell's cell tenant |
+| `fleet` | holds the fleet directory; moves with its coordinator | the fleet tenant |
+| `users` | created by the tenant API (`parosctl tenant create`, the front door); served by front doors | every served tenant |
 
-  | Group | Who | Created by | Moves between cells |
-  |---|---|---|---|
-  | `cells` | each cell's cell tenant | `init`, or adding a cell (M12) | never: it *is* its cell (section 1) |
-  | `fleets` | the fleet tenant | `init` | yes, its coordinator with it |
-  | `users` | every served tenant | the tenant API (`parosctl tenant create`, the front door) | yes |
+So the fleet tenant is `{internal, fleet}`, a cell tenant `{internal, cell}` and a served tenant
+`{users}`. **The groups alone decide whether a tenant moves**: it moves unless one of its groups
+forbids it, and today only `cell` does. There is no per-tenant movability flag (a
+`movable`/`pinned` placement was dropped the same day); the fleet tenant refuses a move of a
+tenant in `cell` when it applies the move's first entry, so no step of the move runs. The tenant
+API creates tenants in `users` only, and the fleet tenant refuses any other group from it.
 
-  The tenant API creates `users` tenants only, and the fleet tenant refuses any other group from
-  it. A front door serves `users` tenants only. There is no per-tenant movability flag (a
-  `movable`/`pinned` placement was dropped the same day); the fleet tenant refuses a move of a
-  `cells` tenant when it applies the move's first entry, so no step of the move runs.
-
-**Moving a tenant (M12)**, of the `fleets` or `users` group, reconfigures its journals and matchmaker set onto the target cell, then
+**Moving a tenant (M12)**, any tenant outside the `cell` group, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
@@ -623,7 +623,7 @@ assumed, and unset is a state to refuse, not a value to fall back on.
   cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
   fleet tenant gets one when `init` creates the fleet, kept when the fleet tenant moves. The fleet tenant records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
-  covers them too. The fleet tenant records each tenant's group (`cells`, `fleets` or `users`) beside its id
+  covers them too. The fleet tenant records each tenant's groups beside its id
   (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
   checked by the fleet tenant needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
@@ -1073,8 +1073,8 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   kept as the future answer if write amplification is ever measured as the bottleneck, since it
   changes `paros-core`'s read semantics; the decision is #227.
 - **A `pinned` flag per tenant** (2026-10-04, dropped the same day). A creator's pin would block
-  rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and the
-  tenant group says so (section 3.7).
+  rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and its
+  `cell` group says so (section 3.7).
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
   the front door as the rendezvous: #216.
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
