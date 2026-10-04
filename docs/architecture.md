@@ -357,7 +357,13 @@ tenant's directory entry carries a state: `REGISTERING`, `READY`, `REMOVING`,
 writes it into meta's directory in `REGISTERING` with a cell assignment (always the one cell
 today), creates the tenant in its cell, then marks it `READY`. If an operation fails partway,
 re-running the same operation is allowed and resumes where it stopped; on success the tenant
-returns to `READY`. A tenant in any state may be removed; only a `READY` or
+returns to `READY`. **A tenant is created once** (decided on 2026-10-04): a creation is named by
+the tenant id its creator drew, so only a re-run carrying that id resumes it; any other creation
+of a name meta holds, in any state and whatever its placement, is refused (`NameTaken`), never
+merged into the first. Until #225 the client drives the steps, so an interrupted creation stays
+`REGISTERING` until it is deleted; with #225 the coordinator that owns the control journal
+finishes every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is
+the work order, no client resumes another's creation). A tenant in any state may be removed; only a `READY` or
 `UPDATING_CONFIGURATION` tenant may be reconfigured. `init` follows the same rule. Cell entries
 carry a state too: `REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a `READY` cell
 receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `init`, and
@@ -644,7 +650,12 @@ Verification is not a milestone: every milestone carries its own share of sectio
 
 ## 9. The toy, done means
 
-From a fresh clone: `docker compose up`, then `parosctl init` against one seed, which creates the
+The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
+(decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
+simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
+`front1`); the rendezvous list that names the first three is the `seeds` alias.
+
+From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 fleet, its one cell and the meta tenant. Create a tenant through meta and mint its JWT. Create a
 journal. `write`, `read` and `tail` from `parosctl`. `set-leader` to a second client and see the
 first one refused, for a `write` and for a `truncate`. Kill one `storage` and one `stateless`

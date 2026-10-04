@@ -8,8 +8,11 @@
 //! (`paros::client::bootstrap::cell_frames`). The cell coordinator is
 //! whoever owns the cell control journal (claimed at `init`), and in M9 it
 //! coordinates meta too (§3.7: the fleet's one cell hosts meta): every
-//! operation here writes both journals under its id. A crashed or
-//! interrupted operation is resumed by running the same command again.
+//! operation here writes both journals under its id. An interrupted `init`
+//! or `delete` is resumed by running the same command again; a tenant is
+//! created once, so a second `create` of a name is refused, and an
+//! interrupted creation stays `REGISTERING` until it is deleted (or, with
+//! #225, finished by the coordinator).
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -21,7 +24,7 @@ use paros::client::bootstrap::cell_frames;
 use paros::client::fleet::{
     FleetFrames, FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, read_meta,
 };
-use paros::meta::Placement;
+use paros::meta::{Placement, TenantState};
 use paros::system::Registry;
 use paros::{JournalId, JournalKey, NodeId, Read, TenantId};
 use serde_json::json;
@@ -50,8 +53,8 @@ pub struct TenantArgs {
 #[derive(Subcommand, Debug)]
 enum TenantCommand {
     /// Create a `users` tenant (`REGISTERING` in meta, hosted by the cell,
-    /// then `READY`). A re-run resumes an interrupted creation of the same
-    /// name. The CLI never creates an `internal` tenant.
+    /// then `READY`). A tenant is created once: a name meta holds, in any
+    /// state, is refused. The CLI never creates an `internal` tenant.
     Create {
         /// The tenant's name.
         name: String,
@@ -125,9 +128,16 @@ pub fn refusal_text(refusal: &FleetRefusal) -> String {
         ),
         FleetRefusal::CellRemoving => "cell_removing".into(),
         FleetRefusal::IdTaken => "id_taken".into(),
-        FleetRefusal::NameBusy { tenant, state } => {
-            format!("name_busy: tenant {} is {}", tenant.0, state.as_str())
-        }
+        FleetRefusal::NameTaken { tenant, state } => format!(
+            "name_taken: tenant {} is {}{}",
+            tenant.0,
+            state.as_str(),
+            if *state == TenantState::Registering {
+                " (an interrupted creation: delete it to create the name again)"
+            } else {
+                ""
+            }
+        ),
         FleetRefusal::Removed { tenant } => {
             format!(
                 "removed: tenant {} was removed while being created",

@@ -62,8 +62,11 @@ tenant in meta (`REGISTERING`, under a random id and a random control journal,
 movable unless `--pinned`), has the cell host it, then marks it `READY`; the
 CLI never creates an `internal` tenant (meta and the cell tenant, which `init`
 registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
-it, then removes it; `parosctl tenant list` prints meta. A crashed or
-interrupted one is resumed by running it again. A tenant's footprint and its
+it, then removes it; `parosctl tenant list` prints meta. An interrupted
+delete is resumed by running it again. A tenant is created once: a second
+`create` of a name meta holds is refused (`name_taken`), and an interrupted
+creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
+finish it). A tenant's footprint and its
 own control journal are not created yet (#210, #225).
 
 **Write and read.** `parosctl` is handed addresses only: `--servers seeds:4500`
@@ -219,7 +222,7 @@ and both required: there is no default tenant and no fixed id (#235,
 | command | what it does |
 |---|---|
 | `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in meta (#229); resumes an interrupted init, refused on an initialized fleet |
-| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates or removes a tenant through meta's directory and the cell, resuming an interrupted run; lists meta's fleet, cells and tenants (#229) |
+| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through meta's directory and the cell; lists meta's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |

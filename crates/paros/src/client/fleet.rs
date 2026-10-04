@@ -135,8 +135,9 @@ pub enum FleetRefusal {
     /// Every tenant frame drawn is held by an entry or was removed: draw
     /// more.
     IdTaken,
-    /// The name is held by a tenant in a state creation cannot resume.
-    NameBusy {
+    /// The name is held by another creation's tenant, in any state: a
+    /// tenant is created once, and only a run carrying its frame resumes it.
+    NameTaken {
         /// The tenant holding it.
         tenant: TenantId,
         /// Its state.
@@ -370,10 +371,13 @@ impl FleetSession {
         }
     }
 
-    /// One step of creating the `users` tenant `name` with `placement`,
-    /// under the frame `draw` (its id and its control journal's) unless meta
-    /// holds the name in `REGISTERING` already (whose frame is resumed).
-    /// Ends with the tenant's id once meta holds it `READY`.
+    /// One step of creating the `users` tenant `name` with `placement`
+    /// under the frame `draw` (its id and its control journal's). The frame
+    /// names the creation: when meta holds `name` under `draw`, the step
+    /// resumes it; under any other frame, in any state, it is refused
+    /// ([`FleetRefusal::NameTaken`]), since a tenant is created once
+    /// (`docs/architecture.md` §3.7). Ends with the tenant's id once meta
+    /// holds it `READY`.
     #[tracing::instrument(level = "trace", skip_all, fields(tenant = draw.tenant.0))]
     pub async fn create_step<P: Providers>(
         &mut self,
@@ -410,6 +414,12 @@ impl FleetSession {
                 .write_meta(client, first, fleet, register, Stage::RegisterTenant)
                 .await;
         };
+        if tenant != draw.tenant || entry.control != draw.journal {
+            return Step::Refused(FleetRefusal::NameTaken {
+                tenant,
+                state: entry.state,
+            });
+        }
         let cell_id = match entry.state {
             TenantState::Ready => {
                 return Step::Done {
@@ -418,7 +428,7 @@ impl FleetSession {
                 };
             }
             TenantState::Registering => entry.cell_id,
-            state => return Step::Refused(FleetRefusal::NameBusy { tenant, state }),
+            state => return Step::Refused(FleetRefusal::NameTaken { tenant, state }),
         };
         if let Err(stop) = self.cell_of(client, first, fleet, cell_id).await {
             return stop;

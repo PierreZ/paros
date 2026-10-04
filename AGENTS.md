@@ -244,7 +244,9 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   `pinned`, the creator's choice). Fleet operations (`init`'s fleet half, tenant create
   and remove) are idempotent state machines over meta and the cell control journal
   (`paros::client::fleet`): one write per step, every entry fenced by its fleet id, resumed from
-  what the journals hold.
+  what the journals hold. A tenant is created once: a creation is named by its drawn frame, and
+  any other creation of a held name is refused (`NameTaken`); finishing an interrupted one is the
+  coordinator's job (#225), never another client's.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are

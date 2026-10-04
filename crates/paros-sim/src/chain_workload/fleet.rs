@@ -53,7 +53,8 @@ const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 #[derive(Clone, Debug)]
 enum Pending {
     Init,
-    Create(Vec<u8>, Placement),
+    /// The name, its placement and the frame this client's creation drew.
+    Create(Vec<u8>, Placement, JournalKey),
     Remove(Vec<u8>),
 }
 
@@ -211,17 +212,29 @@ impl FleetOps {
         let crash = buggify_with_prob!(0.2);
         if class % 2 == 0 {
             if crash {
+                let frame = tenant_frame(payload);
                 let step = session
-                    .create_step(&client, first, &name, placement, tenant_frame(payload))
+                    .create_step(&client, first, &name, placement, frame)
                     .await;
                 if let Step::Advanced(_) = step {
                     assert_reachable!("fleet: a tenant creation stops after one step");
-                    self.pending = Some(Pending::Create(name, placement));
+                    self.pending = Some(Pending::Create(name, placement, frame));
                 }
                 return;
             }
-            self.create(&client, &mut session, first, (name, placement), payload)
-                .await;
+            let draws = vec![
+                tenant_frame(payload),
+                tenant_frame(payload.rotate_left(23) ^ 0x7e57),
+            ];
+            self.create(
+                &client,
+                &mut session,
+                first,
+                (name, placement),
+                draws,
+                payload,
+            )
+            .await;
         } else {
             if crash {
                 if let Step::Advanced(_) = session.remove_step(&client, first, &name).await {
@@ -251,12 +264,15 @@ impl FleetOps {
         let mut session = self.session(self.frames, policy);
         let ended = match &pending {
             Pending::Init => self.finish_init(&client, &mut session, first, draw).await,
-            Pending::Create(name, placement) => {
+            Pending::Create(name, placement, frame) => {
+                // Only this creation's own frame resumes it (a tenant is
+                // created once).
                 self.create(
                     &client,
                     &mut session,
                     first,
                     (name.clone(), *placement),
+                    vec![*frame],
                     draw,
                 )
                 .await
@@ -307,13 +323,15 @@ impl FleetOps {
         }
     }
 
-    /// Create `name` with `placement` to its end; whether it ended.
+    /// Create `name` with `placement` under the first of `draws` meta does
+    /// not hold, to its end; whether it ended.
     async fn create(
         &mut self,
         client: &ChainClient,
         session: &mut FleetSession,
         first: usize,
         (name, placement): (Vec<u8>, Placement),
+        draws: Vec<JournalKey>,
         draw: u64,
     ) -> bool {
         // A frame this client had created — the collision a random u64 never
@@ -334,12 +352,15 @@ impl FleetOps {
                 assert_reachable!("fleet: a duplicate tenant id is refused");
             }
         }
-        let draws = [
-            tenant_frame(draw),
-            tenant_frame(draw.rotate_left(23) ^ 0x7e57),
-        ];
         let run = session
-            .create_tenant(client, first, &name, placement, draws, Duration::ZERO)
+            .create_tenant(
+                client,
+                first,
+                &name,
+                placement,
+                draws.clone(),
+                Duration::ZERO,
+            )
             .await;
         self.created(session, &name, placement, &run);
         match run.outcome {
@@ -354,6 +375,16 @@ impl FleetOps {
                     { "client" => self.client_id }
                 );
                 assert_reachable!("fleet: a tenant operation before init is refused");
+                true
+            }
+            Step::Refused(FleetRefusal::NameTaken { tenant, .. }) => {
+                let holder = session.meta().named(&name).map(|(t, _)| t);
+                assert_always!(
+                    holder == Some(tenant) && draws.iter().all(|d| d.tenant != tenant),
+                    "fleet: a second creation of a name is refused for another frame",
+                    { "tenant" => tenant.0 }
+                );
+                assert_reachable!("fleet: a second creation of a name is refused");
                 true
             }
             Step::Refused(FleetRefusal::Removed { .. }) => {
