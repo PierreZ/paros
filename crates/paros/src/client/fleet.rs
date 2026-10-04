@@ -59,7 +59,7 @@ use super::checkpoint::{
     AppendOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome,
 };
 use super::outcome::ClaimOutcome;
-use super::writer::WriterOutcome;
+use super::writer::{Writer, WriterOutcome};
 use crate::machine::CELL_CONTROL;
 use crate::meta::{CellState, META, METADATA_VERSION, Meta, MetaCommand, MetaEntry, TenantState};
 use crate::system::{FleetRegistration, Registry, SystemCommand};
@@ -226,6 +226,29 @@ impl FleetSession {
     #[must_use]
     pub fn cell(&self) -> &Registry {
         self.cell.state()
+    }
+
+    /// The writers of meta and of the cell's control journal: the
+    /// generation each owns and the position it writes next.
+    #[must_use]
+    pub fn writers(&self) -> (&Writer, &Writer) {
+        (self.meta.writer(), self.cell.writer())
+    }
+
+    /// Claim and fold both journals — the cell's, then meta — unless this
+    /// session holds them already: for a caller that reads the two folds
+    /// side by side (a consistency check).
+    ///
+    /// # Errors
+    ///
+    /// A claim or a fold that did not reach its tail.
+    pub async fn open<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        self.open_cell(client, first).await?;
+        self.open_meta(client, first).await
     }
 
     /// One step of `init`'s fleet half. The cell's side is written first

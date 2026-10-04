@@ -1305,7 +1305,7 @@ fn quiet_faults(ctx: &SimContext) -> StorageFaults<SimTimeProvider> {
 }
 
 /// Arm the system journals on a genesis node (#189): the board, the seats of
-/// the system journals on a seed, every seat's port reporting to the board, and
+/// the system journals (and meta's, #229) on a seed, every seat's port reporting to the board, and
 /// the plan the driver follows them by.
 fn system_rig(
     ctx: &SimContext,
@@ -1321,7 +1321,12 @@ fn system_rig(
         seat.audit = seat.audit.clone().with_system(board.clone());
     }
     if seeds.contains(&self_rank) {
-        for journal in [paros::system::DIRECTORY, paros::system::REGISTRY] {
+        // Meta (#229) lives beside them: the fleet's one cell hosts it.
+        for journal in [
+            paros::system::DIRECTORY,
+            paros::system::REGISTRY,
+            paros::meta::META,
+        ] {
             let config = Config {
                 journal,
                 id: self_rank,

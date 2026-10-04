@@ -20,7 +20,8 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `chain_workload.rs` → `ChainWorkload`, `ChainConfig` → the op alphabet, weights, reconfiguration shape rings.
 - `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
-- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`).
+- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals.
+- `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229): `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step and changed-identity shapes, and the check that meta's directory equals the cell's tenant list (run only when both folds are one instant's).
 - `world/mod.rs` → `StorageWorld`, `storage_world_for` → fake disk, copy budget, parked ids, provisioning ledger, reconfiguration ledger.
 - `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
 - `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
@@ -57,8 +58,8 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
   window (`hold_journal`). The first is `JournalKey::default()`; the others' frames are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
-  injected corruption. `system_journals` → the directory and the registry on half the seeds, on `SEED_COUNT`
-  (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
+  injected corruption. `system_journals` → the directory, the registry and meta (#229) on half the seeds, on
+  `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
 
@@ -75,7 +76,9 @@ capacity, and a registered joiner registering again is a reboot, #211) · `SET_L
 the generation) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
 `BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
-#211) · `OP_COUNT=25`. Retired ids are no-ops that keep their slot in the alphabet.
+#211) · `FLEET_INIT=25` (`init`'s fleet half through `paros::client::fleet`, #229) · `TENANT=26`
+(create or remove a tenant through meta and the cell; either may stop after one step, a BUGGIFY
+crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired ids are no-ops that keep their slot in the alphabet.
 
 - Each client is an **owner** or a **reader** for the run (knob; each journal's first client
   owns). Owners claim before writing and re-claim when superseded.

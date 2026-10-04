@@ -245,7 +245,11 @@ fn a_laptop_cell_inits_writes_reads_restarts_and_refuses_what_it_must() {
     // Init's fleet steps (#229): the cell recorded its fleet, and meta —
     // served by the seeds as `1/1` — lists the fleet and the cell `READY`.
     assert!(exists(
-        &cluster.data_dir("seed0").join("journals").join("1").join("1")
+        &cluster
+            .data_dir("seed0")
+            .join("journals")
+            .join("1")
+            .join("1")
     ));
     let fleet = initialized["fleet"].as_u64().expect("a fleet id");
     assert_ne!(fleet, 0, "{initialized}");

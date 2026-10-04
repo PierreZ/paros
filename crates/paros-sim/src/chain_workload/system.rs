@@ -113,21 +113,33 @@ pub(super) struct SystemOps {
 }
 
 /// The system journals' half of the audit's write oracles, as a
-/// [`CallObserver`]: a library call that writes to `journal` (a
-/// [`Checkpointer`]'s) announces its records and its exact write before it
-/// leaves, like every hand-built system append here does.
-struct Announce {
-    journal: JournalKey,
-    audit: Arc<crate::audit::AuditWorld>,
+/// [`CallObserver`]: a library call that writes to one of `journals` (a
+/// [`Checkpointer`]'s, a fleet operation's) announces its records and its
+/// exact write to that journal's audit before it leaves, like every
+/// hand-built system append here does.
+pub(super) struct Announce {
+    journals: Vec<(JournalKey, Arc<crate::audit::AuditWorld>)>,
+}
+
+impl Announce {
+    /// An observer announcing the writes to each of `journals`.
+    pub(super) fn new(ctx: &SimContext, journals: &[JournalKey]) -> Self {
+        Self {
+            journals: journals
+                .iter()
+                .map(|journal| (*journal, audit_world_for(ctx.state(), *journal)))
+                .collect(),
+        }
+    }
 }
 
 impl CallObserver for Announce {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
         if let Attempted::Write(write) = attempt
-            && attempt.journal() == self.journal
+            && let Some((_, audit)) = self.journals.iter().find(|(j, _)| *j == attempt.journal())
         {
             for record in &write.records {
-                self.audit.note_submitted(user_command_hash(record));
+                audit.note_submitted(user_command_hash(record));
             }
             let entry = Entry {
                 generation: Generation(write.generation),
@@ -135,8 +147,7 @@ impl CallObserver for Announce {
                 seq: Seq(write.seq),
                 records: write.records.iter().cloned().map(Value).collect(),
             };
-            self.audit
-                .note_appended(paros::command_hash(&Command::Write(entry)));
+            audit.note_appended(paros::command_hash(&Command::Write(entry)));
         }
         None
     }
@@ -201,10 +212,7 @@ impl SystemOps {
         let seeds = self.seeds.min(nodes.server_count()).max(1);
         nodes
             .clone()
-            .with_observer(Arc::new(Announce {
-                journal,
-                audit: audit_world_for(ctx.state(), journal),
-            }))
+            .with_observer(Arc::new(Announce::new(ctx, &[journal])))
             .rotating_over(seeds)
     }
 
