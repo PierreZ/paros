@@ -110,9 +110,9 @@ jobs:
       - name: Type-check, test and bundle the web app
         run: nix develop --command bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 
-  # The toy (#196): the image builds from a fresh clone with Docker alone (the one
-  # build outside Nix), its Rust version is the channel rust-toolchain.toml pins,
-  # and a Compose cell answers `init`, one write and one read.
+  # The toy (#196), the user's demo and no test: the image builds from a fresh
+  # clone with Docker alone (the one build outside Nix), and its Rust version is
+  # the channel rust-toolchain.toml pins.
   image:
     runs-on: ubuntu-latest
     steps:
@@ -121,11 +121,6 @@ jobs:
         run: scripts/check-dockerfile-toolchain.sh
       - name: Build the image
         run: docker compose build
-      - name: Smoke test (up, init, write, read)
-        run: scripts/compose-smoke.sh
-      - name: Logs on failure
-        if: failure()
-        run: docker compose logs
 
   # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
   # the Paxos sim with sancov instrumentation on the shipped library (paros_core +

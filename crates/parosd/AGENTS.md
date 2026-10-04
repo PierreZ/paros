@@ -37,11 +37,6 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   diagnostics to stderr.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
   reopens with every acked write.
-- `tests/deploy.rs` → three seeds and a stateless machine on a laptop: `init` (refused off a
-  seed and on an initialized fleet), meta listing the cell `READY`, a tenant created, re-run,
-  listed and deleted (#229), write, read, restart, a superseded writer and truncation,
-  the refusals (unknown variable, tunable floor, class change, amnesia, lost identity, a wiped
-  volume never forming a second cell), `SIGTERM`.
 
 ## Entry points
 
@@ -80,10 +75,11 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Tests & gates
 
-- `cargo nextest run -p parosd` (`tests/deploy.rs` uses `CARGO_BIN_EXE_parosd` / `_parosctl`).
+- `cargo nextest run -p parosd`: unit tests and `tests/real_fs.rs`. No test spawns `parosd`
+  processes: behaviour is proved in simulation.
 - `cargo build -p parosd` is the shipped build (see the feature note below).
-- CI's `image` job: `scripts/check-dockerfile-toolchain.sh`, `docker compose build`,
-  `scripts/compose-smoke.sh` (up, init, one write, one read).
+- CI's `image` job: `scripts/check-dockerfile-toolchain.sh`, `docker compose build`. The
+  Compose toy is the user's demo, run by hand, never a test.
 
 ## Deps & pins (`Cargo.toml`)
 

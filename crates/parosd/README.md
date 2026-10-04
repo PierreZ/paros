@@ -30,7 +30,7 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 
 | machine | class | failure domain | role today |
 |---|---|---|---|
-| `seed1`, `seed2`, `seed3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
+| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
 | `front1` | `stateless` | `zone-b` | waits for placement (M9) |
 
@@ -40,7 +40,7 @@ rendezvous — here `seeds:4500`, which resolves to the three seeds. On its firs
 start it **mints its `node_id`** at random and records it in its data directory
 (there is no `PAROS_ID`), then waits. A machine never forms a cell on its own.
 
-**Init.** `parosctl init` goes to one seed (`seed1`, which every seed's join
+**Init.** `parosctl init` goes to one seed (`node1`, which every seed's join
 list names). That seed identifies every seed, mints the cell's id, records the
 plan, forms every other seed and then itself; every seed then serves the **cell
 control journal**, **meta's control journal** (the fleet's directory: the
@@ -71,9 +71,9 @@ stands for every seed, and each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
 generation it read), then writes at the tail.
 
-**Kill and restart.** `docker compose kill seed2` (a storage machine) and
+**Kill and restart.** `docker compose kill node2` (a storage machine) and
 `docker compose kill front1` (a stateless one): the journal keeps a majority and
-keeps taking writes. `docker compose start seed2` brings the machine back as an
+keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
@@ -85,24 +85,23 @@ applies.
 **Lose a disk.** Two ways, both refused:
 
 - *the stores, not the identity* (`docker compose run --rm --entrypoint sh
-  seed2 -c 'rm -rf /var/lib/paros/journals'` while `seed2` is stopped): the next
+  node2 -c 'rm -rf /var/lib/paros/journals'` while `node2` is stopped): the next
   start finds stores without their format marker and stops with **amnesia**
   (exit 78). Losing one journal's store alone parks that journal on the machine
   and keeps serving the others.
-- *the whole volume* (`docker compose rm -sf seed2 && docker volume rm
-  paros_seed2 && docker compose up -d seed2`): the machine comes back as a **new
+- *the whole volume* (`docker compose rm -sf node2 && docker volume rm
+  paros_node2 && docker compose up -d node2`): the machine comes back as a **new
   machine** with a new `node_id`, and waits. It never rejoins as the old one: an
   `init` sent to it (`docker compose run --rm --entrypoint parosctl parosctl
-  --servers seed2:4500 init`) is refused (`cell_exists`), since the other seeds
+  --servers node2:4500 init`) is refused (`cell_exists`), since the other seeds
   serve the cell. Healing the cell around it is reconfiguration onto another machine,
   driven by the tenant coordinator in M9.
 
 **What is not proven in simulation yet.** The journals' protocol, the driver
 and the stores are the code the deterministic simulation runs. The machine
 phase — formatting an identity, waiting, `init` and `FormCell` — and the
-uniform start are not in the simulation yet (#216); the deploy test
-(`tests/deploy.rs`) runs them on a laptop, and CI runs the Compose smoke test
-(`scripts/compose-smoke.sh`).
+uniform start are not in the simulation yet (#216). This toy is a demo to run
+by hand: no test runs it, and CI only builds its image.
 
 ## Without Docker
 

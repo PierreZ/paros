@@ -43,9 +43,9 @@ A cell of five machines with Docker alone, from a fresh clone:
 
 ```sh
 docker compose up -d --build
-docker compose run --rm init
-docker compose run --rm parosctl write 256 hello world --owner 7
-docker compose run --rm parosctl read 256
+docker compose run --rm init        # prints journals=T/J
+docker compose run --rm parosctl write T/J hello world --owner 7
+docker compose run --rm parosctl read T/J
 ```
 
 The walkthrough — init, write and read, kill and restart a machine, supersede a
