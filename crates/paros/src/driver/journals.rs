@@ -197,6 +197,13 @@ pub(crate) struct Journals<S, A> {
     /// tenant's directory): no frame is fixed (§3.8), so the deployment says
     /// which they are. They serve no user plane and outlive a retirement.
     control: BTreeSet<JournalKey>,
+    /// The journal whose configuration carries the deployment (matchmakers,
+    /// proxy leaders, replicas), once one booted here: the plane, whether it
+    /// is live now or not.
+    deployed: Option<JournalKey>,
+    /// Every journal that booted in this incarnation: the ones whose
+    /// configuration this node has read.
+    booted: BTreeSet<JournalKey>,
 }
 
 impl<S, A> Journals<S, A> {
@@ -208,7 +215,19 @@ impl<S, A> Journals<S, A> {
             down: BTreeSet::new(),
             newly_quarantined: Vec::new(),
             last_fault: None,
+            deployed: None,
+            booted: BTreeSet::new(),
         }
+    }
+
+    /// `journal` booted: it is live, and its configuration is known.
+    pub(crate) fn insert(&mut self, journal: JournalKey, rt: JournalRt<S, A>) {
+        let config = rt.node.config();
+        if config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0 {
+            self.deployed.get_or_insert(journal);
+        }
+        self.booted.insert(journal);
+        self.live.insert(journal, rt);
     }
 
     /// Whether `journal` is one this node serves at all (live, quarantined
@@ -231,19 +250,27 @@ impl<S, A> Journals<S, A> {
         self.live.iter_mut().find(|(journal, _)| **journal == key)
     }
 
-    /// [`Journals::first`], read-only.
+    /// [`Journals::first`], read-only: the journal that carries the
+    /// deployment, or, on a node with none, its first user journal. `None`
+    /// while the plane is not live here, or while a journal that never
+    /// booted could be it: answering from another journal would be a lie
+    /// (a `no_matchmakers` refusal from a plain journal while the
+    /// matchmaker journal is quarantined).
     pub(crate) fn plane(&self) -> Option<(&JournalKey, &JournalRt<S, A>)> {
-        let users = || {
-            self.live
-                .iter()
-                .filter(|(journal, _)| !self.control.contains(journal))
-        };
-        users()
-            .find(|(_, rt)| {
-                let config = rt.node.config();
-                config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0
-            })
-            .or_else(|| users().next())
+        if let Some(key) = self.deployed {
+            return self.live.get_key_value(&key);
+        }
+        let unknown = self
+            .quarantined
+            .keys()
+            .chain(&self.down)
+            .any(|journal| !self.booted.contains(journal) && !self.control.contains(journal));
+        if unknown {
+            return None;
+        }
+        self.live
+            .iter()
+            .find(|(journal, _)| !self.control.contains(journal))
     }
 
     /// Whether `journal` is one of the deployment's control journals.

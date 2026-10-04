@@ -1732,7 +1732,7 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
     };
     match boot_journal(providers, storage, boot, audit, tunables, hooks).await {
         Ok(rt) => {
-            journals.live.insert(journal, rt);
+            journals.insert(journal, rt);
             stores.opened(journal);
         }
         Err(fault @ RunError::Storage(_)) => journals.requarantine(journal, now, fault),
