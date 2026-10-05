@@ -677,6 +677,16 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// [`journal_store`]: half the seeds keep #188's static deployment. On a
 /// seed with matchmakers a joiner the registry admits joins the default
 /// journal as a spare a reconfiguration may pull in.
+///
+/// The fleet operations (#229) ride this draw — meta and the cell's control
+/// journal are system journals — and stay on it (#247 item 9, decided from
+/// the sweep's coverage on 2026-10-05): with every control-plane oracle of
+/// #247 in place, `cargo xtask sim run paros-chain` saturated in 624 seeds,
+/// every fleet gate fired, so the 50% draw costs the control plane no reach,
+/// while the other half keeps the static deployment and the refusal parity
+/// of a system append on a seed without system journals. The rarest fleet
+/// gate ("a tenant removal resumed after a crash") is bounded by the
+/// `TENANT` weight and the name alphabet, not by this draw.
 #[tracing::instrument(level = "debug", skip(state), fields(perturb))]
 pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
     let registry = registry(state);
