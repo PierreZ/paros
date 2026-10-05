@@ -35,6 +35,7 @@ use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod fleet;
 mod fold;
+mod foreign;
 mod races;
 mod rpc;
 mod system;
@@ -1451,6 +1452,27 @@ impl Workload for ChainWorkload {
             // leader — the stale-hint edge `WRITE_TO_NON_LEADER` reaches only
             // deliberately.
             let ignore_hint = (raw_policy >> 2) % 8 == 0;
+
+            // The cross-tenant attack (#247), its own location: a write, a
+            // truncation or a claim sent under a frame that is not this
+            // journal's — another tenant's journal, or a frame nobody serves
+            // — must be refused, and never reach the other journal.
+            if matches!(op, WRITE | TRUNCATE | SET_LEADER) && buggify_with_prob!(0.1) {
+                let journals = self
+                    .plan
+                    .as_ref()
+                    .map(|plan| plan.ids.clone())
+                    .unwrap_or_default();
+                foreign::attack(
+                    ctx,
+                    &nodes,
+                    (op, &writer),
+                    (journal, &journals),
+                    (target, raw_payload),
+                    request_timeout,
+                )
+                .await;
+            }
 
             match op {
                 WRITE | WRITE_TO_NON_LEADER => {

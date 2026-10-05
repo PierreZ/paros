@@ -429,6 +429,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "an applied slot was decided by a durable accept quorum before any node applied it",
             { "node" => node.0, "slot" => slot.0 }
         );
+        if command.write().is_some() && st.foreign.contains(&vhash) {
+            assert_always!(
+                !matches!(
+                    outcome,
+                    Some(paros::Outcome::Accepted { .. } | paros::Outcome::Duplicate { .. })
+                ),
+                "journal: a write under another tenant's fence is refused at apply",
+                { "node" => node.0, "slot" => slot.0 }
+            );
+        }
         st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
         drop(st);

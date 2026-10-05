@@ -79,6 +79,16 @@ impl AuditWorld {
         self.lock().appended.insert(vhash);
     }
 
+    /// A client sent the write hashing to `vhash` to this world's journal
+    /// under **another** journal's fence (#247, the cross-tenant attack): it
+    /// was appended here, so a slot may hold it, but every verdict on it
+    /// must be a refusal.
+    pub(crate) fn note_foreign(&self, vhash: u64) {
+        let mut st = self.lock();
+        st.appended.insert(vhash);
+        st.foreign.insert(vhash);
+    }
+
     /// The hash of the record the nodes' verdicts accepted at `position`
     /// (#204) — what a journal read's record there must hash to. `None`
     /// when the audit has not seen it accepted.
