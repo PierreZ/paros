@@ -216,7 +216,8 @@ impl SystemOps {
     }
 
     /// The client of the seeds — the nodes hosting the system journals —
-    /// that announces its system writes to `journal`'s audit.
+    /// that announces its system writes to `journal`'s audit, under a leader
+    /// hint of its own (the hint `nodes` carries is its own journal's).
     fn seed_client(
         &self,
         ctx: &SimContext,
@@ -226,6 +227,7 @@ impl SystemOps {
         let seeds = self.seeds.min(nodes.server_count()).max(1);
         nodes
             .clone()
+            .with_own_leader_hint()
             .with_observer(Arc::new(Announce::new(ctx, &[journal])))
             .rotating_over(seeds)
     }

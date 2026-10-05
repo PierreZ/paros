@@ -114,10 +114,14 @@ impl FleetOps {
         )
     }
 
-    /// The seeds' client, announcing every write to meta and the registry.
+    /// The seeds' client, announcing every write to meta and the registry,
+    /// under a leader hint of its own: the hint of the client it is cloned
+    /// from names the client's own journal's leader, which need not serve
+    /// meta or the registry at all.
     fn client(&self, ctx: &SimContext, nodes: &ChainClient) -> ChainClient {
         nodes
             .clone()
+            .with_own_leader_hint()
             .with_observer(std::sync::Arc::new(Announce::new(
                 ctx,
                 &[self.frames.meta, self.frames.cell],
