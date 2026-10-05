@@ -910,8 +910,9 @@ stay as they are.
 
 Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
 ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`, the retired
-read-index path and the unset `JournalIdentifier`s that meant "the first journal", #243) are in
-the history and AGENTS.md.
+read-index path and the unset `JournalIdentifier`s that meant "the first journal", #243; the
+fleet tenant, `JournalIdentifier` and proxy renames in the code, #244) are in the history and
+AGENTS.md.
 
 - The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
   `SetLeader(new, old)`, with a hidden term counter in the core; `Write` takes an explicit
@@ -926,7 +927,6 @@ the history and AGENTS.md.
   and replicas follow (#193).
 - The coordinators replace the operator's client: `parosctl` stops writing as the lowest seed's
   node id (#240, #212).
-- The meta tenant is renamed the fleet tenant in the code (#244).
 - The in-memory "world" stores of the simulation retire; every role runs on moonpool-journal
   under at least the same chaos (section 5, #176, #202).
 
@@ -956,7 +956,7 @@ deferred and carries no milestone yet. The interactive game and the lessons (`tr
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`front1`); the rendezvous list that names the first three is the `seeds` alias.
+`proxy1`); the rendezvous list that names the first three is the `seeds` alias.
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 fleet, its one cell and the fleet tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and

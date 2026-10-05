@@ -106,7 +106,7 @@ fn fresh(id: u64) -> ColocatedNode {
     let config = Config {
         peers: (0..6).map(NodeId).collect(),
         quorum_system: GRID,
-        ..Config::new(NodeId(id), paros_core::JournalKey::UNSET)
+        ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
     };
     ColocatedNode::new(&FreshStore { config })
 }

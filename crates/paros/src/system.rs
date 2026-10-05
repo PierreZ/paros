@@ -6,7 +6,7 @@
 //! every node learns them by reading them.
 //!
 //! This module is the one reading of their entries: the typed
-//! [`SystemCommand`] a client writes (one record per position, framed by
+//! [`SystemCommand`] a client writes (one record per position, encoded by
 //! [`SystemCommand::encode`]), and the two pure folds — [`Directory`] and
 //! [`Registry`] — that every node, and every client reading back its own
 //! request, runs over the chosen entries in position order. A fold is a function
@@ -43,7 +43,7 @@
 //!   The cell's side of the fleet (#229, §3.7): `JoinFleet` records, once,
 //!   the fleet this cell belongs to and its own `cell_id` (`init` step 3),
 //!   and `HostTenant` / `DropTenant` the tenants it hosts — the cell's
-//!   tenant list, which meta's directory ([`crate::meta`]) must equal.
+//!   tenant list, which the fleet directory ([`crate::fleet`]) must equal.
 //!   Every one names its fleet, and an entry naming another fleet than the
 //!   one the cell joined is refused; a repeat folds to
 //!   [`RegistryEvent::Unchanged`], so a re-run step is harmless.
@@ -60,7 +60,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{AcceptorConfig, JournalId, JournalKey, NodeId, TenantId};
+use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, NodeId, TenantId};
 use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
@@ -69,7 +69,7 @@ pub use crate::machine::Class;
 use crate::rpc::system as wire;
 use crate::rpc::{config_from_proto, config_to_proto};
 
-// The two system journals have no fixed frame (§3.8): a deployment draws
+// The two system journals have no fixed identifier (§3.8): a deployment draws
 // both and hands them to whoever folds them (`crate::SystemPlan`).
 
 /// One system-journal entry, as a client appends it and a fold reads it.
@@ -126,7 +126,7 @@ pub enum SystemCommand {
         /// The slot's class.
         class: Class,
         /// The journal the slot is for.
-        journal: JournalKey,
+        journal: JournalIdentifier,
     },
     /// Release a booking.
     ReleaseCapacity {
@@ -262,7 +262,7 @@ impl SystemCommand {
                 booking: book.booking,
                 node: NodeId(book.node),
                 class: book.class.parse()?,
-                journal: JournalKey::new(TenantId(book.tenant), JournalId(book.journal)),
+                journal: JournalIdentifier::new(TenantId(book.tenant), JournalId(book.journal)),
             },
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
@@ -494,7 +494,7 @@ pub struct Booking {
     /// The class of the slot (always the node's).
     pub class: Class,
     /// The journal it was booked for.
-    pub journal: JournalKey,
+    pub journal: JournalIdentifier,
 }
 
 /// What one registry record folded to.
@@ -666,7 +666,7 @@ pub struct Registry {
     /// The tenants the cell hosts (#229).
     hosted: BTreeSet<TenantId>,
     /// The tenants the cell dropped (#229): never hosted again, so a stale
-    /// `HostTenant` — decided by an operator from a meta fold another
+    /// `HostTenant` — decided by an operator from a fleet directory fold another
     /// operator's removal has since overtaken — is refused here, where the
     /// cell's single writer judges it.
     dropped: BTreeSet<TenantId>,
@@ -818,7 +818,7 @@ impl Registry {
         if joined.fleet_id == 0 || joined.cell_id == 0 {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
-        if joined.version == 0 || joined.version > crate::meta::METADATA_VERSION {
+        if joined.version == 0 || joined.version > crate::fleet::METADATA_VERSION {
             return RegistryEvent::Refused(RegistryRefusal::Unsupported);
         }
         match self.fleet {
@@ -896,7 +896,7 @@ impl Registry {
         booking: u64,
         id: NodeId,
         class: Class,
-        journal: JournalKey,
+        journal: JournalIdentifier,
     ) -> RegistryEvent {
         if self.bookings.contains_key(&booking) {
             return RegistryEvent::Refused(RegistryRefusal::BookingTaken { booking });
@@ -1067,7 +1067,7 @@ impl Checkpointable for Registry {
                 Booking {
                     node: NodeId(b.node),
                     class: b.class.parse()?,
-                    journal: JournalKey::new(TenantId(b.tenant), JournalId(b.journal)),
+                    journal: JournalIdentifier::new(TenantId(b.tenant), JournalId(b.journal)),
                 },
             );
         }
@@ -1168,7 +1168,7 @@ mod tests {
                 booking: 7,
                 node: NodeId(100),
                 class: Class::Stateless,
-                journal: JournalKey::new(TenantId(300), JournalId(400)),
+                journal: JournalIdentifier::new(TenantId(300), JournalId(400)),
             },
             SystemCommand::ReleaseCapacity { booking: 7 },
             SystemCommand::JoinFleet {
@@ -1362,7 +1362,7 @@ mod tests {
             booking,
             node: NodeId(node),
             class,
-            journal: JournalKey::new(TenantId(300), JournalId(booking)),
+            journal: JournalIdentifier::new(TenantId(300), JournalId(booking)),
         })
     }
 
@@ -1525,7 +1525,7 @@ mod tests {
             RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
         );
         assert_eq!(
-            registry.fold(1, &join(fleet, cell, crate::meta::METADATA_VERSION + 1)),
+            registry.fold(1, &join(fleet, cell, crate::fleet::METADATA_VERSION + 1)),
             RegistryEvent::Refused(RegistryRefusal::Unsupported)
         );
         assert_eq!(

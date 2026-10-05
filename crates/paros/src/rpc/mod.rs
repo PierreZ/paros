@@ -44,10 +44,10 @@ pub mod system {
     include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));
 }
 
-/// The meta tenant's entries (#229), generated from `proto/meta.proto`.
-pub mod meta {
+/// The fleet tenant's entries (#229), generated from `proto/fleet.proto`.
+pub mod fleet {
     #![allow(missing_docs, clippy::pedantic)]
-    include!(concat!(env!("OUT_DIR"), "/paros.meta.v1.rs"));
+    include!(concat!(env!("OUT_DIR"), "/paros.fleet.v1.rs"));
 }
 
 /// The machine contract (#196, #216), generated from `proto/machine.proto`:

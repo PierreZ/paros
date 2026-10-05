@@ -37,7 +37,7 @@ use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometime
 use paros::system::{
     Class, DirectoryEvent, DirectoryRefusal, RegistryEvent, RegistryRefusal, SystemEvent,
 };
-use paros::{JournalId, JournalKey, NodeId};
+use paros::{JournalId, JournalIdentifier, NodeId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
 
@@ -52,17 +52,17 @@ pub(crate) struct SystemBoard {
     /// A joiner joins the default journal as a spare a reconfiguration may
     /// pull in (a seed with matchmakers, no proxies, no replicas).
     spares: bool,
-    /// The genesis journals: frames the directory never allocates.
-    genesis: BTreeSet<JournalKey>,
+    /// The genesis journals: identifiers the directory never allocates.
+    genesis: BTreeSet<JournalIdentifier>,
     /// The genesis pool: a node outside it is a joiner.
     genesis_pool: BTreeSet<u64>,
     /// Per `(journal, lsn)`: the digest of the event the first node to fold
     /// it folded it to.
-    folded: BTreeMap<(JournalKey, u64), u64>,
+    folded: BTreeMap<(JournalIdentifier, u64), u64>,
     /// Every id the directory created, with the LSN that created it.
     created: BTreeMap<JournalId, u64>,
     /// `(node, journal)`: the node folded the journal's tombstone.
-    tombstoned: BTreeSet<(u64, JournalKey)>,
+    tombstoned: BTreeSet<(u64, JournalIdentifier)>,
     /// Joiners some node has admitted to its pool.
     admitted_anywhere: BTreeSet<u64>,
     /// `(node, from)`: `node` refused a message from `from`, not yet in its
@@ -118,7 +118,7 @@ impl SystemBoard {
     /// Record the run's genesis (idempotent: every node arms the same).
     pub(crate) fn arm(
         &mut self,
-        genesis: impl IntoIterator<Item = JournalKey>,
+        genesis: impl IntoIterator<Item = JournalIdentifier>,
         pool: impl IntoIterator<Item = u64>,
         joiners: bool,
         spares: bool,
@@ -140,7 +140,7 @@ impl SystemBoard {
     pub(crate) fn folded(
         &mut self,
         node: NodeId,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         lsn: u64,
         event: &SystemEvent,
     ) {
@@ -176,14 +176,14 @@ impl SystemBoard {
                 assert_always!(
                     id.is_set()
                         && at == lsn
-                        && !self.genesis.contains(&JournalKey::new(journal.tenant, *id)),
+                        && !self.genesis.contains(&JournalIdentifier::new(journal.tenant, *id)),
                     "system: a created journal takes a drawn user id, never reused",
                     { "id" => id.0, "lsn" => lsn, "first" => at }
                 );
             }
             SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
                 self.tombstoned
-                    .insert((node.0, JournalKey::new(journal.tenant, *id)));
+                    .insert((node.0, JournalIdentifier::new(journal.tenant, *id)));
             }
             SystemEvent::Directory(DirectoryEvent::Refused(DirectoryRefusal::NameTaken {
                 winner,
@@ -284,7 +284,7 @@ impl SystemBoard {
 
     /// `node` acknowledged an append to `journal`: never after it folded the
     /// journal's tombstone.
-    pub(crate) fn acked(&self, node: NodeId, journal: JournalKey) {
+    pub(crate) fn acked(&self, node: NodeId, journal: JournalIdentifier) {
         assert_always!(
             !self.tombstoned.contains(&(node.0, journal)),
             "system: a node acknowledges no append to a journal after folding its tombstone",

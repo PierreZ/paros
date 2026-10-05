@@ -16,8 +16,8 @@
 //!    class `storage`, one its own join list names — `Init` and
 //!    `FormCell`. It never forms a cell on its own (#216).
 //! 3. **Serve.** A formed machine runs `paros::run_journals` over its
-//!    cell's plan: the cell control journal, meta's, and the static
-//!    assignment that stands in for placement until M9 (#212) — every frame
+//!    cell's plan: the cell control journal, the fleet tenant's, and the static
+//!    assignment that stands in for placement until M9 (#212) — every identifier
 //!    drawn at `init`, none fixed — plain Multi-Paxos over the
 //!    seeds. Every start after formation is an existing member's
 //!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
@@ -49,7 +49,7 @@ use std::time::Duration;
 use clap::Parser;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::machine::{CellPlan, MachineFacts};
-use paros::{BootRefusal, DriverTunables, JournalKey, NoHooks, NodeId, RunError};
+use paros::{BootRefusal, DriverTunables, JournalIdentifier, NoHooks, NodeId, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -276,7 +276,7 @@ async fn serve(
     tunables: DriverTunables,
     shutdown: CancellationToken,
 ) -> ExitCode {
-    let genesis: BTreeMap<JournalKey, paros::Config> = plan
+    let genesis: BTreeMap<JournalIdentifier, paros::Config> = plan
         .journals
         .iter()
         .map(|&journal| (journal, journal_config(&plan, node_id, journal)))

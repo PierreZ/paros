@@ -134,7 +134,7 @@ where
     A: Audit,
 {
     let self_id = out.self_node().0;
-    // The journal every message of this batch is framed by (#188).
+    // The journal every message of this batch belongs to (#188).
     let journal = node.config().journal;
     // The replica tier serves one journal (#188): a journal with no replica
     // in its configuration never addresses one.

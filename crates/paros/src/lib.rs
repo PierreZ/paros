@@ -31,11 +31,11 @@ mod audit;
 pub mod client;
 mod corruption;
 mod driver;
+pub mod fleet;
 mod hooks;
 pub mod journal;
 pub mod machine;
 mod matchmaker;
-pub mod meta;
 mod provision;
 mod proxy;
 mod replica_tier;
@@ -65,7 +65,9 @@ pub use rpc::{
 /// generated protobuf bodies.
 pub mod wire {
     pub use crate::rpc::methods;
-    pub use crate::rpc::{checkpoint, common, internal, machine, matchmaker, meta, public, system};
+    pub use crate::rpc::{
+        checkpoint, common, fleet, internal, machine, matchmaker, public, system,
+    };
 }
 pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

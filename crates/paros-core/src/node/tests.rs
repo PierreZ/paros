@@ -47,7 +47,7 @@ impl TestStorage {
                 matchmakers: Vec::new(),
                 matchmaker_pool: Vec::new(),
                 proxy_count: 0,
-                ..Config::new(NodeId(id), crate::JournalKey::UNSET)
+                ..Config::new(NodeId(id), crate::JournalIdentifier::UNSET)
             },
             first_slot: Slot(0),
             faulty: Vec::new(),

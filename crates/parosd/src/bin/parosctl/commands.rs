@@ -13,8 +13,9 @@ use paros::client::{
 };
 use paros::wire::common::Ballot;
 use paros::{
-    ClientId, Generation, InspectReply, JournalKey, JournalState, QuorumSystem, RetireRequest, Seq,
-    Value, WireQuorumSystem, journal_state_from_proto, quorum_system_from_proto,
+    ClientId, Generation, InspectReply, JournalIdentifier, JournalState, QuorumSystem,
+    RetireRequest, Seq, Value, WireQuorumSystem, journal_state_from_proto,
+    quorum_system_from_proto,
 };
 use serde_json::{Value as Json, json};
 
@@ -32,7 +33,7 @@ fn start(client: &ParosClient) -> usize {
 #[derive(Args, Debug)]
 pub struct WriteArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The records, in order, each one argument.
     #[arg(required = true)]
     records: Vec<String>,
@@ -48,14 +49,14 @@ pub struct WriteArgs {
 }
 
 /// Where `journal` stands, read from any server.
-async fn journal_state(client: &ParosClient, journal: JournalKey) -> Option<JournalState> {
+async fn journal_state(client: &ParosClient, journal: JournalIdentifier) -> Option<JournalState> {
     client.journal_state(journal, start(client)).await
 }
 
 /// Who a writing command acts as: the journal, the owner id, and the
 /// overrides of `parosctl write` (a truncation names no position).
 struct Identity {
-    journal: JournalKey,
+    journal: JournalIdentifier,
     owner: u64,
     generation: Option<u64>,
     seq: Option<u64>,
@@ -212,7 +213,7 @@ fn refused(out: &Printer, what: &str, state: &JournalState) -> Ending {
     Ending::Refused
 }
 
-fn unknown_journal(journal: JournalKey) -> Ending {
+fn unknown_journal(journal: JournalIdentifier) -> Ending {
     note(&format!("no server serves journal {journal}"));
     Ending::Refused
 }
@@ -221,7 +222,7 @@ fn unknown_journal(journal: JournalKey) -> Ending {
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -307,7 +308,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
 #[derive(Args, Debug)]
 pub struct TailArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -365,7 +366,7 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
 #[derive(Args, Debug)]
 pub struct TruncateArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// Drop every record below this position.
     #[arg(long)]
     up_to: u64,
@@ -425,7 +426,7 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
 #[derive(Args, Debug)]
 pub struct SetLeaderArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The client that should own the journal.
     #[arg(long)]
     owner: u64,
@@ -479,9 +480,9 @@ pub async fn set_leader(client: &ParosClient, out: &Printer, args: SetLeaderArgs
 pub struct InspectArgs {
     /// The journal to inspect, `TENANT/JOURNAL`. Without it, each node is
     /// asked for its own facts alone: its id, its cell and the control
-    /// journals (no frame has a default, #243).
+    /// journals (no identifier has a default, #243).
     #[arg(long)]
-    journal: Option<JournalKey>,
+    journal: Option<JournalIdentifier>,
 }
 
 fn ballot_text(ballot: Option<Ballot>) -> String {
@@ -703,9 +704,9 @@ pub struct RetireArgs {
     gc_watermark: Option<Ballot>,
     /// The journal whose leader reports the GC watermark, `TENANT/JOURNAL`
     /// (the journal the matchmakers serve); needed without
-    /// `--gc-watermark`: no frame has a default (#243).
+    /// `--gc-watermark`: no identifier has a default (#243).
     #[arg(long)]
-    journal: Option<JournalKey>,
+    journal: Option<JournalIdentifier>,
 }
 
 fn parse_ballot(s: &str) -> Result<Ballot, String> {
@@ -720,7 +721,7 @@ fn parse_ballot(s: &str) -> Result<Ballot, String> {
 
 /// The effective GC watermark `journal`'s leader reports, read from every
 /// server.
-async fn leader_watermark(client: &ParosClient, journal: JournalKey) -> Option<Ballot> {
+async fn leader_watermark(client: &ParosClient, journal: JournalIdentifier) -> Option<Ballot> {
     for server in 0..client.server_count() {
         if let Some(reply) = client.inspect(server, journal).await
             && reply.leader

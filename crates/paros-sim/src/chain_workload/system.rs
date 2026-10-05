@@ -44,8 +44,8 @@ use paros::system::{
     SystemCommand, SystemEvent, registry_event,
 };
 use paros::{
-    AcceptorConfig, Command, Entry, Generation, JournalId, JournalKey, NodeId, QuorumSystem, Seq,
-    Value,
+    AcceptorConfig, Command, Entry, Generation, JournalId, JournalIdentifier, NodeId, QuorumSystem,
+    Seq, Value,
 };
 
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
@@ -88,20 +88,20 @@ enum Appended {
 pub(super) struct SystemOps {
     /// The run runs the system journals.
     active: bool,
-    /// The directory's frame (drawn per seed: no frame is fixed, §3.8).
-    directory: JournalKey,
-    /// The registry's frame.
-    registry: JournalKey,
+    /// The directory's identifier (drawn per seed: no identifier is fixed, §3.8).
+    directory: JournalIdentifier,
+    /// The registry's identifier.
+    registry: JournalIdentifier,
     /// The deployment's journal.
-    main: JournalKey,
+    main: JournalIdentifier,
     /// How many genesis ranks host the system journals (the seeds).
     seeds: usize,
     /// The genesis pool size.
     pool: usize,
     /// The joiners, `(id, address, machine)`.
     joiners: Vec<(NodeId, String, JoinerMachine)>,
-    /// The genesis journals: frames the directory never allocates.
-    genesis: Vec<JournalKey>,
+    /// The genesis journals: identifiers the directory never allocates.
+    genesis: Vec<JournalIdentifier>,
     /// A registered joiner joins the default journal as a spare (a seed with
     /// matchmakers and neither proxies nor replicas, `process::spare_template`),
     /// so a reconfiguration may name one.
@@ -123,12 +123,12 @@ pub(super) struct SystemOps {
 /// exact write to that journal's audit before it leaves, like every
 /// hand-built system append here does.
 pub(super) struct Announce {
-    journals: Vec<(JournalKey, Arc<crate::audit::AuditWorld>)>,
+    journals: Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>)>,
 }
 
 impl Announce {
     /// An observer announcing the writes to each of `journals`.
-    pub(super) fn new(ctx: &SimContext, journals: &[JournalKey]) -> Self {
+    pub(super) fn new(ctx: &SimContext, journals: &[JournalIdentifier]) -> Self {
         Self {
             journals: journals
                 .iter()
@@ -166,9 +166,9 @@ impl SystemOps {
     /// with.
     pub(super) fn new(
         deployment: &crate::roles::Deployment,
-        frames: crate::shape::Frames,
+        identifiers: crate::shape::Identifiers,
         active: bool,
-        genesis: Vec<JournalKey>,
+        genesis: Vec<JournalIdentifier>,
         machines: &[JoinerMachine],
         client_id: u64,
         timeout: Duration,
@@ -177,9 +177,9 @@ impl SystemOps {
         let matchmakers = !deployment.matchmakers().is_empty();
         Self {
             active,
-            directory: frames.directory,
-            registry: frames.registry,
-            main: frames.main,
+            directory: identifiers.directory,
+            registry: identifiers.registry,
+            main: identifiers.main,
             seeds: crate::shape::seed_ranks(pool).len().max(1),
             pool,
             joiners: deployment
@@ -206,7 +206,7 @@ impl SystemOps {
     }
 
     /// Whether `journal` is one of the two system journals.
-    fn is_system(&self, journal: JournalKey) -> bool {
+    fn is_system(&self, journal: JournalIdentifier) -> bool {
         journal == self.directory || journal == self.registry
     }
 
@@ -221,7 +221,7 @@ impl SystemOps {
         &self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalKey,
+        journal: JournalIdentifier,
     ) -> ChainClient {
         let seeds = self.seeds.min(nodes.server_count()).max(1);
         nodes
@@ -236,7 +236,7 @@ impl SystemOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         command: &SystemCommand,
         draw: u64,
     ) -> Appended {
@@ -256,7 +256,7 @@ impl SystemOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         targets: &[usize],
         record: Vec<u8>,
         draw: u64,
@@ -357,15 +357,15 @@ impl SystemOps {
         &self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         draw: u64,
     ) -> Option<(Vec<(u64, SystemEvent)>, Directory, Registry)> {
         let seed = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
         let mut directory = Directory::new(
             self.genesis
                 .iter()
-                .filter(|key| key.tenant == self.directory.tenant)
-                .map(|key| key.journal),
+                .filter(|journal| journal.tenant == self.directory.tenant)
+                .map(|journal| journal.journal),
         );
         let mut registry = Folder::new(self.empty_registry());
         let mut events = Vec::new();
@@ -513,8 +513,8 @@ impl SystemOps {
                     assert_reachable!("system: a client creates a journal and reads back its id");
                     self.created.push(id);
                     self.ever_created.push(id);
-                    let key = JournalKey::new(self.directory.tenant, id);
-                    self.append_to_created(ctx, nodes, key, &config, payload)
+                    let created = JournalIdentifier::new(self.directory.tenant, id);
+                    self.append_to_created(ctx, nodes, created, &config, payload)
                         .await;
                     return;
                 }
@@ -545,7 +545,7 @@ impl SystemOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         config: &AcceptorConfig,
         draw: u64,
     ) {
@@ -857,10 +857,9 @@ impl SystemOps {
         } else {
             machine.class
         };
-        let journal = self
-            .created
-            .first()
-            .map_or(self.main, |id| JournalKey::new(self.directory.tenant, *id));
+        let journal = self.created.first().map_or(self.main, |id| {
+            JournalIdentifier::new(self.directory.tenant, *id)
+        });
         let booking = crate::chain::splitmix(draw ^ self.client_id.rotate_left(32));
         let command = SystemCommand::BookCapacity {
             booking,

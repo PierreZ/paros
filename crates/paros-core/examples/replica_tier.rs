@@ -84,7 +84,7 @@ fn config(id: u64) -> Config {
     Config {
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::new(NodeId(id), paros_core::JournalKey::UNSET)
+        ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
     }
 }
 

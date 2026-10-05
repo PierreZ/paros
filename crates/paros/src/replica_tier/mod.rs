@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    Ballot, Command, JournalId, JournalKey, MustSync, NodeId, Outcome, Party, QuorumSystem,
+    Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
 };
 
@@ -329,7 +329,7 @@ where
                 // once the row answered whole and this replica folded the
                 // maximum watermark. The row override is the node's hook,
                 // asked only under a grid, from the loop.
-                if refuse_journal(journal, JournalKey::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
+                if refuse_journal(journal, JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
                     let refused = ReadAck { unknown_journal: true, ..ReadAck::default() };
                     answer(hooks, audit, me_id, Reply::LogRead, reply, refused);
                     continue;
@@ -362,7 +362,7 @@ where
             Some((req, reply)) = inspects.recv() => {
                 // No batch: an inspect reads the replica and its store. It
                 // names the replica's journal or asks for the node alone; an
-                // unset frame or another journal is refused (#243).
+                // unset identifier or another journal is refused (#243).
                 let full = inspect(&replica);
                 let answer = match req.target() {
                     Ok(InspectTarget::Node) => full.node_facts(),

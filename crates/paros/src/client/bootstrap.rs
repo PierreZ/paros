@@ -1,6 +1,6 @@
 //! Bootstrap calls (#196, #216): forming a cell with `init`, and learning a
-//! deployment's node ids and its control journals' frames from its
-//! addresses (no frame is fixed, `docs/architecture.md` §3.8).
+//! deployment's node ids and its control journals' identifiers from its
+//! addresses (no identifier is fixed, `docs/architecture.md` §3.8).
 //!
 //! A machine's id is random, minted at format (#225), so an operator knows
 //! addresses — a rendezvous name, a join list — never ids. These calls
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::{ErrorReason, RpcHandle};
-use paros_core::{JournalId, JournalKey, NodeId, TenantId};
+use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use super::Client;
 use super::outcome::SetLeaderOutcome;
@@ -142,11 +142,12 @@ pub enum ClaimCellOutcome {
 /// fleet's only when it names that one too.
 #[must_use]
 pub fn control_journals_of(reply: &InspectReply) -> Option<ControlJournals> {
-    let cell = JournalKey::new(
+    let cell = JournalIdentifier::new(
         TenantId(reply.control_tenant),
         JournalId(reply.control_journal),
     );
-    let fleet = JournalKey::new(TenantId(reply.meta_tenant), JournalId(reply.meta_journal));
+    let fleet =
+        JournalIdentifier::new(TenantId(reply.fleet_tenant), JournalId(reply.fleet_journal));
     (reply.cell_id != 0 && cell.is_set()).then_some(ControlJournals {
         cell_id: reply.cell_id,
         cell,
@@ -181,7 +182,7 @@ pub async fn control_journals<P: Providers>(client: &Client<P>) -> Option<Contro
 /// to `patience`.
 pub async fn claim_cell<P: Providers>(
     client: &Client<P>,
-    control: JournalKey,
+    control: JournalIdentifier,
     coordinator: NodeId,
     patience: Duration,
 ) -> ClaimCellOutcome {
@@ -199,7 +200,7 @@ pub async fn claim_cell<P: Providers>(
 
 async fn claim_cell_once<P: Providers>(
     client: &Client<P>,
-    control: JournalKey,
+    control: JournalIdentifier,
     coordinator: NodeId,
 ) -> ClaimCellOutcome {
     let Some(state) = client.journal_state(control, 0).await else {

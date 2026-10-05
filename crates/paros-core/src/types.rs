@@ -14,11 +14,11 @@ pub struct NodeId(pub u64);
 pub struct Slot(pub u64);
 
 /// The identity of one **tenant** (#226, #235): the owner of a set of
-/// journals, and the first half of the frame every peer and client message
-/// carries ([`JournalKey`]).
+/// journals, and the first half of the identifier every peer and client message
+/// carries ([`JournalIdentifier`]).
 ///
 /// Random, drawn by whoever creates the tenant and checked where it is
-/// recorded — meta's directory for every tenant, the system ones included
+/// recorded — the fleet directory for every tenant, the system ones included
 /// (`docs/architecture.md` §3.8). **No id is fixed**: there is no well-known
 /// tenant and no reserved range, and `0` means *unset* and is never
 /// served. An id has **no default**: it is drawn or read, never assumed. The core never makes a protocol decision on the id.
@@ -39,7 +39,7 @@ impl TenantId {
 
 /// The identity of one **journal** inside its tenant (#184, #235): an
 /// independent ordered log with its own ballots, its own chosen prefix and
-/// its own store. A journal is named by its [`JournalKey`], the pair
+/// its own store. A journal is named by its [`JournalIdentifier`], the pair
 /// `(TenantId, JournalId)`: a journal id is unique only within its tenant.
 ///
 /// Random, drawn by the journal's creator and checked at apply by the
@@ -65,22 +65,22 @@ impl JournalId {
     }
 }
 
-/// The **frame** of every peer and client message (#226, #235): the tenant
+/// The **identifier** of every peer and client message (#226, #235): the tenant
 /// and the journal inside it. Uniqueness is only ever needed where it can be
-/// checked — a tenant id by meta, a journal id by its tenant's control
-/// journal — so a journal is only ever named by the pair. A frame has no
+/// checked — a tenant id by the fleet directory, a journal id by its tenant's control
+/// journal — so a journal is only ever named by the pair. An identifier has no
 /// default: it is always drawn or read, never assumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct JournalKey {
+pub struct JournalIdentifier {
     /// The tenant that owns the journal.
     pub tenant: TenantId,
     /// The journal, unique within its tenant.
     pub journal: JournalId,
 }
 
-impl JournalKey {
-    /// The unset frame: both halves `0`. Never served, and never read as a
+impl JournalIdentifier {
+    /// The unset identifier: both halves `0`. Never served, and never read as a
     /// default: a request that names it is refused (#243).
     pub const UNSET: Self = Self::new(TenantId::UNSET, JournalId::UNSET);
 
@@ -90,7 +90,7 @@ impl JournalKey {
         Self { tenant, journal }
     }
 
-    /// Whether both halves are set: a frame with an unset half names
+    /// Whether both halves are set: an identifier with an unset half names
     /// nothing and is refused.
     #[must_use]
     pub const fn is_set(self) -> bool {
@@ -98,28 +98,28 @@ impl JournalKey {
     }
 }
 
-impl core::fmt::Display for JournalKey {
+impl core::fmt::Display for JournalIdentifier {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}/{}", self.tenant.0, self.journal.0)
     }
 }
 
-impl core::str::FromStr for JournalKey {
+impl core::str::FromStr for JournalIdentifier {
     type Err = &'static str;
 
-    /// `<tenant>/<journal>`, the form [`JournalKey`]'s `Display` renders.
+    /// `<tenant>/<journal>`, the form [`JournalIdentifier`]'s `Display` renders.
     /// Both halves must be set: there is no default tenant.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let (tenant, journal) = text
             .split_once('/')
-            .ok_or("a journal frame is <tenant>/<journal>")?;
+            .ok_or("a journal identifier is <tenant>/<journal>")?;
         let tenant = TenantId(tenant.parse().map_err(|_| "a tenant id is a u64")?);
         let journal = JournalId(journal.parse().map_err(|_| "a journal id is a u64")?);
-        let key = Self::new(tenant, journal);
-        if key.is_set() {
-            Ok(key)
+        let identifier = Self::new(tenant, journal);
+        if identifier.is_set() {
+            Ok(identifier)
         } else {
-            Err("a journal frame names a tenant and a journal, both non-zero")
+            Err("a journal identifier names a tenant and a journal, both non-zero")
         }
     }
 }

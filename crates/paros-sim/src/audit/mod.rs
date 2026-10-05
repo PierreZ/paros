@@ -55,7 +55,7 @@ use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
 use paros::client::{MatchmakersRefusal, RetireRefusal};
 use paros::{
     AcceptorConfig, Audit, Ballot, BootRefusal, Command, Deployment, EdgeRejection, GcAck, GcStep,
-    HANDOFF_BATCH, Handoff, HistoryPage, JournalKey, LEADER_RECOVERY_BATCH, LogReadAnswer,
+    HANDOFF_BATCH, Handoff, HistoryPage, JournalIdentifier, LEADER_RECOVERY_BATCH, LogReadAnswer,
     LogReadReport, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     Message, NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
@@ -78,7 +78,7 @@ pub(crate) struct NodeAudit<T> {
     world: Arc<AuditWorld>,
     /// The journal this port reports for and the run's cross-journal board
     /// (#188); `None` for a port outside the journal plane (a matchmaker).
-    journal: Option<(JournalKey, Arc<Mutex<journals::JournalBoard>>)>,
+    journal: Option<(JournalIdentifier, Arc<Mutex<journals::JournalBoard>>)>,
     /// The run's system-journal board (#189), on a node that follows the
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
@@ -143,7 +143,7 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// on `board` see its applies, its sends and its quarantines.
     pub(crate) fn in_journal(
         mut self,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         board: Arc<Mutex<journals::JournalBoard>>,
     ) -> Self {
         self.journal = Some((journal, board));
@@ -1055,7 +1055,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.journal_read_on_replica |= st.replicas.contains(&node.0);
     }
 
-    fn journal_refused(&self, _node: NodeId, _journal: JournalKey, _call: &'static str) {
+    fn journal_refused(&self, _node: NodeId, _journal: JournalIdentifier, _call: &'static str) {
         assert_reachable!("journal: a call naming an unserved journal is refused");
     }
 
@@ -1063,7 +1063,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn system_folded(
         &self,
         node: NodeId,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         seq: u64,
         event: &paros::system::SystemEvent,
     ) {
@@ -1075,7 +1075,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn checkpoint_folded(
         &self,
         node: NodeId,
-        _journal: JournalKey,
+        _journal: JournalIdentifier,
         seq: u64,
         verified: Option<bool>,
     ) {
@@ -1084,13 +1084,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn journal_started(&self, node: NodeId, _journal: JournalKey) {
+    fn journal_started(&self, node: NodeId, _journal: JournalIdentifier) {
         if let Some(mut board) = self.system_board() {
             board.started(node);
         }
     }
 
-    fn journal_stopped(&self, node: NodeId, journal: JournalKey) {
+    fn journal_stopped(&self, node: NodeId, journal: JournalIdentifier) {
         assert_reachable!(
             "system: a node stops a journal the directory tombstoned or its retirement ended"
         );
@@ -1102,7 +1102,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn unpooled_message(&self, node: NodeId, _journal: JournalKey, from: NodeId) {
+    fn unpooled_message(&self, node: NodeId, _journal: JournalIdentifier, from: NodeId) {
         if let Some(mut board) = self.system_board() {
             board.refused(node, from);
         }

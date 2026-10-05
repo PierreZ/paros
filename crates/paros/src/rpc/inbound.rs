@@ -9,7 +9,7 @@ use moonpool_core::{Detach, Providers, SimulationError, SimulationResult, TaskPr
 use moonpool_rpc::{
     AccessClass, IncomingRequest, ReplyHandle, RequestStream, RpcConfig, RpcHandle, RpcMethod,
 };
-use paros_core::{JournalId, JournalKey, Message, Party, TenantId};
+use paros_core::{JournalId, JournalIdentifier, Message, Party, TenantId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -157,7 +157,7 @@ pub(crate) fn serve_deliveries<P: Providers>(
     me: Party,
     on_reject: OnReject,
     shutdown: CancellationToken,
-) -> SimulationResult<mpsc::Receiver<(JournalKey, Message)>> {
+) -> SimulationResult<mpsc::Receiver<(JournalIdentifier, Message)>> {
     // The lane's own endpoint queue (moonpool-rpc's per-endpoint queues):
     // `capacity` batches, never the client inbox's depth. While this task
     // waits on a full inbox the queue absorbs one batch from every peer
@@ -191,7 +191,7 @@ pub(crate) fn serve_deliveries<P: Providers>(
 #[tracing::instrument(level = "debug", skip_all, fields(at = %me))]
 async fn deliver_all(
     stream: &mut RequestStream<DeliverRpc>,
-    inbox: &mpsc::Sender<(JournalKey, Message)>,
+    inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
     me: Party,
     on_reject: &OnReject,
 ) {
@@ -207,12 +207,12 @@ async fn deliver_all(
 #[tracing::instrument(level = "trace", skip_all, fields(at = %me, messages = batch.messages.len()))]
 async fn enqueue_batch(
     batch: internal::Deliver,
-    inbox: &mpsc::Sender<(JournalKey, Message)>,
+    inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
     me: Party,
     on_reject: &OnReject,
 ) -> bool {
     for message in batch.messages {
-        let journal = JournalKey::new(TenantId(message.tenant), JournalId(message.journal));
+        let journal = JournalIdentifier::new(TenantId(message.tenant), JournalId(message.journal));
         if !journal.is_set() {
             on_reject(EdgeRejection::UnsetJournal);
             tracing::warn!("a Paxos message names no journal");

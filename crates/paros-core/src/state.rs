@@ -1,7 +1,7 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
 use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
-use crate::types::{Ballot, JournalKey, NodeId, Slot};
+use crate::types::{Ballot, JournalIdentifier, NodeId, Slot};
 
 /// The small, persisted-whole durable scalars of Multi-Paxos: the state that has
 /// to hit stable storage **before any message predicated on it is sent**.
@@ -106,24 +106,24 @@ pub struct Config {
     /// carries no quorum obligation, and which process answers to a
     /// `ReplicaId` is the driver's deployment map.
     pub replica_count: usize,
-    /// The journal this node serves, framed by its tenant (#184, #235):
+    /// The journal this node serves, named with its tenant (#184, #235):
     /// carried for assertions and tracing, never read by a protocol decision
     /// — the driver routes a message to its journal before the core sees it,
     /// and a client call naming any other journal is refused at the wire.
     /// A deployment draws one for every journal it serves (no id is fixed
     /// and none has a default, `docs/architecture.md` §3.8); a node alone
-    /// that routes nothing is given [`JournalKey::UNSET`].
-    pub journal: JournalKey,
+    /// that routes nothing is given [`JournalIdentifier::UNSET`].
+    pub journal: JournalIdentifier,
 }
 
 impl Config {
     /// Node `id` serving the journal `journal`, alone: no peers, a
     /// majority, nothing opt-in. There is no `Config::default`: a node and
-    /// its frame are always named (no id has a default,
+    /// its identifier are always named (no id has a default,
     /// `docs/architecture.md` §3.8); a sans-IO caller that routes nothing
-    /// names [`JournalKey::UNSET`] outright.
+    /// names [`JournalIdentifier::UNSET`] outright.
     #[must_use]
-    pub fn new(id: NodeId, journal: JournalKey) -> Self {
+    pub fn new(id: NodeId, journal: JournalIdentifier) -> Self {
         Self {
             id,
             peers: Vec::new(),

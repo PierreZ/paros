@@ -63,7 +63,7 @@ pub(super) fn config(id: NodeId, size: u64, system: QuorumSystem) -> Config {
     Config {
         peers: peers(size),
         quorum_system: system,
-        ..Config::new(id, paros_core::JournalKey::UNSET)
+        ..Config::new(id, paros_core::JournalIdentifier::UNSET)
     }
 }
 

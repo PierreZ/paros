@@ -10,7 +10,7 @@
 # A machine mints its node id on
 # its first start and waits; `init`, sent to node1, forms the cell over the
 # three nodes the `seeds` alias resolves to (the rendezvous) and claims its control
-# journal. `storage4` and `front1` wait for placement, which is M9 (#211,
+# journal. `storage4` and `proxy1` wait for placement, which is M9 (#211,
 # #212). No restart policy: exit 78 means "do not restart" (an operator acts),
 # and `docker compose start <machine>` brings a killed machine back.
 
@@ -74,15 +74,15 @@ services:
       PAROS_FAILURE_DOMAIN: zone-a
     volumes: [storage4:/var/lib/paros]
 
-  front1:
+  proxy1:
     <<: *parosd
-    hostname: front1
+    hostname: proxy1
     environment:
       <<: *env
-      PAROS_LISTEN: front1:4500
+      PAROS_LISTEN: proxy1:4500
       PAROS_CLASS: stateless
       PAROS_FAILURE_DOMAIN: zone-b
-    volumes: [front1:/var/lib/paros]
+    volumes: [proxy1:/var/lib/paros]
 
   # `init`, once, after `up`: sent to node1 (one of the nodes the `seeds` join
   # list names). It waits for the seed to listen; re-running it resumes an
@@ -101,4 +101,4 @@ volumes:
   node2:
   node3:
   storage4:
-  front1:
+  proxy1:

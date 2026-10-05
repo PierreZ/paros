@@ -69,10 +69,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
-    ClientId, ColocatedNode, Control, Delegation, Entry, GcAck, Generation, JournalId, JournalKey,
-    MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet,
-    Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply,
-    ReconfigureRequest, ReconfigurerStep, Seq, TenantId, Value,
+    ClientId, ColocatedNode, Control, Delegation, Entry, GcAck, Generation, JournalId,
+    JournalIdentifier, MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId,
+    MatchmakerSet, Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem,
+    ReconfigureReply, ReconfigureRequest, ReconfigurerStep, Seq, TenantId, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -811,10 +811,10 @@ where
             "the system plan names another node".into(),
         )));
     }
-    // No frame is fixed (§3.8): the deployment names its control journals —
-    // the cell's and meta's from the cell plan, the system journals a
+    // No identifier is fixed (§3.8): the deployment names its control journals —
+    // the cell's and the fleet tenant's from the cell plan, the system journals a
     // `SystemPlan` follows — and every other journal is a user's.
-    let control: BTreeSet<JournalKey> = cell
+    let control: BTreeSet<JournalIdentifier> = cell
         .iter()
         .flat_map(|cell| std::iter::once(cell.cell).chain(cell.fleet))
         .chain(
@@ -983,7 +983,7 @@ where
     let mut handover = HandoverDriver::new(NodeId(self_id));
     // Set by an accepted operator `Retire`: the node exits at its next tick,
     // after the ack had a beat to leave.
-    let mut retiring: Option<JournalKey> = None;
+    let mut retiring: Option<JournalIdentifier> = None;
 
     let out = Outbound::new(peer_queues, proxy_queues, learners, me);
     let shared = Shared {
@@ -1018,7 +1018,7 @@ where
                 // state machine's, at apply. The reply is held until the
                 // slot applies and answered with that verdict; a non-leader
                 // redirects immediately.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1059,7 +1059,7 @@ where
             Some((req, reply)) = rpc.set_leader.recv() => {
                 // A journal `SetLeader` (#204): a compare-and-swap decided
                 // into the log and judged at apply, like a `Write`.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1089,7 +1089,7 @@ where
                 // truncated like any other (§3.9: its owner checkpoints it,
                 // then truncates up to the checkpoint, #230); a follower that
                 // reads below the floor jumps to the checkpoint there.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1120,7 +1120,7 @@ where
                 // the read is served from this node's journal fold once it
                 // covers the maximum. Never a redirect: no role is asked
                 // for.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1348,7 +1348,7 @@ where
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it
                 // produces no `Ready` batch. It names its journal or asks for
-                // the node alone (#243): no frame has a default, so an unset
+                // the node alone (#243): no identifier has a default, so an unset
                 // one is refused, and so is a journal not live here — the
                 // node's own facts are answered either way.
                 let facts = operator::node_facts(self_id, cell.as_ref());
@@ -1413,7 +1413,7 @@ where
                     admit_pool(&mut journals, f);
                 }
                 // Every live journal's beat, in id order.
-                let live: Vec<JournalKey> = journals.live.keys().copied().collect();
+                let live: Vec<JournalIdentifier> = journals.live.keys().copied().collect();
                 for journal in live {
                     if multi && hooks.hold_journal(journal) {
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
@@ -1467,7 +1467,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
     async fn apply(
         &mut self,
         follower: &SystemFollower<P>,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         events: Vec<(u64, SystemEvent)>,
         checkpoints: Vec<(u64, Option<bool>)>,
     ) {
@@ -1487,7 +1487,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                 SystemEvent::Directory(DirectoryEvent::Created { id, config, .. }) => {
                     // A created journal lives in the directory's tenant
                     // (#235): the directory is that tenant's control journal.
-                    let id = JournalKey::new(journal.tenant, id);
+                    let id = JournalIdentifier::new(journal.tenant, id);
                     // A stateless machine never takes acceptor work (#211):
                     // a configuration naming one runs without it.
                     if !config.members().contains(&me)
@@ -1522,7 +1522,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     }
                 }
                 SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
-                    let id = JournalKey::new(journal.tenant, id);
+                    let id = JournalIdentifier::new(journal.tenant, id);
                     if self.journals.serves(id) {
                         self.journals.park(id, None);
                         self.audit.journal_stopped(me, id);
@@ -1597,7 +1597,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
 
     /// This node's own retirement: every user journal it serves stops.
     fn retire_self(&mut self, me: NodeId) {
-        let served: Vec<JournalKey> = self
+        let served: Vec<JournalIdentifier> = self
             .journals
             .live
             .keys()
@@ -1672,7 +1672,7 @@ fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &Syst
 fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     journals: &Journals<S, A>,
     follower: Option<&SystemFollower<P>>,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     call: &'static str,
     self_id: u64,
     audit: &N,
@@ -1701,7 +1701,7 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
     providers: &P,
     stores: &mut J,
     journals: &mut Journals<J::Store, J::Audit>,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     now: u64,
     tunables: &DriverTunables,
     hooks: &H,

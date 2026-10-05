@@ -39,7 +39,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.
 - `message.rs` → `Message`, `Audience`, `Party` · `ready.rs` → `Ready<'a>` (second `ready()` before `advance()` is a compile error).
 - `state.rs` → `HardState` (two scalars, `#[non_exhaustive]`), `Config` (`proxy_count`, `replica_count`, `reply_owner`).
-- `storage.rs` → `Storage` (read-only recovery port) · `write.rs` → `WriteOp`, `AcceptorWrite`, `MustSync` · `types.rs` → `Ballot`, `Slot`, `Command`, `TenantId`, `JournalId`, `JournalKey` (the frame, #235), ….
+- `storage.rs` → `Storage` (read-only recovery port) · `write.rs` → `WriteOp`, `AcceptorWrite`, `MustSync` · `types.rs` → `Ballot`, `Slot`, `Command`, `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), ….
 
 ## Public surface
 

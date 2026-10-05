@@ -18,7 +18,7 @@ use super::{
     ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader,
     SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
-use paros_core::JournalKey;
+use paros_core::JournalIdentifier;
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
 /// reach whichever incarnation is serving that address.
@@ -142,7 +142,7 @@ impl<P: Providers> NodeClient<P> {
     }
 
     /// Inspect the node alone (#243): its id, its cell and the control
-    /// journals' frames, and no journal's state.
+    /// journals' identifiers, and no journal's state.
     ///
     /// # Errors
     ///
@@ -159,7 +159,10 @@ impl<P: Providers> NodeClient<P> {
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn inspect_journal(&self, journal: JournalKey) -> Result<InspectReply, RpcError> {
+    pub async fn inspect_journal(
+        &self,
+        journal: JournalIdentifier,
+    ) -> Result<InspectReply, RpcError> {
         self.inspect
             .try_get_reply(&InspectRequest {
                 journal: journal.journal.0,

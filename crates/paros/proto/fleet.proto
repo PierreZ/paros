@@ -1,22 +1,22 @@
 syntax = "proto3";
 
-package paros.meta.v1;
+package paros.fleet.v1;
 
-// The meta tenant's control journal (#229): the fleet's directory, tenant ->
-// cell, plus the cell entries (`docs/architecture.md` §3.7). Its frame is
-// random like every frame (§3.8), drawn at `init`. Each entry is one record
-// of a `Write`, written by meta's coordinator (whoever claimed the journal
-// with `SetLeader`); `paros::meta::Meta` is the one fold of them. The core
+// The fleet tenant's control journal (#229): the fleet's directory, tenant ->
+// cell, plus the cell entries (`docs/architecture.md` §3.7). Its identifier is
+// random like every identifier (§3.8), drawn at `init`. Each entry is one record
+// of a `Write`, written by the fleet tenant's coordinator (whoever claimed the journal
+// with `SetLeader`); `paros::fleet::FleetDirectory` is the one fold of them. The core
 // keeps the records as opaque as any other.
 //
 // Every entry names the fleet it was written for and the metadata version
 // its writer speaks: a step of a fleet operation that finds another fleet is
 // refused (FDB's `MetaclusterOperationContext`), and a reader refuses a
-// version it does not understand. Meta is checkpointed with
-// `paros::client::checkpoint` (#227): `MetaState` is the checkpoint's state.
+// version it does not understand. The fleet tenant is checkpointed with
+// `paros::client::checkpoint` (#227): `FleetDirectoryState` is the checkpoint's state.
 //
 // Enums are `uint32`s whose `0` is unset and refused: nothing defaults.
-message MetaEntry {
+message FleetEntry {
   uint64 fleet_id = 1;
   uint32 version = 2;
   oneof kind {
@@ -29,17 +29,17 @@ message MetaEntry {
   }
 }
 
-// `init`: meta records the fleet's id, once, and registers itself as the
-// fleet's first tenant (`{internal, fleet}`) under its own frame. A re-run
-// with the same id and frame changes nothing; anything else is refused.
+// `init`: the fleet tenant records the fleet's id, once, and registers itself as the
+// fleet's first tenant (`{internal, fleet}`) under its own identifier. A re-run
+// with the same id and identifier changes nothing; anything else is refused.
 message FormFleet {
-  uint64 meta_tenant = 1;
-  uint64 meta_journal = 2;
+  uint64 fleet_tenant = 1;
+  uint64 fleet_journal = 2;
 }
 
 // `init` (and adding a cell, M12): the cell `cell_id` joins the directory,
 // `REGISTERING`, and its cell tenant is registered (`{internal, cell}`) under
-// the frame of its control journal.
+// the identifier of its control journal.
 message AddCell {
   uint64 cell_id = 1;
   uint64 control_tenant = 2;
@@ -82,14 +82,14 @@ message RemoveTenant {
 // The checkpoint state: the fleet, every cell and tenant entry by id, and
 // every removed tenant id — in id order, so equal states encode to equal
 // bytes.
-message MetaState {
+message FleetDirectoryState {
   uint64 fleet_id = 1;
   uint32 version = 2;
   repeated CellEntry cells = 3;
   repeated TenantEntry tenants = 4;
   repeated uint64 removed = 5;
-  uint64 meta_tenant = 6;
-  uint64 meta_journal = 7;
+  uint64 fleet_tenant = 6;
+  uint64 fleet_journal = 7;
 }
 
 message CellEntry {

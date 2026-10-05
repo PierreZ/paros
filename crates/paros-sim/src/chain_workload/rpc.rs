@@ -20,7 +20,7 @@ use paros::client::{
     Answered, Attempted, CallObserver, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
     WriteOutcome, write_request,
 };
-use paros::{Entry, JournalKey, Read};
+use paros::{Entry, JournalIdentifier, Read};
 
 use crate::audit::{Attempt, Call, Seen};
 use crate::chain::user_command_hash;
@@ -45,7 +45,7 @@ use crate::client::ChainClient;
 /// where it is caught.
 #[derive(Clone)]
 pub(crate) struct CallLog {
-    journal: JournalKey,
+    journal: JournalIdentifier,
     client: u64,
     time: SimTimeProvider,
     attempts: Arc<Mutex<Vec<Attempt>>>,
@@ -60,7 +60,7 @@ struct Retries {
 }
 
 impl CallLog {
-    pub(crate) fn new(journal: JournalKey, client: u64, time: SimTimeProvider) -> Self {
+    pub(crate) fn new(journal: JournalIdentifier, client: u64, time: SimTimeProvider) -> Self {
         Self {
             journal,
             client,
@@ -275,7 +275,7 @@ pub(super) async fn within<T>(
 /// [`judged_write`].
 pub(super) fn write_once(
     nodes: &ChainClient,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     target: usize,
     entry: &Entry,
     abandon: bool,
@@ -290,7 +290,7 @@ pub(super) fn write_once(
 /// for [`judged_write`].
 pub(super) fn set_leader_once(
     nodes: &ChainClient,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     target: usize,
     (expected, owner): (u64, u64),
     created: bool,
@@ -303,7 +303,7 @@ pub(super) fn set_leader_once(
 pub(super) fn read_once(
     client: &ChainClient,
     target: usize,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     from: u64,
     limit: u64,
     wait_ms: u64,

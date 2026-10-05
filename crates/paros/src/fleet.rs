@@ -1,64 +1,64 @@
-//! The **meta tenant** (#229, `docs/architecture.md` §3.7): the fleet's
+//! The **fleet tenant** (#229, `docs/architecture.md` §3.7): the fleet
 //! directory. Its control journal answers one question — which tenant lives
 //! in which cell — plus the cell entries; quotas, billing and status live
-//! elsewhere. Its frame is random like every frame (§3.8): `init` draws it
-//! and records it in the cell plan, and meta records it in its own first
-//! entry.
+//! elsewhere. Its identifier is random like every identifier (§3.8): `init`
+//! draws it and records it in the cell plan, and the fleet tenant records it
+//! in its own first entry.
 //!
-//! This module is the one reading of meta's entries: the typed
-//! [`MetaEntry`] a fleet operation writes (one record per position) and the
-//! pure fold [`Meta`] every reader runs over them in position order. Like the
+//! This module is the one reading of the fleet tenant's entries: the typed
+//! [`FleetEntry`] a fleet operation writes (one record per position) and the
+//! pure fold [`FleetDirectory`] every reader runs over them in position order. Like the
 //! system journals' folds ([`crate::system`]) it is a function of the log
 //! alone, so every reader that folded a prefix agrees on it; and like them it
 //! is not an application (#186): the core keeps the records opaque.
 //!
 //! - **Every entry names its fleet and its metadata version.** The first
-//!   entry, [`MetaCommand::FormFleet`], records the fleet's id once; any later
-//!   entry naming another fleet is refused ([`MetaRefusal::OtherFleet`]), so
+//!   entry, [`FleetCommand::FormFleet`], records the fleet's id once; any later
+//!   entry naming another fleet is refused ([`FleetDirectoryRefusal::OtherFleet`]), so
 //!   a step of a fleet operation that talks to another fleet than its
 //!   previous step did changes nothing (FDB's `MetaclusterOperationContext`).
 //!   An entry whose version this fold does not understand is refused
-//!   ([`MetaRefusal::UnknownVersion`]).
+//!   ([`FleetDirectoryRefusal::UnknownVersion`]).
 //! - **Every tenant belongs to a set of groups** ([`Groups`]), fixed when it
-//!   is registered (§3.7, decided on 2026-10-04): meta is `{internal, fleet}`
+//!   is registered (§3.7, decided on 2026-10-04): the fleet tenant is `{internal, fleet}`
 //!   (registered by `FormFleet`), each cell's cell tenant `{internal, cell}`
 //!   (registered by `AddCell`), and a served tenant `{users}`.
 //!   `RegisterTenant` — the tenant API's entry — cannot express another
 //!   set, and an `internal` tenant is never marked or removed through it
-//!   ([`MetaRefusal::Internal`]). The groups alone decide whether a tenant
+//!   ([`FleetDirectoryRefusal::Internal`]). The groups alone decide whether a tenant
 //!   may move ([`Groups::may_move`]): only `cell` forbids it. There is no
 //!   per-tenant placement flag.
 //! - **Every fleet operation is an idempotent state machine.** A tenant is
 //!   written in `REGISTERING` with its cell assignment, created in the cell,
 //!   then marked `READY` ([`crate::client::fleet`]); `init` takes its cell
 //!   entry through the same `REGISTERING` → `READY`. An entry that asks for
-//!   what the directory already holds folds to [`MetaEvent::Unchanged`], so
+//!   what the directory already holds folds to [`FleetEvent::Unchanged`], so
 //!   re-running a step after a crash is harmless. The transitions are
 //!   [`TenantState::may_become`] and [`CellState::may_become`].
 //! - **No id is fixed** (§3.8). A tenant's id and its control journal's are
 //!   random, drawn by its creator and checked here, the tenant ids' single
-//!   writer: an id any entry holds — meta's own and the cell tenants'
+//!   writer: an id any entry holds — the fleet tenant's own and the cell tenants'
 //!   included — or that was ever removed is taken
-//!   ([`MetaRefusal::TenantIdTaken`]), and the creator redraws; an unset id
+//!   ([`FleetDirectoryRefusal::TenantIdTaken`]), and the creator redraws; an unset id
 //!   is malformed. A live name is held by one tenant at a time
-//!   ([`MetaRefusal::NameTaken`]).
+//!   ([`FleetDirectoryRefusal::NameTaken`]).
 //! - **Only a `READY` cell receives new tenants.**
 //! - **The directory is a pointer, never the authority** (#225): a tenant's
 //!   control journal's generation wins over it, and the directory is
 //!   rebuilt from the cells' tenant lists when lost (the recovery issue,
-//!   #231). Meta is checkpointed with `paros::client::checkpoint` (#227),
-//!   `Inline` in M9: [`Meta`] is [`Checkpointable`].
+//!   #231). The fleet directory is checkpointed with `paros::client::checkpoint` (#227),
+//!   `Inline` in M9: [`FleetDirectory`] is [`Checkpointable`].
 //!
 //! Every malformed entry folds to a refusal, never a panic: the entries are
 //! external input.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{JournalId, JournalKey, TenantId};
+use paros_core::{JournalId, JournalIdentifier, TenantId};
 use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
-use crate::rpc::meta as wire;
+use crate::rpc::fleet as wire;
 
 /// The metadata version this fold speaks: written into every entry, and
 /// into the cell's side of the registration (`crate::system`). `2` since
@@ -70,11 +70,11 @@ pub const METADATA_VERSION: u32 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
     /// Created only by paros's own operations (`init`, adding a cell), never
-    /// through the tenant API: meta and every cell tenant.
+    /// through the tenant API: the fleet tenant and every cell tenant.
     Internal,
     /// Never leaves its cell: it *is* its cell. Each cell's cell tenant.
     Cell,
-    /// Holds the fleet directory and moves with its coordinator: meta.
+    /// Holds the fleet directory and moves with its coordinator: the fleet tenant.
     Fleet,
     /// Created by the tenant API and served by its own proxies: every
     /// served tenant.
@@ -116,7 +116,7 @@ impl Group {
 pub struct Groups(u32);
 
 impl Groups {
-    /// Meta, the fleet tenant: `{internal, fleet}`.
+    /// The fleet tenant: `{internal, fleet}`.
     pub const FLEET_TENANT: Self = Self(Group::Internal.bit() | Group::Fleet.bit());
     /// A cell tenant: `{internal, cell}`.
     pub const CELL_TENANT: Self = Self(Group::Internal.bit() | Group::Cell.bit());
@@ -214,7 +214,7 @@ impl CellState {
     }
 
     /// Whether a cell in `self` may be marked `to`. A cell is never marked
-    /// `REGISTERING` (only [`MetaCommand::AddCell`] writes that); it becomes
+    /// `REGISTERING` (only [`FleetCommand::AddCell`] writes that); it becomes
     /// `READY` from `REGISTERING` or `RESTORING`, `RESTORING` from `READY`,
     /// and `REMOVING` from any state.
     #[must_use]
@@ -252,7 +252,7 @@ impl TenantState {
     }
 
     /// Whether a tenant in `self` may be marked `to` (§3.7). A tenant is
-    /// never marked `REGISTERING` (only [`MetaCommand::RegisterTenant`]
+    /// never marked `REGISTERING` (only [`FleetCommand::RegisterTenant`]
     /// writes that). Any tenant may be removed; only a `READY` one is
     /// reconfigured; an operation's end returns it to `READY`;
     /// a tenant being removed takes no other state.
@@ -296,23 +296,25 @@ impl CellState {
     }
 }
 
-/// What one meta entry asks for.
+/// What one fleet entry asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MetaCommand {
-    /// `init`: record the entry's fleet as meta's, once, and register meta
-    /// itself (`{internal, fleet}`) under its own frame.
+pub enum FleetCommand {
+    /// `init`: record the entry's fleet as the fleet tenant's, once, and
+    /// register the fleet tenant itself (`{internal, fleet}`) under its own
+    /// identifier.
     FormFleet {
-        /// Meta's control journal: its tenant is meta's id.
-        meta: JournalKey,
+        /// The fleet tenant's control journal: its tenant is the fleet
+        /// tenant's id.
+        control: JournalIdentifier,
     },
     /// `init` (and adding a cell, M12): cell `cell_id` joins the directory,
     /// `REGISTERING`, and its cell tenant is registered (`{internal,
-    /// cell}`) under the frame of its control journal.
+    /// cell}`) under the identifier of its control journal.
     AddCell {
         /// The cell's id (random, minted at `init`).
         cell_id: u64,
         /// The cell tenant's control journal.
-        control: JournalKey,
+        control: JournalIdentifier,
     },
     /// Move cell `cell_id` to `state`.
     MarkCell {
@@ -326,7 +328,7 @@ pub enum MetaCommand {
     /// `cell_id`, `REGISTERING`.
     RegisterTenant {
         /// The tenant's control journal: its tenant is the tenant's id.
-        control: JournalKey,
+        control: JournalIdentifier,
         /// Opaque bytes; paros never interprets them.
         name: Vec<u8>,
         /// The cell it is assigned to.
@@ -347,26 +349,26 @@ pub enum MetaCommand {
     },
 }
 
-/// One meta entry: a command, framed by the fleet it was written for and
+/// One fleet entry: a command, stamped with the fleet it was written for and
 /// the metadata version its writer speaks.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MetaEntry {
+pub struct FleetEntry {
     /// The fleet the writer believes it talks to.
     pub fleet_id: u64,
     /// The writer's metadata version.
     pub version: u32,
     /// What it asks for.
-    pub command: MetaCommand,
+    pub command: FleetCommand,
 }
 
-fn frame(tenant: u64, journal: u64) -> JournalKey {
-    JournalKey::new(TenantId(tenant), JournalId(journal))
+fn identifier(tenant: u64, journal: u64) -> JournalIdentifier {
+    JournalIdentifier::new(TenantId(tenant), JournalId(journal))
 }
 
-impl MetaEntry {
+impl FleetEntry {
     /// `command` for fleet `fleet_id` at this fold's [`METADATA_VERSION`].
     #[must_use]
-    pub fn new(fleet_id: u64, command: MetaCommand) -> Self {
+    pub fn new(fleet_id: u64, command: FleetCommand) -> Self {
         Self {
             fleet_id,
             version: METADATA_VERSION,
@@ -377,22 +379,22 @@ impl MetaEntry {
     /// The record a fleet operation writes: exactly one per position.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        use wire::meta_entry::Kind;
+        use wire::fleet_entry::Kind;
         let kind = match &self.command {
-            MetaCommand::FormFleet { meta } => Kind::FormFleet(wire::FormFleet {
-                meta_tenant: meta.tenant.0,
-                meta_journal: meta.journal.0,
+            FleetCommand::FormFleet { control } => Kind::FormFleet(wire::FormFleet {
+                fleet_tenant: control.tenant.0,
+                fleet_journal: control.journal.0,
             }),
-            MetaCommand::AddCell { cell_id, control } => Kind::AddCell(wire::AddCell {
+            FleetCommand::AddCell { cell_id, control } => Kind::AddCell(wire::AddCell {
                 cell_id: *cell_id,
                 control_tenant: control.tenant.0,
                 control_journal: control.journal.0,
             }),
-            MetaCommand::MarkCell { cell_id, state } => Kind::MarkCell(wire::MarkCell {
+            FleetCommand::MarkCell { cell_id, state } => Kind::MarkCell(wire::MarkCell {
                 cell_id: *cell_id,
                 state: state.to_wire(),
             }),
-            MetaCommand::RegisterTenant {
+            FleetCommand::RegisterTenant {
                 control,
                 name,
                 cell_id,
@@ -402,15 +404,15 @@ impl MetaEntry {
                 cell_id: *cell_id,
                 control_journal: control.journal.0,
             }),
-            MetaCommand::MarkTenant { tenant, state } => Kind::MarkTenant(wire::MarkTenant {
+            FleetCommand::MarkTenant { tenant, state } => Kind::MarkTenant(wire::MarkTenant {
                 tenant: tenant.0,
                 state: state.to_wire(),
             }),
-            MetaCommand::RemoveTenant { tenant } => {
+            FleetCommand::RemoveTenant { tenant } => {
                 Kind::RemoveTenant(wire::RemoveTenant { tenant: tenant.0 })
             }
         };
-        wire::MetaEntry {
+        wire::FleetEntry {
             fleet_id: self.fleet_id,
             version: self.version,
             kind: Some(kind),
@@ -422,33 +424,33 @@ impl MetaEntry {
     ///
     /// # Errors
     ///
-    /// The record is not a meta entry, names no kind, or names a state no
+    /// The record is not a fleet entry, names no kind, or names a state no
     /// version knows.
     pub fn decode(record: &[u8]) -> Result<Self, &'static str> {
-        use wire::meta_entry::Kind;
-        let entry = wire::MetaEntry::decode(record).map_err(|_| "not a meta entry")?;
-        let command = match entry.kind.ok_or("a meta entry names no kind")? {
-            Kind::FormFleet(form) => MetaCommand::FormFleet {
-                meta: frame(form.meta_tenant, form.meta_journal),
+        use wire::fleet_entry::Kind;
+        let entry = wire::FleetEntry::decode(record).map_err(|_| "not a fleet entry")?;
+        let command = match entry.kind.ok_or("a fleet entry names no kind")? {
+            Kind::FormFleet(form) => FleetCommand::FormFleet {
+                control: identifier(form.fleet_tenant, form.fleet_journal),
             },
-            Kind::AddCell(add) => MetaCommand::AddCell {
+            Kind::AddCell(add) => FleetCommand::AddCell {
                 cell_id: add.cell_id,
-                control: frame(add.control_tenant, add.control_journal),
+                control: identifier(add.control_tenant, add.control_journal),
             },
-            Kind::MarkCell(mark) => MetaCommand::MarkCell {
+            Kind::MarkCell(mark) => FleetCommand::MarkCell {
                 cell_id: mark.cell_id,
                 state: CellState::from_wire(mark.state).ok_or("an unknown cell state")?,
             },
-            Kind::RegisterTenant(register) => MetaCommand::RegisterTenant {
-                control: frame(register.tenant, register.control_journal),
+            Kind::RegisterTenant(register) => FleetCommand::RegisterTenant {
+                control: identifier(register.tenant, register.control_journal),
                 name: register.name,
                 cell_id: register.cell_id,
             },
-            Kind::MarkTenant(mark) => MetaCommand::MarkTenant {
+            Kind::MarkTenant(mark) => FleetCommand::MarkTenant {
                 tenant: TenantId(mark.tenant),
                 state: TenantState::from_wire(mark.state).ok_or("an unknown tenant state")?,
             },
-            Kind::RemoveTenant(remove) => MetaCommand::RemoveTenant {
+            Kind::RemoveTenant(remove) => FleetCommand::RemoveTenant {
                 tenant: TenantId(remove.tenant),
             },
         };
@@ -475,9 +477,9 @@ pub struct CellEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantEntry {
     /// Its name (opaque bytes; empty for an `internal` tenant, which is
-    /// found by its frame, never by name).
+    /// found by its identifier, never by name).
     pub name: Vec<u8>,
-    /// The cell it lives in (`0` for meta until its hosting cell is added).
+    /// The cell it lives in (`0` for the fleet tenant until its hosting cell is added).
     pub cell_id: u64,
     /// Its control journal's id, inside the tenant.
     pub control: JournalId,
@@ -490,10 +492,10 @@ pub struct TenantEntry {
     pub groups: Groups,
 }
 
-/// What one meta record folded to.
+/// What one fleet record folded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MetaEvent {
-    /// Meta recorded its fleet, and itself as its first tenant.
+pub enum FleetEvent {
+    /// The fleet tenant recorded its fleet, and itself as its first tenant.
     FleetFormed {
         /// The fleet's id.
         fleet_id: u64,
@@ -538,14 +540,14 @@ pub enum MetaEvent {
         covers_up_to: u64,
     },
     /// The entry changed nothing.
-    Refused(MetaRefusal),
+    Refused(FleetDirectoryRefusal),
 }
 
-/// Why a meta entry changed nothing.
+/// Why a fleet entry changed nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MetaRefusal {
-    /// Not one decodable meta entry (or a checkpoint this fold cannot use),
-    /// or an unset id or frame where one must be named.
+pub enum FleetDirectoryRefusal {
+    /// Not one decodable fleet entry (or a checkpoint this fold cannot use),
+    /// or an unset id or identifier where one must be named.
     Malformed,
     /// Written at a metadata version this fold does not understand.
     UnknownVersion {
@@ -554,8 +556,8 @@ pub enum MetaRefusal {
     },
     /// No fleet is formed yet: only `FormFleet` may come first.
     NoFleet,
-    /// The entry names another fleet than the one meta formed (or another
-    /// frame for meta).
+    /// The entry names another fleet than the one the fleet tenant formed (or
+    /// another control journal for the fleet tenant).
     OtherFleet {
         /// The fleet the entry names.
         fleet_id: u64,
@@ -582,7 +584,7 @@ pub enum MetaRefusal {
         /// The cell named.
         cell_id: u64,
     },
-    /// The id names another tenant entry — meta, a cell tenant or a user
+    /// The id names another tenant entry — the fleet tenant, a cell tenant or a user
     /// tenant — or one removed (ids are never reused): the creator redraws.
     TenantIdTaken {
         /// The id asked for.
@@ -614,19 +616,19 @@ pub enum MetaRefusal {
     },
 }
 
-/// The fleet as meta recorded it.
+/// The fleet as the fleet tenant recorded it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Fleet {
+struct Formed {
     id: u64,
     version: u32,
-    /// Meta's own control journal.
-    meta: JournalKey,
+    /// The fleet tenant's own control journal.
+    control: JournalIdentifier,
 }
 
-/// Meta's fold: the fleet, its cells and its tenants.
+/// The fleet directory's fold: the fleet, its cells and its tenants.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Meta {
-    fleet: Option<Fleet>,
+pub struct FleetDirectory {
+    fleet: Option<Formed>,
     cells: BTreeMap<u64, CellEntry>,
     tenants: BTreeMap<TenantId, TenantEntry>,
     /// Live `users` names, to the tenant holding each.
@@ -636,7 +638,7 @@ pub struct Meta {
     next_seq: u64,
 }
 
-impl Meta {
+impl FleetDirectory {
     /// The next position this fold expects.
     #[must_use]
     pub fn next_seq(&self) -> u64 {
@@ -649,10 +651,10 @@ impl Meta {
         self.fleet.map(|fleet| fleet.id)
     }
 
-    /// Meta's own control journal, once the fleet is formed.
+    /// The fleet tenant's own control journal, once the fleet is formed.
     #[must_use]
-    pub fn meta(&self) -> Option<JournalKey> {
-        self.fleet.map(|fleet| fleet.meta)
+    pub fn control(&self) -> Option<JournalIdentifier> {
+        self.fleet.map(|fleet| fleet.control)
     }
 
     /// The cell entry `cell_id`.
@@ -695,7 +697,7 @@ impl Meta {
         self.tenants.contains_key(&tenant) || self.removed.contains(&tenant)
     }
 
-    /// Fold the record at position `seq` of meta (in position order; a gap
+    /// Fold the record at position `seq` of the fleet tenant's journal (in position order; a gap
     /// is simply skipped). A checkpoint record is not an entry: fold through
     /// a [`Folder`](crate::client::checkpoint::Folder).
     ///
@@ -703,54 +705,57 @@ impl Meta {
     ///
     /// If `seq` is below a position already folded (a programmer error of
     /// the caller).
-    pub fn fold(&mut self, seq: u64, record: &[u8]) -> MetaEvent {
-        assert!(seq >= self.next_seq, "meta folds in position order");
+    pub fn fold(&mut self, seq: u64, record: &[u8]) -> FleetEvent {
+        assert!(
+            seq >= self.next_seq,
+            "the fleet directory folds in position order"
+        );
         self.next_seq = seq + 1;
-        let Ok(entry) = MetaEntry::decode(record) else {
-            return MetaEvent::Refused(MetaRefusal::Malformed);
+        let Ok(entry) = FleetEntry::decode(record) else {
+            return FleetEvent::Refused(FleetDirectoryRefusal::Malformed);
         };
         match self.judge(&entry) {
             Ok(event) => event,
-            Err(refusal) => MetaEvent::Refused(refusal),
+            Err(refusal) => FleetEvent::Refused(refusal),
         }
     }
 
     /// The operation context (§3.7): the entry's version is one this fold
-    /// speaks, and it names the fleet meta formed.
-    fn judge(&mut self, entry: &MetaEntry) -> Result<MetaEvent, MetaRefusal> {
+    /// speaks, and it names the fleet the fleet tenant formed.
+    fn judge(&mut self, entry: &FleetEntry) -> Result<FleetEvent, FleetDirectoryRefusal> {
         if entry.fleet_id == 0 || entry.version == 0 {
-            return Err(MetaRefusal::Malformed);
+            return Err(FleetDirectoryRefusal::Malformed);
         }
         if entry.version > METADATA_VERSION {
-            return Err(MetaRefusal::UnknownVersion {
+            return Err(FleetDirectoryRefusal::UnknownVersion {
                 version: entry.version,
             });
         }
-        if let MetaCommand::FormFleet { meta } = entry.command {
-            return self.form_fleet(entry.fleet_id, entry.version, meta);
+        if let FleetCommand::FormFleet { control } = entry.command {
+            return self.form_fleet(entry.fleet_id, entry.version, control);
         }
         match self.fleet {
-            None => return Err(MetaRefusal::NoFleet),
+            None => return Err(FleetDirectoryRefusal::NoFleet),
             Some(fleet) if fleet.id != entry.fleet_id => {
-                return Err(MetaRefusal::OtherFleet {
+                return Err(FleetDirectoryRefusal::OtherFleet {
                     fleet_id: entry.fleet_id,
                 });
             }
             Some(_) => {}
         }
         match &entry.command {
-            MetaCommand::FormFleet { .. } => unreachable!("judged above"),
-            MetaCommand::AddCell { cell_id, control } => {
+            FleetCommand::FormFleet { .. } => unreachable!("judged above"),
+            FleetCommand::AddCell { cell_id, control } => {
                 self.add_cell(*cell_id, *control, entry.version)
             }
-            MetaCommand::MarkCell { cell_id, state } => self.mark_cell(*cell_id, *state),
-            MetaCommand::RegisterTenant {
+            FleetCommand::MarkCell { cell_id, state } => self.mark_cell(*cell_id, *state),
+            FleetCommand::RegisterTenant {
                 control,
                 name,
                 cell_id,
             } => self.register_tenant(*control, name, *cell_id),
-            MetaCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
-            MetaCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
+            FleetCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
+            FleetCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
         }
     }
 
@@ -758,44 +763,46 @@ impl Meta {
         &mut self,
         fleet_id: u64,
         version: u32,
-        meta: JournalKey,
-    ) -> Result<MetaEvent, MetaRefusal> {
-        if !meta.is_set() {
-            return Err(MetaRefusal::Malformed);
+        control: JournalIdentifier,
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
+        if !control.is_set() {
+            return Err(FleetDirectoryRefusal::Malformed);
         }
         match self.fleet {
             None => {
-                self.fleet = Some(Fleet {
+                self.fleet = Some(Formed {
                     id: fleet_id,
                     version,
-                    meta,
+                    control,
                 });
                 self.tenants.insert(
-                    meta.tenant,
+                    control.tenant,
                     TenantEntry {
                         name: Vec::new(),
                         cell_id: 0,
-                        control: meta.journal,
+                        control: control.journal,
                         state: TenantState::Ready,
                         config_seq: 0,
                         groups: Groups::FLEET_TENANT,
                     },
                 );
-                Ok(MetaEvent::FleetFormed { fleet_id })
+                Ok(FleetEvent::FleetFormed { fleet_id })
             }
-            Some(fleet) if fleet.id == fleet_id && fleet.meta == meta => Ok(MetaEvent::Unchanged),
-            Some(_) => Err(MetaRefusal::OtherFleet { fleet_id }),
+            Some(fleet) if fleet.id == fleet_id && fleet.control == control => {
+                Ok(FleetEvent::Unchanged)
+            }
+            Some(_) => Err(FleetDirectoryRefusal::OtherFleet { fleet_id }),
         }
     }
 
     fn add_cell(
         &mut self,
         cell_id: u64,
-        control: JournalKey,
+        control: JournalIdentifier,
         version: u32,
-    ) -> Result<MetaEvent, MetaRefusal> {
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         if cell_id == 0 || !control.is_set() {
-            return Err(MetaRefusal::Malformed);
+            return Err(FleetDirectoryRefusal::Malformed);
         }
         if let Some(cell) = self.cells.get(&cell_id) {
             let same = cell.control_tenant == control.tenant
@@ -804,13 +811,13 @@ impl Meta {
                     .get(&control.tenant)
                     .is_some_and(|t| t.control == control.journal);
             return if same {
-                Ok(MetaEvent::Unchanged)
+                Ok(FleetEvent::Unchanged)
             } else {
-                Err(MetaRefusal::OtherCellTenant { cell_id })
+                Err(FleetDirectoryRefusal::OtherCellTenant { cell_id })
             };
         }
         if self.taken(control.tenant) {
-            return Err(MetaRefusal::TenantIdTaken {
+            return Err(FleetDirectoryRefusal::TenantIdTaken {
                 tenant: control.tenant,
             });
         }
@@ -833,43 +840,47 @@ impl Meta {
                 groups: Groups::CELL_TENANT,
             },
         );
-        // The fleet's first cell hosts meta (#226).
-        if let Some(meta) = self.fleet.map(|fleet| fleet.meta.tenant)
-            && let Some(entry) = self.tenants.get_mut(&meta)
+        // The fleet's first cell hosts the fleet tenant (#226).
+        if let Some(fleet_tenant) = self.fleet.map(|fleet| fleet.control.tenant)
+            && let Some(entry) = self.tenants.get_mut(&fleet_tenant)
             && entry.cell_id == 0
         {
             entry.cell_id = cell_id;
         }
-        Ok(MetaEvent::CellAdded { cell_id })
+        Ok(FleetEvent::CellAdded { cell_id })
     }
 
-    fn mark_cell(&mut self, cell_id: u64, state: CellState) -> Result<MetaEvent, MetaRefusal> {
+    fn mark_cell(
+        &mut self,
+        cell_id: u64,
+        state: CellState,
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let cell = self
             .cells
             .get_mut(&cell_id)
-            .ok_or(MetaRefusal::UnknownCell { cell_id })?;
+            .ok_or(FleetDirectoryRefusal::UnknownCell { cell_id })?;
         if cell.state == state {
-            return Ok(MetaEvent::Unchanged);
+            return Ok(FleetEvent::Unchanged);
         }
         if !cell.state.may_become(state) {
-            return Err(MetaRefusal::CellTransition {
+            return Err(FleetDirectoryRefusal::CellTransition {
                 from: cell.state,
                 to: state,
             });
         }
         cell.state = state;
-        Ok(MetaEvent::CellMarked { cell_id, state })
+        Ok(FleetEvent::CellMarked { cell_id, state })
     }
 
     fn register_tenant(
         &mut self,
-        control: JournalKey,
+        control: JournalIdentifier,
         name: &[u8],
         cell_id: u64,
-    ) -> Result<MetaEvent, MetaRefusal> {
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let tenant = control.tenant;
         if !control.is_set() {
-            return Err(MetaRefusal::Malformed);
+            return Err(FleetDirectoryRefusal::Malformed);
         }
         if let Some(existing) = self.tenants.get(&tenant) {
             // The same registration again: a re-run of the first step.
@@ -878,19 +889,19 @@ impl Meta {
                 && existing.cell_id == cell_id
                 && existing.control == control.journal;
             return if same {
-                Ok(MetaEvent::Unchanged)
+                Ok(FleetEvent::Unchanged)
             } else {
-                Err(MetaRefusal::TenantIdTaken { tenant })
+                Err(FleetDirectoryRefusal::TenantIdTaken { tenant })
             };
         }
         if self.removed.contains(&tenant) {
-            return Err(MetaRefusal::TenantIdTaken { tenant });
+            return Err(FleetDirectoryRefusal::TenantIdTaken { tenant });
         }
         if let Some(&holder) = self.names.get(name) {
-            return Err(MetaRefusal::NameTaken { holder });
+            return Err(FleetDirectoryRefusal::NameTaken { holder });
         }
         if self.cells.get(&cell_id).map(|c| c.state) != Some(CellState::Ready) {
-            return Err(MetaRefusal::CellNotReady { cell_id });
+            return Err(FleetDirectoryRefusal::CellNotReady { cell_id });
         }
         self.names.insert(name.to_vec(), tenant);
         self.tenants.insert(
@@ -904,26 +915,26 @@ impl Meta {
                 groups: Groups::SERVED,
             },
         );
-        Ok(MetaEvent::TenantRegistered { tenant, cell_id })
+        Ok(FleetEvent::TenantRegistered { tenant, cell_id })
     }
 
     fn mark_tenant(
         &mut self,
         tenant: TenantId,
         state: TenantState,
-    ) -> Result<MetaEvent, MetaRefusal> {
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let entry = self
             .tenants
             .get_mut(&tenant)
-            .ok_or(MetaRefusal::UnknownTenant { tenant })?;
+            .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
         if entry.groups.contains(Group::Internal) {
-            return Err(MetaRefusal::Internal { tenant });
+            return Err(FleetDirectoryRefusal::Internal { tenant });
         }
         if entry.state == state {
-            return Ok(MetaEvent::Unchanged);
+            return Ok(FleetEvent::Unchanged);
         }
         if !entry.state.may_become(state) {
-            return Err(MetaRefusal::TenantTransition {
+            return Err(FleetDirectoryRefusal::TenantTransition {
                 from: entry.state,
                 to: state,
             });
@@ -932,22 +943,22 @@ impl Meta {
             entry.config_seq += 1;
         }
         entry.state = state;
-        Ok(MetaEvent::TenantMarked { tenant, state })
+        Ok(FleetEvent::TenantMarked { tenant, state })
     }
 
-    fn remove_tenant(&mut self, tenant: TenantId) -> Result<MetaEvent, MetaRefusal> {
+    fn remove_tenant(&mut self, tenant: TenantId) -> Result<FleetEvent, FleetDirectoryRefusal> {
         if self.removed.contains(&tenant) {
-            return Ok(MetaEvent::Unchanged);
+            return Ok(FleetEvent::Unchanged);
         }
         let entry = self
             .tenants
             .get(&tenant)
-            .ok_or(MetaRefusal::UnknownTenant { tenant })?;
+            .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
         if entry.groups.contains(Group::Internal) {
-            return Err(MetaRefusal::Internal { tenant });
+            return Err(FleetDirectoryRefusal::Internal { tenant });
         }
         if entry.state != TenantState::Removing {
-            return Err(MetaRefusal::TenantTransition {
+            return Err(FleetDirectoryRefusal::TenantTransition {
                 from: entry.state,
                 to: TenantState::Removing,
             });
@@ -956,16 +967,16 @@ impl Meta {
         self.tenants.remove(&tenant);
         self.names.remove(&name);
         self.removed.insert(tenant);
-        Ok(MetaEvent::TenantRemoved { tenant })
+        Ok(FleetEvent::TenantRemoved { tenant })
     }
 
-    fn state_to_wire(&self) -> wire::MetaState {
+    fn state_to_wire(&self) -> wire::FleetDirectoryState {
         let fleet = self.fleet;
-        wire::MetaState {
+        wire::FleetDirectoryState {
             fleet_id: fleet.map_or(0, |f| f.id),
             version: fleet.map_or(0, |f| f.version),
-            meta_tenant: fleet.map_or(0, |f| f.meta.tenant.0),
-            meta_journal: fleet.map_or(0, |f| f.meta.journal.0),
+            fleet_tenant: fleet.map_or(0, |f| f.control.tenant.0),
+            fleet_journal: fleet.map_or(0, |f| f.control.journal.0),
             cells: self
                 .cells
                 .iter()
@@ -994,10 +1005,10 @@ impl Meta {
     }
 }
 
-impl Checkpointable for Meta {
-    type Event = MetaEvent;
+impl Checkpointable for FleetDirectory {
+    type Event = FleetEvent;
 
-    fn apply(&mut self, seq: u64, record: &[u8]) -> MetaEvent {
+    fn apply(&mut self, seq: u64, record: &[u8]) -> FleetEvent {
         self.fold(seq, record)
     }
 
@@ -1006,20 +1017,21 @@ impl Checkpointable for Meta {
     }
 
     fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str> {
-        let state = wire::MetaState::decode(state).map_err(|_| "a meta state does not decode")?;
+        let state = wire::FleetDirectoryState::decode(state)
+            .map_err(|_| "a fleet directory state does not decode")?;
         if state.version > METADATA_VERSION {
-            return Err("a meta state of an unknown metadata version");
+            return Err("a fleet directory state of an unknown metadata version");
         }
         let fleet = match state.fleet_id {
             0 => None,
-            id => Some(Fleet {
+            id => Some(Formed {
                 id,
                 version: state.version,
-                meta: frame(state.meta_tenant, state.meta_journal),
+                control: identifier(state.fleet_tenant, state.fleet_journal),
             }),
         };
-        if fleet.is_some_and(|f| !f.meta.is_set()) {
-            return Err("a meta state names no frame for meta");
+        if fleet.is_some_and(|f| !f.control.is_set()) {
+            return Err("a fleet directory state names no fleet tenant");
         }
         let mut cells = BTreeMap::new();
         for c in state.cells {
@@ -1039,10 +1051,10 @@ impl Checkpointable for Meta {
             let id = TenantId(t.tenant);
             let groups = Groups::from_wire(t.groups).ok_or("an unknown set of tenant groups")?;
             if !id.is_set() || t.control_journal == 0 {
-                return Err("a meta state names an unset tenant frame");
+                return Err("a fleet directory state names an unset tenant identifier");
             }
             if groups.contains(Group::Users) && names.insert(t.name.clone(), id).is_some() {
-                return Err("a meta state names one tenant name twice");
+                return Err("a fleet directory state names one tenant name twice");
             }
             tenants.insert(
                 id,
@@ -1058,7 +1070,7 @@ impl Checkpointable for Meta {
         }
         let removed: BTreeSet<TenantId> = state.removed.into_iter().map(TenantId).collect();
         if removed.iter().any(|id| tenants.contains_key(id)) {
-            return Err("a meta state holds a removed tenant");
+            return Err("a fleet directory state holds a removed tenant");
         }
         self.fleet = fleet;
         self.cells = cells;
@@ -1070,15 +1082,15 @@ impl Checkpointable for Meta {
     }
 }
 
-/// The event a [`Folded`] meta record is reported as (see
+/// The event a [`Folded`] fleet record is reported as (see
 /// [`crate::system::registry_event`]). `None` for a record the fold skipped
 /// or is waiting on.
 #[must_use]
-pub fn meta_event(folded: Folded<MetaEvent>) -> Option<MetaEvent> {
+pub fn fleet_event(folded: Folded<FleetEvent>) -> Option<FleetEvent> {
     match folded {
         Folded::Entry(event) => Some(event),
-        Folded::Checkpoint { covers_up_to, .. } => Some(MetaEvent::Checkpoint { covers_up_to }),
-        Folded::Unreadable(_) => Some(MetaEvent::Refused(MetaRefusal::Malformed)),
+        Folded::Checkpoint { covers_up_to, .. } => Some(FleetEvent::Checkpoint { covers_up_to }),
+        Folded::Unreadable(_) => Some(FleetEvent::Refused(FleetDirectoryRefusal::Malformed)),
         Folded::NeedsRef(_) | Folded::Skipped => None,
     }
 }

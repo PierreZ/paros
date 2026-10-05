@@ -25,8 +25,9 @@ use paros::client::{
     WriteOutcome, Writer, WriterOutcome,
 };
 use paros::{
-    Command, Entry, JournalKey, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
-    TenantId, Truncate, Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
+    Command, Entry, JournalIdentifier, JournalState, QuorumSystem, ReconfigureRefusal,
+    RetireRequest, TenantId, Truncate, Value, WireQuorumSystem, command_hash,
+    quorum_system_from_proto,
 };
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
@@ -138,11 +139,11 @@ const CHECKPOINT: u8 = 23;
 /// one (#211): what the cell coordinator writes.
 const BOOK_CAPACITY: u8 = 24;
 /// Run `init`'s fleet half (#229) through `paros::client::fleet`: the cell
-/// joins the fleet on its side, meta records the fleet and the cell
+/// joins the fleet on its side, the fleet tenant records the fleet and the cell
 /// `READY` — or resume a fleet operation this client stopped in the middle
 /// of.
 const FLEET_INIT: u8 = 25;
-/// Create or remove a tenant through meta's directory and the cell (#229),
+/// Create or remove a tenant through the fleet directory and the cell (#229),
 /// or resume one this client stopped in the middle of.
 const TENANT: u8 = 26;
 const OP_COUNT: u8 = 27;
@@ -440,7 +441,7 @@ impl ChainConfig {
                 // An init is at most four writes, then nothing to do; the
                 // ceiling is an operator re-running init all run long.
                 buggify_knob!(3_u64, 0_u64..21_u64),
-                // A tenant operation claims meta and the cell's journal and
+                // A tenant operation claims the fleet tenant and the cell's journal and
                 // writes up to three steps; the ceiling is a client that
                 // mostly manages tenants, fencing every other operator.
                 buggify_knob!(4_u64, 0_u64..21_u64),
@@ -817,7 +818,7 @@ struct Tail {
     /// The journals some client saw converged (#188): the run ends only once
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
-    converged: BTreeSet<JournalKey>,
+    converged: BTreeSet<JournalIdentifier>,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -888,7 +889,7 @@ pub(crate) struct ChainWorkload {
     digest: Option<DigestSink>,
     /// The journal this client writes and reads (#188), and the run's
     /// plan (set in `setup`).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     plan: Option<crate::shape::JournalPlan>,
     /// This client's id (set in `setup`): its identity as an owner.
     client_id: u64,
@@ -904,7 +905,7 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
-            journal: JournalKey::UNSET,
+            journal: JournalIdentifier::UNSET,
             plan: None,
             client_id: 0,
             calls: None,
@@ -1044,7 +1045,7 @@ impl ChainWorkload {
 /// generation of its own (the races of #205).
 async fn claim(
     nodes: &ChainClient,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     target: usize,
     (me, fresh): (u64, bool),
 ) -> ClaimOutcome {
@@ -1182,7 +1183,7 @@ impl Workload for ChainWorkload {
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let main = crate::shape::frames(ctx.state()).main;
+        let main = crate::shape::identifiers(ctx.state()).main;
         let replica_ips: Vec<(u64, String)> = if self.journal == main {
             deployment
                 .replicas()
@@ -1258,16 +1259,16 @@ impl Workload for ChainWorkload {
         let mut writer = Writer::new(journal, client_id);
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
-        // The fleet operations (#229): meta and the cell's tenant list.
+        // The fleet operations (#229): the fleet tenant and the cell's tenant list.
         let mut fleet_ops = fleet::FleetOps::new(
             &deployment,
-            crate::shape::frames(ctx.state()),
+            crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             client_id,
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
-            crate::shape::frames(ctx.state()),
+            crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             self.plan
                 .as_ref()
@@ -1998,19 +1999,19 @@ impl Workload for ChainWorkload {
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
                     // A client naming a journal this deployment does not
-                    // serve (the unset frame, or another tenant's) must be
+                    // serve (the unset identifier, or another tenant's) must be
                     // refused, never answered from the wrong journal.
                     let stray = !racing && buggify_with_prob!(0.05);
                     let named = if stray {
                         assert_reachable!("chain: a client asks for a journal nobody serves");
                         if raw_policy & 1 == 0 {
-                            JournalKey::UNSET
+                            JournalIdentifier::UNSET
                         } else {
-                            // A frame nobody serves (#235): this journal's
+                            // An identifier nobody serves (#235): this journal's
                             // id in a tenant no run draws (`u64::MAX` is
                             // outside every draw) — the right journal id
                             // under the wrong tenant must be refused too.
-                            JournalKey::new(TenantId(u64::MAX), journal.journal)
+                            JournalIdentifier::new(TenantId(u64::MAX), journal.journal)
                         }
                     } else {
                         journal
@@ -2916,7 +2917,8 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == crate::shape::frames(ctx.state()).main && client_id == 0)
+        let held_replica = (journal == crate::shape::identifiers(ctx.state()).main
+            && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))
@@ -3214,7 +3216,7 @@ impl Workload for ChainWorkload {
         // siblings — a client whose journal is quiet keeps the run alive for
         // one still settling.
         if converged {
-            let appended_to: BTreeSet<JournalKey> = self
+            let appended_to: BTreeSet<JournalIdentifier> = self
                 .plan
                 .as_ref()
                 .map(|plan| {

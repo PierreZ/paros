@@ -180,7 +180,7 @@ mod tests {
             || {
                 std::future::ready(MemStorage::new(Config {
                     peers: vec![NodeId(0)],
-                    ..Config::new(NodeId(0), paros_core::JournalKey::UNSET)
+                    ..Config::new(NodeId(0), paros_core::JournalIdentifier::UNSET)
                 }))
             },
             // In-memory writes are immediately visible: a reboot is the same

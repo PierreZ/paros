@@ -28,10 +28,10 @@
 //!
 //! The plan is a [`CellPlan`]: the cell's id, its bootstrap members (every
 //! seed, by id and address) and the journals they serve from formation —
-//! the cell tenant's control journal ([`CellPlan::control`]), meta's control
-//! journal ([`CellPlan::meta`]: the fleet's one cell hosts meta in M9, #226)
-//! and the static assignment, every frame drawn at `init` (no frame is
-//! fixed, `docs/architecture.md` §3.8)
+//! the cell tenant's control journal ([`CellPlan::control`]), the fleet
+//! tenant's control journal ([`CellPlan::fleet`]: the fleet's one cell hosts
+//! the fleet tenant in M9, #226) and the static assignment, every identifier
+//! drawn at `init` (no identifier is fixed, `docs/architecture.md` §3.8)
 //! that stands in for placement until M9 (#212). Its first coordinator, the
 //! one that claims the cell control journal, is the lowest member id
 //! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalKey, NodeId, TenantId};
+use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 use tokio_util::sync::CancellationToken;
 
 use crate::driver::edge::RpcEdge;
@@ -56,16 +56,16 @@ use crate::rpc::machine as wire;
 use crate::rpc::methods::{FormCellRpc, IdentifyRpc, InitRpc, InspectRpc};
 use crate::rpc::{Inbound, InspectRequest, serve_well_known, well_known};
 
-/// A random frame: a random tenant and a random journal, both set (no id
+/// A random identifier: a random tenant and a random journal, both set (no id
 /// is fixed, `docs/architecture.md` §3.8).
-fn draw_frame<P: Providers>(providers: &P) -> JournalKey {
+fn draw_identifier<P: Providers>(providers: &P) -> JournalIdentifier {
     let draw = || loop {
         let id: u64 = providers.random().random();
         if id != 0 {
             break id;
         }
     };
-    JournalKey::new(TenantId(draw()), JournalId(draw()))
+    JournalIdentifier::new(TenantId(draw()), JournalId(draw()))
 }
 
 /// The fleet's **control journals** as one cell knows them (§3.2, §3.8):
@@ -82,10 +82,10 @@ pub struct ControlJournals {
     /// The cell's id.
     pub cell_id: u64,
     /// The cell tenant's control journal: the registry and the capacity.
-    pub cell: JournalKey,
+    pub cell: JournalIdentifier,
     /// The fleet tenant's control journal (the fleet directory), when this
     /// cell hosts the fleet tenant.
-    pub fleet: Option<JournalKey>,
+    pub fleet: Option<JournalIdentifier>,
 }
 
 /// How long a waiting machine keeps its listener up after the answer that
@@ -97,7 +97,7 @@ const FLUSH: Duration = Duration::from_millis(250);
 pub enum Class {
     /// Anything with a durable store: acceptors, replicas, matchmakers.
     Storage,
-    /// The front door, proxy leaders, batchers, coordinators.
+    /// Proxies, proxy leaders, batchers, coordinators.
     Stateless,
 }
 
@@ -167,14 +167,15 @@ pub struct CellPlan {
     pub cell_id: u64,
     /// The bootstrap members — every seed — by id and address, in id order.
     pub members: Vec<(NodeId, SocketAddr)>,
-    /// The cell tenant's control journal, its frame drawn at `init`.
-    pub control: JournalKey,
-    /// Meta's control journal when this cell hosts meta (the fleet's first
-    /// cell does, #226), its frame drawn at `init`.
-    pub meta: Option<JournalKey>,
-    /// The journals every member serves from formation, in frame order:
-    /// [`CellPlan::control`], [`CellPlan::meta`] and the static assignment.
-    pub journals: Vec<JournalKey>,
+    /// The cell tenant's control journal, its identifier drawn at `init`.
+    pub control: JournalIdentifier,
+    /// The fleet tenant's control journal when this cell hosts the fleet
+    /// tenant (the fleet's first cell does, #226), its identifier drawn at
+    /// `init`.
+    pub fleet: Option<JournalIdentifier>,
+    /// The journals every member serves from formation, in identifier order:
+    /// [`CellPlan::control`], [`CellPlan::fleet`] and the static assignment.
+    pub journals: Vec<JournalIdentifier>,
 }
 
 impl CellPlan {
@@ -194,7 +195,7 @@ impl CellPlan {
     }
 
     /// Whether the plan is one a machine may form: a set cell id, at least
-    /// one member, member ids and addresses unique, every journal frame set
+    /// one member, member ids and addresses unique, every journal identifier set
     /// and unique, the cell control journal among them.
     ///
     /// # Errors
@@ -212,17 +213,17 @@ impl CellPlan {
         if ids.len() != self.members.len() || addrs.len() != self.members.len() {
             return Err("a cell's members are unique by id and by address");
         }
-        let frames: BTreeSet<JournalKey> = self.journals.iter().copied().collect();
-        if frames.len() != self.journals.len() || self.journals.iter().any(|j| !j.is_set()) {
+        let served: BTreeSet<JournalIdentifier> = self.journals.iter().copied().collect();
+        if served.len() != self.journals.len() || self.journals.iter().any(|j| !j.is_set()) {
             return Err("a cell's journals are set and unique");
         }
-        if !self.control.is_set() || !frames.contains(&self.control) {
+        if !self.control.is_set() || !served.contains(&self.control) {
             return Err("a cell serves its control journal");
         }
-        if let Some(meta) = self.meta
-            && (!frames.contains(&meta) || meta.tenant == self.control.tenant)
+        if let Some(fleet) = self.fleet
+            && (!served.contains(&fleet) || fleet.tenant == self.control.tenant)
         {
-            return Err("meta is served, under a tenant of its own");
+            return Err("the fleet tenant is served, under a tenant of its own");
         }
         Ok(())
     }
@@ -234,7 +235,7 @@ impl CellPlan {
         ControlJournals {
             cell_id: self.cell_id,
             cell: self.control,
-            fleet: self.meta,
+            fleet: self.fleet,
         }
     }
 
@@ -248,13 +249,10 @@ impl CellPlan {
             .collect()
     }
 
-    fn journals_to_wire(&self) -> Vec<wire::Frame> {
+    fn journals_to_wire(&self) -> Vec<wire::JournalIdentifier> {
         self.journals
             .iter()
-            .map(|key| wire::Frame {
-                tenant: key.tenant.0,
-                journal: key.journal.0,
-            })
+            .map(|&journal| Self::identifier_to_wire(journal))
             .collect()
     }
 
@@ -268,7 +266,7 @@ impl CellPlan {
             form.cell_id,
             &form.members,
             form.control.as_ref(),
-            form.meta.as_ref(),
+            form.fleet.as_ref(),
             &form.journals,
         )
     }
@@ -283,13 +281,13 @@ impl CellPlan {
             ack.cell_id,
             &ack.members,
             ack.control.as_ref(),
-            ack.meta.as_ref(),
+            ack.fleet.as_ref(),
             &ack.journals,
         )
     }
 
     /// A plan from its wire parts, normalized (members by id, journals by
-    /// frame) and checked.
+    /// identifier) and checked.
     ///
     /// # Errors
     ///
@@ -298,11 +296,13 @@ impl CellPlan {
     fn from_wire(
         cell_id: u64,
         members: &[wire::Member],
-        control: Option<&wire::Frame>,
-        meta: Option<&wire::Frame>,
-        journals: &[wire::Frame],
+        control: Option<&wire::JournalIdentifier>,
+        fleet: Option<&wire::JournalIdentifier>,
+        journals: &[wire::JournalIdentifier],
     ) -> Result<Self, &'static str> {
-        let frame = |f: &wire::Frame| JournalKey::new(TenantId(f.tenant), JournalId(f.journal));
+        let identifier = |f: &wire::JournalIdentifier| {
+            JournalIdentifier::new(TenantId(f.tenant), JournalId(f.journal))
+        };
         let mut members = members
             .iter()
             .map(|m| {
@@ -313,26 +313,26 @@ impl CellPlan {
             })
             .collect::<Result<Vec<_>, _>>()?;
         members.sort_unstable();
-        let mut journals: Vec<JournalKey> = journals
+        let mut journals: Vec<JournalIdentifier> = journals
             .iter()
-            .map(|f| JournalKey::new(TenantId(f.tenant), JournalId(f.journal)))
+            .map(|f| JournalIdentifier::new(TenantId(f.tenant), JournalId(f.journal)))
             .collect();
         journals.sort_unstable();
         let plan = Self {
             cell_id,
             members,
-            control: control.map_or(JournalKey::UNSET, frame),
-            meta: meta.map(frame).filter(|meta| meta.is_set()),
+            control: control.map_or(JournalIdentifier::UNSET, identifier),
+            fleet: fleet.map(identifier).filter(|fleet| fleet.is_set()),
             journals,
         };
         plan.check()?;
         Ok(plan)
     }
 
-    fn frame_to_wire(key: JournalKey) -> wire::Frame {
-        wire::Frame {
-            tenant: key.tenant.0,
-            journal: key.journal.0,
+    fn identifier_to_wire(journal: JournalIdentifier) -> wire::JournalIdentifier {
+        wire::JournalIdentifier {
+            tenant: journal.tenant.0,
+            journal: journal.journal.0,
         }
     }
 
@@ -341,8 +341,8 @@ impl CellPlan {
             cell_id: self.cell_id,
             members: self.members_to_wire(),
             journals: self.journals_to_wire(),
-            control: Some(Self::frame_to_wire(self.control)),
-            meta: self.meta.map(Self::frame_to_wire),
+            control: Some(Self::identifier_to_wire(self.control)),
+            fleet: self.fleet.map(Self::identifier_to_wire),
         }
     }
 
@@ -354,8 +354,8 @@ impl CellPlan {
             members: self.members_to_wire(),
             journals: self.journals_to_wire(),
             coordinator: self.coordinator().0,
-            control: Some(Self::frame_to_wire(self.control)),
-            meta: self.meta.map(Self::frame_to_wire),
+            control: Some(Self::identifier_to_wire(self.control)),
+            fleet: self.fleet.map(Self::identifier_to_wire),
         }
     }
 }
@@ -390,7 +390,7 @@ pub trait CellLedger {
 /// forms this machine, and return the plan it formed — or `None` on
 /// `shutdown`. `assignment` is how many user journals a cell this machine
 /// initializes serves beside its control journals — the static assignment,
-/// until #212 — each under a frame `init` draws.
+/// until #212 — each under an identifier `init` draws.
 ///
 /// # Errors
 ///
@@ -569,21 +569,24 @@ async fn run_init<P: Providers, L: CellLedger>(
                 break id;
             }
         };
-        // Every frame is drawn (§3.8): the cell tenant's control journal,
-        // meta's (this cell hosts it: the fleet's first), and the static
+        // Every identifier is drawn (§3.8): the cell tenant's control journal,
+        // the fleet tenant's (this cell hosts it: the fleet's first), and the static
         // user journals under one drawn user tenant.
-        let control = draw_frame(providers);
-        let meta = draw_frame(providers);
-        let users = draw_frame(providers).tenant;
-        let mut journals: BTreeSet<JournalKey> = [control, meta].into_iter().collect();
+        let control = draw_identifier(providers);
+        let fleet = draw_identifier(providers);
+        let users = draw_identifier(providers).tenant;
+        let mut journals: BTreeSet<JournalIdentifier> = [control, fleet].into_iter().collect();
         while journals.len() < 2 + assignment {
-            journals.insert(JournalKey::new(users, draw_frame(providers).journal));
+            journals.insert(JournalIdentifier::new(
+                users,
+                draw_identifier(providers).journal,
+            ));
         }
         let plan = CellPlan {
             cell_id,
             members,
             control,
-            meta: Some(meta),
+            fleet: Some(fleet),
             journals: journals.into_iter().collect(),
         };
         plan.check().map_err(|_| "malformed")?;
@@ -623,8 +626,8 @@ async fn run_init<P: Providers, L: CellLedger>(
 
 /// Whether the machine at `seed` serves a cell: it answers a node-only
 /// `Inspect` (a waiting machine serves no `Inspect` at all) naming a cell. A
-/// machine that has no plan cannot know any frame to ask for: no frame is
-/// fixed (§3.8).
+/// machine that has no plan cannot know any identifier to ask for: no
+/// identifier is fixed (§3.8).
 async fn serves_cell<P: Providers>(
     time: &P::Time,
     rpc: &RpcHandle<P>,
@@ -647,17 +650,21 @@ mod tests {
         SocketAddr::from(([10, 0, 0, 1], port))
     }
 
-    fn frame(tenant: u64, journal: u64) -> JournalKey {
-        JournalKey::new(TenantId(tenant), JournalId(journal))
+    fn identifier(tenant: u64, journal: u64) -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(tenant), JournalId(journal))
     }
 
     fn plan() -> CellPlan {
         CellPlan {
             cell_id: 7,
             members: vec![(NodeId(9), addr(1)), (NodeId(3), addr(2))],
-            control: frame(0x51, 0x52),
-            meta: Some(frame(0x61, 0x62)),
-            journals: vec![frame(0x51, 0x52), frame(0x61, 0x62), frame(0x71, 0x72)],
+            control: identifier(0x51, 0x52),
+            fleet: Some(identifier(0x61, 0x62)),
+            journals: vec![
+                identifier(0x51, 0x52),
+                identifier(0x61, 0x62),
+                identifier(0x71, 0x72),
+            ],
         }
     }
 
@@ -688,12 +695,15 @@ mod tests {
         no_control.journals.remove(0);
         assert!(no_control.check().is_err());
         let mut unset = plan();
-        unset.control = JournalKey::UNSET;
+        unset.control = JournalIdentifier::UNSET;
         assert!(unset.check().is_err());
         let mut shared = plan();
-        shared.meta = Some(frame(0x51, 0x99));
-        shared.journals.push(frame(0x51, 0x99));
-        assert!(shared.check().is_err(), "meta has a tenant of its own");
+        shared.fleet = Some(identifier(0x51, 0x99));
+        shared.journals.push(identifier(0x51, 0x99));
+        assert!(
+            shared.check().is_err(),
+            "the fleet tenant has a tenant of its own"
+        );
         assert!("cloud".parse::<Class>().is_err());
         assert_eq!("storage".parse::<Class>(), Ok(Class::Storage));
     }

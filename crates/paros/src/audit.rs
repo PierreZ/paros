@@ -20,10 +20,11 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalKey, JournalState, LogRead,
-    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
-    NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply, ReconfigureRequest,
-    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq, Slot, Value,
+    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalState,
+    LogRead, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
+    Message, NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq,
+    Slot, Value,
 };
 
 use crate::driver::BootRefusal;
@@ -188,7 +189,7 @@ pub trait Audit {
 
     /// This node refused a client call naming a journal it does not serve
     /// (`0`, or any other id than its own, #185). `call` names the RPC.
-    fn journal_refused(&self, node: NodeId, journal: JournalKey, call: &'static str) {}
+    fn journal_refused(&self, node: NodeId, journal: JournalIdentifier, call: &'static str) {}
 
     /// This node folded the system-journal record at position `seq` of
     /// `journal` (#189: the directory or the node registry) into `event` —
@@ -196,7 +197,7 @@ pub trait Audit {
     fn system_folded(
         &self,
         node: NodeId,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         seq: u64,
         event: &crate::system::SystemEvent,
     ) {
@@ -209,7 +210,7 @@ pub trait Audit {
     fn checkpoint_folded(
         &self,
         node: NodeId,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         seq: u64,
         verified: Option<bool>,
     ) {
@@ -217,16 +218,16 @@ pub trait Audit {
 
     /// This node started serving `journal`, a journal the directory created
     /// naming it (#189).
-    fn journal_started(&self, node: NodeId, journal: JournalKey) {}
+    fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {}
 
     /// This node stopped serving `journal` for good (#189): its tombstone was
     /// folded, or this node's own retirement was.
-    fn journal_stopped(&self, node: NodeId, journal: JournalKey) {}
+    fn journal_stopped(&self, node: NodeId, journal: JournalIdentifier) {}
 
     /// This node refused a peer message for `journal` from `from`, a node its
     /// registry fold does not have in the pool yet (#189). A liveness cost
     /// until the fold catches up, never a safety one.
-    fn unpooled_message(&self, node: NodeId, journal: JournalKey, from: NodeId) {}
+    fn unpooled_message(&self, node: NodeId, journal: JournalIdentifier, from: NodeId) {}
 
     /// This node's registry fold admitted `admitted` to the pool (#189): its
     /// messages are accepted from now on.

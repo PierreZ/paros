@@ -2,31 +2,31 @@
 //! answers one (the node loop, the replica tier) and every client that
 //! sends one.
 //!
-//! No frame has a default (`docs/architecture.md` §3.8): an `Inspect` names
+//! No identifier has a default (`docs/architecture.md` §3.8): an `Inspect` names
 //! the journal it asks about, or asks for the node alone — its id, its cell
-//! and the control journals' frames, which is how a client handed only an
-//! address learns the frames before it can name any journal. An unset frame
+//! and the control journals' identifiers, which is how a client handed only an
+//! address learns the identifiers before it can name any journal. An unset identifier
 //! that does not ask for the node alone is refused, never read as "the
 //! node's first journal".
 
-use paros_core::{JournalId, JournalKey, TenantId};
+use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::{InspectReply, InspectRequest};
 
 /// What a well-formed `Inspect` asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InspectTarget {
-    /// The node alone: its id, its cell and the control journals' frames.
+    /// The node alone: its id, its cell and the control journals' identifiers.
     Node,
     /// The node and one journal it serves.
-    Journal(JournalKey),
+    Journal(JournalIdentifier),
 }
 
 /// Why an `Inspect` was not answered for a journal. The node's own facts
 /// are answered either way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InspectRefusal {
-    /// The request named no journal (a half of its frame is `0`) and did not
+    /// The request named no journal (a half of its identifier is `0`) and did not
     /// ask for the node alone.
     Unset,
     /// The request asked for the node alone and named a journal too.
@@ -64,10 +64,10 @@ impl InspectRequest {
     /// # Errors
     ///
     /// [`InspectRefusal::Malformed`] for a node-only request that names a
-    /// frame half, [`InspectRefusal::Unset`] for a journal request whose
-    /// frame has an unset half.
+    /// identifier half, [`InspectRefusal::Unset`] for a journal request whose
+    /// identifier has an unset half.
     pub fn target(&self) -> Result<InspectTarget, InspectRefusal> {
-        let journal = JournalKey::new(TenantId(self.tenant), JournalId(self.journal));
+        let journal = JournalIdentifier::new(TenantId(self.tenant), JournalId(self.journal));
         match (self.node_only, self.tenant != 0 || self.journal != 0) {
             (true, false) => Ok(InspectTarget::Node),
             (true, true) => Err(InspectRefusal::Malformed),
@@ -89,7 +89,7 @@ impl InspectReply {
     }
 
     /// The node's own facts of this reply — its id, its cell and the control
-    /// journals' frames — and nothing about any journal: the answer to a
+    /// journals' identifiers — and nothing about any journal: the answer to a
     /// node-only `Inspect`.
     #[must_use]
     pub fn node_facts(&self) -> Self {
@@ -98,8 +98,8 @@ impl InspectReply {
             cell_id: self.cell_id,
             control_tenant: self.control_tenant,
             control_journal: self.control_journal,
-            meta_tenant: self.meta_tenant,
-            meta_journal: self.meta_journal,
+            fleet_tenant: self.fleet_tenant,
+            fleet_journal: self.fleet_journal,
             ..Self::default()
         }
     }
@@ -122,12 +122,12 @@ mod tests {
         assert_eq!(request(0, 0, true).target(), Ok(InspectTarget::Node));
         assert_eq!(
             request(3, 4, false).target(),
-            Ok(InspectTarget::Journal(JournalKey::new(
+            Ok(InspectTarget::Journal(JournalIdentifier::new(
                 TenantId(3),
                 JournalId(4)
             )))
         );
-        // No frame has a default: unset is refused, never "the first journal".
+        // No identifier has a default: unset is refused, never "the first journal".
         assert_eq!(request(0, 0, false).target(), Err(InspectRefusal::Unset));
         assert_eq!(request(3, 0, false).target(), Err(InspectRefusal::Unset));
         assert_eq!(request(0, 4, false).target(), Err(InspectRefusal::Unset));
@@ -142,8 +142,8 @@ mod tests {
             cell_id: 7,
             control_tenant: 1,
             control_journal: 2,
-            meta_tenant: 3,
-            meta_journal: 4,
+            fleet_tenant: 3,
+            fleet_journal: 4,
             leader: true,
             first_slot: 5,
             members: vec![9],
@@ -152,7 +152,7 @@ mod tests {
         let refused = full.clone().refused(InspectRefusal::UnknownJournal);
         assert_eq!(refused.refusal, "unknown_journal");
         assert_eq!(
-            (refused.node, refused.cell_id, refused.meta_journal),
+            (refused.node, refused.cell_id, refused.fleet_journal),
             (9, 7, 4)
         );
         assert!(!refused.leader);

@@ -58,8 +58,8 @@ use std::time::Duration;
 use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{
-    DriverHooks, HandoffContext, JournalKey, Message, NodeId, Party, ProxyId, ReconfigurerPhase,
-    Seam, Slot,
+    DriverHooks, HandoffContext, JournalIdentifier, Message, NodeId, Party, ProxyId,
+    ReconfigurerPhase, Seam, Slot,
 };
 
 /// The shape every inline-gated hook shares: one `buggify_with_prob!` draw
@@ -98,7 +98,7 @@ pub(crate) struct BuggifyHooks<T> {
     withhold_gc: bool,
     /// The journal held on every node for the chaos window (#188), drawn
     /// once per seed (`crate::shape::journals`); `None` on most seeds.
-    held_journal: Option<JournalKey>,
+    held_journal: Option<JournalIdentifier>,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
@@ -115,7 +115,7 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 
     /// Hold `held` on this node for the chaos window
     /// (`DriverHooks::hold_journal`, #188).
-    pub(crate) fn holding_journal(mut self, held: Option<JournalKey>) -> Self {
+    pub(crate) fn holding_journal(mut self, held: Option<JournalIdentifier>) -> Self {
         self.held_journal = held;
         self
     }
@@ -185,7 +185,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         self.withhold_gc
     }
 
-    fn hold_journal(&self, journal: JournalKey) -> bool {
+    fn hold_journal(&self, journal: JournalIdentifier) -> bool {
         // Drawn once per seed (the plan's own BUGGIFY location and its
         // reachable), never per call: a deterministic answer is safe to ask
         // per inbound message. Only inside the chaos window, so the held

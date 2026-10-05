@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::Providers;
-use paros_core::{ColocatedNode, JournalKey, NodeId};
+use paros_core::{ColocatedNode, JournalIdentifier, NodeId};
 
 use crate::audit::Audit;
 use crate::hooks::DriverHooks;
@@ -49,19 +49,19 @@ pub trait JournalStores {
     type Audit: Audit + Clone + Send + Sync + 'static;
 
     /// The journals this node serves, a static list (ids `>= 1`).
-    fn journals(&self) -> Vec<JournalKey>;
+    fn journals(&self) -> Vec<JournalIdentifier>;
 
     /// Open `journal`'s store with the operator's boot claim, or `None` when
     /// the journal must stay down on this node for good (its disk is gone).
-    fn open(&mut self, journal: JournalKey) -> Option<(Self::Store, BootKind)>;
+    fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)>;
 
     /// The audit port `journal` reports to.
-    fn audit(&self, journal: JournalKey) -> Self::Audit;
+    fn audit(&self, journal: JournalIdentifier) -> Self::Audit;
 
     /// The audit port the node's own facts report to — what no single
     /// journal owns: the edge's rejections, a peer lane's delivery failures,
     /// a refused journal id, the system journals' folds. Named by the
-    /// opener, never borrowed from a journal (no frame has a default,
+    /// opener, never borrowed from a journal (no identifier has a default,
     /// §3.8, #243).
     fn node_audit(&self) -> Self::Audit;
 
@@ -70,7 +70,7 @@ pub trait JournalStores {
     /// cannot (the default: a static list). A later [`JournalStores::open`]
     /// of `journal` opens it. Idempotent: a node that re-folds the directory
     /// after a restart asks again for a journal it already holds.
-    fn create(&mut self, journal: JournalKey, config: paros_core::Config) -> bool {
+    fn create(&mut self, journal: JournalIdentifier, config: paros_core::Config) -> bool {
         let _ = (journal, config);
         false
     }
@@ -81,7 +81,7 @@ pub trait JournalStores {
     /// provisioned on disk, so an opener that keeps a provisioning record
     /// outside its stores (#208) records `journal` now, and every later
     /// open is an existing member's. The default does nothing.
-    fn opened(&mut self, journal: JournalKey) {
+    fn opened(&mut self, journal: JournalIdentifier) {
         let _ = journal;
     }
 
@@ -90,13 +90,13 @@ pub trait JournalStores {
     /// [`DriverTunables::quarantine_ticks`]. An opener that already knows
     /// the store will not open again (a disk gone for good) can say so now
     /// rather than at the re-open. The default does nothing.
-    fn quarantined(&mut self, journal: JournalKey) {
+    fn quarantined(&mut self, journal: JournalIdentifier) {
         let _ = journal;
     }
 
     /// `journal` was tombstoned (#189): its store will never be opened
     /// again. The default keeps it.
-    fn delete(&mut self, journal: JournalKey) {
+    fn delete(&mut self, journal: JournalIdentifier) {
         let _ = journal;
     }
 }
@@ -105,7 +105,7 @@ pub trait JournalStores {
 /// once. A quarantine never re-opens it — a one-journal node that loses its
 /// journal has nothing left and exits with the fault, the pre-#188 rule.
 pub(crate) struct SingleStore<S, A> {
-    pub(crate) journal: JournalKey,
+    pub(crate) journal: JournalIdentifier,
     pub(crate) store: Option<(S, BootKind)>,
     pub(crate) audit: A,
 }
@@ -114,15 +114,15 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
     type Store = S;
     type Audit = A;
 
-    fn journals(&self) -> Vec<JournalKey> {
+    fn journals(&self) -> Vec<JournalIdentifier> {
         vec![self.journal]
     }
 
-    fn open(&mut self, _journal: JournalKey) -> Option<(S, BootKind)> {
+    fn open(&mut self, _journal: JournalIdentifier) -> Option<(S, BootKind)> {
         self.store.take()
     }
 
-    fn audit(&self, _journal: JournalKey) -> A {
+    fn audit(&self, _journal: JournalIdentifier) -> A {
         self.audit.clone()
     }
 
@@ -195,30 +195,30 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A:
 /// A node's journals: the live runtimes, the quarantined ones waiting to
 /// re-open (with the tick they went down), and the ones down for good.
 pub(crate) struct Journals<S, A> {
-    pub(crate) live: BTreeMap<JournalKey, JournalRt<S, A>>,
-    quarantined: BTreeMap<JournalKey, u64>,
-    down: BTreeSet<JournalKey>,
+    pub(crate) live: BTreeMap<JournalIdentifier, JournalRt<S, A>>,
+    quarantined: BTreeMap<JournalIdentifier, u64>,
+    down: BTreeSet<JournalIdentifier>,
     /// Journals quarantined since the loop last told the opener
     /// ([`JournalStores::quarantined`]).
-    newly_quarantined: Vec<JournalKey>,
+    newly_quarantined: Vec<JournalIdentifier>,
     /// The fault that ended the most recent incarnation, the node's exit
     /// when nothing is left.
     last_fault: Option<RunError>,
-    /// The control journals among the ones served (the cell's, meta's, a
-    /// tenant's directory): no frame is fixed (§3.8), so the deployment says
+    /// The control journals among the ones served (the cell's, the fleet tenant's, a
+    /// tenant's directory): no identifier is fixed (§3.8), so the deployment says
     /// which they are. They serve no user plane and outlive a retirement.
-    control: BTreeSet<JournalKey>,
+    control: BTreeSet<JournalIdentifier>,
     /// The journal whose configuration carries the deployment (matchmakers,
     /// proxy leaders, replicas), once one booted here: the plane, whether it
     /// is live now or not.
-    deployed: Option<JournalKey>,
+    deployed: Option<JournalIdentifier>,
     /// Every journal that booted in this incarnation: the ones whose
     /// configuration this node has read.
-    booted: BTreeSet<JournalKey>,
+    booted: BTreeSet<JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
-    pub(crate) fn new(control: BTreeSet<JournalKey>) -> Self {
+    pub(crate) fn new(control: BTreeSet<JournalIdentifier>) -> Self {
         Self {
             control,
             live: BTreeMap::new(),
@@ -232,7 +232,7 @@ impl<S, A> Journals<S, A> {
     }
 
     /// `journal` booted: it is live, and its configuration is known.
-    pub(crate) fn insert(&mut self, journal: JournalKey, rt: JournalRt<S, A>) {
+    pub(crate) fn insert(&mut self, journal: JournalIdentifier, rt: JournalRt<S, A>) {
         let config = rt.node.config();
         if config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0 {
             self.deployed.get_or_insert(journal);
@@ -243,7 +243,7 @@ impl<S, A> Journals<S, A> {
 
     /// Whether `journal` is one this node serves at all (live, quarantined
     /// or down) — the difference between "not here now" and "unknown".
-    pub(crate) fn serves(&self, journal: JournalKey) -> bool {
+    pub(crate) fn serves(&self, journal: JournalIdentifier) -> bool {
         self.live.contains_key(&journal)
             || self.quarantined.contains_key(&journal)
             || self.down.contains(&journal)
@@ -253,12 +253,14 @@ impl<S, A> Journals<S, A> {
     /// of the single-journal planes: matchmaking, retirement): the
     /// deployment's journal — the one whose configuration names its
     /// matchmakers, proxies or replicas, which only one journal of a process
-    /// may (#188) — or else the first live user journal. No frame is fixed
+    /// may (#188) — or else the first live user journal. No identifier is fixed
     /// (§3.8), so id order says nothing; the control journals serve no
     /// plane.
-    pub(crate) fn first(&mut self) -> Option<(&JournalKey, &mut JournalRt<S, A>)> {
-        let key = *self.plane()?.0;
-        self.live.iter_mut().find(|(journal, _)| **journal == key)
+    pub(crate) fn first(&mut self) -> Option<(&JournalIdentifier, &mut JournalRt<S, A>)> {
+        let deployed = *self.plane()?.0;
+        self.live
+            .iter_mut()
+            .find(|(journal, _)| **journal == deployed)
     }
 
     /// [`Journals::first`], read-only: the journal that carries the
@@ -267,9 +269,9 @@ impl<S, A> Journals<S, A> {
     /// booted could be it: answering from another journal would be a lie
     /// (a `no_matchmakers` refusal from a plain journal while the
     /// matchmaker journal is quarantined).
-    pub(crate) fn plane(&self) -> Option<(&JournalKey, &JournalRt<S, A>)> {
-        if let Some(key) = self.deployed {
-            return self.live.get_key_value(&key);
+    pub(crate) fn plane(&self) -> Option<(&JournalIdentifier, &JournalRt<S, A>)> {
+        if let Some(deployed) = self.deployed {
+            return self.live.get_key_value(&deployed);
         }
         let unknown = self
             .quarantined
@@ -285,7 +287,7 @@ impl<S, A> Journals<S, A> {
     }
 
     /// Whether `journal` is one of the deployment's control journals.
-    pub(crate) fn is_control(&self, journal: JournalKey) -> bool {
+    pub(crate) fn is_control(&self, journal: JournalIdentifier) -> bool {
         self.control.contains(&journal)
     }
 
@@ -300,7 +302,7 @@ impl<S, A> Journals<S, A> {
     /// Mark `journal` down for good: its store refused to boot (`fault`,
     /// a boot refusal) or its opener has no store for it (`None`, a disk
     /// gone — the node simply stops serving the journal).
-    pub(crate) fn park(&mut self, journal: JournalKey, fault: Option<RunError>) {
+    pub(crate) fn park(&mut self, journal: JournalIdentifier, fault: Option<RunError>) {
         self.live.remove(&journal);
         self.quarantined.remove(&journal);
         self.down.insert(journal);
@@ -311,8 +313,8 @@ impl<S, A> Journals<S, A> {
 
     /// The journals whose quarantine is over at tick `now`, removed from the
     /// quarantine list (the caller re-opens each).
-    pub(crate) fn due(&mut self, now: u64, quarantine_ticks: u64) -> Vec<JournalKey> {
-        let due: Vec<JournalKey> = self
+    pub(crate) fn due(&mut self, now: u64, quarantine_ticks: u64) -> Vec<JournalIdentifier> {
+        let due: Vec<JournalIdentifier> = self
             .quarantined
             .iter()
             .filter(|(_, since)| now.saturating_sub(**since) >= quarantine_ticks.max(1))
@@ -325,14 +327,14 @@ impl<S, A> Journals<S, A> {
     }
 
     /// Put `journal` back in quarantine from tick `now` (its re-open failed).
-    pub(crate) fn requarantine(&mut self, journal: JournalKey, now: u64, fault: RunError) {
+    pub(crate) fn requarantine(&mut self, journal: JournalIdentifier, now: u64, fault: RunError) {
         self.quarantined.insert(journal, now);
         self.newly_quarantined.push(journal);
         self.last_fault = Some(fault);
     }
 
     /// The journals quarantined since the last call, for the opener.
-    pub(crate) fn take_quarantined(&mut self) -> Vec<JournalKey> {
+    pub(crate) fn take_quarantined(&mut self) -> Vec<JournalIdentifier> {
         std::mem::take(&mut self.newly_quarantined)
     }
 
@@ -369,7 +371,7 @@ impl<S, A: Audit> Journals<S, A> {
     /// the node with nothing to serve.
     pub(crate) fn fold(
         &mut self,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         outcome: Result<(), RunError>,
         now: u64,
         self_id: u64,

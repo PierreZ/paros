@@ -34,7 +34,7 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 |---|---|---|---|
 | `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
-| `front1` | `stateless` | `zone-b` | waits for placement (M9) |
+| `proxy1` | `stateless` | `zone-b` | waits for placement (M9) |
 
 **Start and wait.** A machine starts with its listen address, its data
 directory (a named volume), its class, capacity and failure domain, and its
@@ -45,28 +45,28 @@ start it **mints its `node_id`** at random and records it in its data directory
 **Init.** `parosctl init` goes to one seed (`node1`, which every seed's join
 list names). That seed identifies every seed, mints the cell's id, records the
 plan, forms every other seed and then itself; every seed then serves the **cell
-control journal**, **meta's control journal** (the fleet's directory: the
+control journal**, **the fleet tenant's control journal** (the fleet directory: the
 fleet's one cell hosts it) and the toy's journal (the static assignment that
 stands in for placement until M9), plain Multi-Paxos over the seeds. **No
-frame is fixed**: `init` draws every one, records them in the cell plan, and
-prints them (`control=`, `meta=`, `journals=`); afterwards any machine's
-node-only `Inspect` names the cell's control journal and meta's, which is how
+identifier is fixed**: `init` draws every one, records them in the cell plan, and
+prints them (`control=`, `fleet_control=`, `journals=`); afterwards any machine's
+node-only `Inspect` names the cell's control journal and the fleet tenant's, which is how
 `parosctl tenant` finds them. Then the first cell coordinator — the lowest seed
 id, until the coordinator election of #225 — claims the cell control journal
 with `SetLeader(expected_gen = 0)`. Last come the **fleet steps** (#229): the
-cell records the fleet's id (minted by `init`) on its side, and meta records
+cell records the fleet's id (minted by `init`) on its side, and the fleet tenant records
 the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 `init` resumes an interrupted one, and on an initialized fleet it is refused
 (`already_initialized`).
 
 **Tenants.** `parosctl tenant create acme` registers a `{users}` tenant in
-meta (`REGISTERING`, under a random id and a random control journal), has the
+the fleet directory (`REGISTERING`, under a random id and a random control journal), has the
 cell host it, then marks it `READY`; the CLI never creates an `internal` tenant
-(meta, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
+(the fleet tenant, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
 `init` registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
-it, then removes it; `parosctl tenant list` prints meta. An interrupted
+it, then removes it; `parosctl tenant list` prints the fleet directory. An interrupted
 delete is resumed by running it again. A tenant is created once: a second
-`create` of a name meta holds is refused (`name_taken`), and an interrupted
+`create` of a name the fleet tenant holds is refused (`name_taken`), and an interrupted
 creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
 finish it). A tenant's footprint and its
 own control journal are not created yet (#210, #225).
@@ -77,7 +77,7 @@ stands for every seed, and each server's node id is learned from its own
 generation it read), then writes at the tail.
 
 **Kill and restart.** `docker compose kill node2` (a storage machine) and
-`docker compose kill front1` (a stateless one): the journal keeps a majority and
+`docker compose kill proxy1` (a stateless one): the journal keeps a majority and
 keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
@@ -223,8 +223,8 @@ and both required: there is no default tenant and no fixed id (#235,
 
 | command | what it does |
 |---|---|
-| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in meta (#229); resumes an interrupted init, refused on an initialized fleet |
-| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through meta's directory and the cell; lists meta's fleet, cells and tenants (#229) |
+| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in the fleet directory (#229); resumes an interrupted init, refused on an initialized fleet |
+| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |

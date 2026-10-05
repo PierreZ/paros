@@ -176,9 +176,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 - A reconfiguration request on a deployment without matchmakers is **refused**, never honored.
 - Flexible quorums, grids, matchmakers, proxies and replicas are **configuration data**, never
   implied by code being present, and in simulation each is drawn per seed so one campaign proves
-  every mode. Every peer and client message is framed by a `JournalKey` `(TenantId, JournalId)`;
-  inside that frame the
-  plain deployment exchanges the same messages and persists the same scalars.
+  every mode. Every peer and client message carries a `JournalIdentifier` `(TenantId, JournalId)`;
+  under that identifier the plain deployment exchanges the same messages and persists the same
+  scalars.
 
 ## Matchmaking, reconfiguration, GC, generations
 
@@ -221,20 +221,20 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 
 - **Share processes, disks and connections, never protocol state.** Each journal has its own
   `ColocatedNode`, ballots, log and store; the one cross-journal property is non-interference.
-  The frame `JournalKey { tenant, journal }` (#235) rides the `Deliver` envelope per message
+  The `JournalIdentifier { tenant, journal }` (#235) rides the `Deliver` envelope per message
   (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
   each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
   check them, never a log position. **No id is fixed and none has a default**
   (`docs/architecture.md` §3.8): `0` is unset and the only value with a meaning, there is no
-  reserved range and no well-known tenant or journal; the control journals' frames are drawn at
+  reserved range and no well-known tenant or journal; the control journals' identifiers are drawn at
   `init`, recorded in the cell plan and learned through a node-only `Inspect`
   (`paros::machine::ControlJournals`); an `Inspect` names its journal or asks for the node alone;
-  the sim draws every frame per seed (`paros_sim::shape::Frames`). Stores live at
+  the sim draws every identifier per seed (`paros_sim::shape::Identifiers`). Stores live at
   `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
   `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
 - **System journals** (the directory = a user tenant's control journal, the node registry = the
-  cell tenant's control journal, both frames in the `SystemPlan`) are opt-in through a
+  cell tenant's control journal, both identifiers in the `SystemPlan`) are opt-in through a
   `SystemPlan` (`None` is the static deployment), folded by `paros::system::{Directory,
   Registry}`; a created journal's id is drawn by its creator and checked at apply (`IdTaken`: the creator
   redraws), never reused. The core's pool grows, never shrinks
@@ -242,14 +242,15 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
-- **Meta** (`paros::meta`, #229) is the fleet's directory: tenant → cell plus the cell entries,
-  hosted by the fleet's one cell. Every tenant has a set of groups (`paros::meta::Groups`), fixed
-  at registration: meta `{internal, fleet}`, a cell tenant `{internal, cell}` (both created only by
+- **The fleet tenant** (`paros::fleet`, #229; named *meta* until #244) holds the fleet directory
+  (`FleetDirectory`): tenant → cell plus the cell entries, hosted by the fleet's one cell. Every
+  tenant has a set of groups (`paros::fleet::Groups`), fixed at registration: the fleet tenant
+  `{internal, fleet}`, a cell tenant `{internal, cell}` (both created only by
   `init`/adding a cell), a served tenant `{users}` (the tenant API's); only `cell` forbids a move,
   and there is no per-tenant placement. Fleet operations (`init`'s fleet half, tenant create
-  and remove) are idempotent state machines over meta and the cell control journal
+  and remove) are idempotent state machines over the fleet tenant and the cell control journal
   (`paros::client::fleet`): one write per step, every entry fenced by its fleet id, resumed from
-  what the journals hold. A tenant is created once: a creation is named by its drawn frame, and
+  what the journals hold. A tenant is created once: a creation is named by its drawn identifier, and
   any other creation of a held name is refused (`NameTaken`); finishing an interrupted one is the
   coordinator's job (#225), never another client's.
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method

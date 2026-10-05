@@ -150,14 +150,14 @@ pub(crate) fn reconfigure_matchmakers(
 }
 
 /// The node's own facts (#243): its id, its cell and the control journals'
-/// frames, and nothing about any journal — the answer to a node-only
-/// `Inspect`, and the half every answer carries. A frame this node does not
+/// identifiers, and nothing about any journal — the answer to a node-only
+/// `Inspect`, and the half every answer carries. An identifier this node does not
 /// know (no cell plan, or a cell that does not host the fleet) is left at
 /// `0` on the wire: absent, never a default.
 pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> InspectReply {
     let (control_tenant, control_journal) =
         cell.map_or((0, 0), |cell| (cell.cell.tenant.0, cell.cell.journal.0));
-    let (meta_tenant, meta_journal) = cell
+    let (fleet_tenant, fleet_journal) = cell
         .and_then(|cell| cell.fleet)
         .map_or((0, 0), |fleet| (fleet.tenant.0, fleet.journal.0));
     InspectReply {
@@ -165,8 +165,8 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
         cell_id: cell.map_or(0, |cell| cell.cell_id),
         control_tenant,
         control_journal,
-        meta_tenant,
-        meta_journal,
+        fleet_tenant,
+        fleet_journal,
         ..InspectReply::default()
     }
 }

@@ -32,7 +32,7 @@ fn config(id: NodeId, peers: &[NodeId], system: QuorumSystem) -> Config {
     Config {
         peers: peers.to_vec(),
         quorum_system: system,
-        ..Config::new(id, paros_core::JournalKey::UNSET)
+        ..Config::new(id, paros_core::JournalIdentifier::UNSET)
     }
 }
 
@@ -1619,7 +1619,7 @@ fn matchmaker_cluster(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::new(*id, paros_core::JournalKey::UNSET)
+                ..Config::new(*id, paros_core::JournalIdentifier::UNSET)
             })
         })
         .collect();

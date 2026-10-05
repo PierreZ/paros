@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_reachable, assert_sometimes};
-use paros::JournalKey;
+use paros::JournalIdentifier;
 
 use crate::shape::JournalPlan;
 
@@ -35,9 +35,9 @@ pub(crate) struct JournalBoard {
     /// The run serves more than one journal.
     multi: bool,
     /// The journal held on every node for the chaos window, if any.
-    held: Option<JournalKey>,
+    held: Option<JournalIdentifier>,
     /// `(node, journal)` pairs quarantined right now.
-    quarantined: BTreeSet<(u64, JournalKey)>,
+    quarantined: BTreeSet<(u64, JournalIdentifier)>,
     /// A journal committed while a sibling was held or not yet caught up.
     committed_while_held: bool,
     /// The held journal applied a slot after its hold ended: it caught up.
@@ -67,18 +67,18 @@ impl JournalBoard {
     }
 
     /// `journal` was quarantined on `node`.
-    pub(crate) fn quarantine(&mut self, node: u64, journal: JournalKey) {
+    pub(crate) fn quarantine(&mut self, node: u64, journal: JournalIdentifier) {
         self.quarantined.insert((node, journal));
         self.quarantined_ever = true;
     }
 
     /// `journal` booted on `node` (at a process boot or a re-open).
-    pub(crate) fn reopened(&mut self, node: u64, journal: JournalKey) {
+    pub(crate) fn reopened(&mut self, node: u64, journal: JournalIdentifier) {
         self.quarantined.remove(&(node, journal));
     }
 
     /// Whether `journal` is quarantined on `node` right now.
-    pub(crate) fn is_quarantined(&self, node: u64, journal: JournalKey) -> bool {
+    pub(crate) fn is_quarantined(&self, node: u64, journal: JournalIdentifier) -> bool {
         self.quarantined.contains(&(node, journal))
     }
 
@@ -87,7 +87,7 @@ impl JournalBoard {
     /// window until it re-elects and commits again, so a sibling's commit
     /// counts until then: commits inside the 4 s window alone are rare
     /// (a run's first leaders are still being elected).
-    pub(crate) fn applied(&mut self, journal: JournalKey, in_chaos: bool) {
+    pub(crate) fn applied(&mut self, journal: JournalIdentifier, in_chaos: bool) {
         let Some(held) = self.held else {
             return;
         };
@@ -104,7 +104,7 @@ impl JournalBoard {
     /// `node` sent a message of `journal`: it is running that journal's
     /// protocol, which counts as serving it while a sibling is quarantined
     /// on the same node.
-    pub(crate) fn sent(&mut self, node: u64, journal: JournalKey) {
+    pub(crate) fn sent(&mut self, node: u64, journal: JournalIdentifier) {
         if self
             .quarantined
             .iter()

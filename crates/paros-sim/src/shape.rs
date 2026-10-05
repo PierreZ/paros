@@ -36,7 +36,9 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
-use paros::{DriverTunables, JournalId, JournalKey, JournalStoreConfig, QuorumSystem, TenantId};
+use paros::{
+    DriverTunables, JournalId, JournalIdentifier, JournalStoreConfig, QuorumSystem, TenantId,
+};
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -511,9 +513,9 @@ struct Registry {
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
-    /// Run-level: every frame the run names (see [`frames`]), fixed by the
+    /// Run-level: every identifier the run names (see [`identifiers`]), fixed by the
     /// first caller.
-    frames: Option<Frames>,
+    identifiers: Option<Identifiers>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -531,30 +533,30 @@ pub(crate) struct JoinerMachine {
 /// non-interference stall), if the seed drew one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct JournalPlan {
-    pub(crate) ids: Vec<JournalKey>,
-    pub(crate) held: Option<JournalKey>,
-    /// The deployment's journal ([`Frames::main`]): the one with the seed's
+    pub(crate) ids: Vec<JournalIdentifier>,
+    pub(crate) held: Option<JournalIdentifier>,
+    /// The deployment's journal ([`Identifiers::main`]): the one with the seed's
     /// matchmakers, proxies, replicas and bootstrap.
-    pub(crate) main: JournalKey,
+    pub(crate) main: JournalIdentifier,
 }
 
-/// Every frame the run names (`docs/architecture.md` §3.8: no frame is
+/// Every identifier the run names (`docs/architecture.md` §3.8: no identifier is
 /// fixed), drawn once per seed: the deployment's journal, the system
 /// journals (the directory — a user tenant's control journal — and the
-/// registry — the cell tenant's), meta's control journal, and the cell's
+/// registry — the cell tenant's), the fleet tenant's control journal, and the cell's
 /// id. Each a random tenant and a random journal, both set; no two share a
 /// tenant except the main journal and the directory, which belong to the
 /// one user tenant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Frames {
+pub(crate) struct Identifiers {
     /// The deployment's journal.
-    pub(crate) main: JournalKey,
+    pub(crate) main: JournalIdentifier,
     /// The directory: the main journal's tenant's control journal.
-    pub(crate) directory: JournalKey,
+    pub(crate) directory: JournalIdentifier,
     /// The registry: the cell tenant's control journal.
-    pub(crate) registry: JournalKey,
-    /// Meta's control journal.
-    pub(crate) meta: JournalKey,
+    pub(crate) registry: JournalIdentifier,
+    /// The fleet tenant's control journal.
+    pub(crate) fleet: JournalIdentifier,
     /// The cell's id.
     pub(crate) cell_id: u64,
 }
@@ -564,33 +566,33 @@ fn draw_id() -> u64 {
     moonpool_sim::sim_random_range(1..u64::MAX)
 }
 
-/// The run's frames (see [`Frames`]), drawn once per seed by whoever asks
+/// The run's identifiers (see [`Identifiers`]), drawn once per seed by whoever asks
 /// first.
-pub(crate) fn frames(state: &StateHandle) -> Frames {
+pub(crate) fn identifiers(state: &StateHandle) -> Identifiers {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.frames.get_or_insert_with(|| {
+    *guard.identifiers.get_or_insert_with(|| {
         let users = TenantId(draw_id());
-        let main = JournalKey::new(users, JournalId(draw_id()));
-        let mut directory = JournalKey::new(users, JournalId(draw_id()));
+        let main = JournalIdentifier::new(users, JournalId(draw_id()));
+        let mut directory = JournalIdentifier::new(users, JournalId(draw_id()));
         while directory == main {
-            directory = JournalKey::new(users, JournalId(draw_id()));
+            directory = JournalIdentifier::new(users, JournalId(draw_id()));
         }
         let mut tenants = vec![users];
         let mut fresh = || loop {
             let tenant = TenantId(draw_id());
             if !tenants.contains(&tenant) {
                 tenants.push(tenant);
-                break JournalKey::new(tenant, JournalId(draw_id()));
+                break JournalIdentifier::new(tenant, JournalId(draw_id()));
             }
         };
         let registry = fresh();
-        let meta = fresh();
-        Frames {
+        let fleet = fresh();
+        Identifiers {
             main,
             directory,
             registry,
-            meta,
+            fleet,
             cell_id: draw_id(),
         }
     })
@@ -599,7 +601,7 @@ pub(crate) fn frames(state: &StateHandle) -> Frames {
 impl JournalPlan {
     /// The journal client `client` appends to: clients are spread over the
     /// journals round-robin.
-    pub(crate) fn for_client(&self, client: usize) -> JournalKey {
+    pub(crate) fn for_client(&self, client: usize) -> JournalIdentifier {
         self.ids
             .get(client % self.ids.len().max(1))
             .copied()
@@ -750,7 +752,7 @@ enum StoreDraw {
 /// its siblings must keep committing.
 #[tracing::instrument(level = "debug", skip(state), fields(perturb))]
 pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
-    let main = frames(state).main;
+    let main = identifiers(state).main;
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -761,11 +763,11 @@ pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
             } else {
                 1
             };
-            // The first journal is the deployment's ([`Frames::main`]);
-            // every other one's frame is drawn (#235): a random journal id,
+            // The first journal is the deployment's ([`Identifiers::main`]);
+            // every other one's identifier is drawn (#235): a random journal id,
             // in the main journal's tenant or a random one — and, in another
             // tenant, sometimes the very journal id of the first, so the
-            // demux is proven to key on both halves of the frame. No frame is
+            // demux is proven to key on both halves of the identifier. No identifier is
             // fixed (§3.8).
             let mut ids = vec![main];
             while ids.len() < usize::try_from(count).unwrap_or(1) {
@@ -780,9 +782,9 @@ pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
                 } else {
                     JournalId(draw_id())
                 };
-                let key = JournalKey::new(tenant, journal);
-                if !ids.contains(&key) {
-                    ids.push(key);
+                let identifier = JournalIdentifier::new(tenant, journal);
+                if !ids.contains(&identifier) {
+                    ids.push(identifier);
                 }
             }
             ids.sort_unstable();

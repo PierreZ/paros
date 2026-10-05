@@ -12,11 +12,11 @@ below takes the journal from `init`'s output (`journals=TENANT/JOURNAL`).
 Needs Docker with the Compose plugin; nothing else (the image is a plain Rust build).
 
 ```sh
-# Five machines: node1..node3 (storage, zones a/b/c), storage4, front1 (stateless).
+# Five machines: node1..node3 (storage, zones a/b/c), storage4, proxy1 (stateless).
 docker compose up -d --build
 
-# Form the cell over node1..node3, register the fleet and meta. Prints one line:
-#   initialized fleet=… cell=… coordinator=… members=3 control=T/J meta=T/J journals=T/J steps=…
+# Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
+#   initialized fleet=… cell=… coordinator=… members=3 control=T/J fleet_control=T/J journals=T/J steps=…
 docker compose run --rm init | tee init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
 

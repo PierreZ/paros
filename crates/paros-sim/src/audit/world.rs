@@ -17,14 +17,17 @@ const AUDIT_WORLD_KEY: &str = "paros-audit-world";
 /// Get-or-create the singleton [`AuditWorld`] for this iteration
 /// (`crate::state::published_arc`).
 pub(crate) fn audit_world(state: &StateHandle) -> Arc<AuditWorld> {
-    audit_world_for(state, crate::shape::frames(state).main)
+    audit_world_for(state, crate::shape::identifiers(state).main)
 }
 
 /// `journal`'s own [`AuditWorld`] (#188): every oracle folds one journal's
 /// transitions, so safety, the clients' folds, convergence and the storage
 /// gates are all keyed by journal without any of them knowing.
-pub(crate) fn audit_world_for(state: &StateHandle, journal: paros::JournalKey) -> Arc<AuditWorld> {
-    let main = crate::shape::frames(state).main;
+pub(crate) fn audit_world_for(
+    state: &StateHandle,
+    journal: paros::JournalIdentifier,
+) -> Arc<AuditWorld> {
+    let main = crate::shape::identifiers(state).main;
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
@@ -39,14 +42,14 @@ pub(crate) fn audit_world_for(state: &StateHandle, journal: paros::JournalKey) -
 #[derive(Default)]
 pub(crate) struct AuditWorld {
     state: Mutex<AuditState>,
-    /// The run's deployment journal ([`crate::shape::Frames::main`]); `None`
+    /// The run's deployment journal ([`crate::shape::Identifiers::main`]); `None`
     /// for a private checker outside any run.
-    main: Option<paros::JournalKey>,
+    main: Option<paros::JournalIdentifier>,
 }
 
 impl AuditWorld {
     /// The run's deployment journal, when this checker belongs to a run.
-    pub(crate) fn main(&self) -> Option<paros::JournalKey> {
+    pub(crate) fn main(&self) -> Option<paros::JournalIdentifier> {
         self.main
     }
 
@@ -554,7 +557,7 @@ impl AuditWorld {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_run(
     state: &StateHandle,
-    journal: paros::JournalKey,
+    journal: paros::JournalIdentifier,
     history: &ClientHistory,
     clients: usize,
 ) -> u64 {

@@ -9,10 +9,10 @@
 //! already serves the cell is asked for it, and the claim is made if it is
 //! still missing.
 //!
-//! Then the fleet steps (#229, `paros::client::fleet`): meta (served by the
+//! Then the fleet steps (#229, `paros::client::fleet`): the fleet tenant (served by the
 //! cell's seeds) records the fleet's id — drawn here, kept on a re-run — and
 //! adds the cell with its cell tenant, the cell records the fleet on its
-//! side, and meta marks the cell `READY`. No frame is fixed (§3.8): a first
+//! side, and the fleet tenant marks the cell `READY`. No identifier is fixed (§3.8): a first
 //! run takes them from the plan it formed and prints them, a re-run learns
 //! them from the seeds' `Inspect`. Both journals are written as the cell
 //! coordinator. Every step is idempotent: `init` is refused only when it
@@ -28,7 +28,7 @@ use paros::client::Client;
 use paros::client::bootstrap::{self, ClaimCellOutcome, InitOutcome};
 use paros::client::fleet::Step;
 use paros::machine::ControlJournals;
-use paros::{JournalKey, NodeId};
+use paros::{JournalIdentifier, NodeId};
 use serde_json::json;
 
 use crate::Ending;
@@ -59,7 +59,7 @@ pub async fn run(
         return Ending::Unreachable;
     };
     let patience = Duration::from_millis(args.patience_ms);
-    let (servers, coordinator, frames, users) =
+    let (servers, coordinator, journals, users) =
         match bootstrap::init(providers, rpc, target, patience).await {
             InitOutcome::Formed(plan) => {
                 note(&format!(
@@ -72,17 +72,17 @@ pub async fn run(
                     .iter()
                     .map(|(id, addr)| (id.0, *addr))
                     .collect();
-                let Some(meta) = plan.meta else {
-                    note("the seed formed a cell that hosts no meta");
+                let Some(fleet_control) = plan.fleet else {
+                    note("the seed formed a cell that hosts no fleet tenant");
                     return Ending::Unreachable;
                 };
                 // The static assignment's user journals, drawn at `init` like
-                // every frame: the only time they are printed.
-                let users: Vec<JournalKey> = plan
+                // every identifier: the only time they are printed.
+                let users: Vec<JournalIdentifier> = plan
                     .journals
                     .iter()
                     .copied()
-                    .filter(|j| *j != plan.control && *j != meta)
+                    .filter(|j| *j != plan.control && *j != fleet_control)
                     .collect();
                 (servers, plan.coordinator(), plan.control_journals(), users)
             }
@@ -112,12 +112,12 @@ pub async fn run(
                     return Ending::Unreachable;
                 }
                 let client = connect(&servers);
-                // No frame is fixed (§3.8): the cell's are learned from it.
-                let Some(frames) = bootstrap::control_journals(&client).await else {
+                // No identifier is fixed (§3.8): the cell's are learned from it.
+                let Some(journals) = bootstrap::control_journals(&client).await else {
                     note("no server named its cell's control journals");
                     return Ending::Unreachable;
                 };
-                let Some(view) = client.inspect(0, frames.cell).await else {
+                let Some(view) = client.inspect(0, journals.cell).await else {
                     note("no server described the cell control journal");
                     return Ending::Unreachable;
                 };
@@ -125,11 +125,11 @@ pub async fn run(
                     note("the cell control journal names no member");
                     return Ending::Unreachable;
                 };
-                (servers, NodeId(coordinator), frames, Vec::new())
+                (servers, NodeId(coordinator), journals, Vec::new())
             }
         };
     let client = connect(&servers);
-    let claimed = match bootstrap::claim_cell(&client, frames.cell, coordinator, patience).await {
+    let claimed = match bootstrap::claim_cell(&client, journals.cell, coordinator, patience).await {
         ClaimCellOutcome::Claimed { generation } => Some(generation),
         // Claimed by an earlier run: the fleet steps resume, and decide
         // whether anything was left to do.
@@ -147,7 +147,7 @@ pub async fn run(
         providers,
         &client,
         &servers,
-        (coordinator, frames),
+        (coordinator, journals),
         &users,
         (claimed, patience),
         out,
@@ -155,7 +155,7 @@ pub async fn run(
     .await
 }
 
-/// `init`'s fleet half, after the cell step, over the cell's `frames` as
+/// `init`'s fleet half, after the cell step, over the cell's `identifiers` as
 /// its `coordinator`: `users` are the user journals this run's formation
 /// drew (printed once), `claimed` the generation when this run claimed the
 /// cell control journal, and `patience` how long a step a moving leader
@@ -164,13 +164,14 @@ async fn fleet_steps(
     providers: &TokioProviders,
     client: &Client<TokioProviders>,
     servers: &[(u64, SocketAddr)],
-    (coordinator, frames): (NodeId, ControlJournals),
-    users: &[JournalKey],
+    (coordinator, journals): (NodeId, ControlJournals),
+    users: &[JournalIdentifier],
     (claimed, patience): (Option<u64>, Duration),
     out: &Printer,
 ) -> Ending {
     let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-    let (Some(meta), Some(mut fleet)) = (frames.fleet, session(client, frames, coordinator, &ids))
+    let (Some(fleet_control), Some(mut fleet)) =
+        (journals.fleet, session(client, journals, coordinator, &ids))
     else {
         note("the cell names no fleet journal");
         return Ending::Refused;
@@ -187,16 +188,16 @@ async fn fleet_steps(
         Step::Done {
             result: fleet_id, ..
         } => {
-            let cell_id = frames.cell_id;
+            let cell_id = journals.cell_id;
             let users: Vec<String> = users.iter().map(ToString::to_string).collect();
             out.emit(
                 || {
                     format!(
-                        "initialized fleet={fleet_id} cell={cell_id} coordinator={} members={} control={} meta={} journals={} steps={}",
+                        "initialized fleet={fleet_id} cell={cell_id} coordinator={} members={} control={} fleet_control={} journals={} steps={}",
                         coordinator.0,
                         servers.len(),
-                        frames.cell,
-                        meta,
+                        journals.cell,
+                        fleet_control,
                         users.join(","),
                         steps(&run.steps).join(",")
                     )
@@ -209,8 +210,8 @@ async fn fleet_steps(
                         "coordinator": coordinator.0,
                         "generation": claimed,
                         "steps": steps(&run.steps),
-                        "control": frames.cell.to_string(),
-                        "meta": meta.to_string(),
+                        "control": journals.cell.to_string(),
+                        "fleet_control": fleet_control.to_string(),
                         "journals": users,
                         "members": servers
                             .iter()

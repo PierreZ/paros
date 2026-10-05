@@ -23,7 +23,7 @@
 //! plan formed 912873
 //! member 6150928431937019931 10.0.0.2:4500
 //! control 11986532017395081213/5302873011246751929
-//! meta 7240096361733624127/14183513009914637262
+//! fleet 7240096361733624127/14183513009914637262
 //! journal 11986532017395081213/5302873011246751929
 //! journal 7240096361733624127/14183513009914637262
 //! journal 2965734451981346203/9861377130450924019
@@ -37,9 +37,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use paros::machine::{CellLedger, CellPlan, Class};
-use paros::{Config, JournalKey, JournalStorage, JournalStoreConfig, NodeId, QuorumSystem};
+use paros::{Config, JournalIdentifier, JournalStorage, JournalStoreConfig, NodeId, QuorumSystem};
 
-use crate::record::{Record, parse_key, write_atomically};
+use crate::record::{Record, parse_identifier, write_atomically};
 use crate::stores::{journal_dir, path_str};
 
 /// The record's file name under the data directory.
@@ -128,8 +128,8 @@ impl MachineRecord {
                 let _ = writeln!(text, "member {} {addr}", id.0);
             }
             let _ = writeln!(text, "control {}", plan.control);
-            if let Some(meta) = plan.meta {
-                let _ = writeln!(text, "meta {meta}");
+            if let Some(fleet) = plan.fleet {
+                let _ = writeln!(text, "fleet {fleet}");
             }
             for journal in &plan.journals {
                 let _ = writeln!(text, "journal {journal}");
@@ -144,7 +144,7 @@ impl MachineRecord {
         let mut members = Vec::new();
         let mut journals = Vec::new();
         let mut control = None;
-        let mut meta = None;
+        let mut fleet = None;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
@@ -174,15 +174,19 @@ impl MachineRecord {
                     ));
                 }
                 "journal" => {
-                    journals
-                        .push(parse_key(value).ok_or_else(|| format!("bad journal {value:?}"))?);
+                    journals.push(
+                        parse_identifier(value).ok_or_else(|| format!("bad journal {value:?}"))?,
+                    );
                 }
                 "control" => {
-                    control =
-                        Some(parse_key(value).ok_or_else(|| format!("bad control {value:?}"))?);
+                    control = Some(
+                        parse_identifier(value).ok_or_else(|| format!("bad control {value:?}"))?,
+                    );
                 }
-                "meta" => {
-                    meta = Some(parse_key(value).ok_or_else(|| format!("bad meta {value:?}"))?);
+                "fleet" => {
+                    fleet = Some(
+                        parse_identifier(value).ok_or_else(|| format!("bad fleet {value:?}"))?,
+                    );
                 }
                 _ => return Err(format!("unknown machine record key {key:?}")),
             }
@@ -199,7 +203,7 @@ impl MachineRecord {
                     cell_id,
                     members,
                     control: control.ok_or("the machine record's plan names no control journal")?,
-                    meta,
+                    fleet,
                     journals,
                 };
                 plan.check()?;
@@ -228,7 +232,7 @@ impl MachineRecord {
 /// Multi-Paxos over every member, under a majority (a cell's bootstrap is
 /// the matchmaker-free exception, `docs/architecture.md` §3.1).
 #[must_use]
-pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalKey) -> Config {
+pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifier) -> Config {
     let members: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     Config {
         peers: members.clone(),
@@ -326,13 +330,18 @@ mod tests {
             MachineRecord::read(dir.path()).expect("readable"),
             Some(bare)
         );
-        let key = |tenant, journal| JournalKey::new(TenantId(tenant), JournalId(journal));
+        let identifier =
+            |tenant, journal| JournalIdentifier::new(TenantId(tenant), JournalId(journal));
         let plan = CellPlan {
             cell_id: 912_873,
             members: vec![(NodeId(5), "10.0.0.2:4500".parse().expect("an address"))],
-            control: key(0x51, 0x52),
-            meta: Some(key(0x61, 0x62)),
-            journals: vec![key(0x51, 0x52), key(0x61, 0x62), key(0x71, 0x72)],
+            control: identifier(0x51, 0x52),
+            fleet: Some(identifier(0x61, 0x62)),
+            journals: vec![
+                identifier(0x51, 0x52),
+                identifier(0x61, 0x62),
+                identifier(0x71, 0x72),
+            ],
         };
         let formed = record(Some((PlanState::Formed, plan.clone())));
         formed.write(dir.path()).expect("written");

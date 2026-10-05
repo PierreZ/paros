@@ -12,7 +12,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::{RpcHandle, ServiceClient};
-use paros_core::{Audience, JournalKey, Message, NodeId, Party, ProxyId};
+use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -95,10 +95,10 @@ pub(crate) struct PeerMailbox {
 /// A mailbox's journal lanes and the round-robin cursor over them.
 #[derive(Default)]
 struct Lanes {
-    /// The envelope's frame `(tenant, journal)` (#235) → its keep-newest
+    /// The envelope's identifier `(tenant, journal)` (#235) → its keep-newest
     /// lane (`BTreeMap`: the drain order is part of determinism).
     by_journal: BTreeMap<(u64, u64), VecDeque<internal::ConsensusMessage>>,
-    /// The frame the next drain starts looking from.
+    /// The identifier the next drain starts looking from.
     cursor: (u64, u64),
     /// Messages queued over every lane.
     total: usize,
@@ -357,7 +357,7 @@ impl Outbound {
         &self,
         hooks: &H,
         audit: &A,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         to: Party,
         msg: &Message,
     ) {
@@ -419,7 +419,7 @@ impl Outbound {
                 );
                 return;
             };
-            // The envelope (#188), framed by the tenant (#235): the
+            // The envelope (#188), named with its tenant (#235): the
             // receiver demuxes on the pair.
             message.tenant = journal.tenant.0;
             message.journal = journal.journal.0;
@@ -690,7 +690,7 @@ pub(crate) fn send_messages<H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     messages: Vec<(Party, Message)>,
 ) where
     H: DriverHooks,

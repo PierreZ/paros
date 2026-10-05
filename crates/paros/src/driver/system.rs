@@ -42,7 +42,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalKey, LogPage, LogRead, NodeId, Party, Seq};
+use paros_core::{JournalIdentifier, LogPage, LogRead, NodeId, Party, Seq};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -73,18 +73,18 @@ pub struct SystemPlan {
     /// The nodes that host the system journals, with their addresses: a node
     /// that does not host them follows them from here.
     pub seeds: Vec<(NodeId, String)>,
-    /// The directory's frame: a tenant's control journal (#235). No frame is
+    /// The directory's identifier: a tenant's control journal (#235). No identifier is
     /// fixed (`docs/architecture.md` §3.8): the deployment drew it.
-    pub directory: JournalKey,
-    /// The registry's frame: the cell tenant's control journal, drawn like
+    pub directory: JournalIdentifier,
+    /// The registry's identifier: the cell tenant's control journal, drawn like
     /// the directory's.
-    pub registry: JournalKey,
+    pub registry: JournalIdentifier,
     /// The pool the deployment was booted with: always in the pool, never
     /// retired through the registry.
     pub genesis_pool: Vec<NodeId>,
     /// The journals the deployment was booted with: ids the directory never
     /// allocates.
-    pub genesis_journals: Vec<JournalKey>,
+    pub genesis_journals: Vec<JournalIdentifier>,
     /// The journals a node outside the genesis pool joins **as a spare** once
     /// the registry admits it: each a configuration template (its journal,
     /// bootstrap membership, quorum system, matchmakers) whose identity and
@@ -97,7 +97,7 @@ pub struct SystemPlan {
 
 /// One remote follow read's answer, back on the loop.
 pub(crate) struct Followed {
-    journal: JournalKey,
+    journal: JournalIdentifier,
     reply: ReadAck,
 }
 
@@ -110,20 +110,20 @@ pub(crate) struct SystemFollower<P: Providers> {
     /// pool and the deployment's static address book (replicas included).
     fixed: BTreeSet<NodeId>,
     directory: Directory,
-    /// The directory's frame.
-    directory_key: JournalKey,
+    /// The directory's identifier.
+    directory_key: JournalIdentifier,
     registry: Folder<Registry>,
-    /// The registry's frame.
-    registry_key: JournalKey,
+    /// The registry's identifier.
+    registry_key: JournalIdentifier,
     /// Checkpoints the registry fold met since the driver last took them:
     /// `(seq, verified)`, see [`crate::Audit::checkpoint_folded`].
     checkpoints: Vec<(u64, Option<bool>)>,
     /// Per system journal: where the next read starts.
-    cursors: BTreeMap<JournalKey, u64>,
+    cursors: BTreeMap<JournalIdentifier, u64>,
     /// System journals with a remote read in flight.
-    outstanding: BTreeSet<JournalKey>,
+    outstanding: BTreeSet<JournalIdentifier>,
     next_seed: usize,
-    tombstones: BTreeSet<JournalKey>,
+    tombstones: BTreeSet<JournalIdentifier>,
     spares: Vec<paros_core::Config>,
     replies: mpsc::Sender<Followed>,
     timeout: Duration,
@@ -174,8 +174,8 @@ impl<P: Providers> SystemFollower<P> {
                 directory: Directory::new(
                     plan.genesis_journals
                         .iter()
-                        .filter(|key| key.tenant == plan.directory.tenant)
-                        .map(|key| key.journal),
+                        .filter(|journal| journal.tenant == plan.directory.tenant)
+                        .map(|journal| journal.journal),
                 ),
                 directory_key: plan.directory,
                 registry: Folder::new(Registry::new(plan.genesis_pool.iter().copied())),
@@ -237,32 +237,32 @@ impl<P: Providers> SystemFollower<P> {
     }
 
     /// Whether `journal` was tombstoned in the directory fold.
-    pub(crate) fn is_tombstoned(&self, journal: JournalKey) -> bool {
+    pub(crate) fn is_tombstoned(&self, journal: JournalIdentifier) -> bool {
         self.tombstones.contains(&journal)
     }
 
     /// Fold one page of `journal` read from this node's own journal fold.
     pub(crate) fn fold_local(
         &mut self,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         page: &LogPage,
     ) -> Vec<(u64, SystemEvent)> {
         let records: Vec<Vec<u8>> = page.records.iter().map(|r| r.0.clone()).collect();
         self.fold(journal, page.from.0, records)
     }
 
-    /// The registry's frame.
-    pub(crate) fn registry_key(&self) -> JournalKey {
+    /// The registry's identifier.
+    pub(crate) fn registry_key(&self) -> JournalIdentifier {
         self.registry_key
     }
 
-    /// The two system journals' frames.
-    fn system(&self) -> [JournalKey; 2] {
+    /// The two system journals' identifiers.
+    fn system(&self) -> [JournalIdentifier; 2] {
         [self.directory_key, self.registry_key]
     }
 
     /// Where the next read of `journal` starts.
-    pub(crate) fn cursor(&self, journal: JournalKey) -> u64 {
+    pub(crate) fn cursor(&self, journal: JournalIdentifier) -> u64 {
         if journal == self.registry_key {
             return self.registry.next_seq();
         }
@@ -272,7 +272,7 @@ impl<P: Providers> SystemFollower<P> {
     /// `journal`'s positions below `floor` are gone (a read answered
     /// `truncated`): the registry's fold jumps there, to restore from the
     /// checkpoint at the floor. The directory is never truncated (#229).
-    pub(crate) fn jump(&mut self, journal: JournalKey, floor: u64) {
+    pub(crate) fn jump(&mut self, journal: JournalIdentifier, floor: u64) {
         if journal == self.registry_key {
             self.registry.jump(floor);
         }
@@ -298,7 +298,7 @@ impl<P: Providers> SystemFollower<P> {
     /// pages may overlap.
     fn fold(
         &mut self,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         from: u64,
         records: Vec<Vec<u8>>,
     ) -> Vec<(u64, SystemEvent)> {
@@ -310,7 +310,7 @@ impl<P: Providers> SystemFollower<P> {
                     let event = self.directory.fold(seq, &record);
                     if let DirectoryEvent::Deleted { id } = &event {
                         self.tombstones
-                            .insert(JournalKey::new(self.directory_key.tenant, *id));
+                            .insert(JournalIdentifier::new(self.directory_key.tenant, *id));
                     }
                     SystemEvent::Directory(event)
                 }
@@ -355,7 +355,7 @@ impl<P: Providers> SystemFollower<P> {
     /// Open a remote follow read of every system journal `local` says this
     /// node does not run and that has none in flight, each to the next seed
     /// in turn.
-    pub(crate) fn poll_remote(&mut self, providers: &P, local: impl Fn(JournalKey) -> bool) {
+    pub(crate) fn poll_remote(&mut self, providers: &P, local: impl Fn(JournalIdentifier) -> bool) {
         for journal in self.system() {
             if local(journal) || self.outstanding.contains(&journal) {
                 continue;
@@ -405,7 +405,7 @@ impl<P: Providers> SystemFollower<P> {
 
 impl Followed {
     /// The system journal the answer is for.
-    pub(crate) fn journal(&self) -> JournalKey {
+    pub(crate) fn journal(&self) -> JournalIdentifier {
         self.journal
     }
 }
@@ -417,7 +417,7 @@ impl Followed {
 pub(crate) fn follow_local<P: Providers, S, A>(
     follower: &mut SystemFollower<P>,
     journals: &Journals<S, A>,
-) -> Vec<(JournalKey, Vec<(u64, SystemEvent)>)> {
+) -> Vec<(JournalIdentifier, Vec<(u64, SystemEvent)>)> {
     let page_records = usize::try_from(FOLLOW_READ_RECORDS).unwrap_or(usize::MAX);
     let mut moved = Vec::new();
     for journal in follower.system() {
