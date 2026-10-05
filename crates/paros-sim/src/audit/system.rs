@@ -402,8 +402,16 @@ impl SystemBoard {
         }
     }
 
-    /// `node` refused a message from `from`, not in its pool yet.
+    /// `node` refused a message from `from`, not in its pool yet. Never a
+    /// genesis node's (#247, static stability): the pool check admits the
+    /// genesis pool whatever the registry fold says, so no tenant journal's
+    /// traffic between genesis nodes waits on its parent.
     pub(crate) fn refused(&mut self, node: NodeId, from: NodeId) {
+        assert_always!(
+            !self.genesis_pool.contains(&from.0),
+            "static: no genesis node's message waits on the registry fold",
+            { "node" => node.0, "from" => from.0 }
+        );
         if self.refused.insert((node.0, from.0)) && self.refused.len() == 1 {
             assert_reachable!("system: a node refuses a message from a node not yet in its pool");
         }

@@ -159,6 +159,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             return;
         };
         let mut board = journals::lock(board);
+        board.applied_under_parent(node.0, *journal);
         if !board.is_multi() {
             return;
         }

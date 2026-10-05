@@ -332,6 +332,11 @@ struct ChainConfig {
     /// reboot that comes straight back, its connections and unsynced writes
     /// still lost; ceiling 2 s, far inside the recovery budget.
     fleet_kill_down_ms: u64,
+    /// How long client 0 holds the control journals' seed down for the
+    /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal
+    /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
+    /// so the seed is back for the recovery tail.
+    parent_hold_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -391,6 +396,7 @@ impl ChainConfig {
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
             fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
+            parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -1397,9 +1403,36 @@ impl Workload for ChainWorkload {
             }
         }
 
+        // Static stability (#247): on its own location, client 0 of a
+        // system-journal run holds the seed — the one node hosting meta, the
+        // cell's control journal and the directory — down for
+        // `parent_hold_ms` of the chaos window, while every tenant journal
+        // keeps committing without it (the journal board's gate).
+        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state(), true))
+            .then(|| servers[0].clone());
+        let mut parent_until: Option<Duration> = None;
+        let mut parent_held_once = false;
+        let journal_board = crate::audit::journals::journal_board(ctx.state());
         for _step in 0..config.steps {
             if shutdown.is_cancelled() {
                 break;
+            }
+            if let Some(ip) = &parent_seed {
+                if parent_until.is_some_and(|until| time.now() >= until) {
+                    crate::lifecycle::restart(ctx, ip).await;
+                    crate::audit::journals::lock(&journal_board).release_parent();
+                    parent_until = None;
+                } else if parent_until.is_none()
+                    && !parent_held_once
+                    && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
+                    && buggify_with_prob!(0.1)
+                {
+                    assert_reachable!("static: the seed hosting the control journals is held down");
+                    crate::lifecycle::crash(ctx, ip).await;
+                    crate::audit::journals::lock(&journal_board).hold_parent(0);
+                    parent_until = Some(time.now() + Duration::from_millis(config.parent_hold_ms));
+                    parent_held_once = true;
+                }
             }
 
             // Exactly six provider draws per logical step, independent of the
@@ -2827,6 +2860,10 @@ impl Workload for ChainWorkload {
             }
         }
 
+        if let (Some(ip), Some(_)) = (&parent_seed, parent_until.take()) {
+            crate::lifecycle::restart(ctx, ip).await;
+            crate::audit::journals::lock(&journal_board).release_parent();
+        }
         assert_sometimes!(
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
