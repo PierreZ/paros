@@ -3439,6 +3439,20 @@ impl Workload for ChainWorkload {
                 digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
             }
         }
+        // The control journals' histories (#247): every client's library
+        // calls at meta, the registry and the directory, searched once (by
+        // client 0, after every run) against the journal model.
+        if self.client_id == 0 && crate::shape::system_journals(ctx.state(), true) {
+            let frames = crate::shape::frames(ctx.state());
+            for journal in [frames.meta, frames.registry, frames.directory] {
+                let attempts = std::mem::take(
+                    &mut *rpc::control_attempts(ctx.state(), journal)
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+                crate::audit::check_control_history(attempts);
+            }
+        }
         if let Some(sink) = &self.digest {
             *sink
                 .lock()

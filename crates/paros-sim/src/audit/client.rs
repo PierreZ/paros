@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_sim::{assert_always, assert_sometimes};
+use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 
 use super::linearizability::Attempt;
 
@@ -192,6 +192,25 @@ impl LinHistory {
             "a read is retried across nodes before committing"
         );
     }
+}
+
+/// The control journals' histories (#247): every attempt any client's
+/// library calls made at one of meta, the cell's control journal (the
+/// registry) or the directory — fleet steps, checkpoints and truncations,
+/// system appends and their read-backs — searched for a linearization
+/// against the same journal model as a tenant journal's, under the same
+/// messages (the same invariant, on another journal). Run once, after every
+/// client's run: every one of them writes these journals.
+#[tracing::instrument(level = "debug", skip_all, fields(attempts = attempts.len()))]
+pub(crate) fn check_control_history(attempts: Vec<Attempt>) {
+    if attempts.is_empty() {
+        return;
+    }
+    assert_reachable!("journal: a control journal's history is searched for a linearization");
+    check_linearizable(&LinHistory {
+        attempts,
+        ..LinHistory::default()
+    });
 }
 
 /// The search's step budget. The histories a campaign produces take tens of

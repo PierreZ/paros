@@ -61,11 +61,23 @@ struct Retries {
 
 impl CallLog {
     pub(crate) fn new(journal: JournalKey, client: u64, time: SimTimeProvider) -> Self {
+        Self::shared(journal, client, time, Arc::default())
+    }
+
+    /// A log of `client`'s attempts at `journal` that appends to `attempts`,
+    /// a history several clients share: a control journal's (#247), which
+    /// every client writes ([`control_attempts`]).
+    pub(crate) fn shared(
+        journal: JournalKey,
+        client: u64,
+        time: SimTimeProvider,
+        attempts: Arc<Mutex<Vec<Attempt>>>,
+    ) -> Self {
         Self {
             journal,
             client,
             time,
-            attempts: Arc::default(),
+            attempts,
             retries: Arc::default(),
         }
     }
@@ -165,6 +177,22 @@ impl CallObserver for CallLog {
         };
         attempt.seen = Some((now.max(attempt.inv), seen));
     }
+}
+
+const CONTROL_LOG_KEY: &str = "paros-control-attempts";
+
+/// Every client's attempts at the control journal `journal` (#247: meta,
+/// the registry, the directory), the history `check()` searches once the
+/// run is over (`crate::state::published_arc`).
+pub(crate) fn control_attempts(
+    state: &moonpool_sim::StateHandle,
+    journal: JournalKey,
+) -> Arc<Mutex<Vec<Attempt>>> {
+    crate::state::published_arc(
+        state,
+        &crate::state::journal_key(CONTROL_LOG_KEY, journal),
+        || Mutex::new(Vec::new()),
+    )
 }
 
 /// The verdict the checker reads off an answer; `None` for no verdict (a

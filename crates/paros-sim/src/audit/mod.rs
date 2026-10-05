@@ -44,7 +44,7 @@ mod state;
 pub(crate) mod system;
 mod world;
 
-pub(crate) use client::ClientHistory;
+pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
