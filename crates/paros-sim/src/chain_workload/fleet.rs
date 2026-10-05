@@ -36,10 +36,11 @@
 //! No function here draws randomness: every choice is read off the
 //! caller's step draws.
 
+use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+    SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::Writer;
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, OpenOutcome};
@@ -55,13 +56,15 @@ use crate::client::ChainClient;
 /// for one often.
 const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 
-/// An operation this client stopped in the middle of (the crash shape), to
-/// resume on its next fleet step.
+/// An operation this client stopped in the middle of — the crash shape, or
+/// a run that did not end (interrupted, its target killed under it, going
+/// round) — to resume on its next fleet step, and at the latest in the
+/// recovery tail (#247): an operator remembers what it was doing.
 #[derive(Clone, Debug)]
 enum Pending {
     Init,
-    /// The name, its placement and the frame this client's creation drew.
-    Create(Vec<u8>, Placement, JournalKey),
+    /// The name, its placement and the frames this client's creation drew.
+    Create(Vec<u8>, Placement, Vec<JournalKey>),
     Remove(Vec<u8>),
 }
 
@@ -82,6 +85,13 @@ pub(super) struct FleetOps {
     /// Tenant frames this client had created: a deliberate reuse names one.
     ever_created: Vec<JournalKey>,
     pending: Option<Pending>,
+    /// The seeds' addresses, by rank: the servers a fleet step talks to.
+    seed_ips: Vec<String>,
+    /// How long into an operation its target is killed, and how long it
+    /// stays down (`ChainConfig::fleet_kill_delay_ms`, `fleet_kill_down_ms`).
+    kill_ms: (u64, u64),
+    /// The pending operation was cut short by its target's kill.
+    killed: bool,
 }
 
 impl FleetOps {
@@ -91,8 +101,10 @@ impl FleetOps {
         frames: crate::shape::Frames,
         active: bool,
         client_id: u64,
+        kill_ms: (u64, u64),
     ) -> Self {
         let pool = deployment.acceptors().len();
+        let seeds = crate::shape::seed_ranks(pool).len().max(1);
         Self {
             active,
             frames: FleetFrames {
@@ -100,12 +112,15 @@ impl FleetOps {
                 cell: frames.registry,
                 meta: frames.meta,
             },
-            seeds: crate::shape::seed_ranks(pool).len().max(1),
+            seeds,
             pool,
             client_id,
             initialized: false,
             ever_created: Vec::new(),
             pending: None,
+            seed_ips: deployment.acceptors().iter().take(seeds).cloned().collect(),
+            kill_ms,
+            killed: false,
         }
     }
 
@@ -155,7 +170,7 @@ impl FleetOps {
             return;
         }
         if self.pending.is_some() {
-            self.resume(ctx, nodes, policy, draw).await;
+            let _ = self.resume(ctx, nodes, policy, draw).await;
             return;
         }
         let client = self.client(ctx, nodes);
@@ -189,15 +204,68 @@ impl FleetOps {
         }
         let mut session = self.session(self.frames, policy);
         if buggify_with_prob!(0.2) {
-            if let Step::Advanced(_) = session.init_step(&client, first, draw | 1).await {
+            if let Step::Advanced(stage) = session.init_step(&client, first, draw | 1).await {
                 assert_reachable!("fleet: an init stops after one step");
+                reach(stage);
                 self.pending = Some(Pending::Init);
             }
             judge_folds(&session);
             return;
         }
-        self.finish_init(&client, &mut session, first, draw).await;
+        let kill = self.killer(ctx, first);
+        let (ended, cut_short) =
+            futures::join!(self.finish_init(&client, &mut session, first, draw), kill);
         judge_folds(&session);
+        self.stopped(ended, cut_short, Pending::Init);
+    }
+
+    /// The process kill of an operation's target (#247): with its own
+    /// BUGGIFY location, a future that crashes the seed `first` names
+    /// `kill_ms.0` into the operation it is joined with — while a step is in
+    /// flight — and restarts it `kill_ms.1` later. Moonpool's own kill: the
+    /// process dies with its connections and unsynced writes, then reboots
+    /// from its disk. Whether it fired.
+    fn killer<'a>(
+        &self,
+        ctx: &'a SimContext,
+        first: usize,
+    ) -> impl Future<Output = bool> + use<'a> {
+        let ip = self
+            .seed_ips
+            .get(first)
+            .cloned()
+            .filter(|_| buggify_with_prob!(0.1));
+        let (delay, down) = self.kill_ms;
+        async move {
+            let Some(ip) = ip else {
+                return false;
+            };
+            if ctx
+                .time()
+                .sleep(Duration::from_millis(delay))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            assert_reachable!("fleet: an operation's target is killed while a step is in flight");
+            crate::lifecycle::crash(ctx, &ip).await;
+            let _ = ctx.time().sleep(Duration::from_millis(down)).await;
+            crate::lifecycle::restart(ctx, &ip).await;
+            true
+        }
+    }
+
+    /// Keep an operation that did not end as this client's pending one;
+    /// `killed` when its target was killed under it.
+    fn stopped(&mut self, ended: bool, killed: bool, pending: Pending) {
+        if !ended {
+            if killed {
+                assert_reachable!("fleet: an operation its target's kill cut short is pending");
+            }
+            self.killed = killed;
+            self.pending = Some(pending);
+        }
     }
 
     /// An operator that crashes between meta's checkpoint and its truncate
@@ -242,7 +310,7 @@ impl FleetOps {
             return;
         }
         if self.pending.is_some() {
-            self.resume(ctx, nodes, policy, payload).await;
+            let _ = self.resume(ctx, nodes, policy, payload).await;
             return;
         }
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
@@ -262,9 +330,10 @@ impl FleetOps {
                 let step = session
                     .create_step(&client, first, &name, placement, frame)
                     .await;
-                if let Step::Advanced(_) = step {
+                if let Step::Advanced(stage) = step {
                     assert_reachable!("fleet: a tenant creation stops after one step");
-                    self.pending = Some(Pending::Create(name, placement, frame));
+                    reach(stage);
+                    self.pending = Some(Pending::Create(name, placement, vec![frame]));
                 }
                 judge_folds(&session);
                 return;
@@ -273,30 +342,41 @@ impl FleetOps {
                 tenant_frame(payload),
                 tenant_frame(payload.rotate_left(23) ^ 0x7e57),
             ];
-            self.create(
-                &client,
-                &mut session,
-                first,
-                (name, placement),
-                draws,
-                payload,
-            )
-            .await;
+            let kill = self.killer(ctx, first);
+            let pending = Pending::Create(name.clone(), placement, draws.clone());
+            let (ended, cut_short) = futures::join!(
+                self.create(
+                    &client,
+                    &mut session,
+                    first,
+                    (name, placement),
+                    draws,
+                    payload,
+                ),
+                kill
+            );
+            self.stopped(ended, cut_short, pending);
         } else {
             if crash {
-                if let Step::Advanced(_) = session.remove_step(&client, first, &name).await {
+                if let Step::Advanced(stage) = session.remove_step(&client, first, &name).await {
                     assert_reachable!("fleet: a tenant removal stops after one step");
+                    reach(stage);
                     self.pending = Some(Pending::Remove(name));
                 }
                 judge_folds(&session);
                 return;
             }
-            self.remove(&client, &mut session, first, &name).await;
+            let kill = self.killer(ctx, first);
+            let pending = Pending::Remove(name.clone());
+            let (ended, cut_short) =
+                futures::join!(self.remove(&client, &mut session, first, &name), kill);
+            self.stopped(ended, cut_short, pending);
         }
         judge_folds(&session);
     }
 
-    /// Run the operation this client stopped in, to its end.
+    /// Run the operation this client stopped in, to its end; whether none is
+    /// pending any more.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     async fn resume(
         &mut self,
@@ -304,24 +384,24 @@ impl FleetOps {
         nodes: &ChainClient,
         policy: CheckpointPolicy,
         draw: u64,
-    ) {
+    ) -> bool {
         let Some(pending) = self.pending.take() else {
-            return;
+            return true;
         };
         let client = self.client(ctx, nodes);
         let first = self.first(draw);
         let mut session = self.session(self.frames, policy);
         let ended = match &pending {
             Pending::Init => self.finish_init(&client, &mut session, first, draw).await,
-            Pending::Create(name, placement, frame) => {
-                // Only this creation's own frame resumes it (a tenant is
+            Pending::Create(name, placement, frames) => {
+                // Only this creation's own frames resume it (a tenant is
                 // created once).
                 self.create(
                     &client,
                     &mut session,
                     first,
                     (name.clone(), *placement),
-                    vec![*frame],
+                    frames.clone(),
                     draw,
                 )
                 .await
@@ -331,7 +411,12 @@ impl FleetOps {
         judge_folds(&session);
         if !ended {
             self.pending = Some(pending);
+            return false;
         }
+        if std::mem::take(&mut self.killed) {
+            assert_reachable!("fleet: an operation its target's kill cut short ends on resumption");
+        }
+        true
     }
 
     /// Run `init` to its end; whether it ended (done or refused).
@@ -343,6 +428,7 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let run = session.init(client, first, draw | 1, Duration::ZERO).await;
+        run.steps.iter().copied().for_each(reach);
         match run.outcome {
             Step::Done {
                 result: fleet,
@@ -412,6 +498,7 @@ impl FleetOps {
                 Duration::ZERO,
             )
             .await;
+        run.steps.iter().copied().for_each(reach);
         self.created(session, &name, placement, &run);
         match run.outcome {
             Step::Done { .. } => {
@@ -500,6 +587,7 @@ impl FleetOps {
         let run = session
             .remove_tenant(client, first, name, Duration::ZERO)
             .await;
+        run.steps.iter().copied().for_each(reach);
         match run.outcome {
             Step::Done { result, last } => {
                 let removed = last == Some(Stage::RemoveTenant);
@@ -593,6 +681,25 @@ impl FleetOps {
             }
         }
         assert_reachable!("fleet: meta's directory is checked against the cell's tenant list");
+    }
+}
+
+/// Each fleet [`Stage`] a step wrote, its own reachable (#247): every
+/// state machine's every step is proven written by some run.
+fn reach(stage: Stage) {
+    match stage {
+        Stage::FormFleet => assert_reachable!("fleet: a step forms the fleet in meta"),
+        Stage::AddCell => assert_reachable!("fleet: a step adds the cell to meta"),
+        Stage::JoinFleet => assert_reachable!("fleet: a step joins the cell to the fleet"),
+        Stage::CellReady => assert_reachable!("fleet: a step marks the cell READY in meta"),
+        Stage::RegisterTenant => assert_reachable!("fleet: a step registers a tenant in meta"),
+        Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
+        Stage::TenantReady => assert_reachable!("fleet: a step marks a tenant READY in meta"),
+        Stage::TenantRemoving => {
+            assert_reachable!("fleet: a step marks a tenant REMOVING in meta");
+        }
+        Stage::DropTenant => assert_reachable!("fleet: a step drops a tenant from the cell"),
+        Stage::RemoveTenant => assert_reachable!("fleet: a step removes a tenant from meta"),
     }
 }
 

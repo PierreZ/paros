@@ -322,6 +322,15 @@ struct ChainConfig {
     /// The `CHECKPOINT` step opens a fresh owner each time, so this leg fires
     /// only near the floor; the factor carries the rest of the range.
     checkpoint_interval_ms: u64,
+    /// How long into a fleet operation its target is killed (#247, the
+    /// process kill mid fleet-step). Floor 0: the kill leaves with the
+    /// operation's first ask; ceiling 200 ms, a few round trips in, when a
+    /// later step is in flight.
+    fleet_kill_delay_ms: u64,
+    /// How long that target stays down before it restarts. Floor 50 ms: a
+    /// reboot that comes straight back, its connections and unsynced writes
+    /// still lost; ceiling 2 s, far inside the recovery budget.
+    fleet_kill_down_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -379,6 +388,8 @@ impl ChainConfig {
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
             checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
+            fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
+            fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -1264,6 +1275,7 @@ impl Workload for ChainWorkload {
             crate::shape::frames(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             client_id,
+            (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
