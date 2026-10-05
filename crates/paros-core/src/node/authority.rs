@@ -21,8 +21,8 @@ impl ColocatedNode {
     /// Every beat is acked by every reachable follower each tick, so a
     /// healthy leader trivially refills the window.
     ///
-    /// A **Phase-2** quorum, for the reason spelled out at the read fence
-    /// (`node/reads.rs`): a leader's authority is the claim that no later
+    /// A **Phase-2** quorum, for the reason spelled out at
+    /// [`Authority::holds`](crate::proposer::Authority::holds): a leader's authority is the claim that no later
     /// ballot has decided behind it, which every future Phase-1 quorum's
     /// intersection with this ack set rules out. On a delegated round the
     /// window is fed by `HeartbeatAck` alone: a proxy's votes never reach

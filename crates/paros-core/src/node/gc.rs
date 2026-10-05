@@ -11,7 +11,7 @@
 //! discharge, and the one `DPaxos`'s "new configuration installed, therefore
 //! the old one is deletable" violates (Appendix D). A leader `L` at ballot
 //! `b` with configuration `C_b`, elected over `H_b`, splits its log at its
-//! election **fence** `F = next_slot − 1` (the read fence, the highest slot
+//! election **fence** `F = next_slot − 1` (the leadership's fence, the highest slot
 //! any promise reported):
 //!
 //! - **Above the fence (Region 3, Scenario 2).** Phase 1 reported nothing
@@ -118,7 +118,7 @@ use crate::membership::{AcceptorConfig, MatchmakerId};
 impl ColocatedNode {
     /// Open the GC campaign of a freshly won leadership over `prior` (`H_b`).
     /// Called once per election on a matchmaker deployment; the fence is
-    /// the read fence (`next_slot - 1`).
+    /// the leadership's fence (`next_slot - 1`).
     pub(super) fn open_gc(&mut self, prior: &[AcceptorConfig]) {
         assert!(
             self.role == NodeRole::Leader,
@@ -130,7 +130,7 @@ impl ColocatedNode {
         );
         self.gc = Some(Collector::new(
             self.deployment_matchmakers().generation,
-            self.proposer.read_floor(),
+            self.proposer.fence(),
             prior,
         ));
         self.try_gc();

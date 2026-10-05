@@ -37,8 +37,6 @@ pub enum AutomationFlag {
     LeaderRecovery,
     /// The driver flushes a batch before sending it on its own.
     PersistOrder,
-    /// A leader serves a confirmed read on its own.
-    ReadServe,
     /// A node that asked for slots a peer already trimmed jumps to that
     /// peer's trim point, keeping its own promise, on its own.
     TrimPoint,
@@ -80,7 +78,6 @@ pub const ALL_FLAGS: &[AutomationFlag] = &[
     AutomationFlag::ReplicaApply,
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
     AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
     AutomationFlag::GridColumn,
@@ -108,7 +105,6 @@ impl AutomationFlag {
             AutomationFlag::ReplicaApply => "apply a chosen slot",
             AutomationFlag::LeaderRecovery => "recover and fill the gaps",
             AutomationFlag::PersistOrder => "persist the batch before the send",
-            AutomationFlag::ReadServe => "serve a confirmed read",
             AutomationFlag::TrimPoint => "jump to the trim point",
             AutomationFlag::AckWrite => "answer a client retry",
             AutomationFlag::GridColumn => "address a slot to its column",

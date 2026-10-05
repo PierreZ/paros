@@ -681,7 +681,6 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
         from: NodeId(0),
         ballot: b,
         commit: None,
-        seq: 1,
         config: None,
     });
     let out = drain(&mut p);

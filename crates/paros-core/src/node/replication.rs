@@ -15,18 +15,15 @@ use crate::membership::AcceptorConfig;
 pub const HEARTBEAT_TICKS: u64 = 1;
 
 impl ColocatedNode {
-    /// Broadcast one leader beat at a fresh, monotonically increasing
-    /// per-ballot sequence number. Both [`ColocatedNode::tick`] and
-    /// [`ColocatedNode::read_index`] beat through here, so every broadcast beat
-    /// carries a seq an ack can be matched against.
+    /// Broadcast one leader beat ([`ColocatedNode::tick`] beats through
+    /// here, once per tick).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn broadcast_heartbeat(&mut self) {
-        // Both callers (`tick` and `read_index`) are leader-gated.
+        // The caller (`tick`) is leader-gated.
         assert!(
             self.role == NodeRole::Leader,
             "only a leader broadcasts beats"
         );
-        self.heartbeat_seq += 1;
         // Beats reach the whole pool, not only the active configuration: a
         // spare or a removed member is still a replica that learns the chosen
         // prefix through the commit watermark and catch-up. Only members' acks
@@ -36,7 +33,6 @@ impl ColocatedNode {
             from: self.config.id,
             ballot: self.ballot,
             commit: self.replica.chosen_index(),
-            seq: self.heartbeat_seq,
             config,
         });
     }
@@ -48,7 +44,6 @@ impl ColocatedNode {
         from: NodeId,
         ballot: Ballot,
         commit: Option<Slot>,
-        seq: u64,
         config: Option<AcceptorConfig>,
     ) {
         let me = self.config.id;
@@ -71,10 +66,10 @@ impl ColocatedNode {
             // The leader's configuration rides on its beats, so a follower
             // that missed the `Prepare` still learns the latest one.
             self.follow_ballot(ballot, config);
-            // Ack the beat, echoing `(ballot, seq)`: the leader counts these
-            // toward read-index confirmation quorums. Below-promise beats fall
-            // through unacked, so a deposed leader's read rounds starve instead
-            // of confirming. No durable write precedes the ack — it claims only
+            // Ack the beat, echoing its ballot: the leader counts these toward
+            // its `CheckQuorum` window. Below-promise beats fall through
+            // unacked, so a deposed leader's window starves instead of
+            // refilling. No durable write precedes the ack — it claims only
             // "my promise is at or below `ballot` right now", which is exactly
             // what this restates (and promise monotonicity preserves).
             assert!(
@@ -93,7 +88,6 @@ impl ColocatedNode {
                 Message::HeartbeatAck {
                     from: me,
                     ballot,
-                    seq,
                     chosen,
                 },
             );
@@ -136,22 +130,14 @@ impl ColocatedNode {
         }
     }
 
-    /// Leader: a peer answered a beat at `(ballot, seq)`. Credit every read
-    /// round the ack qualifies for: same ballot as ours, and a seq at or after
-    /// the round's required beat — an ack to an *earlier* beat proves nothing
-    /// about leadership after the round began, so it never counts. Stale or
+    /// Leader: a peer answered a beat at `ballot`. An ack at our own ballot
+    /// credits the `CheckQuorum` window and the GC fence tally; stale or
     /// cross-ballot acks are dropped whole.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round, seq)))]
-    pub(super) fn on_heartbeat_ack(
-        &mut self,
-        from: NodeId,
-        ballot: Ballot,
-        seq: u64,
-        chosen: Option<Slot>,
-    ) {
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round)))]
+    pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, chosen: Option<Slot>) {
         // Quorum sets are keyed by NodeId, over the **active configuration**:
         // a beat reaches the whole pool, but only a member's ack may count
-        // toward a read round or the `CheckQuorum` window (a joining acceptor
+        // toward the `CheckQuorum` window (a joining acceptor
         // never inflates a quorum it is not in, #122).
         if !self.acceptors.contains(from) {
             return;
@@ -162,8 +148,6 @@ impl ColocatedNode {
         // CheckQuorum: an ack at our ballot is proof this peer can still reach
         // us and has not promised past us — credit the current window.
         self.proposer.credit_authority(from);
-        self.proposer.credit_read_ack(from, seq);
-        self.try_confirm_reads();
         // The GC fence tally (#123): a configured member's chosen index.
         self.note_peer_chosen(from, chosen);
     }

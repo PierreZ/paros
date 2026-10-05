@@ -721,11 +721,10 @@ mod tests {
     use super::*;
 
     /// A heartbeat of `journal`, as the wire carries it.
-    fn beat(journal: u64, seq: u64) -> internal::ConsensusMessage {
+    fn beat(journal: u64) -> internal::ConsensusMessage {
         let mut message = message_to_proto(&Message::HeartbeatAck {
             from: NodeId(1),
             ballot: paros_core::Ballot::zero(),
-            seq,
             chosen: None,
         })
         .expect("a heartbeat ack encodes");
@@ -740,9 +739,9 @@ mod tests {
     #[test]
     fn a_busy_journal_never_evicts_another_journals_messages() {
         let mailbox = PeerMailbox::new(2);
-        assert!(mailbox.push(beat(129, 0), false, false).is_none());
-        for seq in 0..10 {
-            let evicted = mailbox.push(beat(128, seq), false, false);
+        assert!(mailbox.push(beat(129), false, false).is_none());
+        for _ in 0..10 {
+            let evicted = mailbox.push(beat(128), false, false);
             if let Some(evicted) = evicted {
                 assert_eq!(evicted.journal, 128, "only the busy journal's lane evicts");
             }

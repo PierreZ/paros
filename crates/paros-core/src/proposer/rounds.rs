@@ -7,7 +7,7 @@
 //! proposer that another deployment runs *without* the rest of the role.
 //! Compartmentalized Paxos's proxy leader (§3.1) fans a delegated `Accept`
 //! out, folds the `Accepted`s and emits the `Commit` — a Phase-2 tally and
-//! nothing else, no election, no recovery, no read fence — and the rule that
+//! nothing else, no election, no recovery, no fence — and the rule that
 //! there is **no second Phase-2 kernel** in the crate (exactly as the
 //! matchmaker-set decree reuses `Proposer` / `Acceptor` at slot zero rather
 //! than growing a kernel of its own) means it must be *this* tally, embedded.

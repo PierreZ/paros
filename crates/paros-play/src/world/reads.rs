@@ -1,82 +1,15 @@
-//! The two reads a client may ask for — the leader's read-index round and the
-//! leaderless quorum read — and the one place either is answered.
-//!
-//! They are served through the same `ReadState`, and only the client knows
-//! which of the two it asked for.
+//! The read a client may ask for — the leaderless quorum read, the only read
+//! paros serves (the read-index path retired, #243) — and the one place it
+//! is answered.
 
-use paros_core::{NodeId, ReadIndexResult, ReadState, Slot};
+use paros_core::{NodeId, ReadState, Slot};
 
 use crate::action::ActionError;
 use crate::narration::{NarrationKind, prefix_at, say, who};
+use crate::world::World;
 use crate::world::history::PendingRead;
-use crate::world::{World, not_leader};
 
 impl World {
-    /// A client asks `id` for a linearizable read.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`](crate::action::ActionErrorCode).
-    pub fn read_index(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
-        let index = self.require_live(id)?;
-        let slot = self.require_client(client)?;
-        let ctx = self.next_read_ctx;
-        let mark = self.narration.len();
-        // The index the round captured is read off the round itself, right
-        // after it opens and before the pump can confirm it away.
-        let outcome = self.drive(id, index, move |node| {
-            let result = node.read_index(ctx);
-            let captured = node
-                .proposer()
-                .read_rounds()
-                .iter()
-                .find(|round| round.ctx() == ctx)
-                .and_then(paros_core::proposer::ReadRound::index);
-            (result, captured)
-        });
-        let captured = outcome.as_ref().and_then(|(_, captured)| *captured);
-        match outcome.map(|(result, _)| result) {
-            Some(ReadIndexResult::NotLeader(hint)) => {
-                self.narration.truncate(mark);
-                return Err(not_leader(id, hint, "a linearizable read goes to"));
-            }
-            Some(ReadIndexResult::Pending) | None => {}
-        }
-        // Past the refusal, and only here: a read a follower refused was never
-        // issued, so it takes no reading of the history's counter. A counter
-        // that moved on a refused move would leave a gap the replay cannot
-        // reproduce.
-        let issued = self.take_event();
-        self.next_read_ctx += 1;
-        self.clients[slot].reads.push(PendingRead {
-            ctx,
-            node: id,
-            index: captured,
-            leaderless: false,
-            served: false,
-            issued,
-            served_at: None,
-        });
-        let opening = say(
-            NarrationKind::Read,
-            format!(
-                "Client {client} asks {} for a linearizable read. The read captures {}, and it \
-                 writes nothing. It needs fresh proof that {} still leads, and the acks of one \
-                 beat are that proof.",
-                who(id),
-                captured.map_or_else(
-                    || "the empty prefix".to_string(),
-                    |s| format!("slot {} as its watermark", s.0)
-                ),
-                who(id)
-            ),
-        );
-        self.narration.insert(mark, opening);
-        Ok(())
-    }
-
     /// A client asks `id` for a **leaderless** read (Compartmentalized Paxos
     /// §3.4).
     ///
@@ -109,7 +42,6 @@ impl World {
             // maximum watermark the row reports, and the row has not answered
             // yet. `serve_read` fills it in.
             index: None,
-            leaderless: true,
             served: false,
             issued,
             served_at: None,
@@ -134,7 +66,6 @@ impl World {
 
     pub(super) fn serve_read(&mut self, state: ReadState) {
         let mut served = false;
-        let mut leaderless = false;
         let stamp = self.next_event;
         for client in &mut self.clients {
             for read in &mut client.reads {
@@ -143,7 +74,6 @@ impl World {
                     read.index = state.index;
                     read.served_at = Some(stamp);
                     served = true;
-                    leaderless = read.leaderless;
                 }
             }
         }
@@ -152,23 +82,14 @@ impl World {
         }
         self.next_event += 1;
         let at = prefix_at(state.index);
-        let text = if leaderless {
-            format!(
-                "The read at ctx {} is served at {at}, and no leader was asked. A Phase-1 quorum \
-                 reported the highest slot each member had voted in. A Phase-2 quorum chose \
-                 every write acknowledged before this read began. A Phase-1 quorum and a Phase-2 \
-                 quorum always share an acceptor, so the maximum they reported is at or above \
-                 that write. This node has now applied that far.",
-                state.ctx
-            )
-        } else {
-            format!(
-                "The read at ctx {} is served at {at}. A quorum acked a beat that was sent after \
-                 the read began, so no other node was deciding slots at the same time. The \
-                 applied prefix covers the watermark the read captured.",
-                state.ctx
-            )
-        };
+        let text = format!(
+            "The read at ctx {} is served at {at}, and no leader was asked. A Phase-1 quorum \
+             reported the highest slot each member had voted in. A Phase-2 quorum chose every \
+             write acknowledged before this read began. A Phase-1 quorum and a Phase-2 quorum \
+             always share an acceptor, so the maximum they reported is at or above that write. \
+             This node has now applied that far.",
+            state.ctx
+        );
         self.narrate(NarrationKind::Read, text);
     }
 

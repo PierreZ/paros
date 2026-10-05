@@ -315,6 +315,20 @@ fn act_four_registers_its_ten_levels_in_play_order() {
 }
 
 #[test]
+fn the_read_levels_ask_their_question_the_hard_way() {
+    // A quorum read that the cluster could serve at once teaches nothing: each
+    // read level reaches a read that has to wait for the prefix.
+    for id in ["act2/the-read-that-lies", "act3/the-fresh-leader-trap"] {
+        let level = paros_play::level::level(id).expect("a registered level");
+        let seen = asked(level).contains(&(PromptKind::QuorumReadServe, "wait".to_string()));
+        assert!(
+            seen,
+            "{id}: no QuorumReadServe prompt ever expected \"wait\""
+        );
+    }
+}
+
+#[test]
 fn the_act_four_levels_ask_their_question_the_hard_way() {
     // A prompt whose answer is the same every time teaches only half a rule.
     // Each of these levels must reach the answer that costs something: a read

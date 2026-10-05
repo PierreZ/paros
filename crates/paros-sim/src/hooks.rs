@@ -409,7 +409,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // proposer never learns it — the pure quorum-intersection edge
             // that forces a re-propose under a new ballot (P2c for real).
             Message::Accepted { .. } => buggify_with_prob!(0.05),
-            // Starve the read fence / the catch-up push direction. Kept low:
+            // Starve the `CheckQuorum` window / the catch-up push direction. Kept low:
             // these fire per tick per peer, and a high rate is just a
             // partition, which is moonpool's job.
             Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => buggify_with_prob!(0.02),
@@ -615,7 +615,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn expire_parked_read_early(&self) -> bool {
         // Per tick while reads are parked. Kept shy: expiring most parked
         // reads early would stop confirmed reads from ever completing during
-        // the chaos window, and the read-index path is what needs coverage.
+        // the chaos window, and the read path is what needs coverage.
         // Gated in the audit (`read_expired`, the `early` leg).
         self.active() && buggify_with_prob!(0.05)
     }

@@ -45,7 +45,6 @@ export type { QuorumKindView } from './generated/QuorumKindView';
 export type { QuorumSpec } from './generated/QuorumSpec';
 export type { QuorumSystemView } from './generated/QuorumSystemView';
 export type { ReachView } from './generated/ReachView';
-export type { ReadRoundView } from './generated/ReadRoundView';
 export type { ReadView } from './generated/ReadView';
 export type { RegistrationKindView } from './generated/RegistrationKindView';
 export type { RegistrationView } from './generated/RegistrationView';

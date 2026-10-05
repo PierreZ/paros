@@ -333,7 +333,7 @@ pub trait Audit {
     fn handoff_refused(&self, node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {}
 
     /// This node resigned a handoff-installed leadership because its inherited
-    /// read fence stayed uncovered — the deliberate fallback to an ordinary
+    /// fence stayed uncovered — the deliberate fallback to an ordinary
     /// Phase 1. `count` is the monotone total for this incarnation.
     fn handoff_fence_expired(&self, node: NodeId, count: u64) {}
 
@@ -458,13 +458,13 @@ pub trait Audit {
     /// tick. The unit every core timeout is counted in.
     fn ticked(&self, node: NodeId) {}
 
-    /// This node received a `HeartbeatAck` from `from` echoing `(ballot,
-    /// seq)`, reported at the inbox before the core folds it — whether or
+    /// This node received a `HeartbeatAck` from `from` echoing `ballot`,
+    /// reported at the inbox before the core folds it — whether or
     /// not the core counts it (a stale ballot's ack moves nothing). An ack
     /// that reaches a leader refills its `CheckQuorum` window, and an ack in
     /// flight can be older than a window: the deposed-leader oracle measures
     /// from the last ack received, never from the promise-majority alone.
-    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot, seq: u64) {}
+    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {}
 
     /// This node received a `Prepare` below its own compaction floor — the
     /// "campaign against a truncated acceptor" interleaving.

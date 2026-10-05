@@ -1116,7 +1116,7 @@ where
                 // configuration otherwise — for their vote watermarks, and
                 // the read is served from this node's journal fold once it
                 // covers the maximum. Never a redirect: no role is asked
-                // for, and no read-index round exists.
+                // for.
                 let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
@@ -1174,8 +1174,8 @@ where
                 // An ack at the inbox, whatever the core makes of it: what
                 // refills a leader's `CheckQuorum` window, and what the
                 // deposed-leader oracle measures its clock from.
-                if let Message::HeartbeatAck { from, ballot, seq, .. } = &msg {
-                    rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot, *seq);
+                if let Message::HeartbeatAck { from, ballot, .. } = &msg {
+                    rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot);
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it

@@ -118,8 +118,8 @@ impl ColocatedNode {
     /// decided: the truncation a `Truncate` control command ordered (lazily,
     /// *after* the walk so the mutation cannot disturb the iteration, its
     /// [`WriteOp::Truncate`](crate::WriteOp::Truncate) ordered after the
-    /// `SetChosenIndex` writes) and the read rounds waiting on the apply condition (the
-    /// fresh-leader fence). A fold stopped at a hole holds the walk
+    /// `SetChosenIndex` writes) and the quorum reads waiting for the prefix to
+    /// cover their index. A fold stopped at a hole holds the walk
     /// ([`crate::replica::Replica::advance`]).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
@@ -134,6 +134,6 @@ impl ColocatedNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
-        self.serve_reads();
+        self.serve_quorum_reads();
     }
 }

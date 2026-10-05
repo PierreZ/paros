@@ -9,8 +9,7 @@
 //! ([`paros_core::ReadState`]) — the row answered whole and this process's
 //! journal fold covers the maximum. Only then is the page served, from the
 //! fold ([`paros_core::LogRead`], a pure read): every write acknowledged
-//! before the read opened is in it. No read goes through the leader, and no
-//! read-index round is ever asked.
+//! before the read opened is in it. No read goes through the leader.
 //!
 //! A confirmed read with nothing to return yet — it starts at or past the
 //! journal's `next_seq` — waits here for as long as the client asked

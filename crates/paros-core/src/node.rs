@@ -14,11 +14,10 @@ mod learn;
 mod matchmaking;
 mod phase2;
 mod quorum_reads;
-mod reads;
 mod reconfigure;
 mod replication;
 
-pub(crate) use self::reads::READ_TTL_TICKS;
+pub(crate) use self::quorum_reads::READ_TTL_TICKS;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use self::handoff::{
@@ -83,21 +82,6 @@ pub enum ProposeResult {
     Accepted(Slot),
 }
 
-/// The outcome of [`ColocatedNode::read_index`], telling the driver how to answer the
-/// reading client: redirect on `NotLeader`, or park the reply and wait for the
-/// matching [`ReadState`] to surface via [`Ready::read_states`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadIndexResult {
-    /// This node is not the leader; the client should retry the hinted node
-    /// (`None` if leadership is currently unknown).
-    NotLeader(Option<NodeId>),
-    /// The round is running; a [`ReadState`] with this call's `ctx` surfaces via
-    /// [`Ready::read_states`] once confirmed (possibly in the very next batch).
-    /// A round that cannot confirm (leadership lost, acks lost) surfaces
-    /// nothing — the driver owns the client-facing timeout.
-    Pending,
-}
-
 /// **Where a proposal's Phase 2 runs** (#142): on the leader itself, or
 /// handed to a proxy leader that fans the `Accept` out, folds the
 /// `Accepted`s and emits the `Commit`. The driver names it at the
@@ -121,16 +105,17 @@ pub enum Delegation {
     To(ProxyId),
 }
 
-/// A confirmed read-index round, surfaced via [`Ready::read_states`]: at the
-/// moment the round began this node was leader (a heartbeat-ack quorum at its
-/// ballot proved it afterwards) and `index` was covered by the applied prefix
-/// by confirmation time — the linearization point a read at `ctx` observes.
+/// A served quorum read, surfaced via [`Ready::read_states`]: a whole row
+/// answered the read's `PreRead` with vote watermarks whose maximum is
+/// `index`, and this node's chosen prefix covered `index` by the time it
+/// surfaced — the linearization point a read at `ctx` observes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadState {
-    /// The driver-supplied correlation token from [`ColocatedNode::read_index`].
+    /// The driver-supplied correlation token from [`ColocatedNode::quorum_read`].
     pub ctx: u64,
-    /// The read index: the applied watermark the read observes (`None` = empty
-    /// prefix). The node's chosen index is at or past it on confirmation.
+    /// The read index: the maximum vote watermark the read's row reported
+    /// (`None` = empty prefix). The node's chosen index is at or past it
+    /// when it surfaces.
     pub index: Option<Slot>,
 }
 
@@ -165,7 +150,7 @@ pub enum BeliefSource {
 /// probe, the Phase-2 rounds, the bounded recovery, the allocator and the
 /// leadership's standing authority) and the
 /// [`Replica`](crate::replica::Replica) (the chosen prefix, the apply walk,
-/// the at-most-once ledger). Each is its own type and decides its own
+/// the journal fold). Each is its own type and decides its own
 /// questions. This is the deployment Multi-Paxos names: all three on every
 /// node, plus what only a colocation can own —
 ///
@@ -244,7 +229,7 @@ pub struct ColocatedNode {
     acceptor: Acceptor<Command>,
     /// The **replica** component ([`crate::replica::Replica`]): the chosen
     /// log, the durable chosen index, the contiguous apply walk and the
-    /// at-most-once ledger.
+    /// journal state it folds.
     replica: Replica,
 
     // ---- pending output buckets: filled by the protocol logic, drained by
@@ -289,11 +274,6 @@ pub struct ColocatedNode {
     /// reads it to feed a fresh randomized `election_timeout`. Jitter is drawn in
     /// the driver, never here (the core stays zero-dep).
     needs_election_timeout: bool,
-    /// Monotone per-ballot beat sequence, bumped at each broadcast
-    /// ([`ColocatedNode::broadcast_heartbeat`]); reset on winning an election. Acks
-    /// echo it, so a read round knows which beats prove leadership *after* it
-    /// began.
-    heartbeat_seq: u64,
     /// The monotone observability counters of this incarnation
     /// ([`Counters`]): what the driver's audit report reads, never a
     /// decision.
@@ -302,8 +282,8 @@ pub struct ColocatedNode {
     // ---- proposer (multi-decree) ----
     /// The proposer component: the open Phase 1, the CTRL repair probe, the
     /// in-flight Phase-2 rounds, the bounded recovery, the allocator frontier
-    /// and the leadership's standing authority — its read fence, its pending
-    /// read-index rounds and its `CheckQuorum` window
+    /// and the leadership's standing authority — its fence and its
+    /// `CheckQuorum` window
     /// ([`crate::proposer`]). Volatile; dies whole with the
     /// leadership.
     proposer: Proposer<NodeId, Command>,
@@ -350,7 +330,7 @@ pub struct ColocatedNode {
     /// [`LeadershipOrigin`]). `Elected` on every non-leader.
     leadership_origin: LeadershipOrigin,
     /// Ticks a handoff-installed leadership has held an **uncovered inherited
-    /// fence** (its chosen prefix still below `read_floor`). Drives the
+    /// fence** (its chosen prefix still below the proposer's `fence`). Drives the
     /// resignation that hands an unrecoverable inherited log back to an
     /// ordinary Phase 1; reset whenever the fence is covered.
     handoff_fence_elapsed: u64,
@@ -500,18 +480,16 @@ impl ColocatedNode {
                 from,
                 ballot,
                 commit,
-                seq,
                 config,
                 ..
-            } => self.on_heartbeat(from, ballot, commit, seq, config),
+            } => self.on_heartbeat(from, ballot, commit, config),
             Message::HeartbeatAck {
                 from,
                 ballot,
-                seq,
                 chosen,
                 ..
             } => {
-                self.on_heartbeat_ack(from, ballot, seq, chosen);
+                self.on_heartbeat_ack(from, ballot, chosen);
             }
             Message::PreRead { reply_to, ctx } => self.on_pre_read(reply_to, ctx),
             Message::PreReadAck {
@@ -666,70 +644,6 @@ impl ColocatedNode {
         self.open_proposal(None, delegation, Command::Control(control))
     }
 
-    /// Leader entry point for a **linearizable read**: capture the current
-    /// applied watermark as the read index and start a heartbeat-ack quorum
-    /// round to confirm this node is still leader — no log write. The confirmed
-    /// round surfaces as a [`ReadState`] carrying `ctx` via
-    /// [`Ready::read_states`], once a quorum has acked a beat broadcast at or
-    /// after this call **and** the chosen prefix covers the captured index
-    /// (the fresh-leader fence, see the `read_floor` field). A non-leader
-    /// returns [`ReadIndexResult::NotLeader`] with a redirect hint.
-    ///
-    /// # Panics
-    ///
-    /// If an internal invariant is broken (a programmer error, never an
-    /// operating condition): read rounds must confirm in creation order.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
-    pub fn read_index(&mut self, ctx: u64) -> ReadIndexResult {
-        if self.role != NodeRole::Leader {
-            return ReadIndexResult::NotLeader(self.leader);
-        }
-        // The fence dominates: a fresh leader must not serve below the highest
-        // slot its prepare quorum reported, even while its own chosen prefix
-        // still lags the recovered suffix.
-        //
-        // On a deployment with proxy leaders (#142) the leader is no longer
-        // the first to learn what it decided: a proxy's `Commit` goes to
-        // every learner at once, so a follower can apply a delegated slot
-        // before the leader hears of it — and a client that read that slot
-        // there (a quorum read, #143) would then read an *older* prefix
-        // here. Every value chosen under this leadership sits in a round it
-        // opened, so the read also covers the allocator frontier: it waits
-        // for the rounds in flight to decide. The plain deployment, where
-        // the leader decides every round itself, keeps its index exactly.
-        // Red→green: the hunt's seed 14602637684929161325 (two proxies, a
-        // quorum read at 3 on a follower, then a read-index at 2 on the
-        // leader: "chain: a client's read-index watermarks never move
-        // backwards").
-        let opened = self
-            .proposer
-            .next_slot()
-            .0
-            .checked_sub(1)
-            .map(Slot)
-            .filter(|_| self.config.has_proxies());
-        let index = self
-            .replica
-            .chosen_index()
-            .max(self.proposer.read_floor())
-            .max(opened);
-        // Beat immediately (rather than waiting for the next tick) so the
-        // round's confirmation costs one network round trip, not a tick.
-        self.broadcast_heartbeat();
-        // A leader outside its own configuration has no acceptor vote to
-        // cast; a member's own vote is one ack like any other, and the round
-        // confirms only when the membership boundary
-        // (`AcceptorConfig::has_phase2_quorum`) says the acks form a Phase-2
-        // quorum — never a count against a threshold here.
-        let own_vote = self.is_acceptor().then_some(self.config.id);
-        self.proposer
-            .open_read(ctx, index, self.heartbeat_seq, self.tick_count, own_vote);
-        // A single-node cluster is its own quorum: confirm in this same batch.
-        self.try_confirm_reads();
-        self.assert_invariants();
-        ReadIndexResult::Pending
-    }
-
     /// Decided log compaction (a journal `Truncate`, #204): drop every
     /// retained slot at or below `up_to`, raising the truncation floor.
     /// Returns the new floor (the first slot still retained).
@@ -865,8 +779,8 @@ impl ColocatedNode {
         }
         self.tick_handoff_fence();
         self.tick_repair();
-        // Both read tallies: expire what outlived the window, serve the rest.
-        self.tick_reads();
+        // Quorum reads: expire what outlived the window, serve the rest.
+        self.tick_quorum_reads();
         // The GC preconditions can become true without a message (the last
         // inherited round decided on this tick's re-send): re-check per tick.
         self.try_gc();
@@ -1075,7 +989,7 @@ impl ColocatedNode {
     /// Voluntarily resign the leadership: Leader → Follower, keeping every
     /// durable commitment (the promised ballot and the accepted log are
     /// untouched) and dropping only the volatile leadership state — the in-flight
-    /// Phase-2 `proposer` map and any unconfirmed read-index rounds. A no-op on a
+    /// Phase-2 `proposer` map and the standing authority. A no-op on a
     /// node that is not the leader.
     ///
     /// A legitimate operational primitive: a node may want to hand leadership on
@@ -1276,7 +1190,7 @@ impl ColocatedNode {
     }
 
     /// The node's **replica** role: the chosen log, the contiguous apply
-    /// walk and the at-most-once ledger. A
+    /// walk and the journal state it folds. A
     /// read view, like [`ColocatedNode::acceptor`].
     #[must_use]
     pub fn replica(&self) -> &Replica {

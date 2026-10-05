@@ -27,7 +27,6 @@ const DEPOSED_TICK_SLACK: u64 = 2;
 pub(super) struct DeposedStreak {
     pub(super) round: u64,
     pub(super) node: u64,
-    pub(super) seq: u64,
     /// Whether the last beat at this ballot was deposed (a promise-majority
     /// of its configuration sits strictly above it).
     pub(super) deposed: bool,
@@ -191,7 +190,7 @@ pub(super) struct AuditState {
     /// (`SetChosenIndex` flushes relaxed, so a crash may legally rewind it
     /// across incarnations — within one it only advances).
     pub(super) chosen_watermark: BTreeMap<u64, u64>,
-    /// Per node: the highest confirmed read index served, reset each boot.
+    /// Per node: the highest read index served, reset each boot.
     pub(super) read_watermark: BTreeMap<u64, Option<u64>>,
 
     // --- truncation ---------------------------------------------------------
@@ -454,7 +453,7 @@ pub(super) struct AuditState {
     pub(super) decided_below_majority: bool,
     /// Grid coverage (#141): a slot decided on a column, an election covered
     /// by a row, one covered by a row *across* a reconfiguration (a grid in
-    /// `H_b`), a read-index round confirmed by a column, a reconfiguration
+    /// `H_b`), a reconfiguration
     /// between a grid and a majority configuration — the outcomes that prove
     /// the grid genuinely ran, and a slot decided on a column other than its
     /// own (the driver's override took effect).
@@ -1105,11 +1104,13 @@ impl AuditState {
     /// ([`Self::observe_tick`]), never in beats against a fixed count: the
     /// window is exactly one timeout long, the timeout is a per-seed knob with
     /// a structural floor (a 10 ms tick raises it to 25–49 ticks), and a
-    /// client's `read_index` beats add beats per tick — a fixed budget of 40
-    /// beats went red on a seed (18268997339215266796) where node 0 learned it
-    /// was deposed only at the end of a 49-tick window, with no protocol fault
-    /// anywhere.
-    pub(super) fn observe_beat(&mut self, node: u64, ballot: Ballot, seq: u64) {
+    /// fixed budget of 40 beats went red on a seed (18268997339215266796)
+    /// where node 0 learned it was deposed only at the end of a 49-tick
+    /// window, with no protocol fault anywhere.
+    ///
+    /// Idempotent per broadcast: a beat sent to every peer reports once per
+    /// copy, and each copy recomputes the same streak.
+    pub(super) fn observe_beat(&mut self, node: u64, ballot: Ballot) {
         // A promise-majority *of the ballot's own configuration*: only its
         // members' promises decide whether the leader can still assemble a
         // quorum at that ballot.
@@ -1129,16 +1130,12 @@ impl AuditState {
             *entry = DeposedStreak {
                 round: ballot.round,
                 node: ballot.node.0,
-                seq,
                 deposed: false,
                 ticks: 0,
                 beatless_ticks: 0,
                 timeout,
             };
-        } else if entry.seq == seq {
-            return;
         }
-        entry.seq = seq;
         entry.beatless_ticks = 0;
         entry.timeout = timeout;
         if outvoted {

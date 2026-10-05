@@ -30,7 +30,7 @@ use crate::write::WriteOp;
 ///    on them. paros runs no application (#186); a journal client folds what
 ///    it reads.
 /// 4. **Answer** [`Ready::read_states`] — *after* step 3, so the prefix a
-///    read serves covers the confirmed read index this same batch carried.
+///    read serves covers the read index this same batch carried.
 /// 5. Call [`Ready::advance`] to release the gate and unlock the next batch.
 ///
 /// # Async drivers

@@ -9,7 +9,6 @@ import type { MatchmakerSetView } from "./MatchmakerSetView";
 import type { MatchmakingView } from "./MatchmakingView";
 import type { NodeFlavour } from "./NodeFlavour";
 import type { QuorumSystemView } from "./QuorumSystemView";
-import type { ReadRoundView } from "./ReadRoundView";
 import type { RoleView } from "./RoleView";
 import type { Seam } from "./Seam";
 import type { SlotView } from "./SlotView";
@@ -94,10 +93,6 @@ open_rounds: Array<number>,
  * Whether this leader has accepts it could re-send.
  */
 pending_accepts: boolean, 
-/**
- * Read-index rounds awaiting confirmation.
- */
-read_rounds: Array<ReadRoundView>, 
 /**
  * Slots the fresh leadership has still to recover.
  */

@@ -188,14 +188,12 @@ fn every_variant() -> Vec<Message> {
             from: NodeId(0),
             ballot,
             commit: Some(Slot(2)),
-            seq: 9,
             config: None,
         },
         Message::Heartbeat {
             from: NodeId(0),
             ballot,
             commit: Some(Slot(2)),
-            seq: 11,
             config: Some(paros_core::AcceptorConfig::new(
                 vec![NodeId(0), NodeId(2)],
                 paros_core::QuorumSystem::Majority,
@@ -208,13 +206,11 @@ fn every_variant() -> Vec<Message> {
             from: NodeId(0),
             ballot,
             commit: None,
-            seq: 10,
             config: None,
         },
         Message::HeartbeatAck {
             from: NodeId(1),
             ballot,
-            seq: 9,
             chosen: Some(Slot(4)),
         },
         // Cooperative leader handoff: the intended successor, the

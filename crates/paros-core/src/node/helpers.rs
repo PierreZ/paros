@@ -200,15 +200,15 @@ impl ColocatedNode {
     }
 
     /// Drop every volatile leadership and campaign state: the open campaign
-    /// phases, the in-flight rounds, recovery, repair, read rounds and the
-    /// inherited origin. Shared by [`ColocatedNode::become_follower`] and a fresh
+    /// phases, the in-flight rounds, recovery, repair, the standing authority
+    /// and the inherited origin. Shared by [`ColocatedNode::become_follower`] and a fresh
     /// campaign, so a leader that reconfigures abandons exactly what a
     /// deposed one does.
     ///
-    /// Unconfirmed read rounds die with the leadership (inside
-    /// [`Proposer::abandon`], with the fence and the ack window they belong
-    /// to); already-confirmed `pending_read_states` stay — they were valid at
-    /// their linearization point and the driver drains them this same batch.
+    /// The fence and the ack window die with the leadership (inside
+    /// [`Proposer::abandon`]); quorum reads and already-served
+    /// `pending_read_states` stay — a quorum read touches no leader state,
+    /// and the driver drains the served ones this same batch.
     pub(super) fn clear_leadership_state(&mut self) {
         // Leadership state dies whole, the inherited origin included: a
         // demoted node holds no authority, so it can neither be a handoff

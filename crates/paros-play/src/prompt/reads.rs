@@ -1,81 +1,13 @@
-//! The two read questions: a read-index round's leadership proof, and a
-//! leaderless read's watermark.
+//! The read question: a leaderless read's watermark.
 
 use std::collections::BTreeMap;
 
 use paros_core::{NodeId, Slot};
 
 use super::{Choice, Prompt, PromptKind};
-use crate::narration::{self, prefix_at};
+use crate::narration;
 
 impl Prompt {
-    /// A read at `ctx` captured `index`; an ack just arrived. Serve, or wait?
-    ///
-    /// Judged by [`paros_core::proposer::Proposer::confirm_reads`] on a clone,
-    /// after crediting this ack: a read confirms only once a **Phase-2 quorum**
-    /// has acked a beat broadcast at or after the read began *and* the applied
-    /// prefix covers the captured index.
-    ///
-    /// `acks` is the tally **this node's own vote included**. A read round is
-    /// seeded with the leader itself, because a leader is an acceptor of its
-    /// own configuration and its own state is the first evidence it has. The
-    /// card used to print the peer acks alone, and a player who read "1" and
-    /// waited for a third was marked wrong for waiting.
-    #[must_use]
-    // Every argument is one line of the card, and bundling them would only
-    // rename them.
-    #[allow(clippy::too_many_arguments)]
-    pub fn read_serve(
-        id: u64,
-        node: NodeId,
-        ctx: u64,
-        index: Option<Slot>,
-        acks: usize,
-        members: usize,
-        chosen_index: Option<Slot>,
-        confirmed: bool,
-    ) -> Self {
-        let at = prefix_at(index);
-        let applied = narration::at(chosen_index);
-        let expected = if confirmed { "serve" } else { "wait" };
-        let mut explanations = BTreeMap::new();
-        explanations.insert(
-            "serve".to_string(),
-            format!(
-                "This answer gives the client whatever this node holds now. The acks in hand \
-                 are {acks} of {members}, and that count includes the vote of this node. They \
-                 must make a Phase-2 quorum of the configuration of this ballot, for a beat \
-                 sent at or after the read started. The applied prefix ({applied}) must also \
-                 cover {at}. One of those two conditions does not hold. A leader cannot separate \"my followers are slow\" from \"another \
-                 node replaced me and commits without me\". A read on that state gives the \
-                 client a value older than a write that the cluster acknowledged to another \
-                 client. Wait for the acks of the quorum, because they are the proof and they \
-                 need no log write."
-            ),
-        );
-        Self {
-            id,
-            kind: PromptKind::ReadServe,
-            node: node.0,
-            question: format!(
-                "The read of the client (#{ctx}) captured {at}. Serve it, or \
-                 wait?"
-            ),
-            state_summary: vec![
-                format!("read index captured: {at}"),
-                format!("the acks, with the vote of this node: {acks} of {members}"),
-                format!("the applied prefix ends at: {applied}"),
-            ],
-            choices: vec![
-                Choice::new("serve", format!("Serve the read at {at}")),
-                Choice::new("wait", "Wait for the ack quorum"),
-            ],
-            expected: expected.to_string(),
-            explanations,
-            feedback: None,
-        }
-    }
-
     /// A quorum read's row has answered: the highest slot any of them has
     /// voted in is `watermark`, and this node has applied up to `applied`.
     ///

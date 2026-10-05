@@ -1,27 +1,33 @@
-//! The node's **quorum-read wiring** (#143, Compartmentalized Paxos §3.4):
-//! how a `PreRead` on the wire reaches the [`Acceptor`]'s vote watermark,
-//! how a `PreReadAck` reaches the [`QuorumReads`] tally, and how a completed
-//! read waits on the [`Replica`]'s "applied at or past this index" before it
-//! surfaces through the same [`Ready::read_states`] the leader's read-index
-//! path uses (that shared back half — the window, the serving, the
-//! surfacing — is `node/reads.rs`). The components decide; this module
-//! builds the messages and keeps the reads consistent with the
+//! The node's **read wiring** (#143, Compartmentalized Paxos §3.4): how a
+//! `PreRead` on the wire reaches the [`Acceptor`]'s vote watermark, how a
+//! `PreReadAck` reaches the [`QuorumReads`] tally, and how a completed read
+//! waits on the [`Replica`]'s "applied at or past this index" before it
+//! surfaces through [`Ready::read_states`]. The components decide; this
+//! module builds the messages and keeps the reads consistent with the
 //! configuration the node believes in.
 //!
 //! Every node runs it — leader, follower, spare — and no path here touches
-//! the leader's authority, its beats or its acks: the read-index path is
-//! untouched and a plain deployment's `Heartbeat` / `HeartbeatAck` are
-//! byte-for-byte what they were.
+//! the leader's authority, its beats or its acks. It is the only read path:
+//! the leader's read-index rounds retired (#243).
 //!
 //! [`Acceptor`]: crate::acceptor::Acceptor
 //! [`Replica`]: crate::replica::Replica
 //! [`Ready::read_states`]: crate::Ready::read_states
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
-use super::{ColocatedNode, Message, NodeId, NodeRole, Slot};
+use super::{ColocatedNode, Message, NodeId, NodeRole, ReadState, Slot};
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
 use crate::{Command, Control, Delegation, ProposeResult};
+
+/// Ticks a pending quorum read — waiting for its row to answer whole, or for
+/// the replica to cover the index it settled on — may wait before the node
+/// garbage-collects it (lost acks, an unreachable row). Dropped silently: a
+/// read carries no durable obligation, and the driver owns the client reply
+/// (its retry sweep answers first, well inside this window). A watermark
+/// raised by an accept that never decided needs the next leader's gap fill
+/// to be covered, which is why the window is not shorter than an election.
+pub(crate) const READ_TTL_TICKS: u64 = 20;
 
 impl ColocatedNode {
     /// **Leaderless read** entry point, on any node (#143, Compartmentalized
@@ -30,8 +36,7 @@ impl ColocatedNode {
     /// vote watermarks, settle on the maximum once the row answered whole,
     /// and surface a [`ReadState`](super::ReadState) carrying `ctx` through
     /// [`Ready::read_states`] once this node's chosen prefix covers it
-    /// ([`Replica::covers`]). The driver's "wait until applied, then serve"
-    /// path is then exactly the read-index one.
+    /// ([`Replica::covers`]).
     ///
     /// **No clock anywhere.** The read is linearizable by quorum
     /// intersection alone (the argument is on [`crate::quorum_read`]): every
@@ -40,7 +45,7 @@ impl ColocatedNode {
     /// past it. A read that cannot complete — a row that never answers
     /// whole, a watermark the replica never reaches, a configuration that
     /// moves underneath it — surfaces nothing and is dropped after
-    /// `READ_TTL_TICKS` (the window both read tallies share, `node/reads.rs`);
+    /// `READ_TTL_TICKS`;
     /// the driver owns the client-facing timeout, and the client records it
     /// *ambiguous*, never aborted.
     ///
@@ -198,5 +203,28 @@ impl ColocatedNode {
             self.proposer.next_slot() > watermark,
             "a watermark fill leaves the frontier past the watermark"
         );
+    }
+
+    /// Hand the quorum-read tally the replica's answer and queue every read
+    /// it serves: a read confirmed at `index` surfaces once the chosen
+    /// prefix covers it. Called wherever the answer can change: an ack
+    /// folded, the chosen prefix advanced, a tick.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
+    pub(super) fn serve_quorum_reads(&mut self) {
+        let replica = &self.replica;
+        let served = self.quorum_reads.serve(|index| replica.covers(index));
+        self.pending_read_states.extend(
+            served
+                .into_iter()
+                .map(|(ctx, index)| ReadState { ctx, index }),
+        );
+    }
+
+    /// Per-tick upkeep: drop the reads that outlived [`READ_TTL_TICKS`],
+    /// then serve what the prefix may have covered since.
+    pub(super) fn tick_quorum_reads(&mut self) {
+        let now = self.tick_count;
+        self.quorum_reads.expire(now, READ_TTL_TICKS);
+        self.serve_quorum_reads();
     }
 }

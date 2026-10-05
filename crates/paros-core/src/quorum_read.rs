@@ -10,8 +10,7 @@
 //! ([`crate::replica::Replica::covers`]). This module is the tally: a
 //! [`QuorumRead`] folds the answers of one row and completes on
 //! [`AcceptorConfig::has_phase1_quorum_in`]; [`QuorumReads`] holds every
-//! read a node has open, bounded by a TTL exactly like the leader's
-//! read-index rounds. It reads no wire and knows no role — the node's
+//! read a node has open, bounded by a TTL. It reads no wire and knows no role — the node's
 //! `node/quorum_reads.rs` is the wiring that feeds it and acts on its
 //! answers, on **any** node: leader, follower, spare.
 //!
@@ -332,7 +331,7 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
 
     /// Drop every read older than `ttl` ticks at `now` (a row that never
     /// answered whole, a watermark the replica never reached). Dropped
-    /// silently, exactly like a read-index round: the read carries no
+    /// silently: the read carries no
     /// durable obligation, and the driver owns the client reply.
     pub fn expire(&mut self, now: u64, ttl: u64) {
         self.reads

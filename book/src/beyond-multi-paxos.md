@@ -109,9 +109,9 @@ stray copy, honestly and safely, and its vote still counts for nothing.
 
 ## Quorum reads
 
-The grid takes the writes off the leader and leaves the reads on it, because
-[read-index](linearizable-reads.md) asks the leader to prove that it still leads.
-There is a better question, and it does not involve the leader at all.
+The grid takes the writes off the leader. The reads must not go back to it. The
+[quorum read](linearizable-reads.md) does not involve the leader at all, and on a
+grid it asks less.
 
 Ask a **Phase-1 quorum** one thing each: what is the highest slot you have voted
 in? The quorum is a row of the grid, or the membership under a majority. Take the

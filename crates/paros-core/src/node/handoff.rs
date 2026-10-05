@@ -38,9 +38,9 @@
 //!   would ever propose them again (the #54 hole, without an election to fill
 //!   it).
 //!
-//! Everything else a leader holds is either derivable (`read_floor` is
-//! `next_slot - 1`), a fresh-leadership reset (`heartbeat_seq`, the
-//! `CheckQuorum` window, in-flight read rounds), or deliberately **not**
+//! Everything else a leader holds is either derivable (the fence is
+//! `next_slot - 1`), a fresh-leadership reset (the `CheckQuorum` window),
+//! or deliberately **not**
 //! transferred: a handoff is refused while any recovery, repair, or
 //! application-heal state is open (see [`ColocatedNode::can_relinquish`]).
 //!
@@ -558,14 +558,11 @@ impl ColocatedNode {
         self.handoff_fence_elapsed = 0;
         self.counters.election_gap_fills = 0;
         self.proposer.set_next_slot(next_slot);
-        // A fresh leadership's beat sequence and read rounds, exactly as
-        // `try_become_leader` resets them: acks must echo the current ballot,
-        // and no read captured under the predecessor may confirm here. The
-        // inherited read fence: nothing the predecessor acked can sit above
-        // `next_slot - 1`, so no read confirms here until the chosen prefix
-        // covers it. Identical in meaning to a fresh leader's fence, and it is
-        // also what the fence deadline below watches.
-        self.heartbeat_seq = 0;
+        // A fresh leadership's window, exactly as `try_become_leader` opens
+        // it: acks must echo the current ballot. The inherited fence: nothing
+        // the predecessor acked can sit above `next_slot - 1`. Identical in
+        // meaning to a fresh leader's fence, and it is what the fence
+        // deadline below watches.
         let fence = next_slot.0.checked_sub(1).map(Slot);
         self.proposer
             .open_authority(fence, self.is_acceptor().then_some(me));
@@ -640,7 +637,7 @@ impl ColocatedNode {
         }
         let covered = self
             .proposer
-            .read_floor()
+            .fence()
             .is_none_or(|fence| self.replica.chosen_index().is_some_and(|ci| ci >= fence));
         if covered {
             self.handoff_fence_elapsed = 0;

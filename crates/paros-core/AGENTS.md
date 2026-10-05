@@ -15,7 +15,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `proposer/probe.rs` → the CTRL repair probe (Stage 8) for slots a won election could not decide.
 - `proposer/recovery.rs` → `RecoveryPolicy::{Phase1Backed, Inherited}` → the bounded recovery a fresh leadership drains.
 - `proposer/rounds.rs` → `proposer::Rounds`, `Custody` → the one Phase-2 tally (#142); a proxy runs it alone.
-- `proposer/authority.rs` → `proposer::Authority` → the read fence, read-index rounds, `CheckQuorum` window.
+- `proposer/authority.rs` → `proposer::Authority` → the leadership fence and the `CheckQuorum` window.
 - `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor.
 - `replica.rs` → `Replica`, `LogRead`, `LogPage` → chosen prefix, apply walk, journal fold (`journal`, `outcome_at`, `accepted_at`, `fold_hole`, `chosen_gap`, `covers`).
 - `journal_state.rs` → `JournalState`, `Outcome` → the journal-control state machine; pure `apply` judges `Write`/`SetLeader`/`Truncate` (#204); `Write` and `Truncate` share the writer fence `is_current` (#228).
@@ -33,7 +33,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 - `node.rs` → `ColocatedNode`, `Delegation`, the private `Counters` → entry points and driver-policy methods (`resend_pending`, `take_back_delegated`, `step_down`, `relinquish_to`, `reconfigure`, `quorum_read`).
 - `node/{election,phase2,learn,replication,catch_up}.rs` → campaign, Phase-2 open/delegate/decide (`record_own_round`), learner, catch-up + trim-point jump.
-- `node/{authority,reads,quorum_reads}.rs` → `CheckQuorum`; read-index + the shared `serve_reads`/`tick_reads`; `PreRead` wiring.
+- `node/{authority,quorum_reads}.rs` → `CheckQuorum`; the read path (`PreRead` wiring, `serve_quorum_reads`/`tick_quorum_reads`, `READ_TTL_TICKS`).
 - `node/{handoff,gc,matchmaking,reconfigure}.rs` → `DPaxos` handoff, GC wiring, matchmaking wiring, online reconfiguration.
 - `node/{boot,acceptor,helpers,invariants}.rs` → boot path, acceptor wiring, `adopt_configuration`, `assert_invariants`.
 - `node/tests.rs` + `node/tests/*.rs` → unit tests, one file per concern.

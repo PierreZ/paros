@@ -194,24 +194,20 @@ pub(crate) fn message_to_proto(
             from,
             ballot,
             commit,
-            seq,
             config,
         } => Kind::Heartbeat(internal::Heartbeat {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             commit: commit.map(|slot| slot.0),
-            seq: *seq,
             config: config.as_ref().map(config_to_proto),
         }),
         Message::HeartbeatAck {
             from,
             ballot,
-            seq,
             chosen,
         } => Kind::HeartbeatAck(internal::HeartbeatAck {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
-            seq: *seq,
             chosen: chosen.map(|s| s.0),
         }),
         Message::Relinquish {
@@ -325,13 +321,11 @@ pub(crate) fn message_from_proto(
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             commit: message.commit.map(Slot),
-            seq: message.seq,
             config: config_from_proto(message.config)?,
         }),
         Kind::HeartbeatAck(message) => Ok(Message::HeartbeatAck {
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
-            seq: message.seq,
             chosen: message.chosen.map(Slot),
         }),
         Kind::Relinquish(message) => Ok(Message::Relinquish {

@@ -32,15 +32,10 @@ pub(super) struct Proposal {
 pub(super) struct PendingRead {
     pub(super) ctx: u64,
     pub(super) node: NodeId,
-    /// The index the read observes: what a read-index round captured when it
-    /// opened (read off `ReadRound::index`), or the watermark a leaderless
-    /// read was served at. Kept here because the client's history outlives
-    /// the round, which the core drops once it confirms.
+    /// The index the read observes: the watermark the quorum read was
+    /// served at. Kept here because the client's history outlives the read,
+    /// which the core drops once it serves.
     pub(super) index: Option<Slot>,
-    /// Whether this is a **leaderless** read: a Phase-1 quorum's vote
-    /// watermarks rather than a leader's beat acks. The two are served through
-    /// the same `ReadState`, and only the client knows which it asked for.
-    pub(super) leaderless: bool,
     pub(super) served: bool,
     /// When the client asked, on the history's own monotone counter.
     pub(super) issued: u64,

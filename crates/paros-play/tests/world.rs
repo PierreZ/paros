@@ -405,7 +405,7 @@ fn the_after_sync_seam_keeps_the_writes_and_loses_the_messages() {
 // ---- reads ------------------------------------------------------------------
 
 #[test]
-fn a_read_index_round_trips_through_heartbeat_acks() {
+fn a_follower_serves_a_quorum_read_at_the_applied_prefix() {
     let mut world = cluster(3);
     elect(&mut world, 0);
     world
@@ -413,30 +413,24 @@ fn a_read_index_round_trips_through_heartbeat_acks() {
         .expect("admitted");
     deliver_all(&mut world);
     world
-        .read_index(NodeId(0), CLIENT)
-        .expect("the leader opens a read round");
+        .quorum_read(NodeId(1), CLIENT)
+        .expect("any node opens a quorum read");
     assert_eq!(world.unserved_reads(), 1, "the read is pending");
     assert!(
         world
             .wire()
             .iter()
-            .any(|entry| matches!(entry.message(), Some(Message::Heartbeat { .. }))),
-        "opening a read beats immediately"
+            .any(|entry| matches!(entry.message(), Some(Message::PreRead { .. }))),
+        "opening a read asks the acceptors for their watermarks"
     );
     deliver_all(&mut world);
     let served = world.served_reads();
-    assert_eq!(served.len(), 1, "the ack quorum confirmed the read");
+    assert_eq!(
+        served.len(),
+        1,
+        "a Phase-1 quorum answered and the read was served"
+    );
     assert_eq!(served[0].1, Some(Slot(0)), "it observes the applied prefix");
-}
-
-#[test]
-fn a_follower_refuses_a_read() {
-    let mut world = cluster(3);
-    elect(&mut world, 0);
-    let err = world
-        .read_index(NodeId(1), CLIENT)
-        .expect_err("a follower serves no linearizable read");
-    assert_eq!(err.code, paros_play::ActionErrorCode::NotLeader);
 }
 
 // ---- the prompts ------------------------------------------------------------
@@ -704,42 +698,6 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
     let id = prompt.id;
     assert_eq!(world.answer(id, "keep"), Ok(Verdict::Wrong));
     assert_eq!(world.answer(id, "take"), Ok(Verdict::Right));
-}
-
-#[test]
-fn the_read_serve_prompt_waits_without_an_ack_quorum() {
-    let mut world = cluster(3);
-    elect(&mut world, 0);
-    world
-        .propose(NodeId(0), CLIENT, "alpha", None)
-        .expect("admitted");
-    deliver_all(&mut world);
-    world.set_policy(policy(&[PromptKind::ReadServe]));
-    world.read_index(NodeId(0), CLIENT).expect("a read opens");
-    // Deliver the beats, then exactly one ack: one ack plus the leader's own
-    // vote is a majority of three, so the first ack confirms. Check the
-    // question is asked, and that its answer is the core's.
-    deliver_where(&mut world, |message| {
-        matches!(message, Message::Heartbeat { .. })
-    });
-    let ack = world
-        .wire()
-        .iter()
-        .find(|entry| matches!(entry.message(), Some(Message::HeartbeatAck { .. })))
-        .map(|entry| entry.id)
-        .expect("an ack is in flight");
-    world.deliver(ack).expect("delivered");
-    let prompt = world.prompt().expect("the leader is asked");
-    assert_eq!(prompt.kind, PromptKind::ReadServe);
-    let (id, expected) = (prompt.id, prompt.expected().to_string());
-    assert_eq!(
-        expected, "serve",
-        "the leader's own vote plus one ack is two of three"
-    );
-    assert_eq!(world.answer(id, "wait"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, &expected), Ok(Verdict::Right));
-    deliver_all(&mut world);
-    assert_eq!(world.served_reads().len(), 1);
 }
 
 #[test]
@@ -1165,8 +1123,8 @@ fn a_read_across_a_leader_change_is_linearizable() {
             .is_some_and(paros_core::ColocatedNode::is_leader)
     );
     world
-        .read_index(NodeId(1), CLIENT)
-        .expect("the leader opens a read round");
+        .quorum_read(NodeId(1), CLIENT)
+        .expect("the new leader opens a quorum read");
     isolate(&mut world, NodeId(0));
     assert_eq!(world.served_reads().len(), 1, "the read is served");
     assert_eq!(
@@ -1359,15 +1317,6 @@ fn a_follower_serves_a_quorum_read_with_no_leader_involved() {
     assert_eq!(served.len(), 1, "the row answered and the read was served");
     assert_eq!(served[0].1, Some(Slot(0)), "at the highest slot voted");
     assert_eq!(world.clock(), beats_before, "no tick was needed");
-    assert!(
-        world
-            .node(NodeId(0))
-            .expect("running")
-            .proposer()
-            .read_rounds()
-            .is_empty(),
-        "the leader opened no read round"
-    );
     world.linearizable().expect("the history is linearizable");
 }
 

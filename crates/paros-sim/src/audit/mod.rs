@@ -471,8 +471,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             return;
         }
         // #95: every broadcast leader beat feeds the zombie-leader streak.
-        if let Message::Heartbeat { ballot, seq, .. } = msg {
-            self.state().observe_beat(node.0, *ballot, *seq);
+        if let Message::Heartbeat { ballot, .. } = msg {
+            self.state().observe_beat(node.0, *ballot);
             return;
         }
         if let Message::Promise {
@@ -1612,7 +1612,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().election_timeouts.insert(node.0, ticks);
     }
 
-    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot, _seq: u64) {
+    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {
         self.state().observe_ack_received(node.0, from.0, ballot);
     }
 

@@ -44,7 +44,7 @@ mod rounds;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use self::authority::{Authority, ReadRound};
+pub use self::authority::Authority;
 pub use self::election::Election;
 pub use self::probe::RepairProbe;
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
@@ -339,8 +339,8 @@ pub struct Proposer<Id, V> {
     /// from a Phase-1 tally, and a node that holds no leadership still
     /// refuses to let a replayed handoff rewind it.
     next_slot: Slot,
-    /// The leadership's standing authority — the read fence, the pending
-    /// read-index rounds and the `CheckQuorum` window — a standalone
+    /// The leadership's standing authority — the fence and the
+    /// `CheckQuorum` window — a standalone
     /// [`Authority`] this role embeds and delegates to, as it embeds its
     /// [`Rounds`].
     authority: Authority<Id>,
@@ -392,8 +392,8 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Drop every open tally: the campaign, the probe, the rounds, the
-    /// recovery, the re-send cursor, and the standing authority (the read
-    /// fence with its pending rounds and the `CheckQuorum` window).
+    /// recovery, the re-send cursor, and the standing authority (the fence
+    /// and the `CheckQuorum` window).
     /// Leadership state dies whole.
     ///
     /// The allocator frontier is the deliberate exception: it is not a

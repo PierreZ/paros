@@ -1,6 +1,6 @@
 //! Act III — truncation, the trim point, and reads.
 //!
-//! Six levels over the **log world**, and one question runs through all of
+//! Five levels over the **log world**, and one question runs through all of
 //! them: what does a node know, and what is it entitled to *say*? Act II built
 //! a log that grows. This act makes it shrink — which creates a node nothing
 //! can replay to — and then makes it answer questions, which is where the gap
@@ -9,8 +9,8 @@
 //!
 //! The order is the order the mechanisms depend on each other: truncation
 //! first (it is what strands a node), then the trim-point jump that rescues it, then
-//! the read path — the confirmation round, the fresh-leader fence, the
-//! client-visible property all of it exists for — and finally the write ack,
+//! the read path — the quorum read at a fresh leader, the client-visible
+//! property it exists for — and finally the write ack,
 //! which is the other half of that property.
 //!
 //! Every reference solution here is **recorded**, not written: a private
@@ -23,7 +23,7 @@ use crate::action::{Action, ActionKind};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
     CLIENT, REPLIES_AND_BEATS, TIMEOUT, accepted, applied, crash, fresh, is_phase2, on_log,
-    propose_as, read_index_as, restart, slot_traffic, start_election, tick,
+    propose_as, quorum_read_as, restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, to};
 use crate::level::{GoalStatus, Level, WorldKind};
@@ -36,7 +36,6 @@ pub fn levels() -> Vec<&'static Level> {
     vec![
         &TRUNCATE_BY_CONSENSUS,
         &THE_STRANDED_NODE,
-        &READ_INDEX,
         &THE_FRESH_LEADER_TRAP,
         &LINEARIZABLE_OR_NOT,
         &CHOSEN_IS_NOT_APPLIED,
@@ -57,7 +56,7 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::ReplicaApply,
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
+    AutomationFlag::QuorumReadServe,
     AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
 ];
@@ -336,124 +335,7 @@ node vote for a ballot that it refused.",
     },
 };
 
-// ---- 16. read-index ----------------------------------------------------------
-
-const READ_ACTIONS: &[ActionKind] = &[
-    ActionKind::Deliver,
-    ActionKind::Drop,
-    ActionKind::Tick,
-    ActionKind::StartElection,
-    ActionKind::Propose,
-    ActionKind::ReadIndex,
-    ActionKind::Answer,
-    ActionKind::SetAutomation,
-];
-
-/// `act3/read-index`.
-pub static READ_INDEX: Level = Level {
-    id: "act3/read-index",
-    act: 3,
-    title: "Read-index",
-    briefing: "\
-One correct read needs no new protocol: propose a no-op through ordinary \
-consensus, and answer at its slot. The commit proves that the proposer was the \
-leader at that moment, at a quorum. That read also costs a log slot, one flush \
-on every acceptor and a full round trip, for each read. A system with many reads \
-would write nothing useful to its disks.
-
-Read-index keeps the proof and removes the write. The slot of the no-op was \
-never important; only the evidence of current leadership was, and a heartbeat \
-carries that evidence. **Capture** the applied watermark as the read index. \
-**Confirm** the leadership: send a beat, and collect the acks of a quorum. \
-**Serve** the read after the applied prefix covers the captured index. Quorum \
-intersection does the rest: a higher ballot that committed anything holds a \
-promise quorum, and one member of our ack quorum refuses our ballot.
-
-One detail carries the safety, and this level puts it in your hands. An ack \
-counts only if it names the current ballot of the leader. It must also name a \
-beat sequence at or after the beat that was sent when the read started. An ack \
-to an older beat proves nothing: the follower possibly sent it and then promised \
-a higher ballot elsewhere, so you would read the past. One such stale ack is in \
-flight here, from a beat sent before the client asked. Deliver it, and decide \
-whether it is proof.",
-    field_guide: "linearizable-reads.html",
-    symbols: &[
-        "ColocatedNode::read_index",
-        "Proposer::open_read",
-        "Proposer::credit_read_ack",
-        "Proposer::confirm_reads",
-        "ReadState",
-    ],
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[AutomationFlag::ReadServe, AutomationFlag::DeliverHeartbeats],
-    unlocked: &[AutomationFlag::DeliverReplies],
-    unlocks: &[AutomationFlag::ReadServe],
-    allowed_actions: READ_ACTIONS,
-    setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
-    goal: |world| {
-        on_log(world, |log| {
-            if let Err(detail) = log.linearizable() {
-                return GoalStatus::Failed(detail);
-            }
-            let acked = log.highest_acked_slot();
-            let served: Vec<Option<Slot>> = log
-                .reads()
-                .into_iter()
-                .filter(|(_, _, served)| *served)
-                .map(|(_, index, _)| index)
-                .collect();
-            match served.first() {
-                Some(index) if *index >= acked && acked.is_some() => GoalStatus::Reached(format!(
-                    "The cluster served the read at {}, at or above the last acknowledged write \
-                 ({}). The read cost one round of beats and no byte of log.",
-                    at(*index),
-                    at(acked)
-                )),
-                Some(index) => GoalStatus::Open(format!(
-                    "The cluster served a read at {}, but the level asks for an acknowledged \
-                 write below it first.",
-                    at(*index)
-                )),
-                None => GoalStatus::Open(
-                    "Get a command chosen. Then ask for a read, and decide when the proof is \
-                 complete."
-                        .to_string(),
-                ),
-            }
-        })
-    },
-    hint: |_world, mistakes| match mistakes {
-        0 => None,
-        1..=2 => Some(
-            "Look at the beat that the ack names. The number of acks is not the question."
-                .to_string(),
-        ),
-        _ => Some(
-            "An ack to a beat sent *before* the read started proves nothing, because the \
-             follower can promise a higher ballot after it sends the ack. Wait for an ack to \
-             the beat that the read itself caused."
-                .to_string(),
-        ),
-    },
-    reference: || {
-        let mut script = Script::new("act3/read-index");
-        script.play(start_election(0)).settle_all();
-        script.play(propose_as(CLIENT, 0, "alpha")).settle_all();
-        // A beat *before* the read: its ack is the stale one.
-        script.play(tick(0));
-        script.settle(|message| message.kind == "Heartbeat");
-        // The read captures the watermark and beats again.
-        script.play(read_index_as(CLIENT, 0));
-        // The stale ack lands first and proves nothing.
-        script.settle(|message| message.kind == "HeartbeatAck" && message.sent_at == 1);
-        script.answer_all();
-        // Now the beat the read itself triggered, and its ack.
-        script.settle_all();
-        script.finish()
-    },
-};
-
-// ---- 17. the fresh-leader trap ----------------------------------------------
+// ---- 16. the fresh-leader trap ----------------------------------------------
 
 const TRAP_ACTIONS: &[ActionKind] = &[
     ActionKind::Deliver,
@@ -461,7 +343,7 @@ const TRAP_ACTIONS: &[ActionKind] = &[
     ActionKind::Tick,
     ActionKind::StartElection,
     ActionKind::Propose,
-    ActionKind::ReadIndex,
+    ActionKind::QuorumRead,
     ActionKind::Crash,
     ActionKind::Restart,
     ActionKind::Answer,
@@ -474,37 +356,36 @@ pub static THE_FRESH_LEADER_TRAP: Level = Level {
     act: 3,
     title: "The fresh-leader trap",
     briefing: "\
-The confirmation round is not enough, and that is the difficult half of the \
-read path. A leader that just won an election holds a valid quorum. Every ack \
-that it collects is real, at its own current ballot, at this moment. Its applied \
-prefix can still miss writes that the last leader acknowledged to a client. \
-Election recovery re-proposes those slots, and until they decide again, the \
-local state of the new leader does not hold those writes.
+A leader that just won an election holds a valid quorum, and it can still be \
+behind. Its applied prefix can miss a value that the last leader started. \
+Election recovery re-proposes that slot, and until the slot decides again, the \
+local state of the new leader does not hold the value. A read that the new \
+leader answers from its own state can therefore miss a write.
 
-Capture and confirm alone would serve that old watermark with a fresh quorum, \
-and the client would lose a write that the cluster called durable. Raft commits \
-a no-op in the new term before it serves a read, but paros waits instead. At the \
-moment that it wins, a leader records a **read floor**: the highest slot that \
-its promise quorum reported. By quorum intersection that floor is at or above \
-every write that an earlier leader acknowledged. A read captures the *maximum* \
-of the applied watermark and that floor. It confirms only when the ack quorum is \
-complete and the applied prefix covers the captured index.
+A quorum read does not trust the leader. It asks a **Phase-1 quorum** for the \
+highest slot that each acceptor voted in. An acceptor raises that number when \
+it **votes**, not when a slot becomes chosen. The acceptor that holds the \
+inherited value reports its slot, so the read waits for that slot. The read \
+costs the client time, and it does not give the client an old answer. Raft \
+commits a no-op in the new term before it serves a read; paros waits for the \
+slot instead, and no leader takes part.
 
 In this level one other node accepted one command from the old leader. The old \
 leader then stopped before the decision came back, so nothing is chosen and no \
 node applied anything. The Phase 1 of the new leader finds that value and must \
-re-propose it. Ask for a read while the recovery is still in flight: the acks \
-arrive, but the answer is still no. Then let the slot decide again, and the read \
-completes on its own, in the batch that applied the slot.",
+re-propose it. Ask the new leader for a read while the recovery is still in \
+flight: the quorum answers, but the answer is still no. Then let the slot \
+decide again, and the read completes on its own, in the batch that applied the \
+slot.",
     field_guide: "linearizable-reads.html",
     symbols: &[
-        "Proposer::read_floor",
-        "Proposer::confirm_reads",
+        "ColocatedNode::quorum_read",
+        "Acceptor::vote_watermark",
         "Replica::covers",
         "RecoveryStep::Recovered",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[AutomationFlag::ReadServe],
+    pinned_off: &[AutomationFlag::QuorumReadServe],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[],
     allowed_actions: TRAP_ACTIONS,
@@ -527,7 +408,7 @@ completes on its own, in the batch that applied the slot.",
             let recovered = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
             match (served.first(), recovered) {
             (Some(index), true) => GoalStatus::Reached(format!(
-                "The leader refused the read while the recovered slot was still in flight. It \
+                "The new leader held the read while the recovered slot was still in flight. It \
                  served the read at {} after the slot decided again. The quorum was not the \
                  missing part. The applied prefix was.",
                 at(*index)
@@ -547,14 +428,14 @@ completes on its own, in the batch that applied the slot.",
     hint: |_world, mistakes| match mistakes {
         0 => None,
         1..=2 => Some(
-            "The acks are not the question. Compare the index that the read captured with the \
-             applied prefix below it."
+            "The number of answers is not the question. Compare the highest slot that the \
+             quorum voted in with the applied prefix of this node."
                 .to_string(),
         ),
         _ => Some(
-            "The read floor of a new leader is the highest slot that its promise quorum \
-             reported. That slot is above every slot that the leader applied. Wait, because \
-             the read completes by itself when the recovered slot decides."
+            "An acceptor voted in the inherited slot, so the quorum reports that slot. This \
+             node did not apply it yet. Wait, because the read completes by itself when the \
+             recovered slot decides."
                 .to_string(),
         ),
     },
@@ -569,21 +450,22 @@ completes on its own, in the batch that applied the slot.",
         // The leadership dies with the round that would have re-sent it.
         script.play(crash(0));
         // Node 1 campaigns with node 2. Its Phase 1 finds the value at node 1
-        // itself, so its read floor sits above everything it has applied.
+        // itself, and it re-proposes it.
         script.play(start_election(1));
         script.settle(|message| !is_phase2(message));
-        // The read: quorum in hand, applied prefix still empty.
-        script.play(read_index_as(CLIENT, 1));
-        script.settle(|message| matches!(message.kind.as_str(), "Heartbeat" | "HeartbeatAck"));
+        // The read: node 1 voted in the inherited slot, so the quorum reports
+        // it, and node 1 has applied nothing yet.
+        script.play(quorum_read_as(CLIENT, 1));
+        script.settle(|message| matches!(message.kind.as_str(), "PreRead" | "PreReadAck"));
         script.answer_all();
-        // Now let the recovered slot decide; the read fires with the batch that
-        // applies it.
+        // Now let the recovered slot decide; the read is served with the batch
+        // that applies it.
         script.settle_all();
         script.finish()
     },
 };
 
-// ---- 18. linearizable or not ------------------------------------------------
+// ---- 17. linearizable or not ------------------------------------------------
 
 const HISTORY_ACTIONS: &[ActionKind] = &[
     ActionKind::Deliver,
@@ -591,7 +473,7 @@ const HISTORY_ACTIONS: &[ActionKind] = &[
     ActionKind::Tick,
     ActionKind::StartElection,
     ActionKind::Propose,
-    ActionKind::ReadIndex,
+    ActionKind::QuorumRead,
     ActionKind::Answer,
     ActionKind::SetAutomation,
 ];
@@ -621,15 +503,14 @@ the old leadership, and elect a new leader without the knowledge of the old one.
 Then read across the change: the read of the second client must observe the \
 write of the first client, even though a different node answers it. **Then try \
 to break the property:** ask the replaced leader, which still believes that it \
-leads, for a read. It collects nothing, because every follower that promised the \
-new ballot refuses to ack the old ballot. That read stays open for the rest of \
-the level, and the protocol is correct to refuse a read that it cannot prove.",
+leads, for a read. The partition stops every answer to it, so it cannot get the \
+answers of a Phase-1 quorum. That read stays open for the rest of the level, and \
+the protocol is correct to hold a read that it cannot prove.",
     field_guide: "linearizable-reads.html",
     symbols: &[
         "ReadState",
-        "Proposer::confirm_reads",
-        "Proposer::credit_read_ack",
-        "ColocatedNode::read_index",
+        "ColocatedNode::quorum_read",
+        "QuorumReads::serve",
     ],
     automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[],
@@ -690,8 +571,8 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
-            "The read of the replaced leader must stay open. Deliver its beats, and look at \
-             which nodes ack them. A follower that promised the newer ballot does not ack."
+            "The read of the replaced leader must stay open. Look at the answers to its \
+             question: the partition drops each one, so it never holds a Phase-1 quorum."
                 .to_string()
         })
     },
@@ -706,8 +587,9 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
         script.settle(to(2));
         script.settle(|message| message.to == 1);
         script.drop_all(to(0));
-        // The deposed leader is asked for a read it will never be able to prove.
-        script.play(read_index_as(CLIENT, 0));
+        // The deposed leader is asked for a read it will never be able to
+        // prove: every answer to it is dropped.
+        script.play(quorum_read_as(CLIENT, 0));
         script.drop_all(to(0));
         script.settle(to(2));
         script.drop_all(to(0));
@@ -715,14 +597,14 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
         script.play(propose_as(OTHER, 1, "bravo"));
         script.settle(|message| message.to != 0);
         script.drop_all(to(0));
-        script.play(read_index_as(OTHER, 1));
+        script.play(quorum_read_as(OTHER, 1));
         script.settle(|message| message.to != 0);
         script.drop_all(to(0));
         script.finish()
     },
 };
 
-// ---- 19. chosen is not applied ----------------------------------------------
+// ---- 18. chosen is not applied ----------------------------------------------
 
 const RETRY_ACTIONS: &[ActionKind] = &[
     ActionKind::Deliver,

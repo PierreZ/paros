@@ -3,7 +3,7 @@
 //! which subsets of a membership count.
 //!
 //! This is the boundary the rest of the core reasons through and never
-//! around: the proposer, the read rounds, `CheckQuorum` and the GC fence all
+//! around: the proposer, the quorum reads, `CheckQuorum` and the GC fence all
 //! ask [`AcceptorConfig::has_phase1_quorum`] or
 //! [`AcceptorConfig::has_phase2_quorum`], which ask
 //! [`QuorumSystem::is_phase1_quorum`] / [`QuorumSystem::is_phase2_quorum`];
@@ -34,7 +34,7 @@
 //! Compartmentalized Paxos's §3.2: every acceptor sees `1 / cols` of the
 //! commands. A majority or a flexible split names no column and addresses
 //! the whole membership. The claims that rest on *any* Phase-2 quorum — a
-//! leader's standing authority, a read's confirmation, the GC fence — ask
+//! leader's standing authority, the GC fence — ask
 //! the column-less predicate and are satisfied by any full column. The read
 //! side mirrors it (#143): a quorum read is addressed to **one row**
 //! ([`QuorumSystem::row_of`] — `ctx % rows`, [`QuorumSystem::phase1_addressees`])
@@ -464,8 +464,7 @@ impl QuorumSystem {
 
     /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
     /// that choose a value, and every claim that rests on one — a leader's
-    /// standing authority (`CheckQuorum`), a read's confirmation, the GC
-    /// fence's custody claim. A voter outside `members` never counts. Under a
+    /// standing authority (`CheckQuorum`) and the GC fence's custody claim. A voter outside `members` never counts. Under a
     /// grid this is *any* full column — the column-less form the standing
     /// claims ask; a round that was addressed to one column is judged by
     /// [`QuorumSystem::is_phase2_quorum_in`] with that column.
@@ -777,8 +776,8 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
 
     /// Whether `voters` hold a **Phase-2** quorum of this configuration — the
     /// accepts that choose a value, and every claim that rests on one: a
-    /// leader's standing authority (`CheckQuorum`), a read's confirmation,
-    /// the GC fence's custody claim. A voter outside the membership never
+    /// leader's standing authority (`CheckQuorum`) and the GC fence's
+    /// custody claim. A voter outside the membership never
     /// counts. Under a grid, *any* full column; a round addressed to one
     /// column is judged by [`AcceptorConfig::has_phase2_quorum_in`].
     #[must_use]

@@ -1,18 +1,17 @@
 //! The leadership's **standing Phase-2 authority**: the fence a fresh
-//! leadership must cover before it may answer a read, the in-flight
-//! read-index rounds, and the `CheckQuorum` window that keeps proving the
-//! authority still holds.
+//! leadership must cover before its inherited suffix is settled, and the
+//! `CheckQuorum` window that keeps proving the authority still holds.
 //!
-//! All three answer one question — *does a Phase-2 quorum of this ballot's
-//! configuration still answer me?* — and all three die with the leadership
-//! ([`Proposer::abandon`]). They are one **standalone tally**, [`Authority`],
-//! that the [`Proposer`] embeds and delegates to, exactly as it embeds its
-//! Phase-2 [`Rounds`](super::Rounds): none of it is a Paxos tally — it is
-//! what a *leadership* holds beside its rounds, and a deployment that keeps
-//! a leader without the rest of the role (frankenpaxos's leader keeps only
-//! its next slot and its round) keeps this and nothing else. The tally only
-//! counts; how many ticks are too many, and what to do when the window
-//! empties, stay with the wiring.
+//! Both die with the leadership ([`Proposer::abandon`]). They are one
+//! **standalone tally**, [`Authority`], that the [`Proposer`] embeds and
+//! delegates to, exactly as it embeds its Phase-2 [`Rounds`](super::Rounds):
+//! none of it is a Paxos tally — it is what a *leadership* holds beside its
+//! rounds. The tally only counts; how many ticks are too many, and what to
+//! do when the window empties, stay with the wiring.
+//!
+//! The read-index rounds that once lived here retired with the read-index
+//! path (#243): every read is a leaderless quorum read
+//! ([`crate::quorum_read`]), which touches no leader state.
 
 use std::collections::BTreeSet;
 
@@ -20,65 +19,13 @@ use super::Proposer;
 use crate::membership::AcceptorConfig;
 use crate::types::Slot;
 
-/// Volatile state of one in-flight read-index round (leader only).
-#[derive(Clone, Debug)]
-pub struct ReadRound<Id> {
-    /// The driver-supplied correlation token.
-    pub(super) ctx: u64,
-    /// The captured read index: `max(chosen_index, read_floor)` at capture time.
-    pub(super) index: Option<Slot>,
-    /// The beat sequence an ack must answer (at or after) to credit this round:
-    /// the heartbeat broadcast when the round began. Later beats' acks count
-    /// too, so one ack can confirm every older pending round.
-    pub(super) required_seq: u64,
-    /// Peers (incl. self) that acked a qualifying beat at the round's ballot.
-    pub(super) acked_by: BTreeSet<Id>,
-    /// Tick the round was created on, for TTL garbage collection.
-    pub(super) created_tick: u64,
-}
-
-impl<Id> ReadRound<Id> {
-    /// The driver-supplied correlation token the round was opened with.
-    #[must_use]
-    pub fn ctx(&self) -> u64 {
-        self.ctx
-    }
-
-    /// The read index the round captured when it opened:
-    /// `max(chosen_index, read_floor)` at that instant. `None` is the empty
-    /// prefix.
-    #[must_use]
-    pub fn index(&self) -> Option<Slot> {
-        self.index
-    }
-
-    /// The beat sequence an ack must answer (at or after) to credit this
-    /// round.
-    #[must_use]
-    pub fn required_seq(&self) -> u64 {
-        self.required_seq
-    }
-
-    /// The acceptors credited so far — the leader's own vote when it is a
-    /// member, plus every peer that acked a qualifying beat at the round's
-    /// ballot. Confirmation is [`Authority::confirm_reads`]'s question, not
-    /// a count of this set.
-    #[must_use]
-    pub fn acked(&self) -> &BTreeSet<Id> {
-        &self.acked_by
-    }
-}
-
-/// The leadership's **standing authority**: the read fence, the pending
-/// read-index rounds and the `CheckQuorum` window (see the module doc).
-/// Volatile, like everything the proposer holds: it dies whole with the
-/// leadership ([`Authority::clear`]).
+/// The leadership's **standing authority**: the fence and the `CheckQuorum`
+/// window (see the module doc). Volatile, like everything the proposer
+/// holds: it dies whole with the leadership ([`Authority::clear`]).
 #[derive(Clone, Debug)]
 pub struct Authority<Id> {
-    /// The fresh-leader read fence (see [`Authority::read_floor`]).
-    read_floor: Option<Slot>,
-    /// In-flight read-index rounds, in creation order.
-    read_rounds: Vec<ReadRound<Id>>,
+    /// The fresh-leader fence (see [`Authority::fence`]).
+    fence: Option<Slot>,
     /// `CheckQuorum` (#95): the distinct acceptors (incl. self) whose
     /// ballot-matching `HeartbeatAck` or `Accepted` arrived inside the
     /// current window.
@@ -90,8 +37,7 @@ pub struct Authority<Id> {
 impl<Id> Default for Authority<Id> {
     fn default() -> Self {
         Self {
-            read_floor: None,
-            read_rounds: Vec::new(),
+            fence: None,
             quorum_acked_by: BTreeSet::new(),
             quorum_elapsed: 0,
         }
@@ -99,38 +45,37 @@ impl<Id> Default for Authority<Id> {
 }
 
 impl<Id: Copy + Ord> Authority<Id> {
-    /// An authority with no fence, no read round and an empty window.
+    /// An authority with no fence and an empty window.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Drop the fence, every read round and the window: the authority dies
-    /// whole with the leadership that held it.
+    /// Drop the fence and the window: the authority dies whole with the
+    /// leadership that held it.
     pub fn clear(&mut self) {
         *self = Self::default();
     }
 
     // ---- the fence ----------------------------------------------------------
 
-    /// The fresh-leader read fence: the highest slot the winning prepare
-    /// quorum reported (`next_slot - 1` at election, the inherited frontier
-    /// after a handoff). Everything a previous leader may have acked sits at
-    /// or below it (quorum intersection + the `Prepare` floor guard), so no
-    /// read round confirms until the chosen prefix covers it — Raft's "no-op
-    /// at term start" problem, solved by waiting instead.
+    /// The fresh-leader fence: the highest slot the winning prepare quorum
+    /// reported (`next_slot - 1` at election, the inherited frontier after a
+    /// handoff). Everything a previous leader may have acked sits at or below
+    /// it (quorum intersection + the `Prepare` floor guard). The GC campaign
+    /// counts chosen indices past it, and a handoff-installed leadership that
+    /// cannot cover it resigns to an ordinary Phase 1.
     #[must_use]
-    pub fn read_floor(&self) -> Option<Slot> {
-        self.read_floor
+    pub fn fence(&self) -> Option<Slot> {
+        self.fence
     }
 
-    /// Open a fresh leadership's authority: install its read fence, drop any
-    /// read round the previous leadership left, and start a fresh
-    /// `CheckQuorum` window holding `own_vote` (the leader's own acceptor
-    /// vote, absent when it is not a member of its own configuration).
+    /// Open a fresh leadership's authority: install its fence and start a
+    /// fresh `CheckQuorum` window holding `own_vote` (the leader's own
+    /// acceptor vote, absent when it is not a member of its own
+    /// configuration).
     pub fn open(&mut self, fence: Option<Slot>, own_vote: Option<Id>) {
-        self.read_floor = fence;
-        self.read_rounds.clear();
+        self.fence = fence;
         self.renew(own_vote);
     }
 
@@ -162,110 +107,20 @@ impl<Id: Copy + Ord> Authority<Id> {
     }
 
     /// Whether the window holds a **Phase-2** quorum of `config` — the
-    /// leader's standing authority, for the reason spelled out at the read
-    /// fence ([`Authority::confirm_reads`]).
+    /// leader's standing authority.
+    ///
+    /// Not a Phase-1 question: Phase 1 asks what an earlier ballot *could
+    /// have chosen*, and a standing authority asks the opposite — that no
+    /// later ballot has decided anything behind this leader's back. A
+    /// Phase-2 quorum of this ballot's configuration that acked at this
+    /// ballot answers it: every future Phase-1 quorum intersects it
+    /// ([`crate::QuorumSystem::cross_intersects`]), so a successor's election
+    /// must meet an acceptor that still held this ballot's promise. Under a
+    /// flexible quorum system that is a strictly weaker requirement than a
+    /// Phase-1 quorum, which is exactly why the tag matters.
     #[must_use]
     pub fn holds(&self, config: &AcceptorConfig<Id>) -> bool {
         config.has_phase2_quorum(&self.quorum_acked_by)
-    }
-
-    // ---- read-index rounds --------------------------------------------------
-
-    /// Open a read-index round at the captured `index`, confirmable by acks
-    /// of beats at or after `required_seq`, seeded with `own_vote`.
-    ///
-    /// # Panics
-    ///
-    /// If the round is not monotone in index and required beat against the
-    /// previous one: [`Authority::confirm_reads`] front-scans on exactly that
-    /// premise, so it is pinned at the only place a round is created (O(1):
-    /// the last two entries).
-    pub fn open_read(
-        &mut self,
-        ctx: u64,
-        index: Option<Slot>,
-        required_seq: u64,
-        created_tick: u64,
-        own_vote: Option<Id>,
-    ) {
-        self.read_rounds.push(ReadRound {
-            ctx,
-            index,
-            required_seq,
-            acked_by: own_vote.into_iter().collect(),
-            created_tick,
-        });
-        if let [.., prev, last] = self.read_rounds.as_slice() {
-            assert!(
-                prev.index <= last.index,
-                "read rounds are created with monotone indexes"
-            );
-            assert!(
-                prev.required_seq <= last.required_seq,
-                "read rounds are created with monotone required beats"
-            );
-        }
-    }
-
-    /// Credit an ack of beat `seq` from `from` to every round it qualifies
-    /// for: a later beat's ack confirms every older pending round too.
-    pub fn credit_read_ack(&mut self, from: Id, seq: u64) {
-        for round in &mut self.read_rounds {
-            if seq >= round.required_seq {
-                round.acked_by.insert(from);
-            }
-        }
-    }
-
-    /// Confirm the eligible prefix of pending read rounds, in creation order,
-    /// returning `(ctx, index)` per confirmed round: a round resolves once a
-    /// quorum (incl. self) acked a qualifying beat AND `chosen_index` covers
-    /// the round's index (the fresh-leader fence resolves here).
-    /// Confirmability is monotone in creation order — a later round's index
-    /// and required seq are both at or above an earlier one's — so scanning
-    /// the front suffices.
-    ///
-    /// **A read is confirmed by a Phase-2 quorum**, and so is a leader's
-    /// standing authority ([`Authority::holds`]). Neither is a
-    /// Phase-1 question: Phase 1 asks what an earlier ballot *could have
-    /// chosen*, and a read asks the opposite — that no later ballot has
-    /// chosen anything this leader has not seen. What makes the answer sound
-    /// is that a Phase-2 quorum of this ballot's configuration acked a beat
-    /// at this ballot: every future Phase-1 quorum intersects it
-    /// ([`crate::QuorumSystem::cross_intersects`]), so a successor's election
-    /// must meet an acceptor that still held this ballot's promise when the
-    /// read was answered, and could therefore not have decided anything below
-    /// the read's index behind its back. Under a flexible quorum system that
-    /// is a strictly weaker requirement than a Phase-1 quorum, which is
-    /// exactly why the tag matters.
-    pub fn confirm_reads(
-        &mut self,
-        config: &AcceptorConfig<Id>,
-        chosen_index: Option<Slot>,
-    ) -> Vec<(u64, Option<Slot>)> {
-        let mut confirmed = Vec::new();
-        while let Some(round) = self.read_rounds.first() {
-            if !(config.has_phase2_quorum(&round.acked_by) && chosen_index >= round.index) {
-                break;
-            }
-            let round = self.read_rounds.remove(0);
-            confirmed.push((round.ctx, round.index));
-        }
-        confirmed
-    }
-
-    /// Drop every read round older than `ttl` ticks at `now` (lost acks, an
-    /// unreachable quorum). Dropped silently: a round carries no durable
-    /// obligation, and the driver owns the client reply.
-    pub fn expire_reads(&mut self, now: u64, ttl: u64) {
-        self.read_rounds
-            .retain(|r| now.saturating_sub(r.created_tick) <= ttl);
-    }
-
-    /// The read rounds pending confirmation, in creation order.
-    #[must_use]
-    pub fn read_rounds(&self) -> &[ReadRound<Id>] {
-        &self.read_rounds
     }
 }
 
@@ -278,10 +133,10 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
         &self.authority
     }
 
-    /// The fresh-leader read fence ([`Authority::read_floor`]).
+    /// The fresh-leader fence ([`Authority::fence`]).
     #[must_use]
-    pub fn read_floor(&self) -> Option<Slot> {
-        self.authority.read_floor()
+    pub fn fence(&self) -> Option<Slot> {
+        self.authority.fence()
     }
 
     /// Open a fresh leadership's authority ([`Authority::open`]).
@@ -313,51 +168,5 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     #[must_use]
     pub fn authority_holds(&self, config: &AcceptorConfig<Id>) -> bool {
         self.authority.holds(config)
-    }
-
-    /// Open a read-index round ([`Authority::open_read`]).
-    ///
-    /// # Panics
-    ///
-    /// If the round is not monotone against the previous one (see
-    /// [`Authority::open_read`]).
-    pub fn open_read(
-        &mut self,
-        ctx: u64,
-        index: Option<Slot>,
-        required_seq: u64,
-        created_tick: u64,
-        own_vote: Option<Id>,
-    ) {
-        self.authority
-            .open_read(ctx, index, required_seq, created_tick, own_vote);
-    }
-
-    /// Credit an ack of beat `seq` from `from` to every round it qualifies
-    /// for ([`Authority::credit_read_ack`]).
-    pub fn credit_read_ack(&mut self, from: Id, seq: u64) {
-        self.authority.credit_read_ack(from, seq);
-    }
-
-    /// Confirm the eligible prefix of pending read rounds
-    /// ([`Authority::confirm_reads`]).
-    pub fn confirm_reads(
-        &mut self,
-        config: &AcceptorConfig<Id>,
-        chosen_index: Option<Slot>,
-    ) -> Vec<(u64, Option<Slot>)> {
-        self.authority.confirm_reads(config, chosen_index)
-    }
-
-    /// Drop every read round older than `ttl` ticks at `now`
-    /// ([`Authority::expire_reads`]).
-    pub fn expire_reads(&mut self, now: u64, ttl: u64) {
-        self.authority.expire_reads(now, ttl);
-    }
-
-    /// The read rounds pending confirmation ([`Authority::read_rounds`]).
-    #[must_use]
-    pub fn read_rounds(&self) -> &[ReadRound<Id>] {
-        self.authority.read_rounds()
     }
 }

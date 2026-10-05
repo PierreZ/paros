@@ -305,10 +305,10 @@ impl ColocatedNode {
                 "only a leader holds in-flight accept rounds"
             );
         }
-        if !self.proposer.read_rounds().is_empty() {
+        if self.proposer.fence().is_some() {
             assert!(
                 self.role == NodeRole::Leader,
-                "only a leader holds pending read rounds"
+                "only a leader holds a leadership fence"
             );
         }
         if self.proposer.recovery().is_some() {

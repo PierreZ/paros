@@ -252,7 +252,7 @@ message Heartbeat {
   uint64 from = 1;
   .paros.common.v1.Ballot ballot = 2;
   optional uint64 commit = 3;
-  uint64 seq = 4;
+  reserved 4; // was seq, the beat sequence the retired read-index rounds counted
   reserved 5; // was config_id, the dropped configuration tag
   // The leader's registered configuration (absent on plain Multi-Paxos).
   optional .paros.common.v1.AcceptorConfig config = 6;
@@ -261,7 +261,7 @@ message Heartbeat {
 message HeartbeatAck {
   uint64 from = 1;
   .paros.common.v1.Ballot ballot = 2;
-  uint64 seq = 3;
+  reserved 3; // was seq, the beat sequence the retired read-index rounds counted
   reserved 4; // was config_id, the dropped configuration tag
   // The follower's chosen index (absent on plain Multi-Paxos).
   optional uint64 chosen = 5;

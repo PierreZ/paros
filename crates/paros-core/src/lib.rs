@@ -104,7 +104,7 @@ pub use node::{
     BeliefSource, ColocatedNode, Delegation, GcStep, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
     HEARTBEAT_TICKS, Handoff, HandoffCounters, LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep,
     MembershipCounters, NodeRole, PROMISE_BATCH, ProposeResult, REPAIR_TIMEOUT_ELECTIONS,
-    ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult, RepairCounters,
+    ReadState, ReconfigureRefusal, ReconfigureResult, RepairCounters,
 };
 pub use proxy_leader::{ProxyLeader, ProxyReady};
 pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};

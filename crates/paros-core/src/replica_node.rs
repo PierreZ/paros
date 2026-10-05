@@ -42,7 +42,7 @@
 //!   [`WriteOp::Truncate`] / [`WriteOp::TrimmedTo`] — never an
 //!   [`WriteOp::Acceptor`] op. A boot scan reads it back through the same
 //!   [`Storage`] port and [`Replica::from_boot`] rebuilds the prefix and
-//!   the at-most-once ledger as it does on a node.
+//!   the sealed journal state as it does on a node.
 //! - **The walk:** [`ReplicaReady::committed`] in contiguous slot order, the
 //!   slots the prefix just moved over — reported by the driver, handed to no
 //!   application (#186: the client folds what it reads).
@@ -91,7 +91,7 @@
 //!    lagging node — or a replica — learns are read from `chosen`, each
 //!    with the choosing ballot its accepted record holds. The acceptors are
 //!    the durable tier; a replica tier is healed *from* them.
-//! 6. **The handoff's decided tail and the successor's read fence**
+//! 6. **The handoff's decided tail and the successor's fence**
 //!    (`node/handoff.rs`) name chosen slots and a covered chosen index; a
 //!    bare acceptor can lead, so it must be able to describe its tail.
 //! 7. **The journal fold** (#204, `Replica::truncate`, the `state` of a
@@ -152,7 +152,7 @@ pub struct ReplicaNode {
     /// Who this replica is (outside the pool), the acceptors it pulls from
     /// before it has heard a leader, and the deployment's replica count.
     config: Config,
-    /// The chosen prefix, the walk, the ledger.
+    /// The chosen prefix, the walk, the journal fold.
     replica: Replica,
     /// The compaction floor: the first slot whose record is still retained.
     floor: Slot,

@@ -388,7 +388,7 @@ impl ColocatedNode {
         }
         self.election_elapsed = 0;
 
-        // Fix the allocator/read fence from the complete Phase-1 result before
+        // Fix the allocator and the fence from the complete Phase-1 result before
         // starting only its first bounded recovery page. Fresh proposals may
         // then allocate strictly above every inherited slot while the suffix is
         // drained across later Ready batches.
@@ -418,8 +418,8 @@ impl ColocatedNode {
         // and a restart recomputes `next_slot` from the accepted log the same way.
         // The hole would be permanent, and it is not a quiet one: the contiguous
         // chosen prefix freezes one below it cluster-wide (`advance_chosen_index`
-        // walks contiguously) while higher slots keep being chosen, the fresh-leader
-        // read fence sits above it so no read ever confirms again, and commit-replay
+        // walks contiguously) while higher slots keep being chosen, every quorum read
+        // whose watermark sits above it waits forever, and commit-replay
         // catch-up cannot heal it — every node's prefix is frozen below the hole, so
         // no peer has anything to replay.
         //
@@ -465,17 +465,15 @@ impl ColocatedNode {
             RecoveryPolicy::Phase1Backed,
         );
         self.pump_leader_recovery();
-        // The fresh-leader read fence: nothing decided under an earlier ballot
-        // can sit above `next_slot - 1` (the prepare quorum reported it all), so
-        // reads wait until the chosen prefix covers that slot. Beat seqs are
-        // per-ballot; cross-ballot ack confusion is impossible because an ack
-        // must echo the current ballot to count.
+        // The fresh-leader fence: nothing decided under an earlier ballot can
+        // sit above `next_slot - 1` (the prepare quorum reported it all). An
+        // ack must echo the current ballot to count, so no earlier
+        // leadership's ack confuses the fresh window.
         // CheckQuorum: a fresh leadership starts a fresh ack window (self is
         // always reachable — when it is an acceptor at all).
         let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
         self.proposer
             .open_authority(fence, self.is_acceptor().then_some(me));
-        self.heartbeat_seq = 0;
         // Fresh-leader postconditions (#67/#88): the win condition demanded
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.

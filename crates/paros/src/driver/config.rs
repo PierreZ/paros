@@ -79,10 +79,11 @@ pub struct DriverTunables {
     /// after processing, so this races the connection and the peer's
     /// `peer_inbox_capacity`, never its loop. Floor: non-zero.
     pub delivery_timeout: Duration,
-    /// Ticks a parked read may wait for its read-index confirmation before
-    /// the driver answers a retry redirect. Floor: the confirmation is one
-    /// heartbeat-ack round trip, so `read_retry_ticks × tick_interval` must
-    /// exceed it or no read ever confirms. A client whose deadline is shorter
+    /// Ticks a parked read may wait for its quorum read to be served (the
+    /// row answered whole and the fold covers the maximum) before the driver
+    /// answers a retry redirect. Floor: the row answers in one `PreRead`
+    /// round trip, so `read_retry_ticks × tick_interval` must exceed it or no
+    /// read is ever served. A client whose deadline is shorter
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
     /// Ticks a journal `Read` at or past the serving node's end may wait
@@ -232,10 +233,10 @@ impl Default for DriverTunables {
     }
 }
 
-/// Ticks a parked read reply may wait for its read-index confirmation before
+/// Ticks a parked read reply may wait for its quorum read to be served before
 /// the driver answers a retry redirect (500 ms — well inside the sim client's
-/// 1000 ms deadline, and inside the core's own round TTL, so a late core
-/// confirmation just finds the ctx gone and is ignored).
+/// 1000 ms deadline, and inside the core's own read TTL, so a late core
+/// answer just finds the ctx gone and is ignored).
 const READ_RETRY_TICKS: u64 = 10;
 
 /// Ticks a journal `Read` above the end long-polls before an empty answer

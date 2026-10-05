@@ -81,8 +81,8 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
     // The public [`ColocatedNode::step_down`] half of the same property: a leader that
     // resigns of its own accord (no deposing Prepare, no crash) keeps every
     // durable commitment — the promised ballot and the accepted log — and drops
-    // exactly the volatile leadership state: the in-flight Phase-2 rounds and any
-    // unconfirmed read-index round. This is the primitive the simulation drives to
+    // exactly the volatile leadership state: the in-flight Phase-2 rounds and the
+    // standing authority. This is the primitive the simulation drives to
     // make a never-re-sent hole permanent (#54) and to create election churn.
     let mut nodes = cluster_with_three_chosen();
     let promise_before = nodes[0].hard_state().max_promised_ballot;
@@ -90,19 +90,12 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
 
     nodes[0].propose(entry(9, 1, 90));
     let _ = drain(&mut nodes[0]);
-    let _ = nodes[0].read_index(1);
-    let _ = drain(&mut nodes[0]);
     // Snapshot the log *after* the proposal self-accepted into slot 3: that
     // accept is durable and must survive the resignation too.
     let log_before = nodes[0].acceptor().records().clone();
     assert!(
         !nodes[0].proposer.rounds().is_empty(),
         "a Phase-2 round is in flight"
-    );
-    assert_eq!(
-        nodes[0].proposer().read_rounds().len(),
-        1,
-        "a read round is pending"
     );
 
     nodes[0].step_down();
@@ -118,10 +111,6 @@ fn voluntary_step_down_resigns_and_drops_the_volatile_leadership_state() {
         nodes[0].proposer.rounds().is_empty(),
         "the volatile in-flight rounds go with the leadership — this is what makes \
          a hole below a decided slot permanent"
-    );
-    assert!(
-        nodes[0].proposer().read_rounds().is_empty(),
-        "unconfirmed read rounds die with the leadership"
     );
     assert!(
         nodes[0].needs_election_timeout(),

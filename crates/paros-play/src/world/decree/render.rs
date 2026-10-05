@@ -127,7 +127,6 @@ impl DecreeWorld {
             election: None,
             open_rounds: Vec::new(),
             pending_accepts: false,
-            read_rounds: Vec::new(),
             recovery_remaining: 0,
             acceptors: self.config.members().iter().map(|n| n.0).collect(),
             quorum_system: quorum_name(self.config.quorum_system()),
