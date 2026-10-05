@@ -26,7 +26,8 @@ use moonpool_core::TokioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::Client;
 use paros::client::bootstrap::{self, ClaimCellOutcome, InitOutcome};
-use paros::client::fleet::{FleetFrames, Step};
+use paros::client::fleet::Step;
+use paros::machine::ControlJournals;
 use paros::{JournalKey, NodeId};
 use serde_json::json;
 
@@ -83,12 +84,7 @@ pub async fn run(
                     .copied()
                     .filter(|j| *j != plan.control && *j != meta)
                     .collect();
-                let frames = FleetFrames {
-                    cell_id: plan.cell_id,
-                    cell: plan.control,
-                    meta,
-                };
-                (servers, plan.coordinator(), frames, users)
+                (servers, plan.coordinator(), plan.control_journals(), users)
             }
             InitOutcome::Refused(refusal) => {
                 out.emit(
@@ -117,8 +113,8 @@ pub async fn run(
                 }
                 let client = connect(&servers);
                 // No frame is fixed (§3.8): the cell's are learned from it.
-                let Some(frames) = bootstrap::cell_frames(&client).await else {
-                    note("no server named its cell's frames");
+                let Some(frames) = bootstrap::control_journals(&client).await else {
+                    note("no server named its cell's control journals");
                     return Ending::Unreachable;
                 };
                 let Some(view) = client.inspect(0, frames.cell).await else {
@@ -168,13 +164,17 @@ async fn fleet_steps(
     providers: &TokioProviders,
     client: &Client<TokioProviders>,
     servers: &[(u64, SocketAddr)],
-    (coordinator, frames): (NodeId, FleetFrames),
+    (coordinator, frames): (NodeId, ControlJournals),
     users: &[JournalKey],
     (claimed, patience): (Option<u64>, Duration),
     out: &Printer,
 ) -> Ending {
     let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-    let mut fleet = session(client, frames, coordinator, &ids);
+    let (Some(meta), Some(mut fleet)) = (frames.fleet, session(client, frames, coordinator, &ids))
+    else {
+        note("the cell names no fleet journal");
+        return Ending::Refused;
+    };
     let run = fleet.init(client, 0, nonzero(providers), patience).await;
     match run.outcome {
         Step::Done { .. } if claimed.is_none() && run.steps.is_empty() => {
@@ -196,7 +196,7 @@ async fn fleet_steps(
                         coordinator.0,
                         servers.len(),
                         frames.cell,
-                        frames.meta,
+                        meta,
                         users.join(","),
                         steps(&run.steps).join(",")
                     )
@@ -210,7 +210,7 @@ async fn fleet_steps(
                         "generation": claimed,
                         "steps": steps(&run.steps),
                         "control": frames.cell.to_string(),
-                        "meta": frames.meta.to_string(),
+                        "meta": meta.to_string(),
                         "journals": users,
                         "members": servers
                             .iter()

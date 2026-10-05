@@ -227,7 +227,8 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   check them, never a log position. **No id is fixed and none has a default**
   (`docs/architecture.md` §3.8): `0` is unset and the only value with a meaning, there is no
   reserved range and no well-known tenant or journal; the control journals' frames are drawn at
-  `init`, recorded in the cell plan and learned through `Inspect` (`CellFrames`, `FleetFrames`);
+  `init`, recorded in the cell plan and learned through a node-only `Inspect`
+  (`paros::machine::ControlJournals`); an `Inspect` names its journal or asks for the node alone;
   the sim draws every frame per seed (`paros_sim::shape::Frames`). Stores live at
   `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
@@ -242,9 +243,10 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
 - **Meta** (`paros::meta`, #229) is the fleet's directory: tenant → cell plus the cell entries,
-  hosted by the fleet's one cell. Every tenant has a group (`internal`: meta and the cell tenants,
-  created only by `init`/adding a cell; `users`: the tenant API's) and a placement (`movable` or
-  `pinned`, the creator's choice). Fleet operations (`init`'s fleet half, tenant create
+  hosted by the fleet's one cell. Every tenant has a set of groups (`paros::meta::Groups`), fixed
+  at registration: meta `{internal, fleet}`, a cell tenant `{internal, cell}` (both created only by
+  `init`/adding a cell), a served tenant `{users}` (the tenant API's); only `cell` forbids a move,
+  and there is no per-tenant placement. Fleet operations (`init`'s fleet half, tenant create
   and remove) are idempotent state machines over meta and the cell control journal
   (`paros::client::fleet`): one write per step, every entry fenced by its fleet id, resumed from
   what the journals hold. A tenant is created once: a creation is named by its drawn frame, and

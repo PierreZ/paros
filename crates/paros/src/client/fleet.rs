@@ -3,7 +3,7 @@
 //! state machine** over two control journals — meta's (the fleet's
 //! directory) and the cell tenant's (the cell's tenant list). No frame is
 //! fixed (§3.8): the caller hands the session both, read from the cell plan
-//! or from any machine's `Inspect` ([`FleetFrames`]).
+//! or from any machine's node-only `Inspect` ([`ControlJournals`]).
 //!
 //! An operation is a sequence of steps, each **one** write to one of the two
 //! journals, and the next step is decided from what the journals hold, never
@@ -15,14 +15,14 @@
 //! [`FleetSession::remove_tenant`] run steps until the operation ends.
 //!
 //! - **`init`** (steps 2 and 3 of §3.1): meta records the fleet's id and
-//!   itself (`FormFleet`: meta is the fleet's first tenant, `internal` and
-//!   movable), the cell joins meta's directory `REGISTERING` with its cell
-//!   tenant (`AddCell`: `internal` and pinned), the cell records the fleet on
+//!   itself (`FormFleet`: meta is the fleet's first tenant, `{internal,
+//!   fleet}`), the cell joins meta's directory `REGISTERING` with its cell
+//!   tenant (`AddCell`: `{internal, cell}`), the cell records the fleet on
 //!   its side (`JoinFleet`), and meta marks the cell `READY`.
-//! - **Creating a tenant**: a `users` tenant only — the tenant API cannot
+//! - **Creating a tenant**: a `{users}` tenant only — the tenant API cannot
 //!   create an `internal` one. Meta registers it `REGISTERING` with its
-//!   frame, its cell assignment (the one `READY` cell in M9) and its
-//!   placement, the cell hosts it (`HostTenant`), meta marks it `READY`. A
+//!   frame and its cell assignment (the one `READY` cell in M9), the cell
+//!   hosts it (`HostTenant`), meta marks it `READY`. A
 //!   name meta holds in `REGISTERING` — an earlier run's, whoever ran it — is
 //!   resumed under its id; a name held `READY` ends the operation at once.
 //!   Booking the tenant's footprint and writing its own control journal are
@@ -70,22 +70,9 @@ use super::checkpoint::{
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
-use crate::meta::{
-    CellState, METADATA_VERSION, Meta, MetaCommand, MetaEntry, Placement, TenantState,
-};
+use crate::machine::ControlJournals;
+use crate::meta::{CellState, METADATA_VERSION, Meta, MetaCommand, MetaEntry, TenantState};
 use crate::system::{FleetRegistration, Registry, SystemCommand};
-
-/// The frames a fleet operation works on: no frame is fixed (§3.8), so the
-/// caller learns them from the cell plan or from any machine's `Inspect`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FleetFrames {
-    /// The cell's id.
-    pub cell_id: u64,
-    /// The cell tenant's control journal.
-    pub cell: JournalKey,
-    /// Meta's control journal.
-    pub meta: JournalKey,
-}
 
 /// One step a fleet operation wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,7 +211,10 @@ const MAX_STEPS: usize = 8;
 /// writes: meta, as `operator`, and the cell's, as its coordinator.
 #[derive(Clone, Debug)]
 pub struct FleetSession {
-    frames: FleetFrames,
+    journals: ControlJournals,
+    /// The fleet tenant's control journal, read off `journals` at
+    /// construction: a session exists only over a cell that hosts it.
+    fleet: JournalKey,
     meta: Checkpointer<Meta>,
     cell: Checkpointer<Registry>,
     meta_open: bool,
@@ -232,25 +222,30 @@ pub struct FleetSession {
 }
 
 impl FleetSession {
-    /// A session over `frames`, writing meta as client `operator`
+    /// A session over `journals`, writing meta as client `operator`
     /// (checkpointing it under `policy`) and the cell's control journal as
     /// the cell coordinator `coordinator`, folding the cell's journal into
     /// `cell` — the empty registry over the deployment's genesis pool.
+    /// `None` when `journals` names no fleet journal: a cell that does not
+    /// host the fleet tenant runs no fleet operation (no frame has a
+    /// default, §3.8).
     #[must_use]
     pub fn new(
-        frames: FleetFrames,
+        journals: ControlJournals,
         operator: u64,
         coordinator: NodeId,
         cell: Registry,
         policy: CheckpointPolicy,
-    ) -> Self {
-        Self {
-            frames,
-            meta: Checkpointer::new(frames.meta, operator, Meta::default(), policy),
-            cell: Checkpointer::new(frames.cell, coordinator.0, cell, policy),
+    ) -> Option<Self> {
+        let fleet = journals.fleet?;
+        Some(Self {
+            journals,
+            fleet,
+            meta: Checkpointer::new(fleet, operator, Meta::default(), policy),
+            cell: Checkpointer::new(journals.cell, coordinator.0, cell, policy),
             meta_open: false,
             cell_open: false,
-        }
+        })
     }
 
     /// Meta as this session last folded it.
@@ -282,18 +277,19 @@ impl FleetSession {
     /// unless meta or the cell recorded one already, which is then kept — a
     /// re-run never mints a second fleet. Ends with the fleet's id once meta
     /// holds the cell `READY` and the cell names the fleet.
-    #[tracing::instrument(level = "trace", skip_all, fields(cell = self.frames.cell_id))]
+    #[tracing::instrument(level = "trace", skip_all, fields(cell = self.journals.cell_id))]
     pub async fn init_step<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
         fleet_id: u64,
     ) -> Step<u64> {
-        let FleetFrames {
+        let ControlJournals {
             cell_id,
             cell: control,
-            meta: meta_frame,
-        } = self.frames;
+            ..
+        } = self.journals;
+        let meta_frame = self.fleet;
         if cell_id == 0 || !control.is_set() || !meta_frame.is_set() {
             return Step::Refused(FleetRefusal::Unset);
         }
@@ -372,8 +368,7 @@ impl FleetSession {
         }
     }
 
-    /// One step of creating the `users` tenant `name` with `placement`
-    /// under the frame `draw` (its id and its control journal's). The frame
+    /// One step of creating the `users` tenant `name` under the frame `draw` (its id and its control journal's). The frame
     /// names the creation: when meta holds `name` under `draw`, the step
     /// resumes it; under any other frame, in any state, it is refused
     /// ([`FleetRefusal::NameTaken`]), since a tenant is created once
@@ -385,7 +380,6 @@ impl FleetSession {
         client: &Client<P>,
         first: usize,
         name: &[u8],
-        placement: Placement,
         draw: JournalKey,
     ) -> Step<TenantId> {
         if let Err(stop) = self.open_meta(client, first).await {
@@ -409,7 +403,6 @@ impl FleetSession {
                 control: draw,
                 name: name.to_vec(),
                 cell_id,
-                placement,
             };
             return self
                 .write_meta(client, first, fleet, register, Stage::RegisterTenant)
@@ -520,7 +513,7 @@ impl FleetSession {
     /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),
     /// taking an interrupted step again for up to `patience` (a cell still
     /// electing its leaders, an operator racing this one).
-    #[tracing::instrument(level = "debug", skip_all, fields(cell = self.frames.cell_id))]
+    #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id))]
     pub async fn init<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -552,7 +545,6 @@ impl FleetSession {
         client: &Client<P>,
         first: usize,
         name: &[u8],
-        placement: Placement,
         draws: impl IntoIterator<Item = JournalKey>,
         patience: Duration,
     ) -> Run<TenantId> {
@@ -561,7 +553,7 @@ impl FleetSession {
         let mut draw = draws.next().unwrap_or(JournalKey::UNSET);
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
-            let step = self.create_step(client, first, name, placement, draw).await;
+            let step = self.create_step(client, first, name, draw).await;
             if step == Step::Refused(FleetRefusal::IdTaken)
                 && let Some(next) = draws.next()
             {

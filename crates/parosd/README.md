@@ -50,7 +50,7 @@ fleet's one cell hosts it) and the toy's journal (the static assignment that
 stands in for placement until M9), plain Multi-Paxos over the seeds. **No
 frame is fixed**: `init` draws every one, records them in the cell plan, and
 prints them (`control=`, `meta=`, `journals=`); afterwards any machine's
-`Inspect` names the cell's control journal and meta's, which is how
+node-only `Inspect` names the cell's control journal and meta's, which is how
 `parosctl tenant` finds them. Then the first cell coordinator — the lowest seed
 id, until the coordinator election of #225 — claims the cell control journal
 with `SetLeader(expected_gen = 0)`. Last come the **fleet steps** (#229): the
@@ -59,11 +59,11 @@ the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 `init` resumes an interrupted one, and on an initialized fleet it is refused
 (`already_initialized`).
 
-**Tenants.** `parosctl tenant create acme [--pinned]` registers a `users`
-tenant in meta (`REGISTERING`, under a random id and a random control journal,
-movable unless `--pinned`), has the cell host it, then marks it `READY`; the
-CLI never creates an `internal` tenant (meta and the cell tenant, which `init`
-registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
+**Tenants.** `parosctl tenant create acme` registers a `{users}` tenant in
+meta (`REGISTERING`, under a random id and a random control journal), has the
+cell host it, then marks it `READY`; the CLI never creates an `internal` tenant
+(meta, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
+`init` registers); `parosctl tenant delete acme` marks it `REMOVING`, has the cell drop
 it, then removes it; `parosctl tenant list` prints meta. An interrupted
 delete is resumed by running it again. A tenant is created once: a second
 `create` of a name meta holds is refused (`name_taken`), and an interrupted
@@ -230,9 +230,9 @@ and both required: there is no default tenant and no fixed id (#235,
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
 | `parosctl truncate <journal> --up-to N [--owner N] [--generation G]` | drops every record below `N`, as the journal's owner (claimed like `write`); a superseded owner is refused |
 | `parosctl set-leader <journal> --owner X [--expected G]` | compare-and-swaps the writer (against the generation read when `--expected` is absent) |
-| `parosctl inspect [--journal J]` | every server's view: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers |
+| `parosctl inspect [--journal J]` | every server's view of journal `J`: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers; without `--journal`, every server's own facts (node id, cell, control journals): no journal is inspected by default (#243) |
 | `parosctl reconfigure --members 0,1,2 [--quorum majority\|flexible:Q1:Q2\|grid:RxC]` | asks the leader for a new acceptor set |
-| `parosctl retire --node N [--gc-watermark ROUND.NODE]` | retires a node, carrying the GC watermark (read from the leader's `inspect` when absent) |
+| `parosctl retire --node N [--gc-watermark ROUND.NODE \| --journal J]` | retires a node, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent) |
 
 Output is text — one line per record or answer, `key=value` details — or, with
 `--json`, one JSON document per answer. Diagnostics (a claim made on the way, a

@@ -1073,13 +1073,25 @@ impl<P: Providers> Client<P> {
         ReconfigureMatchmakersOutcome::Ambiguous
     }
 
-    /// One bounded `Inspect` of `journal` on server `target` (an unset key
-    /// names the node's first journal); `None` without an answer.
+    /// One bounded `Inspect` of `journal` on server `target`; `None`
+    /// without an answer, and on a refusal (an unset key, a journal not
+    /// live there): no frame has a default (§3.8, #243).
     pub async fn inspect(&self, target: usize, journal: JournalKey) -> Option<InspectReply> {
         let node = self.node(target).clone();
         let probe = async move { node.inspect_journal(journal).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)
             .await
+            .filter(|reply| reply.refusal.is_empty())
+    }
+
+    /// One bounded node-only `Inspect` of server `target` (#243): its id,
+    /// its cell and the control journals' frames; `None` without an answer.
+    pub async fn inspect_node(&self, target: usize) -> Option<InspectReply> {
+        let node = self.node(target).clone();
+        let probe = async move { node.inspect_node().await.ok() };
+        self.bounded(self.tunables.request_timeout, None, probe)
+            .await
+            .filter(|reply| reply.refusal.is_empty())
     }
 
     /// One bounded `Retire` of server `target`, carrying the GC watermark

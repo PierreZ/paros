@@ -68,6 +68,7 @@ mod client;
 mod codec;
 mod consensus;
 mod inbound;
+mod inspect;
 mod matchmaker_codec;
 pub mod methods;
 mod refusal;
@@ -80,6 +81,7 @@ pub use inbound::{EdgeRejection, MAX_FRAME_BYTES};
 pub(crate) use inbound::{
     Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
 };
+pub use inspect::{InspectRefusal, InspectTarget};
 pub use internal::{InspectReply, InspectRequest, RetireAck, RetireRequest};
 pub(crate) use matchmaker::{
     GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,

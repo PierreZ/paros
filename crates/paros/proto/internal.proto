@@ -81,7 +81,8 @@ message ConsensusMessage {
 }
 
 // A journal `Write` decided into one slot (#204): judged at apply by the
-// journal state machine, never at propose time.
+// journal state machine — the safety rule; any propose-time check is only
+// an optimisation (`docs/architecture.md` §2.2).
 message WriteEntry {
   uint64 generation = 1;
   uint64 owner = 2;
@@ -313,10 +314,16 @@ message PreReadAck {
 }
 
 message InspectRequest {
-  // The journal to inspect, with its tenant (#188, #235); a `0` journal asks
-  // for the node's first journal.
+  // The journal to inspect, with its tenant (#188, #235). No frame has a
+  // default (#243): a request that names no journal is refused (`unset`)
+  // unless it asks for the node alone.
   uint64 journal = 1;
   uint64 tenant = 2;
+  // Ask for the answering node's own facts alone — its id, its cell and the
+  // control journals' frames (§3.2) — and no journal's. How a client handed
+  // only an address learns the frames before it can name a journal. The
+  // frame must then be unset; a request that names one too is `malformed`.
+  bool node_only = 3;
 }
 
 message InspectReply {
@@ -368,4 +375,12 @@ message InspectReply {
   uint64 control_journal = 21;
   uint64 meta_tenant = 22;
   uint64 meta_journal = 23;
+  // Why the journal half was not answered, when it was not (#243): "unset"
+  // (the request named no journal and did not ask for the node alone),
+  // "malformed" (it asked for the node alone and named a journal too), or
+  // "unknown_journal" (the journal is not live on this node). Empty on an
+  // answered journal and on a node-only reply. The node's own facts (`node`,
+  // `cell_id` and the frames) are answered either way; every journal field
+  // is empty on a refusal.
+  string refusal = 24;
 }

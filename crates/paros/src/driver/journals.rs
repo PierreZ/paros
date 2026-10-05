@@ -58,6 +58,13 @@ pub trait JournalStores {
     /// The audit port `journal` reports to.
     fn audit(&self, journal: JournalKey) -> Self::Audit;
 
+    /// The audit port the node's own facts report to — what no single
+    /// journal owns: the edge's rejections, a peer lane's delivery failures,
+    /// a refused journal id, the system journals' folds. Named by the
+    /// opener, never borrowed from a journal (no frame has a default,
+    /// §3.8, #243).
+    fn node_audit(&self) -> Self::Audit;
+
     /// Provision a store for `journal`, a journal the directory created
     /// naming this node (#189), under `config`; `false` when this opener
     /// cannot (the default: a static list). A later [`JournalStores::open`]
@@ -116,6 +123,10 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
     }
 
     fn audit(&self, _journal: JournalKey) -> A {
+        self.audit.clone()
+    }
+
+    fn node_audit(&self) -> A {
         self.audit.clone()
     }
 }

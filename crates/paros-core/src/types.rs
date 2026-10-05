@@ -44,8 +44,8 @@ impl TenantId {
 ///
 /// Random, drawn by the journal's creator and checked at apply by the
 /// tenant's control journal — whose own id is random too, recorded where
-/// the tenant is (§3.8). **No id is fixed**: `0` — the [`Default`] — means
-/// *unset* and is never served ([`JournalId::is_set`]); a request that
+/// the tenant is (§3.8). **No id is fixed**, and none has a default: `0`
+/// means *unset* and is never served ([`JournalId::is_set`]); a request that
 /// names no journal is refused at the wire. The core never makes a
 /// protocol decision on the id — a [`crate::ColocatedNode`] carries it in
 /// its [`crate::Config`] for assertions and tracing only; routing a message
@@ -80,8 +80,8 @@ pub struct JournalKey {
 }
 
 impl JournalKey {
-    /// The unset frame: both halves `0`. Never served; an `Inspect` reads it
-    /// as "the node's first journal".
+    /// The unset frame: both halves `0`. Never served, and never read as a
+    /// default: a request that names it is refused (#243).
     pub const UNSET: Self = Self::new(TenantId::UNSET, JournalId::UNSET);
 
     /// The journal `journal` of tenant `tenant`.
@@ -127,7 +127,8 @@ impl core::str::FromStr for JournalKey {
 /// The identity of a journal **client**: a writer that may own a journal
 /// (#204, the `owner` of a [`Entry`] and of a [`Control::SetLeader`]) or a
 /// reader. Opaque to paros; the journal state machine only compares it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Like every id, it has no default: a client is named, never assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClientId(pub u64);
 
@@ -159,10 +160,13 @@ pub struct Value(pub Vec<u8>);
 /// `records`, to be accepted at position `seq` iff `(generation, owner)` is
 /// the journal's current writer and `seq` its next position — judged at
 /// apply, in slot order, by the journal state machine
-/// ([`crate::journal_state::JournalState::apply`]), never at propose time.
+/// ([`crate::journal_state::JournalState::apply`]). That apply-time
+/// judgement is the safety rule: a propose-time refusal from the leader's
+/// own fold is only an optimisation (`docs/architecture.md` §2.2), and the
+/// apply decides every slot whatever was or was not checked before it.
 /// The records are opaque bytes the core counts and slices (a read may start
 /// inside a batch) but never interprets.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry {
     /// The writer generation the client wrote under.

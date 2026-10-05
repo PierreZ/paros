@@ -385,13 +385,14 @@ async fn run_joiner(
         match Box::pin(run_journals(
             ctx.providers().clone(),
             stores,
+            id,
             parse_addr(my_ip)?,
             members.clone(),
             matchmakers.clone(),
             Vec::new(),
             Vec::new(),
             Some(system_plan.clone()),
-            Some(cell_frames(ctx)),
+            Some(control_journals(ctx)),
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -856,13 +857,14 @@ async fn run_acceptor(
         match Box::pin(run_journals(
             ctx.providers().clone(),
             stores,
+            self_rank,
             parse_addr(my_ip)?,
             members.clone(),
             matchmakers.clone(),
             proxies.clone(),
             replicas.clone(),
             system.as_ref().map(|(plan, _)| plan.clone()),
-            system.as_ref().map(|_| cell_frames(ctx)),
+            system.as_ref().map(|_| control_journals(ctx)),
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -1159,6 +1161,19 @@ impl SimStores<'_> {
     fn seat(&self, journal: paros::JournalKey) -> Option<&Seat> {
         self.seats.iter().find(|seat| seat.journal == journal)
     }
+
+    /// A port on `journal`'s audit world and no journal's board — for a
+    /// journal this node holds no seat for, and for the node's own facts.
+    fn world_audit(&self, journal: paros::JournalKey) -> NodeAudit<SimTimeProvider> {
+        let audit = NodeAudit::new(
+            self.ctx.time().clone(),
+            audit_world_for(self.ctx.state(), journal),
+        );
+        match &self.system {
+            Some(board) => audit.with_system(board.clone()),
+            None => audit,
+        }
+    }
 }
 
 impl JournalStores for SimStores<'_> {
@@ -1237,27 +1252,15 @@ impl JournalStores for SimStores<'_> {
     }
 
     fn audit(&self, journal: paros::JournalKey) -> Self::Audit {
-        self.seat(journal).map_or_else(
-            || {
-                // A node that serves no seat for `journal` — a joiner's
-                // node-level port (#189), asked for the unset frame when it
-                // serves no journal yet: the main journal's world.
-                let journal = if journal.is_set() {
-                    journal
-                } else {
-                    crate::shape::frames(self.ctx.state()).main
-                };
-                let audit = NodeAudit::new(
-                    self.ctx.time().clone(),
-                    audit_world_for(self.ctx.state(), journal),
-                );
-                match &self.system {
-                    Some(board) => audit.with_system(board.clone()),
-                    None => audit,
-                }
-            },
-            |seat| seat.audit.clone(),
-        )
+        self.seat(journal)
+            .map_or_else(|| self.world_audit(journal), |seat| seat.audit.clone())
+    }
+
+    /// The node's own facts (#243) report to the main journal's audit world,
+    /// on no journal's board: the run's one genesis journal, which every
+    /// acceptor of the run serves or joins.
+    fn node_audit(&self) -> Self::Audit {
+        self.world_audit(crate::shape::frames(self.ctx.state()).main)
     }
 
     /// A journal the directory created naming this node (#189): a quiet seat
@@ -1302,16 +1305,16 @@ impl JournalStores for SimStores<'_> {
     }
 }
 
-/// The cell's frames as the driver learns them (§3.2, §3.8): the run's
+/// The control journals as the driver learns them (§3.2, §3.8): the run's
 /// drawn cell id, the registry as the cell tenant's control journal, and
-/// meta's — so the driver knows its control journals and `Inspect` names
-/// them.
-fn cell_frames(ctx: &SimContext) -> paros::machine::CellFrames {
+/// meta's as the fleet's — so the driver knows its control journals and
+/// `Inspect` names them.
+fn control_journals(ctx: &SimContext) -> paros::machine::ControlJournals {
     let frames = crate::shape::frames(ctx.state());
-    paros::machine::CellFrames {
+    paros::machine::ControlJournals {
         cell_id: frames.cell_id,
-        control: frames.registry,
-        meta: Some(frames.meta),
+        cell: frames.registry,
+        fleet: Some(frames.meta),
     }
 }
 

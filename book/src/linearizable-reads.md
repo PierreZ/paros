@@ -119,8 +119,9 @@ dedup table at all: the log is the at-most-once table. A retry is the identical
 write — generation, owner, position and bytes — and the journal state machine
 judges it at apply like any other slot (`JournalState::apply`): it is a
 `Duplicate` exactly when the log already holds that write at that position.
-Nothing is judged at propose time, and the driver answers a call only with the
-verdict its slot folded to (`paros::driver::calls`), so an acknowledged write
+The judgement at apply is the safety rule (a leader may refuse early from its
+own fold as an optimisation, never instead of it), and the driver answers a call
+only with the verdict its slot folded to (`paros::driver::calls`), so an acknowledged write
 is always one a read through this node can already see.
 
 ## Where this lives in paros

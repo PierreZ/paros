@@ -16,9 +16,8 @@ use moonpool_rpc::{ErrorReason, RpcHandle};
 use paros_core::{JournalId, JournalKey, NodeId, TenantId};
 
 use super::Client;
-use super::fleet::FleetFrames;
 use super::outcome::SetLeaderOutcome;
-use crate::machine::CellPlan;
+use crate::machine::{CellPlan, ControlJournals};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{InitRpc, InspectRpc};
 use crate::rpc::{InspectReply, InspectRequest, well_known};
@@ -91,9 +90,9 @@ pub async fn init<P: Providers>(
     }
 }
 
-/// Learn the node id of every server in `addrs` from its own `Inspect`
-/// (`node`), each asked once within `timeout`. A server that does not
-/// answer is left out; the order of `addrs` is kept.
+/// Learn the node id of every server in `addrs` from its own node-only
+/// `Inspect` (`node`), each asked once within `timeout`. A server that does
+/// not answer is left out; the order of `addrs` is kept.
 pub async fn discover<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -103,10 +102,7 @@ pub async fn discover<P: Providers>(
     let mut found = Vec::with_capacity(addrs.len());
     for &addr in addrs {
         let client = well_known::<P, InspectRpc>(rpc, addr);
-        let request = InspectRequest {
-            journal: JournalKey::UNSET.journal.0,
-            tenant: JournalKey::UNSET.tenant.0,
-        };
+        let request = InspectRequest::node_only();
         if let Ok(Ok(reply)) = providers
             .time()
             .timeout(timeout, client.try_get_reply(&request))
@@ -141,33 +137,36 @@ pub enum ClaimCellOutcome {
     Ambiguous,
 }
 
-/// The frames a server's `Inspect` reports for its cell (§3.2): `None`
-/// unless it names a cell, the cell tenant's control journal and meta's.
+/// The control journals a server's `Inspect` reports for its cell (§3.2):
+/// `None` unless it names a cell and the cell tenant's control journal; the
+/// fleet's only when it names that one too.
 #[must_use]
-pub fn frames_of(reply: &InspectReply) -> Option<FleetFrames> {
-    let control = JournalKey::new(
+pub fn control_journals_of(reply: &InspectReply) -> Option<ControlJournals> {
+    let cell = JournalKey::new(
         TenantId(reply.control_tenant),
         JournalId(reply.control_journal),
     );
-    let meta = JournalKey::new(TenantId(reply.meta_tenant), JournalId(reply.meta_journal));
-    (reply.cell_id != 0 && control.is_set() && meta.is_set()).then_some(FleetFrames {
+    let fleet = JournalKey::new(TenantId(reply.meta_tenant), JournalId(reply.meta_journal));
+    (reply.cell_id != 0 && cell.is_set()).then_some(ControlJournals {
         cell_id: reply.cell_id,
-        cell: control,
-        meta,
+        cell,
+        fleet: fleet.is_set().then_some(fleet),
     })
 }
 
-/// Learn the cell's frames from its servers (§3.2): an unframed `Inspect`
-/// of each in turn, the first that names them. `None` when none does.
-pub async fn cell_frames<P: Providers>(client: &Client<P>) -> Option<FleetFrames> {
+/// Learn the fleet's control journals from the cell's servers (§3.2): a
+/// node-only `Inspect` of each in turn, the first that names the cell's and
+/// the fleet's. `None` when none does.
+pub async fn control_journals<P: Providers>(client: &Client<P>) -> Option<ControlJournals> {
     for server in 0..client.server_count() {
-        if let Some(frames) = client
-            .inspect(server, JournalKey::UNSET)
+        if let Some(journals) = client
+            .inspect_node(server)
             .await
             .as_ref()
-            .and_then(frames_of)
+            .and_then(control_journals_of)
+            .filter(|journals| journals.fleet.is_some())
         {
-            return Some(frames);
+            return Some(journals);
         }
     }
     None

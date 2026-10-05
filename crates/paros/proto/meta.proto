@@ -30,7 +30,7 @@ message MetaEntry {
 }
 
 // `init`: meta records the fleet's id, once, and registers itself as the
-// fleet's first tenant (`internal`, movable) under its own frame. A re-run
+// fleet's first tenant (`{internal, fleet}`) under its own frame. A re-run
 // with the same id and frame changes nothing; anything else is refused.
 message FormFleet {
   uint64 meta_tenant = 1;
@@ -38,7 +38,7 @@ message FormFleet {
 }
 
 // `init` (and adding a cell, M12): the cell `cell_id` joins the directory,
-// `REGISTERING`, and its cell tenant is registered (`internal`, pinned) under
+// `REGISTERING`, and its cell tenant is registered (`{internal, cell}`) under
 // the frame of its control journal.
 message AddCell {
   uint64 cell_id = 1;
@@ -54,15 +54,17 @@ message MarkCell {
 
 // Tenant creation's first step: tenant `tenant` (a random id its creator
 // drew) named `name`, its control journal `control_journal` (random too),
-// assigned to cell `cell_id`, `REGISTERING`. Always a `users` tenant: the
-// tenant API cannot create an `internal` one. `placement` is 1 movable, 2
-// pinned. A taken id or a taken name is refused.
+// assigned to cell `cell_id`, `REGISTERING`. Always a `{users}` tenant: the
+// tenant API cannot create an `internal` one. A taken id or a taken name is
+// refused.
 message RegisterTenant {
   uint64 tenant = 1;
   bytes name = 2;
   uint64 cell_id = 3;
   uint64 control_journal = 4;
-  uint32 placement = 5;
+  // 5 was the `movable`/`pinned` placement, dropped on 2026-10-04 (#243):
+  // the groups alone decide whether a tenant moves.
+  reserved 5;
 }
 
 // Move tenant `tenant` to `state` (see `TenantState` for the transitions).
@@ -105,8 +107,11 @@ message TenantEntry {
   uint64 config_seq = 5;
   reserved 6;
   uint64 control_journal = 7;
-  // 1 internal, 2 users.
-  uint32 group = 8;
-  // 1 movable, 2 pinned.
-  uint32 placement = 9;
+  // 8 was the single group (1 internal, 2 users) and 9 the placement, both
+  // replaced by `groups` (metadata version 2, #243).
+  reserved 8, 9;
+  // The tenant's set of groups, a bit per group: 1 internal, 2 cell, 4
+  // fleet, 8 users. Only {internal, fleet} (5), {internal, cell} (3) and
+  // {users} (8) exist; any other set is refused.
+  uint32 groups = 10;
 }

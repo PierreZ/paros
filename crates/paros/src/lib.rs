@@ -55,11 +55,11 @@ pub use driver::{
     command_hash, message_kind, parse_addr, registration_history_hash, run_journals, run_node,
 };
 pub use rpc::{
-    EdgeRejection, InspectReply, InspectRequest, MAX_FRAME_BYTES, NodeClient, Read, ReadAck,
-    Reconfigure, ReconfigureAck, ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck,
-    RetireRequest, SetLeader, SetLeaderAck, Truncate, TruncateAck, WireQuorumSystem, Write,
-    WriteAck, journal_state_from_proto, journal_state_to_proto, quorum_system_from_proto,
-    quorum_system_to_proto,
+    EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,
+    NodeClient, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
+    ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader, SetLeaderAck, Truncate,
+    TruncateAck, WireQuorumSystem, Write, WriteAck, journal_state_from_proto,
+    journal_state_to_proto, quorum_system_from_proto, quorum_system_to_proto,
 };
 /// The wire contract: the RPC method markers ([`rpc::methods`]) and the
 /// generated protobuf bodies.

@@ -28,8 +28,10 @@
 //! checkpointed and truncated by its owner (#230), so the registry's fold is
 //! a [`Folder`]: a read below the floor jumps to it, the checkpoint there is
 //! restored (a fold that held every position below verifies it instead), and
-//! the driver re-applies the whole restored registry. The directory is
-//! never truncated yet (#229). The remote reads run on detached tasks that consult no hook
+//! the driver re-applies the whole restored registry. The driver truncates
+//! a system journal like any other (§3.9, #243); the directory's fold does
+//! not restore from a checkpoint yet, and its owner never truncates it
+//! (#229). The remote reads run on detached tasks that consult no hook
 //! and draw no randomness; which seed a read goes to is chosen on the loop,
 //! round-robin, and the answer comes back through an inbox.
 
@@ -252,11 +254,6 @@ impl<P: Providers> SystemFollower<P> {
     /// The registry's frame.
     pub(crate) fn registry_key(&self) -> JournalKey {
         self.registry_key
-    }
-
-    /// Whether `journal` is one of the two system journals.
-    pub(crate) fn is_system(&self, journal: JournalKey) -> bool {
-        self.system().contains(&journal)
     }
 
     /// The two system journals' frames.

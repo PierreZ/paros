@@ -7,12 +7,12 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, JournalKey, MatchmakerId, NodeId, ReconfigureRefusal,
+    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, ReconfigureRefusal,
     ReconfigureResult, StartRefusal,
 };
 
 use crate::audit::Audit;
-use crate::machine::CellFrames;
+use crate::machine::ControlJournals;
 use crate::rpc::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
     RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,
@@ -149,12 +149,33 @@ pub(crate) fn reconfigure_matchmakers(
     }
 }
 
+/// The node's own facts (#243): its id, its cell and the control journals'
+/// frames, and nothing about any journal — the answer to a node-only
+/// `Inspect`, and the half every answer carries. A frame this node does not
+/// know (no cell plan, or a cell that does not host the fleet) is left at
+/// `0` on the wire: absent, never a default.
+pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> InspectReply {
+    let (control_tenant, control_journal) =
+        cell.map_or((0, 0), |cell| (cell.cell.tenant.0, cell.cell.journal.0));
+    let (meta_tenant, meta_journal) = cell
+        .and_then(|cell| cell.fleet)
+        .map_or((0, 0), |fleet| (fleet.tenant.0, fleet.journal.0));
+    InspectReply {
+        node: self_id,
+        cell_id: cell.map_or(0, |cell| cell.cell_id),
+        control_tenant,
+        control_journal,
+        meta_tenant,
+        meta_journal,
+        ..InspectReply::default()
+    }
+}
+
 /// A pure read of the core: what an operator (or a client's composer) sees
-/// of this node.
+/// of this node and of the journal `node` runs.
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
-pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&CellFrames>) -> InspectReply {
-    let control = cell.map_or(JournalKey::UNSET, |cell| cell.control);
-    let meta = cell.and_then(|cell| cell.meta).unwrap_or(JournalKey::UNSET);
+pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> InspectReply {
+    let facts = node_facts(node.config().id.0, cell);
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();
     let (gc_watermark, retirable) =
@@ -191,11 +212,6 @@ pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&CellFrames>) -> Inspec
         gc_watermark,
         folded: node.replica().folded().0,
         journal: Some(journal_state_to_proto(node.replica().journal())),
-        node: node.config().id.0,
-        cell_id: cell.map_or(0, |cell| cell.cell_id),
-        control_tenant: control.tenant.0,
-        control_journal: control.journal.0,
-        meta_tenant: meta.tenant.0,
-        meta_journal: meta.journal.0,
+        ..facts
     }
 }

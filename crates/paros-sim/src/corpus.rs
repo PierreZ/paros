@@ -370,8 +370,11 @@ impl CorpusClients {
     async fn inspect_reply(&self, ctx: &SimContext, i: usize) -> Option<InspectReply> {
         let time = ctx.time();
         let client = &self.clients[i];
+        let journal = crate::shape::frames(ctx.state()).main;
         moonpool_sim::select! {
-            response = client.inspect() => response.ok(),
+            response = client.inspect_journal(journal) => {
+                response.ok().filter(|reply| reply.refusal.is_empty())
+            }
             _ = time.sleep(RPC_TIMEOUT) => None,
         }
     }

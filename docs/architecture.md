@@ -301,7 +301,13 @@ the cell's are the same name.
   only addresses learns the control `JournalIdentifier`s from any machine, then resolves everything else
   through them: the fleet directory gives a tenant's cell and the `JournalIdentifier` of its control journal, and
   that control journal gives the tenant's journals. A re-run of `init` learns the cell's ids the
-  same way.
+  same way. **An `Inspect` names its journal or asks for the node alone** (decided on 2026-10-05,
+  #243): a node-only `Inspect` answers the machine's own facts — its `node_id`, its `cell_id` and
+  the control `JournalIdentifier`s — and nothing about any journal, which is how a client handed
+  only addresses starts; an `Inspect` that names no journal without asking for the node alone is
+  refused (`unset`), never read as "the node's first journal", and one naming a journal the
+  machine does not serve is refused (`unknown_journal`). The machine's own facts ride every
+  answer, refusals included.
 - `cell_id` and `fleet_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad seed configuration.
@@ -903,16 +909,15 @@ stay as they are.
 ## 7. What changes against today
 
 Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
-ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`) are in the history and
-AGENTS.md.
+ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`, the retired
+read-index path and the unset `JournalIdentifier`s that meant "the first journal", #243) are in
+the history and AGENTS.md.
 
 - The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
   `SetLeader(new, old)`, with a hidden term counter in the core; `Write` takes an explicit
   `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow.
-- The read-index path left in `paros-core` retires, and with it every unset `JournalIdentifier` that still
-  means "the first journal" (#243).
 - The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
   levels: tenant names and desired state move into each tenant's control journal, capacity is
   owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).

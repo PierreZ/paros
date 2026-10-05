@@ -209,6 +209,10 @@ impl JournalStores for DirStores {
         NoAudit
     }
 
+    fn node_audit(&self) -> NoAudit {
+        NoAudit
+    }
+
     fn create(&mut self, journal: JournalKey, config: Config) -> bool {
         if self.genesis.contains_key(&journal) {
             return true;

@@ -36,8 +36,9 @@ use moonpool_sim::{
 };
 use paros::client::Writer;
 use paros::client::checkpoint::CheckpointPolicy;
-use paros::client::fleet::{FleetFrames, FleetRefusal, FleetSession, Run, Stage, Step};
-use paros::meta::{CellState, Group, Placement, TenantState};
+use paros::client::fleet::{FleetRefusal, FleetSession, Run, Stage, Step};
+use paros::machine::ControlJournals;
+use paros::meta::{CellState, Groups, TenantState};
 use paros::system::Registry;
 use paros::{JournalId, JournalKey, NodeId, TenantId};
 
@@ -53,8 +54,8 @@ const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 #[derive(Clone, Debug)]
 enum Pending {
     Init,
-    /// The name, its placement and the frame this client's creation drew.
-    Create(Vec<u8>, Placement, JournalKey),
+    /// The name and the frame this client's creation drew.
+    Create(Vec<u8>, JournalKey),
     Remove(Vec<u8>),
 }
 
@@ -64,7 +65,9 @@ pub(super) struct FleetOps {
     active: bool,
     /// The run's frames: the cell's id, the cell tenant's control journal
     /// (the registry) and meta's.
-    frames: FleetFrames,
+    frames: ControlJournals,
+    /// Meta's control journal: the run's frames always name it.
+    meta: JournalKey,
     /// How many genesis ranks host the system journals.
     seeds: usize,
     /// The genesis pool size: the registry's genesis.
@@ -88,11 +91,12 @@ impl FleetOps {
         let pool = deployment.acceptors().len();
         Self {
             active,
-            frames: FleetFrames {
+            frames: ControlJournals {
                 cell_id: frames.cell_id,
                 cell: frames.registry,
-                meta: frames.meta,
+                fleet: Some(frames.meta),
             },
+            meta: frames.meta,
             seeds: crate::shape::seed_ranks(pool).len().max(1),
             pool,
             client_id,
@@ -103,8 +107,9 @@ impl FleetOps {
     }
 
     /// A session over `frames` writing both journals as this client: meta
-    /// as its operator, the cell's as its coordinator.
-    fn session(&self, frames: FleetFrames, policy: CheckpointPolicy) -> FleetSession {
+    /// as its operator, the cell's as its coordinator. `None` only for
+    /// frames that name no meta, which the run's never do.
+    fn session(&self, frames: ControlJournals, policy: CheckpointPolicy) -> Option<FleetSession> {
         FleetSession::new(
             frames,
             self.client_id,
@@ -120,7 +125,7 @@ impl FleetOps {
             .clone()
             .with_observer(std::sync::Arc::new(Announce::new(
                 ctx,
-                &[self.frames.meta, self.frames.cell],
+                &[self.meta, self.frames.cell],
             )))
             .rotating_over(self.seeds.min(nodes.server_count()).max(1))
     }
@@ -152,11 +157,13 @@ impl FleetOps {
         if self.initialized && buggify_with_prob!(0.1) {
             // An operator talking to another cell than the one meta holds.
             assert_reachable!("fleet: an init is told another cell's id");
-            let wrong = FleetFrames {
+            let wrong = ControlJournals {
                 cell_id: self.frames.cell_id ^ 2,
                 ..self.frames
             };
-            let mut session = self.session(wrong, policy);
+            let Some(mut session) = self.session(wrong, policy) else {
+                return;
+            };
             let run = session.init(&client, first, draw | 1, Duration::ZERO).await;
             assert_always!(
                 !matches!(run.outcome, Step::Done { .. }) && run.steps.is_empty(),
@@ -171,7 +178,9 @@ impl FleetOps {
             }
             return;
         }
-        let mut session = self.session(self.frames, policy);
+        let Some(mut session) = self.session(self.frames, policy) else {
+            return;
+        };
         if buggify_with_prob!(0.2) {
             if let Step::Advanced(_) = session.init_step(&client, first, draw | 1).await {
                 assert_reachable!("fleet: an init stops after one step");
@@ -200,25 +209,19 @@ impl FleetOps {
             return;
         }
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
-        // The creator's choice; a pinned tenant is never moved (M12).
-        let placement = if (class >> 1) % 2 == 0 {
-            Placement::Movable
-        } else {
-            Placement::Pinned
-        };
         let client = self.client(ctx, nodes);
         let first = self.first(payload);
-        let mut session = self.session(self.frames, policy);
+        let Some(mut session) = self.session(self.frames, policy) else {
+            return;
+        };
         let crash = buggify_with_prob!(0.2);
         if class % 2 == 0 {
             if crash {
                 let frame = tenant_frame(payload);
-                let step = session
-                    .create_step(&client, first, &name, placement, frame)
-                    .await;
+                let step = session.create_step(&client, first, &name, frame).await;
                 if let Step::Advanced(_) = step {
                     assert_reachable!("fleet: a tenant creation stops after one step");
-                    self.pending = Some(Pending::Create(name, placement, frame));
+                    self.pending = Some(Pending::Create(name, frame));
                 }
                 return;
             }
@@ -226,15 +229,8 @@ impl FleetOps {
                 tenant_frame(payload),
                 tenant_frame(payload.rotate_left(23) ^ 0x7e57),
             ];
-            self.create(
-                &client,
-                &mut session,
-                first,
-                (name, placement),
-                draws,
-                payload,
-            )
-            .await;
+            self.create(&client, &mut session, first, name, draws, payload)
+                .await;
         } else {
             if crash {
                 if let Step::Advanced(_) = session.remove_step(&client, first, &name).await {
@@ -261,17 +257,20 @@ impl FleetOps {
         };
         let client = self.client(ctx, nodes);
         let first = self.first(draw);
-        let mut session = self.session(self.frames, policy);
+        let Some(mut session) = self.session(self.frames, policy) else {
+            self.pending = Some(pending);
+            return;
+        };
         let ended = match &pending {
             Pending::Init => self.finish_init(&client, &mut session, first, draw).await,
-            Pending::Create(name, placement, frame) => {
+            Pending::Create(name, frame) => {
                 // Only this creation's own frame resumes it (a tenant is
                 // created once).
                 self.create(
                     &client,
                     &mut session,
                     first,
-                    (name.clone(), *placement),
+                    name.clone(),
                     vec![*frame],
                     draw,
                 )
@@ -323,14 +322,14 @@ impl FleetOps {
         }
     }
 
-    /// Create `name` with `placement` under the first of `draws` meta does
+    /// Create `name` under the first of `draws` meta does
     /// not hold, to its end; whether it ended.
     async fn create(
         &mut self,
         client: &ChainClient,
         session: &mut FleetSession,
         first: usize,
-        (name, placement): (Vec<u8>, Placement),
+        name: Vec<u8>,
         draws: Vec<JournalKey>,
         draw: u64,
     ) -> bool {
@@ -340,9 +339,7 @@ impl FleetOps {
             assert_reachable!("fleet: a tenant creation reuses an id it created");
             let reused = self.ever_created
                 [usize::try_from(draw % self.ever_created.len() as u64).unwrap_or(0)];
-            let step = session
-                .create_step(client, first, &name, placement, reused)
-                .await;
+            let step = session.create_step(client, first, &name, reused).await;
             assert_always!(
                 !matches!(step, Step::Advanced(Stage::RegisterTenant)),
                 "fleet: a reused tenant id is never registered again",
@@ -353,16 +350,9 @@ impl FleetOps {
             }
         }
         let run = session
-            .create_tenant(
-                client,
-                first,
-                &name,
-                placement,
-                draws.clone(),
-                Duration::ZERO,
-            )
+            .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
-        self.created(session, &name, placement, &run);
+        self.created(session, &name, &run);
         match run.outcome {
             Step::Done { .. } => {
                 self.check_directory(client, session, first).await;
@@ -403,13 +393,7 @@ impl FleetOps {
     }
 
     /// The oracles of a creation's run.
-    fn created(
-        &mut self,
-        session: &FleetSession,
-        name: &[u8],
-        placement: Placement,
-        run: &Run<TenantId>,
-    ) {
+    fn created(&mut self, session: &FleetSession, name: &[u8], run: &Run<TenantId>) {
         let Step::Done { result, last } = run.outcome else {
             return;
         };
@@ -419,8 +403,7 @@ impl FleetOps {
             assert_always!(
                 entry.is_some_and(|t| t.state == TenantState::Ready
                     && t.name == name
-                    && t.group == Group::Users
-                    && t.placement == placement)
+                    && t.groups == Groups::SERVED)
                     && session.cell().hosts(result),
                 "fleet: a created tenant is READY in meta and hosted by its cell",
                 { "tenant" => result.0 }
@@ -488,7 +471,7 @@ impl FleetOps {
         let Some(meta_floor) = still(
             client,
             first,
-            self.frames.meta,
+            self.meta,
             meta_writer,
             session.meta().next_seq(),
         )
@@ -528,13 +511,13 @@ impl FleetOps {
         for tenant in cell.hosted() {
             assert_always!(
                 meta.tenant(tenant)
-                    .is_some_and(|t| t.group == Group::Users && t.cell_id == joined.cell_id),
+                    .is_some_and(|t| t.groups == Groups::SERVED && t.cell_id == joined.cell_id),
                 "fleet: every tenant the cell hosts is in meta under that cell",
                 { "tenant" => tenant.0 }
             );
         }
         for (tenant, entry) in meta.tenants() {
-            if entry.group == Group::Users && entry.state == TenantState::Ready {
+            if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
                 assert_always!(
                     cell.hosts(tenant),
                     "fleet: every READY tenant in meta is hosted by its cell",

@@ -61,7 +61,8 @@ use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::rpc::{
-    InspectReply, Read, ReadAck, ReplySender, journal_state_to_proto, quorum_system_to_proto,
+    InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, ReplySender,
+    journal_state_to_proto, quorum_system_to_proto,
 };
 use crate::storage::LogStorage;
 
@@ -358,9 +359,18 @@ where
                 }
                 tracing::info!(replica = self_id, "replica_tick");
             }
-            Some((_req, reply)) = inspects.recv() => {
-                // No batch: an inspect reads the replica and its store.
-                let _ = reply.send(inspect(&replica));
+            Some((req, reply)) = inspects.recv() => {
+                // No batch: an inspect reads the replica and its store. It
+                // names the replica's journal or asks for the node alone; an
+                // unset frame or another journal is refused (#243).
+                let full = inspect(&replica);
+                let answer = match req.target() {
+                    Ok(InspectTarget::Node) => full.node_facts(),
+                    Ok(InspectTarget::Journal(journal)) if journal == replica.config().journal => full,
+                    Ok(InspectTarget::Journal(_)) => full.refused(InspectRefusal::UnknownJournal),
+                    Err(refusal) => full.refused(refusal),
+                };
+                let _ = reply.send(answer);
             }
             () = shutdown.cancelled() => return Ok(()),
         }

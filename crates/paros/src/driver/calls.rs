@@ -3,7 +3,10 @@
 //! applies, with the verdict the journal state machine gave there
 //! ([`paros_core::Outcome`]).
 //!
-//! Nothing about a call is judged at propose time: the node proposes it
+//! The safety rule is the judgement at apply: whatever is checked before a
+//! slot is proposed (a propose-time refusal is allowed as an optimisation,
+//! `docs/architecture.md` §2.2), the verdict a client gets is the one the
+//! fold gave its slot. This driver checks nothing early: the node proposes it
 //! ([`ColocatedNode::propose_in`](paros_core::ColocatedNode::propose_in),
 //! [`propose_control_in`](paros_core::ColocatedNode::propose_control_in)),
 //! parks the reply on the slot, and `drain_ready` answers it from the fold.

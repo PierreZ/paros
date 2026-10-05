@@ -79,10 +79,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
-use crate::machine::CellFrames;
+use crate::machine::ControlJournals;
 use crate::rpc::{
-    MatchmakerClient, MatchmakersRefusal, ReadAck, ReconfigureMatchmakersAck, ReplySender,
-    SetLeaderAck, TruncateAck, WriteAck,
+    InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
+    ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck,
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
@@ -714,15 +714,16 @@ where
     // shares the same underlying sink.
     A: Audit + Clone + Send + Sync + 'static,
 {
-    let journal = storage.initial_state().1.journal;
+    let config = storage.initial_state().1;
     let stores = SingleStore {
-        journal,
+        journal: config.journal,
         store: Some((storage, boot)),
         audit: audit.clone(),
     };
     Box::pin(run_journals(
         providers,
         stores,
+        config.id,
         local_addr,
         members,
         matchmakers,
@@ -752,9 +753,14 @@ where
 /// [`run_node`]'s fail-stop crash. A seam crash is the process dying, for
 /// every journal.
 ///
-/// Several journals run only on a plain deployment: no matchmakers, proxies
-/// or replicas (the matchmaker plane, the proxy leaders and the replica tier
-/// each serve one journal; journal-tagged proxies are #193).
+/// The matchmaker plane, the proxy leaders and the replica tier serve one
+/// journal each, the node's first user journal: every other journal of a
+/// node — the control journals included — runs plain Multi-Paxos
+/// (journal-tagged planes are #190 and #193).
+///
+/// `node` is this process's node id, named by the caller (no id has a
+/// default, §3.8): every journal's [`paros_core::Config`] must carry it, and
+/// so must `system`'s plan.
 ///
 /// `system` opts the node into the **system journals** (#189,
 /// [`SystemPlan`]): it follows the directory and the node registry (from its
@@ -777,13 +783,14 @@ where
 pub async fn run_journals<P, J, H>(
     providers: P,
     mut stores: J,
+    node: NodeId,
     local_addr: String,
     members: Vec<(NodeId, String)>,
     matchmakers: Vec<(MatchmakerId, String)>,
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<SystemPlan>,
-    cell: Option<CellFrames>,
+    cell: Option<ControlJournals>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -799,16 +806,17 @@ where
             "a node serves at least one journal".into(),
         )));
     }
-    // The node-level audit: what no single journal owns (the edge's
-    // rejections, a peer lane's delivery failures, a refused journal id, the
-    // system journals' folds) reports to the node's first user journal —
-    // the default one on a node that serves none yet.
+    if system.as_ref().is_some_and(|plan| plan.self_id != node) {
+        return Err(RunError::Infra(SimulationError::InvalidState(
+            "the system plan names another node".into(),
+        )));
+    }
     // No frame is fixed (§3.8): the deployment names its control journals —
     // the cell's and meta's from the cell plan, the system journals a
     // `SystemPlan` follows — and every other journal is a user's.
     let control: BTreeSet<JournalKey> = cell
         .iter()
-        .flat_map(|cell| std::iter::once(cell.control).chain(cell.meta))
+        .flat_map(|cell| std::iter::once(cell.cell).chain(cell.fleet))
         .chain(
             system
                 .iter()
@@ -816,12 +824,11 @@ where
         )
         .filter(|journal| journal.is_set())
         .collect();
-    let node_journal = ids
-        .iter()
-        .copied()
-        .find(|journal| !control.contains(journal))
-        .unwrap_or(JournalKey::UNSET);
-    let node_audit = stores.audit(node_journal);
+    // The node-level audit: what no single journal owns (the edge's
+    // rejections, a peer lane's delivery failures, a refused journal id, the
+    // system journals' folds), named by the opener rather than borrowed
+    // from a journal (#243).
+    let node_audit = stores.node_audit();
     // A node exits once it has nothing left to serve — on a static
     // deployment. A node that follows the system journals runs on with none
     // (a joiner waits for the directory to name it) and exits only when a
@@ -871,15 +878,14 @@ where
             "only a node's first journal may name matchmakers, proxies or replicas".into(),
         )));
     }
-    let self_id = match &system {
-        Some(plan) => plan.self_id.0,
-        None => journals
-            .live
-            .values()
-            .next()
-            .map(|rt| rt.node.config().id.0)
-            .unwrap_or_default(),
-    };
+    // The caller named the node (no id has a default, §3.8); every journal
+    // it opened must agree. Caller input, so a mismatch is a refusal.
+    if journals.live.values().any(|rt| rt.node.config().id != node) {
+        return Err(RunError::Infra(SimulationError::InvalidState(
+            "a journal's configuration names another node".into(),
+        )));
+    }
+    let self_id = node.0;
 
     // Every task spawned by this incarnation must stop when the loop exits,
     // including a durability-seam error that immediately starts a replacement
@@ -1079,7 +1085,10 @@ where
                 // at apply (fenced by the writer like a `Write`, #228;
                 // monotone, clamped to `next_seq`), and every node
                 // drops the slots whose records all lie below the new
-                // `first_seq` when its walk reaches it.
+                // `first_seq` when its walk reaches it. A control journal is
+                // truncated like any other (§3.9: its owner checkpoints it,
+                // then truncates up to the checkpoint, #230); a follower that
+                // reads below the floor jumps to the checkpoint there.
                 let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
@@ -1091,12 +1100,6 @@ where
                     }
                     continue;
                 };
-                // The system journals are never truncated (#189): every
-                // node rebuilds its folds from position 0.
-                if follower.as_ref().is_some_and(|f| f.is_system(journal)) {
-                    shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
-                    continue;
-                }
                 let up_to = Seq(req.up_to);
                 let generation = Generation(req.generation);
                 let owner = ClientId(req.owner);
@@ -1344,20 +1347,20 @@ where
             }
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it
-                // produces no `Ready` batch. `0` names the node's first
-                // journal; a journal not live here is not answered.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
-                let rt = if journal.is_set() {
-                    journals.live.get(&journal)
-                } else {
-                    journals
-                        .plane()
-                        .or_else(|| journals.live.iter().next())
-                        .map(|(_, rt)| rt)
+                // produces no `Ready` batch. It names its journal or asks for
+                // the node alone (#243): no frame has a default, so an unset
+                // one is refused, and so is a journal not live here — the
+                // node's own facts are answered either way.
+                let facts = operator::node_facts(self_id, cell.as_ref());
+                let answer = match req.target() {
+                    Ok(InspectTarget::Node) => facts,
+                    Ok(InspectTarget::Journal(journal)) => journals.live.get(&journal).map_or_else(
+                        || facts.refused(InspectRefusal::UnknownJournal),
+                        |rt| operator::inspect(&rt.node, cell.as_ref()),
+                    ),
+                    Err(refusal) => facts.refused(refusal),
                 };
-                if let Some(rt) = rt {
-                    let _ = reply.send(operator::inspect(&rt.node, cell.as_ref()));
-                }
+                let _ = reply.send(answer);
             }
             Some(answer) = follow_answers.recv() => {
                 // A seed's answer to this node's follow read of a system

@@ -58,7 +58,6 @@ fn register(tenant: u64, name: &[u8]) -> Vec<u8> {
         control: key(tenant, tenant + 1),
         name: name.to_vec(),
         cell_id: CELL,
-        placement: Placement::Movable,
     })
 }
 
@@ -91,7 +90,6 @@ fn every_entry_round_trips() {
             control: key(0x9e37_79b9, 7),
             name: b"acme".to_vec(),
             cell_id: CELL,
-            placement: Placement::Pinned,
         },
         MetaCommand::MarkTenant {
             tenant: TenantId(300),
@@ -133,8 +131,8 @@ fn the_fleet_is_formed_once_with_meta_as_its_first_internal_tenant() {
     assert_eq!(meta.meta(), Some(meta_frame()));
     let own = meta.tenant(meta_frame().tenant).expect("meta is a tenant");
     assert_eq!(
-        (own.group, own.placement, own.control),
-        (Group::Internal, Placement::Movable, meta_frame().journal)
+        (own.groups, own.control),
+        (Groups::FLEET_TENANT, meta_frame().journal)
     );
     // A re-run of the same step changes nothing; another frame for meta, or
     // another fleet, is refused — for every later step too.
@@ -185,7 +183,7 @@ fn the_fleet_is_formed_once_with_meta_as_its_first_internal_tenant() {
 }
 
 #[test]
-fn a_cell_brings_its_pinned_cell_tenant_and_only_a_ready_cell_takes_tenants() {
+fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
     let mut meta = Meta::default();
     meta.fold(0, &entry(MetaCommand::FormFleet { meta: meta_frame() }));
     let add = entry(MetaCommand::AddCell {
@@ -195,12 +193,8 @@ fn a_cell_brings_its_pinned_cell_tenant_and_only_a_ready_cell_takes_tenants() {
     assert_eq!(meta.fold(1, &add), MetaEvent::CellAdded { cell_id: CELL });
     let cell_tenant = meta.tenant(cell_frame().tenant).expect("the cell tenant");
     assert_eq!(
-        (
-            cell_tenant.group,
-            cell_tenant.placement,
-            cell_tenant.cell_id
-        ),
-        (Group::Internal, Placement::Pinned, CELL)
+        (cell_tenant.groups, cell_tenant.cell_id),
+        (Groups::CELL_TENANT, CELL)
     );
     // The fleet's first cell hosts meta.
     assert_eq!(
@@ -276,7 +270,6 @@ fn a_users_tenant_id_and_name_are_checked_at_registration() {
                 control: cell_frame(),
                 name: b"acme".to_vec(),
                 cell_id: CELL,
-                placement: Placement::Movable,
             })
         ),
         MetaEvent::Refused(MetaRefusal::TenantIdTaken {
@@ -291,10 +284,7 @@ fn a_users_tenant_id_and_name_are_checked_at_registration() {
         }
     );
     let acme = meta.tenant(TenantId(3)).expect("registered");
-    assert_eq!(
-        (acme.group, acme.placement, acme.control),
-        (Group::Users, Placement::Movable, JournalId(4))
-    );
+    assert_eq!((acme.groups, acme.control), (Groups::SERVED, JournalId(4)));
     // The same registration again is a re-run; the id under another name is
     // taken; the name under another id is taken.
     assert_eq!(meta.fold(6, &register(3, b"acme")), MetaEvent::Unchanged);
@@ -411,7 +401,6 @@ fn the_transition_tables() {
         T::Ready,
         T::Removing,
         T::UpdatingConfiguration,
-        T::Renaming,
         T::Error,
     ];
     for from in states {
@@ -453,4 +442,32 @@ fn a_checkpoint_restores_the_whole_directory() {
         })
     );
     assert!(Meta::default().restore(0, b"\xff\xff").is_err());
+}
+
+#[test]
+fn the_groups_decide_who_moves() {
+    // The three sets of §3.7, and the one rule that forbids a move.
+    assert!(Groups::FLEET_TENANT.contains(Group::Internal));
+    assert!(Groups::FLEET_TENANT.contains(Group::Fleet));
+    assert!(!Groups::FLEET_TENANT.contains(Group::Cell));
+    assert!(Groups::CELL_TENANT.contains(Group::Internal));
+    assert!(Groups::CELL_TENANT.contains(Group::Cell));
+    assert!(!Groups::SERVED.contains(Group::Internal));
+    assert!(Groups::SERVED.contains(Group::Users));
+    assert!(
+        Groups::FLEET_TENANT.may_move(),
+        "the fleet tenant moves with its coordinator"
+    );
+    assert!(Groups::SERVED.may_move(), "a served tenant moves");
+    assert!(!Groups::CELL_TENANT.may_move(), "a cell tenant is its cell");
+    assert_eq!(Groups::FLEET_TENANT.label(), "internal,fleet");
+    assert_eq!(Groups::CELL_TENANT.label(), "internal,cell");
+    assert_eq!(Groups::SERVED.label(), "users");
+    // The wire carries only the three sets.
+    for groups in [Groups::FLEET_TENANT, Groups::CELL_TENANT, Groups::SERVED] {
+        assert_eq!(Groups::from_wire(groups.to_wire()), Some(groups));
+    }
+    for bits in [0, 1, 2, 4, 6, 9, 15, 16] {
+        assert_eq!(Groups::from_wire(bits), None, "bits {bits} name no set");
+    }
 }

@@ -24,14 +24,15 @@ J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
 docker compose run --rm parosctl write "$J" hello world --owner 7
 docker compose run --rm parosctl read "$J"
 
-# Tenants: created once (a second create of a name is refused), movable unless --pinned.
+# Tenants: created once (a second create of a name is refused).
 docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl tenant create globex --pinned
+docker compose run --rm parosctl tenant create globex
 docker compose run --rm parosctl tenant list
 docker compose run --rm parosctl tenant delete acme
 
-# What one machine serves.
+# What each machine is (node id, cell, control journals), then its view of the journal.
 docker compose run --rm parosctl inspect
+docker compose run --rm parosctl inspect --journal "$J"
 
 # Kill a machine and keep writing (a majority is left), then bring it back.
 docker compose kill node2

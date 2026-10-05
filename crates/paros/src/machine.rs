@@ -68,18 +68,24 @@ fn draw_frame<P: Providers>(providers: &P) -> JournalKey {
     JournalKey::new(TenantId(draw()), JournalId(draw()))
 }
 
-/// What a formed cell's machines know of its frames (§3.2, §3.8), handed
-/// to the driver: no control journal has a fixed id, so the driver is told
-/// which journals are control journals (they serve no user plane and outlive
-/// a node's retirement), and `Inspect` answers every client with them.
+/// The fleet's **control journals** as one cell knows them (§3.2, §3.8):
+/// the cell's id, the cell tenant's control journal and, on the cell that
+/// hosts it, the fleet tenant's. No control journal has a fixed id, so they
+/// are learned — from the durable cell plan on a machine of the cell, from
+/// any machine's node-only `Inspect` on a client — and handed on: the driver
+/// is told which journals are control journals (they serve no user plane
+/// and outlive a node's retirement), `Inspect` answers every client with
+/// them, and a fleet operation ([`crate::client::fleet::FleetSession`])
+/// writes them. One type for every holder (#243).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CellFrames {
+pub struct ControlJournals {
     /// The cell's id.
     pub cell_id: u64,
     /// The cell tenant's control journal: the registry and the capacity.
-    pub control: JournalKey,
-    /// Meta's control journal, when this cell hosts meta.
-    pub meta: Option<JournalKey>,
+    pub cell: JournalKey,
+    /// The fleet tenant's control journal (the fleet directory), when this
+    /// cell hosts the fleet tenant.
+    pub fleet: Option<JournalKey>,
 }
 
 /// How long a waiting machine keeps its listener up after the answer that
@@ -221,13 +227,14 @@ impl CellPlan {
         Ok(())
     }
 
-    /// The frames the cell's machines know (see [`CellFrames`]).
+    /// The control journals the cell's machines know (see
+    /// [`ControlJournals`]).
     #[must_use]
-    pub fn frames(&self) -> CellFrames {
-        CellFrames {
+    pub fn control_journals(&self) -> ControlJournals {
+        ControlJournals {
             cell_id: self.cell_id,
-            control: self.control,
-            meta: self.meta,
+            cell: self.control,
+            fleet: self.meta,
         }
     }
 
@@ -614,10 +621,10 @@ async fn run_init<P: Providers, L: CellLedger>(
     Ok(plan)
 }
 
-/// Whether the machine at `seed` serves a cell: it answers an unframed
-/// `Inspect` (a waiting machine has no journal to answer it from) naming a
-/// cell. A machine that has no plan cannot know any frame to ask for: no
-/// frame is fixed (§3.8).
+/// Whether the machine at `seed` serves a cell: it answers a node-only
+/// `Inspect` (a waiting machine serves no `Inspect` at all) naming a cell. A
+/// machine that has no plan cannot know any frame to ask for: no frame is
+/// fixed (§3.8).
 async fn serves_cell<P: Providers>(
     time: &P::Time,
     rpc: &RpcHandle<P>,
@@ -625,10 +632,7 @@ async fn serves_cell<P: Providers>(
     patience: Duration,
 ) -> bool {
     let client = well_known::<P, InspectRpc>(rpc, seed);
-    let request = InspectRequest {
-        journal: JournalKey::UNSET.journal.0,
-        tenant: JournalKey::UNSET.tenant.0,
-    };
+    let request = InspectRequest::node_only();
     matches!(
         time.timeout(patience, client.try_get_reply(&request)).await,
         Ok(Ok(reply)) if reply.cell_id != 0
@@ -668,7 +672,7 @@ mod tests {
             vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))]
         );
         assert_eq!(back.journals, plan.journals);
-        assert_eq!(back.frames(), plan.frames());
+        assert_eq!(back.control_journals(), plan.control_journals());
         assert_eq!(CellPlan::from_init_ack(&plan.init_ack()), Ok(back));
     }
 
