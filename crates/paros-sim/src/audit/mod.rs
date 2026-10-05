@@ -1078,9 +1078,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _journal: JournalKey,
         seq: u64,
         verified: Option<bool>,
+        state: &paros::system::Registry,
     ) {
         if let Some(mut board) = self.system_board() {
-            board.checkpoint_folded(node, seq, verified);
+            board.checkpoint_folded(node, seq, verified, state);
         }
     }
 

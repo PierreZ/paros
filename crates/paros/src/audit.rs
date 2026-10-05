@@ -205,13 +205,16 @@ pub trait Audit {
     /// This node folded a checkpoint record (#230) at position `seq` of
     /// system journal `journal`: `verified` is `Some(equal)` when its fold
     /// already held every position below and compared its own state with
-    /// the checkpoint's, `None` when it restored from it.
+    /// the checkpoint's, `None` when it restored from it. `state` is the
+    /// registry the fold holds right after it (#247: what an oracle that
+    /// models the registry resumes from across a truncation).
     fn checkpoint_folded(
         &self,
         node: NodeId,
         journal: JournalKey,
         seq: u64,
         verified: Option<bool>,
+        state: &crate::system::Registry,
     ) {
     }
 
