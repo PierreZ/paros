@@ -11,7 +11,7 @@ use paros_core::{Ballot, NodeId};
 
 use crate::action::{Action, ActionKind, Phase};
 use crate::auto::AutomationFlag;
-use crate::level::common::{REPLIES_ONLY, chosen_text, open, text};
+use crate::level::common::{REPLIES_ONLY, chosen_text, on_decree, open, text};
 use crate::level::{GoalStatus, Level, WorldKind};
 use crate::world::decree::{DecreeWorld, value};
 
@@ -394,23 +394,22 @@ ballot.",
     allowed_actions: WIRE_ACTIONS,
     setup: || WorldKind::Decree(Box::new(DecreeWorld::new(ACCEPTORS, &[5, 8]))),
     goal: |world| {
-        let Some(decree) = world.decree() else {
-            return GoalStatus::Open("This level runs in the single-decree world.".to_string());
-        };
-        let campaigns = decree.completed_phase1().len();
-        match (chosen_text(world), campaigns) {
-            (Some(value), n) if n >= 2 => GoalStatus::Reached(format!(
-                "{n} ballots completed Phase 1, and the cluster chose exactly one value: \
+        on_decree(world, |decree| {
+            let campaigns = decree.completed_phase1().len();
+            match (chosen_text(world), campaigns) {
+                (Some(value), n) if n >= 2 => GoalStatus::Reached(format!(
+                    "{n} ballots completed Phase 1, and the cluster chose exactly one value: \
                  {value}. The duel cost extra rounds. It did not cost safety."
-            )),
-            (Some(value), _) => GoalStatus::Open(format!(
-                "{value} is chosen, but only one proposer completed Phase 1. Let the other \
+                )),
+                (Some(value), _) => GoalStatus::Open(format!(
+                    "{value} is chosen, but only one proposer completed Phase 1. Let the other \
                  proposer run a ballot too."
-            )),
-            (None, _) => GoalStatus::Open(
-                "Let both proposers run a ballot. Then get one value chosen.".to_string(),
-            ),
-        }
+                )),
+                (None, _) => GoalStatus::Open(
+                    "Let both proposers run a ballot. Then get one value chosen.".to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
@@ -493,42 +492,41 @@ intersection is necessary, and that `q1 + q2 > n` gives cheaper writes.",
         )))
     },
     goal: |world| {
-        let Some(decree) = world.decree() else {
-            return GoalStatus::Open("This level runs in the single-decree world.".to_string());
-        };
-        let Some((_, chosen)) = decree.chosen() else {
-            return GoalStatus::Open(
-                "Nothing is chosen here, but this level always starts with a chosen value."
-                    .to_string(),
-            );
-        };
-        let chosen_text = text(chosen);
-        let later = decree.completed_phase1().iter().find(|campaign| {
-            campaign.ballot
-                > (Ballot {
-                    round: 1,
-                    node: NodeId(5),
-                })
-        });
-        match later {
-            Some(campaign) if text(&campaign.proposed) == chosen_text => {
-                GoalStatus::Reached(format!(
-                    "Ballot {}.{} reached the quorum {:?}. Every quorum of that size contains \
+        on_decree(world, |decree| {
+            let Some((_, chosen)) = decree.chosen() else {
+                return GoalStatus::Open(
+                    "Nothing is chosen here, but this level always starts with a chosen value."
+                        .to_string(),
+                );
+            };
+            let chosen_text = text(chosen);
+            let later = decree.completed_phase1().iter().find(|campaign| {
+                campaign.ballot
+                    > (Ballot {
+                        round: 1,
+                        node: NodeId(5),
+                    })
+            });
+            match later {
+                Some(campaign) if text(&campaign.proposed) == chosen_text => {
+                    GoalStatus::Reached(format!(
+                        "Ballot {}.{} reached the quorum {:?}. Every quorum of that size contains \
                      an acceptor that voted for {chosen_text:?}. P2c therefore made you propose \
                      that value again. No reach set can change the decision.",
-                    campaign.ballot.round,
-                    campaign.ballot.node.0,
-                    campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
-                ))
+                        campaign.ballot.round,
+                        campaign.ballot.node.0,
+                        campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
+                    ))
+                }
+                Some(campaign) => GoalStatus::Failed(format!(
+                    "A campaign proposed {:?}, but the cluster already chose {chosen_text:?}.",
+                    text(&campaign.proposed)
+                )),
+                None => GoalStatus::Open(
+                    "Select a Phase-1 reach set. Then run a ballot above 1.5 with it.".to_string(),
+                ),
             }
-            Some(campaign) => GoalStatus::Failed(format!(
-                "A campaign proposed {:?}, but the cluster already chose {chosen_text:?}.",
-                text(&campaign.proposed)
-            )),
-            None => GoalStatus::Open(
-                "Select a Phase-1 reach set. Then run a ballot above 1.5 with it.".to_string(),
-            ),
-        }
+        })
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {

@@ -179,11 +179,11 @@ fn a_leader_removed_by_its_own_reconfiguration_resigns_once_settled() {
     // Settled: the next tick resigns.
     nodes[0].tick();
     assert_eq!(nodes[0].role(), NodeRole::Follower);
-    assert_eq!(nodes[0].membership_counters().1, 1);
+    assert_eq!(nodes[0].membership_counters().step_downs, 1);
     // ...and it never campaigns again as a non-member, while a member does.
     campaign(&mut nodes[0]);
     assert_eq!(nodes[0].role(), NodeRole::Follower);
-    assert_eq!(nodes[0].membership_counters().0, 1);
+    assert_eq!(nodes[0].membership_counters().campaigns_skipped, 1);
     assert_eq!(
         *nodes[1].acceptors(),
         new,

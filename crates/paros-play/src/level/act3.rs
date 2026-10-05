@@ -22,7 +22,7 @@ use paros_core::{NodeId, QuorumSystem, Slot};
 use crate::action::{Action, ActionKind};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
-    CLIENT, REPLIES_AND_BEATS, TIMEOUT, accepted, all_but, applied, crash, fresh, is_phase2,
+    CLIENT, REPLIES_AND_BEATS, TIMEOUT, accepted, applied, crash, fresh, is_phase2, on_log,
     propose_as, read_index_as, restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, to};
@@ -48,8 +48,8 @@ pub fn levels() -> Vec<&'static Level> {
 /// program order.
 const OTHER: u64 = 8;
 
-/// Every role answered for the player. A level removes exactly the one it
-/// teaches.
+/// Every role answered for the player. A level pins off the ones it teaches
+/// (`pinned_off`), which keeps them off whatever this list says.
 const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::AcceptorReplies,
     AutomationFlag::CommitOverwrite,
@@ -61,18 +61,6 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
 ];
-
-/// Every role but the jump to a peer's trim point.
-const NO_TRIM_POINT: &[AutomationFlag] =
-    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::TrimPoint]);
-
-/// Every role but serving a read.
-const NO_READ_SERVE: &[AutomationFlag] =
-    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::ReadServe]);
-
-/// Every role but answering a client's retry.
-const NO_ACK_WRITE: &[AutomationFlag] =
-    &all_but::<8>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::AckWrite]);
 
 // ---- reading the world for a goal -------------------------------------------
 
@@ -151,33 +139,32 @@ leader proposes it.",
     allowed_actions: TRUNCATE_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let accepted = log.compacts().iter().any(|outcome| outcome.accepted);
-        let floors = distinct_floors(world);
-        let stranded = log.stranded();
-        if !stranded.is_empty() {
-            return GoalStatus::Failed(format!(
-                "node {} is below the floor of the cluster, and every disk deleted the slots \
+        on_log(world, |log| {
+            let accepted = log.compacts().iter().any(|outcome| outcome.accepted);
+            let floors = distinct_floors(world);
+            let stranded = log.stranded();
+            if !stranded.is_empty() {
+                return GoalStatus::Failed(format!(
+                    "node {} is below the floor of the cluster, and every disk deleted the slots \
                  that it still needs.",
-                stranded[0].0
-            ));
-        }
-        match (accepted, floors.as_slice()) {
-            (true, [first]) if *first > 0 => GoalStatus::Reached(format!(
-                "The floor of every node is slot {first}, and no node is stranded. No message \
+                    stranded[0].0
+                ));
+            }
+            match (accepted, floors.as_slice()) {
+                (true, [first]) if *first > 0 => GoalStatus::Reached(format!(
+                    "The floor of every node is slot {first}, and no node is stranded. No message \
                  sent that number. Each node computed it when it applied the same decided \
                  command, at the same place in the same log."
-            )),
-            (false, _) => GoalStatus::Open(
-                "Get some values chosen, then ask the leader to compact the log.".to_string(),
-            ),
-            (_, floors) => GoalStatus::Open(format!(
-                "The floors are still {floors:?}. Deliver the decision to every node. Each \
+                )),
+                (false, _) => GoalStatus::Open(
+                    "Get some values chosen, then ask the leader to compact the log.".to_string(),
+                ),
+                (_, floors) => GoalStatus::Open(format!(
+                    "The floors are still {floors:?}. Deliver the decision to every node. Each \
                  node truncates when it *applies* that slot, not when the leader proposes it."
-            )),
-        }
+                )),
+            }
+        })
     },
     hint: |world, mistakes| {
         let asked = world
@@ -254,61 +241,60 @@ node vote for a ballot that it refused.",
         "Acceptor::trim_to",
         "Replica::trim_to",
     ],
-    automation_on: NO_TRIM_POINT,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::TrimPoint],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::TrimPoint],
     allowed_actions: STRANDED_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Some(node) = log.promise_regressed() {
-            return GoalStatus::Failed(format!(
-                "The durable promise of node {} came back lower than a promise that it \
+        on_log(world, |log| {
+            if let Some(node) = log.promise_regressed() {
+                return GoalStatus::Failed(format!(
+                    "The durable promise of node {} came back lower than a promise that it \
                  already made. A trim point says where the log starts, not what a node promised.",
-                node.0
-            ));
-        }
-        let leader_log = applied(world, 0);
-        if leader_log.is_empty() {
-            return GoalStatus::Open(
-                "Get some commands chosen through the two nodes that are up.".to_string(),
-            );
-        }
-        let cluster_floor = log.disk(NodeId(0)).map_or(0, |disk| disk.floor().0);
-        if cluster_floor == 0 {
-            return GoalStatus::Open(
-                "Ask the leader to compact the log past node 2's position.".to_string(),
-            );
-        }
-        let floor = log.disk(NodeId(2)).map_or(0, |disk| disk.floor().0);
-        let chosen = |node: u64| {
-            log.disk(NodeId(node))
-                .and_then(|disk| disk.hard_state().chosen_index)
-                .map(|slot| slot.0)
-        };
-        if floor == 0 {
-            return GoalStatus::Open(
-                "Start node 2 again, and let it find that it is below the floor. It campaigns \
+                    node.0
+                ));
+            }
+            let leader_log = applied(world, 0);
+            if leader_log.is_empty() {
+                return GoalStatus::Open(
+                    "Get some commands chosen through the two nodes that are up.".to_string(),
+                );
+            }
+            let cluster_floor = log.disk(NodeId(0)).map_or(0, |disk| disk.floor().0);
+            if cluster_floor == 0 {
+                return GoalStatus::Open(
+                    "Ask the leader to compact the log past node 2's position.".to_string(),
+                );
+            }
+            let floor = log.disk(NodeId(2)).map_or(0, |disk| disk.floor().0);
+            let chosen = |node: u64| {
+                log.disk(NodeId(node))
+                    .and_then(|disk| disk.hard_state().chosen_index)
+                    .map(|slot| slot.0)
+            };
+            if floor == 0 {
+                return GoalStatus::Open(
+                    "Start node 2 again, and let it find that it is below the floor. It campaigns \
                  when it hears no leader, and that campaign asks its peers for the range that \
                  it misses."
-                    .to_string(),
-            );
-        }
-        if floor == cluster_floor && chosen(2) >= chosen(0) {
-            GoalStatus::Reached(format!(
-                "Node 2's log starts at slot {floor}, like every other node's, and it kept its \
+                        .to_string(),
+                );
+            }
+            if floor == cluster_floor && chosen(2) >= chosen(0) {
+                GoalStatus::Reached(format!(
+                    "Node 2's log starts at slot {floor}, like every other node's, and it kept its \
                  promise. No peer replayed the slots below it, because they do not exist any \
                  more. A peer told node 2 where its log starts, and everything below that slot \
                  is chosen."
-            ))
-        } else {
-            GoalStatus::Open(format!(
-                "Node 2's floor is slot {floor}, and the cluster's is slot {cluster_floor}."
-            ))
-        }
+                ))
+            } else {
+                GoalStatus::Open(format!(
+                    "Node 2's floor is slot {floor}, and the cluster's is slot {cluster_floor}."
+                ))
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -398,44 +384,43 @@ whether it is proof.",
         "Proposer::confirm_reads",
         "ReadState",
     ],
-    automation_on: NO_READ_SERVE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::ReadServe, AutomationFlag::DeliverHeartbeats],
     unlocked: &[AutomationFlag::DeliverReplies],
     unlocks: &[AutomationFlag::ReadServe],
     allowed_actions: READ_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Err(detail) = log.linearizable() {
-            return GoalStatus::Failed(detail);
-        }
-        let acked = log.highest_acked_slot();
-        let served: Vec<Option<Slot>> = log
-            .reads()
-            .into_iter()
-            .filter(|(_, _, served)| *served)
-            .map(|(_, index, _)| index)
-            .collect();
-        match served.first() {
-            Some(index) if *index >= acked && acked.is_some() => GoalStatus::Reached(format!(
-                "The cluster served the read at {}, at or above the last acknowledged write \
+        on_log(world, |log| {
+            if let Err(detail) = log.linearizable() {
+                return GoalStatus::Failed(detail);
+            }
+            let acked = log.highest_acked_slot();
+            let served: Vec<Option<Slot>> = log
+                .reads()
+                .into_iter()
+                .filter(|(_, _, served)| *served)
+                .map(|(_, index, _)| index)
+                .collect();
+            match served.first() {
+                Some(index) if *index >= acked && acked.is_some() => GoalStatus::Reached(format!(
+                    "The cluster served the read at {}, at or above the last acknowledged write \
                  ({}). The read cost one round of beats and no byte of log.",
-                at(*index),
-                at(acked)
-            )),
-            Some(index) => GoalStatus::Open(format!(
-                "The cluster served a read at {}, but the level asks for an acknowledged \
+                    at(*index),
+                    at(acked)
+                )),
+                Some(index) => GoalStatus::Open(format!(
+                    "The cluster served a read at {}, but the level asks for an acknowledged \
                  write below it first.",
-                at(*index)
-            )),
-            None => GoalStatus::Open(
-                "Get a command chosen. Then ask for a read, and decide when the proof is \
+                    at(*index)
+                )),
+                None => GoalStatus::Open(
+                    "Get a command chosen. Then ask for a read, and decide when the proof is \
                  complete."
-                    .to_string(),
-            ),
-        }
+                        .to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -518,31 +503,29 @@ completes on its own, in the batch that applied the slot.",
         "Replica::covers",
         "RecoveryStep::Recovered",
     ],
-    automation_on: NO_READ_SERVE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::ReadServe],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[],
     allowed_actions: TRAP_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Err(detail) = log.linearizable() {
-            return GoalStatus::Failed(detail);
-        }
-        let served: Vec<Option<Slot>> = log
-            .reads()
-            .into_iter()
-            .filter(|(_, _, served)| *served)
-            .map(|(_, index, _)| index)
-            .collect();
-        // The inherited value is whatever the client asked for, and the level
-        // reads it back from the history rather than naming it here.
-        let executed = applied(world, 1);
-        let asked = log.proposed_values();
-        let recovered = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
-        match (served.first(), recovered) {
+        on_log(world, |log| {
+            if let Err(detail) = log.linearizable() {
+                return GoalStatus::Failed(detail);
+            }
+            let served: Vec<Option<Slot>> = log
+                .reads()
+                .into_iter()
+                .filter(|(_, _, served)| *served)
+                .map(|(_, index, _)| index)
+                .collect();
+            // The inherited value is whatever the client asked for, and the level
+            // reads it back from the history rather than naming it here.
+            let executed = applied(world, 1);
+            let asked = log.proposed_values();
+            let recovered = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
+            match (served.first(), recovered) {
             (Some(index), true) => GoalStatus::Reached(format!(
                 "The leader refused the read while the recovered slot was still in flight. It \
                  served the read at {} after the slot decided again. The quorum was not the \
@@ -559,6 +542,7 @@ completes on its own, in the batch that applied the slot.",
                     .to_string(),
             ),
         }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -654,56 +638,55 @@ the level, and the protocol is correct to refuse a read that it cannot prove.",
     allowed_actions: HISTORY_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT, OTHER]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Err(detail) = log.linearizable() {
-            return GoalStatus::Failed(format!("The history is not linearizable: {detail}"));
-        }
-        let history = log.history();
-        let acked_writes: Vec<_> = history
-            .iter()
-            .filter(|op| op.write && op.completed.is_some())
-            .collect();
-        // A read that completed *after* a write acknowledged at another node
-        // completed, and observed it: the read across the leader change.
-        let across = history.iter().any(|read| {
-            !read.write
-                && read.completed.is_some()
-                && acked_writes.iter().any(|write| {
-                    write.node != read.node
-                        && write.completed < Some(read.started)
-                        && write.at <= read.at
-                        && write.at.is_some()
-                })
-        });
-        let refused = history
-            .iter()
-            .filter(|op| !op.write && op.completed.is_none())
-            .count();
-        match (across, refused) {
-            (true, 1..) => GoalStatus::Reached(format!(
-                "The history is linearizable. A read at one node observed a write that \
+        on_log(world, |log| {
+            if let Err(detail) = log.linearizable() {
+                return GoalStatus::Failed(format!("The history is not linearizable: {detail}"));
+            }
+            let history = log.history();
+            let acked_writes: Vec<_> = history
+                .iter()
+                .filter(|op| op.write && op.completed.is_some())
+                .collect();
+            // A read that completed *after* a write acknowledged at another node
+            // completed, and observed it: the read across the leader change.
+            let across = history.iter().any(|read| {
+                !read.write
+                    && read.completed.is_some()
+                    && acked_writes.iter().any(|write| {
+                        write.node != read.node
+                            && write.completed < Some(read.started)
+                            && write.at <= read.at
+                            && write.at.is_some()
+                    })
+            });
+            let refused = history
+                .iter()
+                .filter(|op| !op.write && op.completed.is_none())
+                .count();
+            match (across, refused) {
+                (true, 1..) => GoalStatus::Reached(format!(
+                    "The history is linearizable. A read at one node observed a write that \
                  another node acknowledged before the read started, across a leader change. {} \
                  read that the protocol cannot prove is still open, and the protocol must keep \
                  it open.",
-                if refused == 1 {
-                    "one".to_string()
-                } else {
-                    refused.to_string()
-                }
-            )),
-            (false, _) => GoalStatus::Open(
-                "Get a write acknowledged. Change the leadership without the knowledge of the \
+                    if refused == 1 {
+                        "one".to_string()
+                    } else {
+                        refused.to_string()
+                    }
+                )),
+                (false, _) => GoalStatus::Open(
+                    "Get a write acknowledged. Change the leadership without the knowledge of the \
                  old leader. Then read at the new leader."
-                    .to_string(),
-            ),
-            (true, 0) => GoalStatus::Open(
-                "Now ask the replaced leader for a read as well, and look at what it cannot \
+                        .to_string(),
+                ),
+                (true, 0) => GoalStatus::Open(
+                    "Now ask the replaced leader for a read as well, and look at what it cannot \
                  do."
-                .to_string(),
-            ),
-        }
+                    .to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
@@ -787,64 +770,63 @@ times, what the journal answers as far as the leader has folded it.",
         "Replica::accepted_at",
         "Replica::outcome_at",
     ],
-    automation_on: NO_ACK_WRITE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::AckWrite],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::AckWrite],
     allowed_actions: RETRY_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let executed = accepted(world, 0);
-        // At most once, for every value the client asked for: which values
-        // those are is the client's business, and the history reports them.
-        let asked = log.proposed_values();
-        if let Some(twice) = asked
-            .iter()
-            .find(|value| executed.iter().filter(|command| command == value).count() > 1)
-        {
-            return GoalStatus::Failed(format!(
-                "The journal accepted the write {twice} twice. A retry of a write the journal \
-                 holds must fold as a duplicate."
-            ));
-        }
-        let all_executed = !asked.is_empty()
-            && asked
+        on_log(world, |log| {
+            let executed = accepted(world, 0);
+            // At most once, for every value the client asked for: which values
+            // those are is the client's business, and the history reports them.
+            let asked = log.proposed_values();
+            if let Some(twice) = asked
                 .iter()
-                .all(|value| executed.iter().any(|command| command == value));
-        let held = log
-            .retries()
-            .iter()
-            .any(|outcome| matches!(outcome.answer, RetryAnswer::InFlight(_)));
-        let acked = log
-            .retries()
-            .iter()
-            .any(|outcome| matches!(outcome.answer, RetryAnswer::Applied(_)));
-        match (all_executed, held, acked) {
-            (true, true, true) => GoalStatus::Reached(format!(
-                "The journal accepted each write exactly once ({}). The first retry came while \
+                .find(|value| executed.iter().filter(|command| command == value).count() > 1)
+            {
+                return GoalStatus::Failed(format!(
+                    "The journal accepted the write {twice} twice. A retry of a write the journal \
+                 holds must fold as a duplicate."
+                ));
+            }
+            let all_executed = !asked.is_empty()
+                && asked
+                    .iter()
+                    .all(|value| executed.iter().any(|command| command == value));
+            let held = log
+                .retries()
+                .iter()
+                .any(|outcome| matches!(outcome.answer, RetryAnswer::InFlight(_)));
+            let acked = log
+                .retries()
+                .iter()
+                .any(|outcome| matches!(outcome.answer, RetryAnswer::Applied(_)));
+            match (all_executed, held, acked) {
+                (true, true, true) => GoalStatus::Reached(format!(
+                    "The journal accepted each write exactly once ({}). The first retry came while \
                  the hole was open: the fold had not reached its position, so it waited in its \
                  own slot and folded as a duplicate. The second came after the hole closed, \
                  and the log already held it. \"Chosen\" and \"applied\" are two different \
                  facts, and a journal answers only from the second.",
-                executed.join(", ")
-            )),
-            (true, false, _) => GoalStatus::Open(
-                "Let the client ask again *while* its write is chosen above the hole. That \
+                    executed.join(", ")
+                )),
+                (true, false, _) => GoalStatus::Open(
+                    "Let the client ask again *while* its write is chosen above the hole. That \
                  window is the subject of this level."
-                    .to_string(),
-            ),
-            (true, true, false) => {
-                GoalStatus::Open("Now close the hole, and let the client ask again.".to_string())
-            }
-            _ => GoalStatus::Open(
-                "Get both writes chosen, but not in order, so the second waits above a hole. \
+                        .to_string(),
+                ),
+                (true, true, false) => GoalStatus::Open(
+                    "Now close the hole, and let the client ask again.".to_string(),
+                ),
+                _ => GoalStatus::Open(
+                    "Get both writes chosen, but not in order, so the second waits above a hole. \
                  Then answer the retries of the client."
-                    .to_string(),
-            ),
-        }
+                        .to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,

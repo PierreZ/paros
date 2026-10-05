@@ -34,12 +34,12 @@ use std::time::Duration;
 use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
+use paros::client::Writer;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{FleetFrames, FleetRefusal, FleetSession, Run, Stage, Step};
-use paros::client::{ReadOutcome, Writer};
 use paros::meta::{CellState, Group, Placement, TenantState};
 use paros::system::Registry;
-use paros::{JournalId, JournalKey, NodeId, Read, TenantId};
+use paros::{JournalId, JournalKey, NodeId, TenantId};
 
 use super::system::Announce;
 use crate::client::ChainClient;
@@ -563,18 +563,7 @@ async fn still(
     writer: &Writer,
     folded: u64,
 ) -> Option<u64> {
-    let read = Read {
-        journal: journal.journal.0,
-        tenant: journal.tenant.0,
-        from_seq: 0,
-        limit: 1,
-        wait_ms: 0,
-    };
-    let (ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state }) =
-        client.read_any(&read, first).await.outcome
-    else {
-        return None;
-    };
+    let state = client.journal_state(journal, first).await?;
     (writer.owned() == Some(state.generation.0)
         && state.owner.is_some_and(|o| o.0 == writer.owner())
         && state.next_seq.0 == folded)

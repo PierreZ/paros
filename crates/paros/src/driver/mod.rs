@@ -81,8 +81,8 @@ use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
 use crate::machine::CellFrames;
 use crate::rpc::{
-    MatchmakerClient, ReadAck, ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck,
-    WriteAck, well_known,
+    MatchmakerClient, MatchmakersRefusal, ReadAck, ReconfigureMatchmakersAck, ReplySender,
+    SetLeaderAck, TruncateAck, WriteAck,
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
@@ -100,7 +100,7 @@ use ready::{ClientWaiters, drain_ready, fold_head};
 use reply::maybe_duplicate;
 use report::{Deltas, handoff_context, maintain};
 use system::{Followed, SystemFollower, follow_local};
-use transport::{LaneOpener, Outbound, PeerQueues, peer_address};
+use transport::{LaneOpener, Outbound, peer_address};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
@@ -935,36 +935,16 @@ where
         audit: &node_audit,
         from: me,
     };
-    let peer_queues = members
-        .into_iter()
-        .chain(replicas)
-        .map(|(id, addr)| {
-            let client = well_known(edge.handle(), peer_address(&addr)?);
-            let to = Party::Node(id);
-            let regular = lanes.open(
-                "paros-peer-delivery",
-                client,
-                to,
-                tunables.peer_queue_capacity,
-            );
-            Ok((id, PeerQueues { regular }))
-        })
-        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    let peer_queues = lanes.open_all(
+        edge.handle(),
+        "paros-peer-delivery",
+        members.into_iter().chain(replicas),
+        Party::Node,
+    )?;
     // The proxy leaders (#142): one lane each, on the same lossy keep-newest
     // contract as a peer's. Empty on a deployment without proxies.
-    let proxy_queues = proxies
-        .into_iter()
-        .map(|(id, addr)| {
-            let client = well_known(edge.handle(), peer_address(&addr)?);
-            let lane = lanes.open(
-                "paros-proxy-delivery",
-                client,
-                Party::Proxy(id),
-                tunables.peer_queue_capacity,
-            );
-            Ok((id, lane))
-        })
-        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    let proxy_queues =
+        lanes.open_all(edge.handle(), "paros-proxy-delivery", proxies, Party::Proxy)?;
 
     // The matchmaker links (#120): one client per matchmaker, and the inbox
     // their answers come back through. Empty on plain Multi-Paxos — and a
@@ -1314,22 +1294,25 @@ where
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
                 let refusal = operator::reconfigure_matchmakers(&rt.node, &mut handover, &target, |m| {
                     links.clients.contains_key(m)
-                });
+                })
+                .err();
+                let accepted = refusal.is_none();
                 let generation = rt.node.matchmaker_set().map_or(0, |set| set.generation.0);
                 if let Some(current) = rt.node.matchmaker_set()
-                    && refusal.is_empty()
+                    && accepted
                 {
                     lp.start_reconfigurer(&mut handover, current, &target, false);
                 }
                 rt.audit.reconfigure_matchmakers_acked(NodeId(self_id), refusal);
-                tracing::info!(node = self_id, accepted = refusal.is_empty(), refusal, "reconfigure_matchmakers_acked");
+                let label = refusal.map_or("", MatchmakersRefusal::label);
+                tracing::info!(node = self_id, accepted, refusal = label, "reconfigure_matchmakers_acked");
                 lp.answer(
                     Reply::ReconfigureMatchmakers,
                     reply,
                     ReconfigureMatchmakersAck {
-                        accepted: refusal.is_empty(),
-                        refusal: refusal.to_string(),
-                        generation: refusal.is_empty().then_some(generation),
+                        accepted,
+                        refusal: label.to_string(),
+                        generation: accepted.then_some(generation),
                     },
                 );
             }
@@ -1595,14 +1578,10 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         if !self.out.has_peer(id) {
             match peer_address(addr) {
                 Ok(addr) => {
-                    let client = well_known(self.rpc, addr);
-                    let regular = self.lanes.open(
-                        "paros-peer-delivery",
-                        client,
-                        Party::Node(id),
-                        self.tunables.peer_queue_capacity,
-                    );
-                    self.out.add_peer(id, PeerQueues { regular });
+                    let lane =
+                        self.lanes
+                            .open(self.rpc, "paros-peer-delivery", addr, Party::Node(id));
+                    self.out.add_peer(id, lane);
                 }
                 Err(error) => {
                     tracing::warn!(node = me.0, admitted = id.0, %error, "registered_address_unusable");

@@ -506,9 +506,7 @@ impl ColocatedNode {
         // static membership.
         let config = match (self.config.has_matchmakers(), config) {
             (false, None) => None,
-            (true, Some(config)) if config.members().iter().all(|m| self.in_pool(*m)) => {
-                Some(config)
-            }
+            (true, Some(config)) if config.is_drawn_from(&self.pool) => Some(config),
             _ => {
                 self.handoff.rejected_shape = self.handoff.rejected_shape.saturating_add(1);
                 return;

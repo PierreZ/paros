@@ -894,8 +894,8 @@ impl MatchmakerReconfigurer {
                     return ReconfigurerStep::Done { successor };
                 }
                 ReconfigurerStep::Published {
-                    old_remaining: old.quorum_size().saturating_sub(old_acks.len()),
-                    new_remaining: successor.quorum_size().saturating_sub(new_acks.len()),
+                    old_remaining: old.remaining(old_acks),
+                    new_remaining: successor.remaining(new_acks),
                 }
             }
         }

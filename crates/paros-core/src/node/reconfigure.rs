@@ -124,7 +124,7 @@ impl ColocatedNode {
         if !self.config.has_matchmakers() {
             return ReconfigureResult::Refused(ReconfigureRefusal::NoMatchmakers);
         }
-        if !config.members().iter().all(|m| self.in_pool(*m)) {
+        if !config.is_drawn_from(&self.pool) {
             return ReconfigureResult::Refused(ReconfigureRefusal::UnknownMember);
         }
         if *config == self.acceptors {

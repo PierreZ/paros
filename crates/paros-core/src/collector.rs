@@ -109,11 +109,13 @@ impl Collector {
             .map(|(watermark, retired)| (*watermark, retired.as_slice()))
     }
 
-    /// Whether `matchmaker` has already acked the floor — what a re-send
-    /// skips.
-    #[must_use]
-    pub fn acked(&self, matchmaker: MatchmakerId) -> bool {
-        self.acked_by.contains(&matchmaker)
+    /// The members of `matchmakers` that have not acked the floor — whom a
+    /// re-send addresses.
+    pub fn unacked<'a>(
+        &'a self,
+        matchmakers: &'a MatchmakerSet,
+    ) -> impl Iterator<Item = MatchmakerId> + 'a {
+        matchmakers.unanswered(&self.acked_by)
     }
 
     /// Record that the requests for this generation are out.
@@ -219,9 +221,7 @@ impl Collector {
         }
         if !matchmakers.has_quorum(&self.acked_by) {
             return GcStep::Acked {
-                remaining: matchmakers
-                    .quorum_size()
-                    .saturating_sub(self.acked_by.len()),
+                remaining: matchmakers.remaining(&self.acked_by),
             };
         }
         // Quorum intersection makes the floor effective for every future

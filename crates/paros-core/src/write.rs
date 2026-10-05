@@ -154,6 +154,19 @@ pub enum MustSync {
     Relaxed,
 }
 
+impl MustSync {
+    /// The durability a batch of `writes` needs: [`MustSync::Sync`] when any
+    /// op needs an fsync ([`WriteOp::needs_sync`]), relaxed otherwise.
+    #[must_use]
+    pub fn for_batch(writes: &[WriteOp]) -> Self {
+        if writes.iter().any(WriteOp::needs_sync) {
+            MustSync::Sync
+        } else {
+            MustSync::Relaxed
+        }
+    }
+}
+
 impl WriteOp {
     /// Whether this op requires an fsync (a promise-raise, an accepted or
     /// learned record, a truncate, or a trim-point jump).

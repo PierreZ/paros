@@ -52,6 +52,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
+use paros::client::{MatchmakersRefusal, RetireRefusal};
 use paros::{
     AcceptorConfig, Audit, Ballot, BootRefusal, Command, Deployment, EdgeRejection, GcAck, GcStep,
     HANDOFF_BATCH, Handoff, HistoryPage, JournalKey, LEADER_RECOVERY_BATCH, LogReadAnswer,
@@ -1946,9 +1947,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state().matchmaker.reconfigurer_backoff();
     }
 
-    fn reconfigure_matchmakers_acked(&self, _node: NodeId, refusal: &'static str) {
+    fn reconfigure_matchmakers_acked(&self, _node: NodeId, refusal: Option<MatchmakersRefusal>) {
         let mut st = self.state();
-        if refusal.is_empty() {
+        if refusal.is_none() {
             reach_once!(
                 st.reconfigure_matchmakers_started,
                 "generation: a client's matchmaker reconfiguration is started"
@@ -1988,35 +1989,33 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .successor_republished(node, successor);
     }
 
-    fn retire_acked(&self, _node: NodeId, accepted: bool, refusal: &str) {
+    fn retire_acked(&self, _node: NodeId, refusal: Option<RetireRefusal>) {
         let mut st = self.state();
         // The refusal legs the shared gate cannot tell apart. `not_collected`
         // is the one #123's rule turns from a workload discipline into a
         // protocol answer: the node is outside the configuration it believes
         // in force, and still refuses, because nothing proves the cluster is
         // done with the configurations it *was* in.
-        if !accepted {
-            match refusal {
-                "not_collected" => reach_once!(
-                    st.retire_not_collected,
-                    "gc: a retirement is refused for want of an effective floor"
-                ),
-                // The freshness leg (#165): outside the configuration it
-                // believes in force, but that belief predates the floor, so
-                // the node cannot tell whether the configuration the floor
-                // kept names it.
-                "stale" => reach_once!(
-                    st.retire_stale,
-                    "gc: a retirement is refused on a belief older than the floor"
-                ),
-                "leader" => reach_once!(
-                    st.retire_leader,
-                    "gc: a retirement is refused by the sitting leader"
-                ),
-                _ => {}
-            }
+        match refusal {
+            Some(RetireRefusal::NotCollected) => reach_once!(
+                st.retire_not_collected,
+                "gc: a retirement is refused for want of an effective floor"
+            ),
+            // The freshness leg (#165): outside the configuration it
+            // believes in force, but that belief predates the floor, so
+            // the node cannot tell whether the configuration the floor
+            // kept names it.
+            Some(RetireRefusal::Stale) => reach_once!(
+                st.retire_stale,
+                "gc: a retirement is refused on a belief older than the floor"
+            ),
+            Some(RetireRefusal::Leader) => reach_once!(
+                st.retire_leader,
+                "gc: a retirement is refused by the sitting leader"
+            ),
+            _ => {}
         }
-        st.matchmaker.retire_acked(accepted);
+        st.matchmaker.retire_acked(refusal.is_none());
     }
 
     fn retired(&self, node: NodeId) {

@@ -57,12 +57,11 @@ use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
 use crate::driver::ready::{crash_if, persist_writes, report_applied, storage_fault_crash};
 use crate::driver::reply::answer;
-use crate::driver::transport::{LaneOpener, Outbound, PeerQueues, peer_address, send_messages};
+use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::rpc::{
     InspectReply, Read, ReadAck, ReplySender, journal_state_to_proto, quorum_system_to_proto,
-    well_known,
 };
 use crate::storage::LogStorage;
 
@@ -114,11 +113,7 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
 
     // A replica holds no promise; the ballot the persist report is handed
     // only ever labels an accepted record, which a replica never writes.
-    let must_sync = if writes.iter().any(WriteOp::needs_sync) {
-        MustSync::Sync
-    } else {
-        MustSync::Relaxed
-    };
+    let must_sync = MustSync::for_batch(&writes);
     persist_writes(
         storage,
         &writes,
@@ -390,19 +385,12 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
         audit,
         from: me,
     };
-    let peer_queues = members
-        .into_iter()
-        .map(|(node, addr)| {
-            let client = well_known(edge.handle(), peer_address(&addr)?);
-            let regular = lanes.open(
-                "paros-replica-catch-up",
-                client,
-                Party::Node(node),
-                tunables.peer_queue_capacity,
-            );
-            Ok((node, PeerQueues { regular }))
-        })
-        .collect::<SimulationResult<BTreeMap<_, _>>>()?;
+    let peer_queues = lanes.open_all(
+        edge.handle(),
+        "paros-replica-catch-up",
+        members,
+        Party::Node,
+    )?;
     let out = Outbound::new(peer_queues, BTreeMap::new(), Vec::new(), me);
     Ok(out)
 }

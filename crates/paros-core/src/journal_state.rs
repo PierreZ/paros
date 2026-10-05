@@ -107,15 +107,6 @@ pub enum Outcome {
     Noop,
 }
 
-impl Outcome {
-    /// Whether the write this outcome answers is durably in the journal —
-    /// accepted now or earlier.
-    #[must_use]
-    pub fn is_written(&self) -> bool {
-        matches!(self, Outcome::Accepted { .. } | Outcome::Duplicate { .. })
-    }
-}
-
 impl JournalState {
     /// Apply one decided `command`. `accepted_at(seq)` answers "which write
     /// was accepted with its first record at `seq`?" for a retry below

@@ -9,6 +9,7 @@ use moonpool_rpc::RpcError;
 use paros_core::{JournalState, ReconfigureRefusal};
 
 use crate::rpc::public::WriteOutcome as WireWriteOutcome;
+pub use crate::rpc::{MatchmakersRefusal, RetireRefusal};
 use crate::rpc::{
     ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck, SetLeaderAck, TruncateAck,
     WriteAck, journal_state_from_proto,
@@ -376,21 +377,6 @@ impl ReconfigureOutcome {
     }
 }
 
-/// Why a matchmaker-set reconfiguration was refused (#125).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MatchmakersRefusal {
-    /// The deployment names no matchmakers.
-    NoMatchmakers,
-    /// The requested set is empty.
-    Empty,
-    /// The requested set names a matchmaker the node has no link to.
-    UnknownMatchmaker,
-    /// A handover is already in flight at the node asked.
-    Busy,
-    /// A label this client does not know: a newer server.
-    Unrecognized,
-}
-
 /// One matchmaker-set reconfiguration's outcome (#125).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReconfigureMatchmakersOutcome {
@@ -417,32 +403,8 @@ impl ReconfigureMatchmakersOutcome {
                 generation: ack.generation.unwrap_or(0),
             };
         }
-        Self::Refused(match ack.refusal.as_str() {
-            "no_matchmakers" => MatchmakersRefusal::NoMatchmakers,
-            "empty" => MatchmakersRefusal::Empty,
-            "unknown_matchmaker" => MatchmakersRefusal::UnknownMatchmaker,
-            "busy" => MatchmakersRefusal::Busy,
-            _ => MatchmakersRefusal::Unrecognized,
-        })
+        Self::Refused(MatchmakersRefusal::from_label(&ack.refusal))
     }
-}
-
-/// Why a node refused to retire (#123, #165).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RetireRefusal {
-    /// The deployment names no matchmakers: nothing is ever collected.
-    Plain,
-    /// The node leads.
-    Leader,
-    /// The node is a member of the configuration it believes in force.
-    Member,
-    /// The node's belief is not bound to the watermark sent: it has not
-    /// heard the configuration the floor kept (re-read `Inspect`).
-    Stale,
-    /// No effective floor above the node's membership fence.
-    NotCollected,
-    /// A label this client does not know: a newer server.
-    Unrecognized,
 }
 
 /// One retirement's outcome (#123).
@@ -466,13 +428,6 @@ impl RetireOutcome {
         if ack.accepted {
             return Self::Retired;
         }
-        Self::Refused(match ack.refusal.as_str() {
-            "plain" => RetireRefusal::Plain,
-            "leader" => RetireRefusal::Leader,
-            "member" => RetireRefusal::Member,
-            "stale" => RetireRefusal::Stale,
-            "not_collected" => RetireRefusal::NotCollected,
-            _ => RetireRefusal::Unrecognized,
-        })
+        Self::Refused(RetireRefusal::from_label(&ack.refusal))
     }
 }

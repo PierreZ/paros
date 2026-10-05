@@ -430,7 +430,7 @@ impl ReplicaNode {
         if !self.config.has_matchmakers() || ballot <= self.acceptors_since {
             return;
         }
-        if !config.members().iter().all(|m| self.in_pool(*m)) {
+        if !config.is_drawn_from(self.config.pool()) {
             return;
         }
         self.acceptors = config;
@@ -439,7 +439,8 @@ impl ReplicaNode {
     }
 
     /// Fold an acceptor's watermark into the read at `ctx`: the node's
-    /// guards (`on_pre_read_ack`), then the tally; `step` serves after.
+    /// guard, then the tally (which owns the row guard); `step` serves
+    /// after.
     fn on_pre_read_ack(
         &mut self,
         from: NodeId,
@@ -449,12 +450,6 @@ impl ReplicaNode {
     ) {
         if !self.in_pool(from) {
             self.counters.ignored += 1;
-            return;
-        }
-        let Some(read) = self.quorum_reads.get(ctx) else {
-            return;
-        };
-        if !read.config().is_phase1_addressee(from, read.row()) {
             return;
         }
         // What the fold did matters only through the serve `step` runs next.

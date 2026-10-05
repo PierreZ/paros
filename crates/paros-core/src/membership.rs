@@ -162,6 +162,17 @@ fn residue(value: u64, modulus: usize) -> usize {
     usize::try_from(value % modulus).unwrap_or(0)
 }
 
+/// The rank owning `slot` among `count` peers of one tier (a proxy leader,
+/// a replica): `slot % count`, `None` when the tier is absent (`count` 0).
+fn slot_rank(slot: Slot, count: usize) -> Option<u64> {
+    (count != 0).then(|| slot.0 % u64::try_from(count).unwrap_or(u64::MAX))
+}
+
+/// Whether `rank` names one of `count` peers of a tier.
+fn rank_is_in(rank: u64, count: usize) -> bool {
+    u64::try_from(count).is_ok_and(|count| rank < count)
+}
+
 /// Whether every member of `cell` voted.
 fn all_voted<'a, I: Ord + 'a>(cell: impl IntoIterator<Item = &'a I>, voters: &BTreeSet<I>) -> bool {
     cell.into_iter().all(|m| voters.contains(m))
@@ -837,6 +848,24 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     pub fn contains(&self, node: Id) -> bool {
         self.members.binary_search(&node).is_ok()
     }
+
+    /// Whether every member is in `pool` (sorted and deduplicated): the
+    /// wire-hygiene question every deployment asks of a configuration it
+    /// learns, registers or is asked to run — one naming a node outside the
+    /// pool is not one it can address.
+    #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// If `pool` is not sorted and deduplicated (a programmer error: every
+    /// pool is normalized where it is built).
+    pub fn is_drawn_from(&self, pool: &[Id]) -> bool {
+        assert!(
+            pool.windows(2).all(|w| w[0] < w[1]),
+            "a pool is sorted and deduplicated"
+        );
+        self.members.iter().all(|m| pool.binary_search(m).is_ok())
+    }
 }
 
 /// Stable identity of a matchmaker within the matchmaker pool. A distinct
@@ -869,17 +898,13 @@ impl ProxyId {
     /// zero — the plain deployment, whose Phase 2 stays colocated.
     #[must_use]
     pub fn of(slot: Slot, proxy_count: usize) -> Option<Self> {
-        if proxy_count == 0 {
-            return None;
-        }
-        let count = u64::try_from(proxy_count).unwrap_or(u64::MAX);
-        Some(Self(slot.0 % count))
+        slot_rank(slot, proxy_count).map(Self)
     }
 
     /// Whether this id names a proxy of a deployment of `proxy_count`.
     #[must_use]
     pub fn is_in(self, proxy_count: usize) -> bool {
-        u64::try_from(proxy_count).is_ok_and(|count| self.0 < count)
+        rank_is_in(self.0, proxy_count)
     }
 }
 
@@ -906,17 +931,13 @@ impl ReplicaId {
     /// count is zero — the plain deployment, where the node asked replies.
     #[must_use]
     pub fn of(slot: Slot, replica_count: usize) -> Option<Self> {
-        if replica_count == 0 {
-            return None;
-        }
-        let count = u64::try_from(replica_count).unwrap_or(u64::MAX);
-        Some(Self(slot.0 % count))
+        slot_rank(slot, replica_count).map(Self)
     }
 
     /// Whether this id names a replica of a deployment of `replica_count`.
     #[must_use]
     pub fn is_in(self, replica_count: usize) -> bool {
-        u64::try_from(replica_count).is_ok_and(|count| self.0 < count)
+        rank_is_in(self.0, replica_count)
     }
 }
 
@@ -1059,6 +1080,36 @@ impl MatchmakerSet {
     #[must_use]
     pub fn has_quorum(&self, voters: &BTreeSet<MatchmakerId>) -> bool {
         QuorumSystem::is_majority(&self.members, voters)
+    }
+
+    /// How many more answers a tally holding `voters` still waits for — the
+    /// one thing a predicate cannot report. Every tally over a voter set asks
+    /// here; the reconfigurer's stop phase, which keys its acks by matchmaker,
+    /// spells the same subtraction itself. Zero once [`Self::has_quorum`]
+    /// holds over voters drawn from this set.
+    ///
+    /// # Panics
+    ///
+    /// If the set is not well formed ([`Self::quorum_size`]).
+    #[must_use]
+    pub fn remaining(&self, voters: &BTreeSet<MatchmakerId>) -> usize {
+        let remaining = self.quorum_size().saturating_sub(voters.len());
+        if self.has_quorum(voters) {
+            assert!(remaining == 0, "a held quorum waits for nothing more");
+        }
+        remaining
+    }
+
+    /// The members not among `voters`, in id order — whom a tally's re-send
+    /// addresses.
+    pub fn unanswered<'a>(
+        &'a self,
+        voters: &'a BTreeSet<MatchmakerId>,
+    ) -> impl Iterator<Item = MatchmakerId> + 'a {
+        self.members
+            .iter()
+            .copied()
+            .filter(|mm| !voters.contains(mm))
     }
 
     /// Whether `id` is a member.

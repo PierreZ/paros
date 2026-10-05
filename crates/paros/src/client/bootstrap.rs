@@ -21,7 +21,7 @@ use super::outcome::SetLeaderOutcome;
 use crate::machine::CellPlan;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{InitRpc, InspectRpc};
-use crate::rpc::{InspectReply, InspectRequest, Read, well_known};
+use crate::rpc::{InspectReply, InspectRequest, well_known};
 
 /// What one `Init` sent to a seed came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,14 +203,7 @@ async fn claim_cell_once<P: Providers>(
     control: JournalKey,
     coordinator: NodeId,
 ) -> ClaimCellOutcome {
-    let read = Read {
-        journal: control.journal.0,
-        tenant: control.tenant.0,
-        from_seq: 0,
-        limit: 1,
-        wait_ms: 0,
-    };
-    let Some(state) = client.read_any(&read, 0).await.outcome.state() else {
+    let Some(state) = client.journal_state(control, 0).await else {
         return ClaimCellOutcome::Unavailable;
     };
     if state.generation.0 > 0 {

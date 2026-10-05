@@ -20,8 +20,8 @@ use paros_core::{Config, MatchmakerId, NodeId, QuorumSystem, Slot};
 use crate::action::{Action, ActionKind, BallotSpec, Phase};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
-    CLIENT, REPLIES_AND_BEATS, REPLIES_ONLY, TIMEOUT, all_but, applied, chosen_text, crash, fresh,
-    is_phase2, open, propose, restart, start_election, text, tick,
+    CLIENT, REPLIES_AND_BEATS, REPLIES_ONLY, TIMEOUT, applied, chosen_text, crash, fresh,
+    is_phase2, on_decree, on_log, open, propose, restart, start_election, text, tick,
 };
 use crate::level::script::{Script, kind, kind_at, not_to, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
@@ -65,7 +65,8 @@ const FOUR_ACCEPTORS: &[u64] = &[1, 2, 3, 4];
 /// The acceptor grid every grid level lays out: two rows of three.
 const GRID: QuorumSystem = QuorumSystem::Grid { rows: 2, cols: 3 };
 
-/// Every prompt-governing flag. A level removes exactly the one it teaches.
+/// Every prompt-governing flag. A level pins off the ones it teaches
+/// (`pinned_off`), which keeps them off whatever this list says.
 const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::AcceptorReplies,
     AutomationFlag::CommitOverwrite,
@@ -85,44 +86,6 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::GenerationFence,
     AutomationFlag::MayRetire,
 ];
-
-/// Every role but the column a grid slot goes to.
-const NO_GRID_COLUMN: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::GridColumn]);
-
-/// Every role but serving a leaderless read.
-const NO_QUORUM_READ_SERVE: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::QuorumReadServe]);
-
-/// Every role but settling a damaged slot.
-const NO_REPAIR_VERDICT: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::RepairVerdict]);
-
-/// Every role but the answer a wiped node's boot gets.
-const NO_WIPED_REJOIN: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::WipedRejoin]);
-
-/// Every role but judging a cross-configuration Phase 1.
-const NO_PHASE1_COMPLETE: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::Phase1Complete]);
-
-/// Every role but fencing a matchmaker generation.
-const NO_GENERATION_FENCE: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::GenerationFence]);
-
-/// Every role but answering a retire request.
-const NO_MAY_RETIRE: &[AutomationFlag] =
-    &all_but::<16>(ALL_ROLES_AUTOMATIC, &[AutomationFlag::MayRetire]);
-
-/// Every role but the two a reconfiguration teaches: judging a
-/// cross-configuration Phase 1, and abandoning a stale belief.
-const NO_PHASE1_NOR_STALE: &[AutomationFlag] = &all_but::<15>(
-    ALL_ROLES_AUTOMATIC,
-    &[
-        AutomationFlag::Phase1Complete,
-        AutomationFlag::StaleConfiguration,
-    ],
-);
 
 /// The toggles a matchmaker level offers once the player has earned the
 /// matchmaker pump.
@@ -281,37 +244,38 @@ no such set exists.",
         )))
     },
     goal: |world| {
-        let Some(decree) = world.decree() else {
-            return GoalStatus::Open("This level runs in the single-decree world.".to_string());
-        };
-        let Some(chosen) = chosen_text(world) else {
-            return GoalStatus::Open(
-                "Get a value chosen. Two acceptors are a Phase-2 quorum here.".to_string(),
-            );
-        };
-        let first = decree.completed_phase1().first().map(|c| c.ballot);
-        let later = decree
-            .completed_phase1()
-            .iter()
-            .find(|campaign| Some(campaign.ballot) > first);
-        match later {
-            Some(campaign) if text(&campaign.proposed) == chosen => GoalStatus::Reached(format!(
-                "Two acceptors chose {chosen}, and three acceptors had to answer to find it \
+        on_decree(world, |decree| {
+            let Some(chosen) = chosen_text(world) else {
+                return GoalStatus::Open(
+                    "Get a value chosen. Two acceptors are a Phase-2 quorum here.".to_string(),
+                );
+            };
+            let first = decree.completed_phase1().first().map(|c| c.ballot);
+            let later = decree
+                .completed_phase1()
+                .iter()
+                .find(|campaign| Some(campaign.ballot) > first);
+            match later {
+                Some(campaign) if text(&campaign.proposed) == chosen => {
+                    GoalStatus::Reached(format!(
+                        "Two acceptors chose {chosen}, and three acceptors had to answer to find it \
                  again. Ballot {}.{} reached {:?}. Every set of three acceptors here contains \
                  one of the two that voted, and that is what `q1 + q2 > n` says.",
-                campaign.ballot.round,
-                campaign.ballot.node.0,
-                campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
-            )),
-            Some(campaign) => GoalStatus::Failed(format!(
-                "A campaign proposed {}, but the cluster already chose {chosen}.",
-                text(&campaign.proposed)
-            )),
-            None => GoalStatus::Open(format!(
-                "{chosen} is chosen. Now run a second ballot, and read what its promises \
+                        campaign.ballot.round,
+                        campaign.ballot.node.0,
+                        campaign.reach.iter().map(|n| n.0).collect::<Vec<_>>()
+                    ))
+                }
+                Some(campaign) => GoalStatus::Failed(format!(
+                    "A campaign proposed {}, but the cluster already chose {chosen}.",
+                    text(&campaign.proposed)
+                )),
+                None => GoalStatus::Open(format!(
+                    "{chosen} is chosen. Now run a second ballot, and read what its promises \
                  report."
-            )),
-        }
+                )),
+            }
+        })
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {
@@ -381,49 +345,50 @@ another column.",
         "ColocatedNode::propose_in",
         "docs/references/papers — Whittaker et al., Compartmentalized Paxos §3.2",
     ],
-    automation_on: NO_GRID_COLUMN,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::GridColumn],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::GridColumn],
     allowed_actions: GRID_ACTIONS,
     setup: || fresh(6, GRID, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let Some(leader) = log.leader() else {
-            return GoalStatus::Open("Elect a leader. A whole row answers Phase 1.".to_string());
-        };
-        let Some(node) = log.node(leader) else {
-            return GoalStatus::Open("The leader is not running.".to_string());
-        };
-        let columns: Vec<usize> = [Slot(0), Slot(1)]
-            .iter()
-            .filter_map(|slot| node.acceptors().column_of(*slot))
-            .collect();
-        let everywhere = (0..6).all(|id| applied(world, id).len() >= 2);
-        let stray = log
-            .node(NodeId(4))
-            .is_some_and(|node| node.acceptor().record(Slot(0)).is_some())
-            && node.acceptors().column_of(Slot(0)).is_some_and(|column| {
-                !node
-                    .acceptors()
-                    .is_phase2_addressee(NodeId(4), Some(column))
-            });
-        match (everywhere, columns.as_slice(), stray) {
-            (true, [first, second], true) if first != second => GoalStatus::Reached(format!(
-                "Column {first} decided slot 0, column {second} decided slot 1, and all six \
+        on_log(world, |log| {
+            let Some(leader) = log.leader() else {
+                return GoalStatus::Open(
+                    "Elect a leader. A whole row answers Phase 1.".to_string(),
+                );
+            };
+            let Some(node) = log.node(leader) else {
+                return GoalStatus::Open("The leader is not running.".to_string());
+            };
+            let columns: Vec<usize> = [Slot(0), Slot(1)]
+                .iter()
+                .filter_map(|slot| node.acceptors().column_of(*slot))
+                .collect();
+            let everywhere = (0..6).all(|id| applied(world, id).len() >= 2);
+            let stray = log
+                .node(NodeId(4))
+                .is_some_and(|node| node.acceptor().record(Slot(0)).is_some())
+                && node.acceptors().column_of(Slot(0)).is_some_and(|column| {
+                    !node
+                        .acceptors()
+                        .is_phase2_addressee(NodeId(4), Some(column))
+                });
+            match (everywhere, columns.as_slice(), stray) {
+                (true, [first, second], true) if first != second => GoalStatus::Reached(format!(
+                    "Column {first} decided slot 0, column {second} decided slot 1, and all six \
                  nodes applied both slots. Node 4 also holds the value of slot 0. Its vote for \
                  that slot counted for nothing, because it is not in column {first}."
-            )),
-            (true, [first, second], false) if first != second => GoalStatus::Open(format!(
-                "Both slots are chosen, on columns {first} and {second}. Now send a copy of \
+                )),
+                (true, [first, second], false) if first != second => GoalStatus::Open(format!(
+                    "Both slots are chosen, on columns {first} and {second}. Now send a copy of \
                  the Accept for slot 0 to a node outside column {first}, and look at the tally."
-            )),
-            _ => GoalStatus::Open(
-                "Get two commands chosen and applied on all six nodes.".to_string(),
-            ),
-        }
+                )),
+                _ => GoalStatus::Open(
+                    "Get two commands chosen and applied on all six nodes.".to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -514,7 +479,7 @@ serve the read.",
         "Replica::covers",
         "docs/references/papers — Whittaker et al., Compartmentalized Paxos §3.4",
     ],
-    automation_on: NO_QUORUM_READ_SERVE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[
         AutomationFlag::QuorumReadServe,
         AutomationFlag::DeliverHeartbeats,
@@ -524,57 +489,59 @@ serve the read.",
     allowed_actions: QUORUM_READ_ACTIONS,
     setup: || fresh(6, GRID, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Err(detail) = log.linearizable() {
-            return GoalStatus::Failed(detail);
-        }
-        if log.beats_broadcast() > 0 {
-            return GoalStatus::Failed(
-                "A leader broadcast a beat. This level answers its read without one.".to_string(),
-            );
-        }
-        let served: Vec<(NodeId, Option<Slot>)> = log
-            .reads()
-            .into_iter()
-            .filter(|(_, _, served)| *served)
-            .map(|(node, index, _)| (node, index))
-            .collect();
-        let leader = log.leader();
-        // A read the cluster could answer at once teaches nothing: the wait is
-        // the half of the rule this level exists for. So the read must reach at
-        // least the slot of a write the client already holds an ack for, which
-        // is the write a stale answer would lose.
-        let acked = log.highest_acked_slot();
-        match served.first() {
-            Some((node, index)) if Some(*node) != leader && *index >= acked && acked.is_some() => {
-                GoalStatus::Reached(format!(
-                    "Node {} answered the read at {}, and it does not lead. No node sent a \
+        on_log(world, |log| {
+            if let Err(detail) = log.linearizable() {
+                return GoalStatus::Failed(detail);
+            }
+            if log.beats_broadcast() > 0 {
+                return GoalStatus::Failed(
+                    "A leader broadcast a beat. This level answers its read without one."
+                        .to_string(),
+                );
+            }
+            let served: Vec<(NodeId, Option<Slot>)> = log
+                .reads()
+                .into_iter()
+                .filter(|(_, _, served)| *served)
+                .map(|(node, index, _)| (node, index))
+                .collect();
+            let leader = log.leader();
+            // A read the cluster could answer at once teaches nothing: the wait is
+            // the half of the rule this level exists for. So the read must reach at
+            // least the slot of a write the client already holds an ack for, which
+            // is the write a stale answer would lose.
+            let acked = log.highest_acked_slot();
+            match served.first() {
+                Some((node, index))
+                    if Some(*node) != leader && *index >= acked && acked.is_some() =>
+                {
+                    GoalStatus::Reached(format!(
+                        "Node {} answered the read at {}, and it does not lead. No node sent a \
                      beat, and the leader opened no read round. The client already holds an ack \
                      for {}, and the answer is at or above that slot. The history is \
                      linearizable.",
-                    node.0,
-                    prefix_at(*index),
-                    prefix_at(acked)
-                ))
-            }
-            Some((node, _)) if Some(*node) == leader => GoalStatus::Open(format!(
-                "Node {} served the read, and it is the leader. Ask a follower instead, \
+                        node.0,
+                        prefix_at(*index),
+                        prefix_at(acked)
+                    ))
+                }
+                Some((node, _)) if Some(*node) == leader => GoalStatus::Open(format!(
+                    "Node {} served the read, and it is the leader. Ask a follower instead, \
                  because any replica can answer.",
-                node.0
-            )),
-            Some((node, index)) => GoalStatus::Open(format!(
-                "Node {} answered the read at {}, and the client holds no ack at or below that \
+                    node.0
+                )),
+                Some((node, index)) => GoalStatus::Open(format!(
+                    "Node {} answered the read at {}, and the client holds no ack at or below that \
                  slot. Get a command chosen and acknowledged first. Then ask for the read.",
-                node.0,
-                prefix_at(*index)
-            )),
-            None => GoalStatus::Open(
-                "Ask a follower for a read. Then decide when the follower may answer it."
-                    .to_string(),
-            ),
-        }
+                    node.0,
+                    prefix_at(*index)
+                )),
+                None => GoalStatus::Open(
+                    "Ask a follower for a read. Then decide when the follower may answer it."
+                        .to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -666,58 +633,57 @@ move it again.",
     allowed_actions: HANDOFF_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let Some(handoff) = log.handoffs().first().copied() else {
-            return GoalStatus::Open(
-                "Get a command chosen. Then move the leadership to a peer.".to_string(),
-            );
-        };
-        let Some(node) = log.node(handoff.to) else {
-            return GoalStatus::Open("The successor is not running.".to_string());
-        };
-        if !node.is_leader() {
-            return GoalStatus::Open(format!(
-                "The old leader offered the authority to node {}. Deliver the message that \
+        on_log(world, |log| {
+            let Some(handoff) = log.handoffs().first().copied() else {
+                return GoalStatus::Open(
+                    "Get a command chosen. Then move the leadership to a peer.".to_string(),
+                );
+            };
+            let Some(node) = log.node(handoff.to) else {
+                return GoalStatus::Open("The successor is not running.".to_string());
+            };
+            if !node.is_leader() {
+                return GoalStatus::Open(format!(
+                    "The old leader offered the authority to node {}. Deliver the message that \
                  carries it.",
-                handoff.to.0
-            ));
-        }
-        if node.ballot() != handoff.ballot {
-            return GoalStatus::Failed(format!(
-                "Node {} leads at a different ballot. It did not inherit the authority. It \
+                    handoff.to.0
+                ));
+            }
+            if node.ballot() != handoff.ballot {
+                return GoalStatus::Failed(format!(
+                    "Node {} leads at a different ballot. It did not inherit the authority. It \
                  won a new one.",
-                handoff.to.0
-            ));
-        }
-        // A command chosen **under the successor** is one at or above the
-        // frontier it was handed: everything below that came from the
-        // predecessor's own leadership.
-        let under_successor = node.replica().chosen_index() >= Some(handoff.next_slot);
-        let refusal = log.handoff_refusal(handoff.to);
-        match (under_successor, refusal) {
-            (true, Some(_)) => GoalStatus::Reached(format!(
-                "Node {} leads at ballot {}.{}, which node {} won. No election ran, and the \
+                    handoff.to.0
+                ));
+            }
+            // A command chosen **under the successor** is one at or above the
+            // frontier it was handed: everything below that came from the
+            // predecessor's own leadership.
+            let under_successor = node.replica().chosen_index() >= Some(handoff.next_slot);
+            let refusal = log.handoff_refusal(handoff.to);
+            match (under_successor, refusal) {
+                (true, Some(_)) => GoalStatus::Reached(format!(
+                    "Node {} leads at ballot {}.{}, which node {} won. No election ran, and the \
                  cluster chose slot {} under the inherited authority. Node {} must not pass the \
                  authority on. An authority moves once, and a second hop needs a durable record \
                  that paros does not keep.",
-                handoff.to.0,
-                handoff.ballot.round,
-                handoff.ballot.node.0,
-                handoff.from.0,
-                handoff.next_slot.0,
-                handoff.to.0
-            )),
-            (false, _) => GoalStatus::Open(format!(
-                "Node {} holds the authority. Get a command chosen under it.",
-                handoff.to.0
-            )),
-            (true, None) => GoalStatus::Failed(format!(
-                "Node {} can pass the authority on. The rule allows one hop only.",
-                handoff.to.0
-            )),
-        }
+                    handoff.to.0,
+                    handoff.ballot.round,
+                    handoff.ballot.node.0,
+                    handoff.from.0,
+                    handoff.next_slot.0,
+                    handoff.to.0
+                )),
+                (false, _) => GoalStatus::Open(format!(
+                    "Node {} holds the authority. Get a command chosen under it.",
+                    handoff.to.0
+                )),
+                (true, None) => GoalStatus::Failed(format!(
+                    "Node {} can pass the authority on. The rule allows one hop only.",
+                    handoff.to.0
+                )),
+            }
+        })
     },
     hint: |world, mistakes| {
         let handed = world.log().is_some_and(|log| !log.handoffs().is_empty());
@@ -796,7 +762,7 @@ Phase 1 is complete.",
         "Proposer::phase1_won",
         "docs/references/papers — Whittaker et al., Matchmaker Paxos §3",
     ],
-    automation_on: NO_PHASE1_COMPLETE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[
         AutomationFlag::Phase1Complete,
         AutomationFlag::DeliverMatchmakerReplies,
@@ -809,38 +775,37 @@ Phase 1 is complete.",
     allowed_actions: MATCHMAKING_ACTIONS,
     setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[], 0),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let Some(leader) = log.leader() else {
-            return GoalStatus::Open(
-                "Elect a leader. A candidate asks the matchmakers first.".to_string(),
-            );
-        };
-        let prior = log.prior_configurations(leader);
-        if prior.is_empty() {
-            return GoalStatus::Open(format!(
-                "Node {} leads, and the matchmakers reported no earlier set. Get a command \
+        on_log(world, |log| {
+            let Some(leader) = log.leader() else {
+                return GoalStatus::Open(
+                    "Elect a leader. A candidate asks the matchmakers first.".to_string(),
+                );
+            };
+            let prior = log.prior_configurations(leader);
+            if prior.is_empty() {
+                return GoalStatus::Open(format!(
+                    "Node {} leads, and the matchmakers reported no earlier set. Get a command \
                  chosen. Then remove node {} and elect another node.",
-                leader.0, leader.0
-            ));
-        }
-        let executed = commands(world, leader.0);
-        if executed.len() < 2 {
-            return GoalStatus::Open(format!(
-                "The cluster elected node {} across a set that the matchmakers named. Get one \
+                    leader.0, leader.0
+                ));
+            }
+            let executed = commands(world, leader.0);
+            if executed.len() < 2 {
+                return GoalStatus::Open(format!(
+                    "The cluster elected node {} across a set that the matchmakers named. Get one \
                  more command chosen under it.",
-                leader.0
-            ));
-        }
-        GoalStatus::Reached(format!(
-            "Node {} leads, and the cluster elected it across the acceptor set that the \
+                    leader.0
+                ));
+            }
+            GoalStatus::Reached(format!(
+                "Node {} leads, and the cluster elected it across the acceptor set that the \
              matchmakers reported for the earlier ballot. It executed {} commands. No Prepare \
              went out before a matchmaker quorum answered. Phase 1 closed only after that set \
              held a quorum of its own.",
-            leader.0,
-            executed.len()
-        ))
+                leader.0,
+                executed.len()
+            ))
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -925,7 +890,7 @@ together is a different claim. The card asks you which claim Phase 1 needs.",
         "Registration::reconfiguration",
         "docs/references/papers — Whittaker et al., Matchmaker Paxos §4.2",
     ],
-    automation_on: NO_PHASE1_NOR_STALE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[
         AutomationFlag::Phase1Complete,
         AutomationFlag::StaleConfiguration,
@@ -935,58 +900,57 @@ together is a different claim. The card asks you which claim Phase 1 needs.",
     allowed_actions: RECONFIGURE_ACTIONS,
     setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[], 0),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let Some(leader) = log.leader() else {
-            return GoalStatus::Open("Elect a leader, then grow onto node 3.".to_string());
-        };
-        let Some(node) = log.node(leader) else {
-            return GoalStatus::Open("The leader is not running.".to_string());
-        };
-        let members = node.acceptors().members().len();
-        if members < 4 {
-            return GoalStatus::Open(format!(
-                "Node {} leads a set of {members}. Ask it to run with the acceptors 0, 1, 2 \
+        on_log(world, |log| {
+            let Some(leader) = log.leader() else {
+                return GoalStatus::Open("Elect a leader, then grow onto node 3.".to_string());
+            };
+            let Some(node) = log.node(leader) else {
+                return GoalStatus::Open("The leader is not running.".to_string());
+            };
+            let members = node.acceptors().members().len();
+            if members < 4 {
+                return GoalStatus::Open(format!(
+                    "Node {} leads a set of {members}. Ask it to run with the acceptors 0, 1, 2 \
                  and 3.",
-                leader.0
-            ));
-        }
-        let prior = log.prior_configurations(leader);
-        if prior.len() < 2 {
-            return GoalStatus::Open(format!(
-                "The new set is in force. Now remove node {} and elect another node. The \
+                    leader.0
+                ));
+            }
+            let prior = log.prior_configurations(leader);
+            if prior.len() < 2 {
+                return GoalStatus::Open(format!(
+                    "The new set is in force. Now remove node {} and elect another node. The \
                  matchmakers tell that campaign about both sets.",
-                leader.0
-            ));
-        }
-        // Which command that is belongs to the client, not to this level: the
-        // last value it asked for is the one the new set decided.
-        let latest = log.proposed_values().last().cloned();
-        let executed = latest
-            .as_ref()
-            .is_some_and(|value| commands(world, 3).iter().any(|command| command == value));
-        if !executed {
-            return GoalStatus::Open(
-                "Get one more command chosen under the new set, and let node 3 execute it."
-                    .to_string(),
-            );
-        }
-        GoalStatus::Reached(format!(
-            "Node {} leads a set of four at ballot {}, which is above the ballot that bound \
+                    leader.0
+                ));
+            }
+            // Which command that is belongs to the client, not to this level: the
+            // last value it asked for is the one the new set decided.
+            let latest = log.proposed_values().last().cloned();
+            let executed = latest
+                .as_ref()
+                .is_some_and(|value| commands(world, 3).iter().any(|command| command == value));
+            if !executed {
+                return GoalStatus::Open(
+                    "Get one more command chosen under the new set, and let node 3 execute it."
+                        .to_string(),
+                );
+            }
+            GoalStatus::Reached(format!(
+                "Node {} leads a set of four at ballot {}, which is above the ballot that bound \
              the set of three. Node 3 promised that ballot before any Accept reached it, and it \
              executed the command chosen under the new set. The campaign that elected node {} \
              had to hold a Phase-1 quorum of both sets. A quorum of the {} acceptors that they \
              name together is not enough.",
-            leader.0,
-            crate::view::show_ballot(node.acceptors_since()),
-            leader.0,
-            prior
-                .iter()
-                .flat_map(|config| config.members().iter().copied())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-        ))
+                leader.0,
+                crate::view::show_ballot(node.acceptors_since()),
+                leader.0,
+                prior
+                    .iter()
+                    .flat_map(|config| config.members().iter().copied())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            ))
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -1087,69 +1051,68 @@ reports.",
         "Ready::gc_requests",
         "docs/analysis/consensus/matchmaker-gc-and-generations.md",
     ],
-    automation_on: NO_MAY_RETIRE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::MayRetire],
     unlocked: MATCHMAKER_TOGGLES,
     unlocks: &[AutomationFlag::MayRetire],
     allowed_actions: GC_ACTIONS,
     setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[], 0),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let refused = !log.refused_retires().is_empty();
-        if !log.retired(NodeId(3)) {
-            let floor = log.leader().and_then(|leader| log.gc_effective(leader));
-            return match floor {
-                Some((watermark, retirable)) if retirable.contains(&NodeId(3)) => {
-                    GoalStatus::Open(format!(
-                        "The floor {} is in force, and it releases node 3. Ask node 3 to \
+        on_log(world, |log| {
+            let refused = !log.refused_retires().is_empty();
+            if !log.retired(NodeId(3)) {
+                let floor = log.leader().and_then(|leader| log.gc_effective(leader));
+                return match floor {
+                    Some((watermark, retirable)) if retirable.contains(&NodeId(3)) => {
+                        GoalStatus::Open(format!(
+                            "The floor {} is in force, and it releases node 3. Ask node 3 to \
                          retire, and give it that watermark.",
-                        crate::view::show_ballot(watermark)
-                    ))
-                }
-                _ => GoalStatus::Open(
-                    "Take node 3 out of the acceptor set. Then beat until a matchmaker quorum \
+                            crate::view::show_ballot(watermark)
+                        ))
+                    }
+                    _ => GoalStatus::Open(
+                        "Take node 3 out of the acceptor set. Then beat until a matchmaker quorum \
                      holds the floor."
-                        .to_string(),
-                ),
-            };
-        }
-        if !refused {
-            return GoalStatus::Failed(
-                "Node 3 retired, and the leader refused no request for a lack of evidence. \
+                            .to_string(),
+                    ),
+                };
+            }
+            if !refused {
+                return GoalStatus::Failed(
+                    "Node 3 retired, and the leader refused no request for a lack of evidence. \
                  This level is about that refusal."
-                    .to_string(),
-            );
-        }
-        // The evidence itself, and not only the outcome: the watermark the
-        // shutdown rested on must be a floor a leadership really reports. A
-        // number that no leader reports is not evidence, whatever it is above.
-        let Some((_, watermark)) = log
-            .retirements()
-            .iter()
-            .copied()
-            .find(|(id, _)| *id == NodeId(3))
-        else {
-            return GoalStatus::Failed(
-                "Node 3 is retired, and the world recorded no watermark for it.".to_string(),
-            );
-        };
-        if !log.reports_gc_floor(watermark) {
-            return GoalStatus::Failed(format!(
-                "Node 3 retired on the watermark {}, and no leader reports that floor. An \
+                        .to_string(),
+                );
+            }
+            // The evidence itself, and not only the outcome: the watermark the
+            // shutdown rested on must be a floor a leadership really reports. A
+            // number that no leader reports is not evidence, whatever it is above.
+            let Some((_, watermark)) = log
+                .retirements()
+                .iter()
+                .copied()
+                .find(|(id, _)| *id == NodeId(3))
+            else {
+                return GoalStatus::Failed(
+                    "Node 3 is retired, and the world recorded no watermark for it.".to_string(),
+                );
+            };
+            if !log.reports_gc_floor(watermark) {
+                return GoalStatus::Failed(format!(
+                    "Node 3 retired on the watermark {}, and no leader reports that floor. An \
                  operator reads a floor from a leader that made it effective.",
-                crate::view::show_ballot(watermark)
-            ));
-        }
-        GoalStatus::Reached(format!(
-            "Node 3 is retired, on the floor {}. The leader reports that floor, and a \
+                    crate::view::show_ballot(watermark)
+                ));
+            }
+            GoalStatus::Reached(format!(
+                "Node 3 is retired, on the floor {}. The leader reports that floor, and a \
              matchmaker quorum wrote it to disk. The first request carried no such evidence, and \
              node 3 refused it with \"not collected\". An installed successor set does not mean \
              a collected predecessor. That floor is above every ballot that bound a set that \
              names node 3.",
-            crate::view::show_ballot(watermark)
-        ))
+                crate::view::show_ballot(watermark)
+            ))
+        })
     },
     hint: |world, mistakes| {
         let effective = world
@@ -1269,67 +1232,66 @@ the matchmaker does with it.",
         "ColocatedNode::learn_matchmakers",
         "docs/analysis/consensus/matchmaker-gc-and-generations.md",
     ],
-    automation_on: NO_GENERATION_FENCE,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::GenerationFence],
     unlocked: MATCHMAKER_TOGGLES,
     unlocks: &[AutomationFlag::GenerationFence],
     allowed_actions: GENERATIONS_ACTIONS,
     setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3], HANDOVER_STALL),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let active: Vec<u64> = log
-            .matchmakers()
-            .iter()
-            .filter(|process| {
-                process.role().is_some_and(|role| {
-                    role.set().generation.0 == 1
-                        && role.phase() == paros_core::MatchmakerPhase::Active
+        on_log(world, |log| {
+            let active: Vec<u64> = log
+                .matchmakers()
+                .iter()
+                .filter(|process| {
+                    process.role().is_some_and(|role| {
+                        role.set().generation.0 == 1
+                            && role.phase() == paros_core::MatchmakerPhase::Active
+                    })
                 })
-            })
-            .map(|process| process.id().0)
-            .collect();
-        if active.len() < 3 {
-            return GoalStatus::Open(format!(
-                "Generation 1 is active at {} of its three members. Drive the handover: stop, \
+                .map(|process| process.id().0)
+                .collect();
+            if active.len() < 3 {
+                return GoalStatus::Open(format!(
+                    "Generation 1 is active at {} of its three members. Drive the handover: stop, \
                  bootstrap, decide and publish.",
-                active.len()
-            ));
-        }
-        // The node that registered through generation 1 must be the leader
-        // itself. Another node's completed campaign proves nothing about this
-        // leadership: `H_b` is per campaign, and a campaign that a node
-        // abandoned or lost took its own registration with it.
-        let registered = log.pool().iter().copied().find(|id| {
-            log.node(*id).is_some_and(|node| {
-                node.matchmaker_set()
-                    .is_some_and(|set| set.generation.0 == 1)
-            }) && !log.prior_configurations(*id).is_empty()
-        });
-        let Some(leader) = log.leader() else {
-            return GoalStatus::Open(
-                "Generation 1 serves. Now elect a leader through it.".to_string(),
-            );
-        };
-        if registered != Some(leader) {
-            return GoalStatus::Open(
-                "Elect a leader that registers its ballot with generation 1.".to_string(),
-            );
-        }
-        if commands(world, leader.0).is_empty() {
-            return GoalStatus::Open(format!(
-                "Node {} leads through generation 1. Get a command chosen.",
-                leader.0
-            ));
-        }
-        GoalStatus::Reached(format!(
-            "Generation 1 = {active:?} serves matchmaking at every member. The matchmaker that \
+                    active.len()
+                ));
+            }
+            // The node that registered through generation 1 must be the leader
+            // itself. Another node's completed campaign proves nothing about this
+            // leadership: `H_b` is per campaign, and a campaign that a node
+            // abandoned or lost took its own registration with it.
+            let registered = log.pool().iter().copied().find(|id| {
+                log.node(*id).is_some_and(|node| {
+                    node.matchmaker_set()
+                        .is_some_and(|set| set.generation.0 == 1)
+                }) && !log.prior_configurations(*id).is_empty()
+            });
+            let Some(leader) = log.leader() else {
+                return GoalStatus::Open(
+                    "Generation 1 serves. Now elect a leader through it.".to_string(),
+                );
+            };
+            if registered != Some(leader) {
+                return GoalStatus::Open(
+                    "Elect a leader that registers its ballot with generation 1.".to_string(),
+                );
+            }
+            if commands(world, leader.0).is_empty() {
+                return GoalStatus::Open(format!(
+                    "Node {} leads through generation 1. Get a command chosen.",
+                    leader.0
+                ));
+            }
+            GoalStatus::Reached(format!(
+                "Generation 1 = {active:?} serves matchmaking at every member. The matchmaker that \
              it replaced stays up, and it sends late candidates to the new generation. The \
              cluster elected node {} through the new generation, and a command is chosen under \
              that leadership. A decree over the generation that it replaced chose one successor.",
-            leader.0
-        ))
+                leader.0
+            ))
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -1441,54 +1403,54 @@ and say which case each report gives the slot.",
         "Proposer::resolve_probe",
         "docs/analysis/storage/ctrl-multipaxos-restatement.md",
     ],
-    automation_on: NO_REPAIR_VERDICT,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::RepairVerdict],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::RepairVerdict],
     allowed_actions: FAULTY_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let damaged = (0..3)
-            .map(NodeId)
-            .find(|id| !log.faulty_records(*id).is_empty());
-        let repaired = (0..3)
-            .map(NodeId)
-            .any(|id| log.disk(id).is_some_and(|disk| disk.has_applied(Slot(0))));
-        let leader = log.leader();
-        let blocked = leader.map_or(0, |id| log.blocked_repairs(id));
-        let value = log
-            .node(NodeId(2))
-            .and_then(|node| node.replica().chosen_at(Slot(0)).map(show_command));
-        // The value the damaged record held is the one the client asked for
-        // first. The level reads it back rather than naming it: a repair is
-        // correct when the slot holds *the value that was voted for*, and any
-        // other value in that slot is a second value for one slot.
-        let voted = log.proposed_values().first().cloned();
-        match (damaged, blocked, repaired, value) {
-            (None, 0, true, Some(value)) if Some(&value) == voted.as_ref() => {
-                GoalStatus::Reached(format!(
-                    "Slot 0 holds {value}. The damaged acceptor voted for that value, and then \
+        on_log(world, |log| {
+            let damaged = (0..3)
+                .map(NodeId)
+                .find(|id| !log.faulty_records(*id).is_empty());
+            let repaired = (0..3)
+                .map(NodeId)
+                .any(|id| log.disk(id).is_some_and(|disk| disk.has_applied(Slot(0))));
+            let leader = log.leader();
+            let blocked = leader.map_or(0, |id| log.blocked_repairs(id));
+            let value = log
+                .node(NodeId(2))
+                .and_then(|node| node.replica().chosen_at(Slot(0)).map(show_command));
+            // The value the damaged record held is the one the client asked for
+            // first. The level reads it back rather than naming it: a repair is
+            // correct when the slot holds *the value that was voted for*, and any
+            // other value in that slot is a second value for one slot.
+            let voted = log.proposed_values().first().cloned();
+            match (damaged, blocked, repaired, value) {
+                (None, 0, true, Some(value)) if Some(&value) == voted.as_ref() => {
+                    GoalStatus::Reached(format!(
+                        "Slot 0 holds {value}. The damaged acceptor voted for that value, and then \
                      it could not read the value. Every node can read the record again, because \
                      the acceptor wrote the value back when it voted for the proposal of the \
                      leader."
-                ))
-            }
-            (None, 0, true, Some(value)) => GoalStatus::Failed(format!(
-                "Slot 0 holds {value}. The repair re-proposed a value that no acceptor \
+                    ))
+                }
+                (None, 0, true, Some(value)) => GoalStatus::Failed(format!(
+                    "Slot 0 holds {value}. The repair re-proposed a value that no acceptor \
                  reported for that slot."
-            )),
-            (Some(id), _, _, _) => GoalStatus::Open(format!(
-                "Node {} still holds a record that it cannot read. Elect a leader, and let it \
+                )),
+                (Some(id), _, _, _) => GoalStatus::Open(format!(
+                    "Node {} still holds a record that it cannot read. Elect a leader, and let it \
                  collect enough answers to settle that slot.",
-                id.0
-            )),
-            _ => GoalStatus::Open(
-                "Damage one accepted record, start the node again, and elect a leader.".to_string(),
-            ),
-        }
+                    id.0
+                )),
+                _ => GoalStatus::Open(
+                    "Damage one accepted record, start the node again, and elect a leader."
+                        .to_string(),
+                ),
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0 => None,
@@ -1579,60 +1541,59 @@ cluster, and the next levels cover that change.",
         "Acceptor::promised",
         "docs/analysis/play/game-plan.md",
     ],
-    automation_on: NO_WIPED_REJOIN,
+    automation_on: ALL_ROLES_AUTOMATIC,
     pinned_off: &[AutomationFlag::WipedRejoin],
     unlocked: REPLIES_AND_BEATS,
     unlocks: &[AutomationFlag::WipedRejoin],
     allowed_actions: WIPE_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Some(node) = log.promise_regressed() {
-            return GoalStatus::Failed(format!(
-                "The durable promise of node {} came back lower than a promise that it \
+        on_log(world, |log| {
+            if let Some(node) = log.promise_regressed() {
+                return GoalStatus::Failed(format!(
+                    "The durable promise of node {} came back lower than a promise that it \
                  already made.",
-                node.0
-            ));
-        }
-        let Some((wiped, promised)) = log.refused_boots().first().copied() else {
-            let erased = (0..3).map(NodeId).find(|id| {
-                log.disk(*id)
-                    .is_some_and(|disk| disk.provisioned() && !disk.is_formatted())
-            });
-            return match erased {
-                Some(id) => GoalStatus::Open(format!(
-                    "The disk of node {} is empty. Try to start the node again.",
-                    id.0
-                )),
-                None => GoalStatus::Open("Erase the disk of one node.".to_string()),
+                    node.0
+                ));
+            }
+            let Some((wiped, promised)) = log.refused_boots().first().copied() else {
+                let erased = (0..3).map(NodeId).find(|id| {
+                    log.disk(*id)
+                        .is_some_and(|disk| disk.provisioned() && !disk.is_formatted())
+                });
+                return match erased {
+                    Some(id) => GoalStatus::Open(format!(
+                        "The disk of node {} is empty. Try to start the node again.",
+                        id.0
+                    )),
+                    None => GoalStatus::Open("Erase the disk of one node.".to_string()),
+                };
             };
-        };
-        if log.node(wiped).is_some() {
-            return GoalStatus::Failed(format!(
-                "node {} is running again on an empty disk.",
-                wiped.0
-            ));
-        }
-        let survivors: usize = (0..3)
-            .map(NodeId)
-            .filter(|id| *id != wiped)
-            .map(|id| applied(world, id.0).len())
-            .max()
-            .unwrap_or(0);
-        if survivors < 2 {
-            return GoalStatus::Open(format!(
-                "Node {} stays out of the cluster. Get one more command chosen without it.",
-                wiped.0
-            ));
-        }
-        GoalStatus::Reached(format!(
-            "The library refuses node {}, and the other two nodes chose another command \
+            if log.node(wiped).is_some() {
+                return GoalStatus::Failed(format!(
+                    "node {} is running again on an empty disk.",
+                    wiped.0
+                ));
+            }
+            let survivors: usize = (0..3)
+                .map(NodeId)
+                .filter(|id| *id != wiped)
+                .map(|id| applied(world, id.0).len())
+                .max()
+                .unwrap_or(0);
+            if survivors < 2 {
+                return GoalStatus::Open(format!(
+                    "Node {} stays out of the cluster. Get one more command chosen without it.",
+                    wiped.0
+                ));
+            }
+            GoalStatus::Reached(format!(
+                "The library refuses node {}, and the other two nodes chose another command \
              without it. Its disk no longer holds the promise {}.{} that it made, and no node in \
              the cluster can give that promise back. The acceptor set must change instead.",
-            wiped.0, promised.round, promised.node.0
-        ))
+                wiped.0, promised.round, promised.node.0
+            ))
+        })
     },
     hint: |_world, mistakes| {
         (mistakes > 0).then(|| {

@@ -27,8 +27,8 @@ use paros_core::{
 use crate::action::{Action, ActionKind, Seam};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
-    CLIENT, REPLIES_ONLY, TIMEOUT, applied, config, crash, fresh, peers, propose, read_index_as,
-    restart, slot_traffic, start_election, tick,
+    CLIENT, REPLIES_ONLY, TIMEOUT, applied, config, crash, fresh, on_log, peers, propose,
+    read_index_as, restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, kind_at, not_to, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
@@ -237,23 +237,21 @@ promise, so restart both nodes and make sure that no promise goes down.",
     allowed_actions: SEAM_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Some(node) = log.promise_regressed() {
-            return GoalStatus::Failed(format!(
-                "The durable promise of node {} is below a promise that it already made. No \
+        on_log(world, |log| {
+            if let Some(node) = log.promise_regressed() {
+                return GoalStatus::Failed(format!(
+                    "The durable promise of node {} is below a promise that it already made. No \
                  part of the protocol is safe after that.",
-                node.0
-            ));
-        }
-        let (before, after) = seams(world);
-        let chosen = log.pool().iter().any(|id| {
-            log.disk(*id)
-                .is_some_and(|d| d.hard_state().chosen_index.is_some())
-        });
-        let down = crashed(world);
-        match (before, after, chosen, down.is_empty()) {
+                    node.0
+                ));
+            }
+            let (before, after) = seams(world);
+            let chosen = log.pool().iter().any(|id| {
+                log.disk(*id)
+                    .is_some_and(|d| d.hard_state().chosen_index.is_some())
+            });
+            let down = crashed(world);
+            match (before, after, chosen, down.is_empty()) {
             (true, true, true, true) => GoalStatus::Reached(
                 "A value is chosen, you cut both seams, and every node came back with every \
                  promise that it made. The batch that reached the disk but not the wire is the \
@@ -278,6 +276,7 @@ promise, so restart both nodes and make sure that no promise goes down.",
                 "Now get a value chosen through the nodes that are up.".to_string(),
             ),
         }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
@@ -676,29 +675,27 @@ permission to fill the slot.",
     allowed_actions: GAP_ACTIONS,
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Some((hole, highest)) = log
-            .pool()
-            .iter()
-            .filter_map(|id| log.node(*id))
-            .find_map(|node| node.replica().chosen_gap())
-        {
-            return GoalStatus::Open(format!(
-                "Slot {} is chosen and slot {} is not, so the applied prefix stops below the \
+        on_log(world, |log| {
+            if let Some((hole, highest)) = log
+                .pool()
+                .iter()
+                .filter_map(|id| log.node(*id))
+                .find_map(|node| node.replica().chosen_gap())
+            {
+                return GoalStatus::Open(format!(
+                    "Slot {} is chosen and slot {} is not, so the applied prefix stops below the \
                  hole. Only a new leadership can propose slot {} again.",
-                highest.0, hole.0, hole.0
-            ));
-        }
-        let executed = applied(world, 1);
-        // `Noop` is the protocol's own control command, so the level may name
-        // it. The client's values are the client's, so they are read back from
-        // the history rather than written down here.
-        let filled = executed.iter().any(|command| command == "Noop");
-        let asked = log.proposed_values();
-        let chosen = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
-        match (filled, chosen) {
+                    highest.0, hole.0, hole.0
+                ));
+            }
+            let executed = applied(world, 1);
+            // `Noop` is the protocol's own control command, so the level may name
+            // it. The client's values are the client's, so they are read back from
+            // the history rather than written down here.
+            let filled = executed.iter().any(|command| command == "Noop");
+            let asked = log.proposed_values();
+            let chosen = !asked.is_empty() && asked.iter().all(|value| executed.contains(value));
+            match (filled, chosen) {
             (true, true) => GoalStatus::Reached(format!(
                 "No node holds a hole, and the cluster executed the commands of the client: {}. \
                  No client asked for the Noop. Quorum intersection makes the Noop the proof \
@@ -714,6 +711,7 @@ permission to fill the slot.",
                 "Let a new leadership account for every slot below its frontier.".to_string(),
             ),
         }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
@@ -810,47 +808,46 @@ the disagreement arrives, decide which record the disk keeps.",
         with_history(3, ballot(1, 2), &records)
     },
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        if let Some(node) = log.promise_regressed() {
-            return GoalStatus::Failed(format!(
-                "The durable promise of node {} came back lower than a promise that it \
+        on_log(world, |log| {
+            if let Some(node) = log.promise_regressed() {
+                return GoalStatus::Failed(format!(
+                    "The durable promise of node {} came back lower than a promise that it \
                  already made.",
-                node.0
-            ));
-        }
-        let down = crashed(world);
-        if let Some(node) = down.first() {
-            return GoalStatus::Open(format!(
-                "Restart node {node} and read its disk back. That is the whole question."
-            ));
-        }
-        let wrong: Vec<u64> = log
-            .pool()
-            .iter()
-            .filter(|id| {
-                log.disk(**id).is_none_or(|disk| {
-                    disk.records()
-                        .get(&Slot(0))
-                        .is_none_or(|(_, command)| show_command(command) != "fresh")
+                    node.0
+                ));
+            }
+            let down = crashed(world);
+            if let Some(node) = down.first() {
+                return GoalStatus::Open(format!(
+                    "Restart node {node} and read its disk back. That is the whole question."
+                ));
+            }
+            let wrong: Vec<u64> = log
+                .pool()
+                .iter()
+                .filter(|id| {
+                    log.disk(**id).is_none_or(|disk| {
+                        disk.records()
+                            .get(&Slot(0))
+                            .is_none_or(|(_, command)| show_command(command) != "fresh")
+                    })
                 })
-            })
-            .map(|id| id.0)
-            .collect();
-        if wrong.is_empty() {
-            GoalStatus::Reached(
-                "Every disk holds the chosen value at slot 0. Every promise came back at \
+                .map(|id| id.0)
+                .collect();
+            if wrong.is_empty() {
+                GoalStatus::Reached(
+                    "Every disk holds the chosen value at slot 0. Every promise came back at \
                  least as high as it was before the crash. The stale record is gone, so the \
                  next election cannot bring it back."
-                    .to_string(),
-            )
-        } else {
-            GoalStatus::Open(format!(
-                "Get the chosen value onto every disk at slot 0. Node(s) {wrong:?} still hold \
+                        .to_string(),
+                )
+            } else {
+                GoalStatus::Open(format!(
+                    "Get the chosen value onto every disk at slot 0. Node(s) {wrong:?} still hold \
                  another value."
-            ))
-        }
+                ))
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
@@ -954,47 +951,46 @@ cluster already acknowledged.",
     allowed_actions: READ_ACTIONS,
     setup: || fresh(5, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
-        let Some(log) = world.log() else {
-            return GoalStatus::Open("This level runs in the replicated-log world.".to_string());
-        };
-        let reads = log.reads();
-        let acked = log.highest_acked_slot();
-        let served: Vec<(NodeId, Option<Slot>)> = reads
-            .iter()
-            .filter(|(_, _, served)| *served)
-            .map(|(node, index, _)| (*node, *index))
-            .collect();
-        if let Some((node, index)) = served
-            .iter()
-            .find(|(_, index)| index.map(|s| s.0) < acked.map(|s| s.0))
-        {
-            return GoalStatus::Failed(format!(
-                "A read that node {} served observed {}, but the cluster had already \
+        on_log(world, |log| {
+            let reads = log.reads();
+            let acked = log.highest_acked_slot();
+            let served: Vec<(NodeId, Option<Slot>)> = reads
+                .iter()
+                .filter(|(_, _, served)| *served)
+                .map(|(node, index, _)| (*node, *index))
+                .collect();
+            if let Some((node, index)) = served
+                .iter()
+                .find(|(_, index)| index.map(|s| s.0) < acked.map(|s| s.0))
+            {
+                return GoalStatus::Failed(format!(
+                    "A read that node {} served observed {}, but the cluster had already \
                  acknowledged a write at {}. That read gave a wrong answer.",
-                node.0,
-                at(*index),
-                at(acked)
-            ));
-        }
-        let unserved = reads.iter().filter(|(_, _, served)| !*served).count();
-        match (served.len(), unserved) {
-            (0, _) => GoalStatus::Open(
-                "Ask for a linearizable read. Then answer for the leader that must prove its \
+                    node.0,
+                    at(*index),
+                    at(acked)
+                ));
+            }
+            let unserved = reads.iter().filter(|(_, _, served)| !*served).count();
+            match (served.len(), unserved) {
+                (0, _) => GoalStatus::Open(
+                    "Ask for a linearizable read. Then answer for the leader that must prove its \
                  leadership."
-                    .to_string(),
-            ),
-            (_, 0) => GoalStatus::Open(
-                "Ask the replaced leader for a read as well. The answer to look at is the \
+                        .to_string(),
+                ),
+                (_, 0) => GoalStatus::Open(
+                    "Ask the replaced leader for a read as well. The answer to look at is the \
                  answer that it must not give."
-                    .to_string(),
-            ),
-            (_, _) => GoalStatus::Reached(format!(
-                "The cluster served one read, at or above the last acknowledged write ({}). \
+                        .to_string(),
+                ),
+                (_, _) => GoalStatus::Reached(format!(
+                    "The cluster served one read, at or above the last acknowledged write ({}). \
                  One read still waits at a node that cannot prove that it leads. That node must \
                  keep the read open.",
-                at(acked)
-            )),
-        }
+                    at(acked)
+                )),
+            }
+        })
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,

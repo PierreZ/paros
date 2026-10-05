@@ -274,7 +274,7 @@ pub struct ResolveReport {
     pub by_read_back: bool,
 }
 
-/// What [`Client::read_until`] and [`Client::read_any`] came back with.
+/// What [`Client::read_any`] came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadReport {
     /// The outcome of the last attempt.
@@ -417,12 +417,6 @@ impl<P: Providers> Client<P> {
         self.servers.len()
     }
 
-    /// How many servers the rotation walks.
-    #[must_use]
-    pub fn rotation(&self) -> usize {
-        self.rotation
-    }
-
     /// The server a node id names, when the client knows it.
     #[must_use]
     pub fn index_of(&self, id: u64) -> Option<usize> {
@@ -483,6 +477,25 @@ impl<P: Providers> Client<P> {
             hint.stale = Some(previous);
         }
         hint.current = next;
+    }
+
+    /// Where a policy loop asks next after server `current` redirected
+    /// naming `leader` (a node id): the named server when the client knows
+    /// it and it is another one; otherwise the next server of the rotation,
+    /// `backoff` later. `None` when the client shut down during the pause.
+    async fn follow_redirect(
+        &self,
+        current: usize,
+        leader: Option<u64>,
+        backoff: Duration,
+    ) -> Option<usize> {
+        match leader.and_then(|id| self.index_of(id)) {
+            Some(next) if next != current => Some(next),
+            _ => self
+                .pause(backoff)
+                .await
+                .then(|| (current + 1) % self.rotation),
+        }
     }
 
     /// Where `retarget` sends the attempt after one at `current` named
@@ -785,21 +798,7 @@ impl<P: Providers> Client<P> {
     /// returned at once; [`ReadOutcome::UnknownJournal`] only when every
     /// server answered so.
     pub async fn read_any(&self, request: &Read, first: usize) -> ReadReport {
-        self.read_rotating(request, first, false).await
-    }
-
-    /// Read `request` inside **one** deadline (`read_timeout` plus its
-    /// `wait_ms`), starting at server `first` and moving on to the next
-    /// server whenever one leaves it unserved or unanswered (or does not
-    /// serve the journal: a whole pass of those ends the read as
-    /// [`ReadOutcome::UnknownJournal`]).
-    pub async fn read_until(&self, request: &Read, first: usize) -> ReadReport {
-        self.read_rotating(request, first, true).await
-    }
-
-    async fn read_rotating(&self, request: &Read, first: usize, one_deadline: bool) -> ReadReport {
         let span = self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
-        let deadline = self.time.now() + span;
         let servers = self.servers.len();
         let mut server = first % servers;
         let mut attempts = 0_u64;
@@ -811,9 +810,7 @@ impl<P: Providers> Client<P> {
             if self.shutdown.is_cancelled() {
                 break;
             }
-            let bound = if one_deadline {
-                deadline.saturating_sub(self.time.now())
-            } else if usize::try_from(attempts).unwrap_or(usize::MAX) >= servers {
+            let bound = if usize::try_from(attempts).unwrap_or(usize::MAX) >= servers {
                 Duration::ZERO
             } else {
                 span
@@ -853,6 +850,15 @@ impl<P: Providers> Client<P> {
         }
     }
 
+    /// Where `journal` stands, read from server `first` on
+    /// ([`Client::read_any`]): its state, `None` when no server served it.
+    pub async fn journal_state(&self, journal: JournalKey, first: usize) -> Option<JournalState> {
+        self.read_any(&state_read(journal), first)
+            .await
+            .outcome
+            .state()
+    }
+
     /// Claim `journal` for `owner` (#204): read where it stands — from
     /// server `first` on, see [`Client::read_any`] — then `SetLeader`
     /// against the generation read, asked of `first`.
@@ -869,14 +875,7 @@ impl<P: Providers> Client<P> {
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
-        let read = Read {
-            journal: journal.journal.0,
-            tenant: journal.tenant.0,
-            from_seq: 0,
-            limit: 1,
-            wait_ms: 0,
-        };
-        let state = match self.read_any(&read, first).await.outcome {
+        let state = match self.read_any(&state_read(journal), first).await.outcome {
             ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } => state,
             ReadOutcome::UnknownJournal => return ClaimOutcome::UnknownJournal,
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
@@ -921,15 +920,13 @@ impl<P: Providers> Client<P> {
                 {
                     self.observe_leader(leader);
                     redirects += 1;
-                    match leader.and_then(|id| self.index_of(id)) {
-                        Some(next) if next != server => server = next,
-                        _ => {
-                            if !self.pause(self.tunables.redirect_backoff).await {
-                                return outcome;
-                            }
-                            server = (server + 1) % self.rotation;
-                        }
-                    }
+                    let Some(next) = self
+                        .follow_redirect(server, leader, self.tunables.redirect_backoff)
+                        .await
+                    else {
+                        return outcome;
+                    };
+                    server = next;
                 }
                 SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. } => {
                     self.observe_leader_at(server);
@@ -962,15 +959,13 @@ impl<P: Providers> Client<P> {
                 .await;
             match outcome {
                 TruncateOutcome::Redirect { leader } => {
-                    match leader.and_then(|id| self.index_of(id)) {
-                        Some(next) if next != server => server = next,
-                        _ => {
-                            if !self.pause(self.tunables.retry_backoff).await {
-                                return TruncateOutcome::Redirect { leader };
-                            }
-                            server = (server + 1) % self.rotation;
-                        }
-                    }
+                    let Some(next) = self
+                        .follow_redirect(server, leader, self.tunables.retry_backoff)
+                        .await
+                    else {
+                        return TruncateOutcome::Redirect { leader };
+                    };
+                    server = next;
                 }
                 TruncateOutcome::Applied { state } => {
                     self.observe_leader_at(server);
@@ -1098,5 +1093,17 @@ impl<P: Providers> Client<P> {
             attempt,
         )
         .await
+    }
+}
+
+/// The read that asks where `journal` stands: one record from position 0,
+/// no wait — answered with the journal state whatever the log holds.
+fn state_read(journal: JournalKey) -> Read {
+    Read {
+        journal: journal.journal.0,
+        tenant: journal.tenant.0,
+        from_seq: 0,
+        limit: 1,
+        wait_ms: 0,
     }
 }

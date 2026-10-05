@@ -396,6 +396,35 @@ struct Counters {
     watermark_fills: u64,
 }
 
+/// The repair counters ([`ColocatedNode::repair_counters`]): monotone per
+/// incarnation, observability only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RepairCounters {
+    /// Faulty records repaired in place.
+    pub repaired: u64,
+    /// Blocked slots resolved as Case 1 (re-proposed from a straggler's
+    /// `have`) after the election closed.
+    pub case1: u64,
+    /// Blocked slots resolved as Case 2 (a full Q1 of `none` assembled from
+    /// stragglers; decided `Noop`).
+    pub case2: u64,
+    /// Recovery-timeout step-downs: a leader resigning because it could not
+    /// finish repairing its blocked slots.
+    pub step_downs: u64,
+}
+
+/// The campaign-membership counters ([`ColocatedNode::membership_counters`],
+/// #122): monotone per incarnation, observability only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MembershipCounters {
+    /// Campaigns this node declined to open because it is not a member of
+    /// the configuration it would register.
+    pub campaigns_skipped: u64,
+    /// Leaderships resigned once this node's own reconfiguration removed it
+    /// from the acceptor set.
+    pub step_downs: u64,
+}
+
 impl ColocatedNode {
     /// The single wire entry point: every peer message is a [`Message`],
     /// routed by variant and role. The clock is a separate input
@@ -1209,14 +1238,14 @@ impl ColocatedNode {
         self.acceptors.contains(self.config.id)
     }
 
-    /// Monotone campaign-phase counters this incarnation, for the driver's
-    /// audit report: `(non-member campaigns skipped, non-member step-downs)`.
+    /// Monotone campaign-membership counters this incarnation, for the
+    /// driver's audit report.
     #[must_use]
-    pub fn membership_counters(&self) -> (u64, u64) {
-        (
-            self.counters.non_member_campaigns_skipped,
-            self.counters.non_member_step_downs,
-        )
+    pub fn membership_counters(&self) -> MembershipCounters {
+        MembershipCounters {
+            campaigns_skipped: self.counters.non_member_campaigns_skipped,
+            step_downs: self.counters.non_member_step_downs,
+        }
     }
 
     /// Election timeouts this incarnation that re-sent an open matchmaking
@@ -1363,17 +1392,15 @@ impl ColocatedNode {
     }
 
     /// Monotone repair counters this incarnation, for the driver's audit
-    /// report: `(faulty records repaired in place, Case-1 straggler
-    /// re-proposals, Case-2 straggler no-op fills, recovery-timeout
-    /// step-downs)`.
+    /// report.
     #[must_use]
-    pub fn repair_counters(&self) -> (u64, u64, u64, u64) {
-        (
-            self.acceptor.faulty_repaired(),
-            self.counters.repair_case1,
-            self.counters.repair_case2,
-            self.counters.repair_step_downs,
-        )
+    pub fn repair_counters(&self) -> RepairCounters {
+        RepairCounters {
+            repaired: self.acceptor.faulty_repaired(),
+            case1: self.counters.repair_case1,
+            case2: self.counters.repair_case2,
+            step_downs: self.counters.repair_step_downs,
+        }
     }
 
     // ---- crate-internal accessors used by `Ready` (not public API) ----

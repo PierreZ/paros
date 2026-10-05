@@ -346,18 +346,15 @@ impl Matchmaking {
         matchmakers.has_quorum(&self.registered_by)
     }
 
-    /// How many more complete answers the phase still waits for. The one
-    /// thing a predicate cannot report, and the only place a matchmaker
-    /// quorum is ever spelled as a number.
+    /// How many more complete answers the phase still waits for
+    /// ([`MatchmakerSet::remaining`]).
     ///
     /// # Panics
     ///
     /// If `matchmakers` is not well formed.
     #[must_use]
     pub fn remaining(&self, matchmakers: &MatchmakerSet) -> usize {
-        matchmakers
-            .quorum_size()
-            .saturating_sub(self.registered_by.len())
+        matchmakers.remaining(&self.registered_by)
     }
 
     /// The matchmakers that have not answered completely, with the page
@@ -365,10 +362,7 @@ impl Matchmaking {
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<(MatchmakerId, Option<Ballot>)> {
         matchmakers
-            .members()
-            .iter()
-            .copied()
-            .filter(|mm| !self.registered_by.contains(mm))
+            .unanswered(&self.registered_by)
             .map(|mm| (mm, self.page_next.get(&mm).copied()))
             .collect()
     }
@@ -512,12 +506,7 @@ impl MembershipProbe {
     /// The matchmakers that have not answered — whom a re-send addresses.
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<MatchmakerId> {
-        matchmakers
-            .members()
-            .iter()
-            .copied()
-            .filter(|mm| !self.answered.contains(mm))
-            .collect()
+        matchmakers.unanswered(&self.answered).collect()
     }
 
     /// The highest-ballot effective configuration the answers named, `None`

@@ -503,9 +503,7 @@ impl ColocatedNode {
         // one — must be one this node can run. One naming a node outside the
         // pool (admitted by the registry, not yet by this node) abandons the
         // campaign rather than acting on it.
-        let unknown = |c: &AcceptorConfig, pool: &[NodeId]| {
-            !c.members().iter().all(|n| pool.binary_search(n).is_ok())
-        };
+        let unknown = |c: &AcceptorConfig, pool: &[NodeId]| !c.is_drawn_from(pool);
         if m.quorum_held(matchmakers)
             && (m
                 .stale_belief()
@@ -567,9 +565,7 @@ impl ColocatedNode {
                 "Phase 1 opens only once a matchmaker quorum registered the ballot"
             );
             assert!(
-                prior
-                    .iter()
-                    .all(|c| c.members().iter().all(|n| self.in_pool(*n))),
+                prior.iter().all(|c| c.is_drawn_from(&self.pool)),
                 "every prior configuration is drawn from the node pool"
             );
             self.matchmaking = None;
@@ -616,7 +612,7 @@ impl ColocatedNode {
         // probes again, once the pool has caught up.
         if effective
             .as_ref()
-            .is_some_and(|(_, c)| !c.members().iter().all(|n| self.in_pool(*n)))
+            .is_some_and(|(_, c)| !c.is_drawn_from(&self.pool))
         {
             return MatchStep::UnknownMember;
         }

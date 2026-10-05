@@ -112,7 +112,7 @@ fn accept_repairs_a_faulty_slot_in_place() {
         "the faulty entry was repaired"
     );
     assert!(n.acceptor().records().contains_key(&Slot(3)));
-    let (repaired, _c1, _c2, _sd) = n.repair_counters();
+    let repaired = n.repair_counters().repaired;
     assert_eq!(repaired, 1);
 }
 
@@ -192,7 +192,7 @@ fn blocked_slot_waits_then_resolves_case1_from_a_straggler() {
         Some(val(40)),
         "the straggler's clean copy was recovered, not overwritten"
     );
-    let (_r, case1, case2, _sd) = nodes[0].repair_counters();
+    let crate::RepairCounters { case1, case2, .. } = nodes[0].repair_counters();
     assert_eq!(case1, 1);
     assert_eq!(case2, 0);
 }
@@ -224,11 +224,11 @@ fn recovery_timeout_steps_the_leader_down() {
         nodes[0].tick();
         let q = drain(&mut nodes[0]);
         deliver_filtered(&mut nodes, q, |to, _m| to != NodeId(1));
-        if nodes[0].repair_counters().3 > 0 {
+        if nodes[0].repair_counters().step_downs > 0 {
             break;
         }
     }
-    let (_r, _c1, _c2, step_downs) = nodes[0].repair_counters();
+    let step_downs = nodes[0].repair_counters().step_downs;
     assert_eq!(step_downs, 1, "the recovery timeout fired");
     assert!(!nodes[0].is_leader(), "the blocked leader resigned");
 }

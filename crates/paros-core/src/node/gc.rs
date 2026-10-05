@@ -190,12 +190,7 @@ impl ColocatedNode {
             generation: matchmakers.generation,
             watermark: self.ballot,
         };
-        let targets: Vec<MatchmakerId> = matchmakers
-            .members()
-            .iter()
-            .copied()
-            .filter(|m| !gc.acked(*m))
-            .collect();
+        let targets: Vec<MatchmakerId> = gc.unacked(matchmakers).collect();
         for matchmaker in targets {
             self.pending_gc_requests.push((matchmaker, request));
         }

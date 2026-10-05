@@ -243,22 +243,16 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         addressees
     }
 
-    /// The read open at `ctx`, if any — what the caller's addressee guard
-    /// asks before folding an answer: the row it was addressed to
-    /// ([`QuorumRead::row`]) over the configuration it is judged by
-    /// ([`QuorumRead::config`], through
-    /// [`AcceptorConfig::is_phase1_addressee`]).
-    #[must_use]
-    pub fn get(&self, ctx: u64) -> Option<&QuorumRead<Id>> {
-        self.reads.iter().find(|r| r.ctx == ctx)
-    }
-
-    /// Fold `from`'s watermark into the read at `ctx`. Whether `from` is an
-    /// addressee of the read's row is the caller's guard; a sender already
-    /// counted is ignored. `config_since` is the configuration ballot the
-    /// answer named (`None` on a plain deployment): one above the read's
-    /// abandons it — the row asked need not intersect the successor's
-    /// columns.
+    /// Fold `from`'s watermark into the read at `ctx`. The row guard is the
+    /// tally's own, as the Phase-2 column guard is
+    /// ([`crate::proposer::Proposer::fold_accepted_in`]): an answer from
+    /// outside the read's row, over the configuration the read was opened
+    /// against ([`AcceptorConfig::is_phase1_addressee`]), is ignored before
+    /// anything else, so it can neither be counted nor abandon the read. A
+    /// sender already counted is ignored. `config_since` is the
+    /// configuration ballot the answer named (`None` on a plain
+    /// deployment): one above the read's abandons it — the row asked need
+    /// not intersect the successor's columns.
     pub fn fold(
         &mut self,
         ctx: u64,
@@ -269,6 +263,12 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         let Some(position) = self.reads.iter().position(|r| r.ctx == ctx) else {
             return PreReadFold::Ignored;
         };
+        if !self.reads[position]
+            .config
+            .is_phase1_addressee(from, self.reads[position].row)
+        {
+            return PreReadFold::Ignored;
+        }
         if config_since.is_some_and(|since| since > self.reads[position].config_since) {
             self.reads.remove(position);
             return PreReadFold::Superseded;
@@ -297,8 +297,9 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// # Panics
     ///
     /// If a vote behind a confirmation came from outside the read's row:
-    /// the caller's guard refuses any other sender, restated here so the
-    /// quorum predicate is never fed an id that is not one of the row's.
+    /// [`QuorumReads::fold`]'s row guard refuses any other sender, restated
+    /// here so the quorum predicate is never fed an id that is not one of
+    /// the row's.
     pub fn serve(&mut self, covered: impl Fn(Option<Slot>) -> bool) -> Vec<(u64, Option<Slot>)> {
         let mut served = Vec::new();
         self.reads.retain_mut(|read| {
@@ -376,7 +377,7 @@ mod tests {
             Some((NodeId(5), Some(Slot(2)))),
         );
         assert_eq!(addressees, vec![NodeId(4), NodeId(6)]);
-        assert_eq!(reads.get(1).map(QuorumRead::row), Some(Some(1)));
+        assert_eq!(reads.pending()[0].row(), Some(1));
         assert!(reads.serve(|_| true).is_empty(), "one answer is no row");
         assert_eq!(
             reads.fold(1, NodeId(4), Some(Slot(3)), None),
@@ -412,6 +413,36 @@ mod tests {
             vec![(1, Some(Slot(3)))]
         );
         assert!(reads.is_empty());
+    }
+
+    /// The row guard is the tally's: an answer from outside the read's row
+    /// is never counted, and a newer configuration it names abandons
+    /// nothing — so a caller that skips its own guard cannot feed `serve` a
+    /// watermark from outside the row.
+    #[test]
+    fn an_answer_from_outside_the_row_is_ignored() {
+        let mut reads: QuorumReads<NodeId> = QuorumReads::new();
+        // Row 1 = {4, 5, 6}; node 1 is in row 0.
+        let _ = reads.open(1, Some(1), grid(), ballot(1), 0, None);
+        assert_eq!(
+            reads.fold(1, NodeId(1), Some(Slot(9)), None),
+            PreReadFold::Ignored,
+            "a row-0 acceptor is not an addressee of row 1"
+        );
+        assert_eq!(
+            reads.fold(1, NodeId(1), Some(Slot(9)), Some(ballot(2))),
+            PreReadFold::Ignored,
+            "an answer from outside the row abandons nothing"
+        );
+        assert_eq!(reads.pending().len(), 1);
+        assert!(reads.pending()[0].watermarks().is_empty());
+        for id in [4, 5, 6] {
+            assert_eq!(
+                reads.fold(1, NodeId(id), Some(Slot(2)), None),
+                PreReadFold::Counted
+            );
+        }
+        assert_eq!(reads.serve(|_| true), vec![(1, Some(Slot(2)))]);
     }
 
     /// A row of acceptors that never voted confirms at the empty index,
