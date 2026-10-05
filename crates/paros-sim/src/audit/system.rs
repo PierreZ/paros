@@ -98,6 +98,10 @@ pub(crate) struct SystemBoard {
     truncated: bool,
     /// The booking model crossed a truncation at a restored checkpoint.
     resumed_at_checkpoint: bool,
+    /// Each node's registry fold: the position after the last one it
+    /// reported (its latest incarnation's, as folds report in order), for
+    /// the recovery tail's liveness claim (#247).
+    registry_at: BTreeMap<u64, u64>,
     /// The bookings of each checkpoint a whole fold verified at or past
     /// the model's next position, to compare the model with when it gets
     /// there.
@@ -175,10 +179,11 @@ impl SystemBoard {
             }
             self.learned_before_pool = true;
         }
-        if let SystemEvent::Registry(event) = event
-            && known == digest
-        {
-            self.model_registry(lsn, event);
+        if let SystemEvent::Registry(event) = event {
+            self.registry_at.insert(node.0, lsn + 1);
+            if known == digest {
+                self.model_registry(lsn, event);
+            }
         }
         match event {
             SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
@@ -317,6 +322,7 @@ impl SystemBoard {
         if verified.is_none() {
             self.reader_restarted();
         }
+        self.registry_at.insert(node.0, seq + 1);
         let held: BTreeMap<u64, u64> = state.bookings().map(|(id, b)| (id, b.node.0)).collect();
         match self.registry_next {
             Some(next) if next == seq || (next < seq && verified.is_some()) => {
@@ -338,6 +344,15 @@ impl SystemBoard {
             }
             _ => {}
         }
+    }
+
+    /// The nodes of `nodes` whose registry fold has not reached `tail` (#247).
+    pub(crate) fn registry_lagging(&self, nodes: &[u64], tail: u64) -> Vec<u64> {
+        nodes
+            .iter()
+            .copied()
+            .filter(|node| self.registry_at.get(node).copied().unwrap_or(0) < tail)
+            .collect()
     }
 
     /// A fold restarted from a checkpoint (#230).

@@ -30,8 +30,14 @@
 //! folds — so the two folds are one instant's — every tenant the cell hosts
 //! is in meta under that cell, and every `READY` `users` tenant in meta is
 //! hosted. A tenant mid-operation (`REGISTERING`, `REMOVING`) may be either.
-//! The check claims nothing of its own: a session that does not hold both
-//! journals skips it.
+//! Mid-run the check claims nothing of its own: a session that does not
+//! hold both journals skips it. **At the end of every run** (#247) it runs
+//! over the final folds: in the recovery tail every operator finishes the
+//! operation it stopped in ([`FleetOps::settle`]), and the last one judges
+//! the control plane once every fleet writer is quiet
+//! ([`FleetOps::final_check`]) — the directory's equality, no tenant left
+//! mid-operation, a started `init` `READY`, every live node's registry fold
+//! at the tail.
 //!
 //! No function here draws randomness: every choice is read off the
 //! caller's step draws.
@@ -43,7 +49,7 @@ use moonpool_sim::{
     SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::Writer;
-use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, OpenOutcome};
+use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
 use paros::client::fleet::{FleetFrames, FleetRefusal, FleetSession, Run, Stage, Step};
 use paros::meta::{CellState, Group, Meta, Placement, TenantState};
 use paros::system::Registry;
@@ -651,36 +657,178 @@ impl FleetOps {
         if meta_floor > 0 {
             assert_reachable!("fleet: meta is read past a truncation to its checkpoint");
         }
-        let meta = session.meta();
-        let cell = session.cell();
-        let (Some(fleet), Some(joined)) = (meta.fleet(), cell.fleet()) else {
+        if session.meta().fleet().is_none() || session.cell().fleet().is_none() {
+            return;
+        }
+        directory_equals_cell(session.meta(), session.cell());
+        assert_reachable!("fleet: meta's directory is checked against the cell's tenant list");
+    }
+}
+
+/// How long the recovery tail gives the fleet's control plane (#247): a
+/// pending operation to end, the final folds to be read, every node's
+/// registry fold to reach the tail. An oracle threshold — **never
+/// buggified**: the chaos window is over, moonpool is in recovery mode, and a
+/// control plane that cannot finish one operation in this long is stuck.
+const FLEET_SETTLE: Duration = Duration::from_secs(20);
+
+impl FleetOps {
+    /// The recovery tail's fleet half (#247): resume this client's pending
+    /// operation until it ends. Liveness: once the chaos window closed, an
+    /// operation an operator stopped in — a crash at a step, a run its
+    /// target's kill or a rival cut short — is finished by that operator.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(super) async fn settle(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        policy: CheckpointPolicy,
+        beat: Duration,
+    ) {
+        if !self.active || self.pending.is_none() {
+            return;
+        }
+        let deadline = ctx.time().now() + FLEET_SETTLE;
+        let mut draw = self.client_id;
+        while !self.resume(ctx, nodes, policy, draw).await {
+            if ctx.time().now() >= deadline
+                || ctx.shutdown().is_cancelled()
+                || ctx.time().sleep(beat).await.is_err()
+            {
+                break;
+            }
+            draw = draw.wrapping_add(1);
+        }
+        assert_always!(
+            self.pending.is_none() || ctx.shutdown().is_cancelled(),
+            "fleet: an operation an operator stopped in ends in the recovery tail",
+            { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
+        );
+        assert_reachable!("fleet: a pending operation is finished in the recovery tail");
+    }
+
+    /// The end-of-run check over the final folds (#247), run by the last
+    /// client to [`FleetOps::settle`] — every operator has finished, so meta
+    /// and the cell's control journal are quiet and one read of each is one
+    /// instant's:
+    ///
+    /// - **liveness** — a started `init` left the cell `READY` in meta and
+    ///   joined on its side, and no `users` tenant is left `REGISTERING` or
+    ///   `REMOVING` (every operator finished its own operation; #240's
+    ///   coordinator will own an orphan's); every live node's registry fold
+    ///   reaches the registry's tail;
+    /// - **directory equality** (FDB's `MetaclusterConsistency`), on every
+    ///   seed rather than when one session happened to hold both journals:
+    ///   membership and `cell_id` — every tenant the cell hosts is in meta
+    ///   under that cell, and every `READY` one in meta is hosted. Its
+    ///   assignments and counts join once #212 lands.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(super) async fn final_check(
+        &self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        expected: &[u64],
+    ) {
+        if !self.active {
+            return;
+        }
+        let client = self.client(ctx, nodes);
+        let deadline = ctx.time().now() + FLEET_SETTLE;
+        let mut folds = None;
+        let mut attempt = 0_u64;
+        while folds.is_none() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let first = self.first(attempt);
+            attempt += 1;
+            let meta = paros::client::fleet::read_meta(&client, first, self.frames.meta).await;
+            let mut cell = Folder::new(Registry::new((0..self.pool as u64).map(NodeId)));
+            let loaded =
+                paros::client::checkpoint::load(&mut cell, self.frames.cell, &client, first, 0)
+                    .await;
+            if let (Ok(meta), LoadOutcome::Loaded { .. }) = (meta, loaded) {
+                folds = Some((meta, cell));
+            } else if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                break;
+            }
+        }
+        if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        assert_always!(
+            folds.is_some(),
+            "fleet: meta and the cell's journal are read to their tails after chaos"
+        );
+        let Some((meta, cell)) = folds else {
             return;
         };
-        // The cell joins only after meta added it: both name one fleet, and
-        // meta holds the cell.
-        assert_always!(
-            fleet == joined.fleet_id && meta.cell(joined.cell_id).is_some(),
-            "fleet: meta and the cell name the same fleet and the cell is in meta",
-            { "meta_fleet" => fleet, "cell_fleet" => joined.fleet_id }
-        );
-        for tenant in cell.hosted() {
+        let tail = cell.next_seq();
+        let cell = cell.state();
+        assert_reachable!("fleet: the final folds of meta and the cell are compared");
+        if let Some(fleet) = meta.fleet() {
+            let ready = meta.cell(self.frames.cell_id).map(|c| c.state);
+            let joined = cell.fleet().map(|f| (f.fleet_id, f.cell_id));
             assert_always!(
-                meta.tenant(tenant)
-                    .is_some_and(|t| t.group == Group::Users && t.cell_id == joined.cell_id),
-                "fleet: every tenant the cell hosts is in meta under that cell",
-                { "tenant" => tenant.0 }
+                ready == Some(CellState::Ready) && joined == Some((fleet, self.frames.cell_id)),
+                "fleet: a started init leaves the cell READY and joined after chaos",
+                { "fleet" => fleet, "cell" => self.frames.cell_id }
             );
+            assert_reachable!("fleet: a run ends with the cell READY in meta");
         }
         for (tenant, entry) in meta.tenants() {
-            if entry.group == Group::Users && entry.state == TenantState::Ready {
+            if entry.group == Group::Users {
                 assert_always!(
-                    cell.hosts(tenant),
-                    "fleet: every READY tenant in meta is hosted by its cell",
-                    { "tenant" => tenant.0 }
+                    matches!(entry.state, TenantState::Ready),
+                    "fleet: no tenant is left mid-operation after chaos",
+                    { "tenant" => tenant.0, "state" => format!("{:?}", entry.state) }
                 );
             }
         }
-        assert_reachable!("fleet: meta's directory is checked against the cell's tenant list");
+        directory_equals_cell(&meta, cell);
+        // Every live node follows the registry to its tail.
+        let board = crate::audit::system::system_board(ctx.state());
+        let mut lagging = Vec::new();
+        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            lagging = crate::audit::system::lock(&board).registry_lagging(expected, tail);
+            if lagging.is_empty() || ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                break;
+            }
+        }
+        assert_always!(
+            lagging.is_empty() || ctx.shutdown().is_cancelled(),
+            "registry: every live node's fold reaches the registry's tail after chaos",
+            { "tail" => tail, "lagging" => format!("{lagging:?}") }
+        );
+    }
+}
+
+/// Meta's directory against the cell's tenant list (FDB's
+/// `MetaclusterConsistency`) for two folds of one instant: the same fleet,
+/// the cell in meta, every tenant the cell hosts in meta under that cell,
+/// every `READY` `users` tenant in meta hosted.
+fn directory_equals_cell(meta: &Meta, cell: &Registry) {
+    let (Some(fleet), Some(joined)) = (meta.fleet(), cell.fleet()) else {
+        return;
+    };
+    assert_always!(
+        fleet == joined.fleet_id && meta.cell(joined.cell_id).is_some(),
+        "fleet: meta and the cell name the same fleet and the cell is in meta",
+        { "meta_fleet" => fleet, "cell_fleet" => joined.fleet_id }
+    );
+    for tenant in cell.hosted() {
+        assert_always!(
+            meta.tenant(tenant)
+                .is_some_and(|t| t.group == Group::Users && t.cell_id == joined.cell_id),
+            "fleet: every tenant the cell hosts is in meta under that cell",
+            { "tenant" => tenant.0 }
+        );
+    }
+    for (tenant, entry) in meta.tenants() {
+        if entry.group == Group::Users && entry.state == TenantState::Ready {
+            assert_always!(
+                cell.hosts(tenant),
+                "fleet: every READY tenant in meta is hosted by its cell",
+                { "tenant" => tenant.0 }
+            );
+        }
     }
 }
 

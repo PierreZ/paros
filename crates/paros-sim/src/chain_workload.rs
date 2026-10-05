@@ -829,6 +829,9 @@ struct Tail {
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
     converged: BTreeSet<JournalKey>,
+    /// How many clients finished their fleet operations in the recovery
+    /// tail (#247): the last one judges the control plane's final folds.
+    fleet_settled: usize,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -2904,6 +2907,48 @@ impl Workload for ChainWorkload {
             time.sleep(cutoff.checked_sub(time.now()).unwrap())
                 .await
                 .ok();
+        }
+        // The fleet's control plane in the recovery tail (#247): this
+        // operator finishes the operation it stopped in, and the last one to
+        // do so — every fleet writer is quiet then — judges the final folds
+        // of meta and the cell, and every live node's registry fold.
+        fleet_ops
+            .settle(
+                ctx,
+                &nodes,
+                config.tunables().checkpoint_policy(),
+                Duration::from_millis(config.retry_backoff_ms.max(10)),
+            )
+            .await;
+        let last_to_settle = {
+            let tail = tail(ctx.state());
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.fleet_settled += 1;
+            guard.fleet_settled == guard.registered
+        };
+        if last_to_settle {
+            let journals = self
+                .plan
+                .as_ref()
+                .map(|plan| plan.ids.clone())
+                .unwrap_or_default();
+            // A node down for good — every journal it serves parked — follows
+            // nothing; every joiner follows the registry whatever it stands.
+            let expected: Vec<u64> = servers
+                .iter()
+                .enumerate()
+                .filter(|(_, ip)| {
+                    !journals
+                        .iter()
+                        .all(|j| crate::world::parked_nodes(ctx.state(), *j).contains(*ip))
+                })
+                .map(|(rank, _)| rank as u64)
+                .chain(
+                    (0..deployment.joiners().len())
+                        .map(|rank| crate::roles::joiner_node_id(rank).0),
+                )
+                .collect();
+            fleet_ops.final_check(ctx, &nodes, &expected).await;
         }
         // Every client folds to the tail as the chaos window closes (#205):
         // a client whose program never drew a fold holds the trim fence at
