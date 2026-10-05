@@ -6,7 +6,7 @@
 //!
 //! Every client is an operator: several run fleet operations at once and
 //! fence each other through the journals' generations, and an operation
-//! that loses is resumed later from what the journals hold. Three shapes make
+//! that loses is resumed later from what the journals hold. These shapes make
 //! the state machines' middles likely, each a BUGGIFY location paired with a
 //! reachable where it fires:
 //!
@@ -15,7 +15,14 @@
 //!   same operation, which must end where an uninterrupted one would;
 //! - **a changed identity**: an `init` told another cell's id must be
 //!   refused; a tenant created under an id this client had already used must
-//!   be refused, and the creator redraws.
+//!   be refused, and the creator redraws;
+//! - **a crash between meta's checkpoint and its truncate** (#247, the
+//!   registry owner's shape for the fleet tenant): the checkpoint stays
+//!   mid-log, and every later fold of meta verifies it on the way.
+//!
+//! Every fold a session makes — meta's and the cell's — is held to the
+//! checkpoint oracle the registry's owner is (`judge_folds`): a checkpoint
+//! met with the whole prefix folded is that prefix's state.
 //!
 //! **Meta's directory equals the cell's tenant list** (FDB's
 //! `MetaclusterConsistency`): after an operation that left the session
@@ -35,9 +42,9 @@ use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::Writer;
-use paros::client::checkpoint::CheckpointPolicy;
+use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, OpenOutcome};
 use paros::client::fleet::{FleetFrames, FleetRefusal, FleetSession, Run, Stage, Step};
-use paros::meta::{CellState, Group, Placement, TenantState};
+use paros::meta::{CellState, Group, Meta, Placement, TenantState};
 use paros::system::Registry;
 use paros::{JournalId, JournalKey, NodeId, TenantId};
 
@@ -162,6 +169,7 @@ impl FleetOps {
             };
             let mut session = self.session(wrong, policy);
             let run = session.init(&client, first, draw | 1, Duration::ZERO).await;
+            judge_folds(&session);
             assert_always!(
                 !matches!(run.outcome, Step::Done { .. }) && run.steps.is_empty(),
                 "fleet: an init naming another cell writes nothing and never ends",
@@ -175,15 +183,49 @@ impl FleetOps {
             }
             return;
         }
+        if self.initialized && buggify_with_prob!(0.15) {
+            self.checkpoint_meta_and_stop(&client, policy, first).await;
+            return;
+        }
         let mut session = self.session(self.frames, policy);
         if buggify_with_prob!(0.2) {
             if let Step::Advanced(_) = session.init_step(&client, first, draw | 1).await {
                 assert_reachable!("fleet: an init stops after one step");
                 self.pending = Some(Pending::Init);
             }
+            judge_folds(&session);
             return;
         }
         self.finish_init(&client, &mut session, first, draw).await;
+        judge_folds(&session);
+    }
+
+    /// An operator that crashes between meta's checkpoint and its truncate
+    /// (#247, the registry's shape for the fleet tenant): open meta as its
+    /// owner, write a checkpoint of the fold, and stop. The checkpoint stays
+    /// mid-log; every later fold verifies it on the way, and the next owner's
+    /// checkpoint truncates past it.
+    async fn checkpoint_meta_and_stop(
+        &self,
+        client: &ChainClient,
+        policy: CheckpointPolicy,
+        first: usize,
+    ) {
+        let mut owner =
+            Checkpointer::new(self.frames.meta, self.client_id, Meta::default(), policy);
+        let OpenOutcome::Open { diverged, .. } = owner.open(client, first).await else {
+            return;
+        };
+        assert_always!(
+            diverged.is_none(),
+            "checkpoint: an owner's load finds each checkpoint its prefix's state",
+            { "journal" => self.frames.meta.to_string(), "seq" => diverged.unwrap_or_default() }
+        );
+        if owner.write_checkpoint(client, first).await.is_ok() {
+            assert_reachable!(
+                "fleet: an operator stops between meta's checkpoint and its truncate"
+            );
+        }
     }
 
     /// `TENANT`: create (an even `class`) or remove a `users` tenant named
@@ -224,6 +266,7 @@ impl FleetOps {
                     assert_reachable!("fleet: a tenant creation stops after one step");
                     self.pending = Some(Pending::Create(name, placement, frame));
                 }
+                judge_folds(&session);
                 return;
             }
             let draws = vec![
@@ -245,10 +288,12 @@ impl FleetOps {
                     assert_reachable!("fleet: a tenant removal stops after one step");
                     self.pending = Some(Pending::Remove(name));
                 }
+                judge_folds(&session);
                 return;
             }
             self.remove(&client, &mut session, first, &name).await;
         }
+        judge_folds(&session);
     }
 
     /// Run the operation this client stopped in, to its end.
@@ -283,6 +328,7 @@ impl FleetOps {
             }
             Pending::Remove(name) => self.remove(&client, &mut session, first, name).await,
         };
+        judge_folds(&session);
         if !ended {
             self.pending = Some(pending);
         }
@@ -548,6 +594,22 @@ impl FleetOps {
         }
         assert_reachable!("fleet: meta's directory is checked against the cell's tenant list");
     }
+}
+
+/// Every fold a session made found each checkpoint its prefix's state
+/// (#247): meta's owner checkpoints as it writes, the registry's owner too,
+/// and a fold that meets a checkpoint with the whole prefix folded compares
+/// the two — the registry owner's oracle, for both of a session's journals.
+fn judge_folds(session: &FleetSession) {
+    let diverged = session.diverged();
+    assert_always!(
+        diverged.is_none(),
+        "checkpoint: an owner's load finds each checkpoint its prefix's state",
+        {
+            "journal" => diverged.map(|(j, _)| j.to_string()).unwrap_or_default(),
+            "seq" => diverged.map_or(0, |(_, seq)| seq)
+        }
+    );
 }
 
 /// A tenant frame spread from one draw (#226: random, never a position; no
