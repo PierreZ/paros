@@ -160,9 +160,6 @@ pub const REGISTRY_PAGE: usize = 64;
 // A registry page that carries nothing could never deliver a history.
 const _: () = assert!(REGISTRY_PAGE > 0);
 
-// A registry page that carries nothing could never deliver a history.
-const _: () = assert!(REGISTRY_PAGE > 0);
-
 /// What a GC request did at this matchmaker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcOutcome {

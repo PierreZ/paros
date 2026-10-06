@@ -215,15 +215,42 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     // ---- reads --------------------------------------------------------------
 
     /// The highest ballot promised.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn promised(&self) -> Ballot {
+        // The read side of the write ordering: the last record never stands
+        // above the promise that covered it.
+        assert!(
+            self.records
+                .last_key()
+                .and_then(|s| self.records.get(s))
+                .is_none_or(|(b, _)| *b <= self.promised),
+            "the promise dominates the last record"
+        );
         self.promised
     }
 
     /// The working accepted log.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn records(&self) -> &BTreeMap<Slot, (Ballot, V)> {
-        self.records.entries()
+        let records = self.records.entries();
+        assert!(
+            records
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.first_slot()),
+            "no accepted record survives below the compaction floor"
+        );
+        records
     }
 
     /// The record at `slot`, if readable.
@@ -255,15 +282,35 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     }
 
     /// The compaction floor: the first slot still retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn first_slot(&self) -> Slot {
-        self.records.floor()
+        let floor = self.records.floor();
+        assert!(
+            floor == self.faulty.floor(),
+            "the tri-state's two windows share one floor"
+        );
+        floor
     }
 
     /// The faulty entries: identity known, value lost.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn faulty(&self) -> &BTreeMap<Slot, Ballot> {
-        self.faulty.entries()
+        let faulty = self.faulty.entries();
+        assert!(
+            faulty.keys().next().is_none_or(|s| *s >= self.first_slot()),
+            "no faulty entry survives below the compaction floor"
+        );
+        faulty
     }
 
     /// The lowest faulty slot, if any.

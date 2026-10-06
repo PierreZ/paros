@@ -944,6 +944,13 @@ impl MatchmakerReconfigurer {
                 // [`Self::stop_quorum_reached`], so every ack that arrives
                 // in between widens the reconstruction and a finish's
                 // proposal.
+                // A counted freeze: the member is in, and the decree floor
+                // covers its decree promise.
+                assert!(acks.contains_key(&from), "a counted freeze is recorded");
+                assert!(
+                    *decree_floor >= decree_promised,
+                    "the decree floor covers every frozen promise"
+                );
                 let quorum = old.quorum_size();
                 ReconfigurerStep::Stopped {
                     remaining: quorum.saturating_sub(acks.len()),
@@ -961,6 +968,10 @@ impl MatchmakerReconfigurer {
                 if set != bootstrap.set || !set.contains(from) || !acks.insert(from) {
                     return ReconfigurerStep::Ignored;
                 }
+                assert!(
+                    acks.len() <= bootstrap.set.members().len(),
+                    "only members of the proposed set acknowledge its bootstrap"
+                );
                 let remaining = bootstrap.set.members().len() - acks.len();
                 if remaining > 0 {
                     return ReconfigurerStep::Bootstrapped { remaining };
@@ -976,6 +987,16 @@ impl MatchmakerReconfigurer {
                     round: self.round,
                     node: self.node,
                 };
+                // The decree opens strictly above every decree promise the stop
+                // quorum reported, at this reconfigurer's own ballot.
+                assert!(
+                    ballot.round > decree_floor.round,
+                    "a decree opens above the stop quorum's promises"
+                );
+                assert!(
+                    ballot.node == self.node,
+                    "a decree runs at this node's ballot"
+                );
                 let decree = Box::new(Decree::new(ballot, old, bootstrap.set.members().to_vec()));
                 self.phase = ReconfigurerPhase::Deciding {
                     old: old.clone(),
@@ -1007,6 +1028,15 @@ impl MatchmakerReconfigurer {
                             DecreePromise::Quorum(members) => members,
                         };
                         let adopted = decree.adopted_prior_vote();
+                        // Phase 2 proposes the value P2c selected, at this ballot.
+                        assert!(
+                            decree.value() == Some(&members),
+                            "the decree proposes the selected value"
+                        );
+                        assert!(
+                            decree.ballot() == ballot,
+                            "the decree proposes at its own ballot"
+                        );
                         self.resend();
                         ReconfigurerStep::Proposing {
                             ballot,
@@ -1028,6 +1058,10 @@ impl MatchmakerReconfigurer {
                             AcceptFold::Chosen(members) => members,
                         };
                         let successor = MatchmakerSet::new(old.generation.next(), members);
+                        assert!(
+                            successor.generation == old.generation.next(),
+                            "a chosen successor is the next generation"
+                        );
                         self.phase = ReconfigurerPhase::Publishing {
                             old: old.clone(),
                             successor: successor.clone(),
@@ -1098,6 +1132,13 @@ impl MatchmakerReconfigurer {
                     successor.contains(from) && at >= successor.generation && new_acks.insert(from);
                 if !counted_old && !counted_new {
                     return ReconfigurerStep::Ignored;
+                }
+                // A counted learner is in the tally of the set it counts for.
+                if counted_new {
+                    assert!(
+                        new_acks.contains(&from),
+                        "a counted successor member is tallied"
+                    );
                 }
                 if old.has_quorum(old_acks) && successor.has_quorum(new_acks) {
                     let successor = successor.clone();

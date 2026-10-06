@@ -36,11 +36,20 @@ pub struct Authority<Id> {
 
 impl<Id> Default for Authority<Id> {
     fn default() -> Self {
-        Self {
+        let authority = Self {
             fence: None,
             quorum_acked_by: BTreeSet::new(),
             quorum_elapsed: 0,
-        }
+        };
+        assert!(
+            authority.fence.is_none(),
+            "a default authority has no fence"
+        );
+        assert!(
+            authority.quorum_elapsed == 0,
+            "a default authority's window is fresh"
+        );
+        authority
     }
 }
 
@@ -214,15 +223,44 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     // ---- the standing authority: delegated to the embedded `Authority` ----
 
     /// The leadership's standing authority, whole.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn authority(&self) -> &Authority<Id> {
+        // The fence lies below the frontier the leadership allocates from.
+        if let Some(fence) = self.authority.fence() {
+            assert!(
+                fence < self.next_slot,
+                "a leadership's fence lies below its frontier"
+            );
+            assert!(
+                self.election.is_none(),
+                "a campaign holds no standing authority"
+            );
+        }
         &self.authority
     }
 
     /// The fresh-leader fence ([`Authority::fence`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn fence(&self) -> Option<Slot> {
-        self.authority.fence()
+        let fence = self.authority.fence();
+        if let Some(fence) = fence {
+            assert!(
+                fence < self.next_slot,
+                "a leadership's fence lies below its frontier"
+            );
+            assert!(self.election.is_none(), "a campaign holds no fence");
+        }
+        fence
     }
 
     /// Open a fresh leadership's authority ([`Authority::open`]).
@@ -245,8 +283,22 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Start the `CheckQuorum` window again ([`Authority::renew`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn renew_authority(&mut self, own_vote: Option<Id>) {
+        assert!(
+            self.election.is_none(),
+            "a candidate has no authority to renew"
+        );
+        let fence = self.authority.fence();
         self.authority.renew(own_vote);
+        assert!(
+            self.authority.fence() == fence,
+            "a renewed window keeps its fence"
+        );
     }
 
     /// Credit `from` to the current window ([`Authority::credit`]): an ack
@@ -268,14 +320,38 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
 
     /// Advance the window's clock by one tick and report its age
     /// ([`Authority::tick`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn tick_authority(&mut self) -> u64 {
-        self.authority.tick()
+        assert!(self.election.is_none(), "only a leadership's window ages");
+        let age = self.authority.tick();
+        assert!(age > 0, "a ticked window has aged");
+        age
     }
 
     /// Whether the window holds a Phase-2 quorum of `config`
     /// ([`Authority::holds`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn authority_holds(&self, config: &AcceptorConfig<Id>) -> bool {
-        self.authority.holds(config)
+        assert!(
+            config.is_well_formed(),
+            "authority is judged over a well-formed configuration"
+        );
+        let holds = self.authority.holds(config);
+        if holds {
+            assert!(
+                self.election.is_none(),
+                "a campaign holds no standing authority"
+            );
+        }
+        holds
     }
 }

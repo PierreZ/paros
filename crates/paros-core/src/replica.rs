@@ -309,8 +309,23 @@ impl Replica {
     // ---- reads --------------------------------------------------------------
 
     /// The durable chosen index (the commit index).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen_index(&self) -> Option<Slot> {
+        // The chosen index covers everything the fold applied, and the floor
+        // never outruns it.
+        assert!(
+            self.folded <= self.first_unchosen(),
+            "the fold lies inside the chosen prefix"
+        );
+        assert!(
+            self.floor <= self.first_unchosen(),
+            "the floor lies inside the chosen prefix"
+        );
         self.chosen_index
     }
 
@@ -320,9 +335,22 @@ impl Replica {
     /// folded* everything up to it. `None` is the empty watermark, covered by
     /// any prefix. The replica consumes "applied past `index`" and nothing
     /// else — it never sees the watermark tally that produced the index.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn covers(&self, index: Option<Slot>) -> bool {
-        index.is_none_or(|i| i < self.folded)
+        let covered = index.is_none_or(|i| i < self.folded);
+        // A covered index is inside the chosen prefix: folded is chosen.
+        if let Some(index) = index.filter(|_| covered) {
+            assert!(
+                self.chosen_index.is_some_and(|ci| index <= ci),
+                "a covered index lies inside the chosen prefix"
+            );
+        }
+        covered
     }
 
     /// First slot not in the contiguous chosen prefix.
@@ -345,21 +373,48 @@ impl Replica {
     }
 
     /// Every slot known chosen, contiguous or not.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen(&self) -> &BTreeMap<Slot, Command> {
+        assert!(
+            self.chosen.keys().next().is_none_or(|s| *s >= self.floor),
+            "no chosen value survives below the floor"
+        );
         &self.chosen
     }
 
     /// Whether `slot` is known chosen here.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_chosen(&self, slot: Slot) -> bool {
-        self.chosen.contains_key(&slot)
+        let chosen = self.chosen.contains_key(&slot);
+        if chosen {
+            assert!(slot >= self.floor, "a held chosen slot is retained");
+        }
+        chosen
     }
 
     /// The value chosen at `slot`, if known.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
-        self.chosen.get(&slot)
+        let command = self.chosen.get(&slot);
+        if command.is_some() {
+            assert!(slot >= self.floor, "a held chosen slot is retained");
+        }
+        command
     }
 
     /// The journal state at the fold's head.
@@ -398,8 +453,18 @@ impl Replica {
     }
 
     /// The first slot the fold has not applied.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn folded(&self) -> Slot {
+        assert!(self.folded >= self.floor, "the fold starts at the floor");
+        assert!(
+            self.folded <= self.first_unchosen(),
+            "the fold lies inside the chosen prefix"
+        );
         self.folded
     }
 

@@ -527,7 +527,18 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, owner = entry.owner.0, seq = entry.seq.0)))]
     pub fn propose(&mut self, entry: Entry) -> ProposeResult {
-        self.propose_in(entry, None, Delegation::Auto)
+        let result = self.propose_in(entry, None, Delegation::Auto);
+        if let ProposeResult::Accepted(slot) = result {
+            assert!(
+                slot < self.proposer.next_slot(),
+                "an admitted write holds an allocated slot"
+            );
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader admits a write"
+            );
+        }
+        result
     }
 
     /// [`ColocatedNode::propose`] with the driver naming the **column** the
@@ -574,9 +585,16 @@ impl ColocatedNode {
         delegation: Delegation,
     ) -> ProposeResult {
         if self.role != NodeRole::Leader {
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a refusing non-leader holds no round"
+            );
             return ProposeResult::NotLeader(self.leader);
         }
-        self.open_proposal(column, delegation, Command::Write(entry))
+        let marks = self.durable_marks();
+        let result = self.open_proposal(column, delegation, Command::Write(entry));
+        self.assert_marks_monotone(marks);
+        result
     }
 
     /// The tail every proposal entry point shares: allocate the next slot,
@@ -652,7 +670,18 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, control = ?control)))]
     pub fn propose_control(&mut self, control: Control) -> ProposeResult {
-        self.propose_control_in(control, Delegation::Auto)
+        let result = self.propose_control_in(control, Delegation::Auto);
+        if let ProposeResult::Accepted(slot) = result {
+            assert!(
+                slot < self.proposer.next_slot(),
+                "an admitted control holds an allocated slot"
+            );
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader admits a control command"
+            );
+        }
+        result
     }
 
     /// [`ColocatedNode::propose_control`] with the driver naming the proxy
@@ -672,9 +701,16 @@ impl ColocatedNode {
         delegation: Delegation,
     ) -> ProposeResult {
         if self.role != NodeRole::Leader {
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a refusing non-leader holds no round"
+            );
             return ProposeResult::NotLeader(self.leader);
         }
-        self.open_proposal(None, delegation, Command::Control(control))
+        let marks = self.durable_marks();
+        let result = self.open_proposal(None, delegation, Command::Control(control));
+        self.assert_marks_monotone(marks);
+        result
     }
 
     /// Decided log compaction (a journal `Truncate`, #204): drop every
@@ -1172,8 +1208,21 @@ impl ColocatedNode {
     /// clock resets wherever the core hears from a live leadership or starts
     /// a campaign, and a caller that wants to draw it reads it here rather
     /// than re-deriving those reset sites.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn election_elapsed(&self) -> u64 {
+        // A leader's election clock is stopped at zero: only a follower or a
+        // candidate counts toward a timeout.
+        if self.role == NodeRole::Leader {
+            assert!(
+                self.election_elapsed == 0,
+                "a leader's election clock is stopped"
+            );
+        }
         self.election_elapsed
     }
 
@@ -1189,15 +1238,41 @@ impl ColocatedNode {
 
     /// This node's static configuration (identity, bootstrap membership, pool
     /// and matchmaker set).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn config(&self) -> &Config {
+        assert!(
+            self.config.pool().binary_search(&self.config.id).is_ok(),
+            "a node's boot pool names the node itself"
+        );
+        assert!(
+            self.config.has_matchmakers() == self.matchmakers.is_some(),
+            "a matchmaker set is believed exactly on a matchmaker deployment"
+        );
         &self.config
     }
 
     /// The addressable pool in force (#189): `Config::pool`, plus every node
     /// [`ColocatedNode::extend_pool`] admitted since this incarnation booted.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn pool(&self) -> &[NodeId] {
+        assert!(
+            self.pool.windows(2).all(|w| w[0] < w[1]),
+            "the pool is sorted and deduplicated"
+        );
+        assert!(
+            self.pool.len() >= self.config.pool().len(),
+            "the pool only grows from boot"
+        );
         &self.pool
     }
 
@@ -1242,8 +1317,23 @@ impl ColocatedNode {
     /// has seen registered: on a leader, the one its Phase 2 quorums are
     /// counted over; on a follower, its belief about the latest one. The
     /// bootstrap configuration on plain Multi-Paxos, always.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn acceptors(&self) -> &AcceptorConfig {
+        assert!(
+            self.acceptors.is_drawn_from(&self.pool),
+            "the configuration in force is drawn from the pool"
+        );
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.acceptors.members() == self.config.peers,
+                "a plain deployment runs its bootstrap membership"
+            );
+        }
         &self.acceptors
     }
 
@@ -1326,26 +1416,72 @@ impl ColocatedNode {
 
     /// Whether this node is a member of its active configuration
     /// ([`ColocatedNode::acceptors`]) — a real acceptor whose own vote counts.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_acceptor(&self) -> bool {
-        self.acceptors.contains(self.config.id)
+        let member = self.acceptors.contains(self.config.id);
+        if member {
+            assert!(
+                self.in_pool(self.config.id),
+                "a member of the configuration is pooled"
+            );
+        }
+        if !self.config.has_matchmakers() {
+            assert!(member, "a plain deployment's node is always a member");
+        }
+        member
     }
 
     /// Monotone campaign-membership counters this incarnation, for the
     /// driver's audit report.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn membership_counters(&self) -> MembershipCounters {
-        MembershipCounters {
+        let counters = MembershipCounters {
             campaigns_skipped: self.counters.non_member_campaigns_skipped,
             step_downs: self.counters.non_member_step_downs,
+        };
+        // A node is outside its configuration only on a deployment that
+        // reconfigures: plain Multi-Paxos skips and resigns nothing.
+        if counters.campaigns_skipped > 0 {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment skips a campaign"
+            );
         }
+        if counters.step_downs > 0 {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment resigns a non-member"
+            );
+        }
+        counters
     }
 
     /// Election timeouts this incarnation that re-sent an open matchmaking
     /// phase's requests instead of abandoning the campaign. Observability
     /// only (see [`ColocatedNode::tick`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn matchmaking_timeouts(&self) -> u64 {
+        if self.counters.matchmaking_timeouts > 0 {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment matchmakes"
+            );
+        }
         self.counters.matchmaking_timeouts
     }
 
@@ -1384,16 +1520,46 @@ impl ColocatedNode {
     /// accepted log, the compaction floor and the CTRL tri-state. A read
     /// view for drivers and oracles; every write goes through the [`Ready`]
     /// batch this node emits.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn acceptor(&self) -> &Acceptor<Command> {
+        // The cross-role coupling a reader of the acceptor relies on.
+        assert!(
+            self.acceptor.first_slot() <= self.first_unchosen(),
+            "the compaction floor never outruns the chosen prefix"
+        );
+        assert!(
+            self.acceptor
+                .faulty()
+                .keys()
+                .all(|s| *s >= self.acceptor.first_slot()),
+            "no faulty record survives below the floor"
+        );
         &self.acceptor
     }
 
     /// The node's **replica** role: the chosen log, the contiguous apply
     /// walk and the journal state it folds. A
     /// read view, like [`ColocatedNode::acceptor`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn replica(&self) -> &Replica {
+        assert!(
+            self.replica.folded() >= self.acceptor.first_slot(),
+            "the journal fold starts at the compaction floor"
+        );
+        assert!(
+            self.replica.folded() <= self.replica.first_unchosen(),
+            "the journal fold never passes the chosen prefix"
+        );
         &self.replica
     }
 
@@ -1422,15 +1588,42 @@ impl ColocatedNode {
     /// probe, the in-flight Phase-2 rounds, the allocator frontier and the
     /// leadership's standing authority. A read view, like
     /// [`ColocatedNode::acceptor`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn proposer(&self) -> &Proposer<NodeId, Command> {
+        if self.role != NodeRole::Leader {
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a non-leader holds no round"
+            );
+            assert!(
+                self.proposer.recovery().is_none(),
+                "a non-leader holds no recovery"
+            );
+        }
         &self.proposer
     }
 
     /// The quorum reads this node has open (#143, [`crate::quorum_read`]),
     /// for drivers / oracles.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn quorum_reads(&self) -> &QuorumReads<NodeId> {
+        assert!(
+            self.quorum_reads
+                .pending()
+                .iter()
+                .all(|r| r.config().is_drawn_from(&self.pool)),
+            "an open read asks a configuration drawn from the pool"
+        );
         &self.quorum_reads
     }
 
@@ -1538,8 +1731,18 @@ impl ColocatedNode {
     /// each election it wins. A read-only observability counter: the driver reads
     /// it on the transition to Leader so a simulation can prove the gap-fill path
     /// is genuinely reached.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn election_gap_fills(&self) -> u64 {
+        // Every fill took a slot below the frontier.
+        assert!(
+            self.counters.election_gap_fills <= self.proposer.next_slot().0,
+            "gap fills never outnumber the allocated slots"
+        );
         self.counters.election_gap_fills
     }
 
@@ -1547,8 +1750,17 @@ impl ColocatedNode {
     /// [`Control::Noop`] because a pre-read reported a vote watermark at or
     /// past its allocator frontier (`node/quorum_reads.rs`). The driver
     /// reports the delta so a simulation can prove the path is reached.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn watermark_fills(&self) -> u64 {
+        assert!(
+            self.counters.watermark_fills <= self.proposer.next_slot().0,
+            "watermark fills never outnumber the allocated slots"
+        );
         self.counters.watermark_fills
     }
 
@@ -1626,10 +1838,41 @@ impl ColocatedNode {
     // ---- crate-internal accessors used by `Ready` (not public API) ----
 
     pub(crate) fn pending_writes(&self) -> &[WriteOp] {
+        // Negative space: a colocated node never writes a replica's learned
+        // record; its chosen values land as authoritative accepted records.
+        assert!(
+            !self
+                .pending_writes
+                .iter()
+                .any(|w| matches!(w, WriteOp::Learned { .. })),
+            "a colocated node persists no learned record"
+        );
         &self.pending_writes
     }
 
     pub(crate) fn pending_messages(&self) -> &[(Audience, Message)] {
+        let me = self.config.id;
+        // A node speaks only in its own name.
+        assert!(
+            self.pending_messages.iter().all(|(_, m)| match m {
+                Message::Prepare { reply_to, .. } | Message::PreRead { reply_to, .. } => {
+                    *reply_to == me
+                }
+                Message::Promise { from, .. }
+                | Message::Accepted { from, .. }
+                | Message::Nack { from, .. }
+                | Message::CatchUpRequest { from, .. }
+                | Message::CatchUpResponse { from, .. }
+                | Message::TrimmedTo { from, .. }
+                | Message::Relinquish { from, .. }
+                | Message::Heartbeat { from, .. }
+                | Message::HeartbeatAck { from, .. }
+                | Message::PreReadAck { from, .. } => *from == me,
+                Message::Commit { from, .. } => *from == Party::Node(me),
+                Message::Accept { leader, .. } => *leader == me,
+            }),
+            "a node sends only in its own name"
+        );
         &self.pending_messages
     }
 
@@ -1648,18 +1891,60 @@ impl ColocatedNode {
     }
 
     pub(crate) fn pending_read_states(&self) -> &[ReadState] {
+        // The apply condition, read back as the batch surfaces: the fold
+        // covers every read it answers.
+        assert!(
+            self.pending_read_states
+                .iter()
+                .all(|r| self.replica.covers(r.index)),
+            "a surfaced read is covered by the fold"
+        );
         &self.pending_read_states
     }
 
     pub(crate) fn pending_match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
+        if !self.pending_match_requests.is_empty() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment registers"
+            );
+        }
+        assert!(
+            self.pending_match_requests
+                .iter()
+                .all(|(_, r)| r.from == self.config.id),
+            "a registration leaves in this node's name"
+        );
         &self.pending_match_requests
     }
 
     pub(crate) fn pending_gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
+        if !self.pending_gc_requests.is_empty() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment collects"
+            );
+        }
+        assert!(
+            self.pending_gc_requests
+                .iter()
+                .all(|(_, r)| r.from == self.config.id),
+            "a GC request leaves in this node's name"
+        );
         &self.pending_gc_requests
     }
 
     pub(crate) fn pending_recovery_batch(&self) -> Option<(usize, usize, usize)> {
+        if let Some((started, gap_fills, _)) = self.pending_recovery_batch {
+            assert!(
+                gap_fills <= started,
+                "a recovery page fills only rounds it started"
+            );
+            assert!(
+                started <= LEADER_RECOVERY_BATCH,
+                "a recovery page is bounded"
+            );
+        }
         self.pending_recovery_batch
     }
 

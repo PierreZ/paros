@@ -118,20 +118,48 @@ pub struct QuorumRead<Id> {
 
 impl<Id: Copy + Ord> QuorumRead<Id> {
     /// The reader's correlation token.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn ctx(&self) -> u64 {
+        // A read's row is one its configuration has.
+        assert!(
+            self.config.admits_read_row(self.row),
+            "a read asks a row of its configuration"
+        );
         self.ctx
     }
 
     /// The row this read was addressed to (`None`: no row).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn row(&self) -> Option<usize> {
+        assert!(
+            self.config.admits_read_row(self.row),
+            "a read asks a row of its configuration"
+        );
         self.row
     }
 
     /// The configuration the read is judged over.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn config(&self) -> &AcceptorConfig<Id> {
+        assert!(
+            self.config.is_well_formed(),
+            "a read is judged over a well-formed configuration"
+        );
         &self.config
     }
 
@@ -198,7 +226,9 @@ pub struct QuorumReads<Id> {
 
 impl<Id> Default for QuorumReads<Id> {
     fn default() -> Self {
-        Self { reads: Vec::new() }
+        let reads = Self { reads: Vec::new() };
+        assert!(reads.reads.is_empty(), "a default tally holds no read");
+        reads
     }
 }
 
@@ -217,8 +247,21 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     }
 
     /// The open reads, in creation order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn pending(&self) -> &[QuorumRead<Id>] {
+        // Every token is opened at most once.
+        assert!(
+            self.reads
+                .iter()
+                .enumerate()
+                .all(|(i, r)| self.reads[..i].iter().all(|o| o.ctx != r.ctx)),
+            "a read token is open at most once"
+        );
         &self.reads
     }
 

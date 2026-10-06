@@ -36,27 +36,69 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
     /// an operating condition).
     #[must_use]
     pub fn new(entries: BTreeMap<K, V>, floor: K) -> Self {
+        let count = entries.len();
         let window = Self { entries, floor };
         window.assert_invariants();
+        assert!(
+            window.entries.len() == count,
+            "a window keeps every entry it is built from"
+        );
         window
     }
 
     /// The floor: the first key still retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn floor(&self) -> K {
+        assert!(
+            self.entries
+                .keys()
+                .next()
+                .is_none_or(|first| *first >= self.floor),
+            "no entry survives below the retained window's floor"
+        );
         self.floor
     }
 
     /// Whether `key` sits below the floor — everything a caller needs to
     /// refuse a question about a key this window can no longer answer.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn below_floor(&self, key: K) -> bool {
-        key < self.floor
+        let below = key < self.floor;
+        // Negative space: a key below the floor is never retained.
+        if below {
+            assert!(
+                !self.entries.contains_key(&key),
+                "a key below the floor is not retained"
+            );
+        }
+        below
     }
 
     /// The retained entries, in key order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn entries(&self) -> &BTreeMap<K, V> {
+        assert!(
+            self.entries
+                .keys()
+                .next()
+                .is_none_or(|first| *first >= self.floor),
+            "no entry survives below the retained window's floor"
+        );
         &self.entries
     }
 

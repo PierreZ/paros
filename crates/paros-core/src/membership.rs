@@ -200,7 +200,12 @@ fn slot_rank(slot: Slot, count: usize) -> Option<u64> {
 
 /// Whether `rank` names one of `count` peers of a tier.
 fn rank_is_in(rank: u64, count: usize) -> bool {
-    u64::try_from(count).is_ok_and(|count| rank < count)
+    let inside = u64::try_from(count).is_ok_and(|count| rank < count);
+    // Nothing ranks inside an empty deployment.
+    if count == 0 {
+        assert!(!inside, "no rank lies inside an empty deployment");
+    }
+    inside
 }
 
 /// Whether every member of `cell` voted.
@@ -273,16 +278,29 @@ impl QuorumSystem {
     /// it is **geometry, true by construction**: a row and a column of the
     /// same grid always share exactly one cell, so a full row always meets a
     /// full column — whatever `rows` and `cols` are.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn cross_intersects(self, members: usize) -> bool {
-        match self {
+        let intersects = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 self.phase1_quorum_size(members)
                     .saturating_add(self.phase2_quorum_size(members))
                     > members
             }
             QuorumSystem::Grid { .. } => true,
+        };
+        // Two majorities always meet; a row always meets a column.
+        if matches!(self, QuorumSystem::Majority | QuorumSystem::Grid { .. }) {
+            assert!(
+                intersects,
+                "a majority or a grid cross-intersects by construction"
+            );
         }
+        intersects
     }
 
     /// Whether this quorum system can be run over a membership of `members`
@@ -377,9 +395,19 @@ impl QuorumSystem {
     /// same predicate as the acceptor pool: the body is a `binary_search`
     /// over a sorted membership and a count, and neither depends on what an
     /// identity *is*.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_majority<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> bool {
-        counted(members, voters) >= majority_of(members.len())
+        let majority = counted(members, voters) >= majority_of(members.len());
+        // A majority of a non-empty membership is somebody.
+        if majority && !members.is_empty() {
+            assert!(!voters.is_empty(), "a majority holds a vote");
+        }
+        majority
     }
 
     /// The **row** a quorum read is addressed to under this quorum system
@@ -458,9 +486,22 @@ impl QuorumSystem {
     /// Under a grid this is *any* full row — the row-less form an election
     /// asks; a quorum read addressed to one row is judged by
     /// [`QuorumSystem::is_phase1_quorum_in`] with that row.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_phase1_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
-        self.is_phase1_quorum_in(members, voters, None)
+        let quorum = self.is_phase1_quorum_in(members, voters, None);
+        // Under a majority the two phases ask the same question.
+        if self == QuorumSystem::Majority {
+            assert!(
+                quorum == Self::is_majority(members, voters),
+                "a majority's Phase-1 quorum is a majority"
+            );
+        }
+        quorum
     }
 
     /// Whether `voters` form a **Phase-1** quorum over `members` **in
@@ -591,9 +632,21 @@ impl QuorumSystem {
     /// grid this is *any* full column — the column-less form the standing
     /// claims ask; a round that was addressed to one column is judged by
     /// [`QuorumSystem::is_phase2_quorum_in`] with that column.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_phase2_quorum<I: Ord>(self, members: &[I], voters: &BTreeSet<I>) -> bool {
-        self.is_phase2_quorum_in(members, voters, None)
+        let quorum = self.is_phase2_quorum_in(members, voters, None);
+        if self == QuorumSystem::Majority {
+            assert!(
+                quorum == Self::is_majority(members, voters),
+                "a majority's Phase-2 quorum is a majority"
+            );
+        }
+        quorum
     }
 
     /// Whether `voters` form a **Phase-2** quorum over `members` **in
@@ -910,16 +963,36 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// The row a quorum read with token `ctx` is addressed to under this
     /// configuration — [`QuorumSystem::row_of`]: `ctx % rows` on a grid,
     /// `None` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn row_of(&self, ctx: u64) -> Option<usize> {
-        self.quorum_system.row_of(ctx)
+        let row = self.quorum_system.row_of(ctx);
+        assert!(
+            self.admits_read_row(row),
+            "a derived row is one of this configuration's"
+        );
+        row
     }
 
     /// The row a quorum read with token `ctx` goes to when its reader names
     /// `chosen` — [`QuorumSystem::read_row`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_row(&self, ctx: u64, chosen: Option<usize>) -> Option<usize> {
-        self.quorum_system.read_row(ctx, chosen)
+        let row = self.quorum_system.read_row(ctx, chosen);
+        assert!(
+            self.admits_read_row(row),
+            "a read runs on one of this configuration's rows"
+        );
+        row
     }
 
     /// Whether `row` names a read row of this configuration —
@@ -938,8 +1011,14 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// If a row is named under a majority or a flexible split.
     #[must_use]
     pub fn is_phase1_addressee(&self, node: Id, row: Option<usize>) -> bool {
-        self.quorum_system
-            .is_phase1_addressee(&self.members, &node, row)
+        let addressee = self
+            .quorum_system
+            .is_phase1_addressee(&self.members, &node, row);
+        // Only a member is ever addressed.
+        if addressee {
+            assert!(self.contains(node), "a Phase-1 addressee is a member");
+        }
+        addressee
     }
 
     /// The acceptors a Phase-1 message in `row` addresses, out of this
@@ -1007,9 +1086,23 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// The column `slot`'s Phase 2 is addressed to under this configuration
     /// — [`QuorumSystem::column_of`]: `slot % cols` on a grid, `None`
     /// otherwise.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn column_of(&self, slot: Slot) -> Option<usize> {
-        self.quorum_system.column_of(slot)
+        let column = self.quorum_system.column_of(slot);
+        // A slot's column is one of this configuration's, and it holds a
+        // whole Phase-2 quorum.
+        if let Some(column) = column {
+            assert!(
+                !self.phase2_addressees(Some(column)).is_empty(),
+                "a slot's column has members"
+            );
+        }
+        column
     }
 
     /// Whether `node` is an acceptor a Phase-2 message in `column` is
@@ -1021,8 +1114,13 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// If a column is named under a majority or a flexible split.
     #[must_use]
     pub fn is_phase2_addressee(&self, node: Id, column: Option<usize>) -> bool {
-        self.quorum_system
-            .is_phase2_addressee(&self.members, &node, column)
+        let addressee = self
+            .quorum_system
+            .is_phase2_addressee(&self.members, &node, column);
+        if addressee {
+            assert!(self.contains(node), "a Phase-2 addressee is a member");
+        }
+        addressee
     }
 
     /// The acceptors a Phase-2 message in `column` addresses, out of this
@@ -1044,21 +1142,53 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     }
 
     /// The membership, sorted and deduplicated.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn members(&self) -> &[Id] {
+        // The membership every predicate binary-searches: non-empty, sorted
+        // and deduplicated (`AcceptorConfig::new`).
+        assert!(
+            !self.members.is_empty(),
+            "a configuration names an acceptor"
+        );
         &self.members
     }
 
     /// The quorum system this configuration's tallies are judged under.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn quorum_system(&self) -> QuorumSystem {
+        assert!(
+            self.quorum_system.admits(self.members.len()),
+            "a configuration admits its quorum system"
+        );
         self.quorum_system
     }
 
     /// Whether `node` is a member of this configuration.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn contains(&self, node: Id) -> bool {
-        self.members.binary_search(&node).is_ok()
+        let member = self.members.binary_search(&node).is_ok();
+        // The binary search is only sound over the sorted membership the
+        // constructor built; restated where it is relied on.
+        assert!(
+            self.members.windows(2).all(|w| w[0] < w[1]),
+            "a configuration's membership is sorted and deduplicated"
+        );
+        member
     }
 
     /// Whether every member is in `pool` (sorted and deduplicated): the
@@ -1128,9 +1258,21 @@ impl ProxyId {
     }
 
     /// Whether this id names a proxy of a deployment of `proxy_count`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_in(self, proxy_count: usize) -> bool {
-        rank_is_in(self.0, proxy_count)
+        let deployed = rank_is_in(self.0, proxy_count);
+        if deployed {
+            assert!(
+                proxy_count > 0,
+                "a deployed proxy belongs to a proxy deployment"
+            );
+        }
+        deployed
     }
 }
 
@@ -1175,9 +1317,21 @@ impl ReplicaId {
     }
 
     /// Whether this id names a replica of a deployment of `replica_count`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_in(self, replica_count: usize) -> bool {
-        rank_is_in(self.0, replica_count)
+        let deployed = rank_is_in(self.0, replica_count);
+        if deployed {
+            assert!(
+                replica_count > 0,
+                "a deployed replica belongs to a replica tier"
+            );
+        }
+        deployed
     }
 }
 
@@ -1290,8 +1444,17 @@ impl MatchmakerSet {
     }
 
     /// The members, sorted and deduplicated.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn members(&self) -> &[MatchmakerId] {
+        assert!(
+            !self.members.is_empty(),
+            "a matchmaker set names a matchmaker"
+        );
         &self.members
     }
 
@@ -1383,9 +1546,19 @@ impl MatchmakerSet {
     }
 
     /// Whether `id` is a member.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn contains(&self, id: MatchmakerId) -> bool {
-        self.members.binary_search(&id).is_ok()
+        let member = self.members.binary_search(&id).is_ok();
+        assert!(
+            self.members.windows(2).all(|w| w[0] < w[1]),
+            "a matchmaker set is sorted and deduplicated"
+        );
+        member
     }
 
     /// Whether this set can serve as a matchmaker configuration at all: it

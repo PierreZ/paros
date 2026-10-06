@@ -71,21 +71,54 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
     }
 
     /// The leadership ballot the probe queries at.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
+        assert!(
+            !self.blocked.is_empty(),
+            "an open repair probe holds a blocked slot"
+        );
         self.promises.ballot
     }
 
     /// First slot the original Phase 1 covered — the cursor a re-sent
     /// `Prepare` echoes.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn suffix_start(&self) -> Slot {
+        assert!(
+            self.blocked
+                .first()
+                .is_none_or(|s| *s >= self.promises.from_slot),
+            "a blocked slot lies inside the campaign range"
+        );
         self.promises.from_slot
     }
 
     /// The slots still undecidable (Case 3: wait).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn blocked(&self) -> &BTreeSet<Slot> {
+        assert!(
+            !self.blocked.is_empty(),
+            "an open repair probe holds a blocked slot"
+        );
+        assert!(
+            self.best_have.keys().all(|s| self.blocked.contains(s)),
+            "the probe's have-tally is over blocked slots only"
+        );
         &self.blocked
     }
 
@@ -115,8 +148,23 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     // ---- repair probe -------------------------------------------------------
 
     /// The open repair probe, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn probe(&self) -> Option<&RepairProbe<Id, V>> {
+        if let Some(probe) = &self.probe {
+            assert!(
+                self.election.is_none(),
+                "a probe outlives its campaign, never overlaps it"
+            );
+            assert!(
+                !probe.blocked.is_empty(),
+                "an open repair probe holds a blocked slot"
+            );
+        }
         self.probe.as_ref()
     }
 
@@ -136,9 +184,25 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     }
 
     /// The open probe's age in driver ticks, `None` when none is open.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn probe_elapsed(&self) -> Option<u64> {
-        self.probe.as_ref().map(|probe| probe.elapsed)
+        let elapsed = self.probe.as_ref().map(|probe| probe.elapsed);
+        assert!(
+            elapsed.is_some() == self.probe.is_some(),
+            "only an open probe has an age"
+        );
+        if elapsed.is_some() {
+            assert!(
+                self.election.is_none(),
+                "a probe's clock runs after its campaign"
+            );
+        }
+        elapsed
     }
 
     /// Fold one straggler `Promise` page into the open repair probe. Only the
@@ -186,6 +250,16 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         }
         let fold = probe.promises.close_page(from, next_from_slot);
         probe.assert_invariants();
+        if fold == PromiseFold::Answered {
+            assert!(
+                probe.promises.answered.contains(&from),
+                "an answered straggler is counted"
+            );
+        }
+        assert!(
+            fold != PromiseFold::Ignored,
+            "a page past the guards always folds"
+        );
         fold
     }
 
