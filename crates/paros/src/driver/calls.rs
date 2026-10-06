@@ -50,6 +50,17 @@ impl Call {
     /// The command this call proposed: what its slot must have decided for
     /// the slot's verdict to be this call's.
     pub(crate) fn command(&self) -> Command {
+        let command = self.command_unchecked();
+        // A call proposes exactly its own kind of command.
+        assert!(
+            matches!(self, Call::Write { .. }) == command.write().is_some(),
+            "a Write call proposes a write and nothing else does"
+        );
+        command
+    }
+
+    /// [`Call::command`] before its postcondition.
+    fn command_unchecked(&self) -> Command {
         match self {
             Call::Write { entry, .. } => Command::Write(entry.clone()),
             Call::SetLeader {
@@ -80,6 +91,28 @@ impl Call {
         audit: &A,
     ) {
         let me = NodeId(self_id);
+        // A verdict answers the call whose command its slot decided: the
+        // outcome is always of the call's own kind.
+        match &self {
+            Call::Write { .. } => assert!(
+                matches!(
+                    outcome,
+                    Outcome::Accepted { .. }
+                        | Outcome::Duplicate { .. }
+                        | Outcome::Refused(_)
+                        | Outcome::Truncated(_)
+                ),
+                "a Write is answered with a write's verdict"
+            ),
+            Call::SetLeader { .. } => assert!(
+                matches!(outcome, Outcome::Leader(_) | Outcome::LeaderRefused(_)),
+                "a SetLeader is answered with a SetLeader's verdict"
+            ),
+            Call::Truncate { .. } => assert!(
+                matches!(outcome, Outcome::Trimmed(_) | Outcome::TruncateRefused(_)),
+                "a Truncate is answered with a Truncate's verdict"
+            ),
+        }
         match self {
             Call::Write { reply, .. } => {
                 answer(hooks, audit, me, Reply::Write, reply, write_ack(outcome));
@@ -156,6 +189,27 @@ impl Call {
 
 /// The wire verdict of a `Write` whose slot applied to `outcome`.
 pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
+    let ack = write_ack_unchecked(outcome);
+    // An accepted or duplicate write names its records; a refusal names the
+    // state it was judged against.
+    if matches!(
+        outcome,
+        Outcome::Accepted { .. } | Outcome::Duplicate { .. }
+    ) {
+        assert!(ack.count > 0, "an acked write carries records");
+        assert!(ack.state.is_none(), "an acked write names no refusal state");
+    }
+    if matches!(outcome, Outcome::Refused(_) | Outcome::Truncated(_)) {
+        assert!(
+            ack.state.is_some(),
+            "a refused write names the state it was judged against"
+        );
+    }
+    ack
+}
+
+/// [`write_ack`] before its postconditions.
+fn write_ack_unchecked(outcome: &Outcome) -> WriteAck {
     match outcome {
         Outcome::Accepted { seq, count } => WriteAck {
             outcome: WriteOutcome::Accepted.into(),
@@ -187,6 +241,19 @@ pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
 
 /// The wire verdict of a `SetLeader` whose slot applied to `outcome`.
 pub(crate) fn set_leader_ack(outcome: &Outcome) -> SetLeaderAck {
+    let ack = set_leader_ack_unchecked(outcome);
+    // Only a decided SetLeader wins, and a decided one names its state.
+    if ack.won {
+        assert!(ack.decided, "a won SetLeader was decided");
+    }
+    if ack.decided {
+        assert!(ack.state.is_some(), "a decided SetLeader names its state");
+    }
+    ack
+}
+
+/// [`set_leader_ack`] before its postconditions.
+fn set_leader_ack_unchecked(outcome: &Outcome) -> SetLeaderAck {
     match outcome {
         Outcome::Leader(state) => SetLeaderAck {
             decided: true,
@@ -206,6 +273,18 @@ pub(crate) fn set_leader_ack(outcome: &Outcome) -> SetLeaderAck {
 
 /// The wire verdict of a `Truncate` whose slot applied to `outcome`.
 pub(crate) fn truncate_ack(outcome: &Outcome) -> TruncateAck {
+    let ack = truncate_ack_unchecked(outcome);
+    if ack.refused {
+        assert!(ack.decided, "a refused Truncate was decided");
+    }
+    if ack.decided {
+        assert!(ack.state.is_some(), "a decided Truncate names its state");
+    }
+    ack
+}
+
+/// [`truncate_ack`] before its postconditions.
+fn truncate_ack_unchecked(outcome: &Outcome) -> TruncateAck {
     match outcome {
         Outcome::Trimmed(state) => TruncateAck {
             decided: true,

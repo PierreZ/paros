@@ -105,6 +105,15 @@ struct Lanes {
 }
 
 impl Lanes {
+    /// The running total is the sum of the lanes, and the round-robin cursor
+    /// is a journal key.
+    fn assert_invariants(&self) {
+        assert!(
+            self.total == self.by_journal.values().map(VecDeque::len).sum::<usize>(),
+            "a mailbox's total counts every queued message once"
+        );
+    }
+
     /// Pop one message round-robin: the first non-empty lane at or after the
     /// cursor, wrapping; the cursor then moves past that lane.
     fn pop(&mut self) -> Option<internal::ConsensusMessage> {
@@ -114,9 +123,17 @@ impl Lanes {
             .chain(self.by_journal.range(..self.cursor))
             .find(|(_, lane)| !lane.is_empty())
             .map(|(journal, _)| *journal)?;
+        let total = self.total;
         let message = self.by_journal.get_mut(&journal)?.pop_front()?;
         self.total -= 1;
         self.cursor = (journal.0, journal.1.saturating_add(1));
+        // Fairness: the cursor moves strictly past the lane it served.
+        assert!(
+            self.cursor > journal,
+            "the round-robin cursor moves past the served lane"
+        );
+        assert!(self.total + 1 == total, "a pop takes exactly one message");
+        self.assert_invariants();
         Some(message)
     }
 
@@ -195,6 +212,9 @@ impl PeerMailbox {
             if evicted.is_none() {
                 lanes.total += 1;
             }
+            // The lane the message went to now holds it.
+            assert!(lanes.lane_len(journal) > 0, "a pushed message is queued");
+            lanes.assert_invariants();
             evicted
         };
         self.wake.notify_one();
@@ -282,7 +302,12 @@ impl Outbound {
     /// Add a lane to `node` (#189: a node the registry admitted at runtime).
     /// A node already reachable keeps its lane.
     pub(crate) fn add_peer(&self, node: NodeId, lane: PeerMailbox) {
+        // A node never opens a lane to itself.
+        if let Party::Node(me) = self.sender {
+            assert!(node != me, "a node opens no lane to itself");
+        }
         self.peers().entry(node).or_insert(lane);
+        assert!(self.has_peer(node), "an added peer has a lane");
     }
 
     fn peers(&self) -> std::sync::MutexGuard<'_, BTreeMap<NodeId, PeerMailbox>> {
@@ -303,6 +328,16 @@ impl Outbound {
         };
         if *audience == Audience::Learners {
             nodes.extend(self.learners.iter().copied());
+        }
+        // A fan-out never loops back to its sender.
+        if let (Party::Node(me), false) = (self.sender, matches!(audience, Audience::Node(_))) {
+            assert!(!nodes.contains(&me), "a fan-out never addresses its sender");
+        }
+        if audience.proxy().is_some() {
+            assert!(
+                nodes.is_empty(),
+                "a proxy audience resolves through the proxy lanes"
+            );
         }
         nodes
     }
@@ -500,6 +535,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
     ) -> PeerMailbox {
         let client: ServiceClient<P, DeliverRpc> = well_known(rpc, addr);
         let mailbox = PeerMailbox::new(self.tunables.peer_queue_capacity);
+        assert!(mailbox.is_empty(), "a fresh lane holds nothing");
         self.providers
             .task()
             .spawn_task(
@@ -560,6 +596,10 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     to: Party,
 ) {
     let batch_limit = tunables.delivery_batch;
+    assert!(
+        batch_limit > 0,
+        "a delivery batch carries at least one message"
+    );
     let mut carried = None;
     loop {
         let first = if let Some(message) = carried.take() {
@@ -656,6 +696,19 @@ fn delivery_batch<A: Audit>(
     // only where it can have an effect.
     if batch.len() > 1 && messages.take_reverse() {
         batch.reverse();
+    }
+    // A batch is never empty, never longer than its limit, and fits a frame
+    // unless it is one oversized message on its own.
+    assert!(!batch.is_empty(), "a delivery batch carries a message");
+    assert!(
+        batch.len() <= batch_limit.max(1),
+        "a delivery batch honours its limit"
+    );
+    if batch.len() > 1 {
+        assert!(
+            batch_bytes <= DELIVERY_BATCH_BYTES,
+            "a multi-message batch fits its byte budget"
+        );
     }
     (internal::Deliver { messages: batch }, carried)
 }

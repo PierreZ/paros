@@ -135,6 +135,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
     ) -> Result<(), RunError> {
+        assert!(
+            node.config().id.0 == self.self_id,
+            "a node loop settles its own node"
+        );
+        let promised = node.hard_state().max_promised_ballot;
+        let chosen = node.hard_state().chosen_index;
         let mut outbox =
             drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
         if !outbox.gc_requests.is_empty() && self.hooks.withhold_gc_requests() {
@@ -164,6 +170,16 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             self.hooks,
             self.audit,
         );
+        // The settle tail persists and applies; it never lowers what it made
+        // durable (the core's own marks, restated at the I/O seam).
+        assert!(
+            node.hard_state().max_promised_ballot >= promised,
+            "a settled batch never lowers the promise"
+        );
+        assert!(
+            node.hard_state().chosen_index >= chosen,
+            "a settled batch never rewinds the chosen index"
+        );
         Ok(())
     }
 
@@ -182,6 +198,10 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 
     /// Put matchmaker-set handover requests on the matchmaker wire.
     fn send_reconfigure(&self, requests: Vec<(MatchmakerId, ReconfigureRequest)>) {
+        assert!(
+            requests.iter().all(|(_, r)| r.from().0 == self.self_id),
+            "a handover request leaves in this node's name"
+        );
         send_reconfigure_requests(
             self.providers,
             self.links,
@@ -201,6 +221,8 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         target: &[MatchmakerId],
         finishing: bool,
     ) {
+        assert!(handover.is_busy(), "a started handover is running");
+        assert!(!target.is_empty(), "a handover targets a non-empty set");
         self.audit
             .reconfigurer_started(NodeId(self.self_id), current, target);
         tracing::info!(
@@ -260,6 +282,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                     && behind
                     && set.generation.0 > 0
                 {
+                    // A republished successor is a generation this node
+                    // learned on a matchmaker deployment, never the bootstrap.
+                    assert!(
+                        node.config().has_matchmakers(),
+                        "only a matchmaker deployment republishes a successor"
+                    );
                     audit.successor_republished(NodeId(self_id), matchmaker, &set);
                     tracing::info!(
                         node = self_id,
@@ -284,6 +312,10 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     /// and its own location; a preempted decree reopens only here, so two
     /// dueling reconfigurers are paced by their drivers.
     fn pace_handover(&self, node: &ColocatedNode, handover: &mut HandoverDriver) {
+        assert!(
+            node.config().has_matchmakers(),
+            "a handover is paced only on a matchmaker deployment"
+        );
         let (hooks, audit, self_id) = (self.hooks, self.audit, self.self_id);
         handover.tick();
         let stall_budget = node
@@ -389,6 +421,14 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             tracing::info!(node = self_id, "leadership_resigned");
             node.step_down();
         }
+        // Either way the authority is given up in the same call.
+        if handed_off {
+            assert!(
+                node.role() == NodeRole::Follower,
+                "a relinquished authority demotes"
+            );
+            assert!(!node.can_relinquish(), "an authority is relinquished once");
+        }
     }
 }
 
@@ -462,6 +502,10 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
             gc_resend,
             ..
         } = rt;
+        assert!(
+            node.config().id.0 == self_id,
+            "a beat drives this node's own journal"
+        );
         let lp = self.with(&*audit);
         node.tick();
         // Consult each hook only when its decision can have an effect.
@@ -591,10 +635,16 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
     if hooks.skip_delegation() {
         return Delegation::Colocated;
     }
-    match hooks.proxy_for(node.proposer().next_slot(), count) {
+    let choice = match hooks.proxy_for(node.proposer().next_slot(), count) {
         Some(proxy) if proxy.is_in(count) => Delegation::To(proxy),
         _ => Delegation::Auto,
+    };
+    // A named proxy is one the deployment has, chosen by its leader.
+    if let Delegation::To(proxy) = choice {
+        assert!(proxy.is_in(count), "a delegation names a deployed proxy");
+        assert!(node.is_leader(), "only a leader delegates");
     }
+    choice
 }
 
 /// Park `call` on the slot its proposal took (`result`), to be answered
@@ -612,7 +662,18 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
         ProposeResult::NotLeader(hint) => {
             call.no_verdict(hint.map(|n| n.0), shared.hooks, &rt.audit, shared.self_id);
         }
-        ProposeResult::Accepted(slot) => rt.waiters.pending.entry(slot).or_default().push(call),
+        ProposeResult::Accepted(slot) => {
+            // A held call waits on a slot this leader just allocated.
+            assert!(
+                slot < rt.node.proposer().next_slot(),
+                "a call waits on an allocated slot"
+            );
+            rt.waiters.pending.entry(slot).or_default().push(call);
+            assert!(
+                rt.waiters.pending.contains_key(&slot),
+                "a held call is parked on its slot"
+            );
+        }
     }
 }
 
@@ -1609,6 +1670,14 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
             self.audit.journal_stopped(me, journal);
             tracing::info!(node = me.0, journal = %journal, "journal_stopped");
         }
+        // A retired node serves its control journals and nothing else.
+        assert!(
+            self.journals
+                .live
+                .keys()
+                .all(|j| self.journals.is_control(*j)),
+            "a retired node runs no user journal"
+        );
     }
 
     /// This node is in the pool now (#189): it joins every journal a
@@ -1662,6 +1731,13 @@ fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &Syst
     let pool = follower.pool();
     for rt in journals.live.values_mut() {
         rt.node.extend_pool(&pool);
+        // A journal that can reconfigure now admits the whole registry pool.
+        if rt.node.config().has_matchmakers() {
+            assert!(
+                pool.iter().all(|n| rt.node.pool().binary_search(n).is_ok()),
+                "a reconfigurable journal admits the registry's pool"
+            );
+        }
     }
 }
 
@@ -1681,6 +1757,12 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     // whatever this node still holds of it.
     let tombstoned = follower.is_some_and(|f| f.is_tombstoned(journal));
     if journal.is_set() && journals.serves(journal) && !tombstoned {
+        // Unavailable, not unknown: a journal this node serves but cannot
+        // answer right now is quarantined or down, never live.
+        assert!(
+            !journals.live.contains_key(&journal),
+            "a live journal is never refused"
+        );
         tracing::info!(
             node = self_id,
             journal = %journal,
@@ -1720,4 +1802,9 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
         Err(fault @ RunError::Storage(_)) => journals.requarantine(journal, now, fault),
         Err(fault) => journals.park(journal, Some(fault)),
     }
+    // Whatever happened, the journal now sits in exactly one state.
+    assert!(
+        journals.serves(journal),
+        "an opened journal is live, quarantined or down"
+    );
 }

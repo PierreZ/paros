@@ -118,6 +118,18 @@ pub(crate) fn send_outbox<P: Providers, A: Audit>(
     self_id: u64,
     outbox: Outbox,
 ) {
+    // Every matchmaker-wire request a batch hands back speaks for this node.
+    assert!(
+        outbox
+            .match_requests
+            .iter()
+            .all(|(_, r)| r.from.0 == self_id),
+        "a registration leaves in this node's name"
+    );
+    assert!(
+        outbox.gc_requests.iter().all(|(_, r)| r.from.0 == self_id),
+        "a GC request leaves in this node's name"
+    );
     send_match_requests(providers, links, audit, self_id, outbox.match_requests);
     send_gc_requests(
         providers,
@@ -188,6 +200,10 @@ pub(crate) fn send_reconfigure_requests<P: Providers, A: Audit>(
     self_id: u64,
     requests: Vec<(MatchmakerId, ReconfigureRequest)>,
 ) {
+    assert!(
+        requests.iter().all(|(_, r)| r.from().0 == self_id),
+        "a handover request leaves in this node's name"
+    );
     for (matchmaker, request) in requests {
         let Some(client) = link_to(links, self_id, matchmaker) else {
             continue;
@@ -258,6 +274,18 @@ pub(crate) fn surface_matchmaking<A: Audit>(
             "matchmaking_started"
         );
     }
+    // Each phase is surfaced once, keyed by its ballot, and a probe and a
+    // campaign never coexist.
+    assert!(
+        node.membership_probe().is_none() || node.matchmaking_role().is_none(),
+        "a probe and a campaign never coexist"
+    );
+    if let Some(m) = node.matchmaking_role() {
+        assert!(
+            *last_matchmaking == Some(m.ballot()),
+            "an open campaign has been surfaced"
+        );
+    }
 }
 
 /// Send one batch of matchmaking requests, each as its own RPC task whose
@@ -272,6 +300,10 @@ fn send_match_requests<P: Providers, A: Audit>(
     self_id: u64,
     requests: Vec<(MatchmakerId, MatchRequest)>,
 ) {
+    assert!(
+        requests.iter().all(|(_, r)| r.from.0 == self_id),
+        "a matchmaking request leaves in this node's name"
+    );
     for (matchmaker, request) in requests {
         let Some(client) = link_to(links, self_id, matchmaker) else {
             continue;
@@ -317,6 +349,16 @@ fn send_match_requests<P: Providers, A: Audit>(
 /// is folded — the point the audit's registering check needs, in place of a
 /// search over every copy the matchmaker ever sent. `None` for a refusal.
 pub(crate) fn folded_answer(reply: &MatchReply) -> Option<(Ballot, u64)> {
+    let folded = folded_answer_unchecked(reply);
+    assert!(
+        folded.is_some() == matches!(reply.outcome, MatchOutcome::Registered { .. }),
+        "only a registration's answer is folded"
+    );
+    folded
+}
+
+/// [`folded_answer`] before its postcondition.
+fn folded_answer_unchecked(reply: &MatchReply) -> Option<(Ballot, u64)> {
     match &reply.outcome {
         MatchOutcome::Registered {
             history,
@@ -337,6 +379,11 @@ fn report_completed<A: Audit>(
     watermark: Ballot,
     registered_by: usize,
 ) {
+    // A completed registration rests on a quorum: at least one answer.
+    assert!(
+        registered_by > 0,
+        "a completed matchmaking was registered by someone"
+    );
     audit.matchmaking_completed(
         NodeId(self_id),
         ballot,
@@ -390,6 +437,11 @@ pub(crate) fn report_match_step<A: Audit>(
         // catches up; nothing to report beyond the step itself.
         MatchStep::Ignored | MatchStep::ProbeAnswered | MatchStep::UnknownMember => {}
         MatchStep::Registered { remaining } => {
+            // Short of the quorum: someone is still owed.
+            assert!(
+                *remaining > 0,
+                "a registration short of its quorum still waits"
+            );
             audit.match_registered_by(
                 NodeId(self_id),
                 matchmaker,

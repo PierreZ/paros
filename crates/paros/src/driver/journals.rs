@@ -169,6 +169,11 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A:
         .map_err(|e| storage_fault_crash(&audit, self_id, e))?;
     check_format_marker(&mut storage, boot, self_id, &audit).await?;
     let mut node = ColocatedNode::new(&storage);
+    // The core booted from exactly this store's configuration.
+    assert!(
+        node.config().id.0 == self_id,
+        "a journal boots as the node that owns its store"
+    );
     report_boot_state(&node, self_id, &audit);
     // The first randomized election timeout (jitter from the driver's RNG).
     let first_timeout = draw_election_timeout(
@@ -179,6 +184,10 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A:
         tunables.election_timeout_base,
     );
     node.set_election_timeout(first_timeout);
+    assert!(
+        !node.needs_election_timeout(),
+        "a booted journal has its first timeout"
+    );
     audit.election_timeout_set(NodeId(self_id), first_timeout);
     let last = Deltas::new(&node);
     Ok(JournalRt {
@@ -219,6 +228,10 @@ pub(crate) struct Journals<S, A> {
 
 impl<S, A> Journals<S, A> {
     pub(crate) fn new(control: BTreeSet<JournalIdentifier>) -> Self {
+        assert!(
+            control.iter().all(|journal| journal.is_set()),
+            "a control journal is a named journal"
+        );
         Self {
             control,
             live: BTreeMap::new(),
@@ -233,20 +246,67 @@ impl<S, A> Journals<S, A> {
 
     /// `journal` booted: it is live, and its configuration is known.
     pub(crate) fn insert(&mut self, journal: JournalIdentifier, rt: JournalRt<S, A>) {
+        // A journal opens from none of the three states: never twice live,
+        // and out of quarantine before it re-opens.
+        assert!(
+            !self.live.contains_key(&journal),
+            "a journal runs at most one runtime"
+        );
+        assert!(
+            !self.quarantined.contains_key(&journal),
+            "a re-opened journal left quarantine"
+        );
+        assert!(
+            !self.down.contains(&journal),
+            "a journal down for good never re-opens"
+        );
+        assert!(
+            rt.node.config().journal == journal,
+            "a runtime serves the journal it is filed under"
+        );
         let config = rt.node.config();
         if config.has_matchmakers() || config.proxy_count > 0 || config.replica_count > 0 {
             self.deployed.get_or_insert(journal);
         }
         self.booted.insert(journal);
         self.live.insert(journal, rt);
+        self.assert_invariants();
+    }
+
+    /// The three states a journal can be in are disjoint, and the deployed
+    /// journal is one this incarnation booted.
+    fn assert_invariants(&self) {
+        assert!(
+            self.live.keys().all(|j| !self.quarantined.contains_key(j)),
+            "a live journal is not quarantined"
+        );
+        assert!(
+            self.live.keys().all(|j| !self.down.contains(j)),
+            "a live journal is not down"
+        );
+        assert!(
+            self.quarantined.keys().all(|j| !self.down.contains(j)),
+            "a quarantined journal is not down"
+        );
+        if let Some(deployed) = self.deployed {
+            assert!(
+                self.booted.contains(&deployed),
+                "the deployed journal booted here"
+            );
+        }
     }
 
     /// Whether `journal` is one this node serves at all (live, quarantined
     /// or down) — the difference between "not here now" and "unknown".
     pub(crate) fn serves(&self, journal: JournalIdentifier) -> bool {
-        self.live.contains_key(&journal)
+        let serves = self.live.contains_key(&journal)
             || self.quarantined.contains_key(&journal)
-            || self.down.contains(&journal)
+            || self.down.contains(&journal);
+        // Only a named journal is ever served.
+        if serves {
+            assert!(journal.is_set(), "a served journal is named");
+        }
+        serves
     }
 
     /// The node's **plane** journal (the target of a journal-less call and
@@ -258,6 +318,10 @@ impl<S, A> Journals<S, A> {
     /// plane.
     pub(crate) fn first(&mut self) -> Option<(&JournalIdentifier, &mut JournalRt<S, A>)> {
         let deployed = *self.plane()?.0;
+        assert!(
+            self.live.contains_key(&deployed),
+            "the plane's journal is live"
+        );
         self.live
             .iter_mut()
             .find(|(journal, _)| **journal == deployed)
@@ -271,7 +335,13 @@ impl<S, A> Journals<S, A> {
     /// matchmaker journal is quarantined).
     pub(crate) fn plane(&self) -> Option<(&JournalIdentifier, &JournalRt<S, A>)> {
         if let Some(deployed) = self.deployed {
-            return self.live.get_key_value(&deployed);
+            let plane = self.live.get_key_value(&deployed);
+            // The matchmaker plane runs over a user journal, never a control one.
+            assert!(
+                !self.control.contains(&deployed),
+                "the deployed journal is a user journal"
+            );
+            return plane;
         }
         let unknown = self
             .quarantined
@@ -296,7 +366,11 @@ impl<S, A> Journals<S, A> {
     /// node that follows the system journals (#189) runs on with no journal
     /// at all — a joiner boots with none — and exits only on this.
     pub(crate) fn stranded(&self) -> bool {
-        self.live.is_empty() && self.last_fault.is_some()
+        let stranded = self.live.is_empty() && self.last_fault.is_some();
+        if stranded {
+            assert!(self.exhausted(), "a stranded node serves nothing live");
+        }
+        stranded
     }
 
     /// Mark `journal` down for good: its store refused to boot (`fault`,
@@ -309,6 +383,12 @@ impl<S, A> Journals<S, A> {
         if fault.is_some() {
             self.last_fault = fault;
         }
+        assert!(self.down.contains(&journal), "a parked journal is down");
+        assert!(
+            !self.live.contains_key(&journal),
+            "a parked journal runs nothing"
+        );
+        self.assert_invariants();
     }
 
     /// The journals whose quarantine is over at tick `now`, removed from the
@@ -323,11 +403,29 @@ impl<S, A> Journals<S, A> {
         for journal in &due {
             self.quarantined.remove(journal);
         }
+        // A due journal leaves quarantine to re-open; none of them is live.
+        assert!(
+            due.iter().all(|j| !self.quarantined.contains_key(j)),
+            "a due journal has left quarantine"
+        );
+        assert!(
+            due.iter().all(|j| !self.live.contains_key(j)),
+            "a quarantined journal was not live"
+        );
         due
     }
 
     /// Put `journal` back in quarantine from tick `now` (its re-open failed).
     pub(crate) fn requarantine(&mut self, journal: JournalIdentifier, now: u64, fault: RunError) {
+        // Only a journal that failed to re-open goes back: it is in no state.
+        assert!(
+            !self.live.contains_key(&journal),
+            "a re-quarantined journal is not live"
+        );
+        assert!(
+            !self.down.contains(&journal),
+            "a re-quarantined journal is not down"
+        );
         self.quarantined.insert(journal, now);
         self.newly_quarantined.push(journal);
         self.last_fault = Some(fault);
@@ -386,6 +484,12 @@ impl<S, A: Audit> Journals<S, A> {
                 self.quarantined.insert(journal, now);
                 self.newly_quarantined.push(journal);
                 self.last_fault = Some(RunError::Storage(error));
+                // A storage fault quarantines its journal, not the process.
+                assert!(
+                    !self.live.contains_key(&journal),
+                    "a faulted journal runs nothing"
+                );
+                self.assert_invariants();
                 if self.live.is_empty() {
                     // Nothing left to serve this incarnation: the node
                     // exits with the fault (one journal: the pre-#188 rule).

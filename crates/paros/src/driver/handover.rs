@@ -37,10 +37,21 @@ impl HandoverDriver {
     /// Idle until a client asks, or until this node meets a frozen registry
     /// nobody finished replacing.
     pub(crate) fn new(node: NodeId) -> Self {
-        Self {
+        let driver = Self {
             reconfigurer: MatchmakerReconfigurer::new(node),
             resend: Cadence::default(),
             backoff: 0,
+        };
+        assert!(!driver.is_busy(), "a fresh handover driver is idle");
+        driver.assert_invariants();
+        driver
+    }
+
+    /// The pacing belongs to a running handover: an idle one holds no
+    /// backoff.
+    fn assert_invariants(&self) {
+        if !self.reconfigurer.is_busy() {
+            assert!(self.backoff == 0, "an idle handover holds no backoff");
         }
     }
 
@@ -66,7 +77,11 @@ impl HandoverDriver {
         current: &MatchmakerSet,
         target: Vec<MatchmakerId>,
     ) -> Result<(), StartRefusal> {
-        self.reconfigurer.start(current, target)
+        let started = self.reconfigurer.start(current, target);
+        if started.is_ok() {
+            assert!(self.is_busy(), "a started handover is busy");
+        }
+        started
     }
 
     /// Finish a generation someone else froze and abandoned, proposing the
@@ -77,7 +92,11 @@ impl HandoverDriver {
     ///
     /// Same refusals as [`HandoverDriver::start`].
     pub(crate) fn finish(&mut self, current: &MatchmakerSet) -> Result<(), StartRefusal> {
-        self.reconfigurer.finish(current)
+        let finishing = self.reconfigurer.finish(current);
+        if finishing.is_ok() {
+            assert!(self.is_busy(), "a finishing handover is busy");
+        }
+        finishing
     }
 
     /// The requests the running phase wants on the wire right now, taken
@@ -86,6 +105,11 @@ impl HandoverDriver {
         let ready = self.reconfigurer.ready();
         let requests = ready.requests().to_vec();
         ready.advance();
+        // Taking the batch drains it: a second take returns nothing.
+        assert!(
+            self.reconfigurer.ready().requests().is_empty(),
+            "a taken handover batch is drained"
+        );
         requests
     }
 
@@ -105,6 +129,12 @@ impl HandoverDriver {
             .reconfigurer
             .old()
             .map_or(MatchmakerGeneration(0), |set| set.generation);
+        // A closed freeze proposes exactly the next generation.
+        assert!(self.is_busy(), "a closed freeze moves on to the bootstrap");
+        assert!(
+            reconstruction.bootstrap.set.generation == old.next(),
+            "a reconstruction proposes the generation after the frozen one"
+        );
         Some((old, reconstruction))
     }
 
@@ -119,12 +149,16 @@ impl HandoverDriver {
         if !self.reconfigurer.is_busy() {
             self.clear_pacing();
         }
+        self.assert_invariants();
         step
     }
 
     /// Park the preempted decree for `ticks` before it reopens.
     pub(crate) fn back_off(&mut self, ticks: u64) {
+        // Only a running (preempted) handover backs off.
+        assert!(self.is_busy(), "only a running handover backs off");
         self.backoff = ticks;
+        self.assert_invariants();
     }
 
     /// Advance the core's stall clock by one tick.
@@ -146,6 +180,8 @@ impl HandoverDriver {
         if abandoned {
             self.clear_pacing();
         }
+        assert!(!self.is_busy(), "an abandoned handover is idle");
+        self.assert_invariants();
         abandoned
     }
 
@@ -163,7 +199,12 @@ impl HandoverDriver {
             self.backoff -= 1;
             return false;
         }
-        self.resend.tick(cadence)
+        let due = self.resend.tick(cadence);
+        // A re-send is due only for a running handover past its backoff.
+        if due {
+            assert!(self.backoff == 0, "a backed-off handover re-sends nothing");
+        }
+        due
     }
 
     /// Re-issue the running phase's step (a preempted decree reopens above the
@@ -175,5 +216,6 @@ impl HandoverDriver {
     fn clear_pacing(&mut self) {
         self.resend.reset();
         self.backoff = 0;
+        assert!(self.backoff == 0, "cleared pacing holds no backoff");
     }
 }
