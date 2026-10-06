@@ -122,9 +122,14 @@ impl Config {
     /// its identifier are always named (no id has a default,
     /// `docs/architecture.md` §3.8); a sans-IO caller that routes nothing
     /// names [`JournalIdentifier::UNSET`] outright.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(id: NodeId, journal: JournalIdentifier) -> Self {
-        Self {
+        let config = Self {
             id,
             peers: Vec::new(),
             quorum_system: QuorumSystem::default(),
@@ -134,7 +139,18 @@ impl Config {
             proxy_count: 0,
             replica_count: 0,
             journal,
-        }
+        };
+        // A fresh configuration is the plain deployment: every opt-in is off.
+        assert!(
+            !config.has_matchmakers(),
+            "a fresh configuration names no matchmaker"
+        );
+        assert!(!config.has_proxies(), "a fresh configuration runs no proxy");
+        assert!(
+            !config.has_replicas(),
+            "a fresh configuration runs no replica tier"
+        );
+        config
     }
 
     /// The addressable pool: `nodes`, or `peers` when `nodes` is empty.
@@ -176,18 +192,41 @@ impl Config {
     /// the slot without coordination. Nothing routes on it yet: the node a
     /// client asked still acks the proposal it serves, and the owner is
     /// what a future client library that connects to replicas will act on.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
-        ReplicaId::of(slot, self.replica_count)
+        let owner = ReplicaId::of(slot, self.replica_count);
+        // The `None` arm: only a replica tier owns client replies.
+        assert!(
+            owner.is_some() == self.has_replicas(),
+            "a slot has a reply owner iff replicas run"
+        );
+        owner
     }
 
     /// The matchmaker pool: `matchmaker_pool`, or `matchmakers` when empty.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn matchmaker_pool(&self) -> &[MatchmakerId] {
-        if self.matchmaker_pool.is_empty() {
+        let pool = if self.matchmaker_pool.is_empty() {
             &self.matchmakers
         } else {
             &self.matchmaker_pool
+        };
+        if self.has_matchmakers() {
+            assert!(
+                !pool.is_empty(),
+                "a matchmaker deployment has a matchmaker pool"
+            );
         }
+        pool
     }
 }

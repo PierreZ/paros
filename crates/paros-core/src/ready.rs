@@ -5,8 +5,8 @@ use crate::matchmaker::{GcRequest, MatchRequest};
 use crate::membership::MatchmakerId;
 use crate::message::{Audience, Message};
 use crate::node::{ColocatedNode, ReadState};
-use crate::types::{Command, Slot};
-use crate::write::WriteOp;
+use crate::types::{Ballot, Command, Slot};
+use crate::write::{AcceptorWrite, WriteOp};
 
 /// A single batch of work the caller must process, and a **compile-time gate**
 /// enforcing one batch in flight.
@@ -54,9 +54,75 @@ impl<'a> Ready<'a> {
 
     /// The semantic durable write deltas to persist **first** (step 1), in apply
     /// order. Empty when nothing durable changed this batch.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn writes(&self) -> &[WriteOp] {
-        self.node.pending_writes()
+        let writes = self.node.pending_writes();
+        // The write half of the pairs the boot scan re-asserts: no record is
+        // persisted above the promise, and every durable scalar the batch
+        // carries is monotone and at or below the value memory now holds.
+        let promised = self.node.acceptor().promised();
+        assert!(
+            writes.iter().all(|op| match op {
+                WriteOp::Acceptor(
+                    AcceptorWrite::SetPromise(ballot)
+                    | AcceptorWrite::AppendAccepted { ballot, .. },
+                ) => *ballot <= promised,
+                _ => true,
+            }),
+            "a batch persists no promise or record above the promise in memory"
+        );
+        let raises: Vec<Ballot> = writes
+            .iter()
+            .filter_map(|op| match op {
+                WriteOp::Acceptor(AcceptorWrite::SetPromise(ballot)) => Some(*ballot),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            raises.windows(2).all(|w| w[0] < w[1]),
+            "a batch only ever raises the promise"
+        );
+        let chosen: Vec<Slot> = writes
+            .iter()
+            .filter_map(|op| match op {
+                WriteOp::SetChosenIndex(slot) => Some(*slot),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            chosen.windows(2).all(|w| w[0] < w[1]),
+            "a batch only ever advances the chosen index"
+        );
+        assert!(
+            chosen
+                .last()
+                .is_none_or(|ci| Some(*ci) <= self.node.replica().chosen_index()),
+            "a batch persists no chosen index past the one in memory"
+        );
+        let floors: Vec<Slot> = writes
+            .iter()
+            .filter_map(|op| match op {
+                WriteOp::Truncate { first, .. } => Some(*first),
+                WriteOp::TrimmedTo { point, .. } => Some(*point),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            floors.windows(2).all(|w| w[0] < w[1]),
+            "a batch only ever raises the floor"
+        );
+        assert!(
+            floors
+                .last()
+                .is_none_or(|floor| *floor == self.node.acceptor().first_slot()),
+            "a batch's last floor is the floor in memory"
+        );
+        writes
     }
 
     /// Outbound messages to send **after** [`Ready::writes`] are durable
@@ -99,9 +165,25 @@ impl<'a> Ready<'a> {
     /// a batch is pending the core starts no further recovery page;
     /// [`Ready::advance`] clears it and [`ColocatedNode::advance_recovery`]
     /// schedules the next.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovery_batch(&self) -> Option<(usize, usize, usize)> {
-        self.node.pending_recovery_batch()
+        let batch = self.node.pending_recovery_batch();
+        if let Some((started, gap_fills, _)) = batch {
+            assert!(
+                gap_fills <= started,
+                "a recovery page fills only rounds it started"
+            );
+            assert!(
+                started <= crate::LEADER_RECOVERY_BATCH,
+                "a recovery page is bounded"
+            );
+        }
+        batch
     }
 
     /// Matchmaking requests to send this batch, one per addressed matchmaker
@@ -110,17 +192,42 @@ impl<'a> Ready<'a> {
     /// the same batch — over the matchmaker RPC service, never the peer wire;
     /// the answers come back through [`ColocatedNode::on_match_reply`]. Always empty
     /// on plain Multi-Paxos.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn match_requests(&self) -> &[(MatchmakerId, MatchRequest)] {
-        self.node.pending_match_requests()
+        let requests = self.node.pending_match_requests();
+        // The plain path never speaks to a matchmaker.
+        if !requests.is_empty() {
+            assert!(
+                self.node.config().has_matchmakers(),
+                "only a matchmaker deployment registers"
+            );
+        }
+        requests
     }
 
     /// Garbage-collection requests to send this batch (#123), one per
     /// addressed matchmaker, over the matchmaker RPC service; the acks come
     /// back through [`ColocatedNode::on_gc_ack`]. Always empty on plain Multi-Paxos.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn gc_requests(&self) -> &[(MatchmakerId, GcRequest)] {
-        self.node.pending_gc_requests()
+        let requests = self.node.pending_gc_requests();
+        if !requests.is_empty() {
+            assert!(
+                self.node.config().has_matchmakers(),
+                "only a matchmaker deployment collects"
+            );
+        }
+        requests
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the unique

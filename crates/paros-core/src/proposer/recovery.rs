@@ -134,10 +134,11 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
             assert!(blocked.is_empty(), "an inherited recovery blocks no slot");
         }
         assert!(cursor <= end, "a recovery range is never inverted");
-        assert!(
-            blocked.first().is_none_or(|s| *s >= cursor),
-            "a blocked slot lies at or past the recovery cursor"
-        );
+        // A blocked slot may lie *below* the cursor: a faulty record inside
+        // the chosen prefix pulls the campaign range under it, and such a
+        // slot is not chosen here, so the tally can block it (the main hunt
+        // found it on seed 323116061516131908). What bounds it is the
+        // other end: every report named a slot below the frontier.
         assert!(
             blocked.last().is_none_or(|s| *s < end),
             "a blocked slot lies below the recovery end"

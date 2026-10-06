@@ -126,6 +126,22 @@ impl Audience {
     }
 
     fn resolve_excluding(&self, pool: &[NodeId], me: Option<NodeId>) -> Vec<NodeId> {
+        let resolved = self.resolve_unfiltered(pool, me);
+        // A proxy audience names no node, and a broadcast never loops back.
+        if self.proxy().is_some() {
+            assert!(resolved.is_empty(), "a proxy audience resolves to no node");
+        }
+        if let (Some(me), false) = (me, matches!(self, Audience::Node(_))) {
+            assert!(
+                !resolved.contains(&me),
+                "a fan-out never addresses its sender"
+            );
+        }
+        resolved
+    }
+
+    /// [`Audience::resolve_excluding`]'s answer, before its postconditions.
+    fn resolve_unfiltered(&self, pool: &[NodeId], me: Option<NodeId>) -> Vec<NodeId> {
         match self {
             Audience::Node(to) => vec![*to],
             Audience::Proxy(_) => Vec::new(),
