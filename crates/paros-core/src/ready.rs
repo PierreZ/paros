@@ -144,9 +144,20 @@ impl<'a> Ready<'a> {
     /// #94 duplicate surfaces as the `Noop` the walk executed it as. The
     /// driver acks the clients waiting on these slots and reports them; there
     /// is no application to hand them to (#186).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn committed(&self) -> &[(Slot, Command, crate::Outcome)] {
-        self.node.pending_committed()
+        let committed = self.node.pending_committed();
+        // The walk moves forward: each slot once, in slot order.
+        assert!(
+            committed.windows(2).all(|w| w[0].0 < w[1].0),
+            "the walk surfaces each slot once, in order"
+        );
+        committed
     }
 
     /// Read-index rounds confirmed this batch: each [`ReadState`] certifies that

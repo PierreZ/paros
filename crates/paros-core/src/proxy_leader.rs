@@ -675,10 +675,6 @@ impl ProxyLeader {
 
     pub(crate) fn clear_pending(&mut self) {
         self.pending_messages.clear();
-        assert!(
-            self.pending_messages.is_empty(),
-            "an advanced batch has no message left"
-        );
     }
 }
 
@@ -714,6 +710,16 @@ impl ProxyReady<'_> {
                 _ => true,
             }),
             "a proxy speaks in its own name"
+        );
+        // A proxy works for one leadership at a time: nothing it sends runs
+        // above the highest ballot delegated to it.
+        assert!(
+            messages.iter().all(|(_, m)| match m {
+                Message::Accept { ballot, .. } | Message::Commit { ballot, .. } =>
+                    *ballot <= self.proxy.ballot,
+                _ => true,
+            }),
+            "a proxy sends nothing above the ballot it works for"
         );
         messages
     }
