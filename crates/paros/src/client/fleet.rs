@@ -558,6 +558,21 @@ impl FleetSession {
     /// [`FleetSession::create_step`]), under the first of `draws` the fleet tenant does
     /// not hold: a draw the fleet tenant holds already is skipped for the next one. An
     /// interrupted step is taken again for up to `patience`.
+    ///
+    /// The creation is named by its whole draw set, so a resume passes the same
+    /// `draws` and picks up under whichever of them the last run reached: a name
+    /// held under one of this creation's own draws is this creation, not a
+    /// `NameTaken` refusal. Found by the main campaign after the moonpool pin
+    /// advance: a registration under the first draw was overtaken by a
+    /// removal, the run moved on to the second draw and was interrupted again,
+    /// and the next resume, starting from the first draw, refused its own
+    /// tenant and left it registering for good (red on the
+    /// "fleet: a second creation of a name is refused" gate, green after).
+    ///
+    /// # Panics
+    ///
+    /// Never on any input: the one assertion checks that a switch to another
+    /// of this creation's draws moves to a different one.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn create_tenant<P: Providers>(
         &mut self,
@@ -568,15 +583,33 @@ impl FleetSession {
         patience: Duration,
     ) -> Run<TenantId> {
         let deadline = client.now() + patience;
-        let mut draws = draws.into_iter();
-        let mut draw = draws.next().unwrap_or(JournalIdentifier::UNSET);
+        let draws: Vec<JournalIdentifier> = draws.into_iter().collect();
+        let mut at = 0;
+        let mut draw = draws.first().copied().unwrap_or(JournalIdentifier::UNSET);
+        // A switch is no step, so the directory moving between two looks could
+        // bounce between draws: each look may switch at most this often.
+        let mut switches = 2 * draws.len();
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.create_step(client, first, name, draw).await;
-            if step == Step::Refused(FleetRefusal::IdTaken)
-                && let Some(next) = draws.next()
+            if step == Step::Refused(FleetRefusal::IdTaken) && at + 1 < draws.len() && switches > 0
             {
-                draw = next;
+                switches -= 1;
+                at += 1;
+                draw = draws[at];
+                continue;
+            }
+            if let Step::Refused(FleetRefusal::NameTaken { tenant, .. }) = &step
+                && let Some(own) = draws.iter().position(|d| d.tenant == *tenant && *d != draw)
+                && switches > 0
+            {
+                switches -= 1;
+                // `create_step` still checks the holder's control journal under
+                // the draw it switches to, and the draw it holds now is never
+                // switched to again, so a foreign holder is still refused.
+                assert!(own != at, "a switch moves to another draw");
+                at = own;
+                draw = draws[at];
                 continue;
             }
             if retry(client, &step, deadline).await {

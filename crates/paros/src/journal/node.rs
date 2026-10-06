@@ -125,6 +125,31 @@ impl<P: StorageProvider> JournalStorage<P> {
         }
     }
 
+    /// Whether the store under `dir` carries its format marker, read from
+    /// the journal's metadata alone (`Journal::peek_meta`, moonpool#303):
+    /// no recovery scan, no repair, nothing created, so a probe never
+    /// changes what the next boot finds. `false` where no journal exists.
+    ///
+    /// # Errors
+    ///
+    /// A [`StorageError::Corruption`] when no metadata copy is valid or the
+    /// newest does not decode, and the I/O verdict when the namespace cannot
+    /// be read.
+    pub async fn peek_formatted(provider: &P, dir: &str) -> Result<bool, StorageError> {
+        let Some(bytes) = Journal::peek_meta(provider, dir)
+            .await
+            .map_err(|e| open_error(&e))?
+        else {
+            return Ok(false);
+        };
+        let meta = NodeMeta::decode(&bytes).ok_or(StorageError::Corruption {
+            record: StorageRecord::Promise,
+            fault: IntegrityFault::Misdirected,
+            verdict: CorruptionVerdict::Corrupted,
+        })?;
+        Ok(meta.formatted.is_some())
+    }
+
     /// What the last boot scan found ([`JournalBootFacts`]).
     #[must_use]
     pub fn boot_facts(&self) -> JournalBootFacts {

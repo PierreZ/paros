@@ -19,7 +19,7 @@ use paros_core::{
 };
 
 use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
-use crate::corruption::CorruptionVerdict;
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::storage::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
 
@@ -270,6 +270,87 @@ fn a_damaged_accepted_record_is_reported_faulty_mid_log_and_at_the_tail() {
                 .expect("reboots repaired");
             assert_eq!(node.faulty_entries(), vec![(Slot(1), ballot(5))]);
             assert_eq!(node.accepted(Slot(2)).map(|(_, c)| c), Some(user(2, 0xB3)));
+        })
+        .await;
+    });
+}
+
+/// The format probe reads the marker without opening the store: nothing
+/// where there is no journal (and nothing created), the marker once a
+/// format is synced, and the log left exactly as it was.
+#[test]
+fn peek_formatted_reads_the_marker_without_opening_the_store() {
+    runtime().block_on(async {
+        let mut sim = sim(6);
+        run(&mut sim, |provider| async move {
+            assert!(!Node::peek_formatted(&provider, "p").await.expect("peek"));
+            assert!(
+                !provider.exists("p").await.expect("exists"),
+                "nothing created"
+            );
+            let store = small(1_000);
+            let mut node = open_node(provider.clone(), "p", store).await.expect("open");
+            assert!(!Node::peek_formatted(&provider, "p").await.expect("peek"));
+            node.format(&config()).await.expect("format");
+            node.persist_ballot(ballot(5)).await.expect("promise");
+            node.append_accepted(Slot(0), ballot(5), user(0, 0xD0))
+                .await
+                .expect("accept");
+            node.sync(MustSync::Sync).await.expect("sync");
+            let before = node.image.clone();
+            drop(node);
+            assert!(Node::peek_formatted(&provider, "p").await.expect("peek"));
+            let node = open_node(provider, "p", store).await.expect("reboots");
+            assert_eq!(node.image, before, "the probe changed nothing");
+        })
+        .await;
+    });
+}
+
+/// A segment missing between the start and the tail is acknowledged
+/// history gone, never the end of the log: the store refuses to boot with
+/// a lost-write verdict (moonpool's `SegmentGap`).
+#[test]
+fn a_missing_middle_segment_is_a_lost_write() {
+    runtime().block_on(async {
+        let mut sim = sim(4);
+        run(&mut sim, |provider| async move {
+            let store = small(1_000);
+            let mut node = open_node(provider.clone(), "g", store).await.expect("open");
+            node.format(&config()).await.expect("format");
+            node.persist_ballot(ballot(5)).await.expect("promise");
+            let mut segments = Vec::new();
+            for slot in 0..400_u64 {
+                node.append_accepted(Slot(slot), ballot(5), user(slot, 0xC0))
+                    .await
+                    .expect("accept");
+                node.sync(MustSync::Sync).await.expect("sync");
+                segments = provider.list_dir("g").await.expect("list");
+                segments.retain(|name| {
+                    std::path::Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("wal"))
+                });
+                if segments.len() >= 3 {
+                    break;
+                }
+            }
+            assert!(segments.len() >= 3, "the log spans three segments");
+            drop(node);
+            segments.sort();
+            provider
+                .delete(&format!("g/{}", segments[1]))
+                .await
+                .expect("delete the middle segment");
+            provider.sync_dir("g").await.expect("sync dir");
+            assert!(matches!(
+                open_node(provider, "g", store).await,
+                Err(StorageError::Corruption {
+                    record: StorageRecord::Store,
+                    fault: IntegrityFault::LostWrite,
+                    verdict: CorruptionVerdict::Corrupted,
+                })
+            ));
         })
         .await;
     });

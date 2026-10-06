@@ -43,9 +43,8 @@ use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
     AcceptorConfig, BootKind, BootRefusal, Config, JournalStorage, JournalStoreConfig,
-    JournalStores, LogStorage, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId,
-    ReplicaId, RunError, SystemPlan, parse_addr, run_journals, run_matchmaker, run_proxy,
-    run_replica,
+    JournalStores, MatchmakerConfig, MatchmakerId, NodeId, ProxyConfig, ProxyId, ReplicaId,
+    RunError, SystemPlan, parse_addr, run_journals, run_matchmaker, run_proxy, run_replica,
 };
 
 /// One role's address book: the group's IPs in rank order, each paired with
@@ -829,7 +828,7 @@ async fn run_acceptor(
     // that list: it boots, and the library refuses it (#147, below).
     loop {
         if journal_store.is_some() {
-            resolve_provisioning(ctx, &seats, my_ip, journal_store).await;
+            resolve_provisioning(ctx, &seats, my_ip).await;
         }
         let provisioned = seats[0]
             .world
@@ -1121,15 +1120,7 @@ fn journal_dir(journal: paros::JournalIdentifier) -> String {
 /// disk — a store that carries the marker was provisioned, one that does
 /// not was not, and its next boot is a first boot again.
 #[tracing::instrument(level = "debug", skip_all, fields(ip = %ip))]
-async fn resolve_provisioning(
-    ctx: &SimContext,
-    seats: &[Seat],
-    ip: &str,
-    journal_store: Option<JournalStoreConfig>,
-) {
-    let Some(layout) = journal_store else {
-        return;
-    };
+async fn resolve_provisioning(ctx: &SimContext, seats: &[Seat], ip: &str) {
     for seat in seats {
         let ambiguous = seat
             .world
@@ -1139,14 +1130,12 @@ async fn resolve_provisioning(
         if !ambiguous {
             continue;
         }
-        let mut probe = JournalStorage::new(
-            ctx.storage().clone(),
-            journal_dir(seat.journal),
-            seat.config.clone(),
-            layout,
-        );
-        let formatted = probe.boot_scan().await.is_ok() && probe.is_formatted();
-        drop(probe);
+        // Read the marker without opening the store: a probe that recovered
+        // and repaired the journal would change what the boot it decides
+        // then finds.
+        let formatted = JournalStorage::peek_formatted(ctx.storage(), &journal_dir(seat.journal))
+            .await
+            .unwrap_or(false);
         let mut guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
         if formatted {
             guard.note_provisioned(ip);

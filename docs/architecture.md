@@ -839,13 +839,19 @@ data (section 3.10, deferred). Cross-region replication and witness replicas are
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
 on 2026-10-04, #176, #202). Every storage fault moonpool can inject is eventually in contract.
-Four start masked, each with an issue to lift the mask: phantom writes (a write acknowledged as
-synced that never lands loses an acknowledged vote, which no quorum survives), a hung disk (it
-needs a storage watchdog in the driver), barrier violations ("sync lies") and moonpool's
-slow-disk extremes (until a hunt shows whether paros stays live on them; if it does not, that is
-a finding, not a knob to clamp). Matchmaker stores take damage too, under a minority or rolling
-pattern counted as the run's one matchmaker loss and exclusive with the matchmaker wipe, once
-matchmakers have a locality in the simulation.
+Three families start masked through moonpool's `storage_fault_mask` (moonpool#292), each with
+an issue to lift the mask: phantom writes (a write acknowledged as synced that never lands loses
+an acknowledged vote, which no quorum survives), a hung disk (`DiskFailure`: it needs a storage
+watchdog in the driver) and stall/throttle episodes (`Degradation`). Barrier violations ("sync
+lies") and moonpool's slow-disk extremes run unmasked (decided on 2026-10-06, #176): no moonpool
+profile draws barrier violations, and the slow-disk extremes are a performance knob the mask
+does not cover; if paros does not stay live on them, that is a finding, not a knob to clamp.
+Matchmaker stores take damage too, under a minority or rolling pattern counted as the run's one
+matchmaker loss and exclusive with the matchmaker wipe; matchmakers get their failure domains
+as a second `.cluster()` group with its own `replicated_storage_faults` call (moonpool#297
+gives `.processes()` groups no locality). moonpool reports no per-process damage (moonpool#295,
+closed as not planned), so the ground truth stays the ledgered injector's and the journal's
+own verdicts.
 
 Zones are failure domains, and a cell spans enough of them for its quorums (section 3.7). What
 the WPaxos read (section 10) established for one region with several availability zones:

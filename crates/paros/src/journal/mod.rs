@@ -176,14 +176,24 @@ impl JournalStoreConfig {
 /// replay can classify. Every arm is a crash verdict.
 fn open_error(error: &JournalError) -> StorageError {
     match error {
-        JournalError::DoubleFault { .. } => StorageError::Corruption {
-            record: StorageRecord::Store,
-            fault: IntegrityFault::ChecksumMismatch,
-            verdict: CorruptionVerdict::Corrupted,
-        },
+        // Neither an entry nor its slot, or neither header copy, checks out.
+        JournalError::DoubleFault { .. } | JournalError::BadSegmentHeader { .. } => {
+            StorageError::Corruption {
+                record: StorageRecord::Store,
+                fault: IntegrityFault::ChecksumMismatch,
+                verdict: CorruptionVerdict::Corrupted,
+            }
+        }
         JournalError::MetadataCorrupt { .. } => StorageError::Corruption {
             record: StorageRecord::Promise,
             fault: IntegrityFault::ChecksumMismatch,
+            verdict: CorruptionVerdict::Corrupted,
+        },
+        // A segment missing between the start and the tail: the entries it
+        // held were acknowledged, and nothing on disk stands in for them.
+        JournalError::SegmentGap { .. } => StorageError::Corruption {
+            record: StorageRecord::Store,
+            fault: IntegrityFault::LostWrite,
             verdict: CorruptionVerdict::Corrupted,
         },
         JournalError::SegmentSize { .. } => StorageError::Metadata {
@@ -194,7 +204,14 @@ fn open_error(error: &JournalError) -> StorageError {
             fault: IntegrityFault::ReadError,
             verdict: CorruptionVerdict::Corrupted,
         },
-        _ => StorageError::Metadata {
+        // Not damage an open reports: a shipped layout is valid
+        // (`assert_layout`), and the rest belong to reads and appends.
+        JournalError::InvalidConfig(_)
+        | JournalError::Corrupt(_)
+        | JournalError::OutOfRange { .. }
+        | JournalError::EntryTooLarge { .. }
+        | JournalError::CheckpointTooLarge { .. }
+        | JournalError::Poisoned => StorageError::Metadata {
             fault: MetadataFault::Missing,
         },
     }
