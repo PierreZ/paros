@@ -342,9 +342,8 @@ impl FleetOps {
         let Some(mut session) = self.session(self.journals, policy) else {
             return;
         };
-        let crash = buggify_with_prob!(0.2);
         if class % 2 == 0 {
-            if crash {
+            if buggify_with_prob!(0.2) {
                 let identifier = tenant_identifier(payload);
                 let step = session.create_step(&client, first, &name, identifier).await;
                 if let Step::Advanced(stage) = step {
@@ -367,7 +366,11 @@ impl FleetOps {
             );
             self.stopped(ended, cut_short, pending);
         } else {
-            if crash {
+            // The removal's crash is its own location, and fires often: a
+            // removal needs a `READY` tenant of that name to write its first
+            // step at all, so a shared 20% left "a tenant removal resumed
+            // after a crash" the sweep's rarest gate, near its seed cap.
+            if buggify_with_prob!(0.5) {
                 if let Step::Advanced(stage) = session.remove_step(&client, first, &name).await {
                     assert_reachable!("fleet: a tenant removal stops after one step");
                     reach(stage);

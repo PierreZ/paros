@@ -688,7 +688,8 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// while the other half keeps the static deployment and the refusal parity
 /// of a system append on a seed without system journals. The rarest fleet
 /// gate ("a tenant removal resumed after a crash") is bounded by the
-/// `TENANT` weight and the name alphabet, not by this draw.
+/// `TENANT` weight, the name alphabet and the removal's own crash location
+/// in `chain_workload/fleet.rs`, not by this draw.
 #[tracing::instrument(level = "debug", skip(state), fields(perturb))]
 pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
     let registry = registry(state);
