@@ -30,8 +30,7 @@ use std::path::{Path, PathBuf};
 
 use moonpool_core::TokioStorageProvider;
 use paros::{
-    BootKind, Config, JournalIdentifier, JournalStorage, JournalStoreConfig, JournalStores,
-    LogStorage, NoAudit,
+    BootKind, Config, JournalIdentifier, JournalStorage, JournalStoreConfig, JournalStores, NoAudit,
 };
 
 use crate::record::{Record, parse_identifier};
@@ -135,9 +134,9 @@ impl DirStores {
         found.sort_unstable();
         let mut resolved = false;
         for journal in found {
-            let probe = Config::new(paros::NodeId(self.record.id), journal);
-            let mut store = self.store(journal, probe);
-            if store.boot_scan().await.is_ok() && store.is_formatted() {
+            let dir = path_str(&journal_dir(&self.data_dir, journal));
+            let formatted = JournalStorage::peek_formatted(&self.provider, &dir).await;
+            if formatted.unwrap_or(false) {
                 tracing::info!(journal = %journal, "created_journal_resolved");
                 self.record.journals.insert(journal);
                 resolved = true;

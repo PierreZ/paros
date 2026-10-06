@@ -275,6 +275,38 @@ fn a_damaged_accepted_record_is_reported_faulty_mid_log_and_at_the_tail() {
     });
 }
 
+/// The format probe reads the marker without opening the store: nothing
+/// where there is no journal (and nothing created), the marker once a
+/// format is synced, and the log left exactly as it was.
+#[test]
+fn peek_formatted_reads_the_marker_without_opening_the_store() {
+    runtime().block_on(async {
+        let mut sim = sim(6);
+        run(&mut sim, |provider| async move {
+            assert!(!Node::peek_formatted(&provider, "p").await.expect("peek"));
+            assert!(
+                !provider.exists("p").await.expect("exists"),
+                "nothing created"
+            );
+            let store = small(1_000);
+            let mut node = open_node(provider.clone(), "p", store).await.expect("open");
+            assert!(!Node::peek_formatted(&provider, "p").await.expect("peek"));
+            node.format(&config()).await.expect("format");
+            node.persist_ballot(ballot(5)).await.expect("promise");
+            node.append_accepted(Slot(0), ballot(5), user(0, 0xD0))
+                .await
+                .expect("accept");
+            node.sync(MustSync::Sync).await.expect("sync");
+            let before = node.image.clone();
+            drop(node);
+            assert!(Node::peek_formatted(&provider, "p").await.expect("peek"));
+            let node = open_node(provider, "p", store).await.expect("reboots");
+            assert_eq!(node.image, before, "the probe changed nothing");
+        })
+        .await;
+    });
+}
+
 /// A segment missing between the start and the tail is acknowledged
 /// history gone, never the end of the log: the store refuses to boot with
 /// a lost-write verdict (moonpool's `SegmentGap`).
