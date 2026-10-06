@@ -53,6 +53,10 @@ use crate::write::AcceptorWrite;
 /// a `Promise` carries a continuation cursor.
 pub const PROMISE_BATCH: usize = 64;
 
+// A page that cannot carry one entry could never make progress through a
+// faulty or accepted suffix: the continuation cursor would never advance.
+const _: () = assert!(PROMISE_BATCH > 0);
+
 /// What a `Prepare` did at this acceptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrepareOutcome {
@@ -223,9 +227,31 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     }
 
     /// The record at `slot`, if readable.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn record(&self, slot: Slot) -> Option<&(Ballot, V)> {
-        self.records.get(slot)
+        let record = self.records.get(slot);
+        if let Some((ballot, _)) = record {
+            // Read-back of `record_accepted`'s preconditions: a readable
+            // record sits at or above the floor and under the promise.
+            assert!(
+                !self.records.below_floor(slot),
+                "a readable record sits above the floor"
+            );
+            assert!(
+                *ballot <= self.promised,
+                "the promise dominates a readable record"
+            );
+            assert!(
+                !self.faulty.contains_key(slot),
+                "a readable slot is never faulty"
+            );
+        }
+        record
     }
 
     /// The compaction floor: the first slot still retained.
@@ -241,9 +267,25 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     }
 
     /// The lowest faulty slot, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn first_faulty(&self) -> Option<Slot> {
-        self.faulty.first_key()
+        let first = self.faulty.first_key();
+        if let Some(slot) = first {
+            assert!(
+                slot >= self.first_slot(),
+                "a faulty entry sits above the floor"
+            );
+            assert!(
+                !self.records.contains_key(slot),
+                "a faulty slot is never readable"
+            );
+        }
+        first
     }
 
     /// The **vote watermark** (#143, Compartmentalized Paxos §3.4): the
@@ -262,13 +304,33 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// this acceptor cast is either retained, faulty, or below the floor.
     /// Monotone across [`Acceptor::record_accepted`] and
     /// [`Acceptor::truncate`] (asserted at both).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn vote_watermark(&self) -> Option<Slot> {
         let truncated = self.first_slot().0.checked_sub(1).map(Slot);
-        [self.records.last_key(), self.faulty.last_key(), truncated]
+        let watermark = [self.records.last_key(), self.faulty.last_key(), truncated]
             .into_iter()
             .flatten()
-            .max()
+            .max();
+        // Postconditions: the watermark covers every vote this acceptor still
+        // holds, and every vote the floor stands in for.
+        assert!(
+            watermark >= self.records.last_key(),
+            "the vote watermark covers every retained record"
+        );
+        assert!(
+            watermark >= self.faulty.last_key(),
+            "the vote watermark covers every faulty entry"
+        );
+        assert!(
+            watermark >= truncated,
+            "the vote watermark covers every truncated slot"
+        );
+        watermark
     }
 
     /// Faulty entries repaired in place this incarnation — half of the CTRL
@@ -300,6 +362,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         from_slot: Slot,
         writes: &mut Vec<W>,
     ) -> PrepareOutcome {
+        let writes_before = writes.len();
         if self.records.below_floor(from_slot) {
             return PrepareOutcome::BelowFloor;
         }
@@ -315,6 +378,19 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             self.promised == ballot,
             "a promise reply carries the exact promised ballot"
         );
+        // Negative space: a raise emits exactly the one durable promise, a
+        // same-ballot continuation emits nothing.
+        if raised {
+            assert!(
+                writes.len() == writes_before + 1,
+                "a raised promise emits one write"
+            );
+        } else {
+            assert!(
+                writes.len() == writes_before,
+                "a re-affirmed promise emits no write"
+            );
+        }
         PrepareOutcome::Promised { raised }
     }
 
@@ -356,6 +432,36 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             (Some((slot, _)), None) | (None, Some((slot, _))) => Some(**slot),
             (Some((ra, _)), Some((rf, _))) => Some(*std::cmp::min(*ra, *rf)),
         };
+        // Postconditions: bounded, disjoint, at or after the requested slot,
+        // and the cursor strictly past everything this page carried.
+        assert!(
+            page.accepted.len() + page.faulty.len() <= PROMISE_BATCH,
+            "a promise page is bounded by PROMISE_BATCH"
+        );
+        assert!(
+            page.faulty.keys().all(|s| !page.accepted.contains_key(s)),
+            "a promise page reports a slot as readable or faulty, never both"
+        );
+        assert!(
+            page.accepted
+                .keys()
+                .chain(page.faulty.keys())
+                .all(|s| *s >= from_slot),
+            "a promise page starts at the requested slot"
+        );
+        if let Some(next) = page.next_from_slot {
+            assert!(
+                page.accepted
+                    .keys()
+                    .chain(page.faulty.keys())
+                    .all(|s| *s < next),
+                "the continuation cursor lies past every slot the page carried"
+            );
+            assert!(
+                page.accepted.len() + page.faulty.len() == PROMISE_BATCH,
+                "only a full page carries a continuation cursor"
+            );
+        }
         page
     }
 
@@ -389,10 +495,19 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             ballot >= self.promised,
             "a node's promised ballot never decreases"
         );
+        let writes_before = writes.len();
         if self.promised != ballot {
             self.promised = ballot;
             writes.push(AcceptorWrite::SetPromise(ballot).into());
         }
+        assert!(
+            self.promised == ballot,
+            "the promise lands on the requested ballot"
+        );
+        assert!(
+            writes.len() <= writes_before + 1,
+            "a promise change emits at most one write"
+        );
     }
 
     /// Record `(ballot, command)` as accepted for `slot` and emit the matching
@@ -430,6 +545,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             "a record is never accepted above the promise"
         );
         let watermark_before = self.vote_watermark();
+        let writes_before = writes.len();
         let repaired = self.faulty.remove(slot).is_some();
         if repaired {
             self.faulty_repaired += 1;
@@ -456,6 +572,20 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         assert!(
             self.vote_watermark() >= watermark_before,
             "the vote watermark never decreases across a record"
+        );
+        // The record and its durable op are one: exactly one write, the slot
+        // readable at the ballot just recorded, and no longer faulty.
+        assert!(
+            writes.len() == writes_before + 1,
+            "a record emits exactly one write"
+        );
+        assert!(
+            self.records.get(slot).is_some_and(|(b, _)| *b == ballot),
+            "the record lands at the recorded ballot"
+        );
+        assert!(
+            !self.faulty.contains_key(slot),
+            "a recorded slot is never faulty"
         );
         repaired
     }

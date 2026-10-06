@@ -67,14 +67,15 @@ pub struct Collector {
 
 impl Collector {
     /// The campaign of a freshly won leadership at `generation`, judging
-    /// Region 1 by `fence` and retiring out of `prior` (`H_b`).
+    /// Region 1 by `fence` and retiring out of `prior` (`H_b`, empty when
+    /// nothing below the ballot survived the watermark).
     #[must_use]
     pub fn new(
         generation: MatchmakerGeneration,
         fence: Option<Slot>,
         prior: &[AcceptorConfig],
     ) -> Self {
-        Self {
+        let collector = Self {
             generation,
             fence,
             prior_members: prior
@@ -85,6 +86,44 @@ impl Collector {
             requested: false,
             acked_by: BTreeSet::new(),
             effective: None,
+        };
+        assert!(
+            prior.iter().all(|c| c
+                .members()
+                .iter()
+                .all(|m| collector.prior_members.contains(m))),
+            "the retirement pool names every member of H_b"
+        );
+        assert!(
+            collector.peer_chosen.is_empty(),
+            "a fresh campaign has heard no peer"
+        );
+        collector.assert_invariants();
+        collector
+    }
+
+    /// The tally's own cross-field invariants.
+    ///
+    /// # Panics
+    ///
+    /// If the floor is effective without having been requested, an ack was
+    /// counted before the requests went out, or the effective floor retires
+    /// a node that `H_b` never named.
+    pub fn assert_invariants(&self) {
+        if self.effective.is_some() {
+            assert!(self.requested, "an effective floor was requested first");
+        }
+        if !self.requested {
+            assert!(
+                self.acked_by.is_empty(),
+                "no ack is counted before the requests"
+            );
+        }
+        if let Some((_, retired)) = &self.effective {
+            assert!(
+                retired.iter().all(|n| self.prior_members.contains(n)),
+                "a floor retires only members of H_b"
+            );
         }
     }
 
@@ -104,9 +143,15 @@ impl Collector {
     /// retired — `None` until the quorum holds.
     #[must_use]
     pub fn effective(&self) -> Option<(Ballot, &[NodeId])> {
-        self.effective
+        let effective = self
+            .effective
             .as_ref()
-            .map(|(watermark, retired)| (*watermark, retired.as_slice()))
+            .map(|(watermark, retired)| (*watermark, retired.as_slice()));
+        if effective.is_some() {
+            assert!(self.requested, "an effective floor was requested first");
+            assert!(!self.acked_by.is_empty(), "an effective floor was acked");
+        }
+        effective
     }
 
     /// The members of `matchmakers` that have not acked the floor — whom a
@@ -119,7 +164,20 @@ impl Collector {
     }
 
     /// Record that the requests for this generation are out.
+    ///
+    /// # Panics
+    ///
+    /// If the requests are already out, or the floor is already effective:
+    /// the wiring asks once per generation.
     pub fn request(&mut self) {
+        assert!(
+            !self.requested,
+            "the GC requests go out once per generation"
+        );
+        assert!(
+            self.effective.is_none(),
+            "an effective floor is never re-requested"
+        );
         self.requested = true;
     }
 
@@ -132,15 +190,34 @@ impl Collector {
             self.acked_by.clear();
             self.generation = generation;
         }
+        // Postcondition: an open tally addresses the generation it was told
+        // of, and counts no ack carried over from the replaced one.
+        if self.effective.is_none() {
+            assert!(
+                self.generation == generation,
+                "an open GC tally follows the generation"
+            );
+        }
+        self.assert_invariants();
     }
 
     /// A configured peer reported its chosen index at this ballot (the
     /// monotone half of Region 1's tally).
     pub fn note_chosen(&mut self, from: NodeId, chosen: Option<Slot>) {
+        let before = self.peer_chosen.get(&from).copied();
         if let Some(chosen) = chosen {
             let entry = self.peer_chosen.entry(from).or_insert(chosen);
             *entry = (*entry).max(chosen);
+            assert!(
+                *entry >= chosen,
+                "a peer's chosen index covers its latest report"
+            );
         }
+        // Monotone: a stale (lower or absent) report never lowers the tally.
+        assert!(
+            self.peer_chosen.get(&from).copied() >= before,
+            "a peer's tallied chosen index never decreases"
+        );
     }
 
     /// Whether Region 1 is held: a Phase-2 quorum of `config` reports a
@@ -161,6 +238,12 @@ impl Collector {
             Some(fence) => chosen.is_some_and(|c| c >= fence),
         };
         let me = own.map(|(id, _)| id);
+        if let Some(id) = me {
+            assert!(
+                config.contains(id),
+                "the local half is counted only for a member"
+            );
+        }
         let mut holders: BTreeSet<NodeId> = BTreeSet::new();
         if let Some((id, chosen)) = own
             && reached(chosen)
@@ -174,6 +257,10 @@ impl Collector {
                 .filter(|m| Some(**m) != me)
                 .filter(|m| reached(self.peer_chosen.get(*m).copied()))
                 .copied(),
+        );
+        assert!(
+            holders.iter().all(|h| config.contains(*h)),
+            "only members of the configuration count toward Region 1"
         );
         config.has_phase2_quorum(&holders)
     }
@@ -233,7 +320,16 @@ impl Collector {
             .copied()
             .filter(|n| !config.contains(*n))
             .collect();
+        assert!(
+            config.members().iter().all(|m| !retired.contains(m)),
+            "a floor never retires a member of the configuration in force"
+        );
+        assert!(
+            ack.watermark >= ballot,
+            "an effective floor rests on acks at or above the ballot"
+        );
         self.effective = Some((ballot, retired.clone()));
+        self.assert_invariants();
         GcStep::Effective {
             watermark: ballot,
             retired,

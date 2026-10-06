@@ -127,16 +127,34 @@ pub enum QuorumSystem {
 /// majority is spelled out as arithmetic; every majority in the crate — the
 /// acceptor-side default and the matchmaker quorum — derives from here.
 fn majority_of(members: usize) -> usize {
-    members / 2 + 1
+    let majority = members / 2 + 1;
+    // Two majorities always intersect, and a non-empty membership can
+    // assemble one.
+    assert!(
+        majority.saturating_mul(2) > members,
+        "a majority self-intersects"
+    );
+    if members > 0 {
+        assert!(majority <= members, "a majority fits inside its membership");
+    }
+    majority
 }
 
 /// How many of `voters` are in the sorted membership `members` — the count
 /// every cardinality quorum compares. A voter outside `members` never counts.
 fn counted<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> usize {
-    voters
+    // The binary search below is only sound over a sorted membership.
+    assert!(
+        members.windows(2).all(|w| w[0] < w[1]),
+        "a counted membership is sorted and deduplicated"
+    );
+    let count = voters
         .iter()
         .filter(|v| members.binary_search(v).is_ok())
-        .count()
+        .count();
+    // Strangers never count: at most every member voted.
+    assert!(count <= members.len(), "only members count toward a quorum");
+    count
 }
 
 /// The members of row `row` of a `cols`-wide grid laid row-major over
@@ -144,13 +162,16 @@ fn counted<I: Ord>(members: &[I], voters: &BTreeSet<I>) -> usize {
 fn grid_row<I>(members: &[I], cols: usize, row: usize) -> &[I] {
     let start = row.saturating_mul(cols).min(members.len());
     let end = start.saturating_add(cols).min(members.len());
+    assert!(start <= end, "a grid row is a forward range");
+    assert!(end - start <= cols, "a grid row is at most one row wide");
     &members[start..end]
 }
 
 /// The members of column `column` of a `cols`-wide grid laid row-major over
 /// `members`: every `cols`-th member from `members[column]` on.
 fn grid_column<I>(members: &[I], cols: usize, column: usize) -> impl Iterator<Item = &I> {
-    members.iter().skip(column).step_by(cols.max(1))
+    assert!(cols >= 1, "a grid has at least one column");
+    members.iter().skip(column).step_by(cols)
 }
 
 /// `value % modulus` as an index below `modulus` — the grid's pure
@@ -159,13 +180,22 @@ fn grid_column<I>(members: &[I], cols: usize, column: usize) -> impl Iterator<It
 /// from a `usize`, so it always converts back.
 fn residue(value: u64, modulus: usize) -> usize {
     let modulus = u64::try_from(modulus).unwrap_or(u64::MAX).max(1);
-    usize::try_from(value % modulus).unwrap_or(0)
+    let residue = value % modulus;
+    assert!(residue < modulus, "a residue lies below its modulus");
+    usize::try_from(residue).unwrap_or(0)
 }
 
 /// The rank owning `slot` among `count` peers of one tier (a proxy leader,
 /// a replica): `slot % count`, `None` when the tier is absent (`count` 0).
 fn slot_rank(slot: Slot, count: usize) -> Option<u64> {
-    (count != 0).then(|| slot.0 % u64::try_from(count).unwrap_or(u64::MAX))
+    let rank = (count != 0).then(|| slot.0 % u64::try_from(count).unwrap_or(u64::MAX));
+    if let Some(rank) = rank {
+        assert!(
+            rank_is_in(rank, count),
+            "a slot's rank lies inside the count"
+        );
+    }
+    rank
 }
 
 /// Whether `rank` names one of `count` peers of a tier.
@@ -184,26 +214,51 @@ impl QuorumSystem {
     /// the one thing a predicate cannot report — how many more answers a
     /// pending tally still waits for; whether a tally *holds* is always
     /// [`QuorumSystem::is_phase1_quorum`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn phase1_quorum_size(self, members: usize) -> usize {
-        match self {
+        let size = match self {
             QuorumSystem::Majority => majority_of(members),
             QuorumSystem::Flexible { q1, .. } => q1,
             // A row: `cols` acceptors wide.
             QuorumSystem::Grid { cols, .. } => cols,
+        };
+        if let QuorumSystem::Grid { rows, cols } = self
+            && rows.checked_mul(cols) == Some(members)
+        {
+            assert!(size <= members, "a full row fits inside a tiled membership");
         }
+        size
     }
 
     /// The number of acceptors a **Phase-2** quorum over a membership of
     /// `members` takes. See [`QuorumSystem::phase1_quorum_size`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn phase2_quorum_size(self, members: usize) -> usize {
-        match self {
+        let size = match self {
             QuorumSystem::Majority => majority_of(members),
             QuorumSystem::Flexible { q2, .. } => q2,
             // A column: `rows` acceptors tall.
             QuorumSystem::Grid { rows, .. } => rows,
+        };
+        if let QuorumSystem::Grid { rows, cols } = self
+            && rows.checked_mul(cols) == Some(members)
+        {
+            assert!(
+                size <= members,
+                "a full column fits inside a tiled membership"
+            );
         }
+        size
     }
 
     /// Whether every Phase-1 quorum of a membership of `members` intersects
@@ -243,9 +298,14 @@ impl QuorumSystem {
     /// layout must tile the membership exactly, or some row or column would
     /// be short and the set-membership predicates would answer for a cell
     /// that does not exist.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn admits(self, members: usize) -> bool {
-        match self {
+        let admits = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 let q1 = self.phase1_quorum_size(members);
                 let q2 = self.phase2_quorum_size(members);
@@ -257,7 +317,17 @@ impl QuorumSystem {
             QuorumSystem::Grid { rows, cols } => {
                 rows >= 1 && cols >= 1 && rows.checked_mul(cols) == Some(members)
             }
+        };
+        // Admission is exactly what Paxos safety needs: every admitted system
+        // cross-intersects, over a non-empty membership.
+        if admits {
+            assert!(
+                self.cross_intersects(members),
+                "an admitted system cross-intersects"
+            );
+            assert!(members >= 1, "an admitted system has a member");
         }
+        admits
     }
 
     /// The **column** a slot's Phase 2 is addressed to under this quorum
@@ -275,12 +345,23 @@ impl QuorumSystem {
     /// hook, never inside the core.) Consecutive slots walk the columns
     /// round-robin, so a leader streaming commands spreads them evenly:
     /// Compartmentalized Paxos's `1 / w` per acceptor.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn column_of(self, slot: Slot) -> Option<usize> {
-        match self {
+        let column = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
             QuorumSystem::Grid { cols, .. } => Some(residue(slot.0, cols)),
+        };
+        if let (QuorumSystem::Grid { cols, .. }, Some(column)) = (self, column) {
+            assert!(column < cols.max(1), "a slot's column lies inside the grid");
+        } else {
+            assert!(column.is_none(), "only a grid names a column");
         }
+        column
     }
 
     /// Whether `voters` form a **majority** of the sorted membership
@@ -310,12 +391,23 @@ impl QuorumSystem {
     /// Compartmentalized Paxos §3.4 sends `PreRead` to *a* read quorum; which
     /// one is the reader's choice, and spreading reads over the rows is what
     /// lets the read load scale with the number of rows.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn row_of(self, ctx: u64) -> Option<usize> {
-        match self {
+        let row = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => None,
             QuorumSystem::Grid { rows, .. } => Some(residue(ctx, rows)),
+        };
+        if let (QuorumSystem::Grid { rows, .. }, Some(row)) = (self, row) {
+            assert!(row < rows.max(1), "a read's row lies inside the grid");
+        } else {
+            assert!(row.is_none(), "only a grid names a row");
         }
+        row
     }
 
     /// The row a quorum read with token `ctx` goes to when its reader
@@ -325,12 +417,24 @@ impl QuorumSystem {
     /// round's named column: every row is a Phase-1 quorum, so the choice is
     /// always safe, and a choice the system cannot honour (a row under a
     /// majority, one past a grid's last) falls back rather than failing.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_row(self, ctx: u64, chosen: Option<usize>) -> Option<usize> {
-        match chosen {
+        let row = match chosen {
             Some(row) if self.admits_read_row(Some(row)) => Some(row),
             _ => self.row_of(ctx),
+        };
+        // Whatever the caller chose, the row a read runs on is admitted.
+        if let QuorumSystem::Grid { rows, .. } = self
+            && rows >= 1
+        {
+            assert!(self.admits_read_row(row), "a read runs on an admitted row");
         }
+        row
     }
 
     /// Whether `row` names a read row of this system: `None` under a
@@ -378,7 +482,7 @@ impl QuorumSystem {
         voters: &BTreeSet<I>,
         row: Option<usize>,
     ) -> bool {
-        match self {
+        let quorum = match self {
             QuorumSystem::Majority => {
                 assert!(
                     row.is_none(),
@@ -399,7 +503,15 @@ impl QuorumSystem {
                 Some(row) => row < rows && all_voted(grid_row(members, cols, row), voters),
                 None => (0..rows).any(|row| all_voted(grid_row(members, cols, row), voters)),
             },
+        };
+        // A quorum is never assembled out of strangers alone.
+        if quorum && !members.is_empty() {
+            assert!(
+                counted(members, voters) >= 1,
+                "a Phase-1 quorum holds a member's vote"
+            );
         }
+        quorum
     }
 
     /// Whether `node` is one of the acceptors a Phase-1 message in `row` is
@@ -447,7 +559,7 @@ impl QuorumSystem {
     /// [`QuorumSystem::is_phase1_quorum_in`]).
     #[must_use]
     pub fn phase1_addressees<I: Copy>(self, members: &[I], row: Option<usize>) -> Vec<I> {
-        match self {
+        let addressees = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 assert!(
                     row.is_none(),
@@ -459,7 +571,18 @@ impl QuorumSystem {
                 Some(row) => grid_row(members, cols, row).to_vec(),
                 None => members.to_vec(),
             },
+        };
+        assert!(
+            addressees.len() <= members.len(),
+            "a fan-out addresses only members"
+        );
+        if row.is_none() {
+            assert!(
+                addressees.len() == members.len(),
+                "an unnamed row addresses everyone"
+            );
         }
+        addressees
     }
 
     /// Whether `voters` form a **Phase-2** quorum over `members`: the accepts
@@ -500,7 +623,7 @@ impl QuorumSystem {
         voters: &BTreeSet<I>,
         column: Option<usize>,
     ) -> bool {
-        match self {
+        let quorum = match self {
             QuorumSystem::Majority => {
                 assert!(
                     column.is_none(),
@@ -521,7 +644,15 @@ impl QuorumSystem {
                 }
                 None => (0..cols).any(|c| all_voted(grid_column(members, cols, c), voters)),
             },
+        };
+        // A quorum is never assembled out of strangers alone.
+        if quorum && !members.is_empty() {
+            assert!(
+                counted(members, voters) >= 1,
+                "a Phase-2 quorum holds a member's vote"
+            );
         }
+        quorum
     }
 
     /// Whether `node` is one of the acceptors a Phase-2 message in `column`
@@ -578,7 +709,7 @@ impl QuorumSystem {
     /// [`QuorumSystem::is_phase2_quorum_in`]).
     #[must_use]
     pub fn phase2_addressees<I: Copy>(self, members: &[I], column: Option<usize>) -> Vec<I> {
-        match self {
+        let addressees: Vec<I> = match self {
             QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
                 assert!(
                     column.is_none(),
@@ -590,7 +721,18 @@ impl QuorumSystem {
                 Some(column) => grid_column(members, cols, column).copied().collect(),
                 None => members.to_vec(),
             },
+        };
+        assert!(
+            addressees.len() <= members.len(),
+            "a fan-out addresses only members"
+        );
+        if column.is_none() {
+            assert!(
+                addressees.len() == members.len(),
+                "an unnamed column addresses everyone"
+            );
         }
+        addressees
     }
 }
 
@@ -679,6 +821,21 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
             config.is_well_formed(),
             "an acceptor configuration admits its quorum system"
         );
+        // Paxos safety, restated once at the only constructor: every Phase-1
+        // quorum meets every Phase-2 quorum, and both fit the membership.
+        let n = config.members.len();
+        assert!(
+            config.quorum_system.cross_intersects(n),
+            "an acceptor configuration's quorums cross-intersect"
+        );
+        assert!(
+            config.quorum_system.phase1_quorum_size(n) <= n,
+            "a Phase-1 quorum fits the membership"
+        );
+        assert!(
+            config.quorum_system.phase2_quorum_size(n) <= n,
+            "a Phase-2 quorum fits the membership"
+        );
         config
     }
 
@@ -710,9 +867,22 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// the promises an election or a CTRL repair probe must gather before it
     /// concludes anything about what an earlier ballot could have chosen. A
     /// voter outside the membership never counts.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn has_phase1_quorum(&self, voters: &BTreeSet<Id>) -> bool {
-        self.quorum_system.is_phase1_quorum(&self.members, voters)
+        let quorum = self.quorum_system.is_phase1_quorum(&self.members, voters);
+        if quorum {
+            assert!(
+                counted(&self.members, voters)
+                    >= self.quorum_system.phase1_quorum_size(self.members.len()),
+                "a Phase-1 quorum counts at least the Phase-1 quorum size"
+            );
+        }
+        quorum
     }
 
     /// Whether `voters` hold a **Phase-1** quorum of this configuration in
@@ -724,8 +894,17 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// If a row is named under a majority or a flexible split.
     #[must_use]
     pub fn has_phase1_quorum_in(&self, voters: &BTreeSet<Id>, row: Option<usize>) -> bool {
-        self.quorum_system
-            .is_phase1_quorum_in(&self.members, voters, row)
+        let quorum = self
+            .quorum_system
+            .is_phase1_quorum_in(&self.members, voters, row);
+        if quorum {
+            assert!(
+                counted(&self.members, voters)
+                    >= self.quorum_system.phase1_quorum_size(self.members.len()),
+                "a Phase-1 quorum counts at least the Phase-1 quorum size"
+            );
+        }
+        quorum
     }
 
     /// The row a quorum read with token `ctx` is addressed to under this
@@ -771,7 +950,12 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// If a row is named under a majority or a flexible split.
     #[must_use]
     pub fn phase1_addressees(&self, row: Option<usize>) -> Vec<Id> {
-        self.quorum_system.phase1_addressees(&self.members, row)
+        let addressees = self.quorum_system.phase1_addressees(&self.members, row);
+        assert!(
+            addressees.iter().all(|a| self.is_phase1_addressee(*a, row)),
+            "a Phase-1 fan-out addresses exactly the row's members"
+        );
+        addressees
     }
 
     /// Whether `voters` hold a **Phase-2** quorum of this configuration — the
@@ -780,9 +964,22 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// custody claim. A voter outside the membership never
     /// counts. Under a grid, *any* full column; a round addressed to one
     /// column is judged by [`AcceptorConfig::has_phase2_quorum_in`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn has_phase2_quorum(&self, voters: &BTreeSet<Id>) -> bool {
-        self.quorum_system.is_phase2_quorum(&self.members, voters)
+        let quorum = self.quorum_system.is_phase2_quorum(&self.members, voters);
+        if quorum {
+            assert!(
+                counted(&self.members, voters)
+                    >= self.quorum_system.phase2_quorum_size(self.members.len()),
+                "a Phase-2 quorum counts at least the Phase-2 quorum size"
+            );
+        }
+        quorum
     }
 
     /// Whether `voters` hold a **Phase-2** quorum of this configuration in
@@ -794,8 +991,17 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// If a column is named under a majority or a flexible split.
     #[must_use]
     pub fn has_phase2_quorum_in(&self, voters: &BTreeSet<Id>, column: Option<usize>) -> bool {
-        self.quorum_system
-            .is_phase2_quorum_in(&self.members, voters, column)
+        let quorum = self
+            .quorum_system
+            .is_phase2_quorum_in(&self.members, voters, column);
+        if quorum {
+            assert!(
+                counted(&self.members, voters)
+                    >= self.quorum_system.phase2_quorum_size(self.members.len()),
+                "a Phase-2 quorum counts at least the Phase-2 quorum size"
+            );
+        }
+        quorum
     }
 
     /// The column `slot`'s Phase 2 is addressed to under this configuration
@@ -827,7 +1033,14 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// If a column is named under a majority or a flexible split.
     #[must_use]
     pub fn phase2_addressees(&self, column: Option<usize>) -> Vec<Id> {
-        self.quorum_system.phase2_addressees(&self.members, column)
+        let addressees = self.quorum_system.phase2_addressees(&self.members, column);
+        assert!(
+            addressees
+                .iter()
+                .all(|a| self.is_phase2_addressee(*a, column)),
+            "a Phase-2 fan-out addresses exactly the column's members"
+        );
+        addressees
     }
 
     /// The membership, sorted and deduplicated.
@@ -895,9 +1108,23 @@ impl ProxyId {
     /// The proxy `slot`'s Phase 2 is delegated to under a deployment of
     /// `proxy_count` proxies: `slot % proxy_count`. `None` when the count is
     /// zero — the plain deployment, whose Phase 2 stays colocated.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn of(slot: Slot, proxy_count: usize) -> Option<Self> {
-        slot_rank(slot, proxy_count).map(Self)
+        let proxy = slot_rank(slot, proxy_count).map(Self);
+        assert!(
+            proxy.is_some() == (proxy_count > 0),
+            "a slot has a proxy iff proxies exist"
+        );
+        assert!(
+            proxy.is_none_or(|p| p.is_in(proxy_count)),
+            "a slot's proxy is deployed"
+        );
+        proxy
     }
 
     /// Whether this id names a proxy of a deployment of `proxy_count`.
@@ -928,9 +1155,23 @@ impl ReplicaId {
     /// The replica that owns `slot`'s reply under a deployment of
     /// `replica_count` replicas: `slot % replica_count`. `None` when the
     /// count is zero — the plain deployment, where the node asked replies.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn of(slot: Slot, replica_count: usize) -> Option<Self> {
-        slot_rank(slot, replica_count).map(Self)
+        let replica = slot_rank(slot, replica_count).map(Self);
+        assert!(
+            replica.is_some() == (replica_count > 0),
+            "a slot has a replica iff replicas exist"
+        );
+        assert!(
+            replica.is_none_or(|r| r.is_in(replica_count)),
+            "a slot's replica is deployed"
+        );
+        replica
     }
 
     /// Whether this id names a replica of a deployment of `replica_count`.
@@ -960,9 +1201,19 @@ pub struct MatchmakerGeneration(pub u64);
 
 impl MatchmakerGeneration {
     /// The next generation.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
+        let next = Self(self.0.saturating_add(1));
+        assert!(next >= self, "a generation never moves back");
+        if self.0 < u64::MAX {
+            assert!(next > self, "a successor generation is strictly newer");
+        }
+        next
     }
 }
 
@@ -1031,6 +1282,10 @@ impl MatchmakerSet {
             set.is_well_formed(),
             "a matchmaker set admits the matchmaker quorum system"
         );
+        assert!(
+            set.quorum_size() <= set.members.len(),
+            "a matchmaker quorum fits the set"
+        );
         set
     }
 
@@ -1076,9 +1331,21 @@ impl MatchmakerSet {
     /// [`QuorumSystem::is_majority`], the one quorum model paros supports for
     /// matchmakers (see [`MatchmakerSet::quorum_size`]); a voter outside the
     /// set never counts.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn has_quorum(&self, voters: &BTreeSet<MatchmakerId>) -> bool {
-        QuorumSystem::is_majority(&self.members, voters)
+        let quorum = QuorumSystem::is_majority(&self.members, voters);
+        if quorum {
+            assert!(
+                counted(&self.members, voters) >= self.quorum_size(),
+                "a matchmaker quorum is a majority of members"
+            );
+        }
+        quorum
     }
 
     /// How many more answers a tally holding `voters` still waits for — the
@@ -1096,6 +1363,10 @@ impl MatchmakerSet {
         if self.has_quorum(voters) {
             assert!(remaining == 0, "a held quorum waits for nothing more");
         }
+        assert!(
+            remaining <= self.quorum_size(),
+            "a tally never owes more than a quorum"
+        );
         remaining
     }
 

@@ -82,12 +82,32 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
     /// whoever answered before it opened (the candidate itself, or the
     /// election's promise quorum when a probe inherits it).
     fn new(ballot: Ballot, from_slot: Slot, answered: BTreeSet<Id>) -> Self {
-        Self {
+        let tally = Self {
             ballot,
             from_slot,
             answered,
             promise_next: BTreeMap::new(),
-        }
+        };
+        tally.assert_invariants();
+        tally
+    }
+
+    /// The paging invariants: a sender is either mid-suffix (a cursor) or
+    /// answered, never both, and every continuation cursor lies strictly past
+    /// the first slot (a page only ever advances).
+    fn assert_invariants(&self) {
+        assert!(
+            self.promise_next
+                .keys()
+                .all(|id| !self.answered.contains(id)),
+            "an answered sender owes no further page"
+        );
+        assert!(
+            self.promise_next
+                .values()
+                .all(|next| *next > self.from_slot),
+            "a continuation cursor lies past the first slot"
+        );
     }
 
     /// Steps 1 and 2 of the fold: whether this page counts at all — the right
@@ -111,20 +131,38 @@ impl<Id: Copy + Ord> PromiseTally<Id> {
             .get(&from)
             .copied()
             .unwrap_or(self.from_slot);
+        assert!(
+            expected >= self.from_slot,
+            "a sender's cursor never precedes the first slot"
+        );
         promise_page_shape_valid(expected, accepted, faulty, from_slot, next_from_slot)
     }
 
     /// Steps 5 and 6: a page that carries a continuation cursor leaves the
     /// sender mid-suffix; a terminal page marks it answered.
     fn close_page(&mut self, from: Id, next_from_slot: Option<Slot>) -> PromiseFold {
-        if let Some(next) = next_from_slot {
+        // Precondition, paired with `accepts`: only a sender still owing a
+        // page reaches the close.
+        assert!(
+            !self.answered.contains(&from),
+            "a page closes for a sender still owing one"
+        );
+        let previous = self
+            .promise_next
+            .get(&from)
+            .copied()
+            .unwrap_or(self.from_slot);
+        let fold = if let Some(next) = next_from_slot {
+            assert!(next > previous, "a continuation cursor only advances");
             self.promise_next.insert(from, next);
             PromiseFold::Continue(next)
         } else {
             self.promise_next.remove(&from);
             self.answered.insert(from);
             PromiseFold::Answered
-        }
+        };
+        self.assert_invariants();
+        fold
     }
 }
 
@@ -209,7 +247,7 @@ fn qualifying_answers<Id: Copy + Ord>(
     reporters: Option<&BTreeMap<Id, Ballot>>,
     threshold: Option<Ballot>,
 ) -> BTreeSet<Id> {
-    answered
+    let qualifying: BTreeSet<Id> = answered
         .iter()
         .filter(|node| {
             reporters
@@ -217,7 +255,18 @@ fn qualifying_answers<Id: Copy + Ord>(
                 .is_none_or(|ballot| Some(*ballot) <= threshold)
         })
         .copied()
-        .collect()
+        .collect();
+    // Postcondition: a reporter above the threshold never qualifies.
+    if let Some(reporters) = reporters {
+        assert!(
+            reporters
+                .iter()
+                .filter(|(_, ballot)| Some(**ballot) > threshold)
+                .all(|(node, _)| !qualifying.contains(node)),
+            "a faulty report above the threshold never qualifies"
+        );
+    }
+    qualifying
 }
 
 /// The members of `configs`, unioned: sorted and deduplicated, so the
@@ -233,6 +282,10 @@ fn member_union<'a, Id: Copy + Ord + 'a>(
         .collect();
     members.sort_unstable();
     members.dedup();
+    assert!(
+        members.windows(2).all(|pair| pair[0] < pair[1]),
+        "a member union is strictly ascending"
+    );
     members
 }
 
@@ -309,6 +362,10 @@ fn merge_report<V: PartialEq>(
         _ => {}
     }
     tally.insert(slot, (ballot, command));
+    assert!(
+        tally.get(&slot).is_some_and(|(held, _)| *held == ballot),
+        "a higher report replaces the tally's entry"
+    );
 }
 
 /// Maximum recovered or gap-fill Phase-2 rounds one leader-recovery pump
@@ -318,6 +375,10 @@ pub const RECOVERY_BATCH: usize = 64;
 /// Maximum in-flight rounds one fair re-send page carries — the bound this
 /// role enforces in [`Proposer::resend_page`].
 pub const RESEND_BATCH: usize = 64;
+
+// A page bound of zero would stall the recovery and the re-send for good.
+const _: () = assert!(RECOVERY_BATCH > 0);
+const _: () = assert!(RESEND_BATCH > 0);
 
 /// The proposer component (see the module doc), over the acceptor identity
 /// `Id` its tallies count and the value `V` its rounds carry.
@@ -361,9 +422,20 @@ impl<Id, V> Default for Proposer<Id, V> {
 
 impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// A proposer with nothing open.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let proposer = Self::default();
+        assert!(
+            proposer.election.is_none(),
+            "a fresh proposer has no campaign"
+        );
+        assert!(proposer.rounds.is_empty(), "a fresh proposer has no round");
+        proposer
     }
 
     /// The component's own cross-field invariants. The proposer holds no
@@ -389,6 +461,16 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
                 .is_none_or(|r| r.policy() == RecoveryPolicy::Phase1Backed || r.blocked.is_empty()),
             "an inherited recovery blocks no slot"
         );
+        // A campaign holds no leadership tally: the probe and the recovery
+        // are opened only by a closed (won) election or an installed handoff,
+        // and a new campaign abandons both first.
+        if self.election.is_some() {
+            assert!(self.probe.is_none(), "a candidate holds no repair probe");
+            assert!(self.recovery.is_none(), "a candidate holds no recovery");
+        }
+        if let Some(probe) = &self.probe {
+            probe.assert_invariants();
+        }
     }
 
     /// Drop every open tally: the campaign, the probe, the rounds, the
@@ -400,12 +482,25 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// Phase-1 tally but a fact about the log this node holds, and a node
     /// with no leadership still uses it to refuse a handoff that would rewind
     /// it (see [`Proposer::next_slot`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn abandon(&mut self) {
         self.election = None;
         self.probe = None;
         self.rounds.clear();
         self.recovery = None;
         self.authority.clear();
+        assert!(
+            self.rounds.is_empty(),
+            "an abandoned leadership leaves no round"
+        );
+        assert!(
+            self.authority.fence().is_none(),
+            "an abandoned leadership has no fence"
+        );
     }
 }
 

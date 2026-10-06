@@ -28,8 +28,17 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     ///
     /// If `first` is below the floor held.
     pub fn truncate(&mut self, first: Slot, sealed: JournalState, writes: &mut Vec<WriteOp>) {
+        let promised = self.promised();
         self.drop_prefix(first);
         writes.push(WriteOp::Truncate { first, sealed });
+        assert!(
+            self.first_slot() == first,
+            "a truncation lands the floor on its slot"
+        );
+        assert!(
+            self.promised() == promised,
+            "a truncation never moves the promise"
+        );
     }
 
     /// Jump below the trim point (#186): drop every record and faulty
@@ -43,8 +52,18 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     ///
     /// If `point` is below the floor held.
     pub fn trim_to(&mut self, point: Slot, state: JournalState, writes: &mut Vec<WriteOp>) {
+        let promised = self.promised();
         self.drop_prefix(point);
         writes.push(WriteOp::TrimmedTo { point, state });
+        assert!(
+            self.first_slot() == point,
+            "a trim jump lands the floor on its point"
+        );
+        // The trim-point jump carries no ballot: the promise never moves.
+        assert!(
+            self.promised() == promised,
+            "a trim jump never moves the promise"
+        );
     }
 
     /// Drop every record and faulty entry below `first` and raise the floor
@@ -59,6 +78,10 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         self.records.raise_floor(first);
         self.faulty.raise_floor(first);
         self.assert_invariants();
+        assert!(
+            self.records.first_key().is_none_or(|s| s >= first),
+            "no record survives below a dropped prefix"
+        );
         // Postcondition: the slots a truncation drops were voted, and the
         // floor now stands in for them — the watermark never regresses.
         assert!(

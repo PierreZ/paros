@@ -47,6 +47,29 @@ pub struct RepairProbe<Id, V> {
 }
 
 impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
+    /// The probe's own invariants: it always has work, and every tally it
+    /// keeps is over a still-blocked slot.
+    pub(super) fn assert_invariants(&self) {
+        assert!(
+            !self.blocked.is_empty(),
+            "an open repair probe holds a blocked slot"
+        );
+        assert!(
+            self.best_have.keys().all(|s| self.blocked.contains(s)),
+            "the probe's have-tally is over blocked slots only"
+        );
+        assert!(
+            self.faulty_reports.keys().all(|s| self.blocked.contains(s)),
+            "the probe's faulty tally is over blocked slots only"
+        );
+        assert!(
+            self.blocked
+                .first()
+                .is_none_or(|s| *s >= self.promises.from_slot),
+            "a blocked slot lies inside the campaign range"
+        );
+    }
+
     /// The leadership ballot the probe queries at.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
@@ -69,12 +92,22 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
     /// The stragglers to re-query: the members of the prior configurations
     /// the election covered — the Phase-1 addressee union — that have not
     /// answered their full suffix. `me` is never a straggler.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn stragglers(&self, me: Id) -> Vec<Id> {
-        member_union(&self.prior)
+        let stragglers: Vec<Id> = member_union(&self.prior)
             .into_iter()
             .filter(|p| *p != me && !self.promises.answered.contains(p))
-            .collect()
+            .collect();
+        assert!(
+            !stragglers.contains(&me),
+            "the leader is never its own straggler"
+        );
+        stragglers
     }
 }
 
@@ -90,9 +123,15 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     /// Advance the open probe's clock by one driver tick and report its new
     /// age; `None` when no probe is open. The caller owns the *policy* (how
     /// many ticks are too many); the probe only counts.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn tick_probe(&mut self) -> Option<u64> {
         let probe = self.probe.as_mut()?;
         probe.elapsed = probe.elapsed.saturating_add(1);
+        assert!(probe.elapsed > 0, "a ticked probe has aged");
         Some(probe.elapsed)
     }
 
@@ -145,7 +184,9 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
                     .insert(from, *fb);
             }
         }
-        probe.promises.close_page(from, next_from_slot)
+        let fold = probe.promises.close_page(from, next_from_slot);
+        probe.assert_invariants();
+        fold
     }
 
     /// Decide every blocked slot the current probe tally allows: Case 1
@@ -153,6 +194,11 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     /// answers with no `have`, reported as no value for the caller to fill).
     /// Closes the probe when nothing stays blocked. Empty when no probe is
     /// open.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn resolve_probe(&mut self) -> Vec<ProbeDecision<V>> {
         let mut decisions = Vec::new();
         let Some(probe) = self.probe.as_mut() else {
@@ -175,8 +221,15 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             probe.faulty_reports.remove(&slot);
             decisions.push(ProbeDecision { slot, command });
         }
+        // A decided slot leaves every tally of the probe.
+        assert!(
+            decisions.iter().all(|d| !probe.blocked.contains(&d.slot)),
+            "a decided slot is no longer blocked"
+        );
         if probe.blocked.is_empty() {
             self.probe = None;
+        } else {
+            probe.assert_invariants();
         }
         decisions
     }
@@ -185,6 +238,11 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     /// path rather than a straggler's `Promise`): drop it from the probe,
     /// closing the probe — and with it its clock — when nothing stays
     /// blocked.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn probe_resolved_elsewhere(&mut self, slot: Slot) {
         let Some(probe) = self.probe.as_mut() else {
             return;
@@ -194,22 +252,41 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         }
         probe.best_have.remove(&slot);
         probe.faulty_reports.remove(&slot);
+        assert!(
+            !probe.blocked.contains(&slot),
+            "a resolved slot is no longer blocked"
+        );
         if probe.blocked.is_empty() {
             self.probe = None;
+        } else {
+            probe.assert_invariants();
         }
     }
 
     /// A trim-point jump dropped everything below `first`: a probe blocked
     /// below the boundary is resolved by the fold as well, and the probe
     /// closes when nothing stays blocked.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn probe_retain_from(&mut self, first: Slot) {
         if let Some(probe) = self.probe.as_mut() {
             probe.blocked = probe.blocked.split_off(&first);
             probe.best_have = probe.best_have.split_off(&first);
             probe.faulty_reports = probe.faulty_reports.split_off(&first);
+            assert!(
+                probe.blocked.first().is_none_or(|s| *s >= first),
+                "no blocked slot survives below the jump"
+            );
             if probe.blocked.is_empty() {
                 self.probe = None;
             }
         }
+        assert!(
+            self.probe.as_ref().is_none_or(|p| !p.blocked.is_empty()),
+            "an open repair probe holds a blocked slot"
+        );
     }
 }

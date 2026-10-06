@@ -149,10 +149,80 @@ impl JournalState {
             self.first_seq >= before.first_seq,
             "a journal's first position never decreases"
         );
-        assert!(
-            self.owner == before.owner || self.generation > before.generation,
-            "a journal's owner changes only with its generation"
-        );
+        if self.owner != before.owner {
+            assert!(
+                self.generation > before.generation,
+                "a journal's owner changes only with its generation"
+            );
+        }
+        // Negative space, per outcome: a refusal, a duplicate and a `Noop`
+        // move nothing; each accepted transition moves exactly its own
+        // scalars.
+        match &outcome {
+            Outcome::Refused(_)
+            | Outcome::Truncated(_)
+            | Outcome::LeaderRefused(_)
+            | Outcome::TruncateRefused(_)
+            | Outcome::Duplicate { .. }
+            | Outcome::Noop => {
+                assert!(*self == before, "a refused or no-op command moves nothing");
+            }
+            Outcome::Accepted { seq, count } => {
+                assert!(
+                    *seq == before.next_seq,
+                    "a write is accepted at the next position"
+                );
+                assert!(*count > 0, "an accepted write carries records");
+                assert!(
+                    self.next_seq.0 == seq.0 + count,
+                    "a write advances by its records"
+                );
+                assert!(
+                    self.generation == before.generation,
+                    "a write never moves the generation"
+                );
+                assert!(
+                    self.first_seq == before.first_seq,
+                    "a write never truncates"
+                );
+            }
+            Outcome::Leader(after) => {
+                assert!(
+                    *after == *self,
+                    "a won SetLeader reports the state after it"
+                );
+                assert!(
+                    self.generation.0 == before.generation.0 + 1,
+                    "a won SetLeader bumps the generation by one"
+                );
+                assert!(
+                    self.next_seq == before.next_seq,
+                    "a SetLeader moves no position"
+                );
+            }
+            Outcome::Trimmed(after) => {
+                assert!(*after == *self, "a truncation reports the state after it");
+                assert!(
+                    self.next_seq == before.next_seq,
+                    "a truncation never moves next_seq"
+                );
+                assert!(
+                    self.generation == before.generation,
+                    "a truncation keeps the writer"
+                );
+            }
+        }
+        // The refusals name the state they were judged against.
+        if let Outcome::Refused(judged)
+        | Outcome::Truncated(judged)
+        | Outcome::LeaderRefused(judged)
+        | Outcome::TruncateRefused(judged) = &outcome
+        {
+            assert!(
+                *judged == before,
+                "a refusal names the state it was judged against"
+            );
+        }
         self.assert_invariants();
         outcome
     }
@@ -187,8 +257,13 @@ impl JournalState {
         if !current || entry.seq != self.next_seq || entry.records.is_empty() {
             return Outcome::Refused(*self);
         }
+        assert!(entry.count() > 0, "an accepted write carries records");
         let seq = self.next_seq;
         self.next_seq = Seq(seq.0 + entry.count());
+        assert!(
+            self.next_seq > seq,
+            "an accepted write advances the next position"
+        );
         Outcome::Accepted {
             seq,
             count: entry.count(),
@@ -201,6 +276,14 @@ impl JournalState {
         }
         self.generation = Generation(self.generation.0 + 1);
         self.owner = Some(owner);
+        assert!(
+            self.generation > expected,
+            "a won SetLeader moves past the expected generation"
+        );
+        assert!(
+            self.is_current(self.generation, owner),
+            "the new owner is the current writer"
+        );
         Outcome::Leader(*self)
     }
 
@@ -208,15 +291,35 @@ impl JournalState {
         if !self.is_current(generation, owner) {
             return Outcome::TruncateRefused(*self);
         }
+        let before = self.first_seq;
         self.first_seq = self.first_seq.max(up_to.min(self.next_seq));
+        assert!(
+            self.first_seq >= before,
+            "a truncation never lowers first_seq"
+        );
+        assert!(
+            self.first_seq <= self.next_seq,
+            "a truncation is clamped to next_seq"
+        );
         Outcome::Trimmed(*self)
     }
 
     /// Whether `(generation, owner)` is the journal's current writer: the
     /// fence a `Write` and a `Truncate` are both judged against.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_current(&self, generation: Generation, owner: ClientId) -> bool {
-        self.owner == Some(owner) && self.generation == generation
+        let current = self.owner == Some(owner) && self.generation == generation;
+        // Paired with `assert_invariants`: a current writer exists only from
+        // the first generation on.
+        if current {
+            assert!(self.generation.0 > 0, "a current writer holds a generation");
+        }
+        current
     }
 
     /// The state's own ordering.

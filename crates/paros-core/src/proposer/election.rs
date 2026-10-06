@@ -94,22 +94,51 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     /// plus `C_b` itself, so the incoming members promise the ballot (and
     /// learn the configuration) before Phase 2 reaches them. `me` is never
     /// addressed (a candidate that is an acceptor is its own first one).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn targets(&self, me: Option<Id>) -> Vec<Id> {
-        member_union(self.prior.iter().chain(std::iter::once(&self.config)))
+        let targets: Vec<Id> = member_union(self.prior.iter().chain(std::iter::once(&self.config)))
             .into_iter()
             .filter(|p| Some(*p) != me)
-            .collect()
+            .collect();
+        if let Some(me) = me {
+            assert!(!targets.contains(&me), "a candidate never addresses itself");
+        }
+        assert!(
+            self.config
+                .members()
+                .iter()
+                .all(|m| Some(*m) == me || targets.contains(m)),
+            "every member of C_b is addressed"
+        );
+        targets
     }
 
     /// The addressees whose complete suffix answer is still missing — what a
     /// Phase-1 re-send targets.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn unpromised(&self, me: Option<Id>) -> Vec<Id> {
-        self.targets(me)
+        let unpromised: Vec<Id> = self
+            .targets(me)
             .into_iter()
             .filter(|p| !self.promises.answered.contains(p))
-            .collect()
+            .collect();
+        if let Some(me) = me {
+            assert!(
+                !unpromised.contains(&me),
+                "a candidate never owes itself a promise"
+            );
+        }
+        unpromised
     }
 
     /// The acceptors whose complete suffix answer has been counted.
@@ -161,6 +190,11 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             self.rounds.is_empty(),
             "a campaign opens with no Phase-2 round in flight"
         );
+        assert!(
+            self.probe.is_none(),
+            "a campaign opens with no repair probe"
+        );
+        assert!(self.recovery.is_none(), "a campaign opens with no recovery");
         let Campaign {
             me,
             ballot,
@@ -186,6 +220,20 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             faulty_reports,
         };
         let targets = election.targets(me);
+        // Postconditions: the candidate is its own first (and only) answer,
+        // and its own reports seed the tally at or above the first slot.
+        assert!(
+            election.promises.answered.len() == usize::from(me.is_some()),
+            "a fresh campaign has only the candidate's own promise"
+        );
+        assert!(
+            election
+                .recovered
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= from_slot),
+            "the recovered suffix starts at the first slot"
+        );
         self.election = Some(election);
         targets
     }
@@ -228,7 +276,23 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         for (slot, fb) in faulty {
             e.faulty_reports.entry(slot).or_default().insert(from, fb);
         }
-        e.promises.close_page(from, next_from_slot)
+        let fold = e.promises.close_page(from, next_from_slot);
+        // A merged page never reaches below the campaign's first slot.
+        assert!(
+            e.recovered
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= e.promises.from_slot),
+            "the recovered suffix stays at or above the first slot"
+        );
+        assert!(
+            e.faulty_reports
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= e.promises.from_slot),
+            "the faulty reports stay at or above the first slot"
+        );
+        fold
     }
 
     /// The win gate (#121): every prior configuration covered — one
@@ -300,6 +364,10 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             .chain(e.faulty_reports.keys())
             .max()
             .copied();
+        assert!(
+            blocked.iter().all(|s| e.faulty_reports.contains_key(s)),
+            "only a faulty-reported slot is ever blocked"
+        );
         if !blocked.is_empty() {
             self.probe = Some(RepairProbe {
                 // The probe inherits the election's ballot, first slot and
@@ -317,6 +385,15 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
                 blocked: blocked.clone(),
             });
         }
+        // The probe is open exactly when something stayed blocked.
+        assert!(
+            self.probe.is_some() != blocked.is_empty(),
+            "a repair probe is open iff a slot stayed blocked"
+        );
+        assert!(
+            self.rounds.is_empty(),
+            "a fresh leadership starts with nothing in flight"
+        );
         Phase1Outcome {
             ballot: e.promises.ballot,
             config: e.config,

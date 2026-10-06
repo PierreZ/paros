@@ -55,11 +55,19 @@ impl<Id: Ord> Custody<Id> {
     /// Colocated custody seeded with `own_vote` as its first accept, when
     /// the opener's own record counts (it is an addressee of the round's
     /// column and its promise allowed the self-accept).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn colocated(own_vote: Option<Id>) -> Self {
-        Self::Colocated {
-            accepted_by: own_vote.into_iter().collect(),
-        }
+        let accepted_by: BTreeSet<Id> = own_vote.into_iter().collect();
+        assert!(
+            accepted_by.len() <= 1,
+            "a fresh round holds at most the own vote"
+        );
+        Self::Colocated { accepted_by }
     }
 }
 
@@ -183,9 +191,20 @@ impl<Id, V> Default for Rounds<Id, V> {
 
 impl<Id, V> Rounds<Id, V> {
     /// A tally with no round open.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let rounds = Self::default();
+        assert!(rounds.by_slot.is_empty(), "a fresh tally has no round");
+        assert!(
+            rounds.resend_cursor.is_none(),
+            "a fresh tally has no re-send cursor"
+        );
+        rounds
     }
 
     /// Every in-flight round, keyed by slot.
@@ -210,21 +229,42 @@ impl<Id, V> Rounds<Id, V> {
 
     /// Close the round at `slot` (decided, or abandoned by a decision that
     /// arrived from elsewhere).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn close(&mut self, slot: Slot) {
         self.by_slot.remove(&slot);
+        assert!(!self.by_slot.contains_key(&slot), "a closed round is gone");
     }
 
     /// Drop every round below `first` (a compaction or a trim-point jump
     /// folded those slots: they are chosen).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn retain_from(&mut self, first: Slot) {
         self.by_slot.retain(|slot, _| *slot >= first);
+        assert!(
+            self.by_slot.keys().next().is_none_or(|s| *s >= first),
+            "no round survives below the retained boundary"
+        );
     }
 
     /// Drop every round and the re-send cursor: the tally dies whole with
     /// the leadership that streamed it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn clear(&mut self) {
         self.by_slot.clear();
         self.resend_cursor = None;
+        assert!(self.by_slot.is_empty(), "a cleared tally has no round");
     }
 
     /// Whether a round is open at `slot` **at `ballot`** — the round half of
@@ -238,13 +278,27 @@ impl<Id, V> Rounds<Id, V> {
     /// decision: what a leader **takes back** and runs colocated
     /// ([`Rounds::take_back`]). Liveness under a dead proxy is the opener's,
     /// and this is how it notices; the threshold is the caller's policy.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn stalled_delegations(&self, after: u64) -> Vec<Slot> {
-        self.by_slot
+        let stalled: Vec<Slot> = self
+            .by_slot
             .iter()
             .filter(|(_, r)| r.resends >= after && r.proxy().is_some())
             .map(|(s, _)| *s)
-            .collect()
+            .collect();
+        assert!(
+            stalled.iter().all(|s| self
+                .by_slot
+                .get(s)
+                .is_some_and(|r| r.accepted_by().is_none())),
+            "a stalled delegation holds no colocated tally"
+        );
+        stalled
     }
 
     /// Every round re-sent at least `after` times without closing, whatever
@@ -255,11 +309,13 @@ impl<Id, V> Rounds<Id, V> {
     /// [`ProxyLeader::expire_stale`]: crate::proxy_leader::ProxyLeader::expire_stale
     #[must_use]
     pub fn stalled(&self, after: u64) -> Vec<Slot> {
-        self.by_slot
+        let stalled: Vec<Slot> = self
+            .by_slot
             .iter()
             .filter(|(_, r)| r.resends >= after)
             .map(|(s, _)| *s)
-            .collect()
+            .collect();
+        stalled
     }
 
     /// Whether every open round runs at `ballot` — what a tally that works
@@ -273,6 +329,11 @@ impl<Id, V> Rounds<Id, V> {
     /// no decision will ever close — and report the slots closed, so a
     /// caller keeping per-round bookkeeping beside the tally (a proxy's
     /// delegators) can drop it in step.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn close_below(&mut self, ballot: Ballot) -> Vec<Slot> {
         let stale: Vec<Slot> = self
             .by_slot
@@ -283,6 +344,10 @@ impl<Id, V> Rounds<Id, V> {
         for slot in &stale {
             self.by_slot.remove(slot);
         }
+        assert!(
+            self.by_slot.values().all(|r| r.ballot >= ballot),
+            "no round below the ballot survives"
+        );
         stale
     }
 }
@@ -312,6 +377,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         column: Option<usize>,
     ) {
         self.insert_round(slot, ballot, command, Custody::colocated(own_vote), column);
+        assert!(
+            self.by_slot.get(&slot).is_some_and(|r| r.proxy().is_none()),
+            "an opened round is colocated"
+        );
     }
 
     /// Open the round for `slot` at `ballot` against `column` **delegated**
@@ -332,6 +401,12 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         proxy: ProxyId,
     ) {
         self.insert_round(slot, ballot, command, Custody::Delegated { proxy }, column);
+        assert!(
+            self.by_slot
+                .get(&slot)
+                .is_some_and(|r| r.proxy() == Some(proxy)),
+            "a delegated round names its proxy"
+        );
     }
 
     /// Insert a fresh round at `slot` under `custody` — the one path
@@ -349,6 +424,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             !self.by_slot.contains_key(&slot),
             "a slot has at most one open Phase-2 round"
         );
+        let open = self.by_slot.len();
         self.by_slot.insert(
             slot,
             Round {
@@ -359,6 +435,14 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
                 resends: 0,
             },
         );
+        assert!(
+            self.by_slot.len() == open + 1,
+            "opening adds exactly one round"
+        );
+        assert!(
+            self.by_slot.get(&slot).is_some_and(|r| r.ballot == ballot),
+            "an opened round runs at its ballot"
+        );
     }
 
     /// **Take a delegated round back**: the proxy did not decide it, so the
@@ -368,6 +452,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// as it is. Always safe: a second fan-out of one `(slot, ballot,
     /// command)` is P2b-idempotent, so nothing the proxy may still do behind
     /// this can disagree with what the opener decides.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn take_back(&mut self, slot: Slot, own_vote: Option<Id>) -> bool {
         let Some(round) = self.by_slot.get_mut(&slot) else {
             return false;
@@ -376,6 +465,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             return false;
         }
         round.custody = Custody::colocated(own_vote);
+        assert!(round.proxy().is_none(), "a round taken back is colocated");
         true
     }
 
@@ -386,6 +476,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// that outran a take-back) is not counted. Whether it counted. Whether
     /// `from` is an addressee of the round's column is the caller's guard;
     /// the decision ([`Rounds::decided`]) restates it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold_accepted(&mut self, from: Id, ballot: Ballot, slot: Slot, vhash: u64) -> bool {
         let Some(round) = self.by_slot.get_mut(&slot) else {
             return false;
@@ -396,6 +491,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         match &mut round.custody {
             Custody::Colocated { accepted_by } => {
                 accepted_by.insert(from);
+                assert!(
+                    accepted_by.contains(&from),
+                    "a counted vote is in the tally"
+                );
                 true
             }
             Custody::Delegated { .. } => false,
@@ -409,6 +508,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// and #122's "a joining acceptor never inflates a quorum it is not
     /// in"), and the vote is not the column's and does not count. Whether
     /// it counted.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold_accepted_in(
         &mut self,
         config: &AcceptorConfig<Id>,
@@ -423,7 +527,16 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         if !config.is_phase2_addressee(from, column) {
             return false;
         }
-        self.fold_accepted(from, ballot, slot, vhash)
+        let counted = self.fold_accepted(from, ballot, slot, vhash);
+        // The write side of the pair `decided` reads back: a counted vote is
+        // always the round column's.
+        if counted {
+            assert!(
+                self.column(slot) == Some(column),
+                "a counted vote's round keeps its column"
+            );
+        }
+        counted
     }
 
     /// Whether the round at `slot` holds a Phase-2 quorum of `config` **in
@@ -451,6 +564,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
                 .all(|n| config.is_phase2_addressee(*n, round.column)),
             "every vote behind a decision comes from the round's column"
         );
+        assert!(
+            !accepted_by.is_empty(),
+            "a decision rests on at least one vote"
+        );
         Some((round.ballot, round.command.clone()))
     }
 
@@ -463,6 +580,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// one more re-send ([`Round::resends`]) — a delegated round's is a
     /// **re-delegation** — so a stall is visible to the policies that
     /// judge it ([`Rounds::stalled_delegations`], [`Rounds::stalled`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
         // No round survives below the compaction floor (the cross-role
         // invariant `ColocatedNode::assert_invariants` pins), so a fresh cursor
@@ -493,6 +615,17 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         self.resend_cursor = pending
             .last()
             .and_then(|p| p.slot.0.checked_add(1).map(Slot));
+        // Postconditions: bounded, every entry an open round, no slot twice
+        // (the two ranges the page draws from are disjoint).
+        assert!(pending.len() <= RESEND_BATCH, "a re-send page is bounded");
+        assert!(
+            pending.len() == RESEND_BATCH.min(self.by_slot.len()),
+            "a re-send page is as full as the open rounds allow"
+        );
+        assert!(
+            pending.iter().all(|p| self.by_slot.contains_key(&p.slot)),
+            "a re-send page carries only open rounds"
+        );
         pending
     }
 }
@@ -510,23 +643,56 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Take the next slot and advance the frontier past it.
+    ///
+    /// # Panics
+    ///
+    /// If the slot space is exhausted, or a round is already open at the
+    /// frontier (the allocator only ever hands out fresh slots).
     pub fn allocate(&mut self) -> Slot {
         let slot = self.next_slot;
+        assert!(slot.0 < u64::MAX, "the slot space is never exhausted");
+        assert!(
+            !self.rounds.by_slot().contains_key(&slot),
+            "the allocator hands out a slot no round holds"
+        );
         self.next_slot = Slot(slot.0 + 1);
         slot
     }
 
     /// Install the frontier a fresh leadership starts allocating from: what a
     /// won Phase 1 derived from its quorum report, or what a handoff carried.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn set_next_slot(&mut self, slot: Slot) {
         self.next_slot = slot;
+        assert!(
+            self.next_slot == slot,
+            "the installed frontier is the one handed in"
+        );
     }
 
     /// Raise the frontier to `slot` if it sits below — the monotone form an
     /// trim-point jump uses, whose boundary may sit above everything this
     /// node had.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn raise_next_slot(&mut self, slot: Slot) {
+        let before = self.next_slot;
         self.next_slot = self.next_slot.max(slot);
+        assert!(
+            self.next_slot >= slot,
+            "a raised frontier covers the boundary"
+        );
+        assert!(
+            self.next_slot >= before,
+            "the frontier never moves back on a raise"
+        );
     }
 }
 
@@ -553,7 +719,15 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
         own_vote: Option<Id>,
         column: Option<usize>,
     ) {
+        assert!(
+            self.election.is_none(),
+            "a candidate opens no Phase-2 round"
+        );
         self.rounds.open(slot, ballot, command, own_vote, column);
+        assert!(
+            self.rounds.is_open_at(slot, ballot),
+            "the round is open at its ballot"
+        );
     }
 
     /// Open the Phase-2 round for `slot` at `ballot` against `column`,
@@ -570,8 +744,16 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
         column: Option<usize>,
         proxy: ProxyId,
     ) {
+        assert!(
+            self.election.is_none(),
+            "a candidate delegates no Phase-2 round"
+        );
         self.rounds
             .open_delegated(slot, ballot, command, column, proxy);
+        assert!(
+            self.rounds.is_open_at(slot, ballot),
+            "the round is open at its ballot"
+        );
     }
 
     /// Take the delegated round at `slot` back into this proposer's own
@@ -629,13 +811,32 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     }
 
     /// Close the round at `slot` ([`Rounds::close`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn close_round(&mut self, slot: Slot) {
         self.rounds.close(slot);
+        assert!(self.rounds.column(slot).is_none(), "a closed round is gone");
     }
 
     /// Drop every round below `first` ([`Rounds::retain_from`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn retain_rounds_from(&mut self, first: Slot) {
         self.rounds.retain_from(first);
+        assert!(
+            self.rounds
+                .by_slot()
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= first),
+            "no round survives below the retained boundary"
+        );
     }
 
     /// The next fair page of rounds whose `Accept`s are to be re-sent
