@@ -37,6 +37,7 @@
 //! same time, which can only drop a precedence edge, never invent one.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use paros::JournalState;
 
@@ -579,14 +580,30 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
 ///   long tail) made every unknown write a branch at the one state where
 ///   they could all land (hunt seed 651057785248754081: 382 at one
 ///   position, past a 5M-step budget).
+///
+/// And one exclusion rule:
+///
+/// - **Taken positions.** A write answered `Written { seq, count }` holds
+///   `[seq, seq + count)` in every linearization: a position is taken once
+///   and `next_seq` only grows. An unknown write of another call that
+///   overlaps such a range can never have taken effect, so it is not
+///   judged. Without this, a pipelined batch left unknown and later
+///   rewritten, position by position, with fresh bytes the journal answered
+///   made both writes steppable at every position, doubling the search per
+///   position into the same dead end (hunt seed 6883584563191284886: 16
+///   positions, past a 5M-step budget).
 fn judged(attempts: &[Attempt]) -> Vec<usize> {
     let mut seen_records: BTreeSet<u64> = BTreeSet::new();
     let mut answered_writes: BTreeSet<&Call> = BTreeSet::new();
+    let mut taken: Vec<(Range<u64>, &Call)> = Vec::new();
     for attempt in attempts {
         match (&attempt.call, &attempt.seen) {
             (_, Some((_, Seen::Page { records, .. }))) => seen_records.extend(records),
-            (call @ Call::Write { .. }, Some(_)) => {
+            (call @ Call::Write { .. }, Some((_, seen))) => {
                 answered_writes.insert(call);
+                if let Seen::Written { seq, count, .. } = seen {
+                    taken.push((*seq..*seq + *count, call));
+                }
             }
             _ => {}
         }
@@ -610,6 +627,13 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
                     seq,
                     records,
                 } => {
+                    let range = *seq..*seq + records.len() as u64;
+                    let lost = taken.iter().any(|(held, by)| {
+                        *by != call && held.start < range.end && range.start < held.end
+                    });
+                    if lost {
+                        return false;
+                    }
                     let observed = answered_writes.contains(call)
                         || records.iter().any(|r| seen_records.contains(r));
                     unknown.insert(call)
@@ -939,6 +963,37 @@ mod tests {
         // The claim, the read, the observed write (bytes 130) and one
         // representative of the 49 others.
         assert_eq!(kept.len(), 4);
+        assert!(linearizable(&history));
+    }
+
+    /// An unknown pipelined batch whose positions a later, answered rewrite
+    /// took is never judged: it can have landed nowhere, and judging it made
+    /// the search double per position.
+    #[test]
+    fn unknown_writes_at_positions_an_answered_write_took_are_not_judged() {
+        let mut history = vec![at(
+            0,
+            0,
+            Call::SetLeader {
+                expected: 0,
+                owner: 0,
+            },
+            Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+        )];
+        for k in 0..16 {
+            history.push(at(0, 2 + k, write(1, 0, k, &[100 + k]), None));
+        }
+        for k in 0..16 {
+            history.push(at(
+                0,
+                40 + k,
+                write(1, 0, k, &[200 + k]),
+                Some((900, written(k, 1, false))),
+            ));
+        }
+        let kept = judged(&history);
+        // The claim and the sixteen answered rewrites.
+        assert_eq!(kept.len(), 17);
         assert!(linearizable(&history));
     }
 
