@@ -422,20 +422,9 @@ impl<Id, V> Default for Proposer<Id, V> {
 
 impl<Id: Copy + Ord, V> Proposer<Id, V> {
     /// A proposer with nothing open.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new() -> Self {
-        let proposer = Self::default();
-        assert!(
-            proposer.election.is_none(),
-            "a fresh proposer has no campaign"
-        );
-        assert!(proposer.rounds.is_empty(), "a fresh proposer has no round");
-        proposer
+        Self::default()
     }
 
     /// The component's own cross-field invariants. The proposer holds no

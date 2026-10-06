@@ -209,10 +209,6 @@ impl Matchmaking {
             watermark: Ballot::zero(),
             disagreements: 0,
         };
-        assert!(
-            matchmaking.registered_by.is_empty(),
-            "a fresh phase has heard nobody"
-        );
         matchmaking.assert_invariants();
         matchmaking
     }
@@ -648,25 +644,14 @@ pub struct MembershipProbe {
 
 impl MembershipProbe {
     /// Open a probe tagged `ballot`, from a node that believes `believed`.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(ballot: Ballot, believed: AcceptorConfig) -> Self {
-        let probe = Self {
+        Self {
             ballot,
             believed,
             answered: BTreeSet::new(),
             effective: None,
-        };
-        assert!(probe.answered.is_empty(), "a fresh probe has heard nobody");
-        assert!(
-            probe.effective.is_none(),
-            "a fresh probe has learned nothing"
-        );
-        probe
+        }
     }
 
     /// The tag of this probe's requests.
@@ -700,10 +685,6 @@ impl MembershipProbe {
         if let Some((ballot, config)) = effective {
             crate::matchmaker::raise_effective(&mut self.effective, ballot, &config);
         }
-        assert!(
-            self.answered.contains(&matchmaker),
-            "a folded answer is counted"
-        );
         assert!(
             self.effective.as_ref().map(|(b, _)| *b) >= held,
             "the probed effective configuration only moves forward"

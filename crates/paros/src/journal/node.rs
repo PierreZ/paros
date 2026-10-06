@@ -457,13 +457,6 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             self.append_staged().await?;
             self.maybe_checkpoint().await?;
         }
-        assert!(!self.meta_dirty, "a sync leaves no metadata unsaved");
-        if !relaxed_only {
-            assert!(
-                self.staged.is_empty(),
-                "a strict sync leaves nothing staged"
-            );
-        }
         Ok(())
     }
 

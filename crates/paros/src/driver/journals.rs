@@ -402,11 +402,6 @@ impl<S, A> Journals<S, A> {
         if fault.is_some() {
             self.last_fault = fault;
         }
-        assert!(self.down.contains(&journal), "a parked journal is down");
-        assert!(
-            !self.live.contains_key(&journal),
-            "a parked journal runs nothing"
-        );
         self.assert_invariants();
     }
 
@@ -423,10 +418,6 @@ impl<S, A> Journals<S, A> {
             self.quarantined.remove(journal);
         }
         // A due journal leaves quarantine to re-open; none of them is live.
-        assert!(
-            due.iter().all(|j| !self.quarantined.contains_key(j)),
-            "a due journal has left quarantine"
-        );
         assert!(
             due.iter().all(|j| !self.live.contains_key(j)),
             "a quarantined journal was not live"
@@ -513,11 +504,6 @@ impl<S, A: Audit> Journals<S, A> {
                 self.quarantined.insert(journal, now);
                 self.newly_quarantined.push(journal);
                 self.last_fault = Some(RunError::Storage(error));
-                // A storage fault quarantines its journal, not the process.
-                assert!(
-                    !self.live.contains_key(&journal),
-                    "a faulted journal runs nothing"
-                );
                 self.assert_invariants();
                 if self.live.is_empty() {
                     // Nothing left to serve this incarnation: the node

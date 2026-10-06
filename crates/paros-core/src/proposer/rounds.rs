@@ -55,18 +55,9 @@ impl<Id: Ord> Custody<Id> {
     /// Colocated custody seeded with `own_vote` as its first accept, when
     /// the opener's own record counts (it is an addressee of the round's
     /// column and its promise allowed the self-accept).
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn colocated(own_vote: Option<Id>) -> Self {
         let accepted_by: BTreeSet<Id> = own_vote.into_iter().collect();
-        assert!(
-            accepted_by.len() <= 1,
-            "a fresh round holds at most the own vote"
-        );
         Self::Colocated { accepted_by }
     }
 }
@@ -127,44 +118,23 @@ impl<Id, V> Round<Id, V> {
     }
 
     /// The proxy this round is delegated to, if it is.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn proxy(&self) -> Option<ProxyId> {
-        let proxy = match &self.custody {
+        match &self.custody {
             Custody::Delegated { proxy, .. } => Some(*proxy),
             Custody::Colocated { .. } => None,
-        };
-        // Custody is one or the other: a delegated round tallies nothing here.
-        assert!(
-            proxy.is_some() == matches!(self.custody, Custody::Delegated { .. }),
-            "a round names a proxy exactly when it is delegated"
-        );
-        proxy
+        }
     }
 
     /// The acceptors (incl. self) whose accept at this round's ballot has
     /// been counted **here** — what a Phase-2 re-send addresses the
     /// complement of. `None` on a delegated round: its votes are the proxy's.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn accepted_by(&self) -> Option<&BTreeSet<Id>> {
-        let accepted_by = match &self.custody {
+        match &self.custody {
             Custody::Colocated { accepted_by } => Some(accepted_by),
             Custody::Delegated { .. } => None,
-        };
-        assert!(
-            accepted_by.is_some() == matches!(self.custody, Custody::Colocated { .. }),
-            "a round tallies votes exactly when it is colocated"
-        );
-        accepted_by
+        }
     }
 }
 
@@ -203,31 +173,18 @@ pub struct Rounds<Id, V> {
 
 impl<Id, V> Default for Rounds<Id, V> {
     fn default() -> Self {
-        let rounds = Self {
+        Self {
             by_slot: BTreeMap::new(),
             resend_cursor: None,
-        };
-        assert!(rounds.by_slot.is_empty(), "a default tally holds no round");
-        rounds
+        }
     }
 }
 
 impl<Id, V> Rounds<Id, V> {
     /// A tally with no round open.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new() -> Self {
-        let rounds = Self::default();
-        assert!(rounds.by_slot.is_empty(), "a fresh tally has no round");
-        assert!(
-            rounds.resend_cursor.is_none(),
-            "a fresh tally has no re-send cursor"
-        );
-        rounds
+        Self::default()
     }
 
     /// Every in-flight round, keyed by slot.
@@ -252,14 +209,8 @@ impl<Id, V> Rounds<Id, V> {
 
     /// Close the round at `slot` (decided, or abandoned by a decision that
     /// arrived from elsewhere).
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     pub fn close(&mut self, slot: Slot) {
         self.by_slot.remove(&slot);
-        assert!(!self.by_slot.contains_key(&slot), "a closed round is gone");
     }
 
     /// Drop every round below `first` (a compaction or a trim-point jump
@@ -279,34 +230,16 @@ impl<Id, V> Rounds<Id, V> {
 
     /// Drop every round and the re-send cursor: the tally dies whole with
     /// the leadership that streamed it.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     pub fn clear(&mut self) {
         self.by_slot.clear();
         self.resend_cursor = None;
-        assert!(self.by_slot.is_empty(), "a cleared tally has no round");
     }
 
     /// Whether a round is open at `slot` **at `ballot`** — the round half of
     /// "does this `Nack` supersede work in flight" ([`Proposer::supersedes`]).
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_open_at(&self, slot: Slot, ballot: Ballot) -> bool {
-        let open = self.by_slot.get(&slot).is_some_and(|r| r.ballot == ballot);
-        if open {
-            assert!(
-                self.by_slot.contains_key(&slot),
-                "an open round is held at its slot"
-            );
-        }
-        open
+        self.by_slot.get(&slot).is_some_and(|r| r.ballot == ballot)
     }
 
     /// The delegated rounds re-delegated at least `after` times without a
@@ -364,18 +297,9 @@ impl<Id, V> Rounds<Id, V> {
 
     /// Whether every open round runs at `ballot` — what a tally that works
     /// for exactly one leadership at a time (the proxy leader) asserts.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn all_at(&self, ballot: Ballot) -> bool {
-        let all = self.by_slot.values().all(|r| r.ballot == ballot);
-        if self.by_slot.is_empty() {
-            assert!(all, "an empty tally runs at every ballot");
-        }
-        all
+        self.by_slot.values().all(|r| r.ballot == ballot)
     }
 
     /// Close every round below `ballot` — a superseded leadership's, which
@@ -917,14 +841,8 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     }
 
     /// Close the round at `slot` ([`Rounds::close`]).
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     pub fn close_round(&mut self, slot: Slot) {
         self.rounds.close(slot);
-        assert!(self.rounds.column(slot).is_none(), "a closed round is gone");
     }
 
     /// Drop every round below `first` ([`Rounds::retain_from`]).

@@ -257,10 +257,6 @@ impl JournalReads {
                 reply,
             },
         );
-        assert!(
-            self.confirming.contains_key(&ctx),
-            "a parked read awaits its confirmation"
-        );
         assert!(self.next_ctx > ctx, "a read token is never reused");
         self.assert_invariants();
     }

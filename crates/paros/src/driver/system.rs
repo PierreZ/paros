@@ -237,10 +237,6 @@ impl<P: Providers> SystemFollower<P> {
     pub(crate) fn take_checkpoints(&mut self) -> Vec<(u64, Option<bool>)> {
         let taken = std::mem::take(&mut self.checkpoints);
         assert!(
-            self.checkpoints.is_empty(),
-            "taken checkpoints are reported once"
-        );
-        assert!(
             taken.windows(2).all(|w| w[0].0 < w[1].0),
             "checkpoints are reported in position order"
         );
@@ -332,10 +328,6 @@ impl<P: Providers> SystemFollower<P> {
         // Every answer closes the one read `poll_remote` opened for it.
         let was_outstanding = self.outstanding.remove(&journal);
         assert!(was_outstanding, "a follow answer closes an open read");
-        assert!(
-            !self.outstanding.contains(&journal),
-            "an answered follow read is closed"
-        );
         if reply.unknown_journal || !reply.served {
             return Vec::new();
         }

@@ -226,24 +226,15 @@ pub struct QuorumReads<Id> {
 
 impl<Id> Default for QuorumReads<Id> {
     fn default() -> Self {
-        let reads = Self { reads: Vec::new() };
-        assert!(reads.reads.is_empty(), "a default tally holds no read");
-        reads
+        Self { reads: Vec::new() }
     }
 }
 
 impl<Id: Copy + Ord> QuorumReads<Id> {
     /// No read open.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new() -> Self {
-        let reads = Self::default();
-        assert!(reads.reads.is_empty(), "a fresh tally holds no read");
-        reads
+        Self::default()
     }
 
     /// The open reads, in creation order.

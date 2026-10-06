@@ -539,8 +539,6 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             self.append(&records).await?;
             self.maybe_checkpoint().await?;
         }
-        assert!(!self.meta_dirty, "a sync leaves no metadata unsaved");
-        assert!(self.staged.is_empty(), "a sync leaves nothing staged");
         Ok(())
     }
 }

@@ -36,59 +36,25 @@ pub struct Authority<Id> {
 
 impl<Id> Default for Authority<Id> {
     fn default() -> Self {
-        let authority = Self {
+        Self {
             fence: None,
             quorum_acked_by: BTreeSet::new(),
             quorum_elapsed: 0,
-        };
-        assert!(
-            authority.fence.is_none(),
-            "a default authority has no fence"
-        );
-        assert!(
-            authority.quorum_elapsed == 0,
-            "a default authority's window is fresh"
-        );
-        authority
+        }
     }
 }
 
 impl<Id: Copy + Ord> Authority<Id> {
     /// An authority with no fence and an empty window.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new() -> Self {
-        let authority = Self::default();
-        assert!(authority.fence.is_none(), "a fresh authority has no fence");
-        assert!(
-            authority.quorum_acked_by.is_empty(),
-            "a fresh authority has no ack"
-        );
-        authority
+        Self::default()
     }
 
     /// Drop the fence and the window: the authority dies whole with the
     /// leadership that held it.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     pub fn clear(&mut self) {
         *self = Self::default();
-        assert!(self.fence.is_none(), "a cleared authority has no fence");
-        assert!(
-            self.quorum_acked_by.is_empty(),
-            "a cleared authority has no ack"
-        );
-        assert!(
-            self.quorum_elapsed == 0,
-            "a cleared authority's window is fresh"
-        );
     }
 
     // ---- the fence ----------------------------------------------------------

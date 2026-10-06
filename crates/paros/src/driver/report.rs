@@ -169,7 +169,7 @@ pub(crate) struct Deltas {
 impl Deltas {
     /// The trackers' starting point: the counters the core recovered with.
     pub(crate) fn new(node: &ColocatedNode) -> Self {
-        let deltas = Self {
+        Self {
             role: node.role(),
             quorum_lost: node.quorum_lost_step_downs(),
             watermark_fills: node.watermark_fills(),
@@ -180,16 +180,7 @@ impl Deltas {
             matchmaking_timeouts: node.matchmaking_timeouts(),
             matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
             failed_campaigns: 0,
-        };
-        assert!(
-            deltas.matchmaking.is_none(),
-            "a fresh tracker has surfaced no phase"
-        );
-        assert!(
-            deltas.failed_campaigns == 0,
-            "a fresh tracker counts no failed campaign"
-        );
-        deltas
+        }
     }
 }
 

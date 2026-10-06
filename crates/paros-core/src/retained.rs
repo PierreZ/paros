@@ -195,15 +195,8 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
     }
 
     /// Remove the entry at `key`, returning it.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
     pub fn remove(&mut self, key: K) -> Option<V> {
-        let removed = self.entries.remove(&key);
-        assert!(!self.entries.contains_key(&key), "a removed entry is gone");
-        removed
+        self.entries.remove(&key)
     }
 
     /// Raise the floor to `floor`, dropping everything below it.

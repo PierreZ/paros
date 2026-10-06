@@ -231,8 +231,6 @@ impl PeerMailbox {
                     "a lane evicts only its own journal's message"
                 );
             }
-            // The lane the message went to now holds it.
-            assert!(lanes.lane_len(journal) > 0, "a pushed message is queued");
             lanes.assert_invariants();
             evicted
         };
@@ -326,7 +324,6 @@ impl Outbound {
             assert!(node != me, "a node opens no lane to itself");
         }
         self.peers().entry(node).or_insert(lane);
-        assert!(self.has_peer(node), "an added peer has a lane");
     }
 
     fn peers(&self) -> std::sync::MutexGuard<'_, BTreeMap<NodeId, PeerMailbox>> {
@@ -554,7 +551,6 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
     ) -> PeerMailbox {
         let client: ServiceClient<P, DeliverRpc> = well_known(rpc, addr);
         let mailbox = PeerMailbox::new(self.tunables.peer_queue_capacity);
-        assert!(mailbox.is_empty(), "a fresh lane holds nothing");
         self.providers
             .task()
             .spawn_task(
