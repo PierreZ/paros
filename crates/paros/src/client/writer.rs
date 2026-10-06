@@ -10,7 +10,7 @@
 //! would only be asking the journal to fence it again.
 
 use moonpool_core::Providers;
-use paros_core::{ClientId, Entry, Generation, JournalKey, JournalState, Seq, Value};
+use paros_core::{ClientId, Entry, Generation, JournalIdentifier, JournalState, Seq, Value};
 
 use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};
 use super::{Client, Resolution, WriteOptions};
@@ -83,7 +83,7 @@ pub enum WriterOutcome {
 /// takes a copy, advances it per write, and folds the verdicts back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Writer {
-    journal: JournalKey,
+    journal: JournalIdentifier,
     owner: ClientId,
     /// The generation it believes it owns (`None`: it does not).
     owned: Option<u64>,
@@ -95,7 +95,7 @@ pub struct Writer {
 
 /// The `Write` request carrying `entry` to `journal`.
 #[must_use]
-pub fn write_request(journal: JournalKey, entry: &Entry) -> Write {
+pub fn write_request(journal: JournalIdentifier, entry: &Entry) -> Write {
     Write {
         journal: journal.journal.0,
         tenant: journal.tenant.0,
@@ -109,7 +109,7 @@ pub fn write_request(journal: JournalKey, entry: &Entry) -> Write {
 impl Writer {
     /// A writer of `journal` as client `owner`, owning nothing yet.
     #[must_use]
-    pub fn new(journal: JournalKey, owner: u64) -> Self {
+    pub fn new(journal: JournalIdentifier, owner: u64) -> Self {
         Self {
             journal,
             owner: ClientId(owner),
@@ -121,7 +121,7 @@ impl Writer {
 
     /// The journal it writes.
     #[must_use]
-    pub fn journal(&self) -> JournalKey {
+    pub fn journal(&self) -> JournalIdentifier {
         self.journal
     }
 

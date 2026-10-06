@@ -172,7 +172,6 @@ Prompt kinds for PR 1:
 | `ReplicaApply` | Slots chosen: {…}. chosen_index = k. Apply slot s? | `Replica::learn` then `Replica::advance` on a clone: did the walk surface s as committed? |
 | `PersistOrder` | A Ready holds writes and messages. Sync first or send first? | always sync first (the seam level's explanation) |
 | `CommitOverwrite` | Commit says slot s is Y; your accepted record says X at a lower ballot. Keep X or take Y? | a **constant** (`take`), and the doc says why: `record_accepted` is an upsert by slot, and the prompt is raised only when what arrived was decided at a strictly higher ballot, so the core has no "keep" state to be in |
-| `ReadServe` | Read ctx captured index i; quorum of acks held; chosen_index = c. Serve or wait? | `confirm_reads` (Act III's fresh-leader trap; the Act II variant is the deposed leader) |
 | `SnapshotPromise` | A peer's snapshot at boundary i, taken under ballot b, arrived; you promised p. What is your promise now? | `set_promise` + `Acceptor::install` on a clone, driven exactly as `on_install_snapshot` drives the real one (Act III) |
 | `AckWrite` | A client retried (client, seq). Acked as applied, held in flight, or given a fresh slot? | `Replica::applied_at` then `Replica::inflight_at` on a clone — the two dedup tables, in the order the core consults them (Act III) |
 
@@ -236,9 +235,10 @@ the tests replay. Level ids are stable strings (`act1/choose-a-value`), never in
 12. `act2/what-survives-a-crash` — crash and restart at each step of a decision; goal: the
     restarted node's `HardState` never regressed and the chosen value is intact. Includes the
     `CommitOverwrite` prompt (the stale-accept resurrection of `restart-safety.md`).
-13. `act2/the-read-that-lies` — the deposed-but-unaware leader; `ReadServe` prompt: a read
-    with no ack quorum must not be served. Goal: the client's read watermark never regresses.
-    (Read-index proper, `read_floor` and linearizability are Act III.)
+13. `act2/the-read-that-lies` — a follower that missed a leader change is asked for a quorum
+    read; `QuorumReadServe` prompt: a Phase-1 quorum reported a slot the follower has not
+    applied, so it waits. Goal: the read observes the last acknowledged write. (The
+    read-index path this level once taught retired with #243.)
 
 ### Act III — truncation, snapshots, reads (log world; 3 nodes, 2 clients)
 
@@ -250,11 +250,10 @@ the tests replay. Level ids are stable strings (`act1/choose-a-value`), never in
     catch-up is refused below the floor; the peer offers a snapshot; `SnapshotPromise` prompt:
     the node adopts `max(promise, snapshot ballot)`, never lower. Goal: the node rejoins with
     its promise intact.
-16. `act3/read-index` — a read must prove leadership *now*: capture the chosen index, confirm
-    with a quorum of acks to the *current* beat, serve once applied. `ReadServe` prompt: acks
-    to an older beat prove nothing. Reward: automation of the confirm step.
+16. *(retired with the read-index path, #243: `act3/read-index`.)*
 17. `act3/the-fresh-leader-trap` — a new leader with a quorum in hand but a lagging chosen
-    index: `ReadServe` prompt says wait for the read floor; slot re-decides; the read fires.
+    index: a quorum read at it settles on the inherited slot's vote; `QuorumReadServe` prompt
+    says wait; the slot re-decides; the read is served.
 18. `act3/linearizable-or-not` — two clients, one leader change; the player produces a history
     and the game judges it by the three conditions (a committed read sees every write acked
     before it began; watermarks never go backwards; a later write lands above an earlier

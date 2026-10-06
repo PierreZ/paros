@@ -126,6 +126,22 @@ impl Audience {
     }
 
     fn resolve_excluding(&self, pool: &[NodeId], me: Option<NodeId>) -> Vec<NodeId> {
+        let resolved = self.resolve_unfiltered(pool, me);
+        // A proxy audience names no node, and a broadcast never loops back.
+        if self.proxy().is_some() {
+            assert!(resolved.is_empty(), "a proxy audience resolves to no node");
+        }
+        if let (Some(me), false) = (me, matches!(self, Audience::Node(_))) {
+            assert!(
+                !resolved.contains(&me),
+                "a fan-out never addresses its sender"
+            );
+        }
+        resolved
+    }
+
+    /// [`Audience::resolve_excluding`]'s answer, before its postconditions.
+    fn resolve_unfiltered(&self, pool: &[NodeId], me: Option<NodeId>) -> Vec<NodeId> {
         match self {
             Audience::Node(to) => vec![*to],
             Audience::Proxy(_) => Vec::new(),
@@ -340,8 +356,8 @@ pub enum Message {
     /// not move (#180's rule): everything below the trim point is chosen, the
     /// application that folded it lives in the client, and a trim point is
     /// replicated by consensus (a decided `Truncate`), so the only facts a
-    /// laggard needs are where the retained log starts and the at-most-once
-    /// ledger of what it will never walk.
+    /// laggard needs are where the retained log starts and the journal
+    /// state sealed over what it will never walk.
     TrimmedTo {
         /// Sender (the serving peer).
         from: NodeId,
@@ -443,7 +459,7 @@ pub enum Message {
     // ---- Liveness ----
     /// Leader → peers: a liveness beat carrying the leader's commit index so
     /// followers advance their chosen prefix. Broadcast on the leader's tick
-    /// cadence (and by a read round), never received by its sender.
+    /// cadence, never received by its sender.
     Heartbeat {
         /// The leader heartbeating.
         from: NodeId,
@@ -457,11 +473,6 @@ pub enum Message {
         /// and a follower missing exactly that slot read the beat as "no lag" and
         /// never pulled (#56).
         commit: Option<Slot>,
-        /// Monotone per-ballot beat sequence number, assigned at broadcast
-        /// (`0` on the tick-injected self event, which never leaves the node).
-        /// Echoed by [`Message::HeartbeatAck`] so the leader can tell which
-        /// beat an ack answers — the freshness a read-index round counts.
-        seq: u64,
         /// The configuration the leader's ballot runs with, so a follower that
         /// missed the `Prepare` (down or partitioned through the election)
         /// still learns the latest configuration from ordinary beats.
@@ -510,19 +521,16 @@ pub enum Message {
     },
 
     /// Follower → leader: acknowledges a [`Message::Heartbeat`] whose ballot the
-    /// follower accepts (its promise is at or below it), echoing `(ballot, seq)`.
-    /// A quorum of acks at the leader's current ballot, for beats broadcast at or
-    /// after a read-index round began, proves the node was still leader after the
-    /// read was captured — the no-log-write leadership confirmation linearizable
-    /// reads need. Carries no durable obligation: the ack claims only "my promise
-    /// is at or below `ballot` right now".
+    /// follower accepts (its promise is at or below it), echoing its ballot.
+    /// The acks at the leader's current ballot refill its `CheckQuorum` window
+    /// and, on a matchmaker deployment, feed its GC fence. Carries no durable
+    /// obligation: the ack claims only "my promise is at or below `ballot`
+    /// right now".
     HeartbeatAck {
         /// The acknowledging follower.
         from: NodeId,
         /// The heartbeat's ballot, echoed.
         ballot: Ballot,
-        /// The heartbeat's beat sequence number, echoed.
-        seq: u64,
         /// The follower's contiguous chosen index, on a matchmaker
         /// deployment: what the leader's garbage collection (#123) counts
         /// toward "a Phase-2 quorum holds the prefix below my fence". Absent

@@ -97,7 +97,7 @@ fn config(id: u64) -> Config {
     Config {
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::new(NodeId(id), crate::JournalKey::UNSET)
+        ..Config::new(NodeId(id), crate::JournalIdentifier::UNSET)
     }
 }
 
@@ -491,7 +491,7 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
     assert!(ReplicaId(1).is_in(2));
     assert!(!ReplicaId(2).is_in(2));
     assert_eq!(
-        Config::new(NodeId(0), crate::JournalKey::UNSET).reply_owner(Slot(5)),
+        Config::new(NodeId(0), crate::JournalIdentifier::UNSET).reply_owner(Slot(5)),
         None
     );
 }

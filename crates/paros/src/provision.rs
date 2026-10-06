@@ -106,7 +106,7 @@ mod tests {
         Config {
             peers: peers.iter().copied().map(NodeId).collect(),
             nodes: peers.iter().copied().map(NodeId).collect(),
-            ..Config::new(NodeId(0), paros_core::JournalKey::UNSET)
+            ..Config::new(NodeId(0), paros_core::JournalIdentifier::UNSET)
         }
     }
 

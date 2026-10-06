@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::{
     BeliefSource, ColocatedNode, Delegation, HANDOFF_BATCH, HANDOFF_FENCE_ELECTIONS,
     LEADER_RECOVERY_BATCH, LeadershipOrigin, MatchStep, NodeRole, PROMISE_BATCH, ProposeResult,
-    READ_TTL_TICKS, ReadIndexResult, ReadState, ReconfigureRefusal, ReconfigureResult,
+    READ_TTL_TICKS, ReadState, ReconfigureRefusal, ReconfigureResult,
 };
 use crate::matchmaker::{
     MatchOutcome, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
@@ -47,7 +47,7 @@ impl TestStorage {
                 matchmakers: Vec::new(),
                 matchmaker_pool: Vec::new(),
                 proxy_count: 0,
-                ..Config::new(NodeId(id), crate::JournalKey::UNSET)
+                ..Config::new(NodeId(id), crate::JournalIdentifier::UNSET)
             },
             first_slot: Slot(0),
             faulty: Vec::new(),
@@ -344,7 +344,7 @@ fn cluster_with_three_chosen() -> [ColocatedNode; 3] {
     nodes
 }
 
-// ---- linearizable reads (read-index) ---------------------------------------
+// ---- addressing one node of a cluster ---------------------------------------
 
 /// The node of `nodes` whose id is `to`. Panics if `to` is not a cluster
 /// member.
@@ -389,7 +389,6 @@ mod membership_probe;
 mod phase2;
 mod pool;
 mod quorum_reads;
-mod reads;
 mod reconfigure;
 mod recovery;
 mod replication;

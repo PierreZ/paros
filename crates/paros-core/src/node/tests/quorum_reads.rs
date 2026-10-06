@@ -88,12 +88,11 @@ fn a_quorum_read_completes_on_a_row_that_is_not_a_column() {
     ready.advance();
     assert!(nodes[4].quorum_reads().is_empty());
     assert!(
-        nodes[0].proposer().read_rounds().is_empty(),
-        "the leader took no part: no read-index round was opened"
-    );
-    assert_eq!(
-        nodes[0].heartbeat_seq, 1,
-        "no beat was broadcast for the read (the one beat is make_leader's)"
+        !nodes[0]
+            .pending_messages
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Heartbeat { .. })),
+        "the leader took no part: no beat was broadcast for the read"
     );
 }
 

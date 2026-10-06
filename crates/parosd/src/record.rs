@@ -24,21 +24,21 @@
 //! journal 2965734451981346203/9861377130450924019
 //! ```
 //!
-//! A journal is named by its frame `<tenant>/<journal>` (#235).
+//! A journal is named by its identifier `<tenant>/<journal>` (#235).
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use paros::JournalKey;
+use paros::JournalIdentifier;
 #[cfg(test)]
 use paros::{JournalId, TenantId};
 
-/// Parse a journal frame written `<tenant>/<journal>` (#235), the form
-/// [`JournalKey`]'s `Display` renders.
+/// Parse a journal identifier written `<tenant>/<journal>` (#235), the form
+/// [`JournalIdentifier`]'s `Display` renders.
 #[must_use]
-pub fn parse_key(text: &str) -> Option<JournalKey> {
+pub fn parse_identifier(text: &str) -> Option<JournalIdentifier> {
     text.contains('/').then(|| text.parse().ok()).flatten()
 }
 
@@ -54,7 +54,7 @@ pub struct Record {
     pub id: u64,
     /// The journals whose stores are provisioned (a node's; empty for a
     /// matchmaker or a replica).
-    pub journals: BTreeSet<JournalKey>,
+    pub journals: BTreeSet<JournalIdentifier>,
 }
 
 impl Record {
@@ -99,7 +99,7 @@ impl Record {
                 }
                 "journal" => {
                     let journal =
-                        parse_key(value).ok_or_else(|| format!("bad journal {value:?}"))?;
+                        parse_identifier(value).ok_or_else(|| format!("bad journal {value:?}"))?;
                     journals.insert(journal);
                 }
                 _ => return Err(format!("unknown record key {key:?}")),
@@ -191,8 +191,8 @@ mod tests {
             role: "node".into(),
             id: 3,
             journals: [
-                JournalKey::new(TenantId(7), JournalId(9)),
-                JournalKey::new(TenantId(300), JournalId(9_000)),
+                JournalIdentifier::new(TenantId(7), JournalId(9)),
+                JournalIdentifier::new(TenantId(300), JournalId(9_000)),
             ]
             .into_iter()
             .collect(),

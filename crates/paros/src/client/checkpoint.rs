@@ -47,7 +47,7 @@
 use std::time::Duration;
 
 use moonpool_core::Providers;
-use paros_core::{JournalId, JournalKey, Value};
+use paros_core::{JournalId, JournalIdentifier, Value};
 use prost::Message as _;
 
 use super::reader::{Reader, ReaderOutcome};
@@ -507,7 +507,7 @@ pub struct Checkpointer<S> {
 impl<S: Checkpointable> Checkpointer<S> {
     /// An owner of `journal` as client `owner` over the empty `state`.
     #[must_use]
-    pub fn new(journal: JournalKey, owner: u64, state: S, policy: CheckpointPolicy) -> Self {
+    pub fn new(journal: JournalIdentifier, owner: u64, state: S, policy: CheckpointPolicy) -> Self {
         Self {
             writer: Writer::new(journal, owner),
             folder: Folder::new(state),
@@ -685,7 +685,7 @@ impl<S: Checkpointable> Checkpointer<S> {
 #[tracing::instrument(level = "debug", skip_all, fields(journal = %journal, tail))]
 pub async fn load<P: Providers, S: Checkpointable>(
     folder: &mut Folder<S>,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     client: &Client<P>,
     first: usize,
     tail: u64,
@@ -758,11 +758,11 @@ pub async fn load<P: Providers, S: Checkpointable>(
 /// read.
 async fn read_chunks<P: Providers>(
     client: &Client<P>,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     at: &CheckpointRef,
     first: usize,
 ) -> Option<Vec<Vec<u8>>> {
-    let mut reader = Reader::new(JournalKey::new(journal.tenant, at.journal), 0);
+    let mut reader = Reader::new(JournalIdentifier::new(journal.tenant, at.journal), 0);
     let mut chunks = Vec::new();
     while reader.cursor() < at.end_seq {
         match reader.next(client, first).await {
@@ -959,7 +959,7 @@ mod tests {
         // The toy state is every entry's bytes, so the log since the start
         // is exactly the state's size.
         let mut lazy = Checkpointer::new(
-            JournalKey::new(paros_core::TenantId(7), paros_core::JournalId(9)),
+            JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9)),
             1,
             Log::default(),
             policy(2),
@@ -969,7 +969,7 @@ mod tests {
         assert!(!lazy.due(Duration::from_secs(1)), "4 bytes against 2 × 4");
         assert!(lazy.due(Duration::from_secs(10)), "the clock says");
         let mut eager = Checkpointer::new(
-            JournalKey::new(paros_core::TenantId(7), paros_core::JournalId(9)),
+            JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9)),
             1,
             Log::default(),
             policy(1),

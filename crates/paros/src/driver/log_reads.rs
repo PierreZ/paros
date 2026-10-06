@@ -9,8 +9,7 @@
 //! ([`paros_core::ReadState`]) — the row answered whole and this process's
 //! journal fold covers the maximum. Only then is the page served, from the
 //! fold ([`paros_core::LogRead`], a pure read): every write acknowledged
-//! before the read opened is in it. No read goes through the leader, and no
-//! read-index round is ever asked.
+//! before the read opened is in it. No read goes through the leader.
 //!
 //! A confirmed read with nothing to return yet — it starts at or past the
 //! journal's `next_seq` — waits here for as long as the client asked
@@ -26,7 +25,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use paros_core::{JournalKey, LogRead, NodeId, ReadState, Seq, Slot};
+use paros_core::{JournalIdentifier, LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::hooks::{DriverHooks, Reply};
@@ -40,6 +39,12 @@ pub(crate) const READ_PAGE_RECORDS: usize = 256;
 /// The byte budget of one page: far below the frame limit. A page that can
 /// hold a record always holds one, whatever its size.
 pub(crate) const READ_PAGE_BYTES: usize = 64 * 1024;
+
+// A page carries at least one record and always fits one RPC frame (a lone
+// record above the budget is the page's one exception, bounded by the write
+// that carried it).
+const _: () = assert!(READ_PAGE_RECORDS > 0);
+const _: () = assert!(READ_PAGE_BYTES < crate::rpc::MAX_FRAME_BYTES as usize);
 
 /// One journal read, from its arrival to its answer.
 struct PendingRead {
@@ -80,7 +85,33 @@ fn at_end(read: &LogRead) -> bool {
 
 /// The wire answer for a core read page.
 fn read_ack(read: &LogRead) -> ReadAck {
+    let ack = read_ack_unchecked(read);
+    if matches!(read, LogRead::NotHeld) {
+        // Not held here: unserved, carrying neither state nor records.
+        assert!(!ack.served, "a read not held here is unserved");
+        assert!(ack.state.is_none(), "an unserved read names no state");
+        assert!(
+            ack.records.is_empty(),
+            "an unserved read carries no records"
+        );
+        return ack;
+    }
+    // A served answer always names the state it was read from, and only a
+    // truncated read says so.
+    assert!(ack.served, "a page or a truncation is a served read");
+    assert!(ack.state.is_some(), "a served read names the journal state");
+    assert!(
+        ack.truncated == matches!(read, LogRead::Truncated(_)),
+        "only a truncated read is answered truncated"
+    );
+    ack
+}
+
+/// [`read_ack`] before its postconditions.
+fn read_ack_unchecked(read: &LogRead) -> ReadAck {
     match read {
+        // Unserved: the client asks another server (`ReadOutcome::Unserved`).
+        LogRead::NotHeld => ReadAck::default(),
         LogRead::Truncated(state) => ReadAck {
             served: true,
             truncated: true,
@@ -107,7 +138,30 @@ fn send<H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
 ) {
-    let report = LogReadReport::of(read, from, how);
+    let Some(report) = LogReadReport::of(read, from, how) else {
+        // The fold's floor rose ahead of it (a trim-point jump): the record
+        // is in the journal but not here, so the read is answered unserved
+        // and the client asks elsewhere (`LogRead::NotHeld`).
+        tracing::info!(node = node.0, from = from.0, answer = ?how, "log_read_not_held");
+        let ack = read_ack(read);
+        assert!(!ack.served, "a read this process does not hold is unserved");
+        answer(hooks, audit, node, Reply::ReadUnserved, reply, ack);
+        return;
+    };
+    // A woken read is one the fold moved past: never an empty tail page.
+    if how == LogReadAnswer::Woke {
+        assert!(!at_end(read), "a woken read has something to serve");
+    }
+    let ack = read_ack(read);
+    // The audit's view and the wire answer are two encodings of one read.
+    assert!(
+        ack.truncated == report.truncated,
+        "the audit and the wire agree on truncation"
+    );
+    assert!(
+        ack.records.len() == report.records.len(),
+        "the audit and the wire carry the same records"
+    );
     audit.log_read_served(node, &report);
     tracing::info!(
         node = node.0,
@@ -118,21 +172,28 @@ fn send<H: DriverHooks, A: Audit>(
         answer = ?how,
         "log_read_served"
     );
-    answer(hooks, audit, node, Reply::LogRead, reply, read_ack(read));
+    answer(hooks, audit, node, Reply::LogRead, reply, ack);
 }
 
 /// The refusal a call naming a journal this process does not serve gets
-/// (#185: an unset half, or any frame but its own, #235), reported through
+/// (#185: an unset half, or any identifier but its own, #235), reported through
 /// [`Audit::journal_refused`]. `true` when the call was refused.
 pub(crate) fn refuse_journal<A: Audit>(
-    served: JournalKey,
-    asked: JournalKey,
+    served: JournalIdentifier,
+    asked: JournalIdentifier,
     call: &'static str,
     node: NodeId,
     audit: &A,
 ) -> bool {
     if asked.is_set() && asked == served {
         return false;
+    }
+    // Negative space: a refusal is never for the named journal this serves.
+    if asked.is_set() {
+        assert!(
+            asked != served,
+            "a named journal this process serves is never refused"
+        );
     }
     audit.journal_refused(node, asked, call);
     tracing::info!(node = node.0, journal = %asked, call, "journal_refused");
@@ -142,12 +203,49 @@ pub(crate) fn refuse_journal<A: Audit>(
 /// How many ticks `wait_ms` is at `tick`, capped at `cap`.
 pub(crate) fn wait_ticks(wait_ms: u64, tick: Duration, cap: u64) -> u64 {
     let tick_ms = u64::try_from(tick.as_millis()).unwrap_or(u64::MAX).max(1);
-    wait_ms.div_ceil(tick_ms).min(cap)
+    let ticks = wait_ms.div_ceil(tick_ms).min(cap);
+    assert!(ticks <= cap, "a long-poll never outwaits its cap");
+    if wait_ms == 0 {
+        assert!(ticks == 0, "a read that asks no wait never waits");
+    }
+    ticks
 }
 
 impl JournalReads {
+    /// The read tally's own invariants: every token was minted here, every
+    /// page is bounded, and only a read that may wait is parked.
+    fn assert_invariants(&self) {
+        assert!(
+            self.confirming.keys().all(|ctx| *ctx < self.next_ctx),
+            "every confirming read carries a token minted here"
+        );
+        assert!(
+            self.confirming
+                .values()
+                .chain(&self.parked)
+                .all(|p| p.limit > 0 && p.limit <= READ_PAGE_RECORDS),
+            "every pending read's page is bounded"
+        );
+        assert!(
+            self.parked.iter().all(|p| p.wait_ticks > 0),
+            "only a read that asked to wait is parked"
+        );
+        assert!(
+            self.confirming
+                .values()
+                .chain(&self.parked)
+                .all(|p| p.parked_at <= self.now),
+            "no read was parked in the future"
+        );
+    }
+
     /// The `ctx` the next read's quorum read opens with.
     pub(crate) fn next_ctx(&self) -> u64 {
+        // The next token is fresh: no read waits on it yet.
+        assert!(
+            !self.confirming.contains_key(&self.next_ctx),
+            "the next read token is unused"
+        );
         self.next_ctx
     }
 
@@ -180,6 +278,8 @@ impl JournalReads {
                 reply,
             },
         );
+        assert!(self.next_ctx > ctx, "a read token is never reused");
+        self.assert_invariants();
     }
 
     /// Serve every read the core confirmed in this batch (`served`): report
@@ -227,6 +327,12 @@ impl JournalReads {
                 );
             }
         }
+        // A confirmed read leaves the confirming tally, answered or parked.
+        assert!(
+            served.iter().all(|s| !self.confirming.contains_key(&s.ctx)),
+            "a confirmed read is no longer confirming"
+        );
+        self.assert_invariants();
     }
 
     /// Re-serve every read waiting at the tail after a batch: a read the
@@ -241,7 +347,8 @@ impl JournalReads {
         if self.parked.is_empty() {
             return;
         }
-        let mut still = Vec::with_capacity(self.parked.len());
+        let before = self.parked.len();
+        let mut still = Vec::with_capacity(before);
         for parked in std::mem::take(&mut self.parked) {
             let page = read(parked.from, parked.limit, READ_PAGE_BYTES);
             if at_end(&page) {
@@ -259,6 +366,9 @@ impl JournalReads {
             }
         }
         self.parked = still;
+        // Waking only answers: it never parks a read.
+        assert!(self.parked.len() <= before, "a wake never parks a read");
+        self.assert_invariants();
     }
 
     /// Per-tick upkeep: a read whose confirmation is overdue
@@ -298,6 +408,20 @@ impl JournalReads {
                 );
             }
         }
+        // What is still confirming is inside its deadline, and an early
+        // expiry leaves nothing confirming at all.
+        if expire_all {
+            assert!(
+                self.confirming.is_empty(),
+                "an early expiry answers every read"
+            );
+        }
+        assert!(
+            self.confirming
+                .values()
+                .all(|p| ticks.saturating_sub(p.parked_at) <= retry_ticks),
+            "no confirming read outlives its deadline"
+        );
         if self.parked.is_empty() {
             return;
         }
@@ -317,6 +441,14 @@ impl JournalReads {
                 audit,
             );
         }
+        // Nothing parked outlives its wait.
+        assert!(
+            self.parked
+                .iter()
+                .all(|p| ticks.saturating_sub(p.parked_at) < p.wait_ticks),
+            "no parked read outlives its wait"
+        );
+        self.assert_invariants();
     }
 
     /// Whether any read is still waiting on its confirmation.

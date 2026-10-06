@@ -165,7 +165,6 @@ fn a_heard_belief_closes_an_open_probe() {
         from: NodeId(4),
         ballot: ballot(3, 4),
         commit: None,
-        seq: 1,
         config: Some(cfg(&[3, 4, 5])),
     });
     assert!(n.membership_probe().is_none());

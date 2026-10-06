@@ -157,6 +157,13 @@ answers. No read goes through the Paxos leader, so reads scale with replicas and
 acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
 `CheckTail` retire.
 
+A server answers only from records it holds (decided on 2026-10-06). A server whose floor rose
+ahead of its fold — it jumped to a peer's trim point, and the `Truncate` that let the peer's
+floor rise lies above it, not yet applied here — still counts records below its floor in the
+journal. A read there is answered **unserved**, the same answer as a read whose confirmation
+timed out, and the client asks another server: never `Truncated` (the journal still has the
+record) and never a page (this server cannot produce it).
+
 ### 2.6 Truncation
 
 A `Truncate` is proposed through consensus and judged at apply in slot order like a `Write`: in
@@ -301,7 +308,13 @@ the cell's are the same name.
   only addresses learns the control `JournalIdentifier`s from any machine, then resolves everything else
   through them: the fleet directory gives a tenant's cell and the `JournalIdentifier` of its control journal, and
   that control journal gives the tenant's journals. A re-run of `init` learns the cell's ids the
-  same way.
+  same way. **An `Inspect` names its journal or asks for the node alone** (decided on 2026-10-05,
+  #243): a node-only `Inspect` answers the machine's own facts — its `node_id`, its `cell_id` and
+  the control `JournalIdentifier`s — and nothing about any journal, which is how a client handed
+  only addresses starts; an `Inspect` that names no journal without asking for the node alone is
+  refused (`unset`), never read as "the node's first journal", and one naming a journal the
+  machine does not serve is refused (`unknown_journal`). The machine's own facts ride every
+  answer, refusals included.
 - `cell_id` and `fleet_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad seed configuration.
@@ -903,7 +916,9 @@ stay as they are.
 ## 7. What changes against today
 
 Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
-ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`) are in the history and
+ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`, the retired
+read-index path and the unset `JournalIdentifier`s that meant "the first journal", #243; the
+fleet tenant, `JournalIdentifier` and proxy renames in the code, #244) are in the history and
 AGENTS.md.
 
 - The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
@@ -911,8 +926,6 @@ AGENTS.md.
   `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow.
-- The read-index path left in `paros-core` retires, and with it every unset `JournalIdentifier` that still
-  means "the first journal" (#243).
 - The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
   levels: tenant names and desired state move into each tenant's control journal, capacity is
   owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).
@@ -921,7 +934,6 @@ AGENTS.md.
   and replicas follow (#193).
 - The coordinators replace the operator's client: `parosctl` stops writing as the lowest seed's
   node id (#240, #212).
-- The meta tenant is renamed the fleet tenant in the code (#244).
 - The in-memory "world" stores of the simulation retire; every role runs on moonpool-journal
   under at least the same chaos (section 5, #176, #202).
 
@@ -951,7 +963,7 @@ deferred and carries no milestone yet. The interactive game and the lessons (`tr
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`front1`); the rendezvous list that names the first three is the `seeds` alias.
+`proxy1`); the rendezvous list that names the first three is the `seeds` alias.
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 fleet, its one cell and the fleet tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and

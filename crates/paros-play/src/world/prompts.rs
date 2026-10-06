@@ -30,7 +30,6 @@ impl World {
         self.nodes[index].as_ref()?;
         self.vote_prompt(to, index, message)
             .or_else(|| self.learn_prompt(to, index, message))
-            .or_else(|| self.read_prompt(to, index, message))
             .or_else(|| self.quorum_read_prompt(to, index, message))
             .or_else(|| self.phase1_prompt(to, index, message))
             .or_else(|| self.repair_prompt(to, index, message))
@@ -419,51 +418,6 @@ impl World {
             }
             _ => None,
         }
-    }
-
-    /// The read-index question: does this ack complete the leadership proof?
-    fn read_prompt(&mut self, to: NodeId, index: usize, message: &Message) -> Option<Prompt> {
-        if !self.policy.manual.contains(&PromptKind::ReadServe) {
-            return None;
-        }
-        let Message::HeartbeatAck { from, seq, .. } = message else {
-            return None;
-        };
-        let node = self.nodes[index].as_ref()?;
-        if node.proposer().read_rounds().is_empty() {
-            return None;
-        }
-        let read = self
-            .clients
-            .iter()
-            .flat_map(|client| client.reads.iter())
-            .find(|read| read.node == to && !read.served && !read.leaderless)?;
-        let (ctx, captured) = (read.ctx, read.index);
-        let mut clone = node.proposer().clone();
-        clone.credit_read_ack(*from, *seq);
-        // The acks the round would hold with this one credited — the leader's
-        // own vote included, which the round is seeded with.
-        let acks = clone
-            .read_rounds()
-            .iter()
-            .find(|round| round.ctx() == ctx)
-            .map_or(0, |round| round.acked().len());
-        let confirmed = !clone
-            .confirm_reads(node.acceptors(), node.replica().chosen_index())
-            .is_empty();
-        let chosen_index = node.replica().chosen_index();
-        let members = node.acceptors().members().len();
-        let id = self.take_prompt_id();
-        Some(Prompt::read_serve(
-            id,
-            to,
-            ctx,
-            captured,
-            acks,
-            members,
-            chosen_index,
-            confirmed,
-        ))
     }
 
     /// The `CommitOverwrite` question, when what arrived contradicts a record

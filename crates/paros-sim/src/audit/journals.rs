@@ -16,13 +16,19 @@
 //!   nodes is held for the chaos window (`DriverHooks::hold_journal`) or
 //!   still recovering from the hold, and a node keeps running its other
 //!   journals' protocol (it sends their beats, votes and acks) while one is
-//!   quarantined.
+//!   quarantined;
+//! - **static stability** (#247) — a tenant journal keeps committing while
+//!   its parent, the control plane (the fleet tenant's control journal, the
+//!   cell's control journal, the
+//!   directory, all on the seed), is held down: the seed is killed for a
+//!   stretch of the chaos window, and some other node applies a tenant
+//!   slot meanwhile.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_reachable, assert_sometimes};
-use paros::JournalKey;
+use paros::JournalIdentifier;
 
 use crate::shape::JournalPlan;
 
@@ -35,9 +41,9 @@ pub(crate) struct JournalBoard {
     /// The run serves more than one journal.
     multi: bool,
     /// The journal held on every node for the chaos window, if any.
-    held: Option<JournalKey>,
+    held: Option<JournalIdentifier>,
     /// `(node, journal)` pairs quarantined right now.
-    quarantined: BTreeSet<(u64, JournalKey)>,
+    quarantined: BTreeSet<(u64, JournalIdentifier)>,
     /// A journal committed while a sibling was held or not yet caught up.
     committed_while_held: bool,
     /// The held journal applied a slot after its hold ended: it caught up.
@@ -47,6 +53,16 @@ pub(crate) struct JournalBoard {
     served_while_quarantined: bool,
     /// Some journal was ever quarantined on some node.
     quarantined_ever: bool,
+    /// The run's tenant journals (the plan's).
+    tenants: BTreeSet<JournalIdentifier>,
+    /// The node hosting the control journals, while it is held down
+    /// (#247): cleared when it is released or boots again.
+    parent_held: Option<u64>,
+    /// The parent was ever held.
+    parent_held_ever: bool,
+    /// Another node applied a tenant journal's slot while the parent was
+    /// held.
+    committed_while_parent_held: bool,
 }
 
 /// The run's [`JournalBoard`] (`crate::state::published`).
@@ -59,6 +75,30 @@ impl JournalBoard {
     pub(crate) fn arm(&mut self, plan: &JournalPlan) {
         self.multi = plan.is_multi();
         self.held = plan.held;
+        self.tenants = plan.ids.iter().copied().collect();
+    }
+
+    /// `node`, which hosts the control journals, is held down (#247).
+    pub(crate) fn hold_parent(&mut self, node: u64) {
+        self.parent_held = Some(node);
+        self.parent_held_ever = true;
+    }
+
+    /// The parent hold is over.
+    pub(crate) fn release_parent(&mut self) {
+        self.parent_held = None;
+    }
+
+    /// `node` applied a slot of `journal`: a tenant commit while the
+    /// parent is held, when another node applies a tenant journal's slot.
+    pub(crate) fn applied_under_parent(&mut self, node: u64, journal: JournalIdentifier) {
+        if self.parent_held.is_some_and(|parent| parent != node) && self.tenants.contains(&journal)
+        {
+            if !self.committed_while_parent_held {
+                assert_reachable!("static: a tenant journal commits while the seed is held down");
+            }
+            self.committed_while_parent_held = true;
+        }
     }
 
     /// Whether the run serves more than one journal.
@@ -67,18 +107,23 @@ impl JournalBoard {
     }
 
     /// `journal` was quarantined on `node`.
-    pub(crate) fn quarantine(&mut self, node: u64, journal: JournalKey) {
+    pub(crate) fn quarantine(&mut self, node: u64, journal: JournalIdentifier) {
         self.quarantined.insert((node, journal));
         self.quarantined_ever = true;
     }
 
     /// `journal` booted on `node` (at a process boot or a re-open).
-    pub(crate) fn reopened(&mut self, node: u64, journal: JournalKey) {
+    pub(crate) fn reopened(&mut self, node: u64, journal: JournalIdentifier) {
         self.quarantined.remove(&(node, journal));
+        // A held parent that boots again (attrition restarted it early) is
+        // no longer held.
+        if self.parent_held == Some(node) {
+            self.parent_held = None;
+        }
     }
 
     /// Whether `journal` is quarantined on `node` right now.
-    pub(crate) fn is_quarantined(&self, node: u64, journal: JournalKey) -> bool {
+    pub(crate) fn is_quarantined(&self, node: u64, journal: JournalIdentifier) -> bool {
         self.quarantined.contains(&(node, journal))
     }
 
@@ -87,7 +132,7 @@ impl JournalBoard {
     /// window until it re-elects and commits again, so a sibling's commit
     /// counts until then: commits inside the 4 s window alone are rare
     /// (a run's first leaders are still being elected).
-    pub(crate) fn applied(&mut self, journal: JournalKey, in_chaos: bool) {
+    pub(crate) fn applied(&mut self, journal: JournalIdentifier, in_chaos: bool) {
         let Some(held) = self.held else {
             return;
         };
@@ -104,7 +149,7 @@ impl JournalBoard {
     /// `node` sent a message of `journal`: it is running that journal's
     /// protocol, which counts as serving it while a sibling is quarantined
     /// on the same node.
-    pub(crate) fn sent(&mut self, node: u64, journal: JournalKey) {
+    pub(crate) fn sent(&mut self, node: u64, journal: JournalIdentifier) {
         if self
             .quarantined
             .iter()
@@ -118,6 +163,12 @@ impl JournalBoard {
     /// whose cause fired, so a seed that never held or quarantined a journal
     /// never counts against them.
     pub(crate) fn check_gates(&self) {
+        if self.parent_held_ever {
+            assert_sometimes!(
+                self.committed_while_parent_held,
+                "static: a tenant commits while its parent is held"
+            );
+        }
         if !self.multi {
             return;
         }

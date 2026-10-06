@@ -80,7 +80,7 @@ Nothing would ever propose that slot again: `propose` only hands out `next_slot`
 a restart recomputes `next_slot` from the accepted log the same way, so the hole
 outlives reboots. And a hole is not a local blemish — the contiguous chosen prefix
 stops one below it **cluster-wide and permanently**. Higher slots keep being chosen and
-never apply; the fresh-leader read fence sits above the hole; and commit-replay
+never apply; every quorum read whose watermark sits above the hole waits forever; and commit-replay
 catch-up is useless, because every node's prefix is frozen at the same place and no
 peer has anything to replay.
 
@@ -184,8 +184,9 @@ piggybacking. Here is the list, and where paros stands:
 | Catch-up | a lagging node relearns missed values by resend and piggyback | yes: heartbeat resend, election recovery, commit-replay catch-up, *and* a trim-point jump (`TrimmedTo`) once it falls below the floor |
 | No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | yes: recovered slots are re-proposed, and every slot the promise quorum reported nothing for is filled with a `Control::Noop` |
 | Command batching | pack many client commands into one slot | not yet |
-| Read-index reads | linearizable reads with no log write, one heartbeat-ack round | yes: see [Why reads are not free](linearizable-reads.md) |
-| Leader leases | serve linearizable reads locally for a lease period, skipping even the ack round | not yet |
+| Read-index reads | linearizable reads at the leader with no log write, one heartbeat-ack round | retired (#243): every read is a quorum read |
+| Quorum reads | linearizable reads at any replica from a Phase-1 quorum's vote watermarks, no leader and no clock | yes: see [Why reads are not free](linearizable-reads.md) |
+| Leader leases | serve linearizable reads locally for a lease period, skipping even the ack round | no: paros enforces no lease and reads no clock |
 | Truncation | discard the chosen log prefix | yes: a leader-decided `Truncate` control command (one cluster-wide floor), and a below-floor node jumps to the trim point; snapshots of the state are the application's business, not paros's — see [Truncation and the trim point](truncation-and-snapshots.md) |
 | Cooperative handoff | move Phase-2 authority to another node under the *same* ballot, no second Phase 1 | yes, `relinquish_to`, one hop only |
 | Flexible and grid quorums | trade Phase-1 cost against Phase-2 cost (`q1 + q2 > n`) | yes, as deployment data in `QuorumSystem` |

@@ -78,7 +78,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalKey, JournalState, QuorumSystem};
+use paros_core::{JournalIdentifier, JournalState, QuorumSystem};
 use tokio_util::sync::CancellationToken;
 
 pub use observer::{Answered, Attempted, CallObserver, NoObserver};
@@ -357,6 +357,17 @@ impl<P: Providers> Client<P> {
         Self::new(providers, servers, tunables)
     }
 
+    /// The same servers, runtime and policies under a leader hint of its
+    /// own. A hint names one journal's leader: a caller driving several
+    /// journals through one client (a journal's and the control journals',
+    /// #247) keeps one client per journal, or every call to the others
+    /// starts at the first one's leader — which may not serve them at all.
+    #[must_use]
+    pub fn with_own_leader_hint(mut self) -> Self {
+        self.hint = Arc::default();
+        self
+    }
+
     /// Report every attempt to `observer`.
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn CallObserver>) -> Self {
@@ -573,7 +584,7 @@ impl<P: Providers> Client<P> {
     pub fn set_leader_attempt(
         &self,
         target: usize,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         expected: u64,
         owner: u64,
     ) -> impl Future<Output = SetLeaderOutcome> + Send + use<P> {
@@ -852,7 +863,11 @@ impl<P: Providers> Client<P> {
 
     /// Where `journal` stands, read from server `first` on
     /// ([`Client::read_any`]): its state, `None` when no server served it.
-    pub async fn journal_state(&self, journal: JournalKey, first: usize) -> Option<JournalState> {
+    pub async fn journal_state(
+        &self,
+        journal: JournalIdentifier,
+        first: usize,
+    ) -> Option<JournalState> {
         self.read_any(&state_read(journal), first)
             .await
             .outcome
@@ -870,7 +885,7 @@ impl<P: Providers> Client<P> {
     /// generation of its own on purpose.
     pub async fn claim(
         &self,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         owner: u64,
         first: usize,
         fresh: bool,
@@ -897,7 +912,7 @@ impl<P: Providers> Client<P> {
     /// nothing — so this never mints two generations.
     pub async fn set_leader(
         &self,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         expected: u64,
         owner: u64,
         first: usize,
@@ -1073,13 +1088,25 @@ impl<P: Providers> Client<P> {
         ReconfigureMatchmakersOutcome::Ambiguous
     }
 
-    /// One bounded `Inspect` of `journal` on server `target` (an unset key
-    /// names the node's first journal); `None` without an answer.
-    pub async fn inspect(&self, target: usize, journal: JournalKey) -> Option<InspectReply> {
+    /// One bounded `Inspect` of `journal` on server `target`; `None`
+    /// without an answer, and on a refusal (an unset identifier, a journal not
+    /// live there): no identifier has a default (§3.8, #243).
+    pub async fn inspect(&self, target: usize, journal: JournalIdentifier) -> Option<InspectReply> {
         let node = self.node(target).clone();
         let probe = async move { node.inspect_journal(journal).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)
             .await
+            .filter(|reply| reply.refusal.is_empty())
+    }
+
+    /// One bounded node-only `Inspect` of server `target` (#243): its id,
+    /// its cell and the control journals' identifiers; `None` without an answer.
+    pub async fn inspect_node(&self, target: usize) -> Option<InspectReply> {
+        let node = self.node(target).clone();
+        let probe = async move { node.inspect_node().await.ok() };
+        self.bounded(self.tunables.request_timeout, None, probe)
+            .await
+            .filter(|reply| reply.refusal.is_empty())
     }
 
     /// One bounded `Retire` of server `target`, carrying the GC watermark
@@ -1098,7 +1125,7 @@ impl<P: Providers> Client<P> {
 
 /// The read that asks where `journal` stands: one record from position 0,
 /// no wait — answered with the journal state whatever the log holds.
-fn state_read(journal: JournalKey) -> Read {
+fn state_read(journal: JournalIdentifier) -> Read {
     Read {
         journal: journal.journal.0,
         tenant: journal.tenant.0,

@@ -251,8 +251,16 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn resend_matchmaking(&mut self) {
+        let marks = self.durable_marks();
+        let ballot = self.ballot;
         self.queue_match_requests();
         self.queue_probe_requests();
+        // A re-ask moves nothing but the queue: same ballot, nothing durable.
+        assert!(
+            self.ballot == ballot,
+            "a matchmaking re-send never moves the ballot"
+        );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -266,6 +274,11 @@ impl ColocatedNode {
             return;
         };
         let matchmakers = self.deployment_matchmakers();
+        assert!(
+            m.ballot() == self.ballot,
+            "a registration runs at the operating ballot"
+        );
+        let queued = self.pending_match_requests.len();
         let request = phase_request(self.config.id, m, matchmakers.generation);
         let unanswered = m.unanswered(matchmakers);
         for (matchmaker, cursor) in unanswered {
@@ -279,6 +292,13 @@ impl ColocatedNode {
             };
             self.pending_match_requests.push((matchmaker, request));
         }
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(m, _)| matchmakers.contains(*m)),
+            "a registration addresses only the believed generation's matchmakers"
+        );
     }
 
     /// Queue the open membership probe's request toward every matchmaker
@@ -288,6 +308,11 @@ impl ColocatedNode {
             return;
         };
         let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.role == NodeRole::Follower,
+            "only a follower probes its membership"
+        );
+        let queued = self.pending_match_requests.len();
         let request = MatchRequest::probe(
             self.config.id,
             probe.ballot(),
@@ -298,6 +323,13 @@ impl ColocatedNode {
             self.pending_match_requests
                 .push((matchmaker, request.clone()));
         }
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(m, _)| matchmakers.contains(*m)),
+            "a probe addresses only the believed generation's matchmakers"
+        );
     }
 
     /// Open a membership probe (#173), or re-ask an open one: the election
@@ -319,8 +351,12 @@ impl ColocatedNode {
             "a node probes only on the bootstrap default it never heard confirmed"
         );
         assert!(
-            self.role != NodeRole::Leader && self.matchmaking.is_none(),
-            "a probe never overlaps a campaign or a leadership"
+            self.role != NodeRole::Leader,
+            "a probe never overlaps a leadership"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "a probe never overlaps a campaign"
         );
         if self.probe.is_some() {
             // The clock is the probe's retry cadence, as it is a
@@ -337,14 +373,36 @@ impl ColocatedNode {
             self.acceptors.clone(),
         )));
         self.queue_probe_requests();
+        // Every later campaign opens strictly above the probe's tag.
+        assert!(
+            self.round_floor >= round,
+            "the round floor covers the probe's tag"
+        );
+        assert!(
+            self.next_campaign_round().is_none_or(|next| next > round),
+            "the next campaign opens above the probe's tag"
+        );
     }
 
     /// Whether a matchmaking phase or a membership probe is open — the
     /// driver's cue to pace [`ColocatedNode::resend_matchmaking`], consulted
     /// only where a re-send can have an effect.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn matchmaking_pending(&self) -> bool {
-        self.matchmaking.is_some() || self.probe.is_some()
+        let pending = self.matchmaking.is_some() || self.probe.is_some();
+        // The matchmaker plane is the opt-in: plain Multi-Paxos never waits on it.
+        if pending {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment matchmakes"
+            );
+        }
+        pending
     }
 
     /// The open matchmaking phase, if any — the node's own [`Matchmaking`]
@@ -354,8 +412,23 @@ impl ColocatedNode {
     /// histories above the maximum watermark). A caller that wants to ask it
     /// a question — what would one more reply do? — clones it; the node's
     /// own copy moves only through [`ColocatedNode::on_match_reply`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn matchmaking_role(&self) -> Option<&Matchmaking> {
+        if let Some(m) = &self.matchmaking {
+            assert!(
+                self.role == NodeRole::Candidate,
+                "only a candidate matchmakes"
+            );
+            assert!(
+                m.ballot() == self.ballot,
+                "a matchmaking runs at the operating ballot"
+            );
+        }
         self.matchmaking.as_ref()
     }
 
@@ -441,8 +514,12 @@ impl ColocatedNode {
                     "a refused registration never becomes a leadership"
                 );
                 assert!(
-                    self.proposer.election().is_none() && self.matchmaking.is_none(),
-                    "an abandoned campaign leaves no phase open"
+                    self.proposer.election().is_none(),
+                    "an abandoned campaign leaves no Phase 1 open"
+                );
+                assert!(
+                    self.matchmaking.is_none(),
+                    "an abandoned campaign leaves no matchmaking open"
                 );
             }
             MatchStep::Completed { .. } => {
@@ -453,8 +530,12 @@ impl ColocatedNode {
             }
             MatchStep::UnknownMember => {
                 assert!(
-                    self.matchmaking.is_none() && self.probe.is_none(),
-                    "a campaign or probe that met an unknown member is closed"
+                    self.matchmaking.is_none(),
+                    "a campaign that met an unknown member is closed"
+                );
+                assert!(
+                    self.probe.is_none(),
+                    "a probe that met an unknown member is closed"
                 );
             }
             MatchStep::Registered { .. }
@@ -570,6 +651,11 @@ impl ColocatedNode {
             );
             self.matchmaking = None;
             self.start_phase1(config, prior.clone());
+            // The boundary crossed: Phase 1 is open, or already won.
+            assert!(
+                self.role != NodeRole::Follower,
+                "a completed matchmaking campaigns on"
+            );
             MatchStep::Completed {
                 prior,
                 watermark,
@@ -619,8 +705,12 @@ impl ColocatedNode {
         // A belief heard since the probe opened would have closed it
         // (`adopt_configuration`): what closes here is still the default.
         assert!(
-            self.belief_source == BeliefSource::Bootstrap && self.acceptors_since == Ballot::zero(),
+            self.belief_source == BeliefSource::Bootstrap,
             "a probe closes on the bootstrap default it opened on"
+        );
+        assert!(
+            self.acceptors_since == Ballot::zero(),
+            "a probe closes on a belief bound to no ballot"
         );
         let adopted = effective.map(|(ballot, config)| {
             self.adopt_configuration(config, ballot);
@@ -637,9 +727,15 @@ impl ColocatedNode {
         // Postconditions: the probe is spent, the belief is heard, and a
         // campaign opened exactly when the belief names this node.
         assert!(self.probe.is_none(), "a closed probe leaves nothing open");
+        if self.next_campaign_round().is_some() {
+            assert!(
+                member == (self.role != NodeRole::Follower),
+                "a probe that finds its node inside campaigns, and only then"
+            );
+        }
         assert!(
-            member == (self.role == NodeRole::Candidate) || self.next_campaign_round().is_none(),
-            "a probe that finds its node inside campaigns, and only then"
+            self.belief_source == BeliefSource::Heard,
+            "a closed probe's belief is heard"
         );
         MatchStep::ProbeClosed {
             effective: adopted,
@@ -681,6 +777,15 @@ impl ColocatedNode {
             _ => None,
         };
         self.become_follower(None);
+        // A refusal abandons the campaign whole.
+        assert!(
+            self.matchmaking.is_none(),
+            "a refused campaign leaves no matchmaking"
+        );
+        assert!(
+            self.role == NodeRole::Follower,
+            "a refused campaign steps down"
+        );
         match successor {
             Some(set) if self.learn_matchmakers(&set) => MatchStep::Superseded { set },
             _ => MatchStep::Refused(refusal),
@@ -700,8 +805,18 @@ impl ColocatedNode {
     /// The matchmaker set this node believes authoritative (#125): the
     /// bootstrap set at generation 0 until a later one is learned. `None` on
     /// plain Multi-Paxos, which names no matchmakers at all.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn matchmaker_set(&self) -> Option<&MatchmakerSet> {
+        // The `None` arm: exactly the plain deployment names no set.
+        assert!(
+            self.matchmakers.is_some() == self.config.has_matchmakers(),
+            "a matchmaker set is believed exactly on a matchmaker deployment"
+        );
         self.matchmakers.as_ref()
     }
 
@@ -715,6 +830,10 @@ impl ColocatedNode {
     /// On a plain deployment: reaching a matchmaker-plane path there is a
     /// programmer error.
     pub(super) fn deployment_matchmakers(&self) -> &MatchmakerSet {
+        assert!(
+            self.config.has_matchmakers(),
+            "the matchmaker plane runs only on a matchmaker deployment"
+        );
         self.matchmakers
             .as_ref()
             .expect("the matchmaker plane runs only on a matchmaker deployment")
@@ -759,6 +878,17 @@ impl ColocatedNode {
             self.become_follower(None);
         }
         self.reset_gc_for_generation();
+        // The belief moved forward to exactly the set handed in.
+        assert!(
+            self.matchmakers
+                .as_ref()
+                .is_some_and(|m| m.generation == set.generation),
+            "a learned set is the believed generation"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "no registration survives a generation change"
+        );
         self.assert_invariants();
         true
     }

@@ -17,7 +17,7 @@
 //! Act III adds the jump a node makes when it asked a peer for slots that
 //! peer has already trimmed: [`WriteOp::TrimmedTo`] raises the floor to the
 //! peer's trim point and the chosen index to just below it, and seals the
-//! at-most-once ledger for the prefix the node will never walk. No bytes
+//! journal state for the prefix the node will never walk. No bytes
 //! travel and the promise does not move. The applied log simply never sees
 //! the slots below the point — they were decided and dropped before this
 //! node got to them, and the decided `Truncate` that dropped them is what

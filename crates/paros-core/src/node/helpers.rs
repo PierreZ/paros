@@ -11,8 +11,20 @@ impl ColocatedNode {
     /// wiring takes to [`crate::acceptor::Acceptor::record_accepted`] (which
     /// tallies an in-place repair of a faulty entry itself).
     pub(super) fn record_accepted(&mut self, slot: Slot, ballot: Ballot, command: Command) {
+        let writes = self.pending_writes.len();
         self.acceptor
             .record_accepted(slot, ballot, command, &mut self.pending_writes);
+        // The record and its durable op land in this node's one batch.
+        assert!(
+            self.pending_writes.len() == writes + 1,
+            "a record emits one write"
+        );
+        assert!(
+            self.acceptor
+                .record(slot)
+                .is_some_and(|(b, _)| *b == ballot),
+            "a record lands at its ballot"
+        );
     }
 
     /// Whether `node` is in the addressable pool — the wire-hygiene boundary
@@ -20,7 +32,12 @@ impl ColocatedNode {
     /// is never followed, counted, or replied to. Membership of a
     /// *configuration* is a separate, per-configuration question.
     pub(super) fn in_pool(&self, node: NodeId) -> bool {
-        self.pool.binary_search(&node).is_ok()
+        let pooled = self.pool.binary_search(&node).is_ok();
+        // Every configuration this node runs is drawn from the pool.
+        if self.acceptors.contains(node) {
+            assert!(pooled, "a member of the configuration in force is pooled");
+        }
+        pooled
     }
 
     // ---- the wire-configuration coin ----------------------------------------
@@ -36,7 +53,13 @@ impl ColocatedNode {
     /// `config` on the wire: itself on a matchmaker deployment, nothing on
     /// plain Multi-Paxos (see the note above).
     pub(super) fn wire_config_of(&self, config: &AcceptorConfig) -> Option<AcceptorConfig> {
-        self.config.has_matchmakers().then(|| config.clone())
+        let wire = self.config.has_matchmakers().then(|| config.clone());
+        // The plain path carries no configuration, ever.
+        assert!(
+            wire.is_some() == self.config.has_matchmakers(),
+            "only a matchmaker deployment carries a configuration on the wire"
+        );
+        wire
     }
 
     /// The configuration in force on the wire — what a beat, a colocated
@@ -50,9 +73,15 @@ impl ColocatedNode {
     /// a `PreReadAck` carries on a matchmaker deployment, nothing on plain
     /// Multi-Paxos (see the note above).
     pub(super) fn wire_config_since(&self) -> Option<Ballot> {
-        self.config
+        let since = self
+            .config
             .has_matchmakers()
-            .then_some(self.acceptors_since)
+            .then_some(self.acceptors_since);
+        assert!(
+            since.is_some() == self.config.has_matchmakers(),
+            "only a matchmaker deployment carries a configuration ballot"
+        );
+        since
     }
 
     /// The configuration a `Prepare` at this node's ballot carries: the
@@ -65,10 +94,16 @@ impl ColocatedNode {
         if !self.config.has_matchmakers() {
             return None;
         }
-        self.proposer
+        let config = self
+            .proposer
             .election()
             .map(|e| e.config().clone())
-            .or_else(|| Some(self.acceptors.clone()))
+            .or_else(|| Some(self.acceptors.clone()));
+        assert!(
+            config.is_some(),
+            "a matchmaker deployment's Prepare carries C_b"
+        );
+        config
     }
 
     /// Adopt `config` as the latest known configuration when `ballot` is
@@ -89,7 +124,18 @@ impl ColocatedNode {
         if !config.is_drawn_from(&self.pool) {
             return;
         }
+        let since = self.acceptors_since;
         self.adopt_configuration(config, ballot);
+        // A learned configuration is strictly newer than the belief it
+        // replaces: the binding only moves forward off the wire.
+        assert!(
+            self.acceptors_since == ballot,
+            "a learned configuration binds its ballot"
+        );
+        assert!(
+            self.acceptors_since > since,
+            "a learned configuration is newer"
+        );
     }
 
     /// Follow a ballot this node accepted leader contact under — a
@@ -121,11 +167,24 @@ impl ColocatedNode {
     /// answered by it: a probe only ever asks about the bootstrap default
     /// (#173).
     pub(super) fn adopt_configuration(&mut self, config: AcceptorConfig, since: Ballot) {
+        // Plain Multi-Paxos never moves its static membership.
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment adopts a configuration"
+        );
         self.acceptors = config;
         self.acceptors_since = since;
         self.belief_source = BeliefSource::Heard;
         self.probe = None;
         self.record_membership();
+        assert!(
+            self.acceptors_since == since,
+            "the configuration binds its ballot"
+        );
+        assert!(
+            self.probe.is_none(),
+            "an adopted belief answers any open probe"
+        );
     }
 
     /// Record that `acceptors`/`acceptors_since` just moved: if the new
@@ -135,9 +194,18 @@ impl ColocatedNode {
     /// [`ColocatedNode::may_retire`] never under-reports the membership it must
     /// outlive.
     fn record_membership(&mut self) {
+        let fence = self.last_member_ballot;
         if self.is_acceptor() {
             self.last_member_ballot = self.last_member_ballot.max(self.acceptors_since);
+            assert!(
+                self.last_member_ballot >= self.acceptors_since,
+                "a member's fence covers its configuration's ballot"
+            );
         }
+        assert!(
+            self.last_member_ballot >= fence,
+            "the membership fence never falls"
+        );
         // The second thing every configuration move does (#143): a quorum
         // read opened against the superseded configuration asked a row that
         // need not intersect the successor's columns, so it may never
@@ -150,12 +218,22 @@ impl ColocatedNode {
     /// fan-out (commits, beats, catch-up), which reaches spares and removed
     /// members so every replica keeps the chosen log.
     pub(super) fn broadcast(&mut self, msg: Message) {
+        let queued = self.pending_messages.len();
         self.pending_messages.push((Audience::Learners, msg));
+        assert!(
+            self.pending_messages.len() == queued + 1,
+            "a broadcast queues one message"
+        );
     }
 
     /// Queue `msg` to the one node `to`.
     pub(super) fn send(&mut self, to: NodeId, msg: Message) {
+        let queued = self.pending_messages.len();
         self.pending_messages.push((Audience::Node(to), msg));
+        assert!(
+            self.pending_messages.len() == queued + 1,
+            "a send queues one message"
+        );
     }
 
     /// Queue one `Prepare` at `ballot` from `from_slot`, carrying `config`,
@@ -168,15 +246,32 @@ impl ColocatedNode {
         from_slot: Slot,
         config: Option<AcceptorConfig>,
     ) {
+        // A Prepare runs this node's own campaign or probe, at a ballot its
+        // own promise covers (it promised the ballot when it minted it).
+        assert!(
+            ballot <= self.acceptor.promised(),
+            "a Prepare's ballot is one this node promised"
+        );
         let prepare = Message::Prepare {
             reply_to: self.config.id,
             ballot,
             from_slot,
             config,
         };
+        let queued = self.pending_messages.len();
+        let mut sent = 0_usize;
         for to in targets {
+            assert!(
+                to != self.config.id,
+                "a node never prepares itself over the wire"
+            );
             self.send(to, prepare.clone());
+            sent += 1;
         }
+        assert!(
+            self.pending_messages.len() == queued + sent,
+            "one Prepare per target"
+        );
     }
 
     /// A `CatchUpRequest` from this node for the decided range from
@@ -200,15 +295,15 @@ impl ColocatedNode {
     }
 
     /// Drop every volatile leadership and campaign state: the open campaign
-    /// phases, the in-flight rounds, recovery, repair, read rounds and the
-    /// inherited origin. Shared by [`ColocatedNode::become_follower`] and a fresh
+    /// phases, the in-flight rounds, recovery, repair, the standing authority
+    /// and the inherited origin. Shared by [`ColocatedNode::become_follower`] and a fresh
     /// campaign, so a leader that reconfigures abandons exactly what a
     /// deposed one does.
     ///
-    /// Unconfirmed read rounds die with the leadership (inside
-    /// [`Proposer::abandon`], with the fence and the ack window they belong
-    /// to); already-confirmed `pending_read_states` stay — they were valid at
-    /// their linearization point and the driver drains them this same batch.
+    /// The fence and the ack window die with the leadership (inside
+    /// [`Proposer::abandon`]); quorum reads and already-served
+    /// `pending_read_states` stay — a quorum read touches no leader state,
+    /// and the driver drains the served ones this same batch.
     pub(super) fn clear_leadership_state(&mut self) {
         // Leadership state dies whole, the inherited origin included: a
         // demoted node holds no authority, so it can neither be a handoff
@@ -218,6 +313,18 @@ impl ColocatedNode {
         self.proposer.abandon();
         self.matchmaking = None;
         self.gc = None;
+        assert!(
+            self.proposer.election().is_none(),
+            "no campaign survives the clear"
+        );
+        assert!(
+            self.proposer.rounds().is_empty(),
+            "no round survives the clear"
+        );
+        assert!(
+            self.proposer.recovery().is_none(),
+            "no recovery survives the clear"
+        );
     }
 
     /// Step down to Follower, abandoning any campaign or in-flight rounds, and
@@ -229,6 +336,11 @@ impl ColocatedNode {
         self.clear_leadership_state();
         self.election_elapsed = 0;
         self.needs_election_timeout = true;
+        assert!(
+            self.proposer.probe().is_none(),
+            "a follower holds no repair probe"
+        );
+        assert!(self.gc.is_none(), "a follower holds no GC campaign");
     }
 
     /// First slot not in the contiguous chosen prefix.
@@ -259,7 +371,15 @@ impl ColocatedNode {
     /// Whether Phase-1-shaped work is open on the proposer: an election
     /// recovery or a repair probe (see the note above).
     pub(super) fn phase1_work_open(&self) -> bool {
-        self.proposer.recovery().is_some() || self.proposer.probe().is_some()
+        let open = self.proposer.recovery().is_some() || self.proposer.probe().is_some();
+        // Phase-1-shaped work is a leadership's: it dies with it.
+        if open {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds Phase-1-shaped work"
+            );
+        }
+        open
     }
 
     /// Whether the leadership is **settled**: no Phase-1-shaped work open

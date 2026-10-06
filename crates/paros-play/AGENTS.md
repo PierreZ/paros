@@ -27,7 +27,7 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 - `src/world/verbs.rs` → wire, clock, client, handoff and prompt-answer verbs (`propose(.., column)`, `relinquish`).
 - `src/world/history.rs` → the client's record and linearizability judge; `World::proposed_values`.
 - `src/world/lifecycle.rs` → crash, the two seams, restart, wipe (boot refused, narrated), corrupt.
-- `src/world/reads.rs` → read-index and `World::quorum_read`, both via `ReadState`.
+- `src/world/reads.rs` → `World::quorum_read`, the only read, served via `ReadState`.
 - `src/world/disk.rs` → `Disk` → the game's `Storage` impl, the trim-point jump, and the `applied` log.
 - `src/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held; `plan_recovery`.
 - `src/world/prompts.rs` → which delivery raises which prompt, and the clone it is judged on.
@@ -38,7 +38,7 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 - `src/narration.rs` → narration derived from the transition.
 - `src/level/mod.rs` → `Level`, `levels()`, `level(id)` · `src/level/common.rs` → shared worlds and shorthands.
 - `src/level/script.rs` → `Script` → records a reference solution by driving a real `Game`.
-- `src/level/act{1,2,3,4}.rs` → 6 + 7 + 6 + 10 = 29 levels.
+- `src/level/act{1,2,3,4}.rs` → 6 + 7 + 5 + 10 = 28 levels.
 - `src/view.rs` → `GameView` and friends → the one contract the browser reads.
 - `tests/bindings.rs` → writes `web/play/src/generated/` from the `ts_rs::TS` derives.
 - `tests/levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.

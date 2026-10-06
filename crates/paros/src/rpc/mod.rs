@@ -44,10 +44,10 @@ pub mod system {
     include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));
 }
 
-/// The meta tenant's entries (#229), generated from `proto/meta.proto`.
-pub mod meta {
+/// The fleet tenant's entries (#229), generated from `proto/fleet.proto`.
+pub mod fleet {
     #![allow(missing_docs, clippy::pedantic)]
-    include!(concat!(env!("OUT_DIR"), "/paros.meta.v1.rs"));
+    include!(concat!(env!("OUT_DIR"), "/paros.fleet.v1.rs"));
 }
 
 /// The machine contract (#196, #216), generated from `proto/machine.proto`:
@@ -68,6 +68,7 @@ mod client;
 mod codec;
 mod consensus;
 mod inbound;
+mod inspect;
 mod matchmaker_codec;
 pub mod methods;
 mod refusal;
@@ -80,6 +81,7 @@ pub use inbound::{EdgeRejection, MAX_FRAME_BYTES};
 pub(crate) use inbound::{
     Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
 };
+pub use inspect::{InspectRefusal, InspectTarget};
 pub use internal::{InspectReply, InspectRequest, RetireAck, RetireRequest};
 pub(crate) use matchmaker::{
     GarbageCollect as WireGarbageCollect, GarbageCollectAck as WireGarbageCollectAck,

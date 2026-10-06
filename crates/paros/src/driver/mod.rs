@@ -69,20 +69,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
-    ClientId, ColocatedNode, Control, Delegation, Entry, GcAck, Generation, JournalId, JournalKey,
-    MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet,
-    Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply,
-    ReconfigureRequest, ReconfigurerStep, Seq, TenantId, Value,
+    ClientId, ColocatedNode, Control, Delegation, Entry, GcAck, Generation, JournalId,
+    JournalIdentifier, MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId,
+    MatchmakerSet, Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem,
+    ReconfigureReply, ReconfigureRequest, ReconfigurerStep, Seq, TenantId, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
-use crate::machine::CellFrames;
+use crate::machine::ControlJournals;
 use crate::rpc::{
-    MatchmakerClient, MatchmakersRefusal, ReadAck, ReconfigureMatchmakersAck, ReplySender,
-    SetLeaderAck, TruncateAck, WriteAck,
+    InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
+    ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck,
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
@@ -135,6 +135,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         waiters: &mut ClientWaiters,
         last: &mut Deltas,
     ) -> Result<(), RunError> {
+        assert!(
+            node.config().id.0 == self.self_id,
+            "a node loop settles its own node"
+        );
+        let promised = node.hard_state().max_promised_ballot;
+        let chosen = node.hard_state().chosen_index;
         let mut outbox =
             drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
         if !outbox.gc_requests.is_empty() && self.hooks.withhold_gc_requests() {
@@ -164,6 +170,16 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             self.hooks,
             self.audit,
         );
+        // The settle tail persists and applies; it never lowers what it made
+        // durable (the core's own marks, restated at the I/O seam).
+        assert!(
+            node.hard_state().max_promised_ballot >= promised,
+            "a settled batch never lowers the promise"
+        );
+        assert!(
+            node.hard_state().chosen_index >= chosen,
+            "a settled batch never rewinds the chosen index"
+        );
         Ok(())
     }
 
@@ -182,6 +198,10 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 
     /// Put matchmaker-set handover requests on the matchmaker wire.
     fn send_reconfigure(&self, requests: Vec<(MatchmakerId, ReconfigureRequest)>) {
+        assert!(
+            requests.iter().all(|(_, r)| r.from().0 == self.self_id),
+            "a handover request leaves in this node's name"
+        );
         send_reconfigure_requests(
             self.providers,
             self.links,
@@ -201,6 +221,8 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         target: &[MatchmakerId],
         finishing: bool,
     ) {
+        assert!(handover.is_busy(), "a started handover is running");
+        assert!(!target.is_empty(), "a handover targets a non-empty set");
         self.audit
             .reconfigurer_started(NodeId(self.self_id), current, target);
         tracing::info!(
@@ -260,6 +282,12 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                     && behind
                     && set.generation.0 > 0
                 {
+                    // A republished successor is a generation this node
+                    // learned on a matchmaker deployment, never the bootstrap.
+                    assert!(
+                        node.config().has_matchmakers(),
+                        "only a matchmaker deployment republishes a successor"
+                    );
                     audit.successor_republished(NodeId(self_id), matchmaker, &set);
                     tracing::info!(
                         node = self_id,
@@ -284,6 +312,10 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     /// and its own location; a preempted decree reopens only here, so two
     /// dueling reconfigurers are paced by their drivers.
     fn pace_handover(&self, node: &ColocatedNode, handover: &mut HandoverDriver) {
+        assert!(
+            node.config().has_matchmakers(),
+            "a handover is paced only on a matchmaker deployment"
+        );
         let (hooks, audit, self_id) = (self.hooks, self.audit, self.self_id);
         handover.tick();
         let stall_budget = node
@@ -389,6 +421,14 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             tracing::info!(node = self_id, "leadership_resigned");
             node.step_down();
         }
+        // Either way the authority is given up in the same call.
+        if handed_off {
+            assert!(
+                node.role() == NodeRole::Follower,
+                "a relinquished authority demotes"
+            );
+            assert!(!node.can_relinquish(), "an authority is relinquished once");
+        }
     }
 }
 
@@ -462,6 +502,10 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
             gc_resend,
             ..
         } = rt;
+        assert!(
+            node.config().id.0 == self_id,
+            "a beat drives this node's own journal"
+        );
         let lp = self.with(&*audit);
         node.tick();
         // Consult each hook only when its decision can have an effect.
@@ -591,10 +635,16 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
     if hooks.skip_delegation() {
         return Delegation::Colocated;
     }
-    match hooks.proxy_for(node.proposer().next_slot(), count) {
+    let choice = match hooks.proxy_for(node.proposer().next_slot(), count) {
         Some(proxy) if proxy.is_in(count) => Delegation::To(proxy),
         _ => Delegation::Auto,
+    };
+    // A named proxy is one the deployment has, chosen by its leader.
+    if let Delegation::To(proxy) = choice {
+        assert!(proxy.is_in(count), "a delegation names a deployed proxy");
+        assert!(node.is_leader(), "only a leader delegates");
     }
+    choice
 }
 
 /// Park `call` on the slot its proposal took (`result`), to be answered
@@ -612,7 +662,18 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
         ProposeResult::NotLeader(hint) => {
             call.no_verdict(hint.map(|n| n.0), shared.hooks, &rt.audit, shared.self_id);
         }
-        ProposeResult::Accepted(slot) => rt.waiters.pending.entry(slot).or_default().push(call),
+        ProposeResult::Accepted(slot) => {
+            // A held call waits on a slot this leader just allocated.
+            assert!(
+                slot < rt.node.proposer().next_slot(),
+                "a call waits on an allocated slot"
+            );
+            rt.waiters.pending.entry(slot).or_default().push(call);
+            assert!(
+                rt.waiters.pending.contains_key(&slot),
+                "a held call is parked on its slot"
+            );
+        }
     }
 }
 
@@ -714,15 +775,16 @@ where
     // shares the same underlying sink.
     A: Audit + Clone + Send + Sync + 'static,
 {
-    let journal = storage.initial_state().1.journal;
+    let config = storage.initial_state().1;
     let stores = SingleStore {
-        journal,
+        journal: config.journal,
         store: Some((storage, boot)),
         audit: audit.clone(),
     };
     Box::pin(run_journals(
         providers,
         stores,
+        config.id,
         local_addr,
         members,
         matchmakers,
@@ -752,9 +814,14 @@ where
 /// [`run_node`]'s fail-stop crash. A seam crash is the process dying, for
 /// every journal.
 ///
-/// Several journals run only on a plain deployment: no matchmakers, proxies
-/// or replicas (the matchmaker plane, the proxy leaders and the replica tier
-/// each serve one journal; journal-tagged proxies are #193).
+/// The matchmaker plane, the proxy leaders and the replica tier serve one
+/// journal each, the node's first user journal: every other journal of a
+/// node — the control journals included — runs plain Multi-Paxos
+/// (journal-tagged planes are #190 and #193).
+///
+/// `node` is this process's node id, named by the caller (no id has a
+/// default, §3.8): every journal's [`paros_core::Config`] must carry it, and
+/// so must `system`'s plan.
 ///
 /// `system` opts the node into the **system journals** (#189,
 /// [`SystemPlan`]): it follows the directory and the node registry (from its
@@ -777,13 +844,14 @@ where
 pub async fn run_journals<P, J, H>(
     providers: P,
     mut stores: J,
+    node: NodeId,
     local_addr: String,
     members: Vec<(NodeId, String)>,
     matchmakers: Vec<(MatchmakerId, String)>,
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<SystemPlan>,
-    cell: Option<CellFrames>,
+    cell: Option<ControlJournals>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -799,16 +867,17 @@ where
             "a node serves at least one journal".into(),
         )));
     }
-    // The node-level audit: what no single journal owns (the edge's
-    // rejections, a peer lane's delivery failures, a refused journal id, the
-    // system journals' folds) reports to the node's first user journal —
-    // the default one on a node that serves none yet.
-    // No frame is fixed (§3.8): the deployment names its control journals —
-    // the cell's and meta's from the cell plan, the system journals a
+    if system.as_ref().is_some_and(|plan| plan.self_id != node) {
+        return Err(RunError::Infra(SimulationError::InvalidState(
+            "the system plan names another node".into(),
+        )));
+    }
+    // No identifier is fixed (§3.8): the deployment names its control journals —
+    // the cell's and the fleet tenant's from the cell plan, the system journals a
     // `SystemPlan` follows — and every other journal is a user's.
-    let control: BTreeSet<JournalKey> = cell
+    let control: BTreeSet<JournalIdentifier> = cell
         .iter()
-        .flat_map(|cell| std::iter::once(cell.control).chain(cell.meta))
+        .flat_map(|cell| std::iter::once(cell.cell).chain(cell.fleet))
         .chain(
             system
                 .iter()
@@ -816,12 +885,11 @@ where
         )
         .filter(|journal| journal.is_set())
         .collect();
-    let node_journal = ids
-        .iter()
-        .copied()
-        .find(|journal| !control.contains(journal))
-        .unwrap_or(JournalKey::UNSET);
-    let node_audit = stores.audit(node_journal);
+    // The node-level audit: what no single journal owns (the edge's
+    // rejections, a peer lane's delivery failures, a refused journal id, the
+    // system journals' folds), named by the opener rather than borrowed
+    // from a journal (#243).
+    let node_audit = stores.node_audit();
     // A node exits once it has nothing left to serve — on a static
     // deployment. A node that follows the system journals runs on with none
     // (a joiner waits for the directory to name it) and exits only when a
@@ -871,15 +939,14 @@ where
             "only a node's first journal may name matchmakers, proxies or replicas".into(),
         )));
     }
-    let self_id = match &system {
-        Some(plan) => plan.self_id.0,
-        None => journals
-            .live
-            .values()
-            .next()
-            .map(|rt| rt.node.config().id.0)
-            .unwrap_or_default(),
-    };
+    // The caller named the node (no id has a default, §3.8); every journal
+    // it opened must agree. Caller input, so a mismatch is a refusal.
+    if journals.live.values().any(|rt| rt.node.config().id != node) {
+        return Err(RunError::Infra(SimulationError::InvalidState(
+            "a journal's configuration names another node".into(),
+        )));
+    }
+    let self_id = node.0;
 
     // Every task spawned by this incarnation must stop when the loop exits,
     // including a durability-seam error that immediately starts a replacement
@@ -977,7 +1044,7 @@ where
     let mut handover = HandoverDriver::new(NodeId(self_id));
     // Set by an accepted operator `Retire`: the node exits at its next tick,
     // after the ack had a beat to leave.
-    let mut retiring: Option<JournalKey> = None;
+    let mut retiring: Option<JournalIdentifier> = None;
 
     let out = Outbound::new(peer_queues, proxy_queues, learners, me);
     let shared = Shared {
@@ -1012,7 +1079,7 @@ where
                 // state machine's, at apply. The reply is held until the
                 // slot applies and answered with that verdict; a non-leader
                 // redirects immediately.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1053,7 +1120,7 @@ where
             Some((req, reply)) = rpc.set_leader.recv() => {
                 // A journal `SetLeader` (#204): a compare-and-swap decided
                 // into the log and judged at apply, like a `Write`.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1079,8 +1146,11 @@ where
                 // at apply (fenced by the writer like a `Write`, #228;
                 // monotone, clamped to `next_seq`), and every node
                 // drops the slots whose records all lie below the new
-                // `first_seq` when its walk reaches it.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                // `first_seq` when its walk reaches it. A control journal is
+                // truncated like any other (§3.9: its owner checkpoints it,
+                // then truncates up to the checkpoint, #230); a follower that
+                // reads below the floor jumps to the checkpoint there.
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1091,12 +1161,6 @@ where
                     }
                     continue;
                 };
-                // The system journals are never truncated (#189): every
-                // node rebuilds its folds from position 0.
-                if follower.as_ref().is_some_and(|f| f.is_system(journal)) {
-                    shared.with(&node_audit).answer(Reply::Redirect, reply, TruncateAck::default());
-                    continue;
-                }
                 let up_to = Seq(req.up_to);
                 let generation = Generation(req.generation);
                 let owner = ClientId(req.owner);
@@ -1116,8 +1180,8 @@ where
                 // configuration otherwise — for their vote watermarks, and
                 // the read is served from this node's journal fold once it
                 // covers the maximum. Never a redirect: no role is asked
-                // for, and no read-index round exists.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
+                // for.
+                let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
@@ -1174,8 +1238,8 @@ where
                 // An ack at the inbox, whatever the core makes of it: what
                 // refills a leader's `CheckQuorum` window, and what the
                 // deposed-leader oracle measures its clock from.
-                if let Message::HeartbeatAck { from, ballot, seq, .. } = &msg {
-                    rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot, *seq);
+                if let Message::HeartbeatAck { from, ballot, .. } = &msg {
+                    rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot);
                 }
                 // Canary: a Prepare whose from_slot is below our floor is the
                 // dangerous "campaign against a truncated acceptor" case. Record it
@@ -1344,20 +1408,20 @@ where
             }
             Some((req, reply)) = rpc.inspect.recv() => {
                 // No settle tail: an inspect is a pure read of the core, so it
-                // produces no `Ready` batch. `0` names the node's first
-                // journal; a journal not live here is not answered.
-                let journal = JournalKey::new(TenantId(req.tenant), JournalId(req.journal));
-                let rt = if journal.is_set() {
-                    journals.live.get(&journal)
-                } else {
-                    journals
-                        .plane()
-                        .or_else(|| journals.live.iter().next())
-                        .map(|(_, rt)| rt)
+                // produces no `Ready` batch. It names its journal or asks for
+                // the node alone (#243): no identifier has a default, so an unset
+                // one is refused, and so is a journal not live here — the
+                // node's own facts are answered either way.
+                let facts = operator::node_facts(self_id, cell.as_ref());
+                let answer = match req.target() {
+                    Ok(InspectTarget::Node) => facts,
+                    Ok(InspectTarget::Journal(journal)) => journals.live.get(&journal).map_or_else(
+                        || facts.refused(InspectRefusal::UnknownJournal),
+                        |rt| operator::inspect(&rt.node, cell.as_ref()),
+                    ),
+                    Err(refusal) => facts.refused(refusal),
                 };
-                if let Some(rt) = rt {
-                    let _ = reply.send(operator::inspect(&rt.node, cell.as_ref()));
-                }
+                let _ = reply.send(answer);
             }
             Some(answer) = follow_answers.recv() => {
                 // A seed's answer to this node's follow read of a system
@@ -1410,7 +1474,7 @@ where
                     admit_pool(&mut journals, f);
                 }
                 // Every live journal's beat, in id order.
-                let live: Vec<JournalKey> = journals.live.keys().copied().collect();
+                let live: Vec<JournalIdentifier> = journals.live.keys().copied().collect();
                 for journal in live {
                     if multi && hooks.hold_journal(journal) {
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
@@ -1455,6 +1519,29 @@ struct SystemCtx<'a, 'l, P: Providers, J: JournalStores, H: DriverHooks> {
     audit: &'a J::Audit,
 }
 
+/// An event is tagged by the journal whose fold produced it: a registry
+/// event by the registry, a directory event by any other system journal.
+fn assert_event_source(
+    registry: JournalIdentifier,
+    journal: JournalIdentifier,
+    event: &SystemEvent,
+) {
+    match event {
+        SystemEvent::Registry(_) => {
+            assert!(
+                journal == registry,
+                "a registry event comes from the registry"
+            );
+        }
+        SystemEvent::Directory(_) => {
+            assert!(
+                journal != registry,
+                "a directory event never comes from the registry"
+            );
+        }
+    }
+}
+
 impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
     /// Apply what `journal`'s fold moved, in position order: start a created
     /// journal naming this node, stop a tombstoned one, open a lane to an
@@ -1464,27 +1551,25 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
     async fn apply(
         &mut self,
         follower: &SystemFollower<P>,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         events: Vec<(u64, SystemEvent)>,
-        checkpoints: Vec<(u64, Option<bool>)>,
+        checkpoints: Vec<system::FoldedCheckpoint>,
     ) {
         let me = follower.self_id();
-        for (seq, verified) in checkpoints {
-            self.audit.checkpoint_folded(me, journal, seq, verified);
-            tracing::info!(node = me.0, journal = %journal, seq, ?verified, "checkpoint_folded");
-        }
+        self.report_checkpoints(follower, journal, checkpoints);
         // Whether the pool moved or a journal opened: every live journal
         // then admits the registry's pool (`ColocatedNode::extend_pool`,
         // refused on a journal that cannot reconfigure).
         let mut admit = false;
         for (seq, event) in events {
+            assert_event_source(follower.registry_key(), journal, &event);
             self.audit.system_folded(me, journal, seq, &event);
             tracing::info!(node = me.0, journal = %journal, seq, event = ?event, "system_folded");
             match event {
                 SystemEvent::Directory(DirectoryEvent::Created { id, config, .. }) => {
                     // A created journal lives in the directory's tenant
                     // (#235): the directory is that tenant's control journal.
-                    let id = JournalKey::new(journal.tenant, id);
+                    let id = JournalIdentifier::new(journal.tenant, id);
                     // A stateless machine never takes acceptor work (#211):
                     // a configuration naming one runs without it.
                     if !config.members().contains(&me)
@@ -1519,7 +1604,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     }
                 }
                 SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
-                    let id = JournalKey::new(journal.tenant, id);
+                    let id = JournalIdentifier::new(journal.tenant, id);
                     if self.journals.serves(id) {
                         self.journals.park(id, None);
                         self.audit.journal_stopped(me, id);
@@ -1572,9 +1657,34 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
 }
 
 impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+    /// Report each checkpoint `journal`'s fold met, in position order.
+    fn report_checkpoints(
+        &self,
+        follower: &SystemFollower<P>,
+        journal: JournalIdentifier,
+        checkpoints: Vec<system::FoldedCheckpoint>,
+    ) {
+        let me = follower.self_id();
+        for (seq, verified, state) in checkpoints {
+            assert!(
+                journal == follower.registry_key(),
+                "only the registry is checkpointed"
+            );
+            assert!(
+                state.next_seq() <= seq + 1,
+                "a checkpoint's registry holds no position past it"
+            );
+            self.audit
+                .checkpoint_folded(me, journal, seq, verified, &state);
+            tracing::info!(node = me.0, journal = %journal, seq, ?verified, "checkpoint_folded");
+        }
+    }
+
     /// Node `id`, registered at `addr`, is in the pool: open its peer lane
     /// (once) and report the admission.
     fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str) {
+        // This node's own registration joins spares; it is never a peer.
+        assert!(id != me, "a node never admits itself as a peer");
         if !self.out.has_peer(id) {
             match peer_address(addr) {
                 Ok(addr) => {
@@ -1594,7 +1704,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
 
     /// This node's own retirement: every user journal it serves stops.
     fn retire_self(&mut self, me: NodeId) {
-        let served: Vec<JournalKey> = self
+        let served: Vec<JournalIdentifier> = self
             .journals
             .live
             .keys()
@@ -1606,6 +1716,14 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
             self.audit.journal_stopped(me, journal);
             tracing::info!(node = me.0, journal = %journal, "journal_stopped");
         }
+        // A retired node serves its control journals and nothing else.
+        assert!(
+            self.journals
+                .live
+                .keys()
+                .all(|j| self.journals.is_control(*j)),
+            "a retired node runs no user journal"
+        );
     }
 
     /// This node is in the pool now (#189): it joins every journal a
@@ -1659,6 +1777,13 @@ fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &Syst
     let pool = follower.pool();
     for rt in journals.live.values_mut() {
         rt.node.extend_pool(&pool);
+        // A journal that can reconfigure now admits the whole registry pool.
+        if rt.node.config().has_matchmakers() {
+            assert!(
+                pool.iter().all(|n| rt.node.pool().binary_search(n).is_ok()),
+                "a reconfigurable journal admits the registry's pool"
+            );
+        }
     }
 }
 
@@ -1669,7 +1794,7 @@ fn admit_pool<P: Providers, S, A>(journals: &mut Journals<S, A>, follower: &Syst
 fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     journals: &Journals<S, A>,
     follower: Option<&SystemFollower<P>>,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     call: &'static str,
     self_id: u64,
     audit: &N,
@@ -1678,6 +1803,12 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
     // whatever this node still holds of it.
     let tombstoned = follower.is_some_and(|f| f.is_tombstoned(journal));
     if journal.is_set() && journals.serves(journal) && !tombstoned {
+        // Unavailable, not unknown: a journal this node serves but cannot
+        // answer right now is quarantined or down, never live.
+        assert!(
+            !journals.live.contains_key(&journal),
+            "a live journal is never refused"
+        );
         tracing::info!(
             node = self_id,
             journal = %journal,
@@ -1698,7 +1829,7 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
     providers: &P,
     stores: &mut J,
     journals: &mut Journals<J::Store, J::Audit>,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     now: u64,
     tunables: &DriverTunables,
     hooks: &H,
@@ -1717,4 +1848,9 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
         Err(fault @ RunError::Storage(_)) => journals.requarantine(journal, now, fault),
         Err(fault) => journals.park(journal, Some(fault)),
     }
+    // Whatever happened, the journal now sits in exactly one state.
+    assert!(
+        journals.serves(journal),
+        "an opened journal is live, quarantined or down"
+    );
 }

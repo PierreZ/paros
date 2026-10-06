@@ -37,6 +37,16 @@ pub(crate) const DELIVERY_BATCH: usize = 64;
 const CLIENT_INBOX_CAPACITY: usize = 256;
 const PEER_INBOX_CAPACITY: usize = 1024;
 
+// A delivery batch must fit one RPC frame with room for its envelope, a
+// mailbox must hold at least one whole batch, and a keep-alive must time out
+// before the next one is due.
+const _: () = assert!(DELIVERY_BATCH_BYTES < crate::rpc::MAX_FRAME_BYTES as usize);
+const _: () = assert!(DELIVERY_BATCH > 0);
+const _: () = assert!(PEER_QUEUE_CAPACITY >= DELIVERY_BATCH);
+const _: () = assert!(KEEP_ALIVE_TIMEOUT.as_millis() < KEEP_ALIVE_INTERVAL.as_millis());
+const _: () = assert!(CLIENT_INBOX_CAPACITY > 0);
+const _: () = assert!(PEER_INBOX_CAPACITY > 0);
+
 /// Per-node driver tunables — **born workload-buggified config** (AGENTS.md
 /// prong 2): plain data the harness layer randomizes per seed, FDB knob style,
 /// around [`DriverTunables::default()`], the simulation's baseline built from
@@ -79,10 +89,11 @@ pub struct DriverTunables {
     /// after processing, so this races the connection and the peer's
     /// `peer_inbox_capacity`, never its loop. Floor: non-zero.
     pub delivery_timeout: Duration,
-    /// Ticks a parked read may wait for its read-index confirmation before
-    /// the driver answers a retry redirect. Floor: the confirmation is one
-    /// heartbeat-ack round trip, so `read_retry_ticks × tick_interval` must
-    /// exceed it or no read ever confirms. A client whose deadline is shorter
+    /// Ticks a parked read may wait for its quorum read to be served (the
+    /// row answered whole and the fold covers the maximum) before the driver
+    /// answers a retry redirect. Floor: the row answers in one `PreRead`
+    /// round trip, so `read_retry_ticks × tick_interval` must exceed it or no
+    /// read is ever served. A client whose deadline is shorter
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
     /// Ticks a journal `Read` at or past the serving node's end may wait
@@ -206,7 +217,7 @@ pub struct DriverTunables {
 
 impl Default for DriverTunables {
     fn default() -> Self {
-        Self {
+        let tunables = Self {
             tick_interval: TICK_INTERVAL,
             election_timeout_base: ELECTION_TIMEOUT_BASE,
             keep_alive_interval: KEEP_ALIVE_INTERVAL,
@@ -228,14 +239,24 @@ impl Default for DriverTunables {
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
             proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
             proxy_round_resends: PROXY_ROUND_RESENDS,
-        }
+        };
+        // The simulation's baseline is itself a winnable profile.
+        assert!(
+            tunables.check_floors().is_ok(),
+            "the default profile clears every floor"
+        );
+        assert!(
+            tunables.keep_alive_timeout < tunables.keep_alive_interval,
+            "a keep-alive times out before the next is due"
+        );
+        tunables
     }
 }
 
-/// Ticks a parked read reply may wait for its read-index confirmation before
+/// Ticks a parked read reply may wait for its quorum read to be served before
 /// the driver answers a retry redirect (500 ms — well inside the sim client's
-/// 1000 ms deadline, and inside the core's own round TTL, so a late core
-/// confirmation just finds the ctx gone and is ignored).
+/// 1000 ms deadline, and inside the core's own read TTL, so a late core
+/// answer just finds the ctx gone and is ignored).
 const READ_RETRY_TICKS: u64 = 10;
 
 /// Ticks a journal `Read` above the end long-polls before an empty answer
@@ -284,6 +305,16 @@ const PROXY_ROUND_RESENDS: u64 = PROXY_TAKE_BACK_RESENDS * 2;
 /// [`DriverTunables`] field rather than a constant the harness cannot move.
 const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 
+// An election timeout spans at least two beats, so a live leader always
+// beats before a follower's clock fires; a quarantine outlasts an election;
+// a proxy evicts a round only after its leader would have taken it back.
+const _: () = assert!(ELECTION_TIMEOUT_BASE >= 2 * paros_core::HEARTBEAT_TICKS);
+const _: () = assert!(QUARANTINE_TICKS > ELECTION_TIMEOUT_BASE);
+const _: () = assert!(PROXY_ROUND_RESENDS > PROXY_TAKE_BACK_RESENDS);
+const _: () = assert!(ELECTION_BACKOFF_DOUBLINGS >= 2);
+const _: () = assert!(READ_RETRY_TICKS > 0);
+const _: () = assert!(RECONFIGURE_TIMEOUT_ELECTIONS > 0);
+
 /// Parse an IP (which may lack a port) into a socket-address string, defaulting to
 /// port 4500 (the moonpool sim convention). The simulation's parser: it takes
 /// literal addresses only, and `parosd` resolves its hostnames itself, once,
@@ -292,12 +323,19 @@ const RECONFIGURE_TIMEOUT_ELECTIONS: u64 = 4;
 /// # Errors
 ///
 /// Returns an error if `ip` is not a parseable network address.
+///
+/// # Panics
+///
+/// If an assertion on its own invariants, preconditions or postconditions
+/// fails: a programmer error, never an operating condition.
 pub fn parse_addr(ip: &str) -> SimulationResult<String> {
     let addr_str = if ip.contains(':') {
         ip.to_string()
     } else {
         format!("{ip}:4500")
     };
+    assert!(addr_str.contains(':'), "an address always names its port");
+    assert!(addr_str.contains(':'), "an address always names its port");
     addr_str
         .parse::<SocketAddr>()
         .map(|addr| addr.to_string())

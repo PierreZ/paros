@@ -20,7 +20,7 @@ use paros::client::{
     Answered, Attempted, CallObserver, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
     WriteOutcome, write_request,
 };
-use paros::{Entry, JournalKey, Read};
+use paros::{Entry, JournalIdentifier, Read};
 
 use crate::audit::{Attempt, Call, Seen};
 use crate::chain::user_command_hash;
@@ -45,7 +45,7 @@ use crate::client::ChainClient;
 /// where it is caught.
 #[derive(Clone)]
 pub(crate) struct CallLog {
-    journal: JournalKey,
+    journal: JournalIdentifier,
     client: u64,
     time: SimTimeProvider,
     attempts: Arc<Mutex<Vec<Attempt>>>,
@@ -60,12 +60,24 @@ struct Retries {
 }
 
 impl CallLog {
-    pub(crate) fn new(journal: JournalKey, client: u64, time: SimTimeProvider) -> Self {
+    pub(crate) fn new(journal: JournalIdentifier, client: u64, time: SimTimeProvider) -> Self {
+        Self::shared(journal, client, time, Arc::default())
+    }
+
+    /// A log of `client`'s attempts at `journal` that appends to `attempts`,
+    /// a history several clients share: a control journal's (#247), which
+    /// every client writes ([`control_attempts`]).
+    pub(crate) fn shared(
+        journal: JournalIdentifier,
+        client: u64,
+        time: SimTimeProvider,
+        attempts: Arc<Mutex<Vec<Attempt>>>,
+    ) -> Self {
         Self {
             journal,
             client,
             time,
-            attempts: Arc::default(),
+            attempts,
             retries: Arc::default(),
         }
     }
@@ -165,6 +177,22 @@ impl CallObserver for CallLog {
         };
         attempt.seen = Some((now.max(attempt.inv), seen));
     }
+}
+
+const CONTROL_LOG_KEY: &str = "paros-control-attempts";
+
+/// Every client's attempts at the control journal `journal` (#247: the fleet tenant's,
+/// the registry, the directory), the history `check()` searches once the
+/// run is over (`crate::state::published_arc`).
+pub(crate) fn control_attempts(
+    state: &moonpool_sim::StateHandle,
+    journal: JournalIdentifier,
+) -> Arc<Mutex<Vec<Attempt>>> {
+    crate::state::published_arc(
+        state,
+        &crate::state::journal_key(CONTROL_LOG_KEY, journal),
+        || Mutex::new(Vec::new()),
+    )
 }
 
 /// The verdict the checker reads off an answer; `None` for no verdict (a
@@ -275,7 +303,7 @@ pub(super) async fn within<T>(
 /// [`judged_write`].
 pub(super) fn write_once(
     nodes: &ChainClient,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     target: usize,
     entry: &Entry,
     abandon: bool,
@@ -290,7 +318,7 @@ pub(super) fn write_once(
 /// for [`judged_write`].
 pub(super) fn set_leader_once(
     nodes: &ChainClient,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     target: usize,
     (expected, owner): (u64, u64),
     created: bool,
@@ -303,7 +331,7 @@ pub(super) fn set_leader_once(
 pub(super) fn read_once(
     client: &ChainClient,
     target: usize,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     from: u64,
     limit: u64,
     wait_ms: u64,

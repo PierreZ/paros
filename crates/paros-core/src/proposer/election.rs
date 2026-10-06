@@ -60,14 +60,40 @@ pub struct Election<Id, V> {
 
 impl<Id: Copy + Ord, V> Election<Id, V> {
     /// The ballot this election runs under.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
+        // Every report this campaign tallied lies inside its range.
+        assert!(
+            self.recovered
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.promises.from_slot),
+            "the recovered suffix lies inside the campaign range"
+        );
+        assert!(
+            self.faulty_reports
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.promises.from_slot),
+            "the faulty reports lie inside the campaign range"
+        );
         self.promises.ballot
     }
 
     /// `C_b`: the configuration a won election runs Phase 2 with.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn config(&self) -> &AcceptorConfig<Id> {
+        assert!(self.config.is_well_formed(), "C_b admits its quorum system");
         &self.config
     }
 
@@ -75,8 +101,24 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     /// election must independently obtain, in ballot order. On a plain
     /// deployment it is the one static configuration; empty means nothing
     /// below this ballot survived the matchmakers' watermark.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn prior(&self) -> &[AcceptorConfig<Id>] {
+        assert!(
+            self.prior.iter().all(AcceptorConfig::is_well_formed),
+            "every configuration of H_b admits its quorum system"
+        );
+        assert!(
+            self.prior
+                .iter()
+                .enumerate()
+                .all(|(i, c)| !self.prior[..i].contains(c)),
+            "H_b names each configuration once"
+        );
         &self.prior
     }
 
@@ -94,27 +136,69 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     /// plus `C_b` itself, so the incoming members promise the ballot (and
     /// learn the configuration) before Phase 2 reaches them. `me` is never
     /// addressed (a candidate that is an acceptor is its own first one).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn targets(&self, me: Option<Id>) -> Vec<Id> {
-        member_union(self.prior.iter().chain(std::iter::once(&self.config)))
+        let targets: Vec<Id> = member_union(self.prior.iter().chain(std::iter::once(&self.config)))
             .into_iter()
             .filter(|p| Some(*p) != me)
-            .collect()
+            .collect();
+        if let Some(me) = me {
+            assert!(!targets.contains(&me), "a candidate never addresses itself");
+        }
+        assert!(
+            self.config
+                .members()
+                .iter()
+                .all(|m| Some(*m) == me || targets.contains(m)),
+            "every member of C_b is addressed"
+        );
+        targets
     }
 
     /// The addressees whose complete suffix answer is still missing — what a
     /// Phase-1 re-send targets.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn unpromised(&self, me: Option<Id>) -> Vec<Id> {
-        self.targets(me)
+        let unpromised: Vec<Id> = self
+            .targets(me)
             .into_iter()
             .filter(|p| !self.promises.answered.contains(p))
-            .collect()
+            .collect();
+        if let Some(me) = me {
+            assert!(
+                !unpromised.contains(&me),
+                "a candidate never owes itself a promise"
+            );
+        }
+        unpromised
     }
 
     /// The acceptors whose complete suffix answer has been counted.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn promised(&self) -> &BTreeSet<Id> {
+        // A complete answer owes no further page.
+        assert!(
+            self.promises
+                .promise_next
+                .keys()
+                .all(|id| !self.promises.answered.contains(id)),
+            "an answered sender owes no further page"
+        );
         &self.promises.answered
     }
 
@@ -123,8 +207,20 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
     /// P2c runs over it when the election closes; observing it mid-campaign
     /// is how a reader sees *why* a Phase-1 quorum must be complete before
     /// any slot is judged free.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovered(&self) -> &BTreeMap<Slot, (Ballot, V)> {
+        assert!(
+            self.recovered
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= self.promises.from_slot),
+            "the recovered suffix lies inside the campaign range"
+        );
         &self.recovered
     }
 }
@@ -133,8 +229,18 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     // ---- Phase 1 ------------------------------------------------------------
 
     /// The open Phase 1, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn election(&self) -> Option<&Election<Id, V>> {
+        if self.election.is_some() {
+            // A campaign holds no leadership tally.
+            assert!(self.probe.is_none(), "a candidate holds no repair probe");
+            assert!(self.recovery.is_none(), "a candidate holds no recovery");
+        }
         self.election.as_ref()
     }
 
@@ -161,6 +267,11 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             self.rounds.is_empty(),
             "a campaign opens with no Phase-2 round in flight"
         );
+        assert!(
+            self.probe.is_none(),
+            "a campaign opens with no repair probe"
+        );
+        assert!(self.recovery.is_none(), "a campaign opens with no recovery");
         let Campaign {
             me,
             ballot,
@@ -186,6 +297,20 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             faulty_reports,
         };
         let targets = election.targets(me);
+        // Postconditions: the candidate is its own first (and only) answer,
+        // and its own reports seed the tally at or above the first slot.
+        assert!(
+            election.promises.answered.len() == usize::from(me.is_some()),
+            "a fresh campaign has only the candidate's own promise"
+        );
+        assert!(
+            election
+                .recovered
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= from_slot),
+            "the recovered suffix starts at the first slot"
+        );
         self.election = Some(election);
         targets
     }
@@ -228,7 +353,23 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         for (slot, fb) in faulty {
             e.faulty_reports.entry(slot).or_default().insert(from, fb);
         }
-        e.promises.close_page(from, next_from_slot)
+        let fold = e.promises.close_page(from, next_from_slot);
+        // A merged page never reaches below the campaign's first slot.
+        assert!(
+            e.recovered
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= e.promises.from_slot),
+            "the recovered suffix stays at or above the first slot"
+        );
+        assert!(
+            e.faulty_reports
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= e.promises.from_slot),
+            "the faulty reports stay at or above the first slot"
+        );
+        fold
     }
 
     /// The win gate (#121): every prior configuration covered — one
@@ -237,11 +378,32 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
     /// ballot fell below its own promise is refused even with a quorum
     /// behind it; the election stays open and the next campaign ratchets
     /// past the promise).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn phase1_won(&self, promise: Ballot) -> bool {
-        self.election
+        let won = self
+            .election
             .as_ref()
-            .is_some_and(|e| e.covered() && e.promises.ballot >= promise)
+            .is_some_and(|e| e.covered() && e.promises.ballot >= promise);
+        // A quorum of a non-empty H_b is somebody: a won campaign over prior
+        // configurations rests on at least one promise.
+        if let Some(e) = self.election.as_ref().filter(|_| won) {
+            if !e.prior.is_empty() {
+                assert!(
+                    !e.promises.answered.is_empty(),
+                    "a won campaign rests on a promise"
+                );
+            }
+            assert!(
+                e.promises.ballot >= promise,
+                "a won campaign is not below the promise"
+            );
+        }
+        won
     }
 
     /// Close the won Phase 1: hand its tally to the leadership and open the
@@ -300,6 +462,10 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             .chain(e.faulty_reports.keys())
             .max()
             .copied();
+        assert!(
+            blocked.iter().all(|s| e.faulty_reports.contains_key(s)),
+            "only a faulty-reported slot is ever blocked"
+        );
         if !blocked.is_empty() {
             self.probe = Some(RepairProbe {
                 // The probe inherits the election's ballot, first slot and
@@ -317,6 +483,15 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
                 blocked: blocked.clone(),
             });
         }
+        // The probe is open exactly when something stayed blocked.
+        assert!(
+            self.probe.is_some() != blocked.is_empty(),
+            "a repair probe is open iff a slot stayed blocked"
+        );
+        assert!(
+            self.rounds.is_empty(),
+            "a fresh leadership starts with nothing in flight"
+        );
         Phase1Outcome {
             ballot: e.promises.ballot,
             config: e.config,

@@ -51,7 +51,6 @@ function node(id: number, over: Partial<NodeView> = {}): NodeView {
     election: null,
     open_rounds: [],
     pending_accepts: false,
-    read_rounds: [],
     recovery_remaining: 0,
     acceptors: [0, 1, 2],
     quorum_system: 'majority',

@@ -80,17 +80,53 @@ pub(crate) fn plan<R>(scanned: &[Scanned<R>], at_genesis: bool) -> Plan {
         } else {
             (0, None, true, None)
         };
-    let skip = brackets
+    let skip: Vec<Range<usize>> = brackets
         .iter()
         .filter(|bracket| folded.is_none_or(|begin| bracket.start > begin))
         .cloned()
         .collect();
-    Plan {
+    // The open bracket, if any, lies after every closed one: it is the tail.
+    assert!(
+        cut_at.is_none_or(|cut| brackets.iter().all(|b| b.end <= cut)),
+        "the open bracket follows every closed one"
+    );
+    let plan = Plan {
         cut_at,
         start,
         strict,
         skip,
         lost,
+    };
+    plan.assert_shape(scanned.len(), at_genesis);
+    plan
+}
+
+impl Plan {
+    /// The plan's shape, whatever the log held: a start inside the log,
+    /// skips after it in order, a strict bracket only off genesis and at
+    /// the start.
+    fn assert_shape(&self, len: usize, at_genesis: bool) {
+        assert!(self.start <= len, "a fold starts inside the log");
+        if self.lost {
+            assert!(self.start == 0, "a lost fold starts nowhere");
+        }
+        assert!(
+            self.skip
+                .iter()
+                .all(|r| r.start > self.start || (r.start == 0 && self.start == 0)),
+            "a skipped copy lies after the fold's start"
+        );
+        assert!(
+            self.skip.windows(2).all(|w| w[0].end <= w[1].start),
+            "skipped copies are disjoint and in order"
+        );
+        if let Some(strict) = &self.strict {
+            assert!(!at_genesis, "a fold at genesis trusts no damaged bracket");
+            assert!(
+                strict.start == self.start,
+                "the trusted bracket is the start"
+            );
+        }
     }
 }
 

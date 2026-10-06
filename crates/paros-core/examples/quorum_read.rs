@@ -12,11 +12,9 @@
 //! # Where `acceptor_grid` left off
 //!
 //! Every slot's Phase 2 goes to one column, so an acceptor sees a third of
-//! the writes. Reads did not scale the same way: a linearizable read went
-//! to the leader, which confirmed it was still leader with a beat-ack
-//! quorum (the read-index path) and served it. Every read loaded the
-//! leader, and the leader was the bottleneck the grid had just taken the
-//! writes off.
+//! the writes. A read that went to the leader — which would confirm it
+//! was still leader with a beat-ack quorum before serving — would load the
+//! leader, the bottleneck the grid had just taken the writes off.
 //!
 //! # Paxos Quorum Reads (Compartmentalized Paxos §3.4)
 //!
@@ -64,8 +62,8 @@
 //!    chosen and committed everywhere; node 4's replica applies it and the
 //!    waiting read is served at slot 3 — showing the fourth value.
 //!
-//! Throughout, the leader broadcast no beat for either read, opened no
-//! read-index round, and could have been dead for step 3 onward.
+//! Throughout, the leader broadcast no beat for either read and could have
+//! been dead for step 3 onward.
 //!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §3.4–3.5.
@@ -108,7 +106,7 @@ fn fresh(id: u64) -> ColocatedNode {
     let config = Config {
         peers: (0..6).map(NodeId).collect(),
         quorum_system: GRID,
-        ..Config::new(NodeId(id), paros_core::JournalKey::UNSET)
+        ..Config::new(NodeId(id), paros_core::JournalIdentifier::UNSET)
     };
     ColocatedNode::new(&FreshStore { config })
 }
@@ -394,11 +392,11 @@ fn the_leaders_part(cluster: &mut Cluster, leader: NodeId) {
         "no beat was broadcast for either read (the election's beat came before)"
     );
     assert!(
-        cluster.node(leader).proposer().read_rounds().is_empty(),
-        "no read-index round was opened"
+        cluster.node(leader).quorum_reads().is_empty(),
+        "the leader holds no read of its own: both reads ran on followers"
     );
     println!(
-        "\n   the leader sent {} messages after step 1, none of them a beat or a read round: {:?}",
+        "\n   the leader sent {} messages after step 1, none of them a beat: {:?}",
         cluster.sent_by_leader.values().sum::<usize>(),
         cluster.sent_by_leader
     );

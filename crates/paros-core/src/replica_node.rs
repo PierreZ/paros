@@ -42,7 +42,7 @@
 //!   [`WriteOp::Truncate`] / [`WriteOp::TrimmedTo`] — never an
 //!   [`WriteOp::Acceptor`] op. A boot scan reads it back through the same
 //!   [`Storage`] port and [`Replica::from_boot`] rebuilds the prefix and
-//!   the at-most-once ledger as it does on a node.
+//!   the sealed journal state as it does on a node.
 //! - **The walk:** [`ReplicaReady::committed`] in contiguous slot order, the
 //!   slots the prefix just moved over — reported by the driver, handed to no
 //!   application (#186: the client folds what it reads).
@@ -91,7 +91,7 @@
 //!    lagging node — or a replica — learns are read from `chosen`, each
 //!    with the choosing ballot its accepted record holds. The acceptors are
 //!    the durable tier; a replica tier is healed *from* them.
-//! 6. **The handoff's decided tail and the successor's read fence**
+//! 6. **The handoff's decided tail and the successor's fence**
 //!    (`node/handoff.rs`) name chosen slots and a covered chosen index; a
 //!    bare acceptor can lead, so it must be able to describe its tail.
 //! 7. **The journal fold** (#204, `Replica::truncate`, the `state` of a
@@ -152,7 +152,7 @@ pub struct ReplicaNode {
     /// Who this replica is (outside the pool), the acceptors it pulls from
     /// before it has heard a leader, and the deployment's replica count.
     config: Config,
-    /// The chosen prefix, the walk, the ledger.
+    /// The chosen prefix, the walk, the journal fold.
     replica: Replica,
     /// The compaction floor: the first slot whose record is still retained.
     floor: Slot,
@@ -254,8 +254,38 @@ impl ReplicaNode {
             node.replica.learn(slot, &command);
         }
         node.advance();
+        // The boot read-back of the learner's durable writes: the prefix
+        // resumes at or past the durable chosen index, above the floor.
+        assert!(
+            node.replica.chosen_index() >= chosen_index,
+            "a replica's boot never rewinds the durable chosen index"
+        );
+        assert!(
+            node.faulty.iter().all(|s| *s >= floor),
+            "a replica's faulty records lie above its floor"
+        );
         node.assert_invariants();
         node
+    }
+
+    /// The learner's durable watermarks, captured at an entry point and
+    /// compared at its exit: the chosen index and the floor only rise.
+    fn marks(&self) -> (Option<Slot>, Slot) {
+        let marks = (self.replica.chosen_index(), self.floor);
+        assert!(
+            marks.1 <= self.replica.first_unchosen(),
+            "a replica's floor never outruns its chosen prefix"
+        );
+        marks
+    }
+
+    /// The exit half of [`ReplicaNode::marks`].
+    fn assert_marks_monotone(&self, before: (Option<Slot>, Slot)) {
+        assert!(
+            self.replica.chosen_index() >= before.0,
+            "a replica's chosen index never decreases"
+        );
+        assert!(self.floor >= before.1, "a replica's floor never decreases");
     }
 
     // ---- inputs ---------------------------------------------------------------
@@ -272,6 +302,7 @@ impl ReplicaNode {
     /// internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0)))]
     pub fn step(&mut self, msg: Message) {
+        let marks = self.marks();
         match msg {
             Message::Commit {
                 ballot,
@@ -301,6 +332,7 @@ impl ReplicaNode {
             _ => self.counters.ignored += 1,
         }
         self.serve_quorum_reads();
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -314,6 +346,8 @@ impl ReplicaNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(replica = self.config.id.0)))]
     pub fn tick(&mut self) {
+        let marks = self.marks();
+        let ticks = self.tick_count;
         self.tick_count += 1;
         self.quorum_reads.expire(self.tick_count, READ_TTL_TICKS);
         self.serve_quorum_reads();
@@ -327,6 +361,11 @@ impl ReplicaNode {
                 self.request_catch_up(to, from_slot);
             }
         }
+        assert!(
+            self.tick_count == ticks + 1,
+            "a tick advances logical time by one"
+        );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -358,6 +397,15 @@ impl ReplicaNode {
             None,
         );
         self.counters.quorum_reads += 1;
+        // A replica votes nothing, so it is never its own row's addressee.
+        assert!(
+            addressees.iter().all(|to| self.in_pool(*to)),
+            "a replica pre-reads only pooled acceptors"
+        );
+        assert!(
+            self.quorum_reads.pending().iter().any(|r| r.ctx() == ctx),
+            "an opened read is pending"
+        );
         for to in addressees {
             self.pending_messages.push((
                 Audience::Node(to),
@@ -380,7 +428,9 @@ impl ReplicaNode {
     /// If an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0)))]
     pub fn advance_recovery(&mut self) {
+        let marks = self.marks();
         self.advance();
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -413,6 +463,10 @@ impl ReplicaNode {
             return;
         }
         self.leader = Some(from);
+        assert!(
+            self.leader.is_some_and(|l| self.in_pool(l)),
+            "a replica follows a pooled node"
+        );
         self.learn_config(ballot, config);
         if commit > self.replica.chosen_index() {
             self.request_catch_up(from, self.replica.first_unchosen());
@@ -433,9 +487,18 @@ impl ReplicaNode {
         if !config.is_drawn_from(self.config.pool()) {
             return;
         }
+        let since = self.acceptors_since;
         self.acceptors = config;
         self.acceptors_since = ballot;
         self.quorum_reads.abandon_superseded(ballot);
+        assert!(
+            self.acceptors_since > since,
+            "a learned configuration is strictly newer"
+        );
+        assert!(
+            self.acceptors.is_drawn_from(self.config.pool()),
+            "a replica's configuration is drawn from the pool"
+        );
     }
 
     /// Fold an acceptor's watermark into the read at `ctx`: the node's
@@ -460,6 +523,12 @@ impl ReplicaNode {
     fn serve_quorum_reads(&mut self) {
         let replica = &self.replica;
         let served = self.quorum_reads.serve(|index| replica.covers(index));
+        // The apply condition: this replica's own fold covers every read it
+        // answers.
+        assert!(
+            served.iter().all(|(_, index)| self.replica.covers(*index)),
+            "a served read's index is covered by the replica's fold"
+        );
         self.pending_read_states.extend(
             served
                 .into_iter()
@@ -472,6 +541,9 @@ impl ReplicaNode {
     }
 
     fn request_catch_up(&mut self, to: NodeId, from_slot: Slot) {
+        // A pull goes to an acceptor, never to a replica (itself included).
+        assert!(to != self.config.id, "a replica never pulls from itself");
+        assert!(self.in_pool(to), "a replica pulls only from a pooled node");
         self.counters.catch_up_requests += 1;
         self.pending_messages.push((
             Audience::Node(to),
@@ -511,6 +583,17 @@ impl ReplicaNode {
         self.faulty.remove(&slot);
         self.counters.learned += 1;
         self.advance();
+        // A learned slot is held chosen, or folded away below a truncation.
+        if slot >= self.floor {
+            assert!(
+                self.replica.chosen_at(slot) == Some(command),
+                "a learned slot is chosen with its value"
+            );
+        }
+        assert!(
+            !self.faulty.contains(&slot),
+            "a learned slot is no longer faulty"
+        );
     }
 
     /// Walk the contiguous prefix and execute a decided truncation *after*
@@ -524,10 +607,15 @@ impl ReplicaNode {
         // the record is `WriteOp::Learned` from the very command `learn`
         // handed the replica, and the boot scan reads the prefix back from
         // those records.
+        let chosen = self.replica.chosen_index();
         let truncate_up_to = self.replica.advance(|_, _| true, &mut self.pending_writes);
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
+        assert!(
+            self.replica.chosen_index() >= chosen,
+            "a replica's walk never retreats"
+        );
     }
 
     /// Execute a decided truncation on this replica's log, as a node's
@@ -542,9 +630,14 @@ impl ReplicaNode {
         if first <= self.floor {
             return;
         }
+        let writes = self.pending_writes.len();
         let sealed = self.replica.truncate(first);
         self.pending_writes
             .push(WriteOp::Truncate { first, sealed });
+        assert!(
+            self.pending_writes.len() == writes + 1,
+            "a truncation is one durable write"
+        );
         self.floor = first;
         self.faulty = self.faulty.split_off(&first);
         assert!(
@@ -571,6 +664,10 @@ impl ReplicaNode {
             state: sealed,
         });
         self.counters.trim_jumps += 1;
+        assert!(
+            self.floor == point,
+            "a replica's trim jump lands its floor on the point"
+        );
         assert!(
             self.replica.chosen_index() >= old_chosen_index,
             "a replica's trim-point jump never rewinds its chosen index"
@@ -658,22 +755,55 @@ impl ReplicaNode {
 
     /// A **journal read** (#204) from this replica's journal fold — read
     /// replicas serve `Read` so read load leaves the acceptors. A pure read.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::LogRead {
-        self.replica.read(from, limit, max_bytes)
+        let read = self.replica.read(from, limit, max_bytes);
+        if let crate::LogRead::Page(page) = &read {
+            assert!(
+                page.state == self.replica.journal(),
+                "a page names the fold's head"
+            );
+            assert!(page.from == from, "a page starts where the read asked");
+        }
+        read
     }
 
     /// The node whose beat this replica heard last, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn leader(&self) -> Option<NodeId> {
+        if let Some(leader) = self.leader {
+            assert!(self.in_pool(leader), "a replica follows only a pooled node");
+        }
         self.leader
     }
 
     /// The replica that owns `slot`'s client reply
     /// ([`Config::reply_owner`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reply_owner(&self, slot: Slot) -> Option<ReplicaId> {
-        self.config.reply_owner(slot)
+        let owner = self.config.reply_owner(slot);
+        if let Some(owner) = owner {
+            assert!(
+                owner.is_in(self.config.replica_count),
+                "a reply owner is a deployed replica"
+            );
+        }
+        owner
     }
 
     /// Monotone counters this incarnation.
@@ -687,6 +817,14 @@ impl ReplicaNode {
         self.pending_messages.clear();
         self.pending_read_states.clear();
         self.replica.clear_committed();
+        assert!(
+            self.pending_writes.is_empty(),
+            "an advanced batch has no write left"
+        );
+        assert!(
+            self.pending_messages.is_empty(),
+            "an advanced batch has no message left"
+        );
     }
 }
 
@@ -739,9 +877,19 @@ impl ReplicaReady<'_> {
     /// The durable writes to persist first, in order: [`WriteOp::Learned`],
     /// [`WriteOp::SetChosenIndex`], [`WriteOp::Truncate`],
     /// [`WriteOp::TrimmedTo`] — never an acceptor op.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn writes(&self) -> &[WriteOp] {
-        &self.node.pending_writes
+        let writes = &self.node.pending_writes;
+        assert!(
+            !writes.iter().any(|w| matches!(w, WriteOp::Acceptor(_))),
+            "a replica persists no acceptor op"
+        );
+        writes
     }
 
     /// Outbound messages: catch-up requests and quorum-read `PreRead`s,
@@ -755,9 +903,19 @@ impl ReplicaReady<'_> {
     /// row confirmed the index and this replica applied at or past it. The
     /// node's [`crate::Ready::read_states`] contract — answer each one once
     /// the batch's `committed` is applied.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_states(&self) -> &[ReadState] {
-        &self.node.pending_read_states
+        let reads = &self.node.pending_read_states;
+        assert!(
+            reads.iter().all(|r| self.node.replica.covers(r.index)),
+            "a surfaced read is covered by this replica's fold"
+        );
+        reads
     }
 
     /// The `(slot, command)` pairs the prefix just walked over, in

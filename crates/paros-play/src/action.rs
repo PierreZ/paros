@@ -125,7 +125,7 @@ pub enum Phase {
 /// The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
 /// (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
 /// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
-/// (`Propose`, `Retry`, `ReadIndex`, `Compact`), and — when a level makes a
+/// (`Propose`, `Retry`, `QuorumRead`, `Compact`), and — when a level makes a
 /// role manual — the role itself (`Answer`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -204,17 +204,6 @@ pub enum Action {
         node: u64,
         /// The timeout in ticks (0 disables the clock entirely).
         ticks: u64,
-    },
-    /// A client asks `node` for a linearizable read.
-    ReadIndex {
-        /// The node the client asks (must be the leader).
-        node: u64,
-        /// Which client is reading. Omitted (or `null`) means the level's
-        /// first client, which is what every single-client level wants and
-        /// what the field meant before there were two of them.
-        #[serde(default)]
-        #[ts(optional = nullable)]
-        client: Option<u64>,
     },
     /// A client asks `node` for a **leaderless** read: `node` asks a Phase-1
     /// quorum for their vote watermarks and serves the read once its own
@@ -398,8 +387,6 @@ pub enum ActionKind {
     StartElection,
     /// [`Action::SetElectionTimeout`].
     SetElectionTimeout,
-    /// [`Action::ReadIndex`].
-    ReadIndex,
     /// [`Action::QuorumRead`].
     QuorumRead,
     /// [`Action::Relinquish`].
@@ -458,7 +445,6 @@ impl Action {
             Action::Propose { .. } => ActionKind::Propose,
             Action::StartElection { .. } => ActionKind::StartElection,
             Action::SetElectionTimeout { .. } => ActionKind::SetElectionTimeout,
-            Action::ReadIndex { .. } => ActionKind::ReadIndex,
             Action::QuorumRead { .. } => ActionKind::QuorumRead,
             Action::Relinquish { .. } => ActionKind::Relinquish,
             Action::Corrupt { .. } => ActionKind::Corrupt,
@@ -516,10 +502,6 @@ impl Action {
             Action::SetElectionTimeout { node, ticks } => {
                 format!("set the election timeout of node {node} to {ticks} ticks")
             }
-            Action::ReadIndex { node, client } => match client {
-                Some(client) => format!("ask node {node} to read for client {client}"),
-                None => format!("ask node {node} to read"),
-            },
             Action::QuorumRead { node, client } => match client {
                 Some(client) => format!("ask node {node} for a quorum read for client {client}"),
                 None => format!("ask node {node} for a quorum read"),

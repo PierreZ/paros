@@ -40,8 +40,8 @@ message Member {
   string addr = 2;
 }
 
-// A journal's frame (#235).
-message Frame {
+// A journal's identifier: its tenant and the journal inside it (#235).
+message JournalIdentifier {
   uint64 tenant = 1;
   uint64 journal = 2;
 }
@@ -50,14 +50,14 @@ message FormCell {
   uint64 cell_id = 1;
   repeated Member members = 2;
   // The journals every member serves from its formation: the cell control
-  // journal, meta's when this cell hosts it, and the static assignment that
-  // stands in for placement until M9 (#212). No frame is fixed: every one is
+  // journal, the fleet tenant's when this cell hosts it, and the static assignment that
+  // stands in for placement until M9 (#212). No identifier is fixed: every one is
   // drawn at `init` (`docs/architecture.md` §3.8).
-  repeated Frame journals = 3;
+  repeated JournalIdentifier journals = 3;
   // The cell tenant's control journal.
-  Frame control = 4;
-  // Meta's control journal, when this cell hosts meta (unset otherwise).
-  Frame meta = 5;
+  JournalIdentifier control = 4;
+  // The fleet tenant's control journal, when this cell hosts the fleet tenant (unset otherwise).
+  JournalIdentifier fleet = 5;
 }
 
 message FormCellAck {
@@ -76,11 +76,11 @@ message InitAck {
   string refusal = 2;
   uint64 cell_id = 3;
   repeated Member members = 4;
-  repeated Frame journals = 5;
+  repeated JournalIdentifier journals = 5;
   // The first cell coordinator (#225), which claims the cell control
   // journal with `SetLeader(expected_gen = 0)`.
   uint64 coordinator = 6;
-  // The cell tenant's control journal, and meta's (see `FormCell`).
-  Frame control = 7;
-  Frame meta = 8;
+  // The cell tenant's control journal, and the fleet tenant's (see `FormCell`).
+  JournalIdentifier control = 7;
+  JournalIdentifier fleet = 8;
 }

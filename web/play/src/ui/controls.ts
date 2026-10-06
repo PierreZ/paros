@@ -41,10 +41,6 @@ export interface ControlState extends MatchmakerControlState {
   proposeClient: number | null;
   /** The node the client asks, or `null` for the leader. */
   proposeNode: number | null;
-  /** The client that reads, or `null` for the first client. */
-  readClient: number | null;
-  /** The node the read goes to, or `null` for the leader. */
-  readNode: number | null;
   /** The node the compaction request goes to, or `null` for the leader. */
   compactNode: number | null;
   /** The last slot the client permits dropping, or `null` for the default. */
@@ -73,8 +69,6 @@ export function newControlState(): ControlState {
     proposeValue: 'x=1',
     proposeClient: null,
     proposeNode: null,
-    readClient: null,
-    readNode: null,
     compactNode: null,
     compactUpTo: null,
     retryNode: null,
@@ -464,38 +458,6 @@ function quorumReadRow(view: GameView, state: ControlState): HTMLElement | null 
   );
 }
 
-function readRow(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
-  if (!allowed(view, 'read_index')) return null;
-  const clients = view.world.clients;
-  const client = state.readClient ?? clients[0]?.id ?? 0;
-  const target = defaultTarget(view, state.readNode);
-  const select = nodeSelect('read-node', view.world.nodes, target, (id) => {
-    state.readNode = id;
-  });
-  const who = clientSelect('read-client', clients, client, (id) => {
-    state.readClient = id;
-  });
-  return h(
-    'div',
-    { class: 'control-row' },
-    h('span', { class: 'control-label' }, who ? 'a read from' : `client ${client} reads`),
-    who,
-    who ? h('span', { class: 'control-hint' }, 'to') : null,
-    select,
-    action(
-      'Read',
-      'The client asks this node for a read. The node must prove that it is the leader now.',
-      () => {
-        dispatch({
-          kind: 'read_index',
-          node: Number(select.value),
-          client: who ? Number(who.value) : (clients[0]?.id ?? null),
-        });
-      },
-    ),
-  );
-}
-
 function compactRow(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
   if (!allowed(view, 'compact')) return null;
   const target = defaultTarget(view, state.compactNode);
@@ -583,7 +545,6 @@ function retryRows(view: GameView, state: ControlState, dispatch: Dispatch): HTM
 function clientControls(view: GameView, state: ControlState, dispatch: Dispatch): HTMLElement | null {
   const rows = [
     proposeRow(view, state, dispatch),
-    readRow(view, state, dispatch),
     quorumReadRow(view, state),
     compactRow(view, state, dispatch),
     ...retryRows(view, state, dispatch),

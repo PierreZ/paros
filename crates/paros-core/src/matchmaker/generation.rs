@@ -40,6 +40,9 @@ impl Matchmaker {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(matchmaker = self.config.id.0, from = request.from().0)))]
     pub fn step_reconfigure(&mut self, request: ReconfigureRequest) {
         self.assert_invariants();
+        let replies = self.pending_reconfigure_replies.len();
+        let watermark = self.hard_state.gc_watermark;
+        let generation = self.hard_state.generation;
         let reply = match request {
             ReconfigureRequest::Stop { generation, .. } => self.on_stop(generation),
             ReconfigureRequest::Bootstrap { bootstrap, .. } => self.on_bootstrap(bootstrap),
@@ -58,13 +61,35 @@ impl Matchmaker {
                 ..
             } => self.on_chosen(generation, &successor),
         };
+        // One request, one reply in this matchmaker's name; a handover step
+        // never lowers the watermark or the durable generation.
+        assert!(
+            reply.matchmaker() == self.config.id,
+            "a handover reply names its matchmaker"
+        );
         self.pending_reconfigure_replies.push(reply);
+        assert!(
+            self.pending_reconfigure_replies.len() == replies + 1,
+            "every handover request is answered once"
+        );
+        assert!(
+            self.hard_state.gc_watermark >= watermark,
+            "a handover never lowers the watermark"
+        );
+        assert!(
+            self.hard_state.generation >= generation,
+            "a handover never moves a generation back"
+        );
         self.assert_invariants();
     }
 
     /// The refusal every arm falls back to: what this matchmaker is, where it
     /// stands, and the successor it knows of.
     fn refusal(&self) -> ReconfigureReply {
+        assert!(
+            self.set().generation == self.hard_state.generation,
+            "a refusal names the durable generation"
+        );
         ReconfigureReply::Refused {
             matchmaker: self.config.id,
             current: self.set().clone(),
@@ -76,11 +101,19 @@ impl Matchmaker {
     /// Whether this matchmaker answers the handover of `generation`: the
     /// one it is active or frozen for. Every other request is refused.
     fn serves_handover_of(&self, generation: MatchmakerGeneration) -> bool {
-        self.set().generation == generation
+        let serves = self.set().generation == generation
             && matches!(
                 self.phase(),
                 MatchmakerPhase::Active | MatchmakerPhase::Stopped
-            )
+            );
+        // Only a member of the replaced generation takes part in its handover.
+        if serves {
+            assert!(
+                self.set().contains(self.config.id),
+                "a handover member is in its set"
+            );
+        }
+        serves
     }
 
     /// `StopA`: freeze `generation` (durably, before the answer leaves) and
@@ -96,6 +129,11 @@ impl Matchmaker {
             // successor rests on.
             self.freeze();
         }
+        // A stopped generation registers nothing more, ever.
+        assert!(
+            self.phase() == MatchmakerPhase::Stopped,
+            "a stop leaves the generation frozen"
+        );
         ReconfigureReply::Stopped {
             matchmaker: self.config.id,
             generation,
@@ -111,6 +149,7 @@ impl Matchmaker {
     fn on_bootstrap(&mut self, bootstrap: PendingBootstrap) -> ReconfigureReply {
         let me = self.config.id;
         let current = self.set();
+        let current_generation = current.generation;
         let set = bootstrap.set.clone();
         // Wire hygiene: a proposal this matchmaker is not in, or one
         // that would not move it forward, is refused whole. So is a competing
@@ -144,6 +183,20 @@ impl Matchmaker {
                 self.hard_state.pending.push(bootstrap);
                 self.stage_scalars();
             }
+            // The proposal is held, once, for the set it names.
+            assert!(
+                self.hard_state
+                    .pending
+                    .iter()
+                    .filter(|p| p.set == set)
+                    .count()
+                    == 1,
+                "a bootstrap is held once per proposed set"
+            );
+            assert!(
+                set.generation > current_generation,
+                "a bootstrap is for a later generation"
+            );
             ReconfigureReply::Bootstrapped {
                 matchmaker: me,
                 set,
@@ -163,12 +216,22 @@ impl Matchmaker {
             .clone()
             .map(|vote| BTreeMap::from([(DECREE_SLOT, vote)]))
             .unwrap_or_default();
-        Acceptor::new(
+        let acceptor = Acceptor::new(
             self.hard_state.decree.promised,
             records,
             DECREE_SLOT,
             BTreeMap::new(),
-        )
+        );
+        // The decree's acceptor is exactly the durable decree record.
+        assert!(
+            acceptor.promised() == self.hard_state.decree.promised,
+            "the decree acceptor holds the durable promise"
+        );
+        assert!(
+            acceptor.record(DECREE_SLOT).cloned() == self.hard_state.decree.vote,
+            "the decree acceptor holds the durable vote"
+        );
+        acceptor
     }
 
     /// Fold an acceptor whose voting moved back into the durable record, and
@@ -187,9 +250,23 @@ impl Matchmaker {
         if writes.is_empty() {
             return;
         }
+        let promised = self.hard_state.decree.promised;
         self.hard_state.decree.promised = acceptor.promised();
         self.hard_state.decree.vote = acceptor.record(DECREE_SLOT).cloned();
         self.stage_scalars();
+        // The decree promise is monotone, and a vote never outranks it.
+        assert!(
+            self.hard_state.decree.promised >= promised,
+            "the decree promise never falls"
+        );
+        assert!(
+            self.hard_state
+                .decree
+                .vote
+                .as_ref()
+                .is_none_or(|(b, _)| *b <= self.hard_state.decree.promised),
+            "a decree vote never outranks the decree promise"
+        );
     }
 
     /// Phase 1b of the successor decree.
@@ -210,6 +287,10 @@ impl Matchmaker {
             PrepareOutcome::Promised { .. } => {
                 let vote = acceptor.record(DECREE_SLOT).cloned();
                 self.store_decree(&acceptor, &writes);
+                assert!(
+                    self.hard_state.decree.promised == ballot,
+                    "a decree promise lands on the prepared ballot"
+                );
                 ReconfigureReply::Promised {
                     matchmaker: me,
                     generation,
@@ -217,12 +298,19 @@ impl Matchmaker {
                     vote,
                 }
             }
-            PrepareOutcome::Refused | PrepareOutcome::BelowFloor => ReconfigureReply::Nacked {
-                matchmaker: me,
-                generation,
-                ballot,
-                promised: acceptor.promised(),
-            },
+            PrepareOutcome::Refused | PrepareOutcome::BelowFloor => {
+                // The decree slot is the floor, so only a higher promise refuses.
+                assert!(
+                    acceptor.promised() > ballot,
+                    "a decree Nack names a higher promise"
+                );
+                ReconfigureReply::Nacked {
+                    matchmaker: me,
+                    generation,
+                    ballot,
+                    promised: acceptor.promised(),
+                }
+            }
         }
     }
 
@@ -248,18 +336,37 @@ impl Matchmaker {
                 acceptor.set_promise(ballot, &mut writes);
                 acceptor.record_accepted(DECREE_SLOT, ballot, members, &mut writes);
                 self.store_decree(&acceptor, &writes);
+                // A decree vote raises the promise to its ballot first.
+                assert!(
+                    self.hard_state.decree.promised == ballot,
+                    "a decree vote lands with the promise at its ballot"
+                );
+                assert!(
+                    self.hard_state
+                        .decree
+                        .vote
+                        .as_ref()
+                        .is_some_and(|(b, _)| *b == ballot),
+                    "a decree vote is recorded at its ballot"
+                );
                 ReconfigureReply::Accepted {
                     matchmaker: me,
                     generation,
                     ballot,
                 }
             }
-            AcceptOutcome::Refused | AcceptOutcome::BelowFloor => ReconfigureReply::Nacked {
-                matchmaker: me,
-                generation,
-                ballot,
-                promised: acceptor.promised(),
-            },
+            AcceptOutcome::Refused | AcceptOutcome::BelowFloor => {
+                assert!(
+                    acceptor.promised() > ballot,
+                    "a decree Nack names a higher promise"
+                );
+                ReconfigureReply::Nacked {
+                    matchmaker: me,
+                    generation,
+                    ballot,
+                    promised: acceptor.promised(),
+                }
+            }
         }
     }
 
@@ -329,6 +436,18 @@ impl Matchmaker {
                     self.stage_scalars();
                 }
                 let activated = self.activate(successor);
+                // A learned successor is recorded (or already active here).
+                if activated {
+                    assert!(
+                        self.set() == successor,
+                        "an activated member serves the successor"
+                    );
+                } else {
+                    assert!(
+                        self.hard_state.successor.as_ref() == Some(successor),
+                        "a member of the succeeded generation records the chain link"
+                    );
+                }
                 ReconfigureReply::Learned {
                     matchmaker: me,
                     generation,
@@ -346,6 +465,14 @@ impl Matchmaker {
             let pruned = self.prune_settled_pending(successor);
             let activated = self.activate(successor);
             if activated {
+                assert!(
+                    self.set() == successor,
+                    "an activated spare serves the successor"
+                );
+                assert!(
+                    self.phase() == MatchmakerPhase::Active,
+                    "an activated spare is active"
+                );
                 ReconfigureReply::Learned {
                     matchmaker: me,
                     generation,
@@ -371,6 +498,12 @@ impl Matchmaker {
         self.hard_state.phase = MatchmakerPhase::Stopped;
         self.refresh_set();
         self.stage_scalars();
+        // The freeze changes the phase and nothing else about the set.
+        assert!(self.set == set, "a freeze keeps the generation's set");
+        assert!(
+            self.phase() == MatchmakerPhase::Stopped,
+            "a frozen generation is stopped"
+        );
     }
 
     /// Activate `successor` if this matchmaker is one of its members holding
@@ -421,8 +554,12 @@ impl Matchmaker {
             .filter(|(b, _)| *b >= watermark)
             .collect();
         assert!(
-            watermark >= bootstrap.gc_watermark && watermark >= local,
-            "an activation never lowers either watermark it inherits"
+            watermark >= bootstrap.gc_watermark,
+            "an activation never lowers the reconstructed watermark"
+        );
+        assert!(
+            watermark >= local,
+            "an activation never lowers its own watermark"
         );
         assert!(
             registry.keys().all(|b| *b >= watermark),
@@ -447,6 +584,20 @@ impl Matchmaker {
                 scalars: self.hard_state.clone(),
                 registrations: registry,
             });
+        // The successor is active here, at its own generation, with no
+        // successor of its own yet and a fresh decree.
+        assert!(
+            self.set() == successor,
+            "an activation serves the successor set"
+        );
+        assert!(
+            self.phase() == MatchmakerPhase::Active,
+            "an activated generation is active"
+        );
+        assert!(
+            self.hard_state.successor.is_none(),
+            "a fresh generation has no successor"
+        );
         true
     }
 
@@ -463,12 +614,35 @@ impl Matchmaker {
         self.hard_state
             .pending
             .retain(|p| p.set.generation > successor.generation || p.set == *successor);
+        // A decided generation keeps no losing bootstrap.
+        assert!(
+            self.hard_state
+                .pending
+                .iter()
+                .filter(|p| p.set.generation == successor.generation)
+                .all(|p| p.set == *successor),
+            "a decided generation keeps only the chosen bootstrap"
+        );
+        assert!(
+            self.hard_state.pending.len() <= before,
+            "pruning only removes"
+        );
         self.hard_state.pending.len() != before
     }
 
     /// Stage a whole-scalars write.
     pub(super) fn stage_scalars(&mut self) {
+        let writes = self.pending_writes.len();
         self.pending_writes
             .push(MatchmakerWriteOp::SetScalars(self.hard_state.clone()));
+        // The staged scalars are exactly the ones in memory.
+        assert!(
+            self.pending_writes.len() == writes + 1,
+            "staging scalars is one write"
+        );
+        assert!(
+            matches!(self.pending_writes.last(), Some(MatchmakerWriteOp::SetScalars(s)) if *s == self.hard_state),
+            "the staged scalars are the scalars in memory"
+        );
     }
 }

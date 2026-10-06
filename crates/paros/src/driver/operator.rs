@@ -7,12 +7,12 @@
 use std::collections::BTreeSet;
 
 use paros_core::{
-    AcceptorConfig, Ballot, ColocatedNode, JournalKey, MatchmakerId, NodeId, ReconfigureRefusal,
+    AcceptorConfig, Ballot, ColocatedNode, MatchmakerId, NodeId, ReconfigureRefusal,
     ReconfigureResult, StartRefusal,
 };
 
 use crate::audit::Audit;
-use crate::machine::CellFrames;
+use crate::machine::ControlJournals;
 use crate::rpc::{
     InspectReply, MatchmakersRefusal, Reconfigure, ReconfigureAck, RetireAck, RetireRefusal,
     RetireRequest, WireQuorumSystem, common, journal_state_to_proto, quorum_system_from_proto,
@@ -48,8 +48,20 @@ pub(crate) fn reconfigure<A: Audit>(
         }
         _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
     };
+    // A started reconfiguration re-campaigns at the ballot it reports.
+    if let ReconfigureResult::Started(ballot) = result {
+        assert!(
+            node.ballot() == ballot,
+            "a started reconfiguration runs at its ballot"
+        );
+        assert!(!node.is_leader(), "a reconfiguring leader re-campaigns");
+    }
     audit.reconfigure_acked(NodeId(self_id), &members, result);
     let (accepted, refusal, round) = reconfigure_outcome(result);
+    assert!(
+        accepted == matches!(result, ReconfigureResult::Started(_)),
+        "a reconfiguration is accepted exactly when it started"
+    );
     let leader = match result {
         ReconfigureResult::NotLeader(hint) => hint.map(|n| n.0),
         _ => Some(self_id),
@@ -107,7 +119,22 @@ fn retire_refusal(node: &ColocatedNode, watermark: Option<Ballot>) -> Option<Ret
     if watermark.is_some_and(|w| node.may_retire(w)) {
         return None;
     }
-    Some(if !node.config().has_matchmakers() {
+    let refusal = retire_refusal_reason(node, watermark);
+    // A refusal names a reason that holds.
+    match refusal {
+        RetireRefusal::Plain => {
+            assert!(!node.config().has_matchmakers(), "a plain refusal is plain");
+        }
+        RetireRefusal::Leader => assert!(node.is_leader(), "a leader refusal names a leader"),
+        RetireRefusal::Member => assert!(node.is_acceptor(), "a member refusal names a member"),
+        _ => {}
+    }
+    Some(refusal)
+}
+
+/// Why [`retire_refusal`] refuses, once it has established that it does.
+fn retire_refusal_reason(node: &ColocatedNode, watermark: Option<Ballot>) -> RetireRefusal {
+    if !node.config().has_matchmakers() {
         RetireRefusal::Plain
     } else if node.is_leader() {
         RetireRefusal::Leader
@@ -119,7 +146,7 @@ fn retire_refusal(node: &ColocatedNode, watermark: Option<Ballot>) -> Option<Ret
         RetireRefusal::Stale
     } else {
         RetireRefusal::NotCollected
-    })
+    }
 }
 
 /// A matchmaker-set reconfiguration request (#125): any node may drive it.
@@ -139,22 +166,63 @@ pub(crate) fn reconfigure_matchmakers(
         Some(_) if target.is_empty() => Err(MatchmakersRefusal::Empty),
         Some(_) if !target.iter().all(is_known) => Err(MatchmakersRefusal::UnknownMatchmaker),
         Some(current) => {
-            handover
-                .start(current, target.to_vec())
-                .map_err(|refusal| match refusal {
-                    StartRefusal::Busy => MatchmakersRefusal::Busy,
-                    StartRefusal::Empty => MatchmakersRefusal::Empty,
-                })
+            let started =
+                handover
+                    .start(current, target.to_vec())
+                    .map_err(|refusal| match refusal {
+                        StartRefusal::Busy => MatchmakersRefusal::Busy,
+                        StartRefusal::Empty => MatchmakersRefusal::Empty,
+                    });
+            if started.is_ok() {
+                assert!(handover.is_busy(), "an accepted handover is running");
+            }
+            started
         }
     }
 }
 
+/// The node's own facts (#243): its id, its cell and the control journals'
+/// identifiers, and nothing about any journal — the answer to a node-only
+/// `Inspect`, and the half every answer carries. An identifier this node does not
+/// know (no cell plan, or a cell that does not host the fleet) is left at
+/// `0` on the wire: absent, never a default.
+pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> InspectReply {
+    let (control_tenant, control_journal) =
+        cell.map_or((0, 0), |cell| (cell.cell.tenant.0, cell.cell.journal.0));
+    let (fleet_tenant, fleet_journal) = cell
+        .and_then(|cell| cell.fleet)
+        .map_or((0, 0), |fleet| (fleet.tenant.0, fleet.journal.0));
+    // A node-only answer names the cell's control journals or none at all.
+    if cell.is_none() {
+        assert!(
+            control_tenant == 0,
+            "a node outside a cell names no control journal"
+        );
+        assert!(
+            fleet_tenant == 0,
+            "a node outside a cell names no fleet journal"
+        );
+    }
+    InspectReply {
+        node: self_id,
+        cell_id: cell.map_or(0, |cell| cell.cell_id),
+        control_tenant,
+        control_journal,
+        fleet_tenant,
+        fleet_journal,
+        ..InspectReply::default()
+    }
+}
+
 /// A pure read of the core: what an operator (or a client's composer) sees
-/// of this node.
+/// of this node and of the journal `node` runs.
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
-pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&CellFrames>) -> InspectReply {
-    let control = cell.map_or(JournalKey::UNSET, |cell| cell.control);
-    let meta = cell.and_then(|cell| cell.meta).unwrap_or(JournalKey::UNSET);
+pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> InspectReply {
+    let facts = node_facts(node.config().id.0, cell);
+    assert!(
+        facts.node == node.config().id.0,
+        "an inspection answers for the node inspected"
+    );
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();
     let (gc_watermark, retirable) =
@@ -191,11 +259,6 @@ pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&CellFrames>) -> Inspec
         gc_watermark,
         folded: node.replica().folded().0,
         journal: Some(journal_state_to_proto(node.replica().journal())),
-        node: node.config().id.0,
-        cell_id: cell.map_or(0, |cell| cell.cell_id),
-        control_tenant: control.tenant.0,
-        control_journal: control.journal.0,
-        meta_tenant: meta.tenant.0,
-        meta_journal: meta.journal.0,
+        ..facts
     }
 }

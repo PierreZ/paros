@@ -6,11 +6,25 @@ use crate::journal_state::JournalState;
 /// backlog is drained over several rounds rather than one unbounded message.
 const CATCHUP_BATCH: usize = 64;
 
+// A replay page that carries nothing could never heal a laggard.
+const _: () = assert!(CATCHUP_BATCH > 0);
+
 impl ColocatedNode {
     /// Serve a lagging peer's catch-up request by replaying the decided range.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, from_slot = from_slot.0)))]
     pub(super) fn on_catchup_request(&mut self, from: NodeId, from_slot: Slot) {
+        let writes = self.pending_writes.len();
+        let promised = self.acceptor.promised();
         self.serve_catchup(from, from_slot);
+        // Negative space: serving history is a pure reply.
+        assert!(
+            self.pending_writes.len() == writes,
+            "serving catch-up writes nothing"
+        );
+        assert!(
+            self.acceptor.promised() == promised,
+            "serving catch-up moves no promise"
+        );
     }
 
     /// Send `to` the decided `(ballot, entry)` per slot for a bounded range at or
@@ -83,6 +97,24 @@ impl ColocatedNode {
         if entries.is_empty() {
             return;
         }
+        // A replay page is bounded, contiguous from the requested slot, and
+        // decided end to end.
+        assert!(entries.len() <= CATCHUP_BATCH, "a catch-up page is bounded");
+        assert!(
+            entries.keys().next() == Some(&from_slot),
+            "a catch-up page starts at the requested slot"
+        );
+        assert!(
+            entries.keys().next_back().is_some_and(|last| *last <= ci),
+            "a catch-up page ends inside the chosen prefix"
+        );
+        assert!(
+            entries
+                .keys()
+                .zip(entries.keys().skip(1))
+                .all(|(a, b)| b.0 == a.0 + 1),
+            "a catch-up page is contiguous"
+        );
         self.send(to, Message::CatchUpResponse { from: me, entries });
     }
 
@@ -91,9 +123,20 @@ impl ColocatedNode {
     /// the contiguous prefix — filling the hole a missed `Accept`+`Commit` left.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, entries = entries.len())))]
     pub(super) fn on_catchup_response(&mut self, entries: BTreeMap<Slot, (Ballot, Command)>) {
+        let chosen = self.replica.chosen_index();
+        let floor = self.acceptor.first_slot();
         for (slot, (ballot, command)) in entries {
             self.mark_chosen(slot, &command, ballot);
         }
+        // Learning history only ever extends it.
+        assert!(
+            self.replica.chosen_index() >= chosen,
+            "a replay never rewinds the prefix"
+        );
+        assert!(
+            self.acceptor.first_slot() >= floor,
+            "a replay never lowers the floor"
+        );
     }
 
     /// Jump below a peer's trim point (#186): the peer trimmed the prefix

@@ -18,7 +18,7 @@ use super::{
     ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader,
     SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
-use paros_core::JournalKey;
+use paros_core::JournalIdentifier;
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
 /// reach whichever incarnation is serving that address.
@@ -141,31 +141,33 @@ impl<P: Providers> NodeClient<P> {
         self.reconfigure_matchmakers.try_get_reply(request).await
     }
 
-    /// Inspect the node's first journal: its chosen prefix and
-    /// configuration.
+    /// Inspect the node alone (#243): its id, its cell and the control
+    /// journals' identifiers, and no journal's state.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn inspect(&self) -> Result<InspectReply, RpcError> {
+    pub async fn inspect_node(&self) -> Result<InspectReply, RpcError> {
         self.inspect
-            .try_get_reply(&InspectRequest {
-                journal: 0,
-                tenant: 0,
-            })
+            .try_get_reply(&InspectRequest::node_only())
             .await
     }
 
-    /// Inspect `journal` on the node (#188, #235).
+    /// Inspect `journal` on the node (#188, #235). An answer whose
+    /// `refusal` is set describes the node but no journal.
     ///
     /// # Errors
     ///
     /// The attempt's [`RpcError`].
-    pub async fn inspect_journal(&self, journal: JournalKey) -> Result<InspectReply, RpcError> {
+    pub async fn inspect_journal(
+        &self,
+        journal: JournalIdentifier,
+    ) -> Result<InspectReply, RpcError> {
         self.inspect
             .try_get_reply(&InspectRequest {
                 journal: journal.journal.0,
                 tenant: journal.tenant.0,
+                node_only: false,
             })
             .await
     }

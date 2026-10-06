@@ -156,12 +156,22 @@ impl ColocatedNode {
         assert!(
             self.matchmaking
                 .as_ref()
-                .is_some_and(|m| *m.config() == *config && m.kind().is_reconfiguration()),
+                .is_some_and(|m| *m.config() == *config),
             "a reconfiguration registers the requested configuration"
         );
         assert!(
-            self.proposer.rounds().is_empty() && self.proposer.election().is_none(),
+            self.matchmaking
+                .as_ref()
+                .is_some_and(|m| m.kind().is_reconfiguration()),
+            "a reconfiguration registers as a reconfiguration, never a belief"
+        );
+        assert!(
+            self.proposer.rounds().is_empty(),
             "a reconfiguring leader abandons its old ballot's rounds"
+        );
+        assert!(
+            self.proposer.election().is_none(),
+            "a reconfiguring leader opens no Phase 1 before its matchmakers"
         );
         self.assert_invariants();
         ReconfigureResult::Started(self.ballot)

@@ -38,6 +38,17 @@ pub(crate) fn config_hash(config: &AcceptorConfig) -> u64 {
             bytes.extend_from_slice(&(cols as u64).to_le_bytes());
         }
     }
+    // The encoding is the length word, one word per member and a tag that
+    // carries either nothing or two size words: nothing else is folded.
+    let header = 8 * (1 + config.members().len());
+    assert!(
+        bytes.len() > header,
+        "a configuration digest folds its quorum tag"
+    );
+    assert!(
+        bytes.len() == header + 1 || bytes.len() == header + 17,
+        "a quorum tag carries nothing or two size words"
+    );
     value_hash(&bytes)
 }
 
@@ -50,6 +61,12 @@ pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
+    if bytes.is_empty() {
+        assert!(
+            h == 0xcbf2_9ce4_8422_2325,
+            "an empty value hashes to the offset basis"
+        );
+    }
     h
 }
 
@@ -61,6 +78,11 @@ pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
 /// Public so an [`Audit`](crate::Audit) implementation can hash a `Command` it observes on the
 /// wire ([`Audit::sent`](crate::Audit::sent)) with the *same* function the driver uses for the
 /// durable-write and apply callbacks.
+///
+/// # Panics
+///
+/// If an assertion on its own invariants, preconditions or postconditions
+/// fails: a programmer error, never an operating condition.
 #[must_use]
 pub fn command_hash(command: &Command) -> u64 {
     match command {
@@ -84,6 +106,9 @@ pub fn command_hash(command: &Command) -> u64 {
             bytes.extend_from_slice(&generation.0.to_le_bytes());
             bytes.extend_from_slice(&owner.0.to_le_bytes());
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
+            // The no-collision argument below rests on this exact shape.
+            assert!(bytes.len() == 25, "a truncate encodes to twenty-five bytes");
+            assert!(bytes[0] == 0xff, "a truncate encoding starts with its tag");
             value_hash(&bytes)
         }
         // A distinct one-byte tag: no `Truncate` encoding can collide with it (they
@@ -94,6 +119,11 @@ pub fn command_hash(command: &Command) -> u64 {
             let mut bytes = vec![0xfd_u8];
             bytes.extend_from_slice(&expected.0.to_le_bytes());
             bytes.extend_from_slice(&owner.0.to_le_bytes());
+            assert!(bytes.len() == 17, "a set-leader encodes to seventeen bytes");
+            assert!(
+                bytes[0] == 0xfd,
+                "a set-leader encoding starts with its tag"
+            );
             value_hash(&bytes)
         }
     }
@@ -104,12 +134,19 @@ pub fn command_hash(command: &Command) -> u64 {
 /// answer a candidate folded without the reply's bytes travelling through the
 /// port. Order-sensitive, which is what the page contract wants: two pages
 /// with the same registrations in a different order are different answers.
+///
+/// # Panics
+///
+/// If an assertion on its own invariants, preconditions or postconditions
+/// fails: a programmer error, never an operating condition.
 pub fn registration_history_hash<'a, I>(history: I) -> u64
 where
     I: IntoIterator<Item = (&'a Ballot, &'a Registration)>,
 {
     let mut bytes: Vec<u8> = Vec::new();
+    let mut registrations = 0_usize;
     for (ballot, registration) in history {
+        registrations += 1;
         bytes.extend_from_slice(&ballot.round.to_le_bytes());
         bytes.extend_from_slice(&ballot.node.0.to_le_bytes());
         bytes.push(u8::from(registration.kind.is_reconfiguration()));
@@ -119,6 +156,14 @@ where
         // A separator, so two adjacent memberships cannot be re-cut into
         // the same byte string.
         bytes.push(0xff);
+    }
+    // Every registration folds at least its ballot, kind and separator.
+    assert!(
+        bytes.len() >= registrations * 18,
+        "each registration folds its header"
+    );
+    if registrations == 0 {
+        assert!(bytes.is_empty(), "an empty page folds nothing");
     }
     value_hash(&bytes)
 }
@@ -154,6 +199,20 @@ pub(crate) fn reconfigure_reply_kind(reply: &ReconfigureReply) -> &'static str {
 /// round the reconfiguration campaigns at)`.
 #[must_use]
 pub(crate) fn reconfigure_outcome(result: ReconfigureResult) -> (bool, &'static str, Option<u64>) {
+    let outcome = reconfigure_outcome_unchecked(result);
+    // Accepted, label-free and carrying a round are one fact, said three ways.
+    assert!(
+        outcome.0 == outcome.1.is_empty(),
+        "only a refusal carries a label"
+    );
+    assert!(
+        outcome.0 == outcome.2.is_some(),
+        "only a started reconfiguration has a round"
+    );
+    outcome
+}
+
+fn reconfigure_outcome_unchecked(result: ReconfigureResult) -> (bool, &'static str, Option<u64>) {
     match result {
         ReconfigureResult::Started(ballot) => (true, "", Some(ballot.round)),
         ReconfigureResult::NotLeader(_) => (false, "not_leader", None),
@@ -177,8 +236,25 @@ pub(crate) fn reconfigure_outcome(result: ReconfigureResult) -> (bool, &'static 
 /// implementation can tally by the same labels the driver traces with.
 ///
 /// [`Audit`]: crate::Audit
+///
+/// # Panics
+///
+/// If an assertion on its own invariants, preconditions or postconditions
+/// fails: a programmer error, never an operating condition.
 #[must_use]
 pub fn message_kind(m: &Message) -> &'static str {
+    let kind = message_kind_unchecked(m);
+    // Every labelled kind names its origin; the pair below must agree.
+    if kind != "unknown" {
+        assert!(
+            message_sender(m).is_some(),
+            "a labelled message names its sender"
+        );
+    }
+    kind
+}
+
+fn message_kind_unchecked(m: &Message) -> &'static str {
     match m {
         Message::Prepare { .. } => "prepare",
         Message::Promise { .. } => "promise",
@@ -205,6 +281,17 @@ pub fn message_kind(m: &Message) -> &'static str {
 /// see [`paros_core::Message::Heartbeat`]). The kinds with no ballot at all
 /// (the catch-up pair) return `None` outright.
 pub(crate) fn message_route(m: &Message) -> Option<(Party, Ballot, Option<Slot>)> {
+    let route = message_route_unchecked(m);
+    // The route's party and the sender are read from the same field: a
+    // routed message's origin is its sender, never a second party.
+    if let Some((party, _, _)) = route {
+        assert!(message_sender(m) == Some(party), "a route names the sender");
+        assert!(message_kind(m) != "unknown", "a routed message has a label");
+    }
+    route
+}
+
+fn message_route_unchecked(m: &Message) -> Option<(Party, Ballot, Option<Slot>)> {
     match m {
         // Phase 1 is per-ballot: report `from_slot` as the slot for the timeline.
         Message::Prepare {

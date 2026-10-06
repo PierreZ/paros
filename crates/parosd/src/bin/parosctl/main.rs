@@ -118,7 +118,7 @@ impl Global {
 enum Command {
     /// Form the cell over its seeds (#196, #216): sent to the first server,
     /// a waiting seed; then the first cell coordinator claims the cell
-    /// control journal, and the fleet steps register the cell in meta
+    /// control journal, and the fleet steps register the cell in the fleet directory
     /// (#229). Refused on an initialized fleet; a re-run resumes.
     Init(init::InitArgs),
     /// A call to a formed cell.
@@ -146,7 +146,7 @@ enum CellCommand {
     Reconfigure(commands::ReconfigureArgs),
     /// Retire a node the GC floor released.
     Retire(commands::RetireArgs),
-    /// Create, delete and list tenants through meta's directory (#229).
+    /// Create, delete and list tenants through the fleet directory (#229).
     Tenant(fleet::TenantArgs),
 }
 

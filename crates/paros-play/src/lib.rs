@@ -308,11 +308,6 @@ impl Game {
                 self.log_world()?
                     .set_election_timeout(NodeId(*node), *ticks)?;
             }
-            Action::ReadIndex { node, client } => {
-                let world = self.log_world()?;
-                let client = reader(world, *client)?;
-                world.read_index(NodeId(*node), client)?;
-            }
             Action::QuorumRead { node, client } => {
                 let world = self.log_world()?;
                 let client = reader(world, *client)?;

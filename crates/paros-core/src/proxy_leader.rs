@@ -143,6 +143,9 @@ use crate::types::{Ballot, Command, NodeId, Slot, command_fingerprint};
 /// idempotently, and everything a proxy holds is ephemeral anyway.
 pub const DONE_MEMORY: usize = 1024;
 
+// A proxy that remembers no decided round would re-fan-out every duplicate.
+const _: () = assert!(DONE_MEMORY > 0);
+
 /// Monotone counters this incarnation, for the driver's audit report and
 /// the examples: what a proxy did, never what it decided.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -231,6 +234,8 @@ impl ProxyLeader {
     /// it — or an internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
     pub fn step(&mut self, msg: Message) {
+        let ballot = self.ballot;
+        let since = self.acceptors_since;
         match msg {
             Message::Accept {
                 reply_to,
@@ -249,6 +254,13 @@ impl ProxyLeader {
             Message::Nack { from, ballot, slot } => self.on_nack(from, ballot, slot),
             _ => {}
         }
+        // The proxy works for the highest leadership it was handed, and its
+        // configuration only moves forward.
+        assert!(self.ballot >= ballot, "a proxy's ballot never falls");
+        assert!(
+            self.acceptors_since >= since,
+            "a proxy's configuration never moves back"
+        );
         self.assert_invariants();
     }
 
@@ -317,6 +329,14 @@ impl ProxyLeader {
         self.delegators.insert(slot, leader);
         self.counters.delegated += 1;
         self.fan_out(leader, ballot, slot, command, column);
+        assert!(
+            self.rounds.is_open_at(slot, ballot),
+            "a delegated round is open here"
+        );
+        assert!(
+            self.delegators.get(&slot) == Some(&leader),
+            "a round names its delegator"
+        );
     }
 
     /// Queue the `Accept` for `slot` to the addressees of `column`, with
@@ -330,6 +350,12 @@ impl ProxyLeader {
         command: Command,
         column: Option<usize>,
     ) {
+        // A proxy fans out only for the leadership it works for.
+        assert!(
+            ballot == self.ballot,
+            "a proxy fans out at the ballot it works for"
+        );
+        let queued = self.pending_messages.len();
         self.pending_messages.push((
             Audience::AcceptorsOf {
                 config: self.acceptors.clone(),
@@ -344,6 +370,10 @@ impl ProxyLeader {
                 config: None,
             },
         ));
+        assert!(
+            self.pending_messages.len() == queued + 1,
+            "a fan-out queues one Accept"
+        );
     }
 
     /// Adopt `config` as the configuration in force when `ballot` is above
@@ -355,8 +385,13 @@ impl ProxyLeader {
         if ballot <= self.acceptors_since {
             return;
         }
+        let since = self.acceptors_since;
         self.acceptors = config;
         self.acceptors_since = ballot;
+        assert!(
+            self.acceptors_since > since,
+            "a learned configuration is strictly newer"
+        );
     }
 
     /// Close every round below `ballot`: a superseded leadership's, which
@@ -366,6 +401,10 @@ impl ProxyLeader {
             self.delegators.remove(&slot);
             self.counters.superseded += 1;
         }
+        assert!(
+            self.rounds.all_at(ballot),
+            "a superseded leadership's rounds are gone"
+        );
     }
 
     /// An acceptor accepted `slot` at `ballot`: fold it, and decide on a
@@ -394,6 +433,14 @@ impl ProxyLeader {
         self.delegators.remove(&slot);
         self.remember_done(slot, ballot);
         self.counters.decided += 1;
+        assert!(
+            self.rounds.column(slot).is_none(),
+            "a decided proxy round is closed"
+        );
+        assert!(
+            !self.delegators.contains_key(&slot),
+            "a decided round forgets its delegator"
+        );
         self.pending_messages.push((
             Audience::Learners,
             Message::Commit {
@@ -419,6 +466,10 @@ impl ProxyLeader {
             return;
         };
         self.counters.relayed_nacks += 1;
+        assert!(
+            !self.rounds.is_open_at(slot, ballot),
+            "a refused proxy round is closed"
+        );
         self.pending_messages
             .push((Audience::Node(leader), Message::Nack { from, ballot, slot }));
     }
@@ -435,6 +486,7 @@ impl ProxyLeader {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
     pub fn resend_pending(&mut self) {
+        let ballot = self.ballot;
         for accept in self.rounds.resend_page() {
             let leader = *self
                 .delegators
@@ -448,15 +500,29 @@ impl ProxyLeader {
                 accept.column,
             );
         }
+        assert!(
+            self.ballot == ballot,
+            "a re-fan-out never moves the proxy's ballot"
+        );
         self.assert_invariants();
     }
 
     /// Whether this proxy holds rounds whose `Accept`s can be re-sent —
     /// what a driver asks before consulting a policy hook about skipping
     /// the beat.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn has_pending_accepts(&self) -> bool {
-        !self.rounds.is_empty()
+        let pending = !self.rounds.is_empty();
+        assert!(
+            pending != self.delegators.is_empty(),
+            "a proxy holds a delegator exactly for each open round"
+        );
+        pending
     }
 
     /// **Bounded retention** (see the module doc): close every open round
@@ -483,6 +549,10 @@ impl ProxyLeader {
             self.delegators.remove(slot);
             self.counters.expired += 1;
         }
+        assert!(
+            stale.iter().all(|slot| self.rounds.column(*slot).is_none()),
+            "an evicted round is gone"
+        );
         self.assert_invariants();
         stale
     }
@@ -490,10 +560,18 @@ impl ProxyLeader {
     /// Remember `slot` closed at `ballot`, forgetting the lowest slot past
     /// [`DONE_MEMORY`].
     fn remember_done(&mut self, slot: Slot, ballot: Ballot) {
+        assert!(
+            ballot == self.ballot,
+            "a proxy decides at the ballot it works for"
+        );
         self.done.insert(slot, ballot);
         while self.done.len() > DONE_MEMORY {
             self.done.pop_first();
         }
+        assert!(
+            self.done.len() <= DONE_MEMORY,
+            "a proxy's closed-round memory is bounded"
+        );
     }
 
     /// Borrow the proxy to drain one batch of messages. The returned
@@ -568,9 +646,21 @@ impl ProxyLeader {
     }
 
     /// The leader that delegated the open round at `slot`, if one is open.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn delegator(&self, slot: Slot) -> Option<NodeId> {
-        self.delegators.get(&slot).copied()
+        let delegator = self.delegators.get(&slot).copied();
+        if delegator.is_some() {
+            assert!(
+                self.rounds.column(slot).is_some(),
+                "a delegator names an open round"
+            );
+        }
+        delegator
     }
 
     /// Monotone counters this incarnation.
@@ -603,9 +693,35 @@ impl ProxyReady<'_> {
     /// ([`Audience::resolve_from_proxy`]) — a proxy is nobody's peer, so an
     /// `Accept` it fans out reaches the leader too when the leader sits in
     /// the column.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn messages(&self) -> &[(Audience, Message)] {
-        self.proxy.pending_messages()
+        let messages = self.proxy.pending_messages();
+        // A proxy speaks only in its own name: its fan-outs ask for replies
+        // to itself, its commits come from itself.
+        assert!(
+            messages.iter().all(|(_, m)| match m {
+                Message::Accept { reply_to, .. } => *reply_to == Party::Proxy(self.proxy.id),
+                Message::Commit { from, .. } => *from == Party::Proxy(self.proxy.id),
+                _ => true,
+            }),
+            "a proxy speaks in its own name"
+        );
+        // A proxy works for one leadership at a time: nothing it sends runs
+        // above the highest ballot delegated to it.
+        assert!(
+            messages.iter().all(|(_, m)| match m {
+                Message::Accept { ballot, .. } | Message::Commit { ballot, .. } =>
+                    *ballot <= self.proxy.ballot,
+                _ => true,
+            }),
+            "a proxy sends nothing above the ballot it works for"
+        );
+        messages
     }
 
     /// Acknowledge the batch: clears the messages and releases the borrow.

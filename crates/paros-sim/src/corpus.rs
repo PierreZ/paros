@@ -287,9 +287,9 @@ impl CorpusClients {
         first: usize,
         deadline: Duration,
     ) -> Option<u64> {
-        let key = crate::shape::frames(ctx.state()).main;
+        let main = crate::shape::identifiers(ctx.state()).main;
         self.until_accepted(ctx, first, exclude, deadline, |client| async move {
-            let (journal, tenant) = (key.journal.0, key.tenant.0);
+            let (journal, tenant) = (main.journal.0, main.tenant.0);
             match command {
                 Command::Write(entry) => {
                     let ack = client
@@ -370,8 +370,11 @@ impl CorpusClients {
     async fn inspect_reply(&self, ctx: &SimContext, i: usize) -> Option<InspectReply> {
         let time = ctx.time();
         let client = &self.clients[i];
+        let journal = crate::shape::identifiers(ctx.state()).main;
         moonpool_sim::select! {
-            response = client.inspect() => response.ok(),
+            response = client.inspect_journal(journal) => {
+                response.ok().filter(|reply| reply.refusal.is_empty())
+            }
             _ = time.sleep(RPC_TIMEOUT) => None,
         }
     }
@@ -383,14 +386,14 @@ impl CorpusClients {
     #[tracing::instrument(level = "trace", skip_all, fields(server = i))]
     async fn read_state(&self, ctx: &SimContext, i: usize) -> Option<ChainState> {
         let time = ctx.time();
-        let key = crate::shape::frames(ctx.state()).main;
+        let main = crate::shape::identifiers(ctx.state()).main;
         let client = &self.clients[i];
         let mut state = ChainState::default();
         let mut from = 0;
         for _ in 0..FOLD_PAGES {
             let request = Read {
-                journal: key.journal.0,
-                tenant: key.tenant.0,
+                journal: main.journal.0,
+                tenant: main.tenant.0,
                 from_seq: from,
                 limit: 0,
                 wait_ms: 0,

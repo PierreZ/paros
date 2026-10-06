@@ -10,7 +10,7 @@ use paros_core::{NodeId, QuorumSystem, ReconfigurerPhase};
 use crate::view::{
     AttemptView, ChosenView, ClientView, ElectionView, GapView, GcView, GridCellView,
     HandoverPhaseView, MatchmakerView, MatchmakingView, NodeFlavour, NodeView, ProposalView,
-    ReachView, ReadRoundView, ReadView, SlotView, WorldFlavour, WorldView, matchmaker_phase_view,
+    ReachView, ReadView, SlotView, WorldFlavour, WorldView, matchmaker_phase_view,
     matchmaker_set_view, quorum_view, registration_kind_view, registration_view, show_ballot,
     show_role,
 };
@@ -72,7 +72,6 @@ impl World {
                 election: None,
                 open_rounds: Vec::new(),
                 pending_accepts: false,
-                read_rounds: Vec::new(),
                 recovery_remaining: 0,
                 acceptors: disk.config().peers.iter().map(|n| n.0).collect(),
                 quorum_system: quorum_name(disk.config().quorum_system),
@@ -133,7 +132,6 @@ impl World {
             }),
             open_rounds: node.proposer().rounds().keys().map(|s| s.0).collect(),
             pending_accepts: node.has_pending_accepts(),
-            read_rounds: self.read_round_views(id),
             recovery_remaining: node.proposer().recovery_remaining(),
             acceptors: node.acceptors().members().iter().map(|n| n.0).collect(),
             quorum_system: quorum_name(node.acceptors().quorum_system()),
@@ -166,28 +164,6 @@ impl World {
             retired: self.retired[index],
             wiped,
         }
-    }
-
-    fn read_round_views(&self, id: NodeId) -> Vec<ReadRoundView> {
-        let rounds = self
-            .node(id)
-            .map(|node| node.proposer().read_rounds())
-            .unwrap_or_default();
-        self.clients
-            .iter()
-            .flat_map(|c| c.reads.iter())
-            .filter(|r| r.node == id && !r.served)
-            .map(|r| ReadRoundView {
-                ctx: r.ctx,
-                index: r.index.map(|s| s.0),
-                // The round's own credited acks, the leader's vote included;
-                // a leaderless read has no round and counts none.
-                acks: rounds
-                    .iter()
-                    .find(|round| !r.leaderless && round.ctx() == r.ctx)
-                    .map_or(0, |round| round.acked().len()),
-            })
-            .collect()
     }
 }
 

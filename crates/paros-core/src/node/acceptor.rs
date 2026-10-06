@@ -264,6 +264,15 @@ impl ColocatedNode {
 
     /// Queue a `Nack` for `ballot` at `slot` to `to`.
     fn push_nack(&mut self, to: Party, ballot: Ballot, slot: Slot) {
+        // A Nack is honest: the slot lies below the floor (a below-floor
+        // prepare), or the promise already dominates the refused ballot.
+        if slot >= self.acceptor.first_slot() {
+            assert!(
+                ballot < self.acceptor.promised(),
+                "a Nack refuses a ballot below the promise"
+            );
+        }
+        let queued = self.pending_messages.len();
         self.pending_messages.push((
             to.audience(),
             Message::Nack {
@@ -272,5 +281,9 @@ impl ColocatedNode {
                 slot,
             },
         ));
+        assert!(
+            self.pending_messages.len() == queued + 1,
+            "a Nack queues one message"
+        );
     }
 }

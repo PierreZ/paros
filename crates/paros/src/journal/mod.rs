@@ -114,11 +114,13 @@ impl Default for JournalStoreConfig {
     /// The CLSTORE layout (64 MiB segments) and a checkpoint every 32,768
     /// entries — one segment's slot table.
     fn default() -> Self {
-        Self {
+        let config = Self {
             geometry: Geometry::default(),
             direct_io: DirectIo::Optional,
             checkpoint_after: 32_768,
-        }
+        };
+        config.assert_layout();
+        config
     }
 }
 
@@ -128,7 +130,7 @@ impl JournalStoreConfig {
     /// prefix truncation happen within a short run.
     #[must_use]
     pub fn small() -> Self {
-        Self {
+        let config = Self {
             geometry: Geometry {
                 slot_count: 256,
                 // Two header blocks, then 256 × 64-byte slots.
@@ -137,7 +139,26 @@ impl JournalStoreConfig {
             },
             direct_io: DirectIo::Optional,
             checkpoint_after: 256,
-        }
+        };
+        config.assert_layout();
+        config
+    }
+
+    /// A shipped layout is one the journal opens, and checkpoints within
+    /// one segment's slot table (the floor of `checkpoint_after` is 1).
+    fn assert_layout(self) {
+        assert!(
+            self.geometry.validate().is_ok(),
+            "a shipped geometry is valid"
+        );
+        assert!(
+            self.checkpoint_after >= 1,
+            "a checkpoint cadence is at least one"
+        );
+        assert!(
+            self.checkpoint_after <= u64::from(self.geometry.slot_count),
+            "a checkpoint fits within one segment's slot table"
+        );
     }
 
     fn journal(self) -> JournalConfig {

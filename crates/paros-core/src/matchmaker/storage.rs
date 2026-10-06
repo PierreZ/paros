@@ -110,12 +110,23 @@ impl MemRegistry {
     /// keeping the higher of the two watermarks and dropping below it;
     /// [`InstallRegistry`](MatchmakerWriteOp::InstallRegistry) replaces both,
     /// the records filtered at the installed watermark.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn apply(&mut self, op: &MatchmakerWriteOp) {
         match op {
             MatchmakerWriteOp::Register {
                 ballot,
                 registration,
             } => {
+                // The persist half of the pair `Matchmaker::new` reads back:
+                // a registration lands at or above the durable floor.
+                assert!(
+                    *ballot >= self.hard_state.gc_watermark,
+                    "a registration is persisted at or above the watermark"
+                );
                 self.registry.insert(*ballot, registration.clone());
             }
             MatchmakerWriteOp::SetGcWatermark(watermark) => {
@@ -123,6 +134,10 @@ impl MemRegistry {
                     self.hard_state.gc_watermark = *watermark;
                     self.registry = self.registry.split_off(watermark);
                 }
+                assert!(
+                    self.hard_state.gc_watermark >= *watermark,
+                    "a persisted watermark covers the raise"
+                );
             }
             MatchmakerWriteOp::SetScalars(scalars) => {
                 let watermark = scalars.gc_watermark.max(self.hard_state.gc_watermark);
@@ -142,6 +157,14 @@ impl MemRegistry {
                     .collect();
             }
         }
+        // Whatever the op, the store holds nothing below its own floor.
+        assert!(
+            self.registry
+                .keys()
+                .next()
+                .is_none_or(|b| *b >= self.hard_state.gc_watermark),
+            "a persisted registry holds nothing below its watermark"
+        );
     }
 }
 

@@ -20,7 +20,7 @@ under `book/`) holds the diagram rules; this skill is the map.
 | leader election, heartbeats, election gap fill, the optimizations table | `stable-leader.md` |
 | `HardState`, persist-before-send, the boot report, seams, promise monotonicity | `restart-safety.md` |
 | the `Truncate` call and `Control::Truncate`, `first_seq`, the sealed journal state, floors, the trim-point jump (`TrimmedTo`), a `Read` below `first_seq` answered `truncated` | `truncation-and-snapshots.md` (titled *Truncation and the trim point*; keep the filename, `SUMMARY.md` links it) |
-| read-index (`ColocatedNode::read_index`, kept in the core for the game), the read fence, chosen vs applied, the verdict answered at apply, the client-history linearizability check | `linearizable-reads.md` |
+| the quorum read as the read path (`ColocatedNode::quorum_read`, the fresh-leader trap; read-index retired, #243), chosen vs applied, the verdict answered at apply, the client-history linearizability check | `linearizable-reads.md` |
 | flexible quorums, the grid, quorum reads (every public `Read`), proxy leaders, the replica tier, handoff, matchmakers and reconfiguration, GC and retirement, matchmaker-set generations, faulty records, the wiped node, many journals per process | `beyond-multi-paxos.md` (one `##` section per mechanism; written in ASD-STE100) |
 | a new area | a new section of `beyond-multi-paxos.md`, or a new chapter added to `SUMMARY.md` and `index.md` |
 

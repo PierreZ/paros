@@ -8,13 +8,13 @@
 use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
-use paros::JournalKey;
+use paros::JournalIdentifier;
 
 /// The key of `journal`'s copy of a per-journal singleton (#188): `base`
-/// suffixed by the frame. Every journal gets its own audit world and its own
+/// suffixed by the identifier. Every journal gets its own audit world and its own
 /// storage world, which is how every oracle is keyed by journal without an
 /// oracle knowing.
-pub(crate) fn journal_key(base: &str, journal: JournalKey) -> String {
+pub(crate) fn journal_key(base: &str, journal: JournalIdentifier) -> String {
     format!("{base}-{}-{}", journal.tenant.0, journal.journal.0)
 }
 

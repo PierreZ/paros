@@ -25,8 +25,9 @@ use paros::client::{
     WriteOutcome, Writer, WriterOutcome,
 };
 use paros::{
-    Command, Entry, JournalKey, JournalState, QuorumSystem, ReconfigureRefusal, RetireRequest,
-    TenantId, Truncate, Value, WireQuorumSystem, command_hash, quorum_system_from_proto,
+    Command, Entry, JournalIdentifier, JournalState, QuorumSystem, ReconfigureRefusal,
+    RetireRequest, TenantId, Truncate, Value, WireQuorumSystem, command_hash,
+    quorum_system_from_proto,
 };
 
 use crate::audit::{AuditWorld, ClientHistory, audit_world_for, check_run};
@@ -35,6 +36,7 @@ use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod fleet;
 mod fold;
+mod foreign;
 mod races;
 mod rpc;
 mod system;
@@ -138,11 +140,11 @@ const CHECKPOINT: u8 = 23;
 /// one (#211): what the cell coordinator writes.
 const BOOK_CAPACITY: u8 = 24;
 /// Run `init`'s fleet half (#229) through `paros::client::fleet`: the cell
-/// joins the fleet on its side, meta records the fleet and the cell
+/// joins the fleet on its side, the fleet tenant records the fleet and the cell
 /// `READY` — or resume a fleet operation this client stopped in the middle
 /// of.
 const FLEET_INIT: u8 = 25;
-/// Create or remove a tenant through meta's directory and the cell (#229),
+/// Create or remove a tenant through the fleet directory and the cell (#229),
 /// or resume one this client stopped in the middle of.
 const TENANT: u8 = 26;
 const OP_COUNT: u8 = 27;
@@ -322,6 +324,20 @@ struct ChainConfig {
     /// The `CHECKPOINT` step opens a fresh owner each time, so this leg fires
     /// only near the floor; the factor carries the rest of the range.
     checkpoint_interval_ms: u64,
+    /// How long into a fleet operation its target is killed (#247, the
+    /// process kill mid fleet-step). Floor 0: the kill leaves with the
+    /// operation's first ask; ceiling 200 ms, a few round trips in, when a
+    /// later step is in flight.
+    fleet_kill_delay_ms: u64,
+    /// How long that target stays down before it restarts. Floor 50 ms: a
+    /// reboot that comes straight back, its connections and unsynced writes
+    /// still lost; ceiling 2 s, far inside the recovery budget.
+    fleet_kill_down_ms: u64,
+    /// How long client 0 holds the control journals' seed down for the
+    /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal
+    /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
+    /// so the seed is back for the recovery tail.
+    parent_hold_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -379,6 +395,9 @@ impl ChainConfig {
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
             checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
+            fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
+            fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
+            parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -440,7 +459,7 @@ impl ChainConfig {
                 // An init is at most four writes, then nothing to do; the
                 // ceiling is an operator re-running init all run long.
                 buggify_knob!(3_u64, 0_u64..21_u64),
-                // A tenant operation claims meta and the cell's journal and
+                // A tenant operation claims the fleet tenant and the cell's journal and
                 // writes up to three steps; the ceiling is a client that
                 // mostly manages tenants, fencing every other operator.
                 buggify_knob!(4_u64, 0_u64..21_u64),
@@ -817,7 +836,10 @@ struct Tail {
     /// The journals some client saw converged (#188): the run ends only once
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
-    converged: BTreeSet<JournalKey>,
+    converged: BTreeSet<JournalIdentifier>,
+    /// How many clients finished their fleet operations in the recovery
+    /// tail (#247): the last one judges the control plane's final folds.
+    fleet_settled: usize,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -888,7 +910,7 @@ pub(crate) struct ChainWorkload {
     digest: Option<DigestSink>,
     /// The journal this client writes and reads (#188), and the run's
     /// plan (set in `setup`).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     plan: Option<crate::shape::JournalPlan>,
     /// This client's id (set in `setup`): its identity as an owner.
     client_id: u64,
@@ -904,7 +926,7 @@ impl ChainWorkload {
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
-            journal: JournalKey::UNSET,
+            journal: JournalIdentifier::UNSET,
             plan: None,
             client_id: 0,
             calls: None,
@@ -1044,7 +1066,7 @@ impl ChainWorkload {
 /// generation of its own (the races of #205).
 async fn claim(
     nodes: &ChainClient,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     target: usize,
     (me, fresh): (u64, bool),
 ) -> ClaimOutcome {
@@ -1182,7 +1204,7 @@ impl Workload for ChainWorkload {
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         // The replica tier serves the default journal alone (#188).
-        let main = crate::shape::frames(ctx.state()).main;
+        let main = crate::shape::identifiers(ctx.state()).main;
         let replica_ips: Vec<(u64, String)> = if self.journal == main {
             deployment
                 .replicas()
@@ -1258,16 +1280,17 @@ impl Workload for ChainWorkload {
         let mut writer = Writer::new(journal, client_id);
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
-        // The fleet operations (#229): meta and the cell's tenant list.
+        // The fleet operations (#229): the fleet tenant and the cell's tenant list.
         let mut fleet_ops = fleet::FleetOps::new(
             &deployment,
-            crate::shape::frames(ctx.state()),
+            crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             client_id,
+            (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
-            crate::shape::frames(ctx.state()),
+            crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             self.plan
                 .as_ref()
@@ -1381,9 +1404,36 @@ impl Workload for ChainWorkload {
             }
         }
 
+        // Static stability (#247): on its own location, client 0 of a
+        // system-journal run holds the seed — the one node hosting the fleet tenant, the
+        // cell's control journal and the directory — down for
+        // `parent_hold_ms` of the chaos window, while every tenant journal
+        // keeps committing without it (the journal board's gate).
+        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state(), true))
+            .then(|| servers[0].clone());
+        let mut parent_until: Option<Duration> = None;
+        let mut parent_held_once = false;
+        let journal_board = crate::audit::journals::journal_board(ctx.state());
         for _step in 0..config.steps {
             if shutdown.is_cancelled() {
                 break;
+            }
+            if let Some(ip) = &parent_seed {
+                if parent_until.is_some_and(|until| time.now() >= until) {
+                    crate::lifecycle::restart(ctx, ip).await;
+                    crate::audit::journals::lock(&journal_board).release_parent();
+                    parent_until = None;
+                } else if parent_until.is_none()
+                    && !parent_held_once
+                    && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
+                    && buggify_with_prob!(0.1)
+                {
+                    assert_reachable!("static: the seed hosting the control journals is held down");
+                    crate::lifecycle::crash(ctx, ip).await;
+                    crate::audit::journals::lock(&journal_board).hold_parent(0);
+                    parent_until = Some(time.now() + Duration::from_millis(config.parent_hold_ms));
+                    parent_held_once = true;
+                }
             }
 
             // Exactly six provider draws per logical step, independent of the
@@ -1436,6 +1486,27 @@ impl Workload for ChainWorkload {
             // leader — the stale-hint edge `WRITE_TO_NON_LEADER` reaches only
             // deliberately.
             let ignore_hint = (raw_policy >> 2) % 8 == 0;
+
+            // The cross-tenant attack (#247), its own location: a write, a
+            // truncation or a claim sent under an identifier that is not this
+            // journal's — another tenant's journal, or an identifier nobody serves
+            // — must be refused, and never reach the other journal.
+            if matches!(op, WRITE | TRUNCATE | SET_LEADER) && buggify_with_prob!(0.1) {
+                let journals = self
+                    .plan
+                    .as_ref()
+                    .map(|plan| plan.ids.clone())
+                    .unwrap_or_default();
+                foreign::attack(
+                    ctx,
+                    &nodes,
+                    (op, &writer),
+                    (journal, &journals),
+                    (target, raw_payload),
+                    request_timeout,
+                )
+                .await;
+            }
 
             match op {
                 WRITE | WRITE_TO_NON_LEADER => {
@@ -1998,19 +2069,19 @@ impl Workload for ChainWorkload {
                     let span = server_count + replica_count;
                     let mut drawn = usize::try_from(raw_target >> 32).unwrap_or(0) % span.max(1);
                     // A client naming a journal this deployment does not
-                    // serve (the unset frame, or another tenant's) must be
+                    // serve (the unset identifier, or another tenant's) must be
                     // refused, never answered from the wrong journal.
                     let stray = !racing && buggify_with_prob!(0.05);
                     let named = if stray {
                         assert_reachable!("chain: a client asks for a journal nobody serves");
                         if raw_policy & 1 == 0 {
-                            JournalKey::UNSET
+                            JournalIdentifier::UNSET
                         } else {
-                            // A frame nobody serves (#235): this journal's
+                            // An identifier nobody serves (#235): this journal's
                             // id in a tenant no run draws (`u64::MAX` is
                             // outside every draw) — the right journal id
                             // under the wrong tenant must be refused too.
-                            JournalKey::new(TenantId(u64::MAX), journal.journal)
+                            JournalIdentifier::new(TenantId(u64::MAX), journal.journal)
                         }
                     } else {
                         journal
@@ -2790,6 +2861,10 @@ impl Workload for ChainWorkload {
             }
         }
 
+        if let (Some(ip), Some(_)) = (&parent_seed, parent_until.take()) {
+            crate::lifecycle::restart(ctx, ip).await;
+            crate::audit::journals::lock(&journal_board).release_parent();
+        }
         assert_sometimes!(
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
@@ -2893,6 +2968,48 @@ impl Workload for ChainWorkload {
                 .await
                 .ok();
         }
+        // The fleet's control plane in the recovery tail (#247): this
+        // operator finishes the operation it stopped in, and the last one to
+        // do so — every fleet writer is quiet then — judges the final folds
+        // of the fleet directory and the cell, and every live node's registry fold.
+        fleet_ops
+            .settle(
+                ctx,
+                &nodes,
+                config.tunables().checkpoint_policy(),
+                Duration::from_millis(config.retry_backoff_ms.max(10)),
+            )
+            .await;
+        let last_to_settle = {
+            let tail = tail(ctx.state());
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.fleet_settled += 1;
+            guard.fleet_settled == guard.registered
+        };
+        if last_to_settle {
+            let journals = self
+                .plan
+                .as_ref()
+                .map(|plan| plan.ids.clone())
+                .unwrap_or_default();
+            // A node down for good — every journal it serves parked — follows
+            // nothing; every joiner follows the registry whatever it stands.
+            let expected: Vec<u64> = servers
+                .iter()
+                .enumerate()
+                .filter(|(_, ip)| {
+                    !journals
+                        .iter()
+                        .all(|j| crate::world::parked_nodes(ctx.state(), *j).contains(*ip))
+                })
+                .map(|(rank, _)| rank as u64)
+                .chain(
+                    (0..deployment.joiners().len())
+                        .map(|rank| crate::roles::joiner_node_id(rank).0),
+                )
+                .collect();
+            fleet_ops.final_check(ctx, &nodes, &expected).await;
+        }
         // Every client folds to the tail as the chaos window closes (#205):
         // a client whose program never drew a fold holds the trim fence at
         // zero, which refused every truncation of the run — the reason the
@@ -2916,7 +3033,8 @@ impl Workload for ChainWorkload {
         // without it — the jump to the trim point a replica exists to
         // survive, which attrition alone reached once in a thousand runs
         // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == crate::shape::frames(ctx.state()).main && client_id == 0)
+        let held_replica = (journal == crate::shape::identifiers(ctx.state()).main
+            && client_id == 0)
             .then(|| deployment.replicas())
             .filter(|replicas| !replicas.is_empty())
             .filter(|_| buggify_with_prob!(0.5))
@@ -3214,7 +3332,7 @@ impl Workload for ChainWorkload {
         // siblings — a client whose journal is quiet keeps the run alive for
         // one still settling.
         if converged {
-            let appended_to: BTreeSet<JournalKey> = self
+            let appended_to: BTreeSet<JournalIdentifier> = self
                 .plan
                 .as_ref()
                 .map(|plan| {
@@ -3380,6 +3498,24 @@ impl Workload for ChainWorkload {
         {
             for idle in plan.ids.iter().skip(ctx.client_count()) {
                 digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
+            }
+        }
+        // The control journals' histories (#247): every client's library
+        // calls at the fleet tenant, the registry and the directory, searched once (by
+        // client 0, after every run) against the journal model.
+        if self.client_id == 0 && crate::shape::system_journals(ctx.state(), true) {
+            let identifiers = crate::shape::identifiers(ctx.state());
+            for journal in [
+                identifiers.fleet,
+                identifiers.registry,
+                identifiers.directory,
+            ] {
+                let attempts = std::mem::take(
+                    &mut *rpc::control_attempts(ctx.state(), journal)
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+                crate::audit::check_control_history(attempts);
             }
         }
         if let Some(sink) = &self.digest {

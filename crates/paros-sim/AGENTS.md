@@ -20,14 +20,15 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `chain_workload.rs` → `ChainWorkload`, `ChainConfig` → the op alphabet, weights, reconfiguration shape rings.
 - `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
-- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals.
-- `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229): `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step and changed-identity shapes, and the check that meta's directory equals the cell's tenant list (run only when both folds are one instant's).
+- `chain_workload/foreign.rs` → the cross-tenant attack (#247): a `Write`, `Truncate` or `SetLeader` under another tenant's journal or an identifier nobody serves, refused and never applied (`AuditWorld::note_foreign`).
+- `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals and the logger of every attempt at them into the control journals' shared history (#247, `rpc::control_attempts`).
+- `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229): `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step, target-kill (#247), changed-identity and fleet-tenant checkpoint-crash shapes, a reachable per `Stage`, and the check that the fleet directory equals the cell's tenant list — mid-run when both folds are one instant's, and on every run over the final folds, with the recovery tail's control-plane liveness (`settle`, `final_check`).
 - `world/mod.rs` → `StorageWorld`, `storage_world_for` → fake disk, copy budget, parked ids, provisioning ledger, reconfiguration ledger.
 - `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
 - `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
-- `audit/client.rs` → `ClientHistory` · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
+- `audit/client.rs` → `ClientHistory`, `check_control_history` (the fleet tenant's control journal, the registry and the directory, #247) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, generation chain, monotone `first_seq`).
 - `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
 - `corpus.rs` → `E1MaskWorkload`, `BareQuorumWorkload`, `DepartedStragglerWorkload`.
@@ -55,12 +56,12 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
 - `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
-  window (`hold_journal`). The first is the run's main frame (`Frames::main`; `frames` draws it, the
-  directory's, the registry's, meta's and the cell id once per seed: no frame is fixed); the
-  others' frames are drawn
+  window (`hold_journal`). The first is the run's main identifier (`Identifiers::main`; `identifiers` draws it, the
+  directory's, the registry's, the fleet tenant's and the cell id once per seed: no identifier is fixed); the
+  others' identifiers are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
-  injected corruption. `system_journals` → the directory, the registry and meta (#229) on half the seeds, on
+  injected corruption. `system_journals` → the directory, the registry and the fleet tenant's control journal (#229) on half the seeds (the fleet operations too: kept at 50% from the sweep's coverage, #247), on
   `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
@@ -79,7 +80,7 @@ the generation) · `CHECKPOINT=23` (the registry's owner, through `paros::client
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
 `BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
 #211) · `FLEET_INIT=25` (`init`'s fleet half through `paros::client::fleet`, #229) · `TENANT=26`
-(create or remove a tenant through meta and the cell; either may stop after one step, a BUGGIFY
+(create or remove a tenant through the fleet tenant and the cell; either may stop after one step, a BUGGIFY
 crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired ids are no-ops that keep their slot in the alphabet.
 
 - Each client is an **owner** or a **reader** for the run (knob; each journal's first client
@@ -97,14 +98,19 @@ crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired
 ## Boards
 
 - **Journal board** (`audit/journals.rs`): every slot of journal `j` applies only an identity
-  appended to `j`; a quarantined journal sends nothing; a sibling keeps committing while one is
-  held; a node keeps serving the rest while one is quarantined.
+  appended to `j` (a write sent under another tenant's fence only as a refusal, #247); a
+  quarantined journal sends nothing; a sibling keeps committing while one is held; a node keeps
+  serving the rest while one is quarantined; a tenant journal commits while the control
+  journals' seed is held down (static stability, #247).
 - **System board** (`audit/system.rs`): every node folds each system journal alike per LSN; a
   created journal takes its creator's drawn user id, never reused (`IdTaken` only for an id
   created before); no append acked after its tombstone; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves
-  a journal, a booking takes a slot of its node's class and never past its capacity (#211, on the
-  registry's events in LSN order while the board has seen every LSN); gates for name races,
+  a journal, a booking takes a slot of its node's class and never past its capacity, and a live
+  booking id is never booked again (#211, on the registry's events in LSN order; the model
+  crosses a truncation at the checkpoint a restoring node meets and equals every checkpoint it
+  reaches, #247); no genesis node's message waits on the registry fold; every live node's
+  registry fold reaches the tail after chaos; gates for name races,
   joiners learning before admission, refused-then-accepted joiner messages, a re-registration,
   and a fold restarting from a checkpoint once one truncated.
 

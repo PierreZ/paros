@@ -18,7 +18,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   (pending, then formed: the commit point after every store is formatted).
 - `src/stores.rs` → `DirStores` (`JournalStores`) → `<data-dir>/journals/<tenant>/<journal>/`
   (#235); a created journal is a first boot until `opened`, resolved from the disk at `load`.
-- `src/record.rs` → `Record`, `parse_key`, `write_atomically` → `<data-dir>/provisioned`: the
+- `src/record.rs` → `Record`, `parse_identifier`, `write_atomically` → `<data-dir>/provisioned`: the
   journal stores formatted (#208); every record here is rewritten atomically.
 - `src/resolve.rs` → `check_shape`, `resolve`, `resolve_all` → `HOST:PORT` (port required),
   names resolved once at startup; a rendezvous name yields every address; shared with
@@ -58,8 +58,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Local rules
 
-- **Interim (M8 → M9)**: the cell's journals are the cell control journal, meta's, plus one
-  static user journal (every frame drawn at `init` and printed), plain Multi-Paxos over the seeds; a non-seed machine
+- **Interim (M8 → M9)**: the cell's journals are the cell control journal, the fleet tenant's, plus one
+  static user journal (every identifier drawn at `init` and printed), plain Multi-Paxos over the seeds; a non-seed machine
   and every `stateless` one wait for placement (#211, #212); the first cell coordinator is the
   lowest seed id (#225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.

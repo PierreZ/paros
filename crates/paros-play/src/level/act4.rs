@@ -74,7 +74,6 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::ReplicaApply,
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
     AutomationFlag::TrimPoint,
     AutomationFlag::AckWrite,
     AutomationFlag::GridColumn,
@@ -134,7 +133,7 @@ fn deployed(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::new(*id, paros_core::JournalKey::UNSET)
+                ..Config::new(*id, paros_core::JournalIdentifier::UNSET)
             })
         })
         .collect();
@@ -449,10 +448,10 @@ pub static QUORUM_READS: Level = Level {
     act: 4,
     title: "Quorum reads",
     briefing: "\
-The grid moved the writes away from the leader, but the reads stay on the \
-leader. A read-index read asks the leader to prove that it still leads. That \
-proof costs one round of beats and acks on the node that the grid must \
-protect. A better question exists, and it does not use the leader.
+The grid moved the writes away from the leader. A read must not go back to \
+the leader either: a read that asks the leader to prove that it still leads \
+costs one round of beats and acks on the node that the grid must protect. The \
+quorum read of Act II does not use the leader, and on a grid it asks less.
 
 Ask a **row**, which is a Phase-1 quorum, one question each: what is the \
 highest slot that you voted in? Take the largest answer, and let any replica \
@@ -517,7 +516,7 @@ serve the read.",
                 {
                     GoalStatus::Reached(format!(
                         "Node {} answered the read at {}, and it does not lead. No node sent a \
-                     beat, and the leader opened no read round. The client already holds an ack \
+                     beat, and the leader took no part. The client already holds an ack \
                      for {}, and the answer is at or above that slot. The history is \
                      linearizable.",
                         node.0,

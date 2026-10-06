@@ -21,8 +21,8 @@ impl ColocatedNode {
     /// Every beat is acked by every reachable follower each tick, so a
     /// healthy leader trivially refills the window.
     ///
-    /// A **Phase-2** quorum, for the reason spelled out at the read fence
-    /// (`node/reads.rs`): a leader's authority is the claim that no later
+    /// A **Phase-2** quorum, for the reason spelled out at
+    /// [`Authority::holds`](crate::proposer::Authority::holds): a leader's authority is the claim that no later
     /// ballot has decided behind it, which every future Phase-1 quorum's
     /// intersection with this ack set rules out. On a delegated round the
     /// window is fed by `HeartbeatAck` alone: a proxy's votes never reach
@@ -39,9 +39,19 @@ impl ColocatedNode {
             let me = self.config.id;
             self.proposer
                 .renew_authority(self.is_acceptor().then_some(me));
+            assert!(
+                self.role == NodeRole::Leader,
+                "a held window keeps the leadership"
+            );
         } else {
             self.counters.quorum_lost_step_downs += 1;
             self.become_follower(None);
+            // An emptied window resigns whole: no round, no fence survives.
+            assert!(self.role == NodeRole::Follower, "an emptied window resigns");
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a resigned leader holds no round"
+            );
         }
     }
 }

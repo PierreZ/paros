@@ -57,8 +57,6 @@ pub enum PromptKind {
     PersistOrder,
     /// A `Commit` contradicts a record held at a lower ballot. Keep or take?
     CommitOverwrite,
-    /// A read's index is captured and the acks are in. Serve, or wait?
-    ReadServe,
     /// A peer answered a catch-up with its trim point. Where does this node's
     /// log start afterwards, and what does it promise?
     TrimPoint,
@@ -98,7 +96,6 @@ impl PromptKind {
             PromptKind::LeaderRecovery => AutomationFlag::LeaderRecovery,
             PromptKind::ReplicaApply => AutomationFlag::ReplicaApply,
             PromptKind::PersistOrder => AutomationFlag::PersistOrder,
-            PromptKind::ReadServe => AutomationFlag::ReadServe,
             PromptKind::TrimPoint => AutomationFlag::TrimPoint,
             PromptKind::AckWrite => AutomationFlag::AckWrite,
             PromptKind::GridColumn => AutomationFlag::GridColumn,
@@ -124,7 +121,6 @@ pub const ALL_PROMPTS: &[PromptKind] = &[
     PromptKind::ReplicaApply,
     PromptKind::PersistOrder,
     PromptKind::CommitOverwrite,
-    PromptKind::ReadServe,
     PromptKind::TrimPoint,
     PromptKind::AckWrite,
     PromptKind::GridColumn,
@@ -165,9 +161,6 @@ pub fn confirmation(kind: PromptKind) -> &'static str {
         }
         PromptKind::CommitOverwrite => {
             "a restart reads back the record that the choosing ballot decided."
-        }
-        PromptKind::ReadServe => {
-            "a node answers a read only with a proof of leadership newer than the read."
         }
         PromptKind::TrimPoint => {
             "everything below a trim point is chosen and gone, so the node jumps there and \

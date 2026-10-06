@@ -12,7 +12,7 @@ use moonpool_core::{
     Detach, Providers, SimulationError, SimulationResult, TaskProvider, TimeProvider,
 };
 use moonpool_rpc::{RpcHandle, ServiceClient};
-use paros_core::{Audience, JournalKey, Message, NodeId, Party, ProxyId};
+use paros_core::{Audience, JournalIdentifier, Message, NodeId, Party, ProxyId};
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -95,16 +95,25 @@ pub(crate) struct PeerMailbox {
 /// A mailbox's journal lanes and the round-robin cursor over them.
 #[derive(Default)]
 struct Lanes {
-    /// The envelope's frame `(tenant, journal)` (#235) → its keep-newest
+    /// The envelope's identifier `(tenant, journal)` (#235) → its keep-newest
     /// lane (`BTreeMap`: the drain order is part of determinism).
     by_journal: BTreeMap<(u64, u64), VecDeque<internal::ConsensusMessage>>,
-    /// The frame the next drain starts looking from.
+    /// The identifier the next drain starts looking from.
     cursor: (u64, u64),
     /// Messages queued over every lane.
     total: usize,
 }
 
 impl Lanes {
+    /// The running total is the sum of the lanes, and the round-robin cursor
+    /// is a journal key.
+    fn assert_invariants(&self) {
+        assert!(
+            self.total == self.by_journal.values().map(VecDeque::len).sum::<usize>(),
+            "a mailbox's total counts every queued message once"
+        );
+    }
+
     /// Pop one message round-robin: the first non-empty lane at or after the
     /// cursor, wrapping; the cursor then moves past that lane.
     fn pop(&mut self) -> Option<internal::ConsensusMessage> {
@@ -114,9 +123,22 @@ impl Lanes {
             .chain(self.by_journal.range(..self.cursor))
             .find(|(_, lane)| !lane.is_empty())
             .map(|(journal, _)| *journal)?;
+        let total = self.total;
         let message = self.by_journal.get_mut(&journal)?.pop_front()?;
         self.total -= 1;
         self.cursor = (journal.0, journal.1.saturating_add(1));
+        // Fairness: the cursor moves strictly past the lane it served.
+        assert!(
+            self.cursor > journal,
+            "the round-robin cursor moves past the served lane"
+        );
+        assert!(self.total + 1 == total, "a pop takes exactly one message");
+        // Pair of the push-side keying: a lane holds only its own journal.
+        assert!(
+            (message.tenant, message.journal) == journal,
+            "a lane holds only its own journal's messages"
+        );
+        self.assert_invariants();
         Some(message)
     }
 
@@ -147,7 +169,9 @@ impl PeerMailbox {
 
     /// Whether `journal`'s lane is full (the next push into it evicts).
     fn is_full(&self, journal: (u64, u64)) -> bool {
-        self.lock().lane_len(journal) >= self.capacity
+        let len = self.lock().lane_len(journal);
+        assert!(len <= self.capacity, "a lane never exceeds its capacity");
+        len == self.capacity
     }
 
     /// Enqueue `message`, evicting and returning one undelivered message when
@@ -195,6 +219,19 @@ impl PeerMailbox {
             if evicted.is_none() {
                 lanes.total += 1;
             }
+            // Eviction is per lane (#188): only a full lane evicts, and only
+            // its own journal's message — never another journal's.
+            if let Some(victim) = &evicted {
+                assert!(
+                    lanes.lane_len(journal) == self.capacity,
+                    "only a full lane evicts"
+                );
+                assert!(
+                    (victim.tenant, victim.journal) == journal,
+                    "a lane evicts only its own journal's message"
+                );
+            }
+            lanes.assert_invariants();
             evicted
         };
         self.wake.notify_one();
@@ -282,6 +319,10 @@ impl Outbound {
     /// Add a lane to `node` (#189: a node the registry admitted at runtime).
     /// A node already reachable keeps its lane.
     pub(crate) fn add_peer(&self, node: NodeId, lane: PeerMailbox) {
+        // A node never opens a lane to itself.
+        if let Party::Node(me) = self.sender {
+            assert!(node != me, "a node opens no lane to itself");
+        }
         self.peers().entry(node).or_insert(lane);
     }
 
@@ -303,6 +344,16 @@ impl Outbound {
         };
         if *audience == Audience::Learners {
             nodes.extend(self.learners.iter().copied());
+        }
+        // A fan-out never loops back to its sender.
+        if let (Party::Node(me), false) = (self.sender, matches!(audience, Audience::Node(_))) {
+            assert!(!nodes.contains(&me), "a fan-out never addresses its sender");
+        }
+        if audience.proxy().is_some() {
+            assert!(
+                nodes.is_empty(),
+                "a proxy audience resolves through the proxy lanes"
+            );
         }
         nodes
     }
@@ -357,7 +408,7 @@ impl Outbound {
         &self,
         hooks: &H,
         audit: &A,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         to: Party,
         msg: &Message,
     ) {
@@ -419,7 +470,7 @@ impl Outbound {
                 );
                 return;
             };
-            // The envelope (#188), framed by the tenant (#235): the
+            // The envelope (#188), named with its tenant (#235): the
             // receiver demuxes on the pair.
             message.tenant = journal.tenant.0;
             message.journal = journal.journal.0;
@@ -560,6 +611,10 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     to: Party,
 ) {
     let batch_limit = tunables.delivery_batch;
+    assert!(
+        batch_limit > 0,
+        "a delivery batch carries at least one message"
+    );
     let mut carried = None;
     loop {
         let first = if let Some(message) = carried.take() {
@@ -657,6 +712,31 @@ fn delivery_batch<A: Audit>(
     if batch.len() > 1 && messages.take_reverse() {
         batch.reverse();
     }
+    // A batch is never empty, never longer than its limit, and fits a frame
+    // unless it is one oversized message on its own.
+    assert!(!batch.is_empty(), "a delivery batch carries a message");
+    assert!(
+        batch.len() <= batch_limit.max(1),
+        "a delivery batch honours its limit"
+    );
+    if batch.len() > 1 {
+        assert!(
+            batch_bytes <= DELIVERY_BATCH_BYTES,
+            "a multi-message batch fits its byte budget"
+        );
+    }
+    // A carried message is the one that would have overflowed the budget:
+    // the batch stopped short of its limit for bytes, not for count.
+    if let Some(next) = &carried {
+        assert!(
+            batch.len() < batch_limit,
+            "a carried message left room by count"
+        );
+        assert!(
+            batch_bytes.saturating_add(next.encoded_len()) > DELIVERY_BATCH_BYTES,
+            "a message is carried only for bytes"
+        );
+    }
     (internal::Deliver { messages: batch }, carried)
 }
 
@@ -690,7 +770,7 @@ pub(crate) fn send_messages<H, A>(
     out: &Outbound,
     hooks: &H,
     audit: &A,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     messages: Vec<(Party, Message)>,
 ) where
     H: DriverHooks,
@@ -721,11 +801,10 @@ mod tests {
     use super::*;
 
     /// A heartbeat of `journal`, as the wire carries it.
-    fn beat(journal: u64, seq: u64) -> internal::ConsensusMessage {
+    fn beat(journal: u64) -> internal::ConsensusMessage {
         let mut message = message_to_proto(&Message::HeartbeatAck {
             from: NodeId(1),
             ballot: paros_core::Ballot::zero(),
-            seq,
             chosen: None,
         })
         .expect("a heartbeat ack encodes");
@@ -740,9 +819,9 @@ mod tests {
     #[test]
     fn a_busy_journal_never_evicts_another_journals_messages() {
         let mailbox = PeerMailbox::new(2);
-        assert!(mailbox.push(beat(129, 0), false, false).is_none());
-        for seq in 0..10 {
-            let evicted = mailbox.push(beat(128, seq), false, false);
+        assert!(mailbox.push(beat(129), false, false).is_none());
+        for _ in 0..10 {
+            let evicted = mailbox.push(beat(128), false, false);
             if let Some(evicted) = evicted {
                 assert_eq!(evicted.journal, 128, "only the busy journal's lane evicts");
             }

@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
-    Ballot, Command, JournalId, JournalKey, MustSync, NodeId, Outcome, Party, QuorumSystem,
+    Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
 };
 
@@ -61,7 +61,8 @@ use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
 use crate::hooks::{DriverHooks, Reply, Seam};
 use crate::rpc::{
-    InspectReply, Read, ReadAck, ReplySender, journal_state_to_proto, quorum_system_to_proto,
+    InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, ReplySender,
+    journal_state_to_proto, quorum_system_to_proto,
 };
 use crate::storage::LogStorage;
 
@@ -328,7 +329,7 @@ where
                 // once the row answered whole and this replica folded the
                 // maximum watermark. The row override is the node's hook,
                 // asked only under a grid, from the loop.
-                if refuse_journal(journal, JournalKey::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
+                if refuse_journal(journal, JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
                     let refused = ReadAck { unknown_journal: true, ..ReadAck::default() };
                     answer(hooks, audit, me_id, Reply::LogRead, reply, refused);
                     continue;
@@ -358,9 +359,18 @@ where
                 }
                 tracing::info!(replica = self_id, "replica_tick");
             }
-            Some((_req, reply)) = inspects.recv() => {
-                // No batch: an inspect reads the replica and its store.
-                let _ = reply.send(inspect(&replica));
+            Some((req, reply)) = inspects.recv() => {
+                // No batch: an inspect reads the replica and its store. It
+                // names the replica's journal or asks for the node alone; an
+                // unset identifier or another journal is refused (#243).
+                let full = inspect(&replica);
+                let answer = match req.target() {
+                    Ok(InspectTarget::Node) => full.node_facts(),
+                    Ok(InspectTarget::Journal(journal)) if journal == replica.config().journal => full,
+                    Ok(InspectTarget::Journal(_)) => full.refused(InspectRefusal::UnknownJournal),
+                    Err(refusal) => full.refused(refusal),
+                };
+                let _ = reply.send(answer);
             }
             () = shutdown.cancelled() => return Ok(()),
         }

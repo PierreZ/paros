@@ -20,10 +20,11 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalKey, JournalState, LogRead,
-    MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, Message,
-    NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply, ReconfigureRequest,
-    ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq, Slot, Value,
+    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalState,
+    LogRead, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
+    Message, NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply,
+    ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq,
+    Slot, Value,
 };
 
 use crate::driver::BootRefusal;
@@ -107,24 +108,27 @@ pub struct LogReadReport<'a> {
 }
 
 impl<'a> LogReadReport<'a> {
-    /// The report of the core page `read` answering a read from `from`.
+    /// The report of the core page `read` answering a read from `from`;
+    /// `None` for [`LogRead::NotHeld`], which serves nothing (the read is
+    /// answered unserved).
     #[must_use]
-    pub fn of(read: &'a LogRead, from: Seq, answer: LogReadAnswer) -> Self {
+    pub fn of(read: &'a LogRead, from: Seq, answer: LogReadAnswer) -> Option<Self> {
         match read {
-            LogRead::Truncated(state) => Self {
+            LogRead::Truncated(state) => Some(Self {
                 from,
                 truncated: true,
                 records: &[],
                 state: *state,
                 answer,
-            },
-            LogRead::Page(page) => Self {
+            }),
+            LogRead::Page(page) => Some(Self {
                 from,
                 truncated: false,
                 records: &page.records,
                 state: page.state,
                 answer,
-            },
+            }),
+            LogRead::NotHeld => None,
         }
     }
 }
@@ -188,7 +192,7 @@ pub trait Audit {
 
     /// This node refused a client call naming a journal it does not serve
     /// (`0`, or any other id than its own, #185). `call` names the RPC.
-    fn journal_refused(&self, node: NodeId, journal: JournalKey, call: &'static str) {}
+    fn journal_refused(&self, node: NodeId, journal: JournalIdentifier, call: &'static str) {}
 
     /// This node folded the system-journal record at position `seq` of
     /// `journal` (#189: the directory or the node registry) into `event` —
@@ -196,7 +200,7 @@ pub trait Audit {
     fn system_folded(
         &self,
         node: NodeId,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         seq: u64,
         event: &crate::system::SystemEvent,
     ) {
@@ -205,28 +209,31 @@ pub trait Audit {
     /// This node folded a checkpoint record (#230) at position `seq` of
     /// system journal `journal`: `verified` is `Some(equal)` when its fold
     /// already held every position below and compared its own state with
-    /// the checkpoint's, `None` when it restored from it.
+    /// the checkpoint's, `None` when it restored from it. `state` is the
+    /// registry the fold holds right after it (#247: what an oracle that
+    /// models the registry resumes from across a truncation).
     fn checkpoint_folded(
         &self,
         node: NodeId,
-        journal: JournalKey,
+        journal: JournalIdentifier,
         seq: u64,
         verified: Option<bool>,
+        state: &crate::system::Registry,
     ) {
     }
 
     /// This node started serving `journal`, a journal the directory created
     /// naming it (#189).
-    fn journal_started(&self, node: NodeId, journal: JournalKey) {}
+    fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {}
 
     /// This node stopped serving `journal` for good (#189): its tombstone was
     /// folded, or this node's own retirement was.
-    fn journal_stopped(&self, node: NodeId, journal: JournalKey) {}
+    fn journal_stopped(&self, node: NodeId, journal: JournalIdentifier) {}
 
     /// This node refused a peer message for `journal` from `from`, a node its
     /// registry fold does not have in the pool yet (#189). A liveness cost
     /// until the fold catches up, never a safety one.
-    fn unpooled_message(&self, node: NodeId, journal: JournalKey, from: NodeId) {}
+    fn unpooled_message(&self, node: NodeId, journal: JournalIdentifier, from: NodeId) {}
 
     /// This node's registry fold admitted `admitted` to the pool (#189): its
     /// messages are accepted from now on.
@@ -333,7 +340,7 @@ pub trait Audit {
     fn handoff_refused(&self, node: NodeId, target: u64, stale: u64, shape: u64, unfit: u64) {}
 
     /// This node resigned a handoff-installed leadership because its inherited
-    /// read fence stayed uncovered — the deliberate fallback to an ordinary
+    /// fence stayed uncovered — the deliberate fallback to an ordinary
     /// Phase 1. `count` is the monotone total for this incarnation.
     fn handoff_fence_expired(&self, node: NodeId, count: u64) {}
 
@@ -458,13 +465,13 @@ pub trait Audit {
     /// tick. The unit every core timeout is counted in.
     fn ticked(&self, node: NodeId) {}
 
-    /// This node received a `HeartbeatAck` from `from` echoing `(ballot,
-    /// seq)`, reported at the inbox before the core folds it — whether or
+    /// This node received a `HeartbeatAck` from `from` echoing `ballot`,
+    /// reported at the inbox before the core folds it — whether or
     /// not the core counts it (a stale ballot's ack moves nothing). An ack
     /// that reaches a leader refills its `CheckQuorum` window, and an ack in
     /// flight can be older than a window: the deposed-leader oracle measures
     /// from the last ack received, never from the promise-majority alone.
-    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot, seq: u64) {}
+    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {}
 
     /// This node received a `Prepare` below its own compaction floor — the
     /// "campaign against a truncated acceptor" interleaving.

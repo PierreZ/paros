@@ -1,12 +1,12 @@
 //! The chain client's **fleet operations** (#229): `init`'s fleet half and
 //! creating and removing tenants, run through the library's
-//! `paros::client::fleet` — the code `parosctl` ships — against meta's
-//! control journal and the cell control journal at the seeds. Every frame is
-//! the run's drawn one (`crate::shape::Frames`: no frame is fixed, §3.8).
+//! `paros::client::fleet` — the code `parosctl` ships — against the fleet tenant's
+//! control journal and the cell control journal at the seeds. Every identifier is
+//! the run's drawn one (`crate::shape::Identifiers`: no identifier is fixed, §3.8).
 //!
 //! Every client is an operator: several run fleet operations at once and
 //! fence each other through the journals' generations, and an operation
-//! that loses is resumed later from what the journals hold. Three shapes make
+//! that loses is resumed later from what the journals hold. These shapes make
 //! the state machines' middles likely, each a BUGGIFY location paired with a
 //! reachable where it fires:
 //!
@@ -15,31 +15,48 @@
 //!   same operation, which must end where an uninterrupted one would;
 //! - **a changed identity**: an `init` told another cell's id must be
 //!   refused; a tenant created under an id this client had already used must
-//!   be refused, and the creator redraws.
+//!   be refused, and the creator redraws;
+//! - **a crash between the fleet directory's checkpoint and its truncate**
+//!   (#247, the registry owner's shape for the fleet tenant): the checkpoint
+//!   stays mid-log, and every later fold of the directory verifies it on the
+//!   way.
 //!
-//! **Meta's directory equals the cell's tenant list** (FDB's
+//! Every fold a session makes — the directory's and the cell's — is held to the
+//! checkpoint oracle the registry's owner is (`judge_folds`): a checkpoint
+//! met with the whole prefix folded is that prefix's state.
+//!
+//! **The fleet directory equals the cell's tenant list** (FDB's
 //! `MetaclusterConsistency`): after an operation that left the session
 //! holding both journals, when a fresh read finds neither written since its
 //! folds — so the two folds are one instant's — every tenant the cell hosts
-//! is in meta under that cell, and every `READY` `users` tenant in meta is
-//! hosted. A tenant mid-operation (`REGISTERING`, `REMOVING`) may be either.
-//! The check claims nothing of its own: a session that does not hold both
-//! journals skips it.
+//! is in the fleet directory under that cell, and every `READY` `users`
+//! tenant in the fleet directory is hosted. A tenant mid-operation
+//! (`REGISTERING`, `REMOVING`) may be either.
+//! Mid-run the check claims nothing of its own: a session that does not
+//! hold both journals skips it. **At the end of every run** (#247) it runs
+//! over the final folds: in the recovery tail every operator finishes the
+//! operation it stopped in ([`FleetOps::settle`]), and the last one judges
+//! the control plane once every fleet writer is quiet
+//! ([`FleetOps::final_check`]) — the directory's equality, no tenant left
+//! mid-operation, a started `init` `READY`, every live node's registry fold
+//! at the tail.
 //!
 //! No function here draws randomness: every choice is read off the
 //! caller's step draws.
 
+use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+    SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::client::Writer;
-use paros::client::checkpoint::CheckpointPolicy;
-use paros::client::fleet::{FleetFrames, FleetRefusal, FleetSession, Run, Stage, Step};
-use paros::meta::{CellState, Group, Placement, TenantState};
+use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
+use paros::client::fleet::{FleetRefusal, FleetSession, Run, Stage, Step};
+use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
+use paros::machine::ControlJournals;
 use paros::system::Registry;
-use paros::{JournalId, JournalKey, NodeId, TenantId};
+use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 
 use super::system::Announce;
 use crate::client::ChainClient;
@@ -48,23 +65,27 @@ use crate::client::ChainClient;
 /// for one often.
 const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 
-/// An operation this client stopped in the middle of (the crash shape), to
-/// resume on its next fleet step.
+/// An operation this client stopped in the middle of — the crash shape, or
+/// a run that did not end (interrupted, its target killed under it, going
+/// round) — to resume on its next fleet step, and at the latest in the
+/// recovery tail (#247): an operator remembers what it was doing.
 #[derive(Clone, Debug)]
 enum Pending {
     Init,
-    /// The name, its placement and the frame this client's creation drew.
-    Create(Vec<u8>, Placement, JournalKey),
+    /// The name and the identifiers this client's creation drew.
+    Create(Vec<u8>, Vec<JournalIdentifier>),
     Remove(Vec<u8>),
 }
 
 /// The chain client's fleet state across its steps.
 pub(super) struct FleetOps {
-    /// The run runs the system journals (and so meta).
+    /// The run runs the system journals (and so the fleet tenant).
     active: bool,
-    /// The run's frames: the cell's id, the cell tenant's control journal
-    /// (the registry) and meta's.
-    frames: FleetFrames,
+    /// The run's identifiers: the cell's id, the cell tenant's control journal
+    /// (the registry) and the fleet tenant's.
+    journals: ControlJournals,
+    /// The fleet tenant's control journal: the run's identifiers always name it.
+    fleet: JournalIdentifier,
     /// How many genesis ranks host the system journals.
     seeds: usize,
     /// The genesis pool size: the registry's genesis.
@@ -72,41 +93,55 @@ pub(super) struct FleetOps {
     client_id: u64,
     /// This client saw an `init` end.
     initialized: bool,
-    /// Tenant frames this client had created: a deliberate reuse names one.
-    ever_created: Vec<JournalKey>,
+    /// Tenant identifiers this client had created: a deliberate reuse names one.
+    ever_created: Vec<JournalIdentifier>,
     pending: Option<Pending>,
+    /// The seeds' addresses, by rank: the servers a fleet step talks to.
+    seed_ips: Vec<String>,
+    /// How long into an operation its target is killed, and how long it
+    /// stays down (`ChainConfig::fleet_kill_delay_ms`, `fleet_kill_down_ms`).
+    kill_ms: (u64, u64),
+    /// The pending operation was cut short by its target's kill.
+    killed: bool,
 }
 
 impl FleetOps {
     /// The fleet operations of client `client_id` on `deployment`.
     pub(super) fn new(
         deployment: &crate::roles::Deployment,
-        frames: crate::shape::Frames,
+        identifiers: crate::shape::Identifiers,
         active: bool,
         client_id: u64,
+        kill_ms: (u64, u64),
     ) -> Self {
         let pool = deployment.acceptors().len();
+        let seeds = crate::shape::seed_ranks(pool).len().max(1);
         Self {
             active,
-            frames: FleetFrames {
-                cell_id: frames.cell_id,
-                cell: frames.registry,
-                meta: frames.meta,
+            journals: ControlJournals {
+                cell_id: identifiers.cell_id,
+                cell: identifiers.registry,
+                fleet: Some(identifiers.fleet),
             },
-            seeds: crate::shape::seed_ranks(pool).len().max(1),
+            fleet: identifiers.fleet,
+            seeds,
             pool,
             client_id,
             initialized: false,
             ever_created: Vec::new(),
             pending: None,
+            seed_ips: deployment.acceptors().iter().take(seeds).cloned().collect(),
+            kill_ms,
+            killed: false,
         }
     }
 
-    /// A session over `frames` writing both journals as this client: meta
-    /// as its operator, the cell's as its coordinator.
-    fn session(&self, frames: FleetFrames, policy: CheckpointPolicy) -> FleetSession {
+    /// A session over `journals` writing both journals as this client: the
+    /// fleet tenant's as its operator, the cell's as its coordinator. `None`
+    /// only for journals that name no fleet tenant, which the run's never do.
+    fn session(&self, journals: ControlJournals, policy: CheckpointPolicy) -> Option<FleetSession> {
         FleetSession::new(
-            frames,
+            journals,
             self.client_id,
             NodeId(self.client_id),
             Registry::new((0..self.pool as u64).map(NodeId)),
@@ -114,13 +149,17 @@ impl FleetOps {
         )
     }
 
-    /// The seeds' client, announcing every write to meta and the registry.
+    /// The seeds' client, announcing every write to the fleet tenant and the
+    /// registry, under a leader hint of its own: the hint of the client it is
+    /// cloned from names the client's own journal's leader, which need not
+    /// serve the fleet tenant or the registry at all.
     fn client(&self, ctx: &SimContext, nodes: &ChainClient) -> ChainClient {
         nodes
             .clone()
+            .with_own_leader_hint()
             .with_observer(std::sync::Arc::new(Announce::new(
                 ctx,
-                &[self.frames.meta, self.frames.cell],
+                &[self.fleet, self.journals.cell],
             )))
             .rotating_over(self.seeds.min(nodes.server_count()).max(1))
     }
@@ -144,20 +183,23 @@ impl FleetOps {
             return;
         }
         if self.pending.is_some() {
-            self.resume(ctx, nodes, policy, draw).await;
+            let _ = self.resume(ctx, nodes, policy, draw).await;
             return;
         }
         let client = self.client(ctx, nodes);
         let first = self.first(draw);
         if self.initialized && buggify_with_prob!(0.1) {
-            // An operator talking to another cell than the one meta holds.
+            // An operator talking to another cell than the one the fleet tenant holds.
             assert_reachable!("fleet: an init is told another cell's id");
-            let wrong = FleetFrames {
-                cell_id: self.frames.cell_id ^ 2,
-                ..self.frames
+            let wrong = ControlJournals {
+                cell_id: self.journals.cell_id ^ 2,
+                ..self.journals
             };
-            let mut session = self.session(wrong, policy);
+            let Some(mut session) = self.session(wrong, policy) else {
+                return;
+            };
             let run = session.init(&client, first, draw | 1, Duration::ZERO).await;
+            judge_folds(&session);
             assert_always!(
                 !matches!(run.outcome, Step::Done { .. }) && run.steps.is_empty(),
                 "fleet: an init naming another cell writes nothing and never ends",
@@ -171,15 +213,110 @@ impl FleetOps {
             }
             return;
         }
-        let mut session = self.session(self.frames, policy);
-        if buggify_with_prob!(0.2) {
-            if let Step::Advanced(_) = session.init_step(&client, first, draw | 1).await {
-                assert_reachable!("fleet: an init stops after one step");
-                self.pending = Some(Pending::Init);
-            }
+        if self.initialized && buggify_with_prob!(0.15) {
+            self.checkpoint_directory_and_stop(&client, policy, first)
+                .await;
             return;
         }
-        self.finish_init(&client, &mut session, first, draw).await;
+        let Some(mut session) = self.session(self.journals, policy) else {
+            return;
+        };
+        if buggify_with_prob!(0.2) {
+            if let Step::Advanced(stage) = session.init_step(&client, first, draw | 1).await {
+                assert_reachable!("fleet: an init stops after one step");
+                reach(stage);
+                self.pending = Some(Pending::Init);
+            }
+            judge_folds(&session);
+            return;
+        }
+        let kill = self.killer(ctx, first);
+        let (ended, cut_short) =
+            futures::join!(self.finish_init(&client, &mut session, first, draw), kill);
+        judge_folds(&session);
+        self.stopped(ended, cut_short, Pending::Init);
+    }
+
+    /// The process kill of an operation's target (#247): with its own
+    /// BUGGIFY location, a future that crashes the seed `first` names
+    /// `kill_ms.0` into the operation it is joined with — while a step is in
+    /// flight — and restarts it `kill_ms.1` later. Moonpool's own kill: the
+    /// process dies with its connections and unsynced writes, then reboots
+    /// from its disk. Whether it fired.
+    fn killer<'a>(
+        &self,
+        ctx: &'a SimContext,
+        first: usize,
+    ) -> impl Future<Output = bool> + use<'a> {
+        let ip = self
+            .seed_ips
+            .get(first)
+            .cloned()
+            .filter(|_| buggify_with_prob!(0.1));
+        let (delay, down) = self.kill_ms;
+        async move {
+            let Some(ip) = ip else {
+                return false;
+            };
+            if ctx
+                .time()
+                .sleep(Duration::from_millis(delay))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            assert_reachable!("fleet: an operation's target is killed while a step is in flight");
+            crate::lifecycle::crash(ctx, &ip).await;
+            let _ = ctx.time().sleep(Duration::from_millis(down)).await;
+            crate::lifecycle::restart(ctx, &ip).await;
+            true
+        }
+    }
+
+    /// Keep an operation that did not end as this client's pending one;
+    /// `killed` when its target was killed under it.
+    fn stopped(&mut self, ended: bool, killed: bool, pending: Pending) {
+        if !ended {
+            if killed {
+                assert_reachable!("fleet: an operation its target's kill cut short is pending");
+            }
+            self.killed = killed;
+            self.pending = Some(pending);
+        }
+    }
+
+    /// An operator that crashes between the fleet directory's checkpoint and
+    /// its truncate (#247, the registry's shape for the fleet tenant): open
+    /// the fleet tenant's control journal as its owner, write a checkpoint of
+    /// the fold, and stop. The checkpoint stays mid-log; every later fold
+    /// verifies it on the way, and the next owner's checkpoint truncates past
+    /// it.
+    async fn checkpoint_directory_and_stop(
+        &self,
+        client: &ChainClient,
+        policy: CheckpointPolicy,
+        first: usize,
+    ) {
+        let mut owner = Checkpointer::new(
+            self.fleet,
+            self.client_id,
+            FleetDirectory::default(),
+            policy,
+        );
+        let OpenOutcome::Open { diverged, .. } = owner.open(client, first).await else {
+            return;
+        };
+        assert_always!(
+            diverged.is_none(),
+            "checkpoint: an owner's load finds each checkpoint its prefix's state",
+            { "journal" => self.fleet.to_string(), "seq" => diverged.unwrap_or_default() }
+        );
+        if owner.write_checkpoint(client, first).await.is_ok() {
+            assert_reachable!(
+                "fleet: an operator stops between the directory's checkpoint and its truncate"
+            );
+        }
     }
 
     /// `TENANT`: create (an even `class`) or remove a `users` tenant named
@@ -196,58 +333,63 @@ impl FleetOps {
             return;
         }
         if self.pending.is_some() {
-            self.resume(ctx, nodes, policy, payload).await;
+            let _ = self.resume(ctx, nodes, policy, payload).await;
             return;
         }
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
-        // The creator's choice; a pinned tenant is never moved (M12).
-        let placement = if (class >> 1) % 2 == 0 {
-            Placement::Movable
-        } else {
-            Placement::Pinned
-        };
         let client = self.client(ctx, nodes);
         let first = self.first(payload);
-        let mut session = self.session(self.frames, policy);
-        let crash = buggify_with_prob!(0.2);
+        let Some(mut session) = self.session(self.journals, policy) else {
+            return;
+        };
         if class % 2 == 0 {
-            if crash {
-                let frame = tenant_frame(payload);
-                let step = session
-                    .create_step(&client, first, &name, placement, frame)
-                    .await;
-                if let Step::Advanced(_) = step {
+            if buggify_with_prob!(0.2) {
+                let identifier = tenant_identifier(payload);
+                let step = session.create_step(&client, first, &name, identifier).await;
+                if let Step::Advanced(stage) = step {
                     assert_reachable!("fleet: a tenant creation stops after one step");
-                    self.pending = Some(Pending::Create(name, placement, frame));
+                    reach(stage);
+                    self.pending = Some(Pending::Create(name, vec![identifier]));
                 }
+                judge_folds(&session);
                 return;
             }
             let draws = vec![
-                tenant_frame(payload),
-                tenant_frame(payload.rotate_left(23) ^ 0x7e57),
+                tenant_identifier(payload),
+                tenant_identifier(payload.rotate_left(23) ^ 0x7e57),
             ];
-            self.create(
-                &client,
-                &mut session,
-                first,
-                (name, placement),
-                draws,
-                payload,
-            )
-            .await;
+            let kill = self.killer(ctx, first);
+            let pending = Pending::Create(name.clone(), draws.clone());
+            let (ended, cut_short) = futures::join!(
+                self.create(&client, &mut session, first, name, draws, payload),
+                kill
+            );
+            self.stopped(ended, cut_short, pending);
         } else {
-            if crash {
-                if let Step::Advanced(_) = session.remove_step(&client, first, &name).await {
+            // The removal's crash is its own location, and fires often: a
+            // removal needs a `READY` tenant of that name to write its first
+            // step at all, so a shared 20% left "a tenant removal resumed
+            // after a crash" the sweep's rarest gate, near its seed cap.
+            if buggify_with_prob!(0.5) {
+                if let Step::Advanced(stage) = session.remove_step(&client, first, &name).await {
                     assert_reachable!("fleet: a tenant removal stops after one step");
+                    reach(stage);
                     self.pending = Some(Pending::Remove(name));
                 }
+                judge_folds(&session);
                 return;
             }
-            self.remove(&client, &mut session, first, &name).await;
+            let kill = self.killer(ctx, first);
+            let pending = Pending::Remove(name.clone());
+            let (ended, cut_short) =
+                futures::join!(self.remove(&client, &mut session, first, &name), kill);
+            self.stopped(ended, cut_short, pending);
         }
+        judge_folds(&session);
     }
 
-    /// Run the operation this client stopped in, to its end.
+    /// Run the operation this client stopped in, to its end; whether none is
+    /// pending any more.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     async fn resume(
         &mut self,
@@ -255,33 +397,42 @@ impl FleetOps {
         nodes: &ChainClient,
         policy: CheckpointPolicy,
         draw: u64,
-    ) {
+    ) -> bool {
         let Some(pending) = self.pending.take() else {
-            return;
+            return true;
         };
         let client = self.client(ctx, nodes);
         let first = self.first(draw);
-        let mut session = self.session(self.frames, policy);
+        let Some(mut session) = self.session(self.journals, policy) else {
+            self.pending = Some(pending);
+            return false;
+        };
         let ended = match &pending {
             Pending::Init => self.finish_init(&client, &mut session, first, draw).await,
-            Pending::Create(name, placement, frame) => {
-                // Only this creation's own frame resumes it (a tenant is
+            Pending::Create(name, identifiers) => {
+                // Only this creation's own identifiers resume it (a tenant is
                 // created once).
                 self.create(
                     &client,
                     &mut session,
                     first,
-                    (name.clone(), *placement),
-                    vec![*frame],
+                    name.clone(),
+                    identifiers.clone(),
                     draw,
                 )
                 .await
             }
             Pending::Remove(name) => self.remove(&client, &mut session, first, name).await,
         };
+        judge_folds(&session);
         if !ended {
             self.pending = Some(pending);
+            return false;
         }
+        if std::mem::take(&mut self.killed) {
+            assert_reachable!("fleet: an operation its target's kill cut short ends on resumption");
+        }
+        true
     }
 
     /// Run `init` to its end; whether it ended (done or refused).
@@ -293,6 +444,7 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let run = session.init(client, first, draw | 1, Duration::ZERO).await;
+        run.steps.iter().copied().for_each(reach);
         match run.outcome {
             Step::Done {
                 result: fleet,
@@ -300,12 +452,12 @@ impl FleetOps {
             } => {
                 let finished = last == Some(Stage::CellReady);
                 if finished {
-                    let cell = self.frames.cell_id;
-                    let meta_cell = session.meta().cell(cell).map(|c| c.state);
+                    let cell = self.journals.cell_id;
+                    let directory_cell = session.directory().cell(cell).map(|c| c.state);
                     let joined = session.cell().fleet().map(|f| (f.fleet_id, f.cell_id));
                     assert_always!(
-                        meta_cell == Some(CellState::Ready) && joined == Some((fleet, cell)),
-                        "fleet: a finished init leaves the cell READY in meta and joined on its side",
+                        directory_cell == Some(CellState::Ready) && joined == Some((fleet, cell)),
+                        "fleet: a finished init leaves the cell READY in the directory and joined on its side",
                         { "cell" => cell, "fleet" => fleet }
                     );
                     assert_sometimes!(
@@ -323,26 +475,24 @@ impl FleetOps {
         }
     }
 
-    /// Create `name` with `placement` under the first of `draws` meta does
+    /// Create `name` under the first of `draws` the fleet tenant does
     /// not hold, to its end; whether it ended.
     async fn create(
         &mut self,
         client: &ChainClient,
         session: &mut FleetSession,
         first: usize,
-        (name, placement): (Vec<u8>, Placement),
-        draws: Vec<JournalKey>,
+        name: Vec<u8>,
+        draws: Vec<JournalIdentifier>,
         draw: u64,
     ) -> bool {
-        // A frame this client had created — the collision a random u64 never
+        // An identifier this client had created — the collision a random u64 never
         // makes on its own — must be refused, and the creator redraws.
         if !self.ever_created.is_empty() && buggify_with_prob!(0.2) {
             assert_reachable!("fleet: a tenant creation reuses an id it created");
             let reused = self.ever_created
                 [usize::try_from(draw % self.ever_created.len() as u64).unwrap_or(0)];
-            let step = session
-                .create_step(client, first, &name, placement, reused)
-                .await;
+            let step = session.create_step(client, first, &name, reused).await;
             assert_always!(
                 !matches!(step, Step::Advanced(Stage::RegisterTenant)),
                 "fleet: a reused tenant id is never registered again",
@@ -353,16 +503,10 @@ impl FleetOps {
             }
         }
         let run = session
-            .create_tenant(
-                client,
-                first,
-                &name,
-                placement,
-                draws.clone(),
-                Duration::ZERO,
-            )
+            .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
-        self.created(session, &name, placement, &run);
+        run.steps.iter().copied().for_each(reach);
+        self.created(session, &name, &run);
         match run.outcome {
             Step::Done { .. } => {
                 self.check_directory(client, session, first).await;
@@ -378,10 +522,10 @@ impl FleetOps {
                 true
             }
             Step::Refused(FleetRefusal::NameTaken { tenant, .. }) => {
-                let holder = session.meta().named(&name).map(|(t, _)| t);
+                let holder = session.directory().named(&name).map(|(t, _)| t);
                 assert_always!(
                     holder == Some(tenant) && draws.iter().all(|d| d.tenant != tenant),
-                    "fleet: a second creation of a name is refused for another frame",
+                    "fleet: a second creation of a name is refused for another identifier",
                     {
                         "tenant" => tenant.0,
                         "holder" => holder.map_or(0, |t| t.0),
@@ -403,26 +547,19 @@ impl FleetOps {
     }
 
     /// The oracles of a creation's run.
-    fn created(
-        &mut self,
-        session: &FleetSession,
-        name: &[u8],
-        placement: Placement,
-        run: &Run<TenantId>,
-    ) {
+    fn created(&mut self, session: &FleetSession, name: &[u8], run: &Run<TenantId>) {
         let Step::Done { result, last } = run.outcome else {
             return;
         };
         let created = last == Some(Stage::TenantReady);
         if created {
-            let entry = session.meta().tenant(result);
+            let entry = session.directory().tenant(result);
             assert_always!(
                 entry.is_some_and(|t| t.state == TenantState::Ready
                     && t.name == name
-                    && t.group == Group::Users
-                    && t.placement == placement)
+                    && t.groups == Groups::SERVED)
                     && session.cell().hosts(result),
-                "fleet: a created tenant is READY in meta and hosted by its cell",
+                "fleet: a created tenant is READY in the directory and hosted by its cell",
                 { "tenant" => result.0 }
             );
             assert_sometimes!(
@@ -431,10 +568,10 @@ impl FleetOps {
             );
         }
         assert_sometimes!(created, "fleet: a tenant is created READY");
-        if let Some(entry) = session.meta().tenant(result) {
-            let frame = JournalKey::new(result, entry.control);
-            if !self.ever_created.contains(&frame) {
-                self.ever_created.push(frame);
+        if let Some(entry) = session.directory().tenant(result) {
+            let identifier = JournalIdentifier::new(result, entry.control);
+            if !self.ever_created.contains(&identifier) {
+                self.ever_created.push(identifier);
             }
         }
     }
@@ -450,16 +587,17 @@ impl FleetOps {
         let run = session
             .remove_tenant(client, first, name, Duration::ZERO)
             .await;
+        run.steps.iter().copied().for_each(reach);
         match run.outcome {
             Step::Done { result, last } => {
                 let removed = last == Some(Stage::RemoveTenant);
                 if let (Some(tenant), true) = (result, removed) {
                     assert_always!(
-                        session.meta().named(name).is_none()
-                            && session.meta().is_removed(tenant)
+                        session.directory().named(name).is_none()
+                            && session.directory().is_removed(tenant)
                             && !session.cell().hosts(tenant)
                             && session.cell().dropped(tenant),
-                        "fleet: a removed tenant is gone from meta and tombstoned on its cell",
+                        "fleet: a removed tenant is gone from the directory and tombstoned on its cell",
                         { "tenant" => tenant.0 }
                     );
                     assert_sometimes!(
@@ -476,7 +614,7 @@ impl FleetOps {
         }
     }
 
-    /// Meta's directory against the cell's tenant list, when the session's
+    /// The fleet directory against the cell's tenant list, when the session's
     /// two folds are one instant's: it holds both journals already (the
     /// check claims nothing), and a fresh read of each finds this client
     /// still the owner with nothing written past the fold.
@@ -484,13 +622,13 @@ impl FleetOps {
         if !session.holds_both() {
             return;
         }
-        let (meta_writer, cell_writer) = session.writers();
-        let Some(meta_floor) = still(
+        let (directory_writer, cell_writer) = session.writers();
+        let Some(directory_floor) = still(
             client,
             first,
-            self.frames.meta,
-            meta_writer,
-            session.meta().next_seq(),
+            self.fleet,
+            directory_writer,
+            session.directory().next_seq(),
         )
         .await
         else {
@@ -499,7 +637,7 @@ impl FleetOps {
         if still(
             client,
             first,
-            self.frames.cell,
+            self.journals.cell,
             cell_writer,
             session.cell().next_seq(),
         )
@@ -508,50 +646,238 @@ impl FleetOps {
         {
             return;
         }
-        // The two folds are of one instant. Meta's checkpoint and truncation
+        // The two folds are of one instant. The fleet tenant's checkpoint and truncation
         // ran under its owner's policy on the way.
-        if meta_floor > 0 {
-            assert_reachable!("fleet: meta is read past a truncation to its checkpoint");
+        if directory_floor > 0 {
+            assert_reachable!("fleet: the directory is read past a truncation to its checkpoint");
         }
-        let meta = session.meta();
-        let cell = session.cell();
-        let (Some(fleet), Some(joined)) = (meta.fleet(), cell.fleet()) else {
+        if session.directory().fleet().is_none() || session.cell().fleet().is_none() {
             return;
-        };
-        // The cell joins only after meta added it: both name one fleet, and
-        // meta holds the cell.
-        assert_always!(
-            fleet == joined.fleet_id && meta.cell(joined.cell_id).is_some(),
-            "fleet: meta and the cell name the same fleet and the cell is in meta",
-            { "meta_fleet" => fleet, "cell_fleet" => joined.fleet_id }
-        );
-        for tenant in cell.hosted() {
-            assert_always!(
-                meta.tenant(tenant)
-                    .is_some_and(|t| t.group == Group::Users && t.cell_id == joined.cell_id),
-                "fleet: every tenant the cell hosts is in meta under that cell",
-                { "tenant" => tenant.0 }
-            );
         }
-        for (tenant, entry) in meta.tenants() {
-            if entry.group == Group::Users && entry.state == TenantState::Ready {
-                assert_always!(
-                    cell.hosts(tenant),
-                    "fleet: every READY tenant in meta is hosted by its cell",
-                    { "tenant" => tenant.0 }
-                );
-            }
-        }
-        assert_reachable!("fleet: meta's directory is checked against the cell's tenant list");
+        directory_equals_cell(session.directory(), session.cell());
+        assert_reachable!("fleet: the directory is checked against the cell's tenant list");
     }
 }
 
-/// A tenant frame spread from one draw (#226: random, never a position; no
+/// How long the recovery tail gives the fleet's control plane (#247): a
+/// pending operation to end, the final folds to be read, every node's
+/// registry fold to reach the tail. An oracle threshold — **never
+/// buggified**: the chaos window is over, moonpool is in recovery mode, and a
+/// control plane that cannot finish one operation in this long is stuck.
+const FLEET_SETTLE: Duration = Duration::from_secs(20);
+
+impl FleetOps {
+    /// The recovery tail's fleet half (#247): resume this client's pending
+    /// operation until it ends. Liveness: once the chaos window closed, an
+    /// operation an operator stopped in — a crash at a step, a run its
+    /// target's kill or a rival cut short — is finished by that operator.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(super) async fn settle(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        policy: CheckpointPolicy,
+        beat: Duration,
+    ) {
+        if !self.active || self.pending.is_none() {
+            return;
+        }
+        let deadline = ctx.time().now() + FLEET_SETTLE;
+        let mut draw = self.client_id;
+        while !self.resume(ctx, nodes, policy, draw).await {
+            if ctx.time().now() >= deadline
+                || ctx.shutdown().is_cancelled()
+                || ctx.time().sleep(beat).await.is_err()
+            {
+                break;
+            }
+            draw = draw.wrapping_add(1);
+        }
+        assert_always!(
+            self.pending.is_none() || ctx.shutdown().is_cancelled(),
+            "fleet: an operation an operator stopped in ends in the recovery tail",
+            { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
+        );
+        assert_reachable!("fleet: a pending operation is finished in the recovery tail");
+    }
+
+    /// The end-of-run check over the final folds (#247), run by the last
+    /// client to [`FleetOps::settle`] — every operator has finished, so the
+    /// fleet tenant's and the cell's control journals are quiet and one read of each is one
+    /// instant's:
+    ///
+    /// - **liveness** — a started `init` left the cell `READY` in the directory and
+    ///   joined on its side, and no `users` tenant is left `REGISTERING` or
+    ///   `REMOVING` (every operator finished its own operation; #240's
+    ///   coordinator will own an orphan's); every live node's registry fold
+    ///   reaches the registry's tail;
+    /// - **directory equality** (FDB's `MetaclusterConsistency`), on every
+    ///   seed rather than when one session happened to hold both journals:
+    ///   membership and `cell_id` — every tenant the cell hosts is in the
+    ///   directory under that cell, and every `READY` one in it is hosted. Its
+    ///   assignments and counts join once #212 lands.
+    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    pub(super) async fn final_check(
+        &self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        expected: &[u64],
+    ) {
+        if !self.active {
+            return;
+        }
+        let client = self.client(ctx, nodes);
+        let deadline = ctx.time().now() + FLEET_SETTLE;
+        let mut folds = None;
+        let mut attempt = 0_u64;
+        while folds.is_none() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let first = self.first(attempt);
+            attempt += 1;
+            let directory = paros::client::fleet::read_directory(&client, first, self.fleet).await;
+            let mut cell = Folder::new(Registry::new((0..self.pool as u64).map(NodeId)));
+            let loaded =
+                paros::client::checkpoint::load(&mut cell, self.journals.cell, &client, first, 0)
+                    .await;
+            if let (Ok(directory), LoadOutcome::Loaded { .. }) = (directory, loaded) {
+                folds = Some((directory, cell));
+            } else if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                break;
+            }
+        }
+        if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        assert_always!(
+            folds.is_some(),
+            "fleet: the directory and the cell's journal are read to their tails after chaos"
+        );
+        let Some((directory, cell)) = folds else {
+            return;
+        };
+        let tail = cell.next_seq();
+        let cell = cell.state();
+        assert_reachable!("fleet: the final folds of the directory and the cell are compared");
+        if let Some(fleet) = directory.fleet() {
+            let ready = directory.cell(self.journals.cell_id).map(|c| c.state);
+            let joined = cell.fleet().map(|f| (f.fleet_id, f.cell_id));
+            assert_always!(
+                ready == Some(CellState::Ready) && joined == Some((fleet, self.journals.cell_id)),
+                "fleet: a started init leaves the cell READY and joined after chaos",
+                { "fleet" => fleet, "cell" => self.journals.cell_id }
+            );
+            assert_reachable!("fleet: a run ends with the cell READY in the directory");
+        }
+        for (tenant, entry) in directory.tenants() {
+            if entry.groups == Groups::SERVED {
+                assert_always!(
+                    matches!(entry.state, TenantState::Ready),
+                    "fleet: no tenant is left mid-operation after chaos",
+                    { "tenant" => tenant.0, "state" => format!("{:?}", entry.state) }
+                );
+            }
+        }
+        directory_equals_cell(&directory, cell);
+        // Every live node follows the registry to its tail.
+        let board = crate::audit::system::system_board(ctx.state());
+        let mut lagging = Vec::new();
+        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            lagging = crate::audit::system::lock(&board).registry_lagging(expected, tail);
+            if lagging.is_empty() || ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                break;
+            }
+        }
+        assert_always!(
+            lagging.is_empty() || ctx.shutdown().is_cancelled(),
+            "registry: every live node's fold reaches the registry's tail after chaos",
+            { "tail" => tail, "lagging" => format!("{lagging:?}") }
+        );
+    }
+}
+
+/// The fleet directory against the cell's tenant list (FDB's
+/// `MetaclusterConsistency`) for two folds of one instant: the same fleet,
+/// the cell in the directory, every tenant the cell hosts in the directory
+/// under that cell, every `READY` `users` tenant in the directory hosted.
+fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
+    let (Some(fleet), Some(joined)) = (directory.fleet(), cell.fleet()) else {
+        return;
+    };
+    // The cell joins only after the fleet directory added it: both name one
+    // fleet, and the directory holds the cell.
+    assert_always!(
+        fleet == joined.fleet_id && directory.cell(joined.cell_id).is_some(),
+        "fleet: the directory and the cell name the same fleet and the cell is in it",
+        { "directory_fleet" => fleet, "cell_fleet" => joined.fleet_id }
+    );
+    for tenant in cell.hosted() {
+        assert_always!(
+            directory
+                .tenant(tenant)
+                .is_some_and(|t| t.groups == Groups::SERVED && t.cell_id == joined.cell_id),
+            "fleet: every tenant the cell hosts is in the directory under that cell",
+            { "tenant" => tenant.0 }
+        );
+    }
+    for (tenant, entry) in directory.tenants() {
+        if entry.groups == Groups::SERVED && entry.state == TenantState::Ready {
+            assert_always!(
+                cell.hosts(tenant),
+                "fleet: every READY tenant in the directory is hosted by its cell",
+                { "tenant" => tenant.0 }
+            );
+        }
+    }
+}
+
+/// Each fleet [`Stage`] a step wrote, its own reachable (#247): every
+/// state machine's every step is proven written by some run.
+fn reach(stage: Stage) {
+    match stage {
+        Stage::FormFleet => assert_reachable!("fleet: a step forms the fleet in the directory"),
+        Stage::AddCell => assert_reachable!("fleet: a step adds the cell to the directory"),
+        Stage::JoinFleet => assert_reachable!("fleet: a step joins the cell to the fleet"),
+        Stage::CellReady => {
+            assert_reachable!("fleet: a step marks the cell READY in the directory");
+        }
+        Stage::RegisterTenant => {
+            assert_reachable!("fleet: a step registers a tenant in the directory");
+        }
+        Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
+        Stage::TenantReady => {
+            assert_reachable!("fleet: a step marks a tenant READY in the directory");
+        }
+        Stage::TenantRemoving => {
+            assert_reachable!("fleet: a step marks a tenant REMOVING in the directory");
+        }
+        Stage::DropTenant => assert_reachable!("fleet: a step drops a tenant from the cell"),
+        Stage::RemoveTenant => {
+            assert_reachable!("fleet: a step removes a tenant from the directory");
+        }
+    }
+}
+
+/// Every fold a session made found each checkpoint its prefix's state
+/// (#247): the fleet directory's owner checkpoints as it writes, the
+/// registry's owner too, and a fold that meets a checkpoint with the whole prefix folded compares
+/// the two — the registry owner's oracle, for both of a session's journals.
+fn judge_folds(session: &FleetSession) {
+    let diverged = session.diverged();
+    assert_always!(
+        diverged.is_none(),
+        "checkpoint: an owner's load finds each checkpoint its prefix's state",
+        {
+            "journal" => diverged.map(|(j, _)| j.to_string()).unwrap_or_default(),
+            "seq" => diverged.map_or(0, |(_, seq)| seq)
+        }
+    );
+}
+
+/// A tenant identifier spread from one draw (#226: random, never a position; no
 /// range is reserved, §3.8): a set tenant id and a set control journal id.
-fn tenant_frame(draw: u64) -> JournalKey {
+fn tenant_identifier(draw: u64) -> JournalIdentifier {
     let tenant = crate::chain::splitmix(draw).max(1);
     let journal = crate::chain::splitmix(draw ^ 0xc0_7e01).max(1);
-    JournalKey::new(TenantId(tenant), JournalId(journal))
+    JournalIdentifier::new(TenantId(tenant), JournalId(journal))
 }
 
 /// Read where `journal` stands now; its floor when `writer` still owns it
@@ -559,7 +885,7 @@ fn tenant_frame(draw: u64) -> JournalKey {
 async fn still(
     client: &ChainClient,
     first: usize,
-    journal: JournalKey,
+    journal: JournalIdentifier,
     writer: &Writer,
     folded: u64,
 ) -> Option<u64> {

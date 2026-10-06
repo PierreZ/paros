@@ -9,10 +9,43 @@
 //! deployment), the per-role state machine, and the volatile leadership state
 //! that may exist only on a leader.
 
-use super::{Ballot, BeliefSource, ColocatedNode, LeadershipOrigin, NodeRole};
+use super::{Ballot, BeliefSource, ColocatedNode, LeadershipOrigin, NodeRole, Slot};
 use crate::proposer::Round;
 
+/// The three durable watermarks a node only ever raises: the promise, the
+/// chosen index and the compaction floor. Captured at a public entry point
+/// and compared at its exit ([`ColocatedNode::assert_marks_monotone`]).
+pub(super) type DurableMarks = (Ballot, Option<Slot>, Slot);
+
 impl ColocatedNode {
+    /// The durable watermarks as they stand: see [`DurableMarks`].
+    pub(super) fn durable_marks(&self) -> DurableMarks {
+        let marks = (
+            self.acceptor.promised(),
+            self.replica.chosen_index(),
+            self.acceptor.first_slot(),
+        );
+        assert!(
+            marks.2 <= self.first_unchosen(),
+            "the compaction floor never outruns the chosen prefix"
+        );
+        marks
+    }
+
+    /// The write-side half of the boot read-back: across any public entry
+    /// point, the promise, the chosen index and the compaction floor only
+    /// rise — what the persist-before-send batch writes is what a reboot may
+    /// rely on never to regress.
+    pub(super) fn assert_marks_monotone(&self, before: DurableMarks) {
+        let (promised, chosen, floor) = self.durable_marks();
+        assert!(promised >= before.0, "a node's promise never decreases");
+        assert!(chosen >= before.1, "a node's chosen index never decreases");
+        assert!(
+            floor >= before.2,
+            "a node's compaction floor never decreases"
+        );
+    }
+
     /// Assert every cross-field invariant of the node's volatile state, plus
     /// each role's own. Most checks are O(1) or O(log n) (min-key probes);
     /// the role checkers add bounded structural scans over the retained log,
@@ -107,6 +140,25 @@ impl ColocatedNode {
             self.acceptors.is_drawn_from(&self.pool),
             "the active configuration is drawn from the node pool"
         );
+        // The pool is grow-only from the boot pool, and stays the sorted,
+        // deduplicated set `in_pool` binary-searches.
+        assert!(
+            self.pool.windows(2).all(|w| w[0] < w[1]),
+            "the node pool is sorted and deduplicated"
+        );
+        assert!(
+            self.config
+                .pool()
+                .iter()
+                .all(|n| self.pool.binary_search(n).is_ok()),
+            "the node pool always holds the boot pool"
+        );
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.pool.len() == self.config.pool().len(),
+                "a plain deployment's pool never grows"
+            );
+        }
         // The retirement fence (#123): `last_member_ballot` is the highest
         // `acceptors_since` of every configuration that named this node, so
         // while this node *is* a member it is at least the ballot its
@@ -115,26 +167,34 @@ impl ColocatedNode {
         // own, possibly older, ballot (`node/matchmaking.rs`), and the fence
         // keeps the newer membership it already recorded — `may_retire`
         // needs the maximum, never the current binding.
-        assert!(
-            !self.is_acceptor() || self.last_member_ballot >= self.acceptors_since,
-            "a member's fence is at least the ballot its configuration is bound to"
-        );
+        if self.is_acceptor() {
+            assert!(
+                self.last_member_ballot >= self.acceptors_since,
+                "a member's fence is at least the ballot its configuration is bound to"
+            );
+        }
         // The belief's provenance (#173): a configuration bound to a ballot
         // was heard (every binding goes through `adopt_configuration`), and
         // a membership probe is open only on the default it asks about,
         // beside no campaign and no leadership.
-        assert!(
-            self.acceptors_since == Ballot::zero() || self.belief_source == BeliefSource::Heard,
-            "a configuration bound to a ballot is a heard belief"
-        );
+        if self.acceptors_since != Ballot::zero() {
+            assert!(
+                self.belief_source == BeliefSource::Heard,
+                "a configuration bound to a ballot is a heard belief"
+            );
+        }
         if self.probe.is_some() {
             assert!(
                 self.belief_source == BeliefSource::Bootstrap,
                 "a membership probe asks only about the bootstrap default"
             );
             assert!(
-                self.role == NodeRole::Follower && self.matchmaking.is_none(),
-                "a membership probe never overlaps a campaign or a leadership"
+                self.role == NodeRole::Follower,
+                "a membership probe never overlaps a leadership or a candidacy"
+            );
+            assert!(
+                self.matchmaking.is_none(),
+                "a membership probe never overlaps a campaign"
             );
             assert!(
                 self.probe
@@ -206,6 +266,17 @@ impl ColocatedNode {
             self.leader == Some(self.config.id),
             "a leader knows itself as leader"
         );
+        // Ballot zero is no one's: every leadership runs at a minted round.
+        assert!(
+            self.ballot > Ballot::zero(),
+            "a leader operates under a minted ballot"
+        );
+        if self.gc.is_some() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment collects"
+            );
+        }
         // Whose node id the operating ballot names is exactly what
         // separates the two leadership origins — an elected leader owns
         // its ballot, a handoff leader is exercising a predecessor's.
@@ -305,10 +376,10 @@ impl ColocatedNode {
                 "only a leader holds in-flight accept rounds"
             );
         }
-        if !self.proposer.read_rounds().is_empty() {
+        if self.proposer.fence().is_some() {
             assert!(
                 self.role == NodeRole::Leader,
-                "only a leader holds pending read rounds"
+                "only a leader holds a leadership fence"
             );
         }
         if self.proposer.recovery().is_some() {

@@ -58,8 +58,8 @@ use std::time::Duration;
 use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{
-    DriverHooks, HandoffContext, JournalKey, Message, NodeId, Party, ProxyId, ReconfigurerPhase,
-    Seam, Slot,
+    DriverHooks, HandoffContext, JournalIdentifier, Message, NodeId, Party, ProxyId,
+    ReconfigurerPhase, Seam, Slot,
 };
 
 /// The shape every inline-gated hook shares: one `buggify_with_prob!` draw
@@ -98,7 +98,7 @@ pub(crate) struct BuggifyHooks<T> {
     withhold_gc: bool,
     /// The journal held on every node for the chaos window (#188), drawn
     /// once per seed (`crate::shape::journals`); `None` on most seeds.
-    held_journal: Option<JournalKey>,
+    held_journal: Option<JournalIdentifier>,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
@@ -115,7 +115,7 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 
     /// Hold `held` on this node for the chaos window
     /// (`DriverHooks::hold_journal`, #188).
-    pub(crate) fn holding_journal(mut self, held: Option<JournalKey>) -> Self {
+    pub(crate) fn holding_journal(mut self, held: Option<JournalIdentifier>) -> Self {
         self.held_journal = held;
         self
     }
@@ -185,7 +185,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         self.withhold_gc
     }
 
-    fn hold_journal(&self, journal: JournalKey) -> bool {
+    fn hold_journal(&self, journal: JournalIdentifier) -> bool {
         // Drawn once per seed (the plan's own BUGGIFY location and its
         // reachable), never per call: a deterministic answer is safe to ask
         // per inbound message. Only inside the chaos window, so the held
@@ -409,7 +409,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             // proposer never learns it — the pure quorum-intersection edge
             // that forces a re-propose under a new ballot (P2c for real).
             Message::Accepted { .. } => buggify_with_prob!(0.05),
-            // Starve the read fence / the catch-up push direction. Kept low:
+            // Starve the `CheckQuorum` window / the catch-up push direction. Kept low:
             // these fire per tick per peer, and a high rate is just a
             // partition, which is moonpool's job.
             Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => buggify_with_prob!(0.02),
@@ -615,7 +615,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     fn expire_parked_read_early(&self) -> bool {
         // Per tick while reads are parked. Kept shy: expiring most parked
         // reads early would stop confirmed reads from ever completing during
-        // the chaos window, and the read-index path is what needs coverage.
+        // the chaos window, and the read path is what needs coverage.
         // Gated in the audit (`read_expired`, the `early` leg).
         self.active() && buggify_with_prob!(0.05)
     }

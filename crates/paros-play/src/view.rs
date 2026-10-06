@@ -281,8 +281,6 @@ pub struct NodeView {
     pub open_rounds: Vec<u64>,
     /// Whether this leader has accepts it could re-send.
     pub pending_accepts: bool,
-    /// Read-index rounds awaiting confirmation.
-    pub read_rounds: Vec<ReadRoundView>,
     /// Slots the fresh leadership has still to recover.
     pub recovery_remaining: usize,
     /// The acceptor configuration in force here.
@@ -416,17 +414,6 @@ pub struct ElectionView {
     /// Whether the timeout is the no-check-quorum sentinel a hand-stepped
     /// leader holds (see [`crate::world::NO_CHECK_QUORUM`]).
     pub held: bool,
-}
-
-/// A read-index round waiting for its ack quorum.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
-pub struct ReadRoundView {
-    /// The client's correlation token.
-    pub ctx: u64,
-    /// The captured read index.
-    pub index: Option<u64>,
-    /// How many acks are credited to it.
-    pub acks: usize,
 }
 
 /// One slot of a node's log.
@@ -978,28 +965,23 @@ pub fn message_view(
                 next_slot.0
             ),
         ),
-        M::Heartbeat {
-            ballot,
-            commit,
-            seq,
-            ..
-        } => (
+        M::Heartbeat { ballot, commit, .. } => (
             "Heartbeat",
             "heartbeat",
             Some(*ballot),
             *commit,
             format!(
-                "Heartbeat {} #{seq}, commit {}",
+                "Heartbeat {}, commit {}",
                 show_ballot(*ballot),
                 commit.map_or_else(|| "nothing".to_string(), |s| s.0.to_string())
             ),
         ),
-        M::HeartbeatAck { ballot, seq, .. } => (
+        M::HeartbeatAck { ballot, .. } => (
             "HeartbeatAck",
             "heartbeat",
             Some(*ballot),
             None,
-            format!("HeartbeatAck {} #{seq}", show_ballot(*ballot)),
+            format!("HeartbeatAck {}", show_ballot(*ballot)),
         ),
         M::PreRead { ctx, .. } => (
             "PreRead",

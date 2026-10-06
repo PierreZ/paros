@@ -380,20 +380,17 @@ pub(crate) fn receipt(to: NodeId, message: &Message, before: &NodeSnapshot) -> N
             from,
             ballot,
             commit,
-            seq,
             ..
         } => format!(
-            "{node} receives beat #{seq} from node {} at ballot {}, carrying commit {}. Its own \
+            "{node} receives a beat from node {} at ballot {}, carrying commit {}. Its own \
              applied prefix ends at {}.",
             from.0,
             show_ballot(*ballot),
             at(*commit),
             at(before.chosen_index)
         ),
-        Message::HeartbeatAck {
-            from, ballot, seq, ..
-        } => format!(
-            "{node} receives an ack for beat #{seq} at {} from node {}.",
+        Message::HeartbeatAck { from, ballot, .. } => format!(
+            "{node} receives an ack for a beat at {} from node {}.",
             show_ballot(*ballot),
             from.0
         ),
@@ -808,10 +805,10 @@ fn describe_sent(
         ));
     }
 
-    if let Some(seq) = sent.iter().find_map(|(_, m)| match m {
-        Message::Heartbeat { seq, .. } => Some(*seq),
-        _ => None,
-    }) {
+    if sent
+        .iter()
+        .any(|(_, m)| matches!(m, Message::Heartbeat { .. }))
+    {
         let peers = sent
             .iter()
             .filter(|(_, m)| matches!(m, Message::Heartbeat { .. }))
@@ -819,22 +816,22 @@ fn describe_sent(
         out.push(say(
             NarrationKind::Heartbeat,
             format!(
-                "{node} sends beat #{seq} to {}, and the beat carries its commit index. The beat \
+                "{node} sends a beat to {}, and the beat carries its commit index. The beat \
                  costs nothing extra. The commit watermark travels on a message the leader sends \
                  anyway.",
                 many(peers, "peer")
             ),
         ));
     }
-    if let Some(seq) = sent.iter().find_map(|(_, m)| match m {
-        Message::HeartbeatAck { seq, .. } => Some(*seq),
-        _ => None,
-    }) {
+    if sent
+        .iter()
+        .any(|(_, m)| matches!(m, Message::HeartbeatAck { .. }))
+    {
         out.push(say(
             NarrationKind::Heartbeat,
             format!(
-                "{node} acks beat #{seq}. That ack is the only proof a leader has that it still \
-                 leads."
+                "{node} acks the beat. A leader that collects no quorum of these acks for one \
+                 election timeout steps down."
             ),
         ));
     }

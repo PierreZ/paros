@@ -11,7 +11,7 @@ import type { Seam } from "./Seam";
  * The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
  * (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
  * (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
- * (`Propose`, `Retry`, `ReadIndex`, `Compact`), and — when a level makes a
+ * (`Propose`, `Retry`, `QuorumRead`, `Compact`), and — when a level makes a
  * role manual — the role itself (`Answer`).
  */
 export type Action = { "kind": "deliver", 
@@ -82,17 +82,7 @@ node: number,
 /**
  * The timeout in ticks (0 disables the clock entirely).
  */
-ticks: number, } | { "kind": "read_index", 
-/**
- * The node the client asks (must be the leader).
- */
-node: number, 
-/**
- * Which client is reading. Omitted (or `null`) means the level's
- * first client, which is what every single-client level wants and
- * what the field meant before there were two of them.
- */
-client?: number | null, } | { "kind": "quorum_read", 
+ticks: number, } | { "kind": "quorum_read", 
 /**
  * The node the client asks. It need not be the leader.
  */

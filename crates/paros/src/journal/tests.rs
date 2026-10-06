@@ -62,7 +62,7 @@ where
 fn config() -> Config {
     Config {
         peers: vec![NodeId(0)],
-        ..Config::new(NodeId(0), paros_core::JournalKey::UNSET)
+        ..Config::new(NodeId(0), paros_core::JournalIdentifier::UNSET)
     }
 }
 

@@ -63,7 +63,7 @@ pub(super) fn config(id: NodeId, size: u64, system: QuorumSystem) -> Config {
     Config {
         peers: peers(size),
         quorum_system: system,
-        ..Config::new(id, paros_core::JournalKey::UNSET)
+        ..Config::new(id, paros_core::JournalIdentifier::UNSET)
     }
 }
 
@@ -162,9 +162,9 @@ pub(super) fn propose_as(client: u64, node: u64, value: &str) -> Action {
     }
 }
 
-/// `client` asks `node` for a read-index read.
-pub(super) fn read_index_as(client: u64, node: u64) -> Action {
-    Action::ReadIndex {
+/// `client` asks `node` for a quorum read.
+pub(super) fn quorum_read_as(client: u64, node: u64) -> Action {
+    Action::QuorumRead {
         node,
         client: Some(client),
     }

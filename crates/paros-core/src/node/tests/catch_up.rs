@@ -76,7 +76,6 @@ fn a_leader_that_lost_its_chosen_index_is_pushed_the_first_slot_back() {
         from: NodeId(0),
         ballot: b,
         commit: None,
-        seq: 1,
         config: None,
     });
     let replayed = drain(&mut nodes[1]).into_iter().any(|(to, m)| {

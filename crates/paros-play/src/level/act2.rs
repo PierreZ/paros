@@ -11,7 +11,7 @@
 //! edge first, then the log and its holes, then the leader that streams it,
 //! then the three failures that only a leader change can produce — a hole
 //! nobody will ever fill, a record a restart would resurrect, and a read
-//! answered by a leader that has already been replaced.
+//! answered by a node that missed a leader change.
 //!
 //! Every reference solution here is **recorded**, not written: a private
 //! `Script` plays the level, choosing messages by what they are rather than by
@@ -28,7 +28,7 @@ use crate::action::{Action, ActionKind, Seam};
 use crate::auto::AutomationFlag;
 use crate::level::common::{
     CLIENT, REPLIES_ONLY, TIMEOUT, applied, config, crash, fresh, on_log, peers, propose,
-    read_index_as, restart, slot_traffic, start_election, tick,
+    quorum_read_as, restart, slot_traffic, start_election, tick,
 };
 use crate::level::script::{Script, kind, kind_at, not_to, phase, to};
 use crate::level::{GoalStatus, Level, WorldKind};
@@ -59,7 +59,7 @@ const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
     AutomationFlag::ReplicaApply,
     AutomationFlag::LeaderRecovery,
     AutomationFlag::PersistOrder,
-    AutomationFlag::ReadServe,
+    AutomationFlag::QuorumReadServe,
 ];
 
 // ---- worlds -----------------------------------------------------------------
@@ -229,7 +229,7 @@ promise, so restart both nodes and make sure that no promise goes down.",
         AutomationFlag::ProposerP2c,
         AutomationFlag::ReplicaApply,
         AutomationFlag::LeaderRecovery,
-        AutomationFlag::ReadServe,
+        AutomationFlag::QuorumReadServe,
     ],
     pinned_off: &[AutomationFlag::PersistOrder],
     unlocked: REPLIES_ONLY,
@@ -368,7 +368,7 @@ application already ran the command.",
         AutomationFlag::ProposerP2c,
         AutomationFlag::LeaderRecovery,
         AutomationFlag::PersistOrder,
-        AutomationFlag::ReadServe,
+        AutomationFlag::QuorumReadServe,
     ],
     pinned_off: &[AutomationFlag::ReplicaApply],
     unlocked: REPLIES_ONLY,
@@ -467,7 +467,7 @@ cluster a fresh command, and look at the cost: one round trip, not two.",
         AutomationFlag::ProposerP2c,
         AutomationFlag::ReplicaApply,
         AutomationFlag::PersistOrder,
-        AutomationFlag::ReadServe,
+        AutomationFlag::QuorumReadServe,
     ],
     pinned_off: &[AutomationFlag::LeaderRecovery],
     unlocked: REPLIES_ONLY,
@@ -667,7 +667,7 @@ permission to fill the slot.",
         AutomationFlag::ProposerP2c,
         AutomationFlag::ReplicaApply,
         AutomationFlag::PersistOrder,
-        AutomationFlag::ReadServe,
+        AutomationFlag::QuorumReadServe,
     ],
     pinned_off: &[AutomationFlag::LeaderRecovery],
     unlocked: REPLIES_ONLY,
@@ -796,7 +796,7 @@ the disagreement arrives, decide which record the disk keeps.",
         AutomationFlag::ReplicaApply,
         AutomationFlag::LeaderRecovery,
         AutomationFlag::PersistOrder,
-        AutomationFlag::ReadServe,
+        AutomationFlag::QuorumReadServe,
     ],
     pinned_off: &[AutomationFlag::CommitOverwrite],
     unlocked: REPLIES_ONLY,
@@ -898,7 +898,7 @@ const READ_ACTIONS: &[ActionKind] = &[
     ActionKind::Tick,
     ActionKind::StartElection,
     ActionKind::Propose,
-    ActionKind::ReadIndex,
+    ActionKind::QuorumRead,
     ActionKind::Answer,
     ActionKind::SetAutomation,
 ];
@@ -910,31 +910,31 @@ pub static THE_READ_THAT_LIES: Level = Level {
     title: "The read that lies",
     briefing: "\
 A write is safe because a quorum voted for it. A read changes nothing, so no \
-node votes on it, and a read has no quorum. For that reason a read is easy to \
-get wrong. The simple answer is that the leader holds the whole log and answers \
-from memory. But leadership is a **belief**, and a node cannot check that belief \
-on its own. No message tells a leader that another node replaced it, so a quiet \
-follower and a newer ballot look the same to it.
+node votes on it. For that reason a read is easy to get wrong. The simple \
+answer is that a node answers from the log that it applied. But a node cannot \
+know on its own whether its log is current. No message tells a node that a new \
+leader decided slots without it, so a quiet cluster and a cluster that moved on \
+look the same to it.
 
-A read must therefore prove the leadership at the moment of the question, and \
-the proof needs no log write. Capture the watermark that the read must observe, \
-and send a beat to every node. Wait for a **Phase-2 quorum** to ack *that* beat, \
-not an older one. A quorum of acks to a beat sent after the read started shows \
-that no other ballot decided anything. Any quorum that decided a value shares a \
-member with this quorum. Answer the read after the applied prefix covers the \
-captured watermark.
+A read must therefore ask a **Phase-1 quorum**, and it needs no log write and \
+no leader. The node asks each acceptor one question: what is the highest slot \
+that you voted in? It takes the largest answer of a Phase-1 quorum. A Phase-2 \
+quorum chose every write that the cluster acknowledged, and that quorum shares \
+an acceptor with the Phase-1 quorum. So the largest answer is at or above every \
+acknowledged write. The node answers the read after its applied prefix covers \
+that slot.
 
-This level has five nodes. Another node replaced the leader, and neither the old \
-leader nor one follower knows that. The old leader collects exactly one ack, so \
-its own vote plus that ack is two of five. Decide whether two of five is enough. \
-Then ask the real leader the same question and look at the complete proof. The \
-level checks one rule: a read must not observe less than a write that the \
-cluster already acknowledged.",
+This level has five nodes. A new leader replaced the old one and wrote a value, \
+and one follower does not know that. Ask that follower for a read. Its own log \
+and the old leader say one thing, and the third answer says more. Decide \
+whether the follower may answer now. The level checks one rule: a read must not \
+observe less than a write that the cluster already acknowledged.",
     field_guide: "linearizable-reads.html",
     symbols: &[
-        "ColocatedNode::read_index",
-        "Proposer::open_read",
-        "Proposer::confirm_reads",
+        "ColocatedNode::quorum_read",
+        "Acceptor::vote_watermark",
+        "QuorumReads::serve",
+        "Replica::covers",
         "ReadState",
     ],
     automation_on: &[
@@ -945,9 +945,9 @@ cluster already acknowledged.",
         AutomationFlag::LeaderRecovery,
         AutomationFlag::PersistOrder,
     ],
-    pinned_off: &[AutomationFlag::ReadServe],
+    pinned_off: &[AutomationFlag::QuorumReadServe],
     unlocked: REPLIES_ONLY,
-    unlocks: &[AutomationFlag::ReadServe],
+    unlocks: &[AutomationFlag::QuorumReadServe],
     allowed_actions: READ_ACTIONS,
     setup: || fresh(5, QuorumSystem::Majority, &[CLIENT]),
     goal: |world| {
@@ -971,38 +971,40 @@ cluster already acknowledged.",
                     at(acked)
                 ));
             }
-            let unserved = reads.iter().filter(|(_, _, served)| !*served).count();
-            match (served.len(), unserved) {
-                (0, _) => GoalStatus::Open(
-                    "Ask for a linearizable read. Then answer for the leader that must prove its \
-                 leadership."
+            let leader = log.leader();
+            match served.first() {
+                Some((node, index)) if Some(*node) != leader && acked > Some(Slot(0)) => {
+                    GoalStatus::Reached(format!(
+                        "Node {} served the read at {}, at or above the last acknowledged \
+                 write ({}). It did not lead, and it did not know the new leader when the \
+                 client asked. The quorum told it how far to read.",
+                        node.0,
+                        at(*index),
+                        at(acked)
+                    ))
+                }
+                Some(_) => GoalStatus::Open(
+                    "Get a second write acknowledged under a new leader first. Then ask a \
+                 follower that missed it for a read."
                         .to_string(),
                 ),
-                (_, 0) => GoalStatus::Open(
-                    "Ask the replaced leader for a read as well. The answer to look at is the \
-                 answer that it must not give."
+                None => GoalStatus::Open(
+                    "Ask the follower that missed the new leader for a read. Then answer for it."
                         .to_string(),
                 ),
-                (_, _) => GoalStatus::Reached(format!(
-                    "The cluster served one read, at or above the last acknowledged write ({}). \
-                 One read still waits at a node that cannot prove that it leads. That node must \
-                 keep the read open.",
-                    at(acked)
-                )),
             }
         })
     },
     hint: |_world, mistakes| match mistakes {
         0..=1 => None,
         2..=3 => Some(
-            "Count the acks against the configuration, not against the nodes that answered. \
-             Two of five is not a quorum of five."
+            "Compare two numbers on the card: the highest slot that the quorum voted in, and \
+             the last slot that this node applied."
                 .to_string(),
         ),
         _ => Some(
-            "A node serves a read on a quorum of acks to a beat sent *after* the read \
-             started. It must also wait until the applied prefix covers the captured \
-             watermark. With less proof, the leader answers from a belief."
+            "One acceptor in the quorum voted in a slot that this node did not apply. Wait. \
+             The new leader brings that slot here, and the node answers the read then."
                 .to_string(),
         ),
     },
@@ -1017,18 +1019,26 @@ cluster already acknowledged.",
             .settle(|message| message.kind == "Prepare" && (message.to == 2 || message.to == 3))
             .settle(not_to(&[0, 4]));
         script.drop_all(to(0));
-        // The deposed leader is asked for a read, and collects one ack.
-        script
-            .play(read_index_as(CLIENT, 0))
-            .settle(|message| message.kind == "Heartbeat" && message.to == 4)
-            .settle(|message| message.kind == "HeartbeatAck" && message.to == 0);
-        script.answer_all().drop_all(to(0));
-        // The leader that really leads is asked the same question.
-        script
-            .play(read_index_as(CLIENT, 1))
-            .settle(|message| message.kind == "Heartbeat" && (message.to == 2 || message.to == 3))
-            .settle(|message| message.kind == "HeartbeatAck" && message.to == 1);
+        script.drop_all(to(4));
+        // The new leader writes, and the write is acknowledged without node 4.
+        script.play(propose(1, "bravo"));
+        script.settle(not_to(&[0, 4]));
+        script.drop_all(to(0));
+        script.drop_all(to(4));
+        // Node 4 is asked for a read. Its own answer and node 0's say slot 0;
+        // node 2's says the slot of bravo.
+        script.play(quorum_read_as(CLIENT, 4));
+        script.settle(|message| message.kind == "PreRead" && message.to == 0);
+        script.settle(|message| message.kind == "PreReadAck" && message.from == 0);
+        script.settle(|message| message.kind == "PreRead" && message.to == 2);
+        script.settle(|message| message.kind == "PreReadAck" && message.from == 2);
         script.answer_all();
+        script.drop_all(kind("PreRead"));
+        script.drop_all(kind("PreReadAck"));
+        // The new leader beats; node 4 learns the leader, pulls bravo, and
+        // answers the read in the batch that applies it.
+        script.play(tick(1));
+        script.settle_all();
         script.finish()
     },
 };

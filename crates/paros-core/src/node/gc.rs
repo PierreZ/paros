@@ -11,7 +11,7 @@
 //! discharge, and the one `DPaxos`'s "new configuration installed, therefore
 //! the old one is deletable" violates (Appendix D). A leader `L` at ballot
 //! `b` with configuration `C_b`, elected over `H_b`, splits its log at its
-//! election **fence** `F = next_slot − 1` (the read fence, the highest slot
+//! election **fence** `F = next_slot − 1` (the leadership's fence, the highest slot
 //! any promise reported):
 //!
 //! - **Above the fence (Region 3, Scenario 2).** Phase 1 reported nothing
@@ -118,7 +118,7 @@ use crate::membership::{AcceptorConfig, MatchmakerId};
 impl ColocatedNode {
     /// Open the GC campaign of a freshly won leadership over `prior` (`H_b`).
     /// Called once per election on a matchmaker deployment; the fence is
-    /// the read fence (`next_slot - 1`).
+    /// the leadership's fence (`next_slot - 1`).
     pub(super) fn open_gc(&mut self, prior: &[AcceptorConfig]) {
         assert!(
             self.role == NodeRole::Leader,
@@ -130,7 +130,7 @@ impl ColocatedNode {
         );
         self.gc = Some(Collector::new(
             self.deployment_matchmakers().generation,
-            self.proposer.read_floor(),
+            self.proposer.fence(),
             prior,
         ));
         self.try_gc();
@@ -157,6 +157,10 @@ impl ColocatedNode {
         if !self.leadership_settled() {
             return false;
         }
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader judges the forgettability condition"
+        );
         let own = self
             .is_acceptor()
             .then(|| (self.config.id, self.replica.chosen_index()));
@@ -176,6 +180,10 @@ impl ColocatedNode {
             gc.request();
         }
         self.queue_gc_requests();
+        assert!(
+            self.gc_pending(),
+            "a covered campaign leaves a GC request pending"
+        );
     }
 
     /// Queue a `GcRequest` at this ballot to every current-generation
@@ -184,6 +192,14 @@ impl ColocatedNode {
         let Some(gc) = self.gc.as_ref() else {
             return;
         };
+        assert!(
+            gc.requested(),
+            "requests are queued only once the campaign asked"
+        );
+        assert!(
+            gc.effective().is_none(),
+            "an effective floor needs no request"
+        );
         let matchmakers = self.deployment_matchmakers();
         let request = GcRequest {
             from: self.config.id,
@@ -191,6 +207,10 @@ impl ColocatedNode {
             watermark: self.ballot,
         };
         let targets: Vec<MatchmakerId> = gc.unacked(matchmakers).collect();
+        assert!(
+            targets.iter().all(|m| matchmakers.contains(*m)),
+            "a GC request addresses only the current generation's matchmakers"
+        );
         for matchmaker in targets {
             self.pending_gc_requests.push((matchmaker, request));
         }
@@ -213,7 +233,13 @@ impl ColocatedNode {
         if !self.gc_pending() {
             return;
         }
+        let queued = self.pending_gc_requests.len();
         self.queue_gc_requests();
+        // A re-send only ever adds requests; it never retracts a queued one.
+        assert!(
+            self.pending_gc_requests.len() >= queued,
+            "a GC re-send never drops a queued request"
+        );
         self.assert_invariants();
     }
 
@@ -294,20 +320,47 @@ impl ColocatedNode {
     /// above the watermark names. A node retired past that is a member lost
     /// for good in the configuration that re-added it: a majority or a
     /// flexible split may absorb it, a grid's column never decides again.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn may_retire(&self, watermark: Ballot) -> bool {
-        self.config.has_matchmakers()
+        let may = self.config.has_matchmakers()
             && !self.is_acceptor()
             && self.role != NodeRole::Leader
             && watermark > self.last_member_ballot
-            && self.acceptors_since == watermark
+            && self.acceptors_since == watermark;
+        // Negative space, leg by leg: a retirable node is outside its belief
+        // and never the sitting leader.
+        if may {
+            assert!(
+                !self.acceptors.contains(self.config.id),
+                "a retirable node is no member"
+            );
+            assert!(self.role != NodeRole::Leader, "a leader is never retirable");
+        }
+        may
     }
 
     /// The floor this leadership made effective at a matchmaker quorum, and
     /// the acceptors it retired — `None` until then.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn gc_effective(&self) -> Option<(Ballot, &[NodeId])> {
-        self.gc.as_ref().and_then(Collector::effective)
+        let effective = self.gc.as_ref().and_then(Collector::effective);
+        if effective.is_some() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment collects"
+            );
+        }
+        effective
     }
 
     /// Fold one matchmaker's GC ack. An ack for another generation, another
@@ -337,10 +390,12 @@ impl ColocatedNode {
             // The cross-role half of the retirement rule: this node's own
             // retirement, if its reconfiguration removed it, is the
             // operator's to act on after it resigns.
-            assert!(
-                !retired.contains(&me) || !acceptors.contains(me),
-                "a leader inside its configuration is never retired"
-            );
+            if retired.contains(&me) {
+                assert!(
+                    !acceptors.contains(me),
+                    "a leader inside its configuration is never retired"
+                );
+            }
             self.assert_invariants();
         }
         step
@@ -350,6 +405,10 @@ impl ColocatedNode {
     /// a replaced generation say nothing about the new one's quorum.
     pub(super) fn reset_gc_for_generation(&mut self) {
         let generation = self.deployment_matchmakers().generation;
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment has generations"
+        );
         if let Some(gc) = self.gc.as_mut() {
             gc.reset_for_generation(generation);
         }
@@ -358,8 +417,20 @@ impl ColocatedNode {
 
     /// The election fence the open GC campaign judges Region 1 by (`None`
     /// when no campaign is open, or nothing was ever proposed below it).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn gc_fence(&self) -> Option<Slot> {
-        self.gc.as_ref().and_then(Collector::fence)
+        let fence = self.gc.as_ref().and_then(Collector::fence);
+        if fence.is_some() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment collects"
+            );
+        }
+        fence
     }
 }

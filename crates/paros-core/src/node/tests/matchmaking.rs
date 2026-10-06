@@ -830,7 +830,6 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         from: NodeId(1),
         ballot: w,
         commit: None,
-        seq: 1,
         config: Some(cfg(&[1, 2, 3])),
     });
     n.ready().advance();
@@ -845,7 +844,6 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         from: NodeId(1),
         ballot: w,
         commit: None,
-        seq: 1,
         config: Some(cfg(&[1, 2, 3])),
     });
     spare.ready().advance();
@@ -863,7 +861,6 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         from: NodeId(1),
         ballot: ballot(11, 1),
         commit: None,
-        seq: 1,
         config: Some(cfg(&[0, 1, 2])),
     });
     late.ready().advance();

@@ -19,6 +19,12 @@ use serde::de::DeserializeOwned;
 /// not decoded (it reads as damaged).
 const FORMAT_VERSION: u8 = 1;
 
+// A tag carries three words (slot, round, node): the journal's far
+// identifier must hold them whole, or a damaged record loses its identity.
+const _: () = assert!(TAG_SIZE >= 3 * 8);
+// Every kind fits the one byte `kind_of` reads back.
+const _: () = assert!((Kind::Install as u64) <= u8::MAX as u64);
+
 /// What an entry holds, as its epoch records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Kind {
@@ -76,7 +82,13 @@ impl Kind {
 /// The epoch an entry of `kind` gets: the kind itself, so the journal's
 /// far identifier alone says what a damaged entry was.
 pub(crate) fn epoch(kind: Kind) -> u64 {
-    kind as u64
+    let epoch = kind as u64;
+    // Pair of `kind_of`: an epoch this store writes reads back as its kind.
+    assert!(
+        kind_of(epoch) == Some(kind),
+        "an epoch reads back as its kind"
+    );
+    epoch
 }
 
 /// The kind an epoch records, if it is one this store writes.
@@ -90,6 +102,8 @@ pub(crate) fn tag(words: [u64; 3]) -> Tag {
     for (at, word) in words.iter().enumerate() {
         tag[at * 8..at * 8 + 8].copy_from_slice(&word.to_le_bytes());
     }
+    // Pair of `words`: a written tag reads back as the words it carries.
+    assert!(self::words(&tag) == words, "a tag reads back as its words");
     tag
 }
 
@@ -101,7 +115,14 @@ pub(crate) fn words(tag: &Tag) -> [u64; 3] {
 
 /// The tag of a slot's record: its slot and the ballot it carries.
 pub(crate) fn slot_tag(slot: Slot, ballot: Ballot) -> Tag {
-    tag([slot.0, ballot.round, ballot.node.0])
+    let tag = tag([slot.0, ballot.round, ballot.node.0]);
+    // Pair of `slot_identity`: what boot reads from a damaged record's tag
+    // is the identity the write gave it.
+    assert!(
+        slot_identity(&tag) == (slot, ballot),
+        "a slot tag reads back as its slot and ballot"
+    );
+    tag
 }
 
 /// The `(slot, ballot)` a slot record's tag names.
@@ -128,6 +149,18 @@ pub(crate) trait Framed: Serialize + DeserializeOwned {
 pub(crate) fn encode<R: Framed>(record: &R) -> Vec<u8> {
     let mut bytes = vec![FORMAT_VERSION];
     bytes.extend(postcard::to_stdvec(record).expect("in-memory encoding of a store record"));
+    // Pair of `decode`: the payload a write frames decodes back to a record
+    // of the same kind and identity, so a boot never reads its own write as
+    // misdirected.
+    let back: Option<R> = postcard::from_bytes(&bytes[1..]).ok();
+    assert!(
+        back.as_ref().is_some_and(|r| r.kind() == record.kind()),
+        "an encoded record decodes to its kind"
+    );
+    assert!(
+        back.as_ref().is_some_and(|r| r.tag() == record.tag()),
+        "an encoded record decodes to its identity"
+    );
     bytes
 }
 
@@ -160,6 +193,13 @@ impl<R: Framed> Scanned<R> {
         match entry {
             Ok(entry) => {
                 let record = decode(&entry);
+                // `decode` checked the epoch: an intact record has a kind.
+                if record.is_some() {
+                    assert!(
+                        kind_of(entry.epoch).is_some(),
+                        "an intact record has a kind"
+                    );
+                }
                 Self {
                     id: EntryId {
                         index: entry.index,

@@ -6,14 +6,16 @@ use std::time::Duration;
 
 use clap::Args;
 use moonpool_core::TokioProviders;
+use paros::client::bootstrap::control_journals_of;
 use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     Writer, WriterOutcome,
 };
 use paros::wire::common::Ballot;
 use paros::{
-    ClientId, Generation, InspectReply, JournalKey, JournalState, QuorumSystem, RetireRequest, Seq,
-    Value, WireQuorumSystem, journal_state_from_proto, quorum_system_from_proto,
+    ClientId, Generation, InspectReply, JournalIdentifier, JournalState, QuorumSystem,
+    RetireRequest, Seq, Value, WireQuorumSystem, journal_state_from_proto,
+    quorum_system_from_proto,
 };
 use serde_json::{Value as Json, json};
 
@@ -31,7 +33,7 @@ fn start(client: &ParosClient) -> usize {
 #[derive(Args, Debug)]
 pub struct WriteArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The records, in order, each one argument.
     #[arg(required = true)]
     records: Vec<String>,
@@ -47,14 +49,14 @@ pub struct WriteArgs {
 }
 
 /// Where `journal` stands, read from any server.
-async fn journal_state(client: &ParosClient, journal: JournalKey) -> Option<JournalState> {
+async fn journal_state(client: &ParosClient, journal: JournalIdentifier) -> Option<JournalState> {
     client.journal_state(journal, start(client)).await
 }
 
 /// Who a writing command acts as: the journal, the owner id, and the
 /// overrides of `parosctl write` (a truncation names no position).
 struct Identity {
-    journal: JournalKey,
+    journal: JournalIdentifier,
     owner: u64,
     generation: Option<u64>,
     seq: Option<u64>,
@@ -211,7 +213,7 @@ fn refused(out: &Printer, what: &str, state: &JournalState) -> Ending {
     Ending::Refused
 }
 
-fn unknown_journal(journal: JournalKey) -> Ending {
+fn unknown_journal(journal: JournalIdentifier) -> Ending {
     note(&format!("no server serves journal {journal}"));
     Ending::Refused
 }
@@ -220,7 +222,7 @@ fn unknown_journal(journal: JournalKey) -> Ending {
 #[derive(Args, Debug)]
 pub struct ReadArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -306,7 +308,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
 #[derive(Args, Debug)]
 pub struct TailArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -364,7 +366,7 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
 #[derive(Args, Debug)]
 pub struct TruncateArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// Drop every record below this position.
     #[arg(long)]
     up_to: u64,
@@ -424,7 +426,7 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
 #[derive(Args, Debug)]
 pub struct SetLeaderArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalKey,
+    journal: JournalIdentifier,
     /// The client that should own the journal.
     #[arg(long)]
     owner: u64,
@@ -476,10 +478,11 @@ pub async fn set_leader(client: &ParosClient, out: &Printer, args: SetLeaderArgs
 /// `parosctl inspect`.
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// The journal to inspect, `TENANT/JOURNAL` (default: each node's
-    /// first journal).
+    /// The journal to inspect, `TENANT/JOURNAL`. Without it, each node is
+    /// asked for its own facts alone: its id, its cell and the control
+    /// journals (no identifier has a default, #243).
     #[arg(long)]
-    journal: Option<JournalKey>,
+    journal: Option<JournalIdentifier>,
 }
 
 fn ballot_text(ballot: Option<Ballot>) -> String {
@@ -506,15 +509,16 @@ fn quorum_text(reply: &InspectReply) -> String {
     }
 }
 
-/// `parosctl inspect`: every server's view, in server order.
+/// `parosctl inspect`: every server's view, in server order — of the
+/// journal named, or of the node alone.
 pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> Ending {
+    let Some(journal) = args.journal else {
+        return inspect_nodes(client, out).await;
+    };
     let mut answered = false;
     for server in 0..client.server_count() {
         let id = client.id_of(server);
-        let Some(reply) = client
-            .inspect(server, args.journal.unwrap_or(JournalKey::UNSET))
-            .await
-        else {
+        let Some(reply) = client.inspect(server, journal).await else {
             out.emit(
                 || format!("node {id}: no answer"),
                 || json!({ "node": id, "answered": false }),
@@ -563,6 +567,51 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
                     "matchmakers": reply.matchmakers,
                     "matchmaker_generation": reply.matchmaker_generation,
                     "journal": state.as_ref().map(state_json),
+                })
+            },
+        );
+    }
+    if answered {
+        Ending::Success
+    } else {
+        Ending::Unreachable
+    }
+}
+
+/// `parosctl inspect` without `--journal`: every server's own facts — its
+/// id, its cell and the control journals it names.
+async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
+    let mut answered = false;
+    for server in 0..client.server_count() {
+        let id = client.id_of(server);
+        let Some(reply) = client.inspect_node(server).await else {
+            out.emit(
+                || format!("node {id}: no answer"),
+                || json!({ "node": id, "answered": false }),
+            );
+            continue;
+        };
+        answered = true;
+        let journals = control_journals_of(&reply);
+        let cell = journals.map(|j| j.cell.to_string());
+        let fleet = journals.and_then(|j| j.fleet).map(|f| f.to_string());
+        out.emit(
+            || {
+                format!(
+                    "node {}: cell={} control={} fleet={}",
+                    reply.node,
+                    reply.cell_id,
+                    cell.as_deref().unwrap_or("none"),
+                    fleet.as_deref().unwrap_or("none"),
+                )
+            },
+            || {
+                json!({
+                    "node": reply.node,
+                    "answered": true,
+                    "cell": reply.cell_id,
+                    "control": cell,
+                    "fleet": fleet,
                 })
             },
         );
@@ -649,10 +698,15 @@ pub struct RetireArgs {
     /// The node to retire (its id, which must be in `--servers`).
     #[arg(long)]
     node: u64,
-    /// The GC watermark, `ROUND.NODE`; read from the leader's `inspect`
-    /// when absent.
+    /// The GC watermark, `ROUND.NODE`; read from the leader's `inspect` of
+    /// `--journal` when absent.
     #[arg(long, value_parser = parse_ballot)]
     gc_watermark: Option<Ballot>,
+    /// The journal whose leader reports the GC watermark, `TENANT/JOURNAL`
+    /// (the journal the matchmakers serve); needed without
+    /// `--gc-watermark`: no identifier has a default (#243).
+    #[arg(long)]
+    journal: Option<JournalIdentifier>,
 }
 
 fn parse_ballot(s: &str) -> Result<Ballot, String> {
@@ -665,10 +719,11 @@ fn parse_ballot(s: &str) -> Result<Ballot, String> {
     })
 }
 
-/// The effective GC watermark a leader reports, read from every server.
-async fn leader_watermark(client: &ParosClient) -> Option<Ballot> {
+/// The effective GC watermark `journal`'s leader reports, read from every
+/// server.
+async fn leader_watermark(client: &ParosClient, journal: JournalIdentifier) -> Option<Ballot> {
     for server in 0..client.server_count() {
-        if let Some(reply) = client.inspect(server, JournalKey::UNSET).await
+        if let Some(reply) = client.inspect(server, journal).await
             && reply.leader
             && reply.gc_watermark.is_some()
         {
@@ -685,16 +740,20 @@ pub async fn retire(client: &ParosClient, out: &Printer, args: RetireArgs) -> En
         note(&format!("node {} is not in --servers", args.node));
         return Ending::Refused;
     };
-    let watermark = match args.gc_watermark {
-        Some(watermark) => watermark,
-        None => {
-            if let Some(watermark) = leader_watermark(client).await {
-                watermark
-            } else {
-                note("no leader reports an effective GC watermark: nothing is retirable yet");
-                return Ending::Refused;
-            }
-        }
+    let watermark = if let Some(watermark) = args.gc_watermark {
+        watermark
+    } else {
+        let Some(journal) = args.journal else {
+            note(
+                "name the journal whose leader reports the watermark (--journal), or pass --gc-watermark",
+            );
+            return Ending::Refused;
+        };
+        let Some(watermark) = leader_watermark(client, journal).await else {
+            note("no leader reports an effective GC watermark: nothing is retirable yet");
+            return Ending::Refused;
+        };
+        watermark
     };
     let request = RetireRequest {
         gc_watermark: Some(watermark),

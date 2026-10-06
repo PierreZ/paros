@@ -41,7 +41,7 @@ service Paros {
   rpc ReconfigureMatchmakers(.paros.v1.ReconfigureMatchmakers) returns (.paros.v1.ReconfigureMatchmakersAck);
 }
 
-// Every journal call names its journal by the frame `(tenant, journal)`
+// Every journal call names its journal by the identifier `(tenant, journal)`
 // (#184, #235): a `0` half is unset and always refused (`unknown_journal`),
 // as is any journal this process does not serve.
 // A reply that carries no verdict — a redirect, an unknown journal, a
