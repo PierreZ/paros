@@ -101,6 +101,17 @@ pub(crate) struct NodeImage {
 }
 
 impl NodeImage {
+    /// The image's own invariant, whatever the records said: a slot is
+    /// accepted or faulty, never both.
+    pub(crate) fn assert_invariants(&self) {
+        assert!(
+            self.faulty
+                .keys()
+                .all(|slot| !self.accepted.contains_key(slot)),
+            "a slot is accepted or faulty, never both"
+        );
+    }
+
     /// Seal `state` with a floor raised to `first`: a floor that does not
     /// rise keeps the state sealed with the higher one.
     fn seal(&mut self, first: Slot, state: JournalState) {
@@ -114,6 +125,15 @@ impl NodeImage {
         let floor = self.first;
         self.accepted = self.accepted.split_off(&floor);
         self.faulty = self.faulty.split_off(&floor);
+        // Nothing survives below the floor it just raised.
+        assert!(
+            self.accepted.keys().next().is_none_or(|s| *s >= floor),
+            "no accepted record survives below the floor"
+        );
+        assert!(
+            self.faulty.keys().next().is_none_or(|s| *s >= floor),
+            "no faulty record survives below the floor"
+        );
     }
 
     /// Fold one intact record: the live write and the boot replay alike.
@@ -162,6 +182,7 @@ impl NodeImage {
             }
             NodeRecord::End => {}
         }
+        self.assert_invariants();
     }
 
     /// Fold one damaged record (the module doc's table). `strict` says the
@@ -222,6 +243,16 @@ impl NodeImage {
         {
             self.chosen_index = Some(Slot(below));
         }
+        // A finished replay: nothing frozen, and the chosen index covers the
+        // truncated prefix the floor implies (pair of the live `TrimmedTo`).
+        assert!(!self.chosen_frozen, "a finished replay freezes nothing");
+        if let Some(below) = self.first.0.checked_sub(1) {
+            assert!(
+                self.chosen_index.is_some_and(|c| c.0 >= below),
+                "the chosen index covers the truncated prefix"
+            );
+        }
+        self.assert_invariants();
     }
 
     /// The image re-emitted as a checkpoint's content (between `Begin` and
@@ -244,6 +275,16 @@ impl NodeImage {
             ballot: *ballot,
         }));
         records.push(NodeRecord::End);
+        // A bracket: its header, its sealed state, one record per slot, its
+        // end — exactly what `plan` recognises and `apply` folds back.
+        assert!(
+            records.len() == 3 + self.accepted.len() + self.faulty.len(),
+            "a checkpoint copies every slot once"
+        );
+        assert!(
+            matches!(records.first(), Some(NodeRecord::Begin { .. })),
+            "a checkpoint opens with its header"
+        );
         records
     }
 }

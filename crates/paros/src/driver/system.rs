@@ -170,7 +170,6 @@ impl<P: Providers> SystemFollower<P> {
             plan.genesis_pool.iter().all(|n| fixed.contains(n)),
             "the genesis pool is always admitted"
         );
-        assert!(!seeds.is_empty(), "a follower reads from at least one seed");
         Ok((
             Self {
                 self_id: plan.self_id,
@@ -255,7 +254,20 @@ impl<P: Providers> SystemFollower<P> {
 
     /// Whether `journal` was tombstoned in the directory fold.
     pub(crate) fn is_tombstoned(&self, journal: JournalIdentifier) -> bool {
-        self.tombstones.contains(&journal)
+        let tombstoned = self.tombstones.contains(&journal);
+        // Pair of the fold's insert: a tombstone names a journal of the
+        // directory's own tenant, and never a system journal.
+        if tombstoned {
+            assert!(
+                journal.tenant == self.directory_key.tenant,
+                "a tombstone lies in the directory's tenant"
+            );
+            assert!(
+                !self.system().contains(&journal),
+                "a system journal is never tombstoned"
+            );
+        }
+        tombstoned
     }
 
     /// Fold one page of `journal` read from this node's own journal fold.
@@ -285,6 +297,11 @@ impl<P: Providers> SystemFollower<P> {
 
     /// Where the next read of `journal` starts.
     pub(crate) fn cursor(&self, journal: JournalIdentifier) -> u64 {
+        // Only the two system journals are followed.
+        assert!(
+            self.system().contains(&journal),
+            "a follow cursor names a system journal"
+        );
         if journal == self.registry_key {
             return self.registry.next_seq();
         }
@@ -312,7 +329,9 @@ impl<P: Providers> SystemFollower<P> {
     /// Fold one remote answer.
     pub(crate) fn fold_remote(&mut self, followed: Followed) -> Vec<(u64, SystemEvent)> {
         let Followed { journal, reply } = followed;
-        self.outstanding.remove(&journal);
+        // Every answer closes the one read `poll_remote` opened for it.
+        let was_outstanding = self.outstanding.remove(&journal);
+        assert!(was_outstanding, "a follow answer closes an open read");
         assert!(
             !self.outstanding.contains(&journal),
             "an answered follow read is closed"

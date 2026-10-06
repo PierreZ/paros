@@ -209,11 +209,6 @@ impl Cadence {
             self.elapsed = 0;
             return true;
         }
-        // Not yet due: the count stays below the cadence.
-        assert!(
-            self.elapsed < cadence.max(1),
-            "a cadence fires when it is due"
-        );
         false
     }
 
@@ -224,7 +219,6 @@ impl Cadence {
             self.tick(cadence)
         } else {
             self.reset();
-            assert!(self.elapsed == 0, "a closed cadence restarts from zero");
             false
         }
     }

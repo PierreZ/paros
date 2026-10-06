@@ -133,6 +133,11 @@ impl Lanes {
             "the round-robin cursor moves past the served lane"
         );
         assert!(self.total + 1 == total, "a pop takes exactly one message");
+        // Pair of the push-side keying: a lane holds only its own journal.
+        assert!(
+            (message.tenant, message.journal) == journal,
+            "a lane holds only its own journal's messages"
+        );
         self.assert_invariants();
         Some(message)
     }
@@ -164,7 +169,9 @@ impl PeerMailbox {
 
     /// Whether `journal`'s lane is full (the next push into it evicts).
     fn is_full(&self, journal: (u64, u64)) -> bool {
-        self.lock().lane_len(journal) >= self.capacity
+        let len = self.lock().lane_len(journal);
+        assert!(len <= self.capacity, "a lane never exceeds its capacity");
+        len == self.capacity
     }
 
     /// Enqueue `message`, evicting and returning one undelivered message when
@@ -211,6 +218,18 @@ impl PeerMailbox {
             );
             if evicted.is_none() {
                 lanes.total += 1;
+            }
+            // Eviction is per lane (#188): only a full lane evicts, and only
+            // its own journal's message — never another journal's.
+            if let Some(victim) = &evicted {
+                assert!(
+                    lanes.lane_len(journal) == self.capacity,
+                    "only a full lane evicts"
+                );
+                assert!(
+                    (victim.tenant, victim.journal) == journal,
+                    "a lane evicts only its own journal's message"
+                );
             }
             // The lane the message went to now holds it.
             assert!(lanes.lane_len(journal) > 0, "a pushed message is queued");
@@ -708,6 +727,18 @@ fn delivery_batch<A: Audit>(
         assert!(
             batch_bytes <= DELIVERY_BATCH_BYTES,
             "a multi-message batch fits its byte budget"
+        );
+    }
+    // A carried message is the one that would have overflowed the budget:
+    // the batch stopped short of its limit for bytes, not for count.
+    if let Some(next) = &carried {
+        assert!(
+            batch.len() < batch_limit,
+            "a carried message left room by count"
+        );
+        assert!(
+            batch_bytes.saturating_add(next.encoded_len()) > DELIVERY_BATCH_BYTES,
+            "a message is carried only for bytes"
         );
     }
     (internal::Deliver { messages: batch }, carried)

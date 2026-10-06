@@ -297,6 +297,25 @@ pub(crate) fn report_applied<A: Audit>(
     command: &Command,
     outcome: Option<&Outcome>,
 ) {
+    // A slot's verdict is of its command's kind (pair of `JournalState::apply`).
+    if let Some(outcome) = outcome {
+        let write_verdict = matches!(
+            outcome,
+            Outcome::Accepted { .. }
+                | Outcome::Duplicate { .. }
+                | Outcome::Refused(_)
+                | Outcome::Truncated(_)
+        );
+        assert!(
+            write_verdict == command.write().is_some(),
+            "a write's slot folds to a write's verdict"
+        );
+        assert!(
+            matches!(outcome, Outcome::Noop)
+                == matches!(command, Command::Control(paros_core::Control::Noop)),
+            "only a Noop folds to Noop"
+        );
+    }
     let vhash = command_hash(command);
     audit.applied(NodeId(self_id), slot, vhash, command, outcome);
     tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");

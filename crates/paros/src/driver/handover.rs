@@ -169,7 +169,12 @@ impl HandoverDriver {
     /// Ticks the running phase has made no progress for (the core's own
     /// count; the timeout that acts on it is driver policy).
     pub(crate) fn stalled_for(&self) -> u64 {
-        self.reconfigurer.stalled_for()
+        let stalled = self.reconfigurer.stalled_for();
+        // An idle handover has no stall clock running.
+        if !self.is_busy() {
+            assert!(stalled == 0, "an idle handover has not stalled");
+        }
+        stalled
     }
 
     /// Give up the running phase — and the pacing that belonged to it. A
@@ -210,12 +215,14 @@ impl HandoverDriver {
     /// Re-issue the running phase's step (a preempted decree reopens above the
     /// promise that refused it).
     pub(crate) fn resend(&mut self) {
+        // Only a due beat re-sends: a running handover past its backoff.
+        assert!(self.is_busy(), "only a running handover re-sends");
+        assert!(self.backoff == 0, "a backed-off handover re-sends nothing");
         self.reconfigurer.resend();
     }
 
     fn clear_pacing(&mut self) {
         self.resend.reset();
         self.backoff = 0;
-        assert!(self.backoff == 0, "cleared pacing holds no backoff");
     }
 }

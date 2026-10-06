@@ -118,11 +118,22 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
         vec![self.journal]
     }
 
-    fn open(&mut self, _journal: JournalIdentifier) -> Option<(S, BootKind)> {
-        self.store.take()
+    fn open(&mut self, journal: JournalIdentifier) -> Option<(S, BootKind)> {
+        // The driver opens only what `journals` listed: the one journal.
+        assert!(
+            journal == self.journal,
+            "a single store opens only its journal"
+        );
+        let store = self.store.take();
+        assert!(self.store.is_none(), "a single store is handed out once");
+        store
     }
 
-    fn audit(&self, _journal: JournalIdentifier) -> A {
+    fn audit(&self, journal: JournalIdentifier) -> A {
+        assert!(
+            journal == self.journal,
+            "a single store audits only its journal"
+        );
         self.audit.clone()
     }
 
@@ -322,9 +333,12 @@ impl<S, A> Journals<S, A> {
             self.live.contains_key(&deployed),
             "the plane's journal is live"
         );
-        self.live
+        let first = self
+            .live
             .iter_mut()
-            .find(|(journal, _)| **journal == deployed)
+            .find(|(journal, _)| **journal == deployed);
+        assert!(first.is_some(), "the plane's runtime is found");
+        first
     }
 
     /// [`Journals::first`], read-only: the journal that carries the
@@ -358,7 +372,12 @@ impl<S, A> Journals<S, A> {
 
     /// Whether `journal` is one of the deployment's control journals.
     pub(crate) fn is_control(&self, journal: JournalIdentifier) -> bool {
-        self.control.contains(&journal)
+        let control = self.control.contains(&journal);
+        // Pair of the check in `new`: every control journal is named.
+        if control {
+            assert!(journal.is_set(), "a control journal is a named journal");
+        }
+        control
     }
 
     /// Whether the node has nothing left to serve **because of a fault**: no
@@ -429,6 +448,7 @@ impl<S, A> Journals<S, A> {
         self.quarantined.insert(journal, now);
         self.newly_quarantined.push(journal);
         self.last_fault = Some(fault);
+        self.assert_invariants();
     }
 
     /// The journals quarantined since the last call, for the opener.
@@ -439,7 +459,12 @@ impl<S, A> Journals<S, A> {
     /// Whether the node has nothing left to serve this incarnation: no live
     /// journal.
     pub(crate) fn exhausted(&self) -> bool {
-        self.live.is_empty()
+        let exhausted = self.live.is_empty();
+        // Nothing live, so no journal answers for the plane.
+        if exhausted {
+            assert!(self.plane().is_none(), "an exhausted node has no plane");
+        }
+        exhausted
     }
 
     /// The node's exit when [`Journals::exhausted`]: the fault that ended
@@ -450,10 +475,14 @@ impl<S, A> Journals<S, A> {
     ///
     /// The fault that ended the last incarnation.
     pub(crate) fn exit(&mut self) -> Result<(), RunError> {
-        match self.last_fault.take() {
+        // The node exits only once it has nothing live left to serve.
+        assert!(self.exhausted(), "a node exits only when exhausted");
+        let exit = match self.last_fault.take() {
             Some(fault) => Err(fault),
             None => Ok(()),
-        }
+        };
+        assert!(self.last_fault.is_none(), "an exit consumes the last fault");
+        exit
     }
 }
 

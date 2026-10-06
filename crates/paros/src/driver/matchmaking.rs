@@ -406,6 +406,10 @@ fn report_completed<A: Audit>(
 /// (`MatchStep::ProbeAnswered`) moves nothing a checker judges: only its
 /// closing is a transition.
 fn report_probe_closed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: &MatchStep) {
+    assert!(
+        matches!(step, MatchStep::ProbeClosed { .. }),
+        "only a closed probe is reported closed"
+    );
     let MatchStep::ProbeClosed { effective, member } = *step else {
         return;
     };
@@ -417,6 +421,23 @@ fn report_probe_closed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: 
         member,
         "membership_probe_closed"
     );
+}
+
+/// Pair of [`folded_answer`]: a step that moved a registration came from a
+/// registration's answer, and a probe's step from a probe's answer.
+fn assert_step_source(folded: bool, step: &MatchStep) {
+    if matches!(
+        step,
+        MatchStep::Registered { .. } | MatchStep::Paged { .. } | MatchStep::Completed { .. }
+    ) {
+        assert!(folded, "a registration step folded a registration");
+    }
+    if matches!(
+        step,
+        MatchStep::ProbeAnswered | MatchStep::ProbeClosed { .. }
+    ) {
+        assert!(!folded, "a probe step folded no registration");
+    }
 }
 
 /// Report what one matchmaker reply did to the open campaign. `folded` is
@@ -431,6 +452,7 @@ pub(crate) fn report_match_step<A: Audit>(
     folded: Option<(Ballot, u64)>,
     step: &MatchStep,
 ) {
+    assert_step_source(folded.is_some(), step);
     let (folded_watermark, folded_hash) = folded.unwrap_or_default();
     match step {
         // #189: an unknown member abandons the campaign until the registry

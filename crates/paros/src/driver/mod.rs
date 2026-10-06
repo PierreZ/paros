@@ -1519,6 +1519,29 @@ struct SystemCtx<'a, 'l, P: Providers, J: JournalStores, H: DriverHooks> {
     audit: &'a J::Audit,
 }
 
+/// An event is tagged by the journal whose fold produced it: a registry
+/// event by the registry, a directory event by any other system journal.
+fn assert_event_source(
+    registry: JournalIdentifier,
+    journal: JournalIdentifier,
+    event: &SystemEvent,
+) {
+    match event {
+        SystemEvent::Registry(_) => {
+            assert!(
+                journal == registry,
+                "a registry event comes from the registry"
+            );
+        }
+        SystemEvent::Directory(_) => {
+            assert!(
+                journal != registry,
+                "a directory event never comes from the registry"
+            );
+        }
+    }
+}
+
 impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
     /// Apply what `journal`'s fold moved, in position order: start a created
     /// journal naming this node, stop a tombstoned one, open a lane to an
@@ -1542,6 +1565,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         // refused on a journal that cannot reconfigure).
         let mut admit = false;
         for (seq, event) in events {
+            assert_event_source(follower.registry_key(), journal, &event);
             self.audit.system_folded(me, journal, seq, &event);
             tracing::info!(node = me.0, journal = %journal, seq, event = ?event, "system_folded");
             match event {
@@ -1639,6 +1663,8 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
     /// Node `id`, registered at `addr`, is in the pool: open its peer lane
     /// (once) and report the admission.
     fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str) {
+        // This node's own registration joins spares; it is never a peer.
+        assert!(id != me, "a node never admits itself as a peer");
         if !self.out.has_peer(id) {
             match peer_address(addr) {
                 Ok(addr) => {

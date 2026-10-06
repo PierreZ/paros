@@ -57,7 +57,13 @@ enum MatchRecord {
 }
 
 fn ballot_tag(ballot: Ballot) -> Tag {
-    tag([ballot.round, ballot.node.0, 0])
+    let tag = tag([ballot.round, ballot.node.0, 0]);
+    // Pair of `ballot_of`: a damaged registration still names its ballot.
+    assert!(
+        ballot_of(&tag) == ballot,
+        "a registration tag reads back as its ballot"
+    );
+    tag
 }
 
 fn ballot_of(tag: &Tag) -> Ballot {
@@ -104,6 +110,11 @@ impl MatchMeta {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![MATCH_META_VERSION];
         bytes.extend(postcard::to_stdvec(&self).expect("in-memory encoding of the metadata"));
+        // Pair of `decode`: the marker a sync saves is what a boot reads.
+        assert!(
+            Self::decode(&bytes).as_ref() == Some(self),
+            "saved metadata decodes back to itself"
+        );
         bytes
     }
 
@@ -157,6 +168,17 @@ impl MatchImage {
             }
             MatchRecord::End => {}
         }
+        // Whatever the record, nothing survives below the durable watermark
+        // except what an install or checkpoint header put back.
+        if matches!(record, MatchRecord::Scalars(_)) {
+            assert!(
+                self.registry
+                    .keys()
+                    .next()
+                    .is_none_or(|b| *b >= self.hard_state.gc_watermark),
+                "no registration survives below the watermark"
+            );
+        }
     }
 
     fn checkpoint(&self) -> Vec<MatchRecord> {
@@ -170,6 +192,10 @@ impl MatchImage {
                 }),
         );
         records.push(MatchRecord::End);
+        assert!(
+            records.len() == 2 + self.registry.len(),
+            "a checkpoint copies every registration once"
+        );
         records
     }
 }
@@ -239,6 +265,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     }
 
     fn stage(&mut self, record: MatchRecord) {
+        assert!(self.journal.is_some(), "a write is staged on an open store");
         self.image.apply(&record);
         self.staged.push(record);
     }
@@ -354,6 +381,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     }
 
     async fn append(&mut self, records: &[MatchRecord]) -> Result<(), StorageError> {
+        assert!(!records.is_empty(), "an append carries a record");
         let journal = self.journal.as_mut().expect("opened before appending");
         let payloads: Vec<Vec<u8>> = records.iter().map(encode).collect();
         let framed: Vec<Record<'_>> = records
@@ -417,6 +445,7 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
     async fn format(&mut self, config: &MatchmakerConfig) -> Result<(), StorageError> {
         self.opened().await?;
+        assert!(self.meta.formatted.is_none(), "a store is formatted once");
         self.meta.formatted = Some(config.clone());
         self.meta_dirty = true;
         Ok(())
@@ -439,11 +468,21 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(round = watermark.round))]
     async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
         self.opened().await?;
-        if watermark > self.image.hard_state.gc_watermark {
+        let before = self.image.hard_state.gc_watermark;
+        if watermark > before {
             let mut scalars = self.image.hard_state.clone();
             scalars.gc_watermark = watermark;
             self.stage(MatchRecord::Scalars(scalars));
         }
+        // The durable watermark only rises, and reaches what was asked.
+        assert!(
+            self.image.hard_state.gc_watermark >= before,
+            "a watermark never falls"
+        );
+        assert!(
+            self.image.hard_state.gc_watermark >= watermark,
+            "a raised watermark is held"
+        );
         Ok(())
     }
 
@@ -473,6 +512,11 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             });
         }
         self.stage(MatchRecord::End);
+        // The install replaced the image whole: the successor's scalars.
+        assert!(
+            self.image.hard_state.generation == scalars.generation,
+            "an installed registry holds the successor generation"
+        );
         Ok(())
     }
 
@@ -495,6 +539,8 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             self.append(&records).await?;
             self.maybe_checkpoint().await?;
         }
+        assert!(!self.meta_dirty, "a sync leaves no metadata unsaved");
+        assert!(self.staged.is_empty(), "a sync leaves nothing staged");
         Ok(())
     }
 }

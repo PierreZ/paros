@@ -126,7 +126,21 @@ fn send<H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
 ) {
+    // A woken read is one the fold moved past: never an empty tail page.
+    if how == LogReadAnswer::Woke {
+        assert!(!at_end(read), "a woken read has something to serve");
+    }
     let report = LogReadReport::of(read, from, how);
+    let ack = read_ack(read);
+    // The audit's view and the wire answer are two encodings of one read.
+    assert!(
+        ack.truncated == report.truncated,
+        "the audit and the wire agree on truncation"
+    );
+    assert!(
+        ack.records.len() == report.records.len(),
+        "the audit and the wire carry the same records"
+    );
     audit.log_read_served(node, &report);
     tracing::info!(
         node = node.0,
@@ -137,7 +151,7 @@ fn send<H: DriverHooks, A: Audit>(
         answer = ?how,
         "log_read_served"
     );
-    answer(hooks, audit, node, Reply::LogRead, reply, read_ack(read));
+    answer(hooks, audit, node, Reply::LogRead, reply, ack);
 }
 
 /// The refusal a call naming a journal this process does not serve gets
@@ -206,6 +220,11 @@ impl JournalReads {
 
     /// The `ctx` the next read's quorum read opens with.
     pub(crate) fn next_ctx(&self) -> u64 {
+        // The next token is fresh: no read waits on it yet.
+        assert!(
+            !self.confirming.contains_key(&self.next_ctx),
+            "the next read token is unused"
+        );
         self.next_ctx
     }
 
@@ -311,7 +330,8 @@ impl JournalReads {
         if self.parked.is_empty() {
             return;
         }
-        let mut still = Vec::with_capacity(self.parked.len());
+        let before = self.parked.len();
+        let mut still = Vec::with_capacity(before);
         for parked in std::mem::take(&mut self.parked) {
             let page = read(parked.from, parked.limit, READ_PAGE_BYTES);
             if at_end(&page) {
@@ -329,6 +349,8 @@ impl JournalReads {
             }
         }
         self.parked = still;
+        // Waking only answers: it never parks a read.
+        assert!(self.parked.len() <= before, "a wake never parks a read");
         self.assert_invariants();
     }
 
@@ -369,6 +391,20 @@ impl JournalReads {
                 );
             }
         }
+        // What is still confirming is inside its deadline, and an early
+        // expiry leaves nothing confirming at all.
+        if expire_all {
+            assert!(
+                self.confirming.is_empty(),
+                "an early expiry answers every read"
+            );
+        }
+        assert!(
+            self.confirming
+                .values()
+                .all(|p| ticks.saturating_sub(p.parked_at) <= retry_ticks),
+            "no confirming read outlives its deadline"
+        );
         if self.parked.is_empty() {
             return;
         }

@@ -56,6 +56,13 @@ impl Call {
             matches!(self, Call::Write { .. }) == command.write().is_some(),
             "a Write call proposes a write and nothing else does"
         );
+        // The fence a Truncate carries is the one it proposes (#228).
+        if let Call::Truncate { up_to, .. } = self {
+            assert!(
+                matches!(command, Command::Control(Control::Truncate { up_to: u, .. }) if u == *up_to),
+                "a Truncate call proposes its own trim point"
+            );
+        }
         command
     }
 
@@ -205,6 +212,11 @@ pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
             "a refused write names the state it was judged against"
         );
     }
+    // A verdict is an answer, never a redirect.
+    assert!(
+        ack.leader.is_none(),
+        "a write verdict carries no leader hint"
+    );
     ack
 }
 
@@ -248,7 +260,13 @@ pub(crate) fn set_leader_ack(outcome: &Outcome) -> SetLeaderAck {
     }
     if ack.decided {
         assert!(ack.state.is_some(), "a decided SetLeader names its state");
+    } else {
+        assert!(ack.state.is_none(), "an undecided SetLeader names no state");
     }
+    assert!(
+        ack.leader.is_none(),
+        "a SetLeader verdict carries no leader hint"
+    );
     ack
 }
 
@@ -279,7 +297,13 @@ pub(crate) fn truncate_ack(outcome: &Outcome) -> TruncateAck {
     }
     if ack.decided {
         assert!(ack.state.is_some(), "a decided Truncate names its state");
+    } else {
+        assert!(ack.state.is_none(), "an undecided Truncate names no state");
     }
+    assert!(
+        ack.leader.is_none(),
+        "a Truncate verdict carries no leader hint"
+    );
     ack
 }
 

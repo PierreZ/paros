@@ -32,6 +32,11 @@ impl NodeMeta {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![META_VERSION];
         bytes.extend(postcard::to_stdvec(self).expect("in-memory encoding of the metadata"));
+        // Pair of `decode`: the metadata a sync saves is what a boot reads.
+        assert!(
+            Self::decode(&bytes).as_ref() == Some(self),
+            "saved metadata decodes back to itself"
+        );
         bytes
     }
 
@@ -135,6 +140,8 @@ impl<P: StorageProvider> JournalStorage<P> {
     /// Stage one write: fold it into the image now, append it at the next
     /// sync.
     fn stage(&mut self, record: NodeRecord) {
+        // Writes go to an open store: the boot scan ran first.
+        assert!(self.journal.is_some(), "a write is staged on an open store");
         self.image.apply(&record);
         self.staged.push(record);
     }
@@ -215,6 +222,16 @@ impl<P: StorageProvider> JournalStorage<P> {
             at += 1;
         }
         image.finish();
+        // Boot side of the write pairs: the replayed image keeps nothing
+        // below its floor.
+        assert!(
+            image
+                .accepted
+                .keys()
+                .next()
+                .is_none_or(|s| *s >= image.first),
+            "a booted image holds nothing below its floor"
+        );
         if !image.faulty.is_empty() {
             tracing::warn!(
                 node = self.config.id.0,
@@ -236,6 +253,7 @@ impl<P: StorageProvider> JournalStorage<P> {
     }
 
     async fn append(&mut self, records: &[NodeRecord]) -> Result<(), StorageError> {
+        assert!(!records.is_empty(), "an append carries a record");
         let journal = self.journal.as_mut().expect("opened before appending");
         let payloads: Vec<Vec<u8>> = records.iter().map(encode).collect();
         let framed: Vec<Record<'_>> = records
@@ -263,12 +281,22 @@ impl<P: StorageProvider> JournalStorage<P> {
         }
         let begin = journal.next_index();
         let records = self.image.checkpoint();
+        assert!(
+            matches!(records.last(), Some(NodeRecord::End)),
+            "a checkpoint closes its bracket"
+        );
         self.append(&records).await?;
         let journal = self.journal.as_mut().expect("opened before a checkpoint");
         journal
             .truncate_prefix(begin)
             .await
             .map_err(|e| append_error(&e))?;
+        // The log now starts at the checkpoint (or later): the prefix it
+        // summarises is gone.
+        assert!(
+            journal.start_index() <= begin,
+            "a prefix drop keeps the checkpoint"
+        );
         tracing::debug!(
             node = self.config.id.0,
             begin,
@@ -360,6 +388,9 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
     async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
         self.opened().await?;
+        // The marker is set once, never edited (the driver refuses a
+        // formatted store before it gets here).
+        assert!(self.meta.formatted.is_none(), "a store is formatted once");
         self.meta.formatted = Some(config.clone());
         self.meta_dirty = true;
         Ok(())
@@ -368,6 +399,11 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round))]
     async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         self.opened().await?;
+        // Write half of the promise pair: the core only ever raises it.
+        assert!(
+            ballot >= self.meta.promise,
+            "a persisted promise never falls"
+        );
         self.meta.promise = ballot;
         self.meta_dirty = true;
         Ok(())
@@ -420,6 +456,13 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         if !self.staged.is_empty() && !relaxed_only {
             self.append_staged().await?;
             self.maybe_checkpoint().await?;
+        }
+        assert!(!self.meta_dirty, "a sync leaves no metadata unsaved");
+        if !relaxed_only {
+            assert!(
+                self.staged.is_empty(),
+                "a strict sync leaves nothing staged"
+            );
         }
         Ok(())
     }
