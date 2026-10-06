@@ -108,24 +108,27 @@ pub struct LogReadReport<'a> {
 }
 
 impl<'a> LogReadReport<'a> {
-    /// The report of the core page `read` answering a read from `from`.
+    /// The report of the core page `read` answering a read from `from`;
+    /// `None` for [`LogRead::NotHeld`], which serves nothing (the read is
+    /// answered unserved).
     #[must_use]
-    pub fn of(read: &'a LogRead, from: Seq, answer: LogReadAnswer) -> Self {
+    pub fn of(read: &'a LogRead, from: Seq, answer: LogReadAnswer) -> Option<Self> {
         match read {
-            LogRead::Truncated(state) => Self {
+            LogRead::Truncated(state) => Some(Self {
                 from,
                 truncated: true,
                 records: &[],
                 state: *state,
                 answer,
-            },
-            LogRead::Page(page) => Self {
+            }),
+            LogRead::Page(page) => Some(Self {
                 from,
                 truncated: false,
                 records: &page.records,
                 state: page.state,
                 answer,
-            },
+            }),
+            LogRead::NotHeld => None,
         }
     }
 }

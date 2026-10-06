@@ -145,7 +145,10 @@ are gone from every disk in the cluster, not just from its own. A `Read` whose
 journal state that names `first_seq`, the first position it may read. The
 reader resumes there: the library's `paros::client::Reader` moves its cursor to
 that floor and reports the skipped positions as a `ReaderOutcome::Gap`, never
-silently. That is exactly why the client's truncation is its own decision: a
+silently. The laggard itself, until its walk reaches the `Truncate` that let the
+peer's floor rise, still counts records below its new floor that it no longer
+holds: a read there is the core's `LogRead::NotHeld`, answered unserved, and the
+reader asks another server. That is exactly why the client's truncation is its own decision: a
 client truncates only what it no longer needs to read.
 
 One line in that path carries the safety: the jump **does not touch the

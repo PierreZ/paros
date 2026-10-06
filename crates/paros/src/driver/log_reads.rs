@@ -80,6 +80,8 @@ fn at_end(read: &LogRead) -> bool {
 /// The wire answer for a core read page.
 fn read_ack(read: &LogRead) -> ReadAck {
     match read {
+        // Unserved: the client asks another server (`ReadOutcome::Unserved`).
+        LogRead::NotHeld => ReadAck::default(),
         LogRead::Truncated(state) => ReadAck {
             served: true,
             truncated: true,
@@ -106,7 +108,16 @@ fn send<H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
 ) {
-    let report = LogReadReport::of(read, from, how);
+    let Some(report) = LogReadReport::of(read, from, how) else {
+        // The fold's floor rose ahead of it (a trim-point jump): the record
+        // is in the journal but not here, so the read is answered unserved
+        // and the client asks elsewhere (`LogRead::NotHeld`).
+        tracing::info!(node = node.0, from = from.0, answer = ?how, "log_read_not_held");
+        let ack = read_ack(read);
+        assert!(!ack.served, "a read this process does not hold is unserved");
+        answer(hooks, audit, node, Reply::ReadUnserved, reply, ack);
+        return;
+    };
     audit.log_read_served(node, &report);
     tracing::info!(
         node = node.0,

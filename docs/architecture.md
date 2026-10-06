@@ -157,6 +157,13 @@ answers. No read goes through the Paxos leader, so reads scale with replicas and
 acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
 `CheckTail` retire.
 
+A server answers only from records it holds (decided on 2026-10-06). A server whose floor rose
+ahead of its fold — it jumped to a peer's trim point, and the `Truncate` that let the peer's
+floor rise lies above it, not yet applied here — still counts records below its floor in the
+journal. A read there is answered **unserved**, the same answer as a read whose confirmation
+timed out, and the client asks another server: never `Truncated` (the journal still has the
+record) and never a page (this server cannot produce it).
+
 ### 2.6 Truncation
 
 A `Truncate` is proposed through consensus and judged at apply in slot order like a `Write`: in

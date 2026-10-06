@@ -63,6 +63,16 @@ pub enum LogRead {
     Truncated(JournalState),
     /// A page of records.
     Page(LogPage),
+    /// The read starts at a position the journal at this fold's head still
+    /// counts (at or past its `first_seq`) but that lies below this replica's
+    /// floor: the record is gone from here, not from the journal. Only a
+    /// replica whose floor rose before its fold reached the truncation that
+    /// let it rise answers this — one that jumped to a peer's trim point
+    /// ([`Replica::trim_to`]) or rebooted onto a fold stopped at a hole —
+    /// typically only until its fold catches up. The reader asks elsewhere: the
+    /// driver answers it unserved, never `Truncated` (the journal still has
+    /// the record) and never a page (this replica cannot produce it).
+    NotHeld,
 }
 
 /// One page of a journal read ([`Replica::read`]): the records at
@@ -465,15 +475,36 @@ impl Replica {
     /// driver) decides whether to wait for the journal to grow — the
     /// long-poll is not the core's.
     ///
+    /// A `from` at or past `first_seq` but below the base's `next_seq` is
+    /// [`LogRead::NotHeld`]: every record the base counts sits in a slot
+    /// below the floor, dropped here. A floor this replica's own truncation
+    /// set keeps the slot holding `first_seq`, so this meets only a floor
+    /// that rose ahead of the fold: a trim-point jump adopts the peer's base
+    /// at its floor while the decided `Truncate` that let the peer's floor
+    /// rise sits in a slot above it this fold has not reached yet (or a
+    /// reboot's refold stopped at a hole below that slot). Serving such a
+    /// read used to panic looking for the record in the positions index;
+    /// red→green: main-hunt seed 2382785388621081873 (a node jumped to trim
+    /// point 5 with base `first_seq` 0, `next_seq` 1, missed the truncation
+    /// at slot 19, and a quorum read from 0 confirmed at its fold head).
+    ///
     /// # Panics
     ///
-    /// If the positions index does not cover a position below `next_seq`
-    /// (a programmer error).
+    /// If the positions index does not cover a position at or past the
+    /// base's `next_seq` and below `next_seq` (a programmer error).
     #[must_use]
     pub fn read(&self, from: Seq, limit: usize, max_bytes: usize) -> LogRead {
         let state = self.state;
         if from < state.first_seq {
             return LogRead::Truncated(state);
+        }
+        if from < self.base.next_seq {
+            // The record exists in the journal, just not here.
+            assert!(
+                from < state.next_seq,
+                "a position below the base's end lies below the journal's end"
+            );
+            return LogRead::NotHeld;
         }
         let mut page = LogPage {
             from,
@@ -766,8 +797,46 @@ mod tests {
     fn page(read: LogRead) -> super::LogPage {
         match read {
             LogRead::Page(page) => page,
-            LogRead::Truncated(_) => panic!("expected a page"),
+            LogRead::Truncated(_) | LogRead::NotHeld => panic!("expected a page"),
         }
+    }
+
+    /// A trim-point jump whose base still counts a record below the floor
+    /// (the truncation that let the peer's floor rise lies above it, unfolded
+    /// here) serves a read there as not held — never a page, never
+    /// `Truncated` — and serves every position at or past the floor.
+    #[test]
+    fn a_jumped_fold_behind_its_truncation_does_not_hold_the_base_records() {
+        let commands = [
+            claim(),
+            write(0, &[b"a"]),
+            write(1, &[b"b"]),
+            write(2, &[b"c"]),
+            Command::Control(Control::Truncate {
+                generation: Generation(1),
+                owner: ClientId(1),
+                up_to: Seq(1),
+            }),
+        ];
+        let mut r = replica(&commands[..1]);
+        let base = JournalState {
+            owner: Some(ClientId(1)),
+            generation: Generation(1),
+            next_seq: Seq(1),
+            first_seq: Seq(0),
+        };
+        assert_eq!(r.trim_to(Slot(2), base), base);
+        r.learn(Slot(2), &commands[2]);
+        r.advance(|_, _| true, &mut Vec::new());
+        assert_eq!(r.journal().first_seq, Seq(0));
+        assert_eq!(r.read(Seq(0), 8, 64), LogRead::NotHeld);
+        assert_eq!(bytes(&page(r.read(Seq(1), 8, 64))), vec![b"b".to_vec()]);
+        // Once the fold passes the truncation, the gap is `Truncated`.
+        r.learn(Slot(3), &commands[3]);
+        r.learn(Slot(4), &commands[4]);
+        r.advance(|_, _| true, &mut Vec::new());
+        assert_eq!(r.journal().first_seq, Seq(1));
+        assert!(matches!(r.read(Seq(0), 8, 64), LogRead::Truncated(_)));
     }
 
     fn bytes(page: &super::LogPage) -> Vec<Vec<u8>> {
