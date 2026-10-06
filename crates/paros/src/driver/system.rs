@@ -50,6 +50,11 @@ use crate::client::checkpoint::{Folded, Folder};
 use crate::rpc::{NodeClient, Read, ReadAck};
 use crate::system::{Directory, DirectoryEvent, Registry, SystemEvent, registry_event};
 
+/// A checkpoint the registry fold met: its position, how it was folded
+/// (`Some(equal)` verified, `None` restored) and the registry the fold held
+/// right after it, see [`crate::Audit::checkpoint_folded`].
+pub(crate) type FoldedCheckpoint = (u64, Option<bool>, Registry);
+
 use super::config::DriverTunables;
 use super::journals::Journals;
 use super::transport::peer_address;
@@ -116,8 +121,8 @@ pub(crate) struct SystemFollower<P: Providers> {
     /// The registry's identifier.
     registry_key: JournalIdentifier,
     /// Checkpoints the registry fold met since the driver last took them:
-    /// `(seq, verified)`, see [`crate::Audit::checkpoint_folded`].
-    checkpoints: Vec<(u64, Option<bool>)>,
+    /// `(seq, verified, state)`, see [`crate::Audit::checkpoint_folded`].
+    checkpoints: Vec<FoldedCheckpoint>,
     /// Per system journal: where the next read starts.
     cursors: BTreeMap<JournalIdentifier, u64>,
     /// System journals with a remote read in flight.
@@ -227,7 +232,7 @@ impl<P: Providers> SystemFollower<P> {
     }
 
     /// The checkpoints the registry fold met since the last call.
-    pub(crate) fn take_checkpoints(&mut self) -> Vec<(u64, Option<bool>)> {
+    pub(crate) fn take_checkpoints(&mut self) -> Vec<FoldedCheckpoint> {
         std::mem::take(&mut self.checkpoints)
     }
 
@@ -323,7 +328,19 @@ impl<P: Providers> SystemFollower<P> {
                             covers_up_to,
                             verified,
                         } => {
-                            self.checkpoints.push((seq, verified));
+                            // The fold holds the checkpoint's state, whole,
+                            // and stands just past it: what the audit is
+                            // handed is the registry at `seq` (#247).
+                            assert!(
+                                self.registry.is_whole(),
+                                "a folded checkpoint leaves the fold whole"
+                            );
+                            assert!(
+                                self.registry.next_seq() == seq + 1,
+                                "a folded checkpoint leaves the fold just past it"
+                            );
+                            self.checkpoints
+                                .push((seq, verified, self.registry.state().clone()));
                             Folded::Checkpoint {
                                 covers_up_to,
                                 verified,

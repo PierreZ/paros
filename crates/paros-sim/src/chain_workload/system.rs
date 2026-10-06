@@ -50,7 +50,7 @@ use paros::{
 
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
 
-use super::rpc::{read_once, set_leader_once, within, write_once};
+use super::rpc::{CallLog, read_once, set_leader_once, within, write_once};
 use crate::audit::audit_world_for;
 use crate::audit::system::{lock as board_lock, system_board};
 use crate::chain::user_command_hash;
@@ -121,18 +121,38 @@ pub(super) struct SystemOps {
 /// [`CallObserver`]: a library call that writes to one of `journals` (a
 /// [`Checkpointer`]'s, a fleet operation's) announces its records and its
 /// exact write to that journal's audit before it leaves, like every
-/// hand-built system append here does.
+/// hand-built system append here does. It also logs **every attempt** at
+/// those journals — the four calls, answered or not — to the control
+/// journal's shared history (#247, [`super::rpc::control_attempts`]), which
+/// `check()` searches for a linearization against the journal model, as a
+/// tenant journal's history is.
 pub(super) struct Announce {
-    journals: Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>)>,
+    journals: Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>, CallLog)>,
 }
+
+/// An attempt token names its journal in the high bits: a token is one
+/// journal's [`CallLog`] index.
+const TOKEN_JOURNAL_SHIFT: u32 = 48;
 
 impl Announce {
     /// An observer announcing the writes to each of `journals`.
     pub(super) fn new(ctx: &SimContext, journals: &[JournalIdentifier]) -> Self {
+        let client = u64::try_from(ctx.client_id()).unwrap_or(0);
         Self {
             journals: journals
                 .iter()
-                .map(|journal| (*journal, audit_world_for(ctx.state(), *journal)))
+                .map(|journal| {
+                    (
+                        *journal,
+                        audit_world_for(ctx.state(), *journal),
+                        CallLog::shared(
+                            *journal,
+                            client,
+                            ctx.time().clone(),
+                            super::rpc::control_attempts(ctx.state(), *journal),
+                        ),
+                    )
+                })
                 .collect(),
         }
     }
@@ -140,9 +160,12 @@ impl Announce {
 
 impl CallObserver for Announce {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
-        if let Attempted::Write(write) = attempt
-            && let Some((_, audit)) = self.journals.iter().find(|(j, _)| *j == attempt.journal())
-        {
+        let (index, (_, audit, log)) = self
+            .journals
+            .iter()
+            .enumerate()
+            .find(|(_, (j, _, _))| *j == attempt.journal())?;
+        if let Attempted::Write(write) = attempt {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
             }
@@ -154,10 +177,16 @@ impl CallObserver for Announce {
             };
             audit.note_appended(paros::command_hash(&Command::Write(entry)));
         }
-        None
+        let token = log.invoked(attempt)?;
+        Some((index as u64) << TOKEN_JOURNAL_SHIFT | token)
     }
 
-    fn answered(&self, _token: u64, _answer: Answered<'_>) {}
+    fn answered(&self, token: u64, answer: Answered<'_>) {
+        let index = usize::try_from(token >> TOKEN_JOURNAL_SHIFT).unwrap_or(usize::MAX);
+        if let Some((_, _, log)) = self.journals.get(index) {
+            log.answered(token & ((1 << TOKEN_JOURNAL_SHIFT) - 1), answer);
+        }
+    }
 }
 
 impl SystemOps {
@@ -216,7 +245,8 @@ impl SystemOps {
     }
 
     /// The client of the seeds — the nodes hosting the system journals —
-    /// that announces its system writes to `journal`'s audit.
+    /// that announces its system writes to `journal`'s audit, under a leader
+    /// hint of its own (the hint `nodes` carries is its own journal's).
     fn seed_client(
         &self,
         ctx: &SimContext,
@@ -226,6 +256,7 @@ impl SystemOps {
         let seeds = self.seeds.min(nodes.server_count()).max(1);
         nodes
             .clone()
+            .with_own_leader_hint()
             .with_observer(Arc::new(Announce::new(ctx, &[journal])))
             .rotating_over(seeds)
     }
@@ -262,6 +293,15 @@ impl SystemOps {
         draw: u64,
     ) -> Appended {
         let created = !self.is_system(journal);
+        // A system journal's calls go through the seeds' client, which logs
+        // them to the control journal's history (#247); a created journal's
+        // are judged by its answers alone.
+        let caller = if created {
+            nodes.clone()
+        } else {
+            self.seed_client(ctx, nodes, journal)
+        };
+        let nodes = &caller;
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
@@ -361,6 +401,8 @@ impl SystemOps {
         draw: u64,
     ) -> Option<(Vec<(u64, SystemEvent)>, Directory, Registry)> {
         let seed = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
+        let caller = self.seed_client(ctx, nodes, journal);
+        let nodes = &caller;
         let mut directory = Directory::new(
             self.genesis
                 .iter()

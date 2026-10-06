@@ -1469,11 +1469,20 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
         follower: &SystemFollower<P>,
         journal: JournalIdentifier,
         events: Vec<(u64, SystemEvent)>,
-        checkpoints: Vec<(u64, Option<bool>)>,
+        checkpoints: Vec<system::FoldedCheckpoint>,
     ) {
         let me = follower.self_id();
-        for (seq, verified) in checkpoints {
-            self.audit.checkpoint_folded(me, journal, seq, verified);
+        for (seq, verified, state) in checkpoints {
+            assert!(
+                journal == follower.registry_key(),
+                "only the registry is checkpointed"
+            );
+            assert!(
+                state.next_seq() <= seq + 1,
+                "a checkpoint's registry holds no position past it"
+            );
+            self.audit
+                .checkpoint_folded(me, journal, seq, verified, &state);
             tracing::info!(node = me.0, journal = %journal, seq, ?verified, "checkpoint_folded");
         }
         // Whether the pool moved or a journal opened: every live journal

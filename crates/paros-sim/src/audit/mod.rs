@@ -44,7 +44,7 @@ mod state;
 pub(crate) mod system;
 mod world;
 
-pub(crate) use client::ClientHistory;
+pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
@@ -159,6 +159,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             return;
         };
         let mut board = journals::lock(board);
+        board.applied_under_parent(node.0, *journal);
         if !board.is_multi() {
             return;
         }
@@ -429,6 +430,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "an applied slot was decided by a durable accept quorum before any node applied it",
             { "node" => node.0, "slot" => slot.0 }
         );
+        if command.write().is_some() && st.foreign.contains(&vhash) {
+            assert_always!(
+                !matches!(
+                    outcome,
+                    Some(paros::Outcome::Accepted { .. } | paros::Outcome::Duplicate { .. })
+                ),
+                "journal: a write under another tenant's fence is refused at apply",
+                { "node" => node.0, "slot" => slot.0 }
+            );
+        }
         st.any_chosen = true;
         st.observe_applied_index(node.0, slot.0);
         drop(st);
@@ -1078,9 +1089,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         _journal: JournalIdentifier,
         seq: u64,
         verified: Option<bool>,
+        state: &paros::system::Registry,
     ) {
         if let Some(mut board) = self.system_board() {
-            board.checkpoint_folded(node, seq, verified);
+            board.checkpoint_folded(node, seq, verified, state);
         }
     }
 

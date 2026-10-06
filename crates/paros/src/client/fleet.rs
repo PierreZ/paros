@@ -221,6 +221,9 @@ pub struct FleetSession {
     cell: Checkpointer<Registry>,
     directory_open: bool,
     cell_open: bool,
+    /// The first checkpoint a fold of this session found unequal to its own
+    /// state, with its journal (see [`LoadOutcome::Loaded`]).
+    diverged: Option<(JournalIdentifier, u64)>,
 }
 
 impl FleetSession {
@@ -247,7 +250,18 @@ impl FleetSession {
             cell: Checkpointer::new(journals.cell, coordinator.0, cell, policy),
             directory_open: false,
             cell_open: false,
+            diverged: None,
         })
+    }
+
+    /// The first checkpoint any fold of this session — the fleet
+    /// directory's or the cell's, opening or catching up after a write —
+    /// verified and found **unequal** to its own state, with its journal: an
+    /// owner wrote a state that is not the fold of its journal (`None` while
+    /// every one matched).
+    #[must_use]
+    pub fn diverged(&self) -> Option<(JournalIdentifier, u64)> {
+        self.diverged
     }
 
     /// The fleet directory as this session last folded it.
@@ -624,7 +638,8 @@ impl FleetSession {
         first: usize,
     ) -> Result<(), Interrupted> {
         if !self.directory_open {
-            open(&mut self.directory, client, first).await?;
+            let diverged = open(&mut self.directory, client, first).await?;
+            self.note_diverged(self.fleet, diverged);
             self.directory_open = true;
         }
         Ok(())
@@ -638,10 +653,18 @@ impl FleetSession {
         first: usize,
     ) -> Result<(), Interrupted> {
         if !self.cell_open {
-            open(&mut self.cell, client, first).await?;
+            let diverged = open(&mut self.cell, client, first).await?;
+            self.note_diverged(self.journals.cell, diverged);
             self.cell_open = true;
         }
         Ok(())
+    }
+
+    /// Keep the first divergence a fold of `journal` reported.
+    fn note_diverged(&mut self, journal: JournalIdentifier, diverged: Option<u64>) {
+        if self.diverged.is_none() {
+            self.diverged = diverged.map(|seq| (journal, seq));
+        }
     }
 
     /// Open the cell's journal and check it is cell `cell_id` of `fleet`.
@@ -708,9 +731,12 @@ impl FleetSession {
         command: FleetCommand,
     ) -> Result<(), Interrupted> {
         let record = FleetEntry::new(fleet, command).encode();
-        if let Err(stop) = append(&mut self.directory, client, first, record).await {
-            self.directory_open = false;
-            return Err(stop);
+        match append(&mut self.directory, client, first, record).await {
+            Ok(diverged) => self.note_diverged(self.fleet, diverged),
+            Err(stop) => {
+                self.directory_open = false;
+                return Err(stop);
+            }
         }
         if self.directory.due(client.now()) {
             // A checkpoint that does not land leaves the owner's belief
@@ -731,7 +757,10 @@ impl FleetSession {
         stage: Stage,
     ) -> Step<T> {
         match append(&mut self.cell, client, first, command.encode()).await {
-            Ok(()) => Step::Advanced(stage),
+            Ok(diverged) => {
+                self.note_diverged(self.journals.cell, diverged);
+                Step::Advanced(stage)
+            }
             Err(stop) => {
                 self.cell_open = false;
                 Step::Interrupted(stop)
@@ -782,15 +811,16 @@ fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
     }
 }
 
-/// Claim `owner`'s journal and fold it to its tail.
+/// Claim `owner`'s journal and fold it to its tail: the first checkpoint
+/// the fold found diverged, if any.
 async fn open<P: Providers, S: crate::client::checkpoint::Checkpointable>(
     owner: &mut Checkpointer<S>,
     client: &Client<P>,
     first: usize,
-) -> Result<(), Interrupted> {
+) -> Result<Option<u64>, Interrupted> {
     let journal = owner.writer().journal();
     match owner.open(client, first).await {
-        OpenOutcome::Open { .. } => Ok(()),
+        OpenOutcome::Open { diverged, .. } => Ok(diverged),
         OpenOutcome::NotClaimed(outcome) => Err(Interrupted::NotClaimed { journal, outcome }),
         OpenOutcome::Behind(outcome) => Err(Interrupted::Behind { journal, outcome }),
     }
@@ -798,13 +828,14 @@ async fn open<P: Providers, S: crate::client::checkpoint::Checkpointable>(
 
 /// Append `record` as `owner` and make sure the fold holds it: a write the
 /// journal took at another position than the fold's next (a resolved
-/// ambiguity) is folded by reading up to it.
+/// ambiguity) is folded by reading up to it — the first checkpoint that
+/// read found diverged, if any.
 async fn append<P: Providers, S: crate::client::checkpoint::Checkpointable>(
     owner: &mut Checkpointer<S>,
     client: &Client<P>,
     first: usize,
     record: Vec<u8>,
-) -> Result<(), Interrupted> {
+) -> Result<Option<u64>, Interrupted> {
     let journal = owner.writer().journal();
     match owner.append(client, record, first).await {
         AppendOutcome::Written(WriterOutcome::Written { .. }) => {}
@@ -822,12 +853,14 @@ async fn append<P: Providers, S: crate::client::checkpoint::Checkpointable>(
     }
     let tail = owner.writer().next_seq();
     if owner.folder().next_seq() < tail {
-        match owner.load(client, first, tail).await {
-            LoadOutcome::Loaded { up_to, .. } if up_to >= tail => {}
-            outcome => return Err(Interrupted::Behind { journal, outcome }),
-        }
+        return match owner.load(client, first, tail).await {
+            LoadOutcome::Loaded {
+                up_to, diverged, ..
+            } if up_to >= tail => Ok(diverged),
+            outcome => Err(Interrupted::Behind { journal, outcome }),
+        };
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Read the fleet directory (the fleet tenant's control journal `journal`) to its tail, as

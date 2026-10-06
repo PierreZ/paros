@@ -357,6 +357,17 @@ impl<P: Providers> Client<P> {
         Self::new(providers, servers, tunables)
     }
 
+    /// The same servers, runtime and policies under a leader hint of its
+    /// own. A hint names one journal's leader: a caller driving several
+    /// journals through one client (a journal's and the control journals',
+    /// #247) keeps one client per journal, or every call to the others
+    /// starts at the first one's leader — which may not serve them at all.
+    #[must_use]
+    pub fn with_own_leader_hint(mut self) -> Self {
+        self.hint = Arc::default();
+        self
+    }
+
     /// Report every attempt to `observer`.
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn CallObserver>) -> Self {

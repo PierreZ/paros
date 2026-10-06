@@ -21,8 +21,10 @@
 //!   checkpoint yields what folding the full history does);
 //! - **classes and capacity** (#211) — a `stateless` machine never starts a
 //!   journal, a booking takes a slot of its node's own class, and a node is
-//!   never booked past its capacity (judged on the registry's events in
-//!   position order, while the board has seen every position).
+//!   never booked past its capacity, and a live booking id is never booked
+//!   again (judged on the registry's events in position order; a
+//!   truncation is crossed at the checkpoint a restoring node meets, which
+//!   the model equals wherever it reaches one whole, #247).
 //!
 //! The gates are outcomes the run must be proven to reach: a name race
 //! decided by slot order, a joiner that learned the system journals before
@@ -35,7 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::system::{
-    Class, DirectoryEvent, DirectoryRefusal, RegistryEvent, RegistryRefusal, SystemEvent,
+    Class, DirectoryEvent, DirectoryRefusal, Registry, RegistryEvent, RegistryRefusal, SystemEvent,
 };
 use paros::{JournalId, JournalIdentifier, NodeId};
 
@@ -84,14 +86,26 @@ pub(crate) struct SystemBoard {
     /// Each joiner's class and capacity, as the role map drew them (#211).
     machines: BTreeMap<u64, (Class, u64)>,
     /// The registry's events in position order, as first folded anywhere:
-    /// the next position the model expects, `None` once a position was
-    /// first seen out of order (no node folded the ones before it, so the
-    /// model no longer knows the bookings).
+    /// the next position the model expects. A truncation that took
+    /// positions before any node folded them is crossed at the checkpoint a
+    /// restoring node meets there (#247): the model resumes from the
+    /// bookings that checkpoint holds. `None` only once a position was first
+    /// seen above a gap no checkpoint healed (an oracle has fired).
     registry_next: Option<u64>,
     /// The live bookings the model knows, to their node.
     bookings: BTreeMap<u64, u64>,
     /// An owner truncated the registry to a checkpoint (#230).
     truncated: bool,
+    /// The booking model crossed a truncation at a restored checkpoint.
+    resumed_at_checkpoint: bool,
+    /// Each node's registry fold: the position after the last one it
+    /// reported (its latest incarnation's, as folds report in order), for
+    /// the recovery tail's liveness claim (#247).
+    registry_at: BTreeMap<u64, u64>,
+    /// The bookings of each checkpoint a whole fold verified at or past
+    /// the model's next position, to compare the model with when it gets
+    /// there.
+    checkpoints: BTreeMap<u64, BTreeMap<u64, u64>>,
     /// A fold — a node's or a client's — restarted from a checkpoint.
     restarted: bool,
 }
@@ -165,10 +179,11 @@ impl SystemBoard {
             }
             self.learned_before_pool = true;
         }
-        if let SystemEvent::Registry(event) = event
-            && known == digest
-        {
-            self.model_registry(lsn, event);
+        if let SystemEvent::Registry(event) = event {
+            self.registry_at.insert(node.0, lsn + 1);
+            if known == digest {
+                self.model_registry(lsn, event);
+            }
         }
         match event {
             SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
@@ -211,12 +226,34 @@ impl SystemBoard {
             return;
         }
         if lsn > next {
-            // No node folded the positions in between (a truncation took
-            // them first): the model stops here.
+            // A whole fold reports nothing above a gap: the first position a
+            // node folds past the model's is the checkpoint it restored from,
+            // which `checkpoint_folded` has already resumed the model at. An
+            // unreadable record above a gap is reported as `Malformed` and
+            // changes no fold.
+            if matches!(event, RegistryEvent::Refused(RegistryRefusal::Malformed)) {
+                return;
+            }
+            assert_always!(
+                false,
+                "registry: the booking model meets no gap a checkpoint does not heal",
+                { "lsn" => lsn, "next" => next }
+            );
             self.registry_next = None;
             return;
         }
         self.registry_next = Some(lsn + 1);
+        let reached = self.checkpoints.remove(&lsn);
+        self.checkpoints.retain(|seq, _| *seq > lsn);
+        if let (RegistryEvent::Checkpoint { .. }, Some(held)) = (event, reached) {
+            // The model folded every position below the checkpoint: it holds
+            // exactly the checkpoint's bookings.
+            assert_always!(
+                held == self.bookings,
+                "registry: the booking model equals every checkpoint it reaches",
+                { "lsn" => lsn, "model" => self.bookings.len(), "checkpoint" => held.len() }
+            );
+        }
         match event {
             RegistryEvent::Booked {
                 booking,
@@ -235,7 +272,12 @@ impl SystemBoard {
                     "registry: a node is never booked past its capacity",
                     { "node" => node.0, "lsn" => lsn, "held" => held }
                 );
-                self.bookings.insert(*booking, node.0);
+                let before = self.bookings.insert(*booking, node.0);
+                assert_always!(
+                    before.is_none(),
+                    "registry: a live booking id is never booked again",
+                    { "node" => node.0, "lsn" => lsn, "held_by" => before.unwrap_or_default() }
+                );
             }
             RegistryEvent::Released { booking, .. } => {
                 self.bookings.remove(booking);
@@ -261,7 +303,17 @@ impl SystemBoard {
 
     /// `node` folded a registry checkpoint at `seq` (#230): `verified` as
     /// [`paros::Audit::checkpoint_folded`] reports it.
-    pub(crate) fn checkpoint_folded(&mut self, node: NodeId, seq: u64, verified: Option<bool>) {
+    /// `state` is the registry the node's fold holds right after it: the
+    /// booking model is checked against it where the model stands at the
+    /// checkpoint, and resumes from it where a truncation took positions no
+    /// node folded (#247).
+    pub(crate) fn checkpoint_folded(
+        &mut self,
+        node: NodeId,
+        seq: u64,
+        verified: Option<bool>,
+        state: &Registry,
+    ) {
         assert_always!(
             verified != Some(false),
             "checkpoint: a checkpoint is the state its whole prefix folds to",
@@ -270,6 +322,37 @@ impl SystemBoard {
         if verified.is_none() {
             self.reader_restarted();
         }
+        self.registry_at.insert(node.0, seq + 1);
+        let held: BTreeMap<u64, u64> = state.bookings().map(|(id, b)| (id, b.node.0)).collect();
+        match self.registry_next {
+            Some(next) if next == seq || (next < seq && verified.is_some()) => {
+                // The model reaches this checkpoint through the positions
+                // below it (a whole fold folded them), and is compared there
+                // (`model_registry`).
+                self.checkpoints.entry(seq).or_insert(held);
+            }
+            Some(next) if next < seq => {
+                // A truncation took `next..seq` before any node folded them:
+                // resume from the restored checkpoint.
+                if !self.resumed_at_checkpoint {
+                    assert_reachable!("registry: the booking model resumes at a checkpoint");
+                }
+                self.resumed_at_checkpoint = true;
+                self.bookings = held;
+                self.checkpoints.retain(|at, _| *at > seq);
+                self.registry_next = Some(seq + 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// The nodes of `nodes` whose registry fold has not reached `tail` (#247).
+    pub(crate) fn registry_lagging(&self, nodes: &[u64], tail: u64) -> Vec<u64> {
+        nodes
+            .iter()
+            .copied()
+            .filter(|node| self.registry_at.get(node).copied().unwrap_or(0) < tail)
+            .collect()
     }
 
     /// A fold restarted from a checkpoint (#230).
@@ -319,8 +402,16 @@ impl SystemBoard {
         }
     }
 
-    /// `node` refused a message from `from`, not in its pool yet.
+    /// `node` refused a message from `from`, not in its pool yet. Never a
+    /// genesis node's (#247, static stability): the pool check admits the
+    /// genesis pool whatever the registry fold says, so no tenant journal's
+    /// traffic between genesis nodes waits on its parent.
     pub(crate) fn refused(&mut self, node: NodeId, from: NodeId) {
+        assert_always!(
+            !self.genesis_pool.contains(&from.0),
+            "static: no genesis node's message waits on the registry fold",
+            { "node" => node.0, "from" => from.0 }
+        );
         if self.refused.insert((node.0, from.0)) && self.refused.len() == 1 {
             assert_reachable!("system: a node refuses a message from a node not yet in its pool");
         }

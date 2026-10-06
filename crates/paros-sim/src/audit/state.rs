@@ -225,6 +225,10 @@ pub(super) struct AuditState {
     /// The hash of every write a client sent to this world's journal
     /// (#188, `AuditWorld::note_appended`).
     pub(super) appended: BTreeSet<u64>,
+    /// The hash of every write a client sent to this world's journal under
+    /// another journal's fence — the cross-tenant attack (#247,
+    /// `AuditWorld::note_foreign`): refused at apply, never accepted.
+    pub(super) foreign: BTreeSet<u64>,
     /// This run has no client (see `AuditWorld::client_free`).
     pub(super) client_free: bool,
     /// The client fold (#186): per client, the last position it folded (its

@@ -36,6 +36,7 @@ use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 
 mod fleet;
 mod fold;
+mod foreign;
 mod races;
 mod rpc;
 mod system;
@@ -323,6 +324,20 @@ struct ChainConfig {
     /// The `CHECKPOINT` step opens a fresh owner each time, so this leg fires
     /// only near the floor; the factor carries the rest of the range.
     checkpoint_interval_ms: u64,
+    /// How long into a fleet operation its target is killed (#247, the
+    /// process kill mid fleet-step). Floor 0: the kill leaves with the
+    /// operation's first ask; ceiling 200 ms, a few round trips in, when a
+    /// later step is in flight.
+    fleet_kill_delay_ms: u64,
+    /// How long that target stays down before it restarts. Floor 50 ms: a
+    /// reboot that comes straight back, its connections and unsynced writes
+    /// still lost; ceiling 2 s, far inside the recovery budget.
+    fleet_kill_down_ms: u64,
+    /// How long client 0 holds the control journals' seed down for the
+    /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal
+    /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
+    /// so the seed is back for the recovery tail.
+    parent_hold_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -380,6 +395,9 @@ impl ChainConfig {
             ack_race_timeout_ms: buggify_knob!(5_u64, 1_u64..21_u64),
             checkpoint_factor: buggify_knob!(4_u32, 1_u32..9_u32),
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
+            fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
+            fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
+            parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -819,6 +837,9 @@ struct Tail {
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
     converged: BTreeSet<JournalIdentifier>,
+    /// How many clients finished their fleet operations in the recovery
+    /// tail (#247): the last one judges the control plane's final folds.
+    fleet_settled: usize,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -1265,6 +1286,7 @@ impl Workload for ChainWorkload {
             crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state(), true),
             client_id,
+            (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
@@ -1382,9 +1404,36 @@ impl Workload for ChainWorkload {
             }
         }
 
+        // Static stability (#247): on its own location, client 0 of a
+        // system-journal run holds the seed — the one node hosting the fleet tenant, the
+        // cell's control journal and the directory — down for
+        // `parent_hold_ms` of the chaos window, while every tenant journal
+        // keeps committing without it (the journal board's gate).
+        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state(), true))
+            .then(|| servers[0].clone());
+        let mut parent_until: Option<Duration> = None;
+        let mut parent_held_once = false;
+        let journal_board = crate::audit::journals::journal_board(ctx.state());
         for _step in 0..config.steps {
             if shutdown.is_cancelled() {
                 break;
+            }
+            if let Some(ip) = &parent_seed {
+                if parent_until.is_some_and(|until| time.now() >= until) {
+                    crate::lifecycle::restart(ctx, ip).await;
+                    crate::audit::journals::lock(&journal_board).release_parent();
+                    parent_until = None;
+                } else if parent_until.is_none()
+                    && !parent_held_once
+                    && time.now() < Duration::from_millis(CHAOS_DURATION_MS)
+                    && buggify_with_prob!(0.1)
+                {
+                    assert_reachable!("static: the seed hosting the control journals is held down");
+                    crate::lifecycle::crash(ctx, ip).await;
+                    crate::audit::journals::lock(&journal_board).hold_parent(0);
+                    parent_until = Some(time.now() + Duration::from_millis(config.parent_hold_ms));
+                    parent_held_once = true;
+                }
             }
 
             // Exactly six provider draws per logical step, independent of the
@@ -1437,6 +1486,27 @@ impl Workload for ChainWorkload {
             // leader — the stale-hint edge `WRITE_TO_NON_LEADER` reaches only
             // deliberately.
             let ignore_hint = (raw_policy >> 2) % 8 == 0;
+
+            // The cross-tenant attack (#247), its own location: a write, a
+            // truncation or a claim sent under an identifier that is not this
+            // journal's — another tenant's journal, or an identifier nobody serves
+            // — must be refused, and never reach the other journal.
+            if matches!(op, WRITE | TRUNCATE | SET_LEADER) && buggify_with_prob!(0.1) {
+                let journals = self
+                    .plan
+                    .as_ref()
+                    .map(|plan| plan.ids.clone())
+                    .unwrap_or_default();
+                foreign::attack(
+                    ctx,
+                    &nodes,
+                    (op, &writer),
+                    (journal, &journals),
+                    (target, raw_payload),
+                    request_timeout,
+                )
+                .await;
+            }
 
             match op {
                 WRITE | WRITE_TO_NON_LEADER => {
@@ -2791,6 +2861,10 @@ impl Workload for ChainWorkload {
             }
         }
 
+        if let (Some(ip), Some(_)) = (&parent_seed, parent_until.take()) {
+            crate::lifecycle::restart(ctx, ip).await;
+            crate::audit::journals::lock(&journal_board).release_parent();
+        }
         assert_sometimes!(
             successful_after_ambiguity,
             "chain: ambiguous proposal is reconciled as committed"
@@ -2893,6 +2967,48 @@ impl Workload for ChainWorkload {
             time.sleep(cutoff.checked_sub(time.now()).unwrap())
                 .await
                 .ok();
+        }
+        // The fleet's control plane in the recovery tail (#247): this
+        // operator finishes the operation it stopped in, and the last one to
+        // do so — every fleet writer is quiet then — judges the final folds
+        // of the fleet directory and the cell, and every live node's registry fold.
+        fleet_ops
+            .settle(
+                ctx,
+                &nodes,
+                config.tunables().checkpoint_policy(),
+                Duration::from_millis(config.retry_backoff_ms.max(10)),
+            )
+            .await;
+        let last_to_settle = {
+            let tail = tail(ctx.state());
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.fleet_settled += 1;
+            guard.fleet_settled == guard.registered
+        };
+        if last_to_settle {
+            let journals = self
+                .plan
+                .as_ref()
+                .map(|plan| plan.ids.clone())
+                .unwrap_or_default();
+            // A node down for good — every journal it serves parked — follows
+            // nothing; every joiner follows the registry whatever it stands.
+            let expected: Vec<u64> = servers
+                .iter()
+                .enumerate()
+                .filter(|(_, ip)| {
+                    !journals
+                        .iter()
+                        .all(|j| crate::world::parked_nodes(ctx.state(), *j).contains(*ip))
+                })
+                .map(|(rank, _)| rank as u64)
+                .chain(
+                    (0..deployment.joiners().len())
+                        .map(|rank| crate::roles::joiner_node_id(rank).0),
+                )
+                .collect();
+            fleet_ops.final_check(ctx, &nodes, &expected).await;
         }
         // Every client folds to the tail as the chaos window closes (#205):
         // a client whose program never drew a fold holds the trim fence at
@@ -3382,6 +3498,24 @@ impl Workload for ChainWorkload {
         {
             for idle in plan.ids.iter().skip(ctx.client_count()) {
                 digest ^= check_run(ctx.state(), *idle, &ClientHistory::default(), 0);
+            }
+        }
+        // The control journals' histories (#247): every client's library
+        // calls at the fleet tenant, the registry and the directory, searched once (by
+        // client 0, after every run) against the journal model.
+        if self.client_id == 0 && crate::shape::system_journals(ctx.state(), true) {
+            let identifiers = crate::shape::identifiers(ctx.state());
+            for journal in [
+                identifiers.fleet,
+                identifiers.registry,
+                identifiers.directory,
+            ] {
+                let attempts = std::mem::take(
+                    &mut *rpc::control_attempts(ctx.state(), journal)
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+                crate::audit::check_control_history(attempts);
             }
         }
         if let Some(sink) = &self.digest {
