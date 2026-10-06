@@ -226,15 +226,41 @@ pub struct ReconfigurerReady<'a> {
 
 impl ReconfigurerReady<'_> {
     /// The requests the running phase wants on the wire, in order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn requests(&self) -> &[(MatchmakerId, ReconfigureRequest)] {
-        &self.reconfigurer.pending
+        let requests = &self.reconfigurer.pending;
+        // Every request speaks for this reconfigurer, and a reconfigurer at
+        // rest sends nothing.
+        assert!(
+            requests
+                .iter()
+                .all(|(_, r)| r.from() == self.reconfigurer.node),
+            "a handover request names its own reconfigurer"
+        );
+        if !self.reconfigurer.is_busy() {
+            assert!(requests.is_empty(), "an idle reconfigurer sends nothing");
+        }
+        requests
     }
 
     /// Acknowledge the batch: clears the queue and releases the unique
     /// borrow. Consumes `self` — the guard cannot be reused.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn advance(self) {
         self.reconfigurer.pending.clear();
+        assert!(
+            self.reconfigurer.pending.is_empty(),
+            "an advanced batch has no request left"
+        );
     }
 }
 
@@ -272,14 +298,113 @@ pub struct MatchmakerReconfigurer {
 
 impl MatchmakerReconfigurer {
     /// An idle reconfigurer for `node`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(node: NodeId) -> Self {
-        Self {
+        let reconfigurer = Self {
             node,
             round: 0,
             phase: ReconfigurerPhase::Idle,
             pending: Vec::new(),
             elapsed: 0,
+        };
+        assert!(!reconfigurer.is_busy(), "a fresh reconfigurer is idle");
+        reconfigurer.assert_invariants();
+        reconfigurer
+    }
+
+    /// The handover's per-phase invariants: who may have answered, which
+    /// generation each set is, and that an idle reconfigurer holds nothing.
+    ///
+    /// # Panics
+    ///
+    /// If a phase holds an ack from outside the set it tallies, a proposed
+    /// successor is not the next generation, or an idle reconfigurer keeps
+    /// work or a clock.
+    pub fn assert_invariants(&self) {
+        match &self.phase {
+            ReconfigurerPhase::Idle => {
+                assert!(
+                    self.pending.is_empty(),
+                    "an idle reconfigurer queues nothing"
+                );
+                assert!(self.elapsed == 0, "an idle reconfigurer's clock is stopped");
+            }
+            ReconfigurerPhase::Stopping {
+                old, target, acks, ..
+            } => {
+                assert!(
+                    acks.keys().all(|m| old.contains(*m)),
+                    "only members of the replaced generation acknowledge its freeze"
+                );
+                assert!(
+                    target.as_ref().is_none_or(|t| !t.is_empty()),
+                    "a reconfiguration targets a non-empty set"
+                );
+            }
+            ReconfigurerPhase::Bootstrapping {
+                old,
+                bootstrap,
+                acks,
+                ..
+            } => {
+                assert!(
+                    bootstrap.set.generation == old.generation.next(),
+                    "a bootstrap proposes the next generation"
+                );
+                assert!(
+                    acks.iter().all(|m| bootstrap.set.contains(*m)),
+                    "only members of the proposed set acknowledge its bootstrap"
+                );
+                assert!(
+                    bootstrap
+                        .history
+                        .keys()
+                        .all(|b| *b >= bootstrap.gc_watermark),
+                    "a reconstruction holds nothing below its watermark"
+                );
+            }
+            ReconfigurerPhase::Deciding {
+                old,
+                bootstrap,
+                decree,
+            } => {
+                assert!(
+                    bootstrap.set.generation == old.generation.next(),
+                    "a decree decides the next generation"
+                );
+                assert!(
+                    decree.ballot().node == self.node,
+                    "a decree runs at this node's ballot"
+                );
+                assert!(
+                    decree.ballot().round <= self.round,
+                    "a decree's round was minted here"
+                );
+            }
+            ReconfigurerPhase::Publishing {
+                old,
+                successor,
+                old_acks,
+                new_acks,
+            } => {
+                assert!(
+                    successor.generation == old.generation.next(),
+                    "a published successor is the next generation"
+                );
+                assert!(
+                    old_acks.iter().all(|m| old.contains(*m)),
+                    "only members of the replaced set count toward its quorum"
+                );
+                assert!(
+                    new_acks.iter().all(|m| successor.contains(*m)),
+                    "only members of the successor count toward its quorum"
+                );
+            }
         }
     }
 
@@ -296,8 +421,17 @@ impl MatchmakerReconfigurer {
     }
 
     /// The generation being replaced, while a handover runs.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn old(&self) -> Option<&MatchmakerSet> {
+        assert!(
+            self.is_busy() != matches!(self.phase, ReconfigurerPhase::Idle),
+            "busy is exactly not idle"
+        );
         match &self.phase {
             ReconfigurerPhase::Idle => None,
             ReconfigurerPhase::Stopping { old, .. }
@@ -328,6 +462,11 @@ impl MatchmakerReconfigurer {
     /// and decree quorum is drawn, and the target every later quorum is
     /// drawn from — admit the matchmaker quorum system by construction
     /// ([`MatchmakerSet::new`] is the only constructor and asserts it).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn start(
         &mut self,
         current: &MatchmakerSet,
@@ -343,7 +482,9 @@ impl MatchmakerReconfigurer {
         let target = MatchmakerSet::new(current.generation.next(), target)
             .members()
             .to_vec();
+        assert!(!target.is_empty(), "a normalized target names a matchmaker");
         self.begin_stopping(current, Some(target));
+        assert!(self.is_busy(), "a started handover is busy");
         Ok(())
     }
 
@@ -359,11 +500,21 @@ impl MatchmakerReconfigurer {
     /// # Errors
     ///
     /// [`StartRefusal::Busy`] while a handover runs.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn finish(&mut self, current: &MatchmakerSet) -> Result<(), StartRefusal> {
         if self.is_busy() {
             return Err(StartRefusal::Busy);
         }
         self.begin_stopping(current, None);
+        assert!(self.is_busy(), "a finishing handover is busy");
+        assert!(
+            self.old().is_some_and(|old| old == current),
+            "a finish freezes the generation it was handed"
+        );
         Ok(())
     }
 
@@ -380,6 +531,11 @@ impl MatchmakerReconfigurer {
         };
         self.elapsed = 0;
         self.resend();
+        assert!(
+            matches!(self.phase, ReconfigurerPhase::Stopping { .. }),
+            "a handover opens by freezing"
+        );
+        self.assert_invariants();
     }
 
     /// One driver tick while a handover runs: the running phase's stall
@@ -388,10 +544,18 @@ impl MatchmakerReconfigurer {
     /// the driver's decision ([`Self::abandon`]) — the timeout is policy,
     /// paced in the driver's own units, never a constant inside the state
     /// machine.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn tick(&mut self) {
+        let elapsed = self.elapsed;
         if self.is_busy() {
             self.elapsed = self.elapsed.saturating_add(1);
         }
+        assert!(self.elapsed >= elapsed, "a stall clock never runs backward");
+        self.assert_invariants();
     }
 
     /// Driver ticks since the running phase last folded a reply that moved
@@ -420,11 +584,17 @@ impl MatchmakerReconfigurer {
     /// safe: the reconfigurer holds no durable state, the freeze and the
     /// bootstrap are idempotent, and the decree's votes stay durable at the
     /// matchmakers.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn abandon(&mut self) -> bool {
         if !self.is_busy() {
             return false;
         }
         self.abort();
+        assert!(!self.is_busy(), "an abandoned handover is idle");
         true
     }
 
@@ -521,6 +691,10 @@ impl MatchmakerReconfigurer {
                 .all(|b| *b >= bootstrap.gc_watermark),
             "a reconstruction holds nothing below its watermark"
         );
+        assert!(
+            bootstrap.set.generation == old.generation.next(),
+            "a reconstruction proposes the next generation"
+        );
         self.phase = ReconfigurerPhase::Bootstrapping {
             old: old.clone(),
             bootstrap: bootstrap.clone(),
@@ -529,6 +703,7 @@ impl MatchmakerReconfigurer {
         };
         self.elapsed = 0;
         self.resend();
+        self.assert_invariants();
         Some(Reconstruction {
             bootstrap,
             disagreements,
@@ -540,8 +715,14 @@ impl MatchmakerReconfigurer {
     /// reply only stalls the handover until the next call), and a preempted
     /// decree is reopened at a fresh ballot only here — so the driver's
     /// cadence, not the core, paces dueling reconfigurers.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn resend(&mut self) {
         let me = self.node;
+        let queued = self.pending.len();
         let mut queue: Vec<(MatchmakerId, ReconfigureRequest)> = Vec::new();
         match &mut self.phase {
             ReconfigurerPhase::Idle => {}
@@ -636,6 +817,22 @@ impl MatchmakerReconfigurer {
             }
         }
         self.pending.extend(queue);
+        self.assert_requests_since(queued);
+    }
+
+    /// A re-send's postconditions: it only adds requests, each in this
+    /// reconfigurer's name.
+    fn assert_requests_since(&self, queued: usize) {
+        assert!(
+            self.pending.len() >= queued,
+            "a re-send never drops a queued request"
+        );
+        assert!(
+            self.pending[queued..]
+                .iter()
+                .all(|(_, r)| r.from() == self.node),
+            "a re-sent request names its own reconfigurer"
+        );
     }
 
     /// Fold one matchmaker's reply into the running phase.
@@ -645,10 +842,25 @@ impl MatchmakerReconfigurer {
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
     pub fn on_reply(&mut self, reply: ReconfigureReply) -> ReconfigurerStep {
+        let elapsed = self.elapsed;
         let step = self.fold_reply(reply);
         if !matches!(step, ReconfigurerStep::Ignored) {
             self.elapsed = 0;
         }
+        // Only progress resets the stall clock; a duplicate never does.
+        if matches!(step, ReconfigurerStep::Ignored) {
+            assert!(
+                self.elapsed == elapsed,
+                "an ignored reply leaves the stall clock alone"
+            );
+        }
+        if matches!(
+            step,
+            ReconfigurerStep::Done { .. } | ReconfigurerStep::Superseded { .. }
+        ) {
+            assert!(!self.is_busy(), "a finished or superseded handover is idle");
+        }
+        self.assert_invariants();
         step
     }
 
@@ -906,6 +1118,11 @@ impl MatchmakerReconfigurer {
         self.phase = ReconfigurerPhase::Idle;
         self.pending.clear();
         self.elapsed = 0;
+        assert!(!self.is_busy(), "an aborted handover is idle");
+        assert!(
+            self.pending.is_empty(),
+            "an aborted handover queues nothing"
+        );
     }
 }
 

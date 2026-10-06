@@ -145,11 +145,20 @@ pub(crate) fn resolved_set(
     scalars: &MatchmakerHardState,
     bootstrap: &[MatchmakerId],
 ) -> MatchmakerSet {
-    if scalars.generation == MatchmakerGeneration(0) && scalars.members.is_empty() {
+    let set = if scalars.generation == MatchmakerGeneration(0) && scalars.members.is_empty() {
         MatchmakerSet::new(MatchmakerGeneration(0), bootstrap.to_vec())
     } else {
         MatchmakerSet::new(scalars.generation, scalars.members.clone())
-    }
+    };
+    assert!(
+        set.generation == scalars.generation,
+        "the resolved set is the durable generation"
+    );
+    assert!(
+        !set.members().is_empty(),
+        "a resolved set names a matchmaker"
+    );
+    set
 }
 
 /// Where `scalars` stand, resolved the same way: a fresh store makes a
@@ -161,7 +170,7 @@ pub(crate) fn resolved_phase(
     id: MatchmakerId,
     bootstrap: &[MatchmakerId],
 ) -> MatchmakerPhase {
-    match scalars.phase {
+    let phase = match scalars.phase {
         MatchmakerPhase::Fresh => {
             if bootstrap.binary_search(&id).is_ok() {
                 MatchmakerPhase::Active
@@ -170,7 +179,17 @@ pub(crate) fn resolved_phase(
             }
         }
         phase => phase,
+    };
+    // A resolved phase is never `Fresh`: a fresh store is a bootstrap member
+    // or a spare, nothing in between.
+    assert!(
+        phase != MatchmakerPhase::Fresh,
+        "a resolved phase is never fresh"
+    );
+    if scalars.phase != MatchmakerPhase::Fresh {
+        assert!(phase == scalars.phase, "a durable phase resolves to itself");
     }
+    phase
 }
 
 /// Raise a held effective configuration to `(ballot, config)` only when
@@ -185,12 +204,25 @@ pub(crate) fn raise_effective(
     ballot: Ballot,
     config: &AcceptorConfig,
 ) -> bool {
-    if held.as_ref().is_none_or(|(newest, _)| ballot > *newest) {
+    let raised = if held.as_ref().is_none_or(|(newest, _)| ballot > *newest) {
         *held = Some((ballot, config.clone()));
         true
     } else {
         false
+    };
+    // Monotone in its ballot: whatever was offered, the held scalar is at
+    // least as new.
+    assert!(
+        held.as_ref().is_some_and(|(newest, _)| *newest >= ballot),
+        "the effective configuration covers every ballot offered"
+    );
+    if raised {
+        assert!(
+            held.as_ref().is_some_and(|(_, c)| c == config),
+            "a raised effective configuration is the one offered"
+        );
     }
+    raised
 }
 
 /// A matchmaker's static configuration: its identity and the deployment's
@@ -272,20 +304,40 @@ impl RegistrationKind {
 
 impl Registration {
     /// A candidate's belief: the configuration it intends to run with.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn belief(config: AcceptorConfig) -> Self {
-        Self {
+        let registration = Self {
             config,
             kind: RegistrationKind::Belief,
-        }
+        };
+        assert!(
+            !registration.kind.is_reconfiguration(),
+            "a belief is no reconfiguration"
+        );
+        registration
     }
 
     /// A reconfiguration request: the configuration a leader moves to.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reconfiguration(config: AcceptorConfig) -> Self {
-        Self {
+        let registration = Self {
             config,
             kind: RegistrationKind::Reconfiguration,
-        }
+        };
+        assert!(
+            registration.kind.is_reconfiguration(),
+            "a reconfiguration is flagged"
+        );
+        registration
     }
 }

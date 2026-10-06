@@ -174,9 +174,14 @@ pub struct Matchmaking {
 
 impl Matchmaking {
     /// Open the phase for `ballot` with `config` as `C_b`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(ballot: Ballot, config: AcceptorConfig, kind: RegistrationKind) -> Self {
-        Self {
+        let matchmaking = Self {
             ballot,
             config,
             kind,
@@ -186,7 +191,41 @@ impl Matchmaking {
             effective: None,
             watermark: Ballot::zero(),
             disagreements: 0,
-        }
+        };
+        assert!(
+            matchmaking.registered_by.is_empty(),
+            "a fresh phase has heard nobody"
+        );
+        matchmaking.assert_invariants();
+        matchmaking
+    }
+
+    /// The phase's own invariants: a matchmaker is mid-answer or done, never
+    /// both; every unioned slot of the history holds distinct, non-empty
+    /// configurations.
+    ///
+    /// # Panics
+    ///
+    /// If a registered matchmaker still owes a page, or the history holds an
+    /// empty or duplicated entry.
+    pub fn assert_invariants(&self) {
+        assert!(
+            self.page_next
+                .keys()
+                .all(|m| !self.registered_by.contains(m)),
+            "a registered matchmaker owes no further page"
+        );
+        assert!(
+            self.history.values().all(|configs| !configs.is_empty()),
+            "every unioned ballot holds a configuration"
+        );
+        assert!(
+            self.history
+                .values()
+                .all(|configs| u64::try_from(configs.len()).unwrap_or(u64::MAX)
+                    <= self.disagreements + 1),
+            "every extra configuration at a ballot was counted as a disagreement"
+        );
     }
 
     /// The ballot being registered.
@@ -287,10 +326,17 @@ impl Matchmaking {
     /// its watermark maxed, and its effective configuration taken if newer.
     /// A page is counted only at the exact cursor expected from its sender;
     /// a matchmaker whose complete answer is already merged is ignored.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold(&mut self, matchmaker: MatchmakerId, page: RegisteredPage) -> MatchFold {
         if !self.accepts(matchmaker, &page) {
             return MatchFold::Ignored;
         }
+        let watermark = self.watermark;
+        let disagreements = self.disagreements;
         let RegisteredPage {
             history,
             next_from_ballot,
@@ -322,14 +368,26 @@ impl Matchmaking {
         // The watermark is the maximum reported, never the minimum and never
         // a per-reply filter (§3.2): the union is filtered once, at closure.
         self.watermark = self.watermark.max(gc_watermark);
-        if let Some(next) = next_from_ballot {
+        let fold = if let Some(next) = next_from_ballot {
             self.page_next.insert(matchmaker, next);
             MatchFold::Paged(next)
         } else {
             self.page_next.remove(&matchmaker);
             self.registered_by.insert(matchmaker);
             MatchFold::Registered
-        }
+        };
+        // The union is monotone: the watermark is the maximum reported and
+        // the disagreement count only grows.
+        assert!(
+            self.watermark >= watermark,
+            "the unioned watermark never falls"
+        );
+        assert!(
+            self.disagreements >= disagreements,
+            "disagreements are never forgotten"
+        );
+        self.assert_invariants();
+        fold
     }
 
     /// Raise the effective configuration to `(ballot, config)` when it is
@@ -341,9 +399,21 @@ impl Matchmaking {
     /// Whether a matchmaker quorum of `matchmakers` has answered completely
     /// — the phase's own completion predicate, asked at the membership
     /// boundary and never as a count.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
-        matchmakers.has_quorum(&self.registered_by)
+        let held = matchmakers.has_quorum(&self.registered_by);
+        if held {
+            assert!(
+                !self.registered_by.is_empty(),
+                "a registered quorum is someone"
+            );
+        }
+        held
     }
 
     /// How many more complete answers the phase still waits for
@@ -359,12 +429,24 @@ impl Matchmaking {
 
     /// The matchmakers that have not answered completely, with the page
     /// cursor each owes next — whom a re-send addresses, and from where.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<(MatchmakerId, Option<Ballot>)> {
-        matchmakers
+        let unanswered: Vec<(MatchmakerId, Option<Ballot>)> = matchmakers
             .unanswered(&self.registered_by)
             .map(|mm| (mm, self.page_next.get(&mm).copied()))
-            .collect()
+            .collect();
+        assert!(
+            unanswered
+                .iter()
+                .all(|(mm, _)| !self.registered_by.contains(mm)),
+            "a registered matchmaker is never re-asked"
+        );
+        unanswered
     }
 
     /// How many matchmakers have answered completely.
@@ -375,6 +457,11 @@ impl Matchmaking {
 
     /// `H_b`: every distinct configuration reported at a ballot at or above
     /// the maximum watermark, in ballot order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn prior(&self) -> Vec<AcceptorConfig> {
         let mut prior: Vec<AcceptorConfig> = Vec::new();
@@ -385,6 +472,19 @@ impl Matchmaking {
                 }
             }
         }
+        // `H_b` names each configuration once, and only what survived the
+        // maximum watermark.
+        assert!(
+            prior
+                .iter()
+                .enumerate()
+                .all(|(i, c)| !prior[..i].contains(c)),
+            "H_b names each configuration once"
+        );
+        assert!(
+            prior.len() <= self.history.values().map(Vec::len).sum::<usize>(),
+            "H_b holds nothing the histories did not report"
+        );
         prior
     }
 
@@ -393,6 +493,11 @@ impl Matchmaking {
     /// something else. A reconfiguration campaign is exempt — it *is* the
     /// next effective configuration. `None` when no reconfiguration was ever
     /// registered below this ballot, or the belief already matches it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn stale_belief(&self) -> Option<(Ballot, AcceptorConfig)> {
         if self.kind.is_reconfiguration() {
@@ -402,6 +507,12 @@ impl Matchmaking {
         if *config == self.config {
             return None;
         }
+        // Only an ordinary campaign can be stale, against a configuration
+        // other than its own.
+        assert!(
+            !self.kind.is_reconfiguration(),
+            "a reconfiguration is never stale"
+        );
         Some((*newest, config.clone()))
     }
 }
@@ -458,14 +569,25 @@ pub struct MembershipProbe {
 
 impl MembershipProbe {
     /// Open a probe tagged `ballot`, from a node that believes `believed`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(ballot: Ballot, believed: AcceptorConfig) -> Self {
-        Self {
+        let probe = Self {
             ballot,
             believed,
             answered: BTreeSet::new(),
             effective: None,
-        }
+        };
+        assert!(probe.answered.is_empty(), "a fresh probe has heard nobody");
+        assert!(
+            probe.effective.is_none(),
+            "a fresh probe has learned nothing"
+        );
+        probe
     }
 
     /// The tag of this probe's requests.
@@ -482,6 +604,11 @@ impl MembershipProbe {
 
     /// Fold one matchmaker's answer. Returns whether it counted: a second
     /// answer from the same matchmaker is ignored whole (wire input).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold(
         &mut self,
         matchmaker: MatchmakerId,
@@ -490,23 +617,51 @@ impl MembershipProbe {
         if !self.answered.insert(matchmaker) {
             return false;
         }
+        let held = self.effective.as_ref().map(|(b, _)| *b);
         if let Some((ballot, config)) = effective {
             crate::matchmaker::raise_effective(&mut self.effective, ballot, &config);
         }
+        assert!(
+            self.answered.contains(&matchmaker),
+            "a folded answer is counted"
+        );
+        assert!(
+            self.effective.as_ref().map(|(b, _)| *b) >= held,
+            "the probed effective configuration only moves forward"
+        );
         true
     }
 
     /// Whether a matchmaker quorum has answered — asked at the membership
     /// boundary, never as a count.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
-        matchmakers.has_quorum(&self.answered)
+        let held = matchmakers.has_quorum(&self.answered);
+        if held {
+            assert!(!self.answered.is_empty(), "an answered quorum is someone");
+        }
+        held
     }
 
     /// The matchmakers that have not answered — whom a re-send addresses.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<MatchmakerId> {
-        matchmakers.unanswered(&self.answered).collect()
+        let unanswered: Vec<MatchmakerId> = matchmakers.unanswered(&self.answered).collect();
+        assert!(
+            unanswered.iter().all(|m| !self.answered.contains(m)),
+            "an answered matchmaker is never re-asked"
+        );
+        unanswered
     }
 
     /// The highest-ballot effective configuration the answers named, `None`

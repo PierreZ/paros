@@ -157,6 +157,12 @@ use crate::types::{Ballot, NodeId};
 /// matchmaker quorum.
 pub const REGISTRY_PAGE: usize = 64;
 
+// A registry page that carries nothing could never deliver a history.
+const _: () = assert!(REGISTRY_PAGE > 0);
+
+// A registry page that carries nothing could never deliver a history.
+const _: () = assert!(REGISTRY_PAGE > 0);
+
 /// What a GC request did at this matchmaker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcOutcome {
@@ -283,9 +289,23 @@ impl Matchmaker {
     }
 
     /// The highest registered ballot, or `None` on an empty registry.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn highest(&self) -> Option<Ballot> {
-        self.registry.last_key()
+        let highest = self.registry.last_key();
+        // Paired with `advance_gc_watermark`: what survives sits at or above
+        // the durable floor.
+        if let Some(highest) = highest {
+            assert!(
+                highest >= self.hard_state.gc_watermark,
+                "the highest registration sits at or above the watermark"
+            );
+        }
+        highest
     }
 
     /// Where this matchmaker stands, with a fresh store resolved against the
@@ -312,11 +332,30 @@ impl Matchmaker {
     /// freeze and the activation are the only two).
     pub(super) fn refresh_set(&mut self) {
         self.set = self.derive_set();
+        assert!(
+            self.set.generation == self.hard_state.generation,
+            "the materialized set is the durable generation"
+        );
     }
 
     /// The chosen successor of this matchmaker's generation, if learned.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn successor(&self) -> Option<&MatchmakerSet> {
+        if let Some(successor) = &self.hard_state.successor {
+            assert!(
+                successor.generation == self.hard_state.generation.next(),
+                "a recorded successor is the next generation"
+            );
+            assert!(
+                self.hard_state.phase == MatchmakerPhase::Stopped,
+                "a generation with a successor is frozen"
+            );
+        }
         self.hard_state.successor.as_ref()
     }
 
@@ -411,46 +450,7 @@ impl Matchmaker {
             });
             page
         };
-        if let MatchOutcome::Registered {
-            from_ballot,
-            history,
-            next_from_ballot,
-            ..
-        } = &outcome
-        {
-            // Postconditions of a successful answer: the ballot is registered,
-            // the history is exactly the window below it, and only an active
-            // matchmaker of the addressed generation ever registers.
-            assert!(
-                self.registry.contains_key(ballot),
-                "a Registered reply names a registered ballot"
-            );
-            assert!(
-                history.keys().all(|b| *b < ballot),
-                "a history stays strictly below the ballot it answers"
-            );
-            assert!(
-                history.keys().all(|b| *b >= self.hard_state.gc_watermark),
-                "a history never reaches below the watermark"
-            );
-            assert!(
-                history.keys().all(|b| *b >= *from_ballot),
-                "a page starts at the cursor it names"
-            );
-            assert!(
-                history.len() <= REGISTRY_PAGE,
-                "a page carries at most REGISTRY_PAGE registrations"
-            );
-            assert!(
-                next_from_ballot.is_none_or(|next| history.len() == REGISTRY_PAGE
-                    && history.keys().next_back().is_none_or(|last| next > *last)),
-                "a continuation cursor follows a full page"
-            );
-            assert!(
-                self.phase() == MatchmakerPhase::Active && self.set().generation == generation,
-                "only an active matchmaker of the addressed generation registers"
-            );
-        }
+        self.assert_registered_answer(&outcome, ballot, generation);
         self.pending_replies.push(MatchReply {
             matchmaker: self.config.id,
             to: from,
@@ -459,6 +459,68 @@ impl Matchmaker {
             outcome,
         });
         self.assert_invariants();
+    }
+
+    /// The postconditions of a successful registration answer: the ballot
+    /// is registered, the history is exactly the bounded window below it, and
+    /// only an active matchmaker of the addressed generation ever registers.
+    fn assert_registered_answer(
+        &self,
+        outcome: &MatchOutcome,
+        ballot: Ballot,
+        generation: MatchmakerGeneration,
+    ) {
+        let MatchOutcome::Registered {
+            from_ballot,
+            history,
+            next_from_ballot,
+            ..
+        } = outcome
+        else {
+            return;
+        };
+        // Postconditions of a successful answer: the ballot is registered,
+        // the history is exactly the window below it, and only an active
+        // matchmaker of the addressed generation ever registers.
+        assert!(
+            self.registry.contains_key(ballot),
+            "a Registered reply names a registered ballot"
+        );
+        assert!(
+            history.keys().all(|b| *b < ballot),
+            "a history stays strictly below the ballot it answers"
+        );
+        assert!(
+            history.keys().all(|b| *b >= self.hard_state.gc_watermark),
+            "a history never reaches below the watermark"
+        );
+        assert!(
+            history.keys().all(|b| *b >= *from_ballot),
+            "a page starts at the cursor it names"
+        );
+        assert!(
+            history.len() <= REGISTRY_PAGE,
+            "a page carries at most REGISTRY_PAGE registrations"
+        );
+        if next_from_ballot.is_some() {
+            assert!(
+                history.len() == REGISTRY_PAGE,
+                "a continuation cursor follows a full page"
+            );
+        }
+        assert!(
+            next_from_ballot
+                .is_none_or(|next| history.keys().next_back().is_none_or(|last| next > *last)),
+            "a continuation cursor lies past the page"
+        );
+        assert!(
+            self.phase() == MatchmakerPhase::Active,
+            "only an active matchmaker registers"
+        );
+        assert!(
+            self.set().generation == generation,
+            "only a matchmaker of the addressed generation registers"
+        );
     }
 
     /// Answer a membership probe (#173): the effective configuration this
@@ -498,6 +560,24 @@ impl Matchmaker {
     /// The generation fence for a matchmaking or GC request: `None` when
     /// this matchmaker is active for exactly `generation`.
     fn generation_refusal(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {
+        let refusal = self.judge_generation(generation);
+        // The negative space of the generation fence: a request is served
+        // only by an active matchmaker of exactly its generation.
+        if refusal.is_none() {
+            assert!(
+                self.phase() == MatchmakerPhase::Active,
+                "only an active matchmaker serves"
+            );
+            assert!(
+                self.set().generation == generation,
+                "a request is served at its generation"
+            );
+        }
+        refusal
+    }
+
+    /// The refusal [`Matchmaker::generation_refusal`] answers, unchecked.
+    fn judge_generation(&self, generation: MatchmakerGeneration) -> Option<MatchRefusal> {
         let current = self.set();
         match self.phase() {
             MatchmakerPhase::Active if current.generation == generation => None,
@@ -577,10 +657,21 @@ impl Matchmaker {
         if watermark <= self.hard_state.gc_watermark {
             return GcOutcome::Unchanged;
         }
+        let writes = self.pending_writes.len();
         self.hard_state.gc_watermark = watermark;
         self.registry.raise_floor(watermark);
         self.pending_writes
             .push(MatchmakerWriteOp::SetGcWatermark(watermark));
+        // The write side of the boot pair `Matchmaker::new` re-asserts: the
+        // registry floor and the durable watermark move together, in one op.
+        assert!(
+            self.registry.floor() == watermark,
+            "the registry floor is the new watermark"
+        );
+        assert!(
+            self.pending_writes.len() == writes + 1,
+            "a raise stages exactly one write"
+        );
         self.assert_invariants();
         GcOutcome::Raised
     }
@@ -605,6 +696,14 @@ impl Matchmaker {
         // below `ballot`, and the cursor the candidate re-asks with (`None`
         // means the answer is complete).
         let (history, next_from_ballot) = self.registry.page(from_ballot, ballot, REGISTRY_PAGE);
+        assert!(
+            from_ballot >= self.hard_state.gc_watermark,
+            "a page never starts below the watermark"
+        );
+        assert!(
+            history.keys().all(|b| *b < ballot),
+            "a page stays strictly below the ballot it answers"
+        );
         MatchOutcome::Registered {
             from_ballot,
             history,
@@ -618,7 +717,15 @@ impl Matchmaker {
     /// watermark, with no upper bound — the whole frozen registry a `StopB`
     /// hands the reconstruction.
     pub(super) fn history_from_watermark(&self) -> BTreeMap<Ballot, Registration> {
-        self.registry.entries().clone()
+        let history = self.registry.entries().clone();
+        assert!(
+            history
+                .keys()
+                .next()
+                .is_none_or(|b| *b >= self.hard_state.gc_watermark),
+            "a reported history starts at or above the watermark"
+        );
+        history
     }
 
     /// The cross-field checker, called at boot and at every public mutating
@@ -670,8 +777,19 @@ impl Matchmaker {
             self.hard_state
                 .pending
                 .iter()
-                .all(|p| p.set.generation > current && p.set.contains(self.config.id)),
-            "a pending bootstrap is for a later generation this matchmaker is a member of"
+                .all(|p| p.set.generation > current),
+            "a pending bootstrap is for a later generation"
+        );
+        assert!(
+            self.hard_state
+                .pending
+                .iter()
+                .all(|p| p.set.contains(self.config.id)),
+            "a pending bootstrap is for a set this matchmaker is a member of"
+        );
+        assert!(
+            self.config.bootstrap.windows(2).all(|w| w[0] < w[1]),
+            "the bootstrap set is sorted and deduplicated"
         );
         assert!(
             self.set == self.derive_set(),

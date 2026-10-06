@@ -60,23 +60,68 @@ pub struct MatchmakerReady<'a> {
 
 impl MatchmakerReady<'_> {
     /// The durable writes to persist and fsync **first** (step 1), in order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn writes(&self) -> &[MatchmakerWriteOp] {
-        &self.matchmaker.pending_writes
+        let writes = &self.matchmaker.pending_writes;
+        // The durable watermark only rises, so every floor a batch stages is
+        // at or below the one the matchmaker now holds — the batch can never
+        // persist a floor memory has not reached.
+        let watermark = self.matchmaker.hard_state.gc_watermark;
+        assert!(
+            writes.iter().all(|op| match op {
+                MatchmakerWriteOp::Register { .. } => true,
+                MatchmakerWriteOp::SetGcWatermark(raised) => *raised <= watermark,
+                MatchmakerWriteOp::SetScalars(scalars)
+                | MatchmakerWriteOp::InstallRegistry { scalars, .. } => {
+                    scalars.gc_watermark <= watermark
+                }
+            }),
+            "a matchmaker batch never stages a floor above the one it holds"
+        );
+        writes
     }
 
     /// The matchmaking replies to send **after** the writes are durable
     /// (step 2).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn replies(&self) -> &[MatchReply] {
-        &self.matchmaker.pending_replies
+        let replies = &self.matchmaker.pending_replies;
+        assert!(
+            replies
+                .iter()
+                .all(|r| r.matchmaker == self.matchmaker.config.id),
+            "a matchmaker answers in its own name"
+        );
+        replies
     }
 
     /// The reconfiguration replies to send **after** the writes are durable
     /// (step 2).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reconfigure_replies(&self) -> &[ReconfigureReply] {
-        &self.matchmaker.pending_reconfigure_replies
+        let replies = &self.matchmaker.pending_reconfigure_replies;
+        assert!(
+            replies
+                .iter()
+                .all(|r| r.matchmaker() == self.matchmaker.config.id),
+            "a matchmaker answers a handover in its own name"
+        );
+        replies
     }
 
     /// Acknowledge the batch: clears the pending buckets and releases the
@@ -86,5 +131,13 @@ impl MatchmakerReady<'_> {
         self.matchmaker.pending_writes.clear();
         self.matchmaker.pending_replies.clear();
         self.matchmaker.pending_reconfigure_replies.clear();
+        assert!(
+            self.matchmaker.pending_writes.is_empty(),
+            "an advanced batch has no write left"
+        );
+        assert!(
+            self.matchmaker.pending_replies.is_empty(),
+            "an advanced batch has no reply left"
+        );
     }
 }

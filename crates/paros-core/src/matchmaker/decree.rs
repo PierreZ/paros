@@ -113,6 +113,14 @@ impl Decree {
             &BTreeMap::new(),
             &BTreeMap::new(),
         );
+        assert!(
+            proposer.election().is_some_and(|e| e.ballot() == ballot),
+            "a decree opens Phase 1 at its own ballot"
+        );
+        assert!(
+            acceptors.members() == old.members(),
+            "a decree's acceptors are exactly the set being replaced"
+        );
         Self {
             ballot,
             acceptors,
@@ -145,8 +153,20 @@ impl Decree {
 
     /// The promise that refused this ballot, once one has: the caller reopens
     /// strictly above it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn preempted(&self) -> Option<Ballot> {
+        // Only a promise strictly above this ballot preempts it.
+        if let Some(promised) = self.preempted {
+            assert!(
+                promised > self.ballot,
+                "a preempting promise lies above the ballot"
+            );
+        }
         self.preempted
     }
 
@@ -157,6 +177,16 @@ impl Decree {
         if self.preempted.is_some() {
             return Vec::new();
         }
+        let unanswered = self.unanswered_live();
+        assert!(
+            unanswered.iter().all(|m| self.acceptors.contains(*m)),
+            "a decree re-send addresses only its acceptors"
+        );
+        unanswered
+    }
+
+    /// [`Decree::unanswered`] for a decree no promise has preempted.
+    fn unanswered_live(&self) -> Vec<MatchmakerId> {
         match self.proposer.rounds().get(&DECREE_SLOT) {
             None => self
                 .proposer
@@ -228,6 +258,14 @@ impl Decree {
         // A majority names no column.
         self.proposer
             .open_round(DECREE_SLOT, self.ballot, value.clone(), None, None);
+        assert!(
+            self.value() == Some(&value),
+            "Phase 2 carries the selected value"
+        );
+        assert!(
+            self.proposer.election().is_none(),
+            "a won decree closes its Phase 1"
+        );
         DecreePromise::Quorum(value)
     }
 
@@ -259,7 +297,13 @@ impl Decree {
         {
             return AcceptFold::Ignored;
         }
-        if let Some((_, value)) = self.proposer.decided(DECREE_SLOT, &self.acceptors) {
+        if let Some((ballot, value)) = self.proposer.decided(DECREE_SLOT, &self.acceptors) {
+            // A decree chooses its own Phase-2 value at its own ballot.
+            assert!(ballot == self.ballot, "a decree is chosen at its ballot");
+            assert!(
+                self.value() == Some(&value),
+                "a decree chooses the value it proposed"
+            );
             return AcceptFold::Chosen(value);
         }
         let accepted = self
@@ -289,7 +333,17 @@ impl Decree {
         if promised <= self.ballot {
             return;
         }
+        let held = self.preempted;
         self.preempted = Some(self.preempted.map_or(promised, |held| held.max(promised)));
+        // The floor a reopen clears only rises, and covers every refusal.
+        assert!(
+            self.preempted >= held,
+            "a decree's preemption floor never falls"
+        );
+        assert!(
+            self.preempted >= Some(promised),
+            "a preemption covers the refusing promise"
+        );
     }
 
     /// How many matchmakers have promised.
