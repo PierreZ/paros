@@ -98,6 +98,12 @@ impl JournalIdentifier {
     }
 }
 
+// No id has a default and `0` is the only value with a meaning: unset.
+const _: () = assert!(!TenantId::UNSET.is_set());
+const _: () = assert!(!JournalId::UNSET.is_set());
+const _: () = assert!(!JournalIdentifier::UNSET.is_set());
+const _: () = assert!(JournalIdentifier::new(TenantId(1), JournalId(1)).is_set());
+
 impl core::fmt::Display for JournalIdentifier {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}/{}", self.tenant.0, self.journal.0)
@@ -326,6 +332,9 @@ pub fn command_fingerprint(command: &Command) -> u64 {
 /// The FNV-1a offset basis every paros fingerprint folds from.
 pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
+// A zero basis would fingerprint every all-zero prefix to zero.
+const _: () = assert!(FNV_OFFSET != 0);
+
 /// Folds `bytes` into an FNV-1a `hash`: the one mixing step behind
 /// [`command_fingerprint`] and a matchmaker set's decree identity.
 pub(crate) fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
@@ -376,6 +385,10 @@ impl Ballot {
     }
 }
 
+// The sentinel is the order's minimum: round zero, node zero.
+const _: () = assert!(Ballot::zero().round == 0);
+const _: () = assert!(Ballot::zero().node.0 == 0);
+
 impl Default for Ballot {
     /// [`Ballot::zero`]: the smallest ballot, the sentinel of nothing
     /// promised — an order's minimum, not an identity.
@@ -389,9 +402,17 @@ impl Ord for Ballot {
         // Higher round wins; ties broken by NodeId. Written out (rather than
         // derived) so the total-order contract is local to this impl and
         // survives any future field reordering.
-        self.round
+        let order = self
+            .round
             .cmp(&other.round)
-            .then_with(|| self.node.cmp(&other.node))
+            .then_with(|| self.node.cmp(&other.node));
+        // The total order agrees with equality: two ballots tie exactly when
+        // they are the same ballot.
+        assert!(
+            (order == Ordering::Equal) == (self == other),
+            "ballot order agrees with ballot equality"
+        );
+        order
     }
 }
 

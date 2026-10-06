@@ -47,6 +47,8 @@ impl ColocatedNode {
         if self.role == NodeRole::Leader {
             return;
         }
+        let ballot = self.ballot;
+        let promised = self.acceptor.promised();
         if self.config.has_matchmakers() && self.belief_source == BeliefSource::Bootstrap {
             self.probe_membership();
             return;
@@ -57,6 +59,17 @@ impl ColocatedNode {
             return;
         }
         self.campaign(RegistrationKind::Belief, self.acceptors.clone());
+        // A campaign only ever ratchets forward: a fresh ballot above
+        // everything this node promised or led — or, with the round space
+        // exhausted, nothing at all.
+        assert!(
+            self.ballot >= ballot,
+            "a campaign never lowers the operating ballot"
+        );
+        assert!(
+            self.acceptor.promised() >= promised,
+            "a campaign never lowers the promise"
+        );
     }
 
     /// The round the next campaign opens at: strictly above every round this
@@ -64,12 +77,28 @@ impl ColocatedNode {
     /// it. `None` once the round space is exhausted — there is no strictly
     /// higher ballot to mint. The reconfiguration pre-check asks the same.
     pub(super) fn next_campaign_round(&self) -> Option<u64> {
-        self.acceptor
+        let round = self
+            .acceptor
             .promised()
             .round
             .max(self.ballot.round)
             .max(self.round_floor)
-            .checked_add(1)
+            .checked_add(1);
+        if let Some(round) = round {
+            assert!(
+                round > self.acceptor.promised().round,
+                "a campaign opens above the promise"
+            );
+            assert!(
+                round > self.ballot.round,
+                "a campaign opens above the operating ballot"
+            );
+            assert!(
+                round > self.round_floor,
+                "a campaign opens above the round floor"
+            );
+        }
+        round
     }
 
     /// Open a campaign at a fresh ballot: bump the round, promise it durably,
@@ -209,6 +238,19 @@ impl ColocatedNode {
         // peer with nothing past `from_slot` simply sends nothing.
         self.broadcast(self.catch_up_request(from_slot));
         self.try_become_leader();
+        // Phase 1 is open, or it was already won (a configuration this node's
+        // own promise covers alone).
+        if self.role == NodeRole::Candidate {
+            assert!(
+                self.proposer.election().is_some(),
+                "an open campaign holds its Phase 1"
+            );
+        } else {
+            assert!(
+                self.role == NodeRole::Leader,
+                "Phase 1 ends only in a leadership"
+            );
+        }
     }
 
     /// Candidate: collect a `Promise`, merging the reported accepted suffix
@@ -244,6 +286,8 @@ impl ColocatedNode {
         {
             PromiseFold::Ignored => return,
             PromiseFold::Continue(next) => {
+                // A continuation only ever moves forward through the suffix.
+                assert!(next > from_slot, "a promise page's cursor advances");
                 // A valid page is leader contact for election-timeout purposes;
                 // a long suffix must not make the same campaign expire mid-page.
                 self.election_elapsed = 0;
@@ -257,6 +301,13 @@ impl ColocatedNode {
 
     /// Ask `from` for its next `Promise` page at `ballot`, from `next`.
     fn request_promise_page(&mut self, from: NodeId, ballot: Ballot, next: Slot) {
+        // A page is requested for this node's own campaign or probe, from a
+        // peer: the candidate is its own first, complete answer.
+        assert!(
+            ballot == self.ballot,
+            "a page is requested at this node's own ballot"
+        );
+        assert!(from != self.config.id, "a node never pages its own promise");
         let config = self.phase1_wire_config();
         self.send_prepare([from], ballot, next, config);
     }
@@ -273,6 +324,10 @@ impl ColocatedNode {
         faulty: &BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
     ) {
+        assert!(
+            self.role == NodeRole::Leader,
+            "a straggler's promise reaches a leader's probe"
+        );
         match self.proposer.fold_probe_promise(
             from,
             ballot,
@@ -297,7 +352,18 @@ impl ColocatedNode {
     /// blocked.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn resolve_blocked_repairs(&mut self) {
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader resolves blocked repairs"
+        );
         let decisions = self.proposer.resolve_probe();
+        assert!(
+            decisions.iter().all(|d| self
+                .proposer
+                .probe()
+                .is_none_or(|p| !p.blocked().contains(&d.slot))),
+            "a decided repair is no longer blocked"
+        );
         for decision in decisions {
             let slot = decision.slot;
             if self.replica.is_chosen(slot) || slot < self.acceptor.first_slot() {
@@ -567,6 +633,13 @@ impl ColocatedNode {
             started += 1;
         }
 
+        // One bounded page: the pump starts at most a batch of rounds, and
+        // every round it starts runs at the leadership's ballot.
+        assert!(
+            started <= processed,
+            "a recovery page starts at most what it visited"
+        );
+        assert!(processed <= RECOVERY_BATCH, "a recovery page is bounded");
         let remaining = self.proposer.recovery_remaining();
         if remaining == 0 {
             // Closure postconditions live in the component: a recovery only
@@ -592,6 +665,15 @@ impl ColocatedNode {
         }
         if self.proposer.supersedes(ballot, slot) {
             self.become_follower(None);
+            // A superseded leadership or campaign dies whole.
+            assert!(
+                self.proposer.election().is_none(),
+                "a Nack closes the campaign"
+            );
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a Nack abandons every round"
+            );
         }
     }
 }

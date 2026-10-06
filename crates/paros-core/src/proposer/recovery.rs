@@ -43,47 +43,131 @@ pub struct Recovery<V> {
 
 impl<V> Recovery<V> {
     /// The policy this recovery runs under.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn policy(&self) -> RecoveryPolicy {
+        if self.policy == RecoveryPolicy::Inherited {
+            assert!(
+                self.blocked.is_empty(),
+                "an inherited recovery blocks no slot"
+            );
+        }
+        assert!(
+            self.cursor <= self.end,
+            "a recovery's cursor never passes its end"
+        );
         self.policy
     }
 
     /// Whether `slot` is blocked on the repair probe (Case 3: wait).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_blocked(&self, slot: Slot) -> bool {
-        self.blocked.contains(&slot)
+        let blocked = self.blocked.contains(&slot);
+        if blocked {
+            assert!(
+                slot < self.end,
+                "a blocked slot lies below the recovery end"
+            );
+            assert!(
+                self.policy == RecoveryPolicy::Phase1Backed,
+                "only Phase 1 blocks a slot"
+            );
+        }
+        blocked
     }
 
     /// How many slots the cursor has still to sweep.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn remaining(&self) -> usize {
-        usize::try_from(self.end.0.saturating_sub(self.cursor.0)).unwrap_or(usize::MAX)
+        assert!(
+            self.cursor <= self.end,
+            "a recovery's cursor never passes its end"
+        );
+        let remaining = usize::try_from(self.end.0 - self.cursor.0).unwrap_or(usize::MAX);
+        if self.cursor == self.end {
+            assert!(remaining == 0, "a drained recovery has nothing left");
+        }
+        remaining
     }
 
     /// The commands still to re-propose, per slot: what the Phase-1 quorum
     /// (or the handoff) reported for the slots the cursor has not reached
     /// yet. An entry leaves this map as [`Proposer::recovery_next`] passes
     /// it, so the map is the *remaining* plan, never the whole one.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovered(&self) -> &BTreeMap<Slot, V> {
+        // Everything the plan still names lies below its end.
+        assert!(
+            self.recovered
+                .keys()
+                .next_back()
+                .is_none_or(|s| *s < self.end),
+            "a recovered slot lies below the recovery end"
+        );
         &self.recovered
     }
 
     /// The slots blocked on the repair probe (Case 3: wait).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn blocked(&self) -> &BTreeSet<Slot> {
+        assert!(
+            self.blocked.last().is_none_or(|s| *s < self.end),
+            "a blocked slot lies below the recovery end"
+        );
         &self.blocked
     }
 
     /// The next slot the cursor hands out.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn cursor(&self) -> Slot {
+        assert!(
+            self.cursor <= self.end,
+            "a recovery's cursor never passes its end"
+        );
         self.cursor
     }
 
     /// One past the highest slot the recovery covers.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn end(&self) -> Slot {
+        assert!(
+            self.end >= self.cursor,
+            "a recovery's end lies at or past its cursor"
+        );
         self.end
     }
 }
@@ -105,8 +189,23 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     // ---- recovery -----------------------------------------------------------
 
     /// The open recovery continuation, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovery(&self) -> Option<&Recovery<V>> {
+        if let Some(recovery) = &self.recovery {
+            assert!(
+                self.election.is_none(),
+                "a recovery follows its campaign, never overlaps it"
+            );
+            assert!(
+                recovery.cursor <= recovery.end,
+                "a recovery's cursor never passes its end"
+            );
+        }
         self.recovery.as_ref()
     }
 
@@ -130,9 +229,18 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
             self.recovery.is_none(),
             "one recovery continuation per leadership"
         );
+        if policy == RecoveryPolicy::Inherited {
+            assert!(blocked.is_empty(), "an inherited recovery blocks no slot");
+        }
+        assert!(cursor <= end, "a recovery range is never inverted");
+        // A blocked slot may lie *below* the cursor: a faulty record inside
+        // the chosen prefix pulls the campaign range under it, and such a
+        // slot is not chosen here, so the tally can block it (the main hunt
+        // found it on seed 323116061516131908). What bounds it is the
+        // other end: every report named a slot below the frontier.
         assert!(
-            policy == RecoveryPolicy::Phase1Backed || blocked.is_empty(),
-            "an inherited recovery blocks no slot"
+            blocked.last().is_none_or(|s| *s < end),
+            "a blocked slot lies below the recovery end"
         );
         self.recovery = Some(Recovery {
             recovered,
@@ -145,13 +253,23 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
 
     /// Advance the recovery cursor one slot and say what the pump does with
     /// it. `None` when no recovery is open or its range is drained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn recovery_next(&mut self) -> Option<(Slot, RecoveryStep<V>)> {
         let recovery = self.recovery.as_mut()?;
         if recovery.cursor >= recovery.end {
             return None;
         }
         let slot = recovery.cursor;
+        assert!(
+            slot < recovery.end,
+            "the pump hands out only slots inside the range"
+        );
         recovery.cursor = Slot(recovery.cursor.0.saturating_add(1));
+        assert!(recovery.cursor > slot, "the recovery cursor only advances");
         let step = match recovery.recovered.remove(&slot) {
             Some(command) => RecoveryStep::Recovered(command),
             // Only a Phase-1-backed recovery may invent a value for a slot
@@ -165,17 +283,42 @@ impl<Id: Copy + Ord, V> Proposer<Id, V> {
     }
 
     /// Whether the open recovery holds `slot` blocked on the repair probe.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovery_blocked(&self, slot: Slot) -> bool {
-        self.recovery
+        let blocked = self
+            .recovery
             .as_ref()
-            .is_some_and(|recovery| recovery.is_blocked(slot))
+            .is_some_and(|recovery| recovery.is_blocked(slot));
+        // A slot blocked on the recovery is the repair probe's to resolve.
+        if blocked {
+            assert!(
+                self.recovery
+                    .as_ref()
+                    .is_some_and(|r| r.policy == RecoveryPolicy::Phase1Backed),
+                "only a Phase-1-backed recovery blocks a slot"
+            );
+        }
+        blocked
     }
 
     /// How many slots the open recovery has still to sweep (0 when none).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn recovery_remaining(&self) -> usize {
-        self.recovery.as_ref().map_or(0, Recovery::<V>::remaining)
+        let remaining = self.recovery.as_ref().map_or(0, Recovery::<V>::remaining);
+        if self.recovery.is_none() {
+            assert!(remaining == 0, "no recovery has nothing left");
+        }
+        remaining
     }
 
     /// Close the recovery once its cursor swept the whole range.

@@ -43,7 +43,10 @@ pub(crate) fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
     self_id: u64,
     base: u64,
 ) -> u64 {
-    if hooks.shortest_election_timeout() {
+    // A base of at least two beats (`check_floors`): the draw's range is
+    // never empty.
+    assert!(base > 0, "an election timeout base is at least one tick");
+    let ticks = if hooks.shortest_election_timeout() {
         audit.election_timeout_extreme(NodeId(self_id), base);
         tracing::info!(node = self_id, ticks = base, "election_timeout_extreme");
         base
@@ -58,7 +61,15 @@ pub(crate) fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
         ticks
     } else {
         providers.random().random_range(base..base * 2)
-    }
+    };
+    // Whatever the hooks chose, the timeout is one the honest draw could
+    // produce: in `[base, 2 * base)`.
+    assert!(ticks >= base, "an election timeout is at least its base");
+    assert!(
+        ticks < base * 2,
+        "an election timeout stays below twice its base"
+    );
+    ticks
 }
 
 /// Report this batch's cooperative-handoff transitions and return whether an
@@ -79,6 +90,13 @@ fn report_handoff<A: Audit>(
     audit: &A,
 ) -> bool {
     let handoff = node.handoff_counters();
+    // The counters are monotone per incarnation, and the delta tracker was
+    // seeded from this incarnation's.
+    assert!(
+        handoff.installed >= last.installed,
+        "the install counter never falls"
+    );
+    assert!(handoff.out >= last.out, "the handoff counter never falls");
     let installed_now = handoff.installed != last.installed;
     if handoff.rejected_target != last.rejected_target
         || handoff.rejected_stale != last.rejected_stale
@@ -199,6 +217,7 @@ impl Cadence {
     /// Restart the clock.
     pub(crate) fn reset(&mut self) {
         self.elapsed = 0;
+        assert!(self.elapsed == 0, "a reset cadence starts from zero");
     }
 }
 
@@ -213,6 +232,14 @@ fn report_membership<A: Audit>(
     audit: &A,
 ) {
     let membership = node.membership_counters();
+    assert!(
+        membership.campaigns_skipped >= last_membership.campaigns_skipped,
+        "skipped campaigns are counted monotonically"
+    );
+    assert!(
+        membership.step_downs >= last_membership.step_downs,
+        "non-member step-downs are counted monotonically"
+    );
     if membership.campaigns_skipped != last_membership.campaigns_skipped {
         audit.campaign_skipped_non_member(NodeId(self_id), membership.campaigns_skipped);
         tracing::info!(
@@ -287,6 +314,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             *failed_campaigns = failed_campaigns.saturating_add(1);
         }
         let doublings = failed_campaigns.saturating_sub(1).min(backoff_doublings);
+        assert!(doublings <= backoff_doublings, "the backoff is capped");
         let base = election_base.saturating_mul(1_u64 << doublings.min(16));
         if doublings > 0 {
             tracing::info!(node = self_id, doublings, base, "election_backoff");
@@ -294,6 +322,10 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         }
         let ticks = draw_election_timeout(providers, hooks, audit, self_id, base);
         node.set_election_timeout(ticks);
+        assert!(
+            !node.needs_election_timeout(),
+            "a drawn timeout clears the request"
+        );
         audit.election_timeout_set(NodeId(self_id), ticks);
     }
     // Surface any repair progress (Stage 8): in-place heals, straggler
@@ -399,6 +431,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
         for call in std::mem::take(&mut waiters.pending).into_values().flatten() {
             drop(call);
         }
+        assert!(waiters.pending.is_empty(), "a deposed leader holds no call");
     }
     *last_role = role;
 }

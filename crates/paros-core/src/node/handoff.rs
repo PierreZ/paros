@@ -119,6 +119,12 @@ pub const HANDOFF_BATCH: usize = crate::PROMISE_BATCH;
 /// [`REPAIR_TIMEOUT_ELECTIONS`](crate::REPAIR_TIMEOUT_ELECTIONS).
 pub const HANDOFF_FENCE_ELECTIONS: u64 = 3;
 
+// A handoff ships its whole tail in one page, the size of a promise page; a
+// fence deadline of zero would resign every handoff leader on its first tick.
+const _: () = assert!(HANDOFF_BATCH > 0);
+const _: () = assert!(HANDOFF_BATCH <= crate::PROMISE_BATCH);
+const _: () = assert!(HANDOFF_FENCE_ELECTIONS > 0);
+
 /// How a node came to hold its current leadership.
 ///
 /// A deliberate, explicit state rather than a bag of booleans: the two origins
@@ -274,9 +280,14 @@ impl ColocatedNode {
     /// relinquishes a ballot**, its payload names one successor, and no node can
     /// ever be handed an authority it previously gave up — because the only
     /// party who could hand it back is a successor that is not allowed to.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn can_relinquish(&self) -> bool {
-        self.role == NodeRole::Leader
+        let can = self.role == NodeRole::Leader
             && matches!(self.leadership_origin, LeadershipOrigin::Elected)
             && self.acceptors.members().len() > 1
             && self.proposer.election().is_none()
@@ -289,19 +300,52 @@ impl ColocatedNode {
                 .next_slot()
                 .0
                 .saturating_sub(self.first_unchosen().0)
-                <= HANDOFF_BATCH as u64
+                <= HANDOFF_BATCH as u64;
+        // One hop: only the minter of an elected ballot may hand it on, and
+        // only from a settled leadership with nothing Phase-1-shaped open.
+        if can {
+            assert!(
+                self.ballot.node == self.config.id,
+                "a relinquishable ballot is this node's own"
+            );
+            assert!(
+                self.proposer.recovery().is_none(),
+                "a relinquishable leadership is settled"
+            );
+            assert!(
+                self.proposer.probe().is_none(),
+                "a relinquishable leadership has no probe"
+            );
+        }
+        can
     }
 
     /// The peers a handoff may be addressed to: every member of the active
     /// configuration except this node. Empty on a singleton.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn handoff_candidates(&self) -> Vec<NodeId> {
-        self.acceptors
+        let candidates: Vec<NodeId> = self
+            .acceptors
             .members()
             .iter()
             .copied()
             .filter(|p| *p != self.config.id)
-            .collect()
+            .collect();
+        // A successor is a member other than this node.
+        assert!(
+            !candidates.contains(&self.config.id),
+            "a node never hands off to itself"
+        );
+        assert!(
+            candidates.iter().all(|c| self.in_pool(*c)),
+            "every handoff candidate is pooled"
+        );
+        candidates
     }
 
     /// **Relinquish this leadership's Phase-2 authority to `target`** and step
@@ -365,6 +409,12 @@ impl ColocatedNode {
         );
         let from_slot = self.first_unchosen();
         let next_slot = self.proposer.next_slot();
+        // A settled leader's frontier sits at or past its prefix (the
+        // allocator bound `assert_leader_invariants` pins).
+        assert!(
+            from_slot <= next_slot,
+            "a relinquished range is never inverted"
+        );
         let mut decided: BTreeMap<Slot, (Ballot, Command)> = BTreeMap::new();
         let mut pending: BTreeMap<Slot, Command> = BTreeMap::new();
         for s in from_slot.0..next_slot.0 {
@@ -653,6 +703,12 @@ impl ColocatedNode {
         if self.handoff_fence_elapsed >= deadline {
             self.handoff.fence_step_downs = self.handoff.fence_step_downs.saturating_add(1);
             self.become_follower(None);
+            // Resigning hands the inherited log back to an ordinary Phase 1.
+            assert!(self.role == NodeRole::Follower, "a fence timeout resigns");
+            assert!(
+                self.leadership_origin == LeadershipOrigin::Elected,
+                "a resigned node carries no inherited origin"
+            );
         }
     }
 }

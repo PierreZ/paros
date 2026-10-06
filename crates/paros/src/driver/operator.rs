@@ -48,8 +48,20 @@ pub(crate) fn reconfigure<A: Audit>(
         }
         _ => ReconfigureResult::Refused(ReconfigureRefusal::Malformed),
     };
+    // A started reconfiguration re-campaigns at the ballot it reports.
+    if let ReconfigureResult::Started(ballot) = result {
+        assert!(
+            node.ballot() == ballot,
+            "a started reconfiguration runs at its ballot"
+        );
+        assert!(!node.is_leader(), "a reconfiguring leader re-campaigns");
+    }
     audit.reconfigure_acked(NodeId(self_id), &members, result);
     let (accepted, refusal, round) = reconfigure_outcome(result);
+    assert!(
+        accepted == matches!(result, ReconfigureResult::Started(_)),
+        "a reconfiguration is accepted exactly when it started"
+    );
     let leader = match result {
         ReconfigureResult::NotLeader(hint) => hint.map(|n| n.0),
         _ => Some(self_id),
@@ -107,7 +119,22 @@ fn retire_refusal(node: &ColocatedNode, watermark: Option<Ballot>) -> Option<Ret
     if watermark.is_some_and(|w| node.may_retire(w)) {
         return None;
     }
-    Some(if !node.config().has_matchmakers() {
+    let refusal = retire_refusal_reason(node, watermark);
+    // A refusal names a reason that holds.
+    match refusal {
+        RetireRefusal::Plain => {
+            assert!(!node.config().has_matchmakers(), "a plain refusal is plain");
+        }
+        RetireRefusal::Leader => assert!(node.is_leader(), "a leader refusal names a leader"),
+        RetireRefusal::Member => assert!(node.is_acceptor(), "a member refusal names a member"),
+        _ => {}
+    }
+    Some(refusal)
+}
+
+/// Why [`retire_refusal`] refuses, once it has established that it does.
+fn retire_refusal_reason(node: &ColocatedNode, watermark: Option<Ballot>) -> RetireRefusal {
+    if !node.config().has_matchmakers() {
         RetireRefusal::Plain
     } else if node.is_leader() {
         RetireRefusal::Leader
@@ -119,7 +146,7 @@ fn retire_refusal(node: &ColocatedNode, watermark: Option<Ballot>) -> Option<Ret
         RetireRefusal::Stale
     } else {
         RetireRefusal::NotCollected
-    })
+    }
 }
 
 /// A matchmaker-set reconfiguration request (#125): any node may drive it.
@@ -139,12 +166,17 @@ pub(crate) fn reconfigure_matchmakers(
         Some(_) if target.is_empty() => Err(MatchmakersRefusal::Empty),
         Some(_) if !target.iter().all(is_known) => Err(MatchmakersRefusal::UnknownMatchmaker),
         Some(current) => {
-            handover
-                .start(current, target.to_vec())
-                .map_err(|refusal| match refusal {
-                    StartRefusal::Busy => MatchmakersRefusal::Busy,
-                    StartRefusal::Empty => MatchmakersRefusal::Empty,
-                })
+            let started =
+                handover
+                    .start(current, target.to_vec())
+                    .map_err(|refusal| match refusal {
+                        StartRefusal::Busy => MatchmakersRefusal::Busy,
+                        StartRefusal::Empty => MatchmakersRefusal::Empty,
+                    });
+            if started.is_ok() {
+                assert!(handover.is_busy(), "an accepted handover is running");
+            }
+            started
         }
     }
 }
@@ -160,6 +192,17 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
     let (fleet_tenant, fleet_journal) = cell
         .and_then(|cell| cell.fleet)
         .map_or((0, 0), |fleet| (fleet.tenant.0, fleet.journal.0));
+    // A node-only answer names the cell's control journals or none at all.
+    if cell.is_none() {
+        assert!(
+            control_tenant == 0,
+            "a node outside a cell names no control journal"
+        );
+        assert!(
+            fleet_tenant == 0,
+            "a node outside a cell names no fleet journal"
+        );
+    }
     InspectReply {
         node: self_id,
         cell_id: cell.map_or(0, |cell| cell.cell_id),
@@ -176,6 +219,10 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
 pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> InspectReply {
     let facts = node_facts(node.config().id.0, cell);
+    assert!(
+        facts.node == node.config().id.0,
+        "an inspection answers for the node inspected"
+    );
     let since = node.acceptors_since();
     let matchmakers = node.matchmaker_set();
     let (gc_watermark, retirable) =

@@ -30,6 +30,10 @@ const TICK: Duration = Duration::from_millis(100);
 /// milliseconds — with an order of magnitude to spare.
 const ELECTION_BASE: u64 = 10;
 
+// The shipped profile clears the election floor at compile time.
+const _: () = assert!(ELECTION_BASE >= 2 * HEARTBEAT_TICKS);
+const _: () = assert!(TICK.as_millis() > 0);
+
 /// A field below its floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BelowFloor {
@@ -75,10 +79,15 @@ impl DriverTunables {
     /// | re-send cadences | one election base | a lost reply costs a round trip before the retry |
     /// | `reconfigure_backoff_max_ticks` | two election bases | |
     /// | `proxy_take_back_resends`, `proxy_round_resends` | 20, 40 beats | two and four seconds |
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn production() -> Self {
         let defaults = Self::default();
-        Self {
+        let production = Self {
             tick_interval: TICK,
             election_timeout_base: ELECTION_BASE,
             keep_alive_interval: Duration::from_secs(5),
@@ -97,7 +106,22 @@ impl DriverTunables {
             proxy_take_back_resends: 2 * ELECTION_BASE,
             proxy_round_resends: 4 * ELECTION_BASE,
             ..defaults
-        }
+        };
+        // What `parosd` ships is a profile the simulation could have drawn:
+        // above every floor, its proxies evict only after a take-back.
+        assert!(
+            production.check_floors().is_ok(),
+            "the production profile clears every floor"
+        );
+        assert!(
+            production.proxy_round_resends > production.proxy_take_back_resends,
+            "a proxy evicts a round only after its leader would take it back"
+        );
+        assert!(
+            production.keep_alive_timeout < production.keep_alive_interval,
+            "a keep-alive times out before the next is due"
+        );
+        production
     }
 
     /// Check every field against the floor its documentation names. The
@@ -108,6 +132,11 @@ impl DriverTunables {
     /// # Errors
     ///
     /// The first field below its floor.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
@@ -160,14 +189,26 @@ impl DriverTunables {
             ("proxy_take_back_resends", self.proxy_take_back_resends, 1),
             ("proxy_round_resends", self.proxy_round_resends, 1),
         ];
-        match fields.into_iter().find(|(_, value, floor)| value < floor) {
+        assert!(
+            fields.iter().all(|(field, _, _)| !field.is_empty()),
+            "every checked field is named"
+        );
+        let verdict = match fields.into_iter().find(|(_, value, floor)| value < floor) {
             Some((field, value, floor)) => Err(BelowFloor {
                 field,
                 value,
                 floor,
             }),
             None => Ok(()),
+        };
+        // A refusal names a field that really is below its floor.
+        if let Err(below) = &verdict {
+            assert!(
+                below.value < below.floor,
+                "a refused field lies below its floor"
+            );
         }
+        verdict
     }
 }
 

@@ -43,6 +43,10 @@ pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
     audit: &A,
 ) -> Result<(), RunError> {
     let (_, operator) = storage.initial_state();
+    assert!(
+        operator.id.0 == self_id,
+        "a store is checked for the node that owns it"
+    );
     let refusal = match (boot, storage.formatted_config()) {
         (BootKind::ExistingMember, Some(formatted)) if formatted == operator => return Ok(()),
         (BootKind::ExistingMember, Some(formatted)) => {
@@ -86,6 +90,10 @@ pub(crate) async fn check_format_marker<S: LogStorage, A: Audit>(
 pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, audit: &A) {
     // Mark this incarnation coming up (every `booted` after a node's first is
     // a restart).
+    assert!(
+        node.config().id.0 == self_id,
+        "a boot is reported for the node that booted"
+    );
     tracing::info!(node = self_id, "booted");
 
     let promised = node.hard_state().max_promised_ballot;
@@ -160,6 +168,10 @@ pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, au
     // 13093924963020097181) — a later dedup ack would then name a slot no
     // report ever applied. A replay of a slot already reported is
     // idempotent to every oracle.
+    assert!(
+        records.len() == node.acceptor().records().len(),
+        "a boot report names every recovered record once"
+    );
     if let Some(chosen) = node.hard_state().chosen_index {
         let mut next = node.acceptor().first_slot();
         for (slot, (_, command)) in node.acceptor().records().range(..=chosen) {
@@ -175,5 +187,10 @@ pub(crate) fn report_boot_state<A: Audit>(node: &ColocatedNode, self_id: u64, au
             );
             next = Slot(slot.0 + 1);
         }
+        // The re-reported prefix never passes the durable chosen index.
+        assert!(
+            next.0 <= chosen.0 + 1,
+            "a boot replays no slot past the chosen index"
+        );
     }
 }

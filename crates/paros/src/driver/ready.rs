@@ -32,7 +32,17 @@ pub(crate) struct ClientWaiters {
 
 /// The last slot of the node's journal fold — what a read is served from.
 pub(crate) fn fold_head(node: &ColocatedNode) -> Option<Slot> {
-    node.replica().folded().0.checked_sub(1).map(Slot)
+    let head = node.replica().folded().0.checked_sub(1).map(Slot);
+    // The fold's head is a folded slot, inside the chosen prefix.
+    assert!(
+        head.is_none_or(|h| h < node.replica().folded()),
+        "the fold's head lies below the first unfolded slot"
+    );
+    assert!(
+        head <= node.replica().chosen_index(),
+        "the fold's head lies inside the chosen prefix"
+    );
+    head
 }
 
 /// Answer the calls parked on every slot the journal fold now covers
@@ -91,12 +101,22 @@ fn answer_applied_calls<H, A>(
             }
         }
     }
+    // Every call whose slot the fold covers has been answered, one way or
+    // the other: nothing waits below the fold.
+    assert!(
+        waiters.pending.range(..folded).next().is_none(),
+        "no call waits on a slot the fold already covers"
+    );
 }
 
 /// Report one leader-recovery batch this `Ready` carried: how many recovered
 /// slots it started, how many of them were gap fills, and how many remain.
 fn report_recovery_batch<A: Audit>(audit: &A, self_id: u64, batch: (usize, usize, usize)) {
     let (started, gap_fills, remaining) = batch;
+    assert!(
+        gap_fills <= started,
+        "a recovery page fills only rounds it started"
+    );
     let started = u64::try_from(started).unwrap_or(u64::MAX);
     let gap_fills = u64::try_from(gap_fills).unwrap_or(u64::MAX);
     let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
@@ -134,6 +154,11 @@ where
     A: Audit,
 {
     let self_id = out.self_node().0;
+    assert!(
+        self_id == node.config().id.0,
+        "a batch is drained by the node that queued it"
+    );
+    let chosen_before = node.hard_state().chosen_index;
     // The journal every message of this batch belongs to (#188).
     let journal = node.config().journal;
     // The replica tier serves one journal (#188): a journal with no replica
@@ -249,6 +274,11 @@ where
     // doing it inside `Ready::advance` would move single-node state ahead of the
     // I/O the async driver is still performing.
     node.advance_recovery();
+    // The batch only ever moved the prefix forward.
+    assert!(
+        node.hard_state().chosen_index >= chosen_before,
+        "a drained batch never rewinds the chosen index"
+    );
 
     Ok(Outbox {
         match_requests,
@@ -267,6 +297,25 @@ pub(crate) fn report_applied<A: Audit>(
     command: &Command,
     outcome: Option<&Outcome>,
 ) {
+    // A slot's verdict is of its command's kind (pair of `JournalState::apply`).
+    if let Some(outcome) = outcome {
+        let write_verdict = matches!(
+            outcome,
+            Outcome::Accepted { .. }
+                | Outcome::Duplicate { .. }
+                | Outcome::Refused(_)
+                | Outcome::Truncated(_)
+        );
+        assert!(
+            write_verdict == command.write().is_some(),
+            "a write's slot folds to a write's verdict"
+        );
+        assert!(
+            matches!(outcome, Outcome::Noop)
+                == matches!(command, Command::Control(paros_core::Control::Noop)),
+            "only a Noop folds to Noop"
+        );
+    }
     let vhash = command_hash(command);
     audit.applied(NodeId(self_id), slot, vhash, command, outcome);
     tracing::info!(node = self_id, slot = slot.0, vhash, "value_chosen");
@@ -298,6 +347,38 @@ pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
     hooks: &H,
     audit: &A,
 ) -> Result<(), RunError> {
+    // The write half of the pairs the boot scan re-asserts
+    // (`read_back_log`, `ColocatedNode::new`): nothing reaches the disk
+    // above the promise the batch carries, and the scalars it persists only
+    // rise, in the order the core queued them.
+    assert!(
+        writes.iter().all(|op| match op {
+            WriteOp::Acceptor(
+                AcceptorWrite::SetPromise(ballot) | AcceptorWrite::AppendAccepted { ballot, .. },
+            ) => *ballot <= promised,
+            _ => true,
+        }),
+        "a batch persists no promise or vote above the promise it carries"
+    );
+    assert!(
+        writes
+            .iter()
+            .filter_map(|op| match op {
+                WriteOp::Truncate { first, .. } => Some(*first),
+                WriteOp::TrimmedTo { point, .. } => Some(*point),
+                _ => None,
+            })
+            .collect::<Vec<Slot>>()
+            .windows(2)
+            .all(|w| w[0] < w[1]),
+        "a batch persists a strictly rising floor"
+    );
+    if writes.iter().any(WriteOp::needs_sync) {
+        assert!(
+            must_sync == paros_core::MustSync::Sync,
+            "a promise, a vote or a floor is always flushed with an fsync"
+        );
+    }
     let mut promise_changed = false;
     for op in writes {
         let staged = match op {
@@ -357,6 +438,13 @@ pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
         );
     }
 
+    assert!(
+        promise_changed
+            == writes
+                .iter()
+                .any(|op| matches!(op, WriteOp::Acceptor(AcceptorWrite::SetPromise(_)))),
+        "the promise is reported changed exactly when the batch raised it"
+    );
     surface_persisted(writes, promised, promise_changed, self_id, audit);
     Ok(())
 }

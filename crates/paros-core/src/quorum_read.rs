@@ -118,43 +118,102 @@ pub struct QuorumRead<Id> {
 
 impl<Id: Copy + Ord> QuorumRead<Id> {
     /// The reader's correlation token.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn ctx(&self) -> u64 {
+        // A read's row is one its configuration has.
+        assert!(
+            self.config.admits_read_row(self.row),
+            "a read asks a row of its configuration"
+        );
         self.ctx
     }
 
     /// The row this read was addressed to (`None`: no row).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn row(&self) -> Option<usize> {
+        assert!(
+            self.config.admits_read_row(self.row),
+            "a read asks a row of its configuration"
+        );
         self.row
     }
 
     /// The configuration the read is judged over.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn config(&self) -> &AcceptorConfig<Id> {
+        assert!(
+            self.config.is_well_formed(),
+            "a read is judged over a well-formed configuration"
+        );
         &self.config
     }
 
     /// The acceptors that have answered, with the watermark each reported.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn watermarks(&self) -> &BTreeMap<Id, Option<Slot>> {
+        // The row guard's read-back: every counted watermark is the row's.
+        assert!(
+            self.watermarks
+                .keys()
+                .all(|id| self.config.is_phase1_addressee(*id, self.row)),
+            "every counted watermark comes from the read's row"
+        );
         &self.watermarks
     }
 
     /// The read index, once the row answered: the maximum watermark over
     /// the quorum. `None` while still tallying.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn confirmed_index(&self) -> Option<Option<Slot>> {
-        match self.stage {
+        let confirmed = match self.stage {
             Stage::Tallying => None,
             Stage::Confirmed { index } => Some(index),
+        };
+        // A confirmed read's tally is frozen: its index is still the maximum
+        // of the watermarks that confirmed it.
+        if let Some(index) = confirmed {
+            assert!(
+                index == self.max_watermark(),
+                "a confirmed index is the row's maximum"
+            );
         }
+        confirmed
     }
 
     /// The maximum watermark over the answers so far — what the read index
     /// becomes the moment the row is whole.
     fn max_watermark(&self) -> Option<Slot> {
-        self.watermarks.values().copied().flatten().max()
+        let max = self.watermarks.values().copied().flatten().max();
+        assert!(
+            self.watermarks.values().all(|w| *w <= max),
+            "the read index covers every watermark the row reported"
+        );
+        max
     }
 }
 
@@ -179,8 +238,21 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     }
 
     /// The open reads, in creation order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn pending(&self) -> &[QuorumRead<Id>] {
+        // Every token is opened at most once.
+        assert!(
+            self.reads
+                .iter()
+                .enumerate()
+                .all(|(i, r)| self.reads[..i].iter().all(|o| o.ctx != r.ctx)),
+            "a read token is open at most once"
+        );
         &self.reads
     }
 
@@ -230,6 +302,7 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             watermarks.insert(me, watermark);
             addressees.retain(|id| *id != me);
         }
+        let open = self.reads.len();
         self.reads.push(QuorumRead {
             ctx,
             row,
@@ -239,6 +312,14 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             created_tick,
             stage: Stage::Tallying,
         });
+        // The reader never addresses itself, and the read is tallying.
+        if let Some((me, _)) = own {
+            assert!(!addressees.contains(&me), "a reader never pre-reads itself");
+        }
+        assert!(
+            self.reads.len() == open + 1,
+            "opening adds exactly one read"
+        );
         addressees
     }
 
@@ -252,6 +333,11 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// configuration ballot the answer named (`None` on a plain
     /// deployment): one above the read's abandons it — the row asked need
     /// not intersect the successor's columns.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold(
         &mut self,
         ctx: u64,
@@ -277,14 +363,28 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             return PreReadFold::Ignored;
         }
         read.watermarks.insert(from, watermark);
+        assert!(
+            read.watermarks.get(&from) == Some(&watermark),
+            "a counted watermark is the one reported"
+        );
+        assert!(read.stage == Stage::Tallying, "only a tallying read counts");
         PreReadFold::Counted
     }
 
     /// Abandon every read opened against a configuration bound below
     /// `config_since`: the reader learned a newer configuration, and a read
     /// over the superseded one may never complete.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn abandon_superseded(&mut self, config_since: Ballot) {
         self.reads.retain(|r| r.config_since >= config_since);
+        assert!(
+            self.reads.iter().all(|r| r.config_since >= config_since),
+            "no read opened under a superseded configuration survives"
+        );
     }
 
     /// Advance every read: a tallying read whose row is whole (a Phase-1
@@ -326,6 +426,13 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             served.push((read.ctx, index));
             false
         });
+        // A served read leaves the tally: it surfaces exactly once.
+        assert!(
+            served
+                .iter()
+                .all(|(ctx, _)| self.reads.iter().all(|r| r.ctx != *ctx)),
+            "a served read is no longer pending"
+        );
         served
     }
 
@@ -333,9 +440,24 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// answered whole, a watermark the replica never reached). Dropped
     /// silently: the read carries no
     /// durable obligation, and the driver owns the client reply.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn expire(&mut self, now: u64, ttl: u64) {
         self.reads
             .retain(|r| now.saturating_sub(r.created_tick) <= ttl);
+        assert!(
+            self.reads
+                .iter()
+                .all(|r| now.saturating_sub(r.created_tick) <= ttl),
+            "no read outlives its window"
+        );
+        assert!(
+            self.reads.iter().all(|r| r.created_tick <= now),
+            "no read was opened in the future"
+        );
     }
 }
 

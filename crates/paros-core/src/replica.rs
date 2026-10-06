@@ -55,6 +55,9 @@ use crate::write::WriteOp;
 /// hands the driver an unbounded run.
 pub const APPLY_BATCH: usize = 64;
 
+// A walk that releases nothing per batch would never apply a slot.
+const _: () = assert!(APPLY_BATCH > 0);
+
 /// The answer to a journal read ([`Replica::read`], #204).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogRead {
@@ -93,8 +96,19 @@ pub struct LogPage {
 impl LogPage {
     /// Where the next read starts.
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// If the page runs past the position space (a programmer error).
     pub fn next(&self) -> Seq {
-        Seq(self.from.0 + self.records.len() as u64)
+        let len = self.records.len() as u64;
+        assert!(
+            self.from.0.checked_add(len).is_some(),
+            "a page ends inside the position space"
+        );
+        let next = Seq(self.from.0 + len);
+        assert!(next >= self.from, "a page never ends before it starts");
+        next
     }
 }
 
@@ -150,6 +164,11 @@ impl Replica {
     /// exactly the state a node that never restarted holds. A truncation the
     /// replay passes is not re-applied to the log: the store's floor is what
     /// it is, and a lower floor only retains more.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn from_boot(
         chosen_index: Option<Slot>,
@@ -178,6 +197,25 @@ impl Replica {
         };
         replica.refold();
         replica.truncate_due = false;
+        // The boot read-back of the walk's durable writes: everything the
+        // chosen index covers is chosen, and the fold lands between the
+        // sealed floor and the first unchosen slot.
+        assert!(
+            replica.chosen.keys().next_back().copied() <= chosen_index,
+            "a boot rebuild holds no chosen slot past the chosen index"
+        );
+        assert!(
+            replica.folded >= floor,
+            "a boot fold starts at the sealed floor"
+        );
+        assert!(
+            replica.folded <= replica.first_unchosen(),
+            "a boot fold never passes the chosen prefix"
+        );
+        assert!(
+            replica.committed.is_empty(),
+            "a boot rebuild surfaces nothing"
+        );
         replica
     }
 
@@ -213,8 +251,12 @@ impl Replica {
             "the journal fold's base sits at the compaction floor"
         );
         assert!(
-            self.floor <= self.folded && self.folded <= self.first_unchosen(),
-            "the journal fold lies between the floor and the first unchosen slot"
+            self.floor <= self.folded,
+            "the journal fold lies at or above the floor"
+        );
+        assert!(
+            self.folded <= self.first_unchosen(),
+            "the journal fold lies at or below the first unchosen slot"
         );
         if self.folded < self.first_unchosen() {
             assert!(
@@ -223,30 +265,77 @@ impl Replica {
             );
         }
         assert!(
-            self.outcomes.keys().next().is_none_or(|s| *s >= floor)
-                && self.history.keys().next().is_none_or(|s| *s >= floor)
-                && self
-                    .outcomes
-                    .keys()
-                    .next_back()
-                    .is_none_or(|s| *s < self.folded),
-            "the journal fold's per-slot record lies between the floor and the fold"
+            self.outcomes.keys().next().is_none_or(|s| *s >= floor),
+            "no folded outcome survives below the floor"
+        );
+        assert!(
+            self.history.keys().next().is_none_or(|s| *s >= floor),
+            "no folded state survives below the floor"
+        );
+        assert!(
+            self.outcomes
+                .keys()
+                .next_back()
+                .is_none_or(|s| *s < self.folded),
+            "every folded outcome lies below the fold's head"
+        );
+        assert!(
+            self.history
+                .keys()
+                .next_back()
+                .is_none_or(|s| *s < self.folded),
+            "every folded state lies below the fold's head"
         );
         self.base.assert_invariants();
         self.state.assert_invariants();
         assert!(
-            self.base.next_seq <= self.state.next_seq
-                && self.base.first_seq <= self.state.first_seq
-                && self.base.generation <= self.state.generation,
-            "the fold's head never lies behind its base"
+            self.base.next_seq <= self.state.next_seq,
+            "the fold's head never lies behind its base: next_seq"
+        );
+        assert!(
+            self.base.first_seq <= self.state.first_seq,
+            "the fold's head never lies behind its base: first_seq"
+        );
+        assert!(
+            self.base.generation <= self.state.generation,
+            "the fold's head never lies behind its base: generation"
+        );
+        // The positions index names only retained, folded, accepted writes.
+        assert!(
+            self.positions
+                .values()
+                .all(|s| *s >= self.floor && *s < self.folded),
+            "the positions index lies between the floor and the fold"
+        );
+        assert!(
+            self.positions
+                .keys()
+                .next_back()
+                .is_none_or(|seq| *seq < self.state.next_seq),
+            "every indexed write starts below the journal's next position"
         );
     }
 
     // ---- reads --------------------------------------------------------------
 
     /// The durable chosen index (the commit index).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen_index(&self) -> Option<Slot> {
+        // The chosen index covers everything the fold applied, and the floor
+        // never outruns it.
+        assert!(
+            self.folded <= self.first_unchosen(),
+            "the fold lies inside the chosen prefix"
+        );
+        assert!(
+            self.floor <= self.first_unchosen(),
+            "the floor lies inside the chosen prefix"
+        );
         self.chosen_index
     }
 
@@ -256,82 +345,212 @@ impl Replica {
     /// folded* everything up to it. `None` is the empty watermark, covered by
     /// any prefix. The replica consumes "applied past `index`" and nothing
     /// else — it never sees the watermark tally that produced the index.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn covers(&self, index: Option<Slot>) -> bool {
-        index.is_none_or(|i| i < self.folded)
+        let covered = index.is_none_or(|i| i < self.folded);
+        // A covered index is inside the chosen prefix: folded is chosen.
+        if let Some(index) = index.filter(|_| covered) {
+            assert!(
+                self.chosen_index.is_some_and(|ci| index <= ci),
+                "a covered index lies inside the chosen prefix"
+            );
+        }
+        covered
     }
 
     /// First slot not in the contiguous chosen prefix.
+    ///
+    /// # Panics
+    ///
+    /// If the chosen index sits at the end of the slot space.
     #[must_use]
     pub fn first_unchosen(&self) -> Slot {
         match self.chosen_index {
-            Some(s) => Slot(s.0 + 1),
+            Some(s) => {
+                assert!(
+                    s.0 < u64::MAX,
+                    "the chosen index never reaches the end of the slots"
+                );
+                Slot(s.0 + 1)
+            }
             None => Slot(0),
         }
     }
 
     /// Every slot known chosen, contiguous or not.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen(&self) -> &BTreeMap<Slot, Command> {
+        assert!(
+            self.chosen.keys().next().is_none_or(|s| *s >= self.floor),
+            "no chosen value survives below the floor"
+        );
         &self.chosen
     }
 
     /// Whether `slot` is known chosen here.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_chosen(&self, slot: Slot) -> bool {
-        self.chosen.contains_key(&slot)
+        let chosen = self.chosen.contains_key(&slot);
+        if chosen {
+            assert!(slot >= self.floor, "a held chosen slot is retained");
+        }
+        chosen
     }
 
     /// The value chosen at `slot`, if known.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen_at(&self, slot: Slot) -> Option<&Command> {
-        self.chosen.get(&slot)
+        let command = self.chosen.get(&slot);
+        if command.is_some() {
+            assert!(slot >= self.floor, "a held chosen slot is retained");
+        }
+        command
     }
 
     /// The journal state at the fold's head.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn journal(&self) -> JournalState {
+        assert!(
+            self.state.next_seq >= self.base.next_seq,
+            "the fold's head is past its base"
+        );
+        assert!(
+            self.state.first_seq <= self.state.next_seq,
+            "the head's positions are ordered"
+        );
         self.state
     }
 
     /// The journal state at the retention floor (sealed with the last
     /// truncation, or carried by the last trim-point jump).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn journal_base(&self) -> JournalState {
+        assert!(
+            self.base.first_seq <= self.state.first_seq,
+            "the base lies behind the head"
+        );
         self.base
     }
 
     /// The first slot the fold has not applied.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn folded(&self) -> Slot {
+        assert!(self.folded >= self.floor, "the fold starts at the floor");
+        assert!(
+            self.folded <= self.first_unchosen(),
+            "the fold lies inside the chosen prefix"
+        );
         self.folded
     }
 
     /// The slot the fold is stopped at, when it is stopped below the first
     /// unchosen slot: a slot of the prefix whose value this node does not
     /// hold, that a catch-up must bring back before anything past it applies.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn fold_hole(&self) -> Option<Slot> {
-        (self.folded < self.first_unchosen()).then_some(self.folded)
+        let hole = (self.folded < self.first_unchosen()).then_some(self.folded);
+        if let Some(hole) = hole {
+            // The fold stops only at a slot of the prefix it does not hold.
+            assert!(
+                !self.chosen.contains_key(&hole),
+                "a fold hole is a slot not held"
+            );
+            assert!(hole >= self.floor, "a fold hole lies at or above the floor");
+        }
+        hole
     }
 
     /// The outcome of the folded slot `slot`, if it is retained and was not
     /// a `Noop`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn outcome_at(&self, slot: Slot) -> Option<&Outcome> {
-        self.outcomes.get(&slot)
+        let outcome = self.outcomes.get(&slot);
+        if outcome.is_some() {
+            assert!(slot < self.folded, "only a folded slot has an outcome");
+            assert!(slot >= self.floor, "only a retained slot has an outcome");
+        }
+        outcome
     }
 
     /// Newly applied entries this batch, in order, each with the verdict
     /// the journal state machine gave it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn committed(&self) -> &[(Slot, Command, Outcome)] {
+        assert!(
+            self.committed.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "a batch's applied entries ascend by slot"
+        );
+        assert!(
+            self.committed
+                .last()
+                .is_none_or(|(slot, _, _)| *slot < self.first_unchosen()),
+            "an applied entry lies inside the chosen prefix"
+        );
         &self.committed
     }
 
     /// Drop the batch's applied entries (the caller consumed them).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn clear_committed(&mut self) {
         self.committed.clear();
+        assert!(
+            self.committed.is_empty(),
+            "a consumed batch leaves nothing applied"
+        );
     }
 
     /// The **chosen gap**, if this node holds one: `(hole, highest)` where
@@ -346,28 +565,53 @@ impl Replica {
     /// **survives quiescence** is the wedge this exists to make observable —
     /// the chosen index frozen at `hole - 1` cluster-wide while higher slots
     /// keep being chosen.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn chosen_gap(&self) -> Option<(Slot, Slot)> {
         let hole = self.first_unchosen();
         let highest = *self.chosen.range(hole..).next_back()?.0;
+        assert!(
+            highest >= hole,
+            "a gap's highest chosen slot lies at or past its hole"
+        );
         Some((hole, highest))
     }
 
     /// The write accepted with its first record at `seq`, if it is retained
     /// — what the journal state machine compares a retry against.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn accepted_at(&self, seq: Seq) -> Option<&Entry> {
-        self.positions
+        let entry = self
+            .positions
             .get(&seq)
             .and_then(|slot| self.chosen.get(slot))
-            .and_then(Command::write)
+            .and_then(Command::write);
+        // Read-back of the index `fold_one` writes: the write indexed at a
+        // position starts there.
+        if let Some(entry) = entry {
+            assert!(entry.seq == seq, "an indexed write starts at its position");
+        }
+        entry
     }
 
     /// The journal state after every slot below `slot` (a retained slot at
     /// or past the floor, at or below the fold).
     fn state_at(&self, slot: Slot) -> JournalState {
         assert!(
-            slot >= self.floor && slot <= self.folded,
+            slot >= self.floor,
+            "the journal state is asked at a retained slot"
+        );
+        assert!(
+            slot <= self.folded,
             "the journal state is asked at a folded slot"
         );
         self.history
@@ -420,8 +664,12 @@ impl Replica {
             first = needed;
         }
         assert!(
-            first >= self.floor && first <= self.folded,
-            "a compaction floor lies inside the retained fold"
+            first >= self.floor,
+            "a compaction floor lies at or above the floor"
+        );
+        assert!(
+            first <= self.folded,
+            "a compaction floor lies at or below the fold"
         );
         first.0.checked_sub(1).map(Slot)
     }
@@ -454,9 +702,14 @@ impl Replica {
             .and_then(Command::write)
             .expect("an indexed write is a retained chosen write");
         assert!(
-            *start <= position && position.0 < start.0 + entry.count(),
+            *start <= position,
+            "a retained record lies at or past its write's start"
+        );
+        assert!(
+            position.0 < start.0 + entry.count(),
             "a retained record lies inside the write indexed below it"
         );
+        assert!(*slot < self.folded, "a record's write is a folded slot");
         (*slot).max(self.floor)
     }
 
@@ -541,11 +794,26 @@ impl Replica {
                 at = Seq(at.0 + 1);
             }
         }
-        // Postcondition: the page never passes the fold's head.
+        // Postconditions: the page never passes the fold's head, and honours
+        // its bounds — the byte budget may be exceeded only by a lone record.
+        if from < state.next_seq {
+            assert!(
+                page.next() <= state.next_seq,
+                "a read page ends at or below the journal's next position"
+            );
+        } else {
+            assert!(
+                page.records.is_empty(),
+                "a read at the end returns no record"
+            );
+        }
         assert!(
-            from >= state.next_seq || page.next() <= state.next_seq,
-            "a read page ends at or below the journal's next position"
+            page.records.len() <= limit,
+            "a read page honours its record limit"
         );
+        if page.records.len() > 1 {
+            assert!(bytes <= max_bytes, "a read page honours its byte budget");
+        }
         LogRead::Page(page)
     }
 
@@ -564,10 +832,16 @@ impl Replica {
             "a slot is learned chosen once"
         );
         assert!(slot >= self.folded, "a folded slot is never relearned");
+        let folded = self.folded;
         self.chosen.insert(slot, command.clone());
         if slot == self.folded && slot < self.first_unchosen() {
             self.refold();
         }
+        assert!(
+            self.chosen.contains_key(&slot),
+            "a learned slot is held chosen"
+        );
+        assert!(self.folded >= folded, "learning never moves the fold back");
     }
 
     /// Fold one slot at the fold's head, and return its verdict.
@@ -593,6 +867,14 @@ impl Replica {
             self.outcomes.insert(slot, outcome.clone());
         }
         self.folded = Slot(slot.0 + 1);
+        // The write side of the positions pair `accepted_at` reads back.
+        if let Outcome::Accepted { seq, .. } = &outcome {
+            assert!(
+                self.positions.get(seq) == Some(&slot),
+                "an accepted write is indexed"
+            );
+        }
+        assert!(self.folded > slot, "the fold moves past the slot it folded");
         outcome
     }
 
@@ -606,6 +888,16 @@ impl Replica {
                 break;
             };
             self.fold_one(slot, &command);
+        }
+        assert!(
+            self.folded <= end,
+            "a refold never passes the chosen prefix"
+        );
+        if self.folded < end {
+            assert!(
+                !self.chosen.contains_key(&self.folded),
+                "a refold stops only at a hole"
+            );
         }
     }
 
@@ -632,6 +924,8 @@ impl Replica {
         records_agree: impl Fn(Slot, &Command) -> bool,
         writes: &mut Vec<WriteOp>,
     ) -> Option<Slot> {
+        let chosen_before = self.chosen_index;
+        let writes_before = writes.len();
         self.refold();
         if self.folded == self.first_unchosen() {
             let mut next = self.first_unchosen();
@@ -666,6 +960,16 @@ impl Replica {
             );
         }
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        // The chosen index only advances, and each advance is one durable
+        // write: the walk is its only writer.
+        assert!(
+            self.chosen_index >= chosen_before,
+            "the chosen index never decreases"
+        );
+        assert!(
+            writes.len() - writes_before <= APPLY_BATCH,
+            "one walk writes one bounded batch"
+        );
         if std::mem::take(&mut self.truncate_due) {
             self.compaction_target()
         } else {
@@ -689,8 +993,17 @@ impl Replica {
             "a truncation never drops a retained record"
         );
         let base = self.state_at(first);
+        let chosen_index = self.chosen_index;
         self.drop_prefix(first, base);
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        assert!(
+            self.floor == first,
+            "a truncation lands the floor on its slot"
+        );
+        assert!(
+            self.chosen_index == chosen_index,
+            "a truncation never moves the chosen index"
+        );
         base
     }
 
@@ -725,6 +1038,16 @@ impl Replica {
         self.drop_prefix(point, base);
         self.refold();
         self.advance_pending = self.chosen.contains_key(&self.first_unchosen());
+        // Everything below a trim point is chosen and folded here now.
+        assert!(
+            self.chosen_index.is_some_and(|ci| ci >= boundary),
+            "a trim jump covers the boundary with the chosen index"
+        );
+        assert!(self.folded >= point, "a trim jump folds past its point");
+        assert!(
+            self.floor == point,
+            "a trim jump lands the floor on its point"
+        );
         base
     }
 
@@ -733,6 +1056,12 @@ impl Replica {
     /// every chosen value, history entry, outcome and position below it
     /// goes.
     fn drop_prefix(&mut self, first: Slot, base: JournalState) {
+        assert!(
+            first >= self.floor,
+            "the retention floor never moves backward"
+        );
+        assert!(first <= self.folded, "a prefix drop never passes the fold");
+        base.assert_invariants();
         self.base = base;
         self.floor = first;
         self.chosen = self.chosen.split_off(&first);
@@ -746,6 +1075,10 @@ impl Replica {
         assert!(
             self.positions.values().all(|s| *s >= first),
             "no position survives below the floor"
+        );
+        assert!(
+            self.outcomes.keys().next().is_none_or(|s| *s >= first),
+            "no outcome survives below the floor"
         );
     }
 }

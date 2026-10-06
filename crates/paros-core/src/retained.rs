@@ -36,40 +36,106 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
     /// an operating condition).
     #[must_use]
     pub fn new(entries: BTreeMap<K, V>, floor: K) -> Self {
+        let count = entries.len();
         let window = Self { entries, floor };
         window.assert_invariants();
+        assert!(
+            window.entries.len() == count,
+            "a window keeps every entry it is built from"
+        );
         window
     }
 
     /// The floor: the first key still retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn floor(&self) -> K {
+        assert!(
+            self.entries
+                .keys()
+                .next()
+                .is_none_or(|first| *first >= self.floor),
+            "no entry survives below the retained window's floor"
+        );
         self.floor
     }
 
     /// Whether `key` sits below the floor — everything a caller needs to
     /// refuse a question about a key this window can no longer answer.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn below_floor(&self, key: K) -> bool {
-        key < self.floor
+        let below = key < self.floor;
+        // Negative space: a key below the floor is never retained.
+        if below {
+            assert!(
+                !self.entries.contains_key(&key),
+                "a key below the floor is not retained"
+            );
+        }
+        below
     }
 
     /// The retained entries, in key order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn entries(&self) -> &BTreeMap<K, V> {
+        assert!(
+            self.entries
+                .keys()
+                .next()
+                .is_none_or(|first| *first >= self.floor),
+            "no entry survives below the retained window's floor"
+        );
         &self.entries
     }
 
     /// The entry at `key`, if retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn get(&self, key: K) -> Option<&V> {
-        self.entries.get(&key)
+        let value = self.entries.get(&key);
+        if value.is_some() {
+            assert!(
+                !self.below_floor(key),
+                "a retained entry sits at or above the floor"
+            );
+        }
+        value
     }
 
     /// Whether `key` is retained.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn contains_key(&self, key: K) -> bool {
-        self.entries.contains_key(&key)
+        let contains = self.entries.contains_key(&key);
+        if contains {
+            assert!(
+                !self.below_floor(key),
+                "a retained key sits at or above the floor"
+            );
+        }
+        contains
     }
 
     /// The retained entries in `range`, in key order.
@@ -78,15 +144,35 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
     }
 
     /// The highest retained key, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn last_key(&self) -> Option<K> {
-        self.entries.keys().next_back().copied()
+        let last = self.entries.keys().next_back().copied();
+        assert!(
+            last.is_none_or(|k| k >= self.floor),
+            "the last entry sits above the floor"
+        );
+        last
     }
 
     /// The lowest retained key, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn first_key(&self) -> Option<K> {
-        self.entries.keys().next().copied()
+        let first = self.entries.keys().next().copied();
+        assert!(
+            first.is_some() != self.entries.is_empty(),
+            "a window has a first key iff it holds an entry"
+        );
+        first
     }
 
     /// Insert `value` at `key`, returning what it replaced.
@@ -100,7 +186,12 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
             !self.below_floor(key),
             "a retained window never takes an entry below its floor"
         );
-        self.entries.insert(key, value)
+        let previous = self.entries.insert(key, value);
+        assert!(
+            self.entries.contains_key(&key),
+            "an inserted entry is retained"
+        );
+        previous
     }
 
     /// Remove the entry at `key`, returning it.
@@ -122,12 +213,22 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
         );
         self.entries = self.entries.split_off(&floor);
         self.floor = floor;
+        assert!(
+            self.floor == floor,
+            "the floor lands where it was raised to"
+        );
+        self.assert_invariants();
     }
 
     /// One bounded page of the retained entries: at most `limit` of them from
     /// `max(from, floor)` up to (but not including) `upper`, plus the key the
     /// next page starts at when the window did not fit. `None` there means
     /// the answer is complete.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn page(&self, from: K, upper: K, limit: usize) -> (BTreeMap<K, V>, Option<K>)
     where
@@ -140,7 +241,22 @@ impl<K: Copy + Ord, V> RetainedWindow<K, V> {
             .take(limit)
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        (page, window.next().map(|(k, _)| *k))
+        let cursor = window.next().map(|(k, _)| *k);
+        // Postconditions: bounded, inside `[from, upper)`, and the cursor
+        // strictly past everything the page carried.
+        assert!(page.len() <= limit, "a page honours its limit");
+        assert!(
+            page.keys().next().is_none_or(|k| *k >= from),
+            "a page starts at its cursor"
+        );
+        if let Some(cursor) = cursor {
+            assert!(cursor < upper, "a continuation lies below the upper bound");
+            assert!(
+                page.keys().next_back().is_none_or(|k| *k < cursor),
+                "the continuation lies past the page"
+            );
+        }
+        (page, cursor)
     }
 
     /// The window's own invariant: nothing below the floor. A bounded

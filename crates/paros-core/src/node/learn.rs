@@ -30,6 +30,17 @@ impl ColocatedNode {
         if self.proposer.is_round_open_at(slot, ballot) {
             self.proposer.close_round(slot);
         }
+        // A learned slot is chosen here, or compacted away as chosen.
+        if slot >= self.acceptor.first_slot() {
+            assert!(
+                self.replica.is_chosen(slot),
+                "a committed slot is learned chosen"
+            );
+        }
+        assert!(
+            !self.proposer.is_round_open_at(slot, ballot),
+            "a committed round is closed"
+        );
     }
 
     /// Record `(slot, entry)` as chosen: persist the authoritative record,
@@ -123,6 +134,7 @@ impl ColocatedNode {
     /// ([`crate::replica::Replica::advance`]).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn advance_chosen_index(&mut self) {
+        let chosen = self.replica.chosen_index();
         // A faulty record inside the chosen prefix is a hole in the journal
         // fold: the replica holds the walk until it heals (catch-up pulled
         // by `tick_repair`, a trim-point jump, or this node's own election).
@@ -135,5 +147,14 @@ impl ColocatedNode {
             self.compact(up_to);
         }
         self.serve_quorum_reads();
+        // The walk only advances the prefix, and never past what it holds.
+        assert!(
+            self.replica.chosen_index() >= chosen,
+            "the chosen prefix never retreats"
+        );
+        assert!(
+            self.acceptor.first_slot() <= self.first_unchosen(),
+            "a walk's compaction never outruns the chosen prefix"
+        );
     }
 }

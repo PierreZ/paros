@@ -14,6 +14,9 @@ use crate::membership::AcceptorConfig;
 /// hard-coded 1, so a cadence change here would move the oracle with it.
 pub const HEARTBEAT_TICKS: u64 = 1;
 
+// `tick` beats unconditionally, so the cadence is one tick by definition.
+const _: () = assert!(HEARTBEAT_TICKS == 1);
+
 impl ColocatedNode {
     /// Broadcast one leader beat ([`ColocatedNode::tick`] beats through
     /// here, once per tick).
@@ -29,6 +32,11 @@ impl ColocatedNode {
         // prefix through the commit watermark and catch-up. Only members' acks
         // count (`on_heartbeat_ack`).
         let config = self.wire_config();
+        // A beat carries the leader's own ballot, which its promise covers.
+        assert!(
+            self.ballot <= self.acceptor.promised(),
+            "a beat's ballot is one this node promised"
+        );
         self.broadcast(Message::Heartbeat {
             from: self.config.id,
             ballot: self.ballot,
@@ -147,6 +155,10 @@ impl ColocatedNode {
         }
         // CheckQuorum: an ack at our ballot is proof this peer can still reach
         // us and has not promised past us — credit the current window.
+        assert!(
+            self.proposer.election().is_none(),
+            "a leader credits no campaign"
+        );
         self.proposer.credit_authority(from);
         // The GC fence tally (#123): a configured member's chosen index.
         self.note_peer_chosen(from, chosen);

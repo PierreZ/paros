@@ -89,8 +89,25 @@ impl RegisteredPage {
     /// Decode one matchmaker's answer to a registration: the page it
     /// registered, or its refusal. `None` for a probe's answer
     /// ([`MatchOutcome::Probed`]), which no registration folds.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn from_outcome(outcome: MatchOutcome) -> Option<Result<Self, MatchRefusal>> {
+        let probed = matches!(outcome, MatchOutcome::Probed { .. });
+        let decoded = Self::decode(outcome);
+        // Negative space: only a probe's answer decodes to nothing.
+        assert!(
+            decoded.is_none() == probed,
+            "only a probe's answer is not a page"
+        );
+        decoded
+    }
+
+    /// [`Self::from_outcome`] before its postcondition.
+    fn decode(outcome: MatchOutcome) -> Option<Result<Self, MatchRefusal>> {
         match outcome {
             MatchOutcome::Registered {
                 from_ballot,
@@ -174,9 +191,14 @@ pub struct Matchmaking {
 
 impl Matchmaking {
     /// Open the phase for `ballot` with `config` as `C_b`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(ballot: Ballot, config: AcceptorConfig, kind: RegistrationKind) -> Self {
-        Self {
+        let matchmaking = Self {
             ballot,
             config,
             kind,
@@ -186,7 +208,37 @@ impl Matchmaking {
             effective: None,
             watermark: Ballot::zero(),
             disagreements: 0,
-        }
+        };
+        matchmaking.assert_invariants();
+        matchmaking
+    }
+
+    /// The phase's own invariants: a matchmaker is mid-answer or done, never
+    /// both; every unioned slot of the history holds distinct, non-empty
+    /// configurations.
+    ///
+    /// # Panics
+    ///
+    /// If a registered matchmaker still owes a page, or the history holds an
+    /// empty or duplicated entry.
+    pub fn assert_invariants(&self) {
+        assert!(
+            self.page_next
+                .keys()
+                .all(|m| !self.registered_by.contains(m)),
+            "a registered matchmaker owes no further page"
+        );
+        assert!(
+            self.history.values().all(|configs| !configs.is_empty()),
+            "every unioned ballot holds a configuration"
+        );
+        assert!(
+            self.history
+                .values()
+                .all(|configs| u64::try_from(configs.len()).unwrap_or(u64::MAX)
+                    <= self.disagreements + 1),
+            "every extra configuration at a ballot was counted as a disagreement"
+        );
     }
 
     /// The ballot being registered.
@@ -208,22 +260,57 @@ impl Matchmaking {
     }
 
     /// The maximum GC watermark any reply reported so far.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn watermark(&self) -> Ballot {
+        // A raised watermark was reported by someone.
+        if self.watermark > Ballot::zero() {
+            assert!(self.heard_anyone(), "a raised watermark was reported");
+        }
         self.watermark
+    }
+
+    /// Whether any matchmaker's page has been folded, complete or not.
+    fn heard_anyone(&self) -> bool {
+        !self.registered_by.is_empty() || !self.page_next.is_empty()
     }
 
     /// The highest-ballot reconfiguration registration any reply named, with
     /// the ballot it was registered under.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        // Nothing is effective that no answer named.
+        if self.effective.is_some() {
+            assert!(
+                self.heard_anyone(),
+                "an effective configuration was reported"
+            );
+        }
         self.effective.as_ref()
     }
 
     /// Distinct ballots two matchmakers reported with different
     /// configurations. Observability only: the union keeps both.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn disagreements(&self) -> u64 {
+        // A disagreement is two configurations at one unioned ballot.
+        if self.disagreements > 0 {
+            assert!(!self.history.is_empty(), "a disagreement lies in the union");
+        }
         self.disagreements
     }
 
@@ -265,6 +352,11 @@ impl Matchmaking {
             if !at_cursor && !cursor_collected {
                 return false;
             }
+            // Either way a later page never starts below the cursor owed.
+            assert!(
+                page.from_ballot >= *expected,
+                "a later page starts at or above its cursor"
+            );
         }
         // Only the lower bound, exactly as `promise_page_shape_valid` checks
         // its page: an entry above the request's ballot would merely add a
@@ -287,10 +379,17 @@ impl Matchmaking {
     /// its watermark maxed, and its effective configuration taken if newer.
     /// A page is counted only at the exact cursor expected from its sender;
     /// a matchmaker whose complete answer is already merged is ignored.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold(&mut self, matchmaker: MatchmakerId, page: RegisteredPage) -> MatchFold {
         if !self.accepts(matchmaker, &page) {
             return MatchFold::Ignored;
         }
+        let watermark = self.watermark;
+        let disagreements = self.disagreements;
         let RegisteredPage {
             history,
             next_from_ballot,
@@ -322,28 +421,63 @@ impl Matchmaking {
         // The watermark is the maximum reported, never the minimum and never
         // a per-reply filter (§3.2): the union is filtered once, at closure.
         self.watermark = self.watermark.max(gc_watermark);
-        if let Some(next) = next_from_ballot {
+        let fold = if let Some(next) = next_from_ballot {
             self.page_next.insert(matchmaker, next);
             MatchFold::Paged(next)
         } else {
             self.page_next.remove(&matchmaker);
             self.registered_by.insert(matchmaker);
             MatchFold::Registered
-        }
+        };
+        // The union is monotone: the watermark is the maximum reported and
+        // the disagreement count only grows.
+        assert!(
+            self.watermark >= watermark,
+            "the unioned watermark never falls"
+        );
+        assert!(
+            self.disagreements >= disagreements,
+            "disagreements are never forgotten"
+        );
+        self.assert_invariants();
+        fold
     }
 
     /// Raise the effective configuration to `(ballot, config)` when it is
     /// newer than the one held (monotone in the ballot).
     fn raise_effective(&mut self, ballot: Ballot, config: &AcceptorConfig) {
+        let held = self.effective.as_ref().map(|(b, _)| *b);
         crate::matchmaker::raise_effective(&mut self.effective, ballot, config);
+        let now = self.effective.as_ref().map(|(b, _)| *b);
+        // Monotone in the ballot, and never below what was offered.
+        assert!(
+            now >= held,
+            "the effective configuration only moves forward"
+        );
+        assert!(
+            now >= Some(ballot),
+            "a raise lands at or above the offered ballot"
+        );
     }
 
     /// Whether a matchmaker quorum of `matchmakers` has answered completely
     /// — the phase's own completion predicate, asked at the membership
     /// boundary and never as a count.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
-        matchmakers.has_quorum(&self.registered_by)
+        let held = matchmakers.has_quorum(&self.registered_by);
+        if held {
+            assert!(
+                !self.registered_by.is_empty(),
+                "a registered quorum is someone"
+            );
+        }
+        held
     }
 
     /// How many more complete answers the phase still waits for
@@ -354,17 +488,40 @@ impl Matchmaking {
     /// If `matchmakers` is not well formed.
     #[must_use]
     pub fn remaining(&self, matchmakers: &MatchmakerSet) -> usize {
-        matchmakers.remaining(&self.registered_by)
+        // The phase counts only the set it registers with.
+        assert!(
+            self.registered_by.iter().all(|m| matchmakers.contains(*m)),
+            "a registration is counted only from a member"
+        );
+        let remaining = matchmakers.remaining(&self.registered_by);
+        // Pair of `quorum_held`: nothing remains exactly when a quorum holds.
+        assert!(
+            (remaining == 0) == self.quorum_held(matchmakers),
+            "nothing remains exactly when the quorum holds"
+        );
+        remaining
     }
 
     /// The matchmakers that have not answered completely, with the page
     /// cursor each owes next — whom a re-send addresses, and from where.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<(MatchmakerId, Option<Ballot>)> {
-        matchmakers
+        let unanswered: Vec<(MatchmakerId, Option<Ballot>)> = matchmakers
             .unanswered(&self.registered_by)
             .map(|mm| (mm, self.page_next.get(&mm).copied()))
-            .collect()
+            .collect();
+        assert!(
+            unanswered
+                .iter()
+                .all(|(mm, _)| !self.registered_by.contains(mm)),
+            "a registered matchmaker is never re-asked"
+        );
+        unanswered
     }
 
     /// How many matchmakers have answered completely.
@@ -375,6 +532,11 @@ impl Matchmaking {
 
     /// `H_b`: every distinct configuration reported at a ballot at or above
     /// the maximum watermark, in ballot order.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn prior(&self) -> Vec<AcceptorConfig> {
         let mut prior: Vec<AcceptorConfig> = Vec::new();
@@ -385,6 +547,19 @@ impl Matchmaking {
                 }
             }
         }
+        // `H_b` names each configuration once, and only what survived the
+        // maximum watermark.
+        assert!(
+            prior
+                .iter()
+                .enumerate()
+                .all(|(i, c)| !prior[..i].contains(c)),
+            "H_b names each configuration once"
+        );
+        assert!(
+            prior.len() <= self.history.values().map(Vec::len).sum::<usize>(),
+            "H_b holds nothing the histories did not report"
+        );
         prior
     }
 
@@ -393,6 +568,11 @@ impl Matchmaking {
     /// something else. A reconfiguration campaign is exempt — it *is* the
     /// next effective configuration. `None` when no reconfiguration was ever
     /// registered below this ballot, or the belief already matches it.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn stale_belief(&self) -> Option<(Ballot, AcceptorConfig)> {
         if self.kind.is_reconfiguration() {
@@ -402,6 +582,12 @@ impl Matchmaking {
         if *config == self.config {
             return None;
         }
+        // Only an ordinary campaign can be stale, against a configuration
+        // other than its own.
+        assert!(
+            !self.kind.is_reconfiguration(),
+            "a reconfiguration is never stale"
+        );
         Some((*newest, config.clone()))
     }
 }
@@ -482,6 +668,11 @@ impl MembershipProbe {
 
     /// Fold one matchmaker's answer. Returns whether it counted: a second
     /// answer from the same matchmaker is ignored whole (wire input).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     pub fn fold(
         &mut self,
         matchmaker: MatchmakerId,
@@ -490,30 +681,66 @@ impl MembershipProbe {
         if !self.answered.insert(matchmaker) {
             return false;
         }
+        let held = self.effective.as_ref().map(|(b, _)| *b);
         if let Some((ballot, config)) = effective {
             crate::matchmaker::raise_effective(&mut self.effective, ballot, &config);
         }
+        assert!(
+            self.effective.as_ref().map(|(b, _)| *b) >= held,
+            "the probed effective configuration only moves forward"
+        );
         true
     }
 
     /// Whether a matchmaker quorum has answered — asked at the membership
     /// boundary, never as a count.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn quorum_held(&self, matchmakers: &MatchmakerSet) -> bool {
-        matchmakers.has_quorum(&self.answered)
+        let held = matchmakers.has_quorum(&self.answered);
+        if held {
+            assert!(!self.answered.is_empty(), "an answered quorum is someone");
+        }
+        held
     }
 
     /// The matchmakers that have not answered — whom a re-send addresses.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<MatchmakerId> {
-        matchmakers.unanswered(&self.answered).collect()
+        let unanswered: Vec<MatchmakerId> = matchmakers.unanswered(&self.answered).collect();
+        assert!(
+            unanswered.iter().all(|m| !self.answered.contains(m)),
+            "an answered matchmaker is never re-asked"
+        );
+        unanswered
     }
 
     /// The highest-ballot effective configuration the answers named, `None`
     /// when none named one (the bootstrap is then the only configuration
     /// ever in force, as far as a quorum knows).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        // Only an answer names an effective configuration.
+        if self.effective.is_some() {
+            assert!(
+                !self.answered.is_empty(),
+                "a probed configuration was reported"
+            );
+        }
         self.effective.as_ref()
     }
 }

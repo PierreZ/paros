@@ -29,6 +29,9 @@ use crate::{Command, Control, Delegation, ProposeResult};
 /// to be covered, which is why the window is not shorter than an election.
 pub(crate) const READ_TTL_TICKS: u64 = 20;
 
+// A read must outlive the tick it opened in, or no row could ever answer it.
+const _: () = assert!(READ_TTL_TICKS > 0);
+
 impl ColocatedNode {
     /// **Leaderless read** entry point, on any node (#143, Compartmentalized
     /// Paxos §3.4): ask the row [`AcceptorConfig::row_of`] derives for `ctx`
@@ -80,6 +83,7 @@ impl ColocatedNode {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ctx)))]
     pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
         let me = self.config.id;
+        let marks = self.durable_marks();
         // The reader is its own first answer when it sits in the row: its
         // watermark is a fact its durable log holds, exactly what a peer's
         // ack would claim.
@@ -96,12 +100,23 @@ impl ColocatedNode {
             self.tick_count,
             own,
         );
+        // The row's other members, and nobody outside the configuration.
+        assert!(
+            !addressees.contains(&me),
+            "a reader never pre-reads itself over the wire"
+        );
+        assert!(
+            addressees.iter().all(|to| self.acceptors.contains(*to)),
+            "a pre-read addresses only members of the configuration"
+        );
         for to in addressees {
             self.send(to, Message::PreRead { reply_to: me, ctx });
         }
         // A one-node row (a single-node cluster) is its own quorum: serve in
         // this same batch.
         self.serve_quorum_reads();
+        // A read touches no durable state.
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -213,10 +228,22 @@ impl ColocatedNode {
     pub(super) fn serve_quorum_reads(&mut self) {
         let replica = &self.replica;
         let served = self.quorum_reads.serve(|index| replica.covers(index));
+        // The apply condition: a read surfaces only once the fold covers the
+        // index its row reported.
+        assert!(
+            served.iter().all(|(_, index)| self.replica.covers(*index)),
+            "a served read's index is covered by the fold"
+        );
+        let queued = self.pending_read_states.len();
+        let count = served.len();
         self.pending_read_states.extend(
             served
                 .into_iter()
                 .map(|(ctx, index)| ReadState { ctx, index }),
+        );
+        assert!(
+            self.pending_read_states.len() == queued + count,
+            "every served read surfaces once"
         );
     }
 

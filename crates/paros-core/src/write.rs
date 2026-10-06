@@ -157,13 +157,26 @@ pub enum MustSync {
 impl MustSync {
     /// The durability a batch of `writes` needs: [`MustSync::Sync`] when any
     /// op needs an fsync ([`WriteOp::needs_sync`]), relaxed otherwise.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn for_batch(writes: &[WriteOp]) -> Self {
-        if writes.iter().any(WriteOp::needs_sync) {
+        let sync = if writes.iter().any(WriteOp::needs_sync) {
             MustSync::Sync
         } else {
             MustSync::Relaxed
+        };
+        // Negative space: a promise or a vote is never written relaxed.
+        if writes.iter().any(|w| matches!(w, WriteOp::Acceptor(_))) {
+            assert!(
+                sync == MustSync::Sync,
+                "a promise or a vote is always fsync'd"
+            );
         }
+        sync
     }
 }
 

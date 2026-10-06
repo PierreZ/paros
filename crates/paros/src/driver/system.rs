@@ -64,6 +64,9 @@ use super::transport::peer_address;
 /// far below the frame limit).
 const FOLLOW_READ_RECORDS: u64 = 256;
 
+// A follow read that asks for no record never moves its cursor.
+const _: () = assert!(FOLLOW_READ_RECORDS > 0);
+
 /// What a deployment that runs **system journals** (#189) tells a node's
 /// driver. `None` is the static deployment of #188: no directory, no
 /// registry, a pool fixed at boot.
@@ -168,6 +171,10 @@ impl<P: Providers> SystemFollower<P> {
         let timeout = poll + tunables.delivery_timeout.saturating_mul(2);
         let mut fixed: BTreeSet<NodeId> = fixed.into_iter().collect();
         fixed.extend(plan.genesis_pool.iter().copied());
+        assert!(
+            plan.genesis_pool.iter().all(|n| fixed.contains(n)),
+            "the genesis pool is always admitted"
+        );
         Ok((
             Self {
                 self_id: plan.self_id,
@@ -233,7 +240,12 @@ impl<P: Providers> SystemFollower<P> {
 
     /// The checkpoints the registry fold met since the last call.
     pub(crate) fn take_checkpoints(&mut self) -> Vec<FoldedCheckpoint> {
-        std::mem::take(&mut self.checkpoints)
+        let taken = std::mem::take(&mut self.checkpoints);
+        assert!(
+            taken.windows(2).all(|w| w[0].0 < w[1].0),
+            "checkpoints are reported in position order"
+        );
+        taken
     }
 
     /// The journals this node joins as a spare once registered.
@@ -243,7 +255,20 @@ impl<P: Providers> SystemFollower<P> {
 
     /// Whether `journal` was tombstoned in the directory fold.
     pub(crate) fn is_tombstoned(&self, journal: JournalIdentifier) -> bool {
-        self.tombstones.contains(&journal)
+        let tombstoned = self.tombstones.contains(&journal);
+        // Pair of the fold's insert: a tombstone names a journal of the
+        // directory's own tenant, and never a system journal.
+        if tombstoned {
+            assert!(
+                journal.tenant == self.directory_key.tenant,
+                "a tombstone lies in the directory's tenant"
+            );
+            assert!(
+                !self.system().contains(&journal),
+                "a system journal is never tombstoned"
+            );
+        }
+        tombstoned
     }
 
     /// Fold one page of `journal` read from this node's own journal fold.
@@ -252,6 +277,11 @@ impl<P: Providers> SystemFollower<P> {
         journal: JournalIdentifier,
         page: &LogPage,
     ) -> Vec<(u64, SystemEvent)> {
+        // The local follow reads exactly where its cursor stands.
+        assert!(
+            page.from.0 == self.cursor(journal),
+            "a local page starts at the follow cursor"
+        );
         let records: Vec<Vec<u8>> = page.records.iter().map(|r| r.0.clone()).collect();
         self.fold(journal, page.from.0, records)
     }
@@ -268,6 +298,11 @@ impl<P: Providers> SystemFollower<P> {
 
     /// Where the next read of `journal` starts.
     pub(crate) fn cursor(&self, journal: JournalIdentifier) -> u64 {
+        // Only the two system journals are followed.
+        assert!(
+            self.system().contains(&journal),
+            "a follow cursor names a system journal"
+        );
         if journal == self.registry_key {
             return self.registry.next_seq();
         }
@@ -278,15 +313,26 @@ impl<P: Providers> SystemFollower<P> {
     /// `truncated`): the registry's fold jumps there, to restore from the
     /// checkpoint at the floor. The directory is never truncated (#229).
     pub(crate) fn jump(&mut self, journal: JournalIdentifier, floor: u64) {
+        let before = self.cursor(journal);
         if journal == self.registry_key {
             self.registry.jump(floor);
+            assert!(
+                self.cursor(journal) >= floor,
+                "a registry jump lands at or past the floor"
+            );
         }
+        assert!(
+            self.cursor(journal) >= before,
+            "a follow cursor never moves back"
+        );
     }
 
     /// Fold one remote answer.
     pub(crate) fn fold_remote(&mut self, followed: Followed) -> Vec<(u64, SystemEvent)> {
         let Followed { journal, reply } = followed;
-        self.outstanding.remove(&journal);
+        // Every answer closes the one read `poll_remote` opened for it.
+        let was_outstanding = self.outstanding.remove(&journal);
+        assert!(was_outstanding, "a follow answer closes an open read");
         if reply.unknown_journal || !reply.served {
             return Vec::new();
         }
@@ -366,6 +412,15 @@ impl<P: Providers> SystemFollower<P> {
         }
         let cursor = self.cursors.entry(journal).or_default();
         *cursor = (*cursor).max(next);
+        // Events surface in position order, from inside the folded page.
+        assert!(
+            events.windows(2).all(|w| w[0].0 < w[1].0),
+            "folded events surface in position order"
+        );
+        assert!(
+            events.iter().all(|(seq, _)| *seq >= from && *seq < next),
+            "a folded event lies inside its page"
+        );
         events
     }
 
@@ -417,6 +472,13 @@ impl<P: Providers> SystemFollower<P> {
                 })
                 .detach();
         }
+        // Every system journal this node does not run has a read in flight.
+        assert!(
+            self.system()
+                .iter()
+                .all(|journal| local(*journal) || self.outstanding.contains(journal)),
+            "every remote system journal is followed"
+        );
     }
 }
 
@@ -464,5 +526,9 @@ pub(crate) fn follow_local<P: Providers, S, A>(
             moved.push((journal, events));
         }
     }
+    assert!(
+        moved.iter().all(|(_, events)| !events.is_empty()),
+        "only a journal whose fold moved is reported"
+    );
     moved
 }

@@ -50,6 +50,11 @@ pub struct MatchRequest {
 impl MatchRequest {
     /// A candidate's request to register its belief `config` under `ballot`
     /// at `generation`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn new(
         from: NodeId,
@@ -57,18 +62,32 @@ impl MatchRequest {
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
-        Self {
+        let request = Self {
             from,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Belief),
             generation,
             from_ballot: None,
-        }
+        };
+        assert!(
+            !request.purpose.is_reconfiguration(),
+            "a belief is no reconfiguration"
+        );
+        assert!(
+            request.from_ballot.is_none(),
+            "a fresh request starts at the watermark"
+        );
+        request
     }
 
     /// A leader's request to register the reconfiguration to `config` under
     /// `ballot` at `generation` (see [`Registration`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn reconfigure(
         from: NodeId,
@@ -76,14 +95,23 @@ impl MatchRequest {
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
-        Self {
+        let request = Self {
             from,
             ballot,
             config,
             purpose: MatchPurpose::Register(RegistrationKind::Reconfiguration),
             generation,
             from_ballot: None,
-        }
+        };
+        assert!(
+            request.purpose.is_reconfiguration(),
+            "a reconfiguration is flagged"
+        );
+        assert!(
+            request.from_ballot.is_none(),
+            "a fresh request starts at the watermark"
+        );
+        request
     }
 
     /// The request that registers `config` under `ballot` at `generation`
@@ -91,6 +119,11 @@ impl MatchRequest {
     /// [`MatchRequest::reconfigure`] for a reconfiguration — the one place
     /// the node's wiring turns a campaign's [`RegistrationKind`] into its
     /// wire request, whether opening the campaign or re-asking a page.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn for_kind(
         kind: RegistrationKind,
@@ -99,12 +132,17 @@ impl MatchRequest {
         config: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
-        match kind {
+        let request = match kind {
             RegistrationKind::Belief => Self::new(from, ballot, config, generation),
             RegistrationKind::Reconfiguration => {
                 Self::reconfigure(from, ballot, config, generation)
             }
-        }
+        };
+        assert!(
+            request.purpose == MatchPurpose::Register(kind),
+            "a request registers its kind"
+        );
+        request
     }
 
     /// A **membership probe** from `from` (#173): "which configuration is in
@@ -113,6 +151,11 @@ impl MatchRequest {
     /// leaves no record a later campaign's `H_b` must cover; `ballot` only
     /// names the probe so its answers can be told apart, and `believed` is
     /// the configuration the prober holds, carried for observability.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn probe(
         from: NodeId,
@@ -120,14 +163,16 @@ impl MatchRequest {
         believed: AcceptorConfig,
         generation: MatchmakerGeneration,
     ) -> Self {
-        Self {
+        let request = Self {
             from,
             ballot,
             config: believed,
             purpose: MatchPurpose::Probe,
             generation,
             from_ballot: None,
-        }
+        };
+        assert!(request.purpose.is_probe(), "a probe registers nothing");
+        request
     }
 
     /// The same request, asking for the page that starts at `from`: what a
