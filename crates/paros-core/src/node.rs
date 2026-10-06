@@ -56,6 +56,9 @@ pub use crate::proposer::RECOVERY_BATCH as LEADER_RECOVERY_BATCH;
 /// timeout, so the effective window inherits its per-seed jitter.
 pub const REPAIR_TIMEOUT_ELECTIONS: u64 = 3;
 
+// A zero budget would resign every leader that opens a probe on its first tick.
+const _: () = assert!(REPAIR_TIMEOUT_ELECTIONS > 0);
+
 /// This node's role in the cluster. A read-only view for drivers / oracles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -416,6 +419,8 @@ impl ColocatedNode {
     /// error, never an operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn step(&mut self, msg: Message) {
+        let marks = self.durable_marks();
+        let ticks = self.tick_count;
         match msg {
             Message::Prepare {
                 reply_to,
@@ -499,6 +504,12 @@ impl ColocatedNode {
                 config_since,
             } => self.on_pre_read_ack(from, ctx, watermark, config_since),
         }
+        // A message moves no clock, and lowers no durable watermark.
+        assert!(
+            self.tick_count == ticks,
+            "a message never advances logical time"
+        );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -583,10 +594,24 @@ impl ColocatedNode {
             self.role == NodeRole::Leader,
             "only a leader opens a proposal"
         );
+        let marks = self.durable_marks();
+        let frontier = self.proposer.next_slot();
         let slot = self.proposer.allocate();
+        // The allocator hands out exactly its frontier, which no chosen or
+        // compacted slot ever reaches below.
+        assert!(slot == frontier, "a proposal takes the allocator frontier");
+        assert!(
+            slot >= self.acceptor.first_slot(),
+            "a proposal never lands below the floor"
+        );
         let column = column.or_else(|| self.acceptors.column_of(slot));
         let delegation = self.settled_delegation(delegation);
         self.start_accept_round_in(slot, command, column, delegation);
+        assert!(
+            self.proposer.next_slot() > slot,
+            "the frontier moved past the proposal"
+        );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
         ProposeResult::Accepted(slot)
     }
@@ -595,11 +620,19 @@ impl ColocatedNode {
     /// rounds a settled leadership opens are ever delegated
     /// (`node/phase2.rs`).
     fn settled_delegation(&self, delegation: Delegation) -> Delegation {
-        if self.may_delegate() {
+        let settled = if self.may_delegate() {
             delegation
         } else {
             Delegation::Colocated
+        };
+        // A fresh leadership's recovery depends on no proxy.
+        if !self.leadership_settled() {
+            assert!(
+                settled == Delegation::Colocated,
+                "an unsettled leadership never delegates"
+            );
         }
+        settled
     }
 
     /// Leader entry point for a **control command**: get `control` chosen into the
@@ -713,6 +746,8 @@ impl ColocatedNode {
     /// operating condition).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn tick(&mut self) {
+        let marks = self.durable_marks();
+        let ticks = self.tick_count;
         self.tick_count += 1;
         if self.role == NodeRole::Leader {
             // A leader beats on every tick ([`HEARTBEAT_TICKS`] is the
@@ -784,6 +819,11 @@ impl ColocatedNode {
         // The GC preconditions can become true without a message (the last
         // inherited round decided on this tick's re-send): re-check per tick.
         self.try_gc();
+        assert!(
+            self.tick_count == ticks + 1,
+            "a tick advances logical time by one"
+        );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -807,6 +847,11 @@ impl ColocatedNode {
             if self.election_timeout != 0 && elapsed >= timeout {
                 self.counters.repair_step_downs += 1;
                 self.become_follower(None);
+                // Resigning takes the probe, and its clock, with it.
+                assert!(
+                    self.proposer.probe().is_none(),
+                    "a resigned leader holds no probe"
+                );
             } else {
                 let (ballot, from_slot, unanswered) = {
                     let probe = self.proposer.probe().expect("checked above");
@@ -820,6 +865,11 @@ impl ColocatedNode {
                         probe.stragglers(self.config.id),
                     )
                 };
+                // The probe runs the leadership's own Phase 1, never another.
+                assert!(
+                    ballot == self.ballot,
+                    "a repair probe queries at the leader's ballot"
+                );
                 let config = self.phase1_wire_config();
                 self.send_prepare(unanswered, ballot, from_slot, config);
             }
@@ -832,6 +882,11 @@ impl ColocatedNode {
             .chain(self.replica.fold_hole())
             .min();
         if let Some(first_faulty) = hole {
+            // The hole is inside the retained, chosen-or-faulty prefix.
+            assert!(
+                first_faulty >= self.acceptor.first_slot(),
+                "a repair hole is retained"
+            );
             // A faulty **chosen** record leaves a hole in the servable log
             // (catch-up replay stops at it — per-slot attribution — and the
             // journal fold stops at it, holding the walk; the fold's hole
@@ -883,7 +938,13 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return;
         }
+        let marks = self.durable_marks();
         let pending = self.proposer.resend_page();
+        // A re-send carries the leadership's own rounds, nothing else.
+        assert!(
+            pending.iter().all(|accept| accept.ballot == self.ballot),
+            "a re-sent Accept runs at the leader's ballot"
+        );
         for accept in pending {
             // The same column the round was opened against: a re-send never
             // widens a grid round to another column — and the same proxy.
@@ -895,6 +956,7 @@ impl ColocatedNode {
                 accept.proxy,
             );
         }
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -938,6 +1000,21 @@ impl ColocatedNode {
                 taken.push((slot, proxy));
             }
         }
+        // A round taken back is colocated (or already decided and closed).
+        assert!(
+            taken.iter().all(|(slot, _)| self
+                .proposer
+                .rounds()
+                .get(slot)
+                .is_none_or(|r| r.proxy().is_none())),
+            "a round taken back runs colocated"
+        );
+        assert!(
+            taken
+                .iter()
+                .all(|(_, proxy)| proxy.is_in(self.config.proxy_count)),
+            "a round was delegated only to a deployed proxy"
+        );
         self.assert_invariants();
         taken
     }
@@ -945,13 +1022,31 @@ impl ColocatedNode {
     /// The slots this leader currently holds **delegated** to a proxy, with
     /// the proxy each went to — for drivers / oracles (a node that is not the
     /// leader holds none).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn delegated_rounds(&self) -> Vec<(Slot, ProxyId)> {
-        self.proposer
+        let delegated: Vec<(Slot, ProxyId)> = self
+            .proposer
             .rounds()
             .iter()
             .filter_map(|(slot, round)| round.proxy().map(|proxy| (*slot, proxy)))
-            .collect()
+            .collect();
+        // Delegation is the opt-in of a leader on a deployment with proxies.
+        if !delegated.is_empty() {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds delegated rounds"
+            );
+            assert!(
+                self.config.proxy_count > 0,
+                "only a proxy deployment delegates"
+            );
+        }
+        delegated
     }
 
     /// Advance the next bounded page of deferred chosen-prefix application or
@@ -968,22 +1063,38 @@ impl ColocatedNode {
     /// If an internal role/recovery invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
     pub fn advance_recovery(&mut self) {
+        let marks = self.durable_marks();
         let writes_before = self.pending_writes.len();
         self.advance_chosen_index();
         if self.pending_writes.len() != writes_before {
+            self.assert_marks_monotone(marks);
             self.assert_invariants();
             return;
         }
         self.pump_leader_recovery();
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
     /// Whether this leader has Phase-2 rounds whose `Accept`s can be re-sent.
     /// Drivers use this to avoid consulting optional policy hooks when skipping
     /// a re-send would have no observable effect.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn has_pending_accepts(&self) -> bool {
-        self.role == NodeRole::Leader && !self.proposer.rounds().is_empty()
+        let pending = self.role == NodeRole::Leader && !self.proposer.rounds().is_empty();
+        // Rounds outlive no leadership: a non-leader holds none to re-send.
+        if self.role != NodeRole::Leader {
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a non-leader holds no round"
+            );
+        }
+        pending
     }
 
     /// Voluntarily resign the leadership: Leader → Follower, keeping every
@@ -1016,7 +1127,19 @@ impl ColocatedNode {
         if self.role != NodeRole::Leader {
             return;
         }
+        let marks = self.durable_marks();
         self.become_follower(None);
+        // Stepping down keeps every durable commitment and drops every
+        // volatile leadership tally.
+        assert!(
+            self.proposer.rounds().is_empty(),
+            "a resigned leader holds no round"
+        );
+        assert!(
+            self.proposer.fence().is_none(),
+            "a resigned leader holds no fence"
+        );
+        self.assert_marks_monotone(marks);
         self.assert_invariants();
     }
 
@@ -1027,6 +1150,14 @@ impl ColocatedNode {
     pub fn set_election_timeout(&mut self, ticks: u64) {
         self.election_timeout = ticks;
         self.needs_election_timeout = false;
+        assert!(
+            self.election_timeout == ticks,
+            "the driver's timeout is the one in force"
+        );
+        assert!(
+            !self.needs_election_timeout,
+            "a fed timeout clears the request"
+        );
     }
 
     /// The election timeout in force (in ticks; zero until the driver set
@@ -1118,30 +1249,78 @@ impl ColocatedNode {
 
     /// The ballot [`ColocatedNode::acceptors`] was registered under
     /// (`Ballot::zero()` for the bootstrap configuration).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn acceptors_since(&self) -> Ballot {
+        if self.acceptors_since != Ballot::zero() {
+            assert!(
+                self.belief_source == BeliefSource::Heard,
+                "a configuration bound to a ballot is a heard belief"
+            );
+        }
         self.acceptors_since
     }
 
     /// Where [`ColocatedNode::acceptors`] came from: the bootstrap default,
     /// or something this incarnation heard (#173, [`BeliefSource`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn belief_source(&self) -> BeliefSource {
+        if self.belief_source == BeliefSource::Bootstrap {
+            assert!(
+                self.acceptors_since == Ballot::zero(),
+                "the bootstrap belief is bound to no ballot"
+            );
+        }
         self.belief_source
     }
 
     /// The open membership probe, if any (#173) — read-only, like
     /// [`ColocatedNode::matchmaking_role`].
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn membership_probe(&self) -> Option<&MembershipProbe> {
+        if self.probe.is_some() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment probes"
+            );
+            assert!(
+                self.matchmaking.is_none(),
+                "a probe never overlaps a campaign"
+            );
+        }
         self.probe.as_deref()
     }
 
     /// The membership fence [`ColocatedNode::may_retire`] reads: the highest
     /// ballot a configuration naming this node was bound to, as far as this
     /// incarnation heard (volatile; `Ballot::zero()` at boot).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn last_member_ballot(&self) -> Ballot {
+        if self.is_acceptor() {
+            assert!(
+                self.last_member_ballot >= self.acceptors_since,
+                "a member's fence covers its configuration's ballot"
+            );
+        }
         self.last_member_ballot
     }
 
@@ -1172,12 +1351,33 @@ impl ColocatedNode {
 
     /// The current durable scalars (promised ballot, chosen
     /// index), composed from the components that own them.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn hard_state(&self) -> HardState {
-        HardState {
+        let hard_state = HardState {
             max_promised_ballot: self.acceptor.promised(),
             chosen_index: self.replica.chosen_index(),
-        }
+        };
+        // The two scalars as the boot read-back will see them: a chosen index
+        // never lags the compaction floor, and every record sits under the
+        // promise (`Acceptor::assert_invariants` is the other half).
+        assert!(
+            self.acceptor.first_slot() <= self.replica.first_unchosen(),
+            "the durable floor never outruns the durable chosen index"
+        );
+        assert!(
+            self.acceptor
+                .records()
+                .values()
+                .next_back()
+                .is_none_or(|(b, _)| *b <= hard_state.max_promised_ballot),
+            "the durable promise dominates the last record"
+        );
+        hard_state
     }
 
     /// The node's **acceptor** role: the durable promise, the per-slot
@@ -1199,9 +1399,23 @@ impl ColocatedNode {
 
     /// A **journal read** (#204) from this node's journal fold:
     /// [`Replica::read`]. A pure read — nothing in the node moves.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn read_log(&self, from: Seq, limit: usize, max_bytes: usize) -> crate::LogRead {
-        self.replica.read(from, limit, max_bytes)
+        let read = self.replica.read(from, limit, max_bytes);
+        // A read is served from the fold's head, as it stands.
+        if let crate::LogRead::Page(page) = &read {
+            assert!(
+                page.state == self.replica.journal(),
+                "a page names the fold's head"
+            );
+            assert!(page.from == from, "a page starts where the read asked");
+        }
+        read
     }
 
     /// The node's **proposer** role: the open Phase 1, the CTRL repair
@@ -1221,26 +1435,94 @@ impl ColocatedNode {
     }
 
     /// This node's current role.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn role(&self) -> NodeRole {
+        match self.role {
+            NodeRole::Leader => {
+                assert!(
+                    self.leader == Some(self.config.id),
+                    "a leader knows itself as leader"
+                );
+            }
+            NodeRole::Candidate => {
+                assert!(self.leader.is_none(), "a candidate follows no leader");
+                assert!(
+                    self.ballot.node == self.config.id,
+                    "a candidate runs its own ballot"
+                );
+            }
+            NodeRole::Follower => {}
+        }
         self.role
     }
 
     /// The node this one believes is leader, if any.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn leader(&self) -> Option<NodeId> {
+        if self.role == NodeRole::Leader {
+            assert!(
+                self.leader == Some(self.config.id),
+                "a leader knows itself as leader"
+            );
+        }
+        if self.role == NodeRole::Candidate {
+            assert!(self.leader.is_none(), "a candidate follows no leader");
+        }
         self.leader
     }
 
     /// Whether this node is currently the leader.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn is_leader(&self) -> bool {
-        self.role == NodeRole::Leader
+        let leader = self.role == NodeRole::Leader;
+        if leader {
+            assert!(
+                self.proposer.election().is_none(),
+                "a leader has no open campaign"
+            );
+            assert!(
+                self.matchmaking.is_none(),
+                "a leader has no open matchmaking"
+            );
+        }
+        leader
     }
 
     /// This node's current operating ballot.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn ballot(&self) -> Ballot {
+        if self.role == NodeRole::Candidate {
+            assert!(
+                self.ballot.node == self.config.id,
+                "a candidate runs its own ballot"
+            );
+        }
+        if self.role == NodeRole::Leader {
+            assert!(
+                self.ballot > Ballot::zero(),
+                "a leader runs a minted ballot"
+            );
+        }
         self.ballot
     }
 
@@ -1282,8 +1564,20 @@ impl ColocatedNode {
     /// How this node came to hold its current leadership: won by ordinary
     /// Phase 1, or installed from a predecessor's cooperative handoff.
     /// [`LeadershipOrigin::Elected`] on any non-leader.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn leadership_origin(&self) -> LeadershipOrigin {
+        if let LeadershipOrigin::Handoff { from } = self.leadership_origin {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader carries a handoff origin"
+            );
+            assert!(from != self.config.id, "a handoff comes from another node");
+        }
         self.leadership_origin
     }
 
@@ -1300,9 +1594,21 @@ impl ColocatedNode {
     /// when no probe is open): faulty slots the promise quorum resolved neither
     /// as Case 1 (`have`) nor Case 2 (a full Q1 of `none`), still waiting on
     /// stragglers.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn blocked_repairs(&self) -> usize {
-        self.proposer.probe().map_or(0, |p| p.blocked().len())
+        let blocked = self.proposer.probe().map_or(0, |p| p.blocked().len());
+        if blocked > 0 {
+            assert!(
+                self.role == NodeRole::Leader,
+                "only a leader holds a repair probe"
+            );
+        }
+        blocked
     }
 
     /// Monotone repair counters this incarnation, for the driver's audit
@@ -1328,7 +1634,17 @@ impl ColocatedNode {
     }
 
     pub(crate) fn pending_committed(&self) -> &[(Slot, Command, crate::Outcome)] {
-        self.replica.committed()
+        let committed = self.replica.committed();
+        // Persist-before-apply: every surfaced entry is inside the chosen
+        // index this same batch makes durable.
+        assert!(
+            committed.last().is_none_or(|(slot, _, _)| self
+                .replica
+                .chosen_index()
+                .is_some_and(|ci| *slot <= ci)),
+            "an applied entry lies inside the chosen index"
+        );
+        committed
     }
 
     pub(crate) fn pending_read_states(&self) -> &[ReadState] {
@@ -1355,6 +1671,19 @@ impl ColocatedNode {
         self.pending_match_requests.clear();
         self.pending_gc_requests.clear();
         self.pending_recovery_batch = None;
+        // An acknowledged batch leaves nothing to persist, send or apply.
+        assert!(
+            self.pending_writes.is_empty(),
+            "an advanced batch has no write left"
+        );
+        assert!(
+            self.pending_messages.is_empty(),
+            "an advanced batch has no message left"
+        );
+        assert!(
+            self.replica.committed().is_empty(),
+            "an advanced batch has nothing to apply"
+        );
     }
 }
 

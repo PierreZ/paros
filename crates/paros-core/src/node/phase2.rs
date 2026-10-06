@@ -56,6 +56,11 @@ impl ColocatedNode {
         // line (the fold above refused a delegated round's), so a leader whose
         // rounds all run through proxies keeps its standing authority on
         // `HeartbeatAck` alone.
+        // The fold's addressee guard, restated: a counted vote is a member's.
+        assert!(
+            self.acceptors.contains(from),
+            "a counted Accepted comes from a member"
+        );
         if self.role == NodeRole::Leader && ballot == self.ballot {
             self.proposer.credit_authority(from);
         }
@@ -134,6 +139,12 @@ impl ColocatedNode {
             slot >= self.acceptor.first_slot(),
             "an accept round never starts below the compaction floor"
         );
+        // Every slot a round opens at was handed out by the allocator, or
+        // recovered below its frontier.
+        assert!(
+            slot < self.proposer.next_slot(),
+            "an accept round opens below the allocator frontier"
+        );
         // Re-deciding a chosen slot is guarded by the recovery/repair callers;
         // the propose path can only violate it in the acknowledged still-Leader
         // window after a higher-ballot `Commit` passed the allocator (see the
@@ -181,6 +192,14 @@ impl ColocatedNode {
         // grid's other columns never see this slot.
         self.send_accept(slot, ballot, command, column, None);
         self.try_decide(slot);
+        // The round is in flight, or it decided at once (and possibly
+        // compacted away with its prefix).
+        if !self.proposer.is_round_open_at(slot, ballot) && slot >= self.acceptor.first_slot() {
+            assert!(
+                self.replica.is_chosen(slot),
+                "a closed fresh round decided its slot"
+            );
+        }
     }
 
     /// Record the round this leader opens at `slot` in its **own** log,
@@ -217,6 +236,18 @@ impl ColocatedNode {
         }
         self.acceptor.set_promise(ballot, &mut self.pending_writes);
         self.record_accepted(slot, ballot, command.clone());
+        // The allocator's durable trace: the promise covers the round exactly
+        // and the record carries its command.
+        assert!(
+            self.acceptor.promised() == ballot,
+            "an own round's promise sits at its ballot"
+        );
+        assert!(
+            self.acceptor
+                .record(slot)
+                .is_some_and(|(_, c)| c == command),
+            "an own round is recorded with its command"
+        );
         true
     }
 
@@ -228,7 +259,13 @@ impl ColocatedNode {
     /// stray copy and its vote does not count.
     fn own_vote(&self, recorded: bool, column: Option<usize>) -> Option<NodeId> {
         let me = self.config.id;
-        (recorded && self.acceptors.is_phase2_addressee(me, column)).then_some(me)
+        let vote = (recorded && self.acceptors.is_phase2_addressee(me, column)).then_some(me);
+        // A vote counts only where this node's own record backs it.
+        if vote.is_some() {
+            assert!(recorded, "an own vote is backed by an own record");
+            assert!(self.is_acceptor(), "an own vote is a member's");
+        }
+        vote
     }
 
     /// Queue an `Accept` for `slot`: to every Phase-2 addressee of the
@@ -251,6 +288,22 @@ impl ColocatedNode {
         proxy: Option<ProxyId>,
     ) {
         let me = self.config.id;
+        // An `Accept` leaves only a leader, at its own ballot, to a deployed
+        // proxy when delegated.
+        assert!(
+            self.role == NodeRole::Leader,
+            "only a leader sends an Accept"
+        );
+        assert!(
+            ballot == self.ballot,
+            "an Accept runs at the leadership ballot"
+        );
+        if let Some(proxy) = proxy {
+            assert!(
+                proxy.is_in(self.config.proxy_count),
+                "a delegated Accept names a deployed proxy"
+            );
+        }
         let (audience, reply_to, config) = match proxy {
             Some(proxy) => (
                 Audience::Proxy(proxy),
@@ -305,10 +358,12 @@ impl ColocatedNode {
         // Post-decision: the slot now carries exactly the decided command
         // (unless the decision arrived after the slot was chosen elsewhere
         // and compacted away — then `mark_chosen` is a no-op below the floor).
-        assert!(
-            slot < self.acceptor.first_slot() || self.replica.chosen_at(slot) == Some(&command),
-            "a decided slot is chosen with the decided command"
-        );
+        if slot >= self.acceptor.first_slot() {
+            assert!(
+                self.replica.chosen_at(slot) == Some(&command),
+                "a decided slot is chosen with the decided command"
+            );
+        }
         self.broadcast(Message::Commit {
             from: Party::Node(me),
             ballot,

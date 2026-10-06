@@ -39,9 +39,19 @@ impl ColocatedNode {
             let me = self.config.id;
             self.proposer
                 .renew_authority(self.is_acceptor().then_some(me));
+            assert!(
+                self.role == NodeRole::Leader,
+                "a held window keeps the leadership"
+            );
         } else {
             self.counters.quorum_lost_step_downs += 1;
             self.become_follower(None);
+            // An emptied window resigns whole: no round, no fence survives.
+            assert!(self.role == NodeRole::Follower, "an emptied window resigns");
+            assert!(
+                self.proposer.rounds().is_empty(),
+                "a resigned leader holds no round"
+            );
         }
     }
 }
