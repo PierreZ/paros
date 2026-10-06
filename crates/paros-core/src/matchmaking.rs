@@ -89,8 +89,25 @@ impl RegisteredPage {
     /// Decode one matchmaker's answer to a registration: the page it
     /// registered, or its refusal. `None` for a probe's answer
     /// ([`MatchOutcome::Probed`]), which no registration folds.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn from_outcome(outcome: MatchOutcome) -> Option<Result<Self, MatchRefusal>> {
+        let probed = matches!(outcome, MatchOutcome::Probed { .. });
+        let decoded = Self::decode(outcome);
+        // Negative space: only a probe's answer decodes to nothing.
+        assert!(
+            decoded.is_none() == probed,
+            "only a probe's answer is not a page"
+        );
+        decoded
+    }
+
+    /// [`Self::from_outcome`] before its postcondition.
+    fn decode(outcome: MatchOutcome) -> Option<Result<Self, MatchRefusal>> {
         match outcome {
             MatchOutcome::Registered {
                 from_ballot,
@@ -247,22 +264,57 @@ impl Matchmaking {
     }
 
     /// The maximum GC watermark any reply reported so far.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn watermark(&self) -> Ballot {
+        // A raised watermark was reported by someone.
+        if self.watermark > Ballot::zero() {
+            assert!(self.heard_anyone(), "a raised watermark was reported");
+        }
         self.watermark
+    }
+
+    /// Whether any matchmaker's page has been folded, complete or not.
+    fn heard_anyone(&self) -> bool {
+        !self.registered_by.is_empty() || !self.page_next.is_empty()
     }
 
     /// The highest-ballot reconfiguration registration any reply named, with
     /// the ballot it was registered under.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        // Nothing is effective that no answer named.
+        if self.effective.is_some() {
+            assert!(
+                self.heard_anyone(),
+                "an effective configuration was reported"
+            );
+        }
         self.effective.as_ref()
     }
 
     /// Distinct ballots two matchmakers reported with different
     /// configurations. Observability only: the union keeps both.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn disagreements(&self) -> u64 {
+        // A disagreement is two configurations at one unioned ballot.
+        if self.disagreements > 0 {
+            assert!(!self.history.is_empty(), "a disagreement lies in the union");
+        }
         self.disagreements
     }
 
@@ -304,6 +356,11 @@ impl Matchmaking {
             if !at_cursor && !cursor_collected {
                 return false;
             }
+            // Either way a later page never starts below the cursor owed.
+            assert!(
+                page.from_ballot >= *expected,
+                "a later page starts at or above its cursor"
+            );
         }
         // Only the lower bound, exactly as `promise_page_shape_valid` checks
         // its page: an entry above the request's ballot would merely add a
@@ -393,7 +450,18 @@ impl Matchmaking {
     /// Raise the effective configuration to `(ballot, config)` when it is
     /// newer than the one held (monotone in the ballot).
     fn raise_effective(&mut self, ballot: Ballot, config: &AcceptorConfig) {
+        let held = self.effective.as_ref().map(|(b, _)| *b);
         crate::matchmaker::raise_effective(&mut self.effective, ballot, config);
+        let now = self.effective.as_ref().map(|(b, _)| *b);
+        // Monotone in the ballot, and never below what was offered.
+        assert!(
+            now >= held,
+            "the effective configuration only moves forward"
+        );
+        assert!(
+            now >= Some(ballot),
+            "a raise lands at or above the offered ballot"
+        );
     }
 
     /// Whether a matchmaker quorum of `matchmakers` has answered completely
@@ -424,7 +492,18 @@ impl Matchmaking {
     /// If `matchmakers` is not well formed.
     #[must_use]
     pub fn remaining(&self, matchmakers: &MatchmakerSet) -> usize {
-        matchmakers.remaining(&self.registered_by)
+        // The phase counts only the set it registers with.
+        assert!(
+            self.registered_by.iter().all(|m| matchmakers.contains(*m)),
+            "a registration is counted only from a member"
+        );
+        let remaining = matchmakers.remaining(&self.registered_by);
+        // Pair of `quorum_held`: nothing remains exactly when a quorum holds.
+        assert!(
+            (remaining == 0) == self.quorum_held(matchmakers),
+            "nothing remains exactly when the quorum holds"
+        );
+        remaining
     }
 
     /// The matchmakers that have not answered completely, with the page
@@ -667,8 +746,20 @@ impl MembershipProbe {
     /// The highest-ballot effective configuration the answers named, `None`
     /// when none named one (the bootstrap is then the only configuration
     /// ever in force, as far as a quorum knows).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn effective(&self) -> Option<&(Ballot, AcceptorConfig)> {
+        // Only an answer names an effective configuration.
+        if self.effective.is_some() {
+            assert!(
+                !self.answered.is_empty(),
+                "a probed configuration was reported"
+            );
+        }
         self.effective.as_ref()
     }
 }
