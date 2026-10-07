@@ -42,7 +42,7 @@ use std::time::Duration;
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig,
     LinkLatencyConfig, LocalityConfig, NetworkFault, NetworkFaultMask, SimulationBuilder,
-    WorkloadCount,
+    StorageFault, StorageFaultMask, WorkloadCount,
 };
 
 use crate::chain_workload::ChainWorkload;
@@ -229,7 +229,14 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
-fn chaos_surfaces() -> [Chaos; 6] {
+///
+/// `Chaos::Storage` runs moonpool's disk faults under every journal store
+/// (#176): the families a node's own store must survive alone (crash damage
+/// to unsynced sectors: lost, latent and shorn; failed syncs; short
+/// transfers; lost unsynced directory entries), swarm-masked per seed by
+/// moonpool. A world-store seed has no files and is untouched. See
+/// [`storage_fault_mask`] for what is masked.
+fn chaos_surfaces() -> [Chaos; 7] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -259,7 +266,26 @@ fn chaos_surfaces() -> [Chaos; 6] {
             mode: ChaosMode::Swarm,
         },
         Chaos::BuggifyKnobs,
+        Chaos::Storage(ChaosMode::Swarm),
     ]
+}
+
+/// The storage families the campaign leaves out (architecture §5, #176).
+/// Rot (corruption, EIO, misdirection) damages a record on whichever disks
+/// it lands, and random rot eventually hits every copy of one vote, an
+/// unwinnable run: it enters with replicated fault patterns, which keep a
+/// quorum's copies clean. Phantom writes lose an acknowledged vote no quorum
+/// survives; a failed disk needs a storage watchdog in the driver;
+/// degradation episodes are a performance knob. Each has an issue to lift
+/// its mask.
+fn storage_fault_mask() -> StorageFaultMask {
+    StorageFaultMask::all()
+        .without(StorageFault::Corruption)
+        .without(StorageFault::Eio)
+        .without(StorageFault::Misdirect)
+        .without(StorageFault::PhantomWrite)
+        .without(StorageFault::Degradation)
+        .without(StorageFault::DiskFailure)
 }
 
 /// Fresh main-campaign builder. Keeping all state behind process/workload
@@ -273,6 +299,7 @@ fn chaos_surfaces() -> [Chaos; 6] {
 fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .storage_fault_mask(storage_fault_mask())
         .cluster(LocalityConfig::new(PROCESS_POOL_RANGE, 1, 1, 1), || {
             Box::new(NodeProcess::chaotic())
         })

@@ -16,8 +16,13 @@
 //! (`crate::process`).
 
 use std::sync::{Mutex, PoisonError, Weak};
+use std::time::Duration;
 
-use moonpool_sim::{SimStorageProvider, SimTimeProvider, assert_reachable};
+use futures::future::{Either, select};
+use moonpool_sim::{
+    RebootKind, SelfCrash, SimStorageProvider, SimTimeProvider, TimeProvider, assert_reachable,
+    buggify_with_prob,
+};
 use paros::{
     Ballot, Command, Config, HardState, JournalState, JournalStorage, LogStorage, MustSync, Slot,
     Storage, StorageError,
@@ -34,6 +39,67 @@ pub(crate) struct LedgeredJournal {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
+    /// How this node can lose power in the middle of a commit.
+    power: PowerCut,
+}
+
+/// A power loss **inside** a journal commit (#176). A crash from attrition
+/// lands at a random instant, and a commit's unsynced window (entries
+/// written, records or the sync not yet done) is microseconds wide, so the
+/// journal's crash recovery (torn records, records rebuilt from their
+/// entries, an ambiguous last batch) would almost never run. This BUGGIFY
+/// site makes it likely: a buggified commit races a random timer spanning a
+/// commit's duration, and when the timer wins the process cuts its own power through
+/// moonpool's [`SelfCrash`]: the kill lands before the commit's next storage
+/// completion, every unsynced sector resolves by the disk's crash physics,
+/// and the node restarts after a delay. Only inside the chaos window, so the
+/// tail is a genuine recovery.
+pub(crate) struct PowerCut {
+    crash: SelfCrash,
+    time: SimTimeProvider,
+    cutoff: Duration,
+    enabled: bool,
+    /// How long this node's last whole commit took: the span a cut is
+    /// drawn in, so it lands between a write and the sync that would have
+    /// covered it.
+    last_commit: Duration,
+}
+
+impl PowerCut {
+    pub(crate) fn new(
+        crash: SelfCrash,
+        time: SimTimeProvider,
+        cutoff: Duration,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            crash,
+            time,
+            cutoff,
+            enabled,
+            last_commit: Duration::from_millis(1),
+        }
+    }
+
+    /// The delay after which this commit loses power, if it is one that
+    /// does: uniform over the node's last commit's duration.
+    fn draw(&self, entries: usize) -> Option<Duration> {
+        // A commit without entries (a format, a promise) has no persist
+        // record to tear: the metainfo's own copies cover it.
+        if !self.enabled
+            || entries == 0
+            || self.time.now() >= self.cutoff
+            || !buggify_with_prob!(0.25)
+        {
+            return None;
+        }
+        let span = u64::try_from(self.last_commit.as_micros())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        Some(Duration::from_micros(moonpool_sim::sim_random_range(
+            0..span,
+        )))
+    }
 }
 
 impl LedgeredJournal {
@@ -41,12 +107,14 @@ impl LedgeredJournal {
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
+        power: PowerCut,
     ) -> Self {
         Self {
             inner,
             world,
             ip,
             format_pending: false,
+            power,
         }
     }
 
@@ -71,9 +139,9 @@ impl LedgeredJournal {
 /// An acceptor's store (see the module doc).
 pub(crate) enum NodeStore {
     /// The world-backed store: every fault coin, the budget, the ledger.
-    World(DurableStorage<SimTimeProvider>),
+    World(Box<DurableStorage<SimTimeProvider>>),
     /// The shipped journal store on the simulated disk (#187).
-    Journal(LedgeredJournal),
+    Journal(Box<LedgeredJournal>),
 }
 
 impl Storage for NodeStore {
@@ -129,17 +197,24 @@ impl LogStorage for NodeStore {
                 let scanned = s.inner.boot_scan().await;
                 s.ledger(scanned)?;
                 let facts = s.inner.boot_facts();
-                if facts.checkpoint_truncated {
-                    // A cause the geometry makes likely (a small layout, a
-                    // knobbed checkpoint cadence), paired as a reachable.
-                    assert_reachable!(
-                        "journal store: a node boots from a checkpoint-truncated prefix"
-                    );
+                // Causes the crash physics and the small geometry make
+                // likely, each paired as a reachable.
+                if facts.truncated {
+                    assert_reachable!("journal store: a node boots above a truncated prefix");
                 }
-                if facts.ambiguous_kept > 0 {
+                if facts.recovery.torn > 0 {
+                    assert_reachable!("journal store: a crash tears a batch the journal discards");
+                }
+                if facts.recovery.rebuilt > 0 {
+                    assert_reachable!("journal store: a persist record is rebuilt from its entry");
+                }
+                if !facts.recovery.ambiguous.is_empty() {
                     assert_reachable!(
                         "journal store: a crash leaves an ambiguous last batch the journal keeps"
                     );
+                }
+                if facts.recovery.meta_repaired {
+                    assert_reachable!("journal store: a metainfo copy is repaired from its twin");
                 }
                 Ok(())
             }
@@ -206,7 +281,33 @@ impl LogStorage for NodeStore {
         match self {
             Self::World(s) => s.sync(must_sync).await,
             Self::Journal(s) => {
-                let synced = s.inner.sync(must_sync).await;
+                let synced = match s.power.draw(s.inner.staged_entries()) {
+                    None => {
+                        let start = s.power.time.now();
+                        let synced = s.inner.sync(must_sync).await;
+                        s.power.last_commit = s.power.time.now().saturating_sub(start);
+                        synced
+                    }
+                    Some(after) => {
+                        let commit = Box::pin(s.inner.sync(must_sync));
+                        let timer = Box::pin(s.power.time.sleep(after));
+                        match select(commit, timer).await {
+                            Either::Left((synced, _)) => synced,
+                            Either::Right((_, commit)) => {
+                                // Paired with the recovery gates the journal
+                                // reports at the next boot.
+                                assert_reachable!("journal store: a node loses power mid-commit");
+                                let restart = Duration::from_millis(
+                                    moonpool_sim::sim_random_range(500..2500),
+                                );
+                                // The kill lands before the commit's next
+                                // storage completion: keep awaiting it.
+                                let _ = s.power.crash.crash(RebootKind::Crash, Some(restart));
+                                commit.await
+                            }
+                        }
+                    }
+                };
                 s.ledger(synced)?;
                 if std::mem::take(&mut s.format_pending) {
                     // The marker is durable: the provisioning landed.

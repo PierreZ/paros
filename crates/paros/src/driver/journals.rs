@@ -53,7 +53,16 @@ pub trait JournalStores {
 
     /// Open `journal`'s store with the operator's boot claim, or `None` when
     /// the journal must stay down on this node for good (its disk is gone).
-    fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)>;
+    ///
+    /// Async because the claim may need the disk: an opener whose record
+    /// says a format began and never confirmed resolves it by reading the
+    /// store's marker (without opening the store), at every open, the
+    /// re-open of a quarantined journal included. A format whose sync failed
+    /// may have landed anyway, and a first-boot claim on it is refused.
+    fn open(
+        &mut self,
+        journal: JournalIdentifier,
+    ) -> impl Future<Output = Option<(Self::Store, BootKind)>>;
 
     /// The audit port `journal` reports to.
     fn audit(&self, journal: JournalIdentifier) -> Self::Audit;
@@ -118,7 +127,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
         vec![self.journal]
     }
 
-    fn open(&mut self, journal: JournalIdentifier) -> Option<(S, BootKind)> {
+    async fn open(&mut self, journal: JournalIdentifier) -> Option<(S, BootKind)> {
         // The driver opens only what `journals` listed: the one journal.
         assert!(
             journal == self.journal,

@@ -10,6 +10,7 @@
 //! directories, `fsync`, rename — and that is what these exercise.
 
 use moonpool_core::TokioStorageProvider;
+use paros::journal::Durability;
 use paros::{
     Ballot, ClientId, Command, Config, Entry, Generation, JournalMatchmakerStorage, JournalStorage,
     JournalStoreConfig, LogStorage, MatchmakerStorage, MustSync, NodeId, Seq, Slot, Storage, Value,
@@ -35,9 +36,9 @@ fn config() -> Config {
 
 /// A small layout with a short checkpoint cadence, so the suites cross
 /// segment rollovers, checkpoints and prefix drops on the real disk.
-fn layout(checkpoint_after: u64) -> JournalStoreConfig {
+fn layout(durability: Durability) -> JournalStoreConfig {
     JournalStoreConfig {
-        checkpoint_after,
+        durability,
         ..JournalStoreConfig::small()
     }
 }
@@ -55,7 +56,12 @@ async fn open_node(dir: &str, store: JournalStoreConfig) -> Node {
 }
 
 async fn open_registry(dir: &str) -> Registry {
-    let mut registry = JournalMatchmakerStorage::new(TokioStorageProvider::new(), dir, layout(16));
+    let mut registry = JournalMatchmakerStorage::new(
+        TokioStorageProvider::new(),
+        dir,
+        paros::JournalIdentifier::UNSET,
+        layout(Durability::Batched),
+    );
     registry
         .boot_scan()
         .await
@@ -65,19 +71,19 @@ async fn open_registry(dir: &str) -> Registry {
 
 #[test]
 fn journal_storage_passes_the_contract_suite_on_a_real_disk() {
-    for checkpoint_after in [1, 4, 1_000] {
+    for durability in [Durability::Ordered, Durability::Batched] {
         let root = tempfile::tempdir().expect("tempdir");
         runtime().block_on(async {
             let mut instance = 0_u64;
             let fresh = || {
                 instance += 1;
                 let dir = dir(&root, &format!("node-{instance}"));
-                async move { open_node(&dir, layout(checkpoint_after)).await }
+                async move { open_node(&dir, layout(durability)).await }
             };
             let reopen = |old: Node| {
                 let dir = old.dir().to_string();
                 drop(old);
-                async move { open_node(&dir, layout(checkpoint_after)).await }
+                async move { open_node(&dir, layout(durability)).await }
             };
             Box::pin(storage_contract_suite(fresh, reopen)).await;
         });
@@ -130,7 +136,7 @@ fn a_store_dropped_mid_batch_reopens_with_every_acknowledged_write() {
     let root = tempfile::tempdir().expect("tempdir");
     let path = dir(&root, "node");
     runtime().block_on(async {
-        let store = layout(8);
+        let store = layout(Durability::Ordered);
         let mut node = open_node(&path, store).await;
         node.format(&config()).await.expect("format");
         node.sync(MustSync::Sync).await.expect("sync format");

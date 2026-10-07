@@ -1,19 +1,24 @@
 //! [`JournalStorage`]: the node's [`LogStorage`] on `moonpool-journal`.
 
+use std::collections::BTreeMap;
+
 use moonpool_core::StorageProvider;
-use moonpool_journal::{Journal, Record, Recovery};
+use moonpool_journal::{Batch, Journal, ReadError, Recovery};
 use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
 use serde::{Deserialize, Serialize};
 
-use super::frame::{Framed, Scanned, encode, epoch};
-use super::node_image::{NodeImage, NodeRecord};
-use super::plan::plan;
-use super::{GENESIS, JournalStoreConfig, append_error, meta_error, open_error};
-use crate::corruption::{CorruptionVerdict, IntegrityFault};
-use crate::storage::{LogStorage, StorageError, StorageRecord};
+use super::{
+    JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, store_id,
+    undecodable,
+};
+use crate::storage::{LogStorage, StorageError, StorageRecord, WriteOutcome};
 
-/// The scalars the journal's two-copy metadata holds: the ones whose loss
-/// no peer can repair.
+/// The kind byte of an accepted (or learned) entry's identity.
+const ACCEPTED: u8 = 1;
+
+/// The node-unique scalars, kept in the journal's two-copy metainfo: the
+/// ones whose loss no peer can repair, and the ones that must move with the
+/// floor.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NodeMeta {
     /// The format marker (#147) and the configuration the store was
@@ -21,74 +26,61 @@ struct NodeMeta {
     formatted: Option<Config>,
     /// The promised ballot.
     promise: Ballot,
-}
-
-/// Version byte in front of the metadata's encoding. Version 2 (#207)
-/// replaced the bare marker with the configuration it was written under; a
-/// version-1 store does not decode (no deployment ever ran one).
-const META_VERSION: u8 = 2;
-
-impl NodeMeta {
-    fn encode(&self) -> Vec<u8> {
-        let mut bytes = vec![META_VERSION];
-        bytes.extend(postcard::to_stdvec(self).expect("in-memory encoding of the metadata"));
-        // Pair of `decode`: the metadata a sync saves is what a boot reads.
-        assert!(
-            Self::decode(&bytes).as_ref() == Some(self),
-            "saved metadata decodes back to itself"
-        );
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        let (&version, body) = bytes.split_first()?;
-        (version == META_VERSION)
-            .then(|| postcard::from_bytes(body).ok())
-            .flatten()
-    }
+    /// The chosen index as of the last metainfo write (relaxed: it rides
+    /// the writes that happen anyway).
+    chosen_index: Option<Slot>,
+    /// What the slots below the floor folded to (#204).
+    sealed: JournalState,
 }
 
 /// The node's durable store on `moonpool-journal`, over any moonpool
-/// [`StorageProvider`] — Tokio's filesystem in production, the simulator's
-/// disk under test. See the [module docs](super) for the mapping of every
-/// durable fact onto the journal and the corruption table.
+/// [`StorageProvider`]: Tokio's filesystem in production, the simulator's
+/// disk under test. Slot `s` is the journal's position `s`, its ballot the
+/// entry's identity; the scalars are the metainfo. See the [module
+/// docs](super).
 ///
 /// The store opens its journal in [`boot_scan`](LogStorage::boot_scan),
-/// which is also where it loads: until then every accessor answers for an
-/// empty store (the driver reads only the configuration first). A write
-/// before the boot scan runs it.
-///
-/// Like [`MemStorage`](crate::MemStorage) it keeps a log and the acceptor's
-/// scalars and nothing else (#186): a journal's client folds what it reads
-/// and persists its own state.
+/// which is also where it loads; until then every accessor answers for an
+/// empty store. A store with no journal on disk yet creates it at its first
+/// sync.
 pub struct JournalStorage<P: StorageProvider> {
     provider: P,
     dir: String,
     store: JournalStoreConfig,
     config: Config,
-    pub(super) journal: Option<Journal<P>>,
+    journal: Option<Journal<P>>,
     meta: NodeMeta,
+    /// The metainfo changed (a promise, a format, a floor): the next sync
+    /// writes it.
     meta_dirty: bool,
-    pub(super) image: NodeImage,
-    /// Records applied to the image and not yet appended.
-    staged: Vec<NodeRecord>,
-    /// What the last boot scan found (observation only).
+    /// The promise rose since the last sync: it reaches the disk before any
+    /// entry it covers.
+    promise_raised: bool,
+    /// The latest chosen index, ahead of `meta.chosen_index` until the
+    /// next metainfo write.
+    chosen_index: Option<Slot>,
+    first: Slot,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
+    faulty: BTreeMap<Slot, Ballot>,
+    /// Entries staged since the last sync, by slot (a later write to a
+    /// slot replaces an earlier one).
+    staged: BTreeMap<Slot, (Ballot, Vec<u8>)>,
+    /// A floor raised since the last sync.
+    staged_floor: Option<Slot>,
     boot_facts: JournalBootFacts,
 }
 
-/// What a [`JournalStorage`]'s last boot scan found — observation for a
-/// harness's reach gates, never a decision: the store boots the same way
-/// whatever these say.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a [`JournalStorage`]'s last boot found: observation for a harness's
+/// reach gates, never a decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct JournalBootFacts {
-    /// The journal's live prefix started past its genesis: a checkpoint had
-    /// truncated the segments before it.
-    pub checkpoint_truncated: bool,
-    /// Entries of an ambiguous last batch (a crash before its sync resolved)
-    /// the journal kept, marked damaged, instead of cutting.
-    pub ambiguous_kept: usize,
-    /// A torn tail (never acknowledged) was discarded.
-    pub torn_tail: bool,
+    /// What opening the journal found and repaired.
+    pub recovery: Recovery,
+    /// Slots reported faulty: damaged entries whose identity survived.
+    pub faulty: usize,
+    /// The journal's floor is above zero: a truncation or a trim-point jump
+    /// dropped a prefix.
+    pub truncated: bool,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalStorage<P> {
@@ -119,41 +111,46 @@ impl<P: StorageProvider> JournalStorage<P> {
             journal: None,
             meta: NodeMeta::default(),
             meta_dirty: false,
-            image: NodeImage::default(),
-            staged: Vec::new(),
+            promise_raised: false,
+            chosen_index: None,
+            first: Slot(0),
+            accepted: BTreeMap::new(),
+            faulty: BTreeMap::new(),
+            staged: BTreeMap::new(),
+            staged_floor: None,
             boot_facts: JournalBootFacts::default(),
         }
     }
 
-    /// Whether the store under `dir` carries its format marker, read from
-    /// the journal's metadata alone (`Journal::peek_meta`, moonpool#303):
-    /// no recovery scan, no repair, nothing created, so a probe never
-    /// changes what the next boot finds. `false` where no journal exists.
+    /// Whether the store of `journal` under `dir` carries its format marker,
+    /// read from the journal's metainfo alone (`Journal::peek_meta`): no
+    /// recovery, no repair, nothing created, so a probe never changes what
+    /// the next boot finds. `false` where no journal exists.
     ///
     /// # Errors
     ///
-    /// A [`StorageError::Corruption`] when no metadata copy is valid or the
-    /// newest does not decode, and the I/O verdict when the namespace cannot
-    /// be read.
-    pub async fn peek_formatted(provider: &P, dir: &str) -> Result<bool, StorageError> {
-        let Some(bytes) = Journal::peek_meta(provider, dir)
+    /// A [`StorageError::Corruption`] when no metainfo copy is valid or it
+    /// does not decode, and the I/O verdict when the namespace cannot be
+    /// read.
+    pub async fn peek_formatted(
+        provider: &P,
+        dir: &str,
+        journal: paros_core::JournalIdentifier,
+    ) -> Result<bool, StorageError> {
+        let Some(bytes) = Journal::peek_meta(provider, dir, store_id(journal))
             .await
-            .map_err(|e| open_error(&e))?
+            .map_err(|e| open_error(&e, StorageRecord::Promise))?
         else {
             return Ok(false);
         };
-        let meta = NodeMeta::decode(&bytes).ok_or(StorageError::Corruption {
-            record: StorageRecord::Promise,
-            fault: IntegrityFault::Misdirected,
-            verdict: CorruptionVerdict::Corrupted,
-        })?;
+        let meta: NodeMeta = decode(&bytes).ok_or(undecodable(StorageRecord::Promise))?;
         Ok(meta.formatted.is_some())
     }
 
     /// What the last boot scan found ([`JournalBootFacts`]).
     #[must_use]
-    pub fn boot_facts(&self) -> JournalBootFacts {
-        self.boot_facts
+    pub fn boot_facts(&self) -> &JournalBootFacts {
+        &self.boot_facts
     }
 
     /// The directory the journal lives in.
@@ -162,193 +159,160 @@ impl<P: StorageProvider> JournalStorage<P> {
         &self.dir
     }
 
-    /// Stage one write: fold it into the image now, append it at the next
-    /// sync.
-    fn stage(&mut self, record: NodeRecord) {
-        // Writes go to an open store: the boot scan ran first.
-        assert!(self.journal.is_some(), "a write is staged on an open store");
-        self.image.apply(&record);
-        self.staged.push(record);
+    /// How many entries the next sync commits (observation: a harness aims
+    /// a power cut at a commit that writes entries).
+    #[must_use]
+    pub fn staged_entries(&self) -> usize {
+        self.staged.len()
     }
 
-    /// Open and load the journal if the boot scan has not yet.
-    async fn opened(&mut self) -> Result<(), StorageError> {
-        if self.journal.is_none() {
-            self.load().await?;
-        }
-        Ok(())
-    }
-
-    /// Open the journal, replay it into the image, and settle what the
-    /// replay found. The body of [`LogStorage::boot_scan`].
+    /// Open the journal, if there is one, and read it back. The body of
+    /// [`LogStorage::boot_scan`].
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
     async fn load(&mut self) -> Result<(), StorageError> {
-        let (mut journal, recovery) =
-            Journal::open(self.provider.clone(), &self.dir, self.store.journal())
-                .await
-                .map_err(|e| open_error(&e))?;
-        report(self.config.id.0, &recovery);
-        self.boot_facts = JournalBootFacts {
-            checkpoint_truncated: journal.start_index() != GENESIS,
-            ambiguous_kept: recovery.ambiguous_batch.len(),
-            torn_tail: recovery.torn_tail,
-        };
-        self.meta = match journal.meta() {
-            None => NodeMeta::default(),
-            Some(bytes) => NodeMeta::decode(bytes).ok_or(StorageError::Corruption {
-                record: StorageRecord::Promise,
-                fault: IntegrityFault::Misdirected,
-                verdict: CorruptionVerdict::Corrupted,
-            })?,
-        };
-        let entries = journal
-            .read_range(journal.start_index()..journal.next_index())
-            .await
-            .map_err(|e| open_error(&e))?;
-        let mut scanned: Vec<Scanned<NodeRecord>> = entries.into_iter().map(Scanned::new).collect();
-        let plan = plan(&scanned, journal.start_index() == GENESIS);
-        if plan.lost {
-            return Err(StorageError::Corruption {
-                record: StorageRecord::Truncation,
-                fault: IntegrityFault::LostWrite,
-                verdict: CorruptionVerdict::Corrupted,
-            });
-        }
-        if let Some(cut) = plan.cut_at {
-            let from = scanned[cut].id.index;
-            tracing::info!(node = self.config.id.0, from, "journal_open_checkpoint_cut");
-            journal
-                .truncate_suffix(from)
-                .await
-                .map_err(|e| append_error(&e))?;
-            scanned.truncate(cut);
-        }
-        let mut image = NodeImage::default();
-        let mut skip = plan.skip.iter().peekable();
-        let mut at = plan.start;
-        while at < scanned.len() {
-            if let Some(range) = skip.peek()
-                && range.start == at
-            {
-                at = range.end;
-                skip.next();
-                continue;
-            }
-            let entry = &scanned[at];
-            if let Some(record) = &entry.record {
-                image.apply(record);
-            } else {
-                let strict = plan
-                    .strict
-                    .as_ref()
-                    .is_some_and(|range| range.contains(&at));
-                image.apply_damaged(&entry.id, entry.kind, strict)?;
-            }
-            at += 1;
-        }
-        image.finish();
-        // Boot side of the write pairs: the replayed image keeps nothing
-        // below its floor.
-        assert!(
-            image
-                .accepted
-                .keys()
-                .next()
-                .is_none_or(|s| *s >= image.first),
-            "a booted image holds nothing below its floor"
+        let opened = Journal::open(
+            self.provider.clone(),
+            &self.dir,
+            store_id(self.config.journal),
+            self.store.journal(),
+        )
+        .await
+        .map_err(|e| open_error(&e, StorageRecord::Promise))?;
+        let fresh = Self::new(
+            self.provider.clone(),
+            self.dir.clone(),
+            self.config.clone(),
+            self.store,
         );
-        if !image.faulty.is_empty() {
+        let Some((journal, recovery)) = opened else {
+            // No journal on disk: an empty, unformatted store.
+            *self = fresh;
+            return Ok(());
+        };
+        *self = fresh;
+        report(self.config.id.0, &recovery);
+        self.meta = decode(journal.meta()).ok_or(undecodable(StorageRecord::Promise))?;
+        self.first = Slot(journal.floor());
+        self.chosen_index = self.meta.chosen_index;
+        let replay = journal.replay(..).await.map_err(|_| StorageError::Io {
+            record: StorageRecord::Store,
+            outcome: WriteOutcome::Unknown,
+        })?;
+        for (position, read) in replay {
+            let slot = Slot(position);
+            match read {
+                Ok(entry) => {
+                    let (ballot, _) = id_ballot(&entry.id);
+                    let command: Command =
+                        decode(&entry.payload).ok_or(undecodable(StorageRecord::Accepted(slot)))?;
+                    self.accepted.insert(slot, (ballot, command));
+                }
+                // CTRL's recoverable class: the value is lost, the vote's
+                // identity is not. Never "nothing accepted here".
+                Err(ReadError::Damaged { id, .. }) => {
+                    self.faulty.insert(slot, id_ballot(&id).0);
+                }
+                Err(ReadError::Empty { .. } | ReadError::Io(_)) => {
+                    return Err(StorageError::Io {
+                        record: StorageRecord::Accepted(slot),
+                        outcome: WriteOutcome::Unknown,
+                    });
+                }
+            }
+        }
+        // Everything below the floor is chosen (pair of the live trim-point
+        // jump), whatever chosen index the metainfo last carried.
+        if let Some(below) = self.first.0.checked_sub(1)
+            && self.chosen_index.is_none_or(|c| c.0 < below)
+        {
+            self.chosen_index = Some(Slot(below));
+        }
+        // Boot side of the write pairs: nothing below the floor, and a slot
+        // is either accepted or faulty, never both.
+        assert!(
+            self.accepted.keys().next().is_none_or(|s| *s >= self.first),
+            "a booted store holds nothing below its floor"
+        );
+        assert!(
+            self.faulty.keys().all(|s| !self.accepted.contains_key(s)),
+            "a slot is accepted or faulty, never both"
+        );
+        if !self.faulty.is_empty() {
             tracing::warn!(
                 node = self.config.id.0,
-                slots = image.faulty.len() as u64,
+                slots = self.faulty.len() as u64,
                 "faulty_entry_reported"
             );
         }
-        self.image = image;
-        self.staged.clear();
-        self.meta_dirty = false;
+        self.boot_facts = JournalBootFacts {
+            faulty: self.faulty.len(),
+            truncated: self.first.0 > 0,
+            recovery,
+        };
         self.journal = Some(journal);
         Ok(())
     }
 
-    /// Append the staged records as one batch.
-    async fn append_staged(&mut self) -> Result<(), StorageError> {
-        let records = std::mem::take(&mut self.staged);
-        self.append(&records).await
+    /// Raise the floor in memory: the image keeps nothing below it.
+    fn raise_floor(&mut self, first: Slot) {
+        self.first = self.first.max(first);
+        let floor = self.first;
+        self.accepted = self.accepted.split_off(&floor);
+        self.faulty = self.faulty.split_off(&floor);
+        assert!(
+            self.accepted.keys().next().is_none_or(|s| *s >= floor),
+            "no accepted record survives below the floor"
+        );
     }
 
-    async fn append(&mut self, records: &[NodeRecord]) -> Result<(), StorageError> {
-        assert!(!records.is_empty(), "an append carries a record");
-        let journal = self.journal.as_mut().expect("opened before appending");
-        let payloads: Vec<Vec<u8>> = records.iter().map(encode).collect();
-        let framed: Vec<Record<'_>> = records
-            .iter()
-            .zip(&payloads)
-            .map(|(record, payload)| {
-                Record::new(epoch(record.kind()), payload).with_tag(record.tag())
-            })
-            .collect();
-        journal
-            .append(&framed)
-            .await
-            .map_err(|e| append_error(&e))?;
-        Ok(())
-    }
-
-    /// Checkpoint once the live log is long enough: the image as one
-    /// bracketed batch, then the whole segments before it dropped.
-    #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
-    async fn maybe_checkpoint(&mut self) -> Result<(), StorageError> {
-        let journal = self.journal.as_ref().expect("opened before a checkpoint");
-        let live = journal.next_index() - journal.start_index();
-        if live < self.store.checkpoint_after.max(1) || !self.staged.is_empty() {
-            return Ok(());
+    /// Seal `state` at `first` unless the floor is already above it.
+    fn seal(&mut self, first: Slot, state: JournalState) {
+        if first >= self.first {
+            self.meta.sealed = state;
+            self.meta_dirty = true;
         }
-        let begin = journal.next_index();
-        let records = self.image.checkpoint();
-        assert!(
-            matches!(records.last(), Some(NodeRecord::End)),
-            "a checkpoint closes its bracket"
-        );
-        self.append(&records).await?;
-        let journal = self.journal.as_mut().expect("opened before a checkpoint");
-        journal
-            .truncate_prefix(begin)
+    }
+
+    /// Commit `batch`, creating the journal first if none is on disk yet.
+    async fn commit(&mut self, batch: Batch) -> Result<(), StorageError> {
+        if self.journal.is_none() {
+            let created = Journal::create(
+                self.provider.clone(),
+                &self.dir,
+                store_id(self.config.journal),
+                self.store.journal(),
+                &encode(&self.meta),
+            )
             .await
-            .map_err(|e| append_error(&e))?;
-        // The log now starts at the checkpoint (or later): the prefix it
-        // summarises is gone.
-        assert!(
-            journal.start_index() <= begin,
-            "a prefix drop keeps the checkpoint"
-        );
-        tracing::debug!(
-            node = self.config.id.0,
-            begin,
-            start = journal.start_index(),
-            "journal_checkpointed"
-        );
-        Ok(())
+            .map_err(|e| open_error(&e, StorageRecord::Promise))?;
+            self.journal = Some(created);
+        }
+        let journal = self.journal.as_mut().expect("created above");
+        journal.commit(batch).await.map_err(|e| commit_error(&e))
     }
 }
 
-/// Trace what opening the journal repaired on its own.
+/// Trace what opening the journal found and repaired on its own.
 fn report(node: u64, recovery: &Recovery) {
-    if recovery.torn_tail {
-        tracing::info!(node, "journal_torn_tail_discarded");
-    }
-    if !recovery.ambiguous_batch.is_empty() {
-        tracing::warn!(
-            node,
-            entries = recovery.ambiguous_batch.len() as u64,
-            "journal_ambiguous_batch_kept"
-        );
-    }
-    if recovery.slots_rewritten + recovery.headers_repaired > 0 || recovery.meta_repaired {
+    if recovery.torn > 0 {
         tracing::info!(
             node,
-            slots = recovery.slots_rewritten as u64,
-            headers = recovery.headers_repaired as u64,
+            records = u64::from(recovery.torn),
+            "journal_torn_discarded"
+        );
+    }
+    if !recovery.ambiguous.is_empty() {
+        tracing::warn!(
+            node,
+            entries = recovery.ambiguous.len() as u64,
+            "journal_ambiguous_batch"
+        );
+    }
+    if recovery.rebuilt > 0 || recovery.headers_repaired > 0 || recovery.meta_repaired {
+        tracing::info!(
+            node,
+            records = u64::from(recovery.rebuilt),
+            headers = u64::from(recovery.headers_repaired),
             meta = recovery.meta_repaired,
             "journal_identifiers_repaired"
         );
@@ -359,50 +323,39 @@ impl<P: StorageProvider> Storage for JournalStorage<P> {
     fn initial_state(&self) -> (HardState, Config) {
         let mut hard_state = HardState::default();
         hard_state.max_promised_ballot = self.meta.promise;
-        hard_state.chosen_index = self.image.chosen_index;
+        hard_state.chosen_index = self.chosen_index;
         (hard_state, self.config.clone())
     }
 
     fn accepted(&self, slot: Slot) -> Option<(Ballot, Command)> {
-        self.image.accepted.get(&slot).cloned()
+        self.accepted.get(&slot).cloned()
     }
 
     fn first_slot(&self) -> Slot {
-        self.image.first
+        self.first
     }
 
     fn last_slot(&self) -> Slot {
-        self.image
-            .accepted
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(Slot(0))
+        self.accepted.keys().next_back().copied().unwrap_or(Slot(0))
     }
 
     fn sealed_state(&self) -> JournalState {
-        self.image.sealed
+        self.meta.sealed
     }
 
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
-        self.image
-            .faulty
-            .iter()
-            .map(|(slot, ballot)| (*slot, *ballot))
-            .collect()
+        self.faulty.iter().map(|(s, b)| (*s, *b)).collect()
     }
 }
 
 impl<P: StorageProvider> LogStorage for JournalStorage<P> {
-    /// Open the journal and fold it into the image (see the [module
-    /// docs](super) for the per-kind corruption table). A clean store, a
-    /// store with faulty entries (reported through the read
-    /// ports), and a store whose tail a crash tore all boot; a store the
-    /// journal cannot open, a trusted checkpoint that lost its header or
-    /// ledger are crash verdicts.
+    /// Open the journal and read it back (see the [module docs](super) for
+    /// what damage means). A clean store, a store with faulty entries
+    /// (reported through the read ports) and a store whose last batch a
+    /// crash tore all boot; a journal that cannot be opened is a crash
+    /// verdict.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        self.journal = None;
         self.load().await
     }
 
@@ -412,7 +365,6 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
     async fn format(&mut self, config: &Config) -> Result<(), StorageError> {
-        self.opened().await?;
         // The marker is set once, never edited (the driver refuses a
         // formatted store before it gets here).
         assert!(self.meta.formatted.is_none(), "a store is formatted once");
@@ -423,14 +375,16 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round))]
     async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
-        self.opened().await?;
         // Write half of the promise pair: the core only ever raises it.
         assert!(
             ballot >= self.meta.promise,
             "a persisted promise never falls"
         );
-        self.meta.promise = ballot;
-        self.meta_dirty = true;
+        if ballot > self.meta.promise {
+            self.meta.promise = ballot;
+            self.meta_dirty = true;
+            self.promise_raised = true;
+        }
         Ok(())
     }
 
@@ -441,61 +395,115 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         ballot: Ballot,
         command: Command,
     ) -> Result<(), StorageError> {
-        self.opened().await?;
-        self.stage(NodeRecord::Accepted {
-            slot,
-            ballot,
-            command,
-        });
+        // A re-sent `Accept` the store already holds (the same ballot and
+        // command, on disk or staged for the next sync) writes nothing: the
+        // core's sync still precedes its reply, and it finds nothing to
+        // commit. Re-committing it would cost a journal commit per re-send,
+        // and a leader re-sending a page of rounds would keep every
+        // acceptor's disk busy with copies while its tally crawled
+        // (witness 5953348164786240469: 1,073 re-sends of one slot before
+        // its quorum, the cluster stalled past the recovery tail).
+        if self
+            .accepted
+            .get(&slot)
+            .is_some_and(|(held, cmd)| *held == ballot && *cmd == command)
+        {
+            assert!(
+                !self.faulty.contains_key(&slot),
+                "a held entry is not faulty"
+            );
+            return Ok(());
+        }
+        self.staged.insert(slot, (ballot, encode(&command)));
+        self.faulty.remove(&slot);
+        self.accepted.insert(slot, (ballot, command));
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0))]
     async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
-        self.opened().await?;
-        self.stage(NodeRecord::ChosenIndex(slot));
+        self.chosen_index = Some(slot);
         Ok(())
     }
 
-    /// The metadata first, then the log: the promise is durable before any
-    /// record it covers. A [`MustSync::Relaxed`] batch holding nothing but
-    /// chosen-index records is deferred to the next flush — the relaxed
-    /// contract lets a crash lose it.
+    /// One journal commit. A raised promise goes first, in a commit of its
+    /// own, so it is durable before any entry it covers. The chosen index
+    /// is never a reason to write: a [`MustSync::Relaxed`] flush holding
+    /// nothing else writes nothing, and the next metainfo write carries it.
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0))]
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
-        self.opened().await?;
-        if self.meta_dirty {
-            let bytes = self.meta.encode();
-            let journal = self.journal.as_mut().expect("opened");
-            journal
-                .save_meta(&bytes)
-                .await
-                .map_err(|e| meta_error(&e, StorageRecord::Promise))?;
-            self.meta_dirty = false;
+        let _ = must_sync;
+        if !self.meta_dirty && self.staged.is_empty() {
+            return Ok(());
         }
-        let relaxed_only = must_sync == MustSync::Relaxed
-            && self
-                .staged
-                .iter()
-                .all(|record| matches!(record, NodeRecord::ChosenIndex(_)));
-        if !self.staged.is_empty() && !relaxed_only {
-            self.append_staged().await?;
-            self.maybe_checkpoint().await?;
+        // The entries the flush's own floor leaves standing (the core may
+        // stage a slot and then jump past it in the same flush: the jump
+        // drops it, as it drops every slot below).
+        let floor = self.staged_floor.take();
+        let entries: Vec<_> = std::mem::take(&mut self.staged)
+            .into_iter()
+            .filter(|(slot, _)| floor.is_none_or(|f| *slot >= f))
+            .collect();
+        let meta = self.meta_dirty.then(|| {
+            self.meta.chosen_index = self.chosen_index;
+            encode(&self.meta)
+        });
+        // A raised promise is durable before any entry accepted under it.
+        if let Some(meta) = &meta
+            && self.promise_raised
+            && !entries.is_empty()
+        {
+            let mut promise = Batch::new();
+            promise.set_meta(meta.clone());
+            self.commit(promise).await?;
         }
+        // Packed into batches that each fit one segment: a node catching up
+        // a long log after a reboot stages more than one holds (witness
+        // 6142474209351073489, refused `BatchTooLarge` on every boot before
+        // the split). Every batch but the last carries entries only; the
+        // last carries the floor and the metainfo, so neither is durable
+        // before the entries under it. Nothing is acknowledged before the
+        // whole sync returns.
+        let geometry = self.store.geometry;
+        let mut staged = Batch::new();
+        for (slot, (ballot, payload)) in entries {
+            if !staged.is_empty() && !staged.fits_another(geometry, payload.len()) {
+                assert!(staged.fits(geometry), "a packed batch fits one segment");
+                self.commit(std::mem::take(&mut staged)).await?;
+            }
+            staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
+        }
+        if let Some(floor) = floor {
+            staged.truncate_prefix(floor.0);
+        }
+        if let Some(meta) = meta {
+            staged.set_meta(meta);
+        }
+        self.commit(staged).await?;
+        self.meta_dirty = false;
+        self.promise_raised = false;
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, first = first.0))]
     async fn truncate(&mut self, first: Slot, sealed: JournalState) -> Result<(), StorageError> {
-        self.opened().await?;
-        self.stage(NodeRecord::Truncate { first, sealed });
+        self.seal(first, sealed);
+        self.raise_floor(first);
+        self.staged_floor = Some(self.staged_floor.map_or(first, |f| f.max(first)));
+        self.meta_dirty = true;
         Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, point = point.0))]
     async fn trimmed_to(&mut self, point: Slot, state: JournalState) -> Result<(), StorageError> {
-        self.opened().await?;
-        self.stage(NodeRecord::TrimmedTo { point, state });
+        self.seal(point, state);
+        let boundary = Slot(point.0.saturating_sub(1));
+        if self.chosen_index.is_none_or(|ci| ci < boundary) {
+            self.chosen_index = Some(boundary);
+        }
+        self.raise_floor(point);
+        self.staged_floor = Some(self.staged_floor.map_or(point, |f| f.max(point)));
+        self.meta_dirty = true;
         Ok(())
     }
 }

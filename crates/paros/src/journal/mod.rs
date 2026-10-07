@@ -1,123 +1,100 @@
 //! The **durable stores**: [`JournalStorage`] ([`LogStorage`](crate::LogStorage)) and
 //! [`JournalMatchmakerStorage`] ([`MatchmakerStorage`](crate::MatchmakerStorage)), both on
-//! `moonpool-journal` — the CLSTORE write-ahead journal over moonpool's
-//! `BlockFile`, generic over the provider's `StorageProvider`, so the same
-//! stores run over Tokio's filesystem in production and over the
+//! `moonpool-journal`, the CLSTORE journal over moonpool's storage providers,
+//! so the same stores run over Tokio's filesystem in production and over the
 //! simulator's disk in tests.
 //!
-//! # The shape: a log of write operations, folded at boot
+//! # The shape: state, not a log of operations
 //!
-//! The journal is a dense, append-only log with a far identifier per entry;
-//! paros's durable state is not (an acceptor re-accepts a slot at a higher
-//! ballot while later slots stay, a slot may have no record at all, the
-//! floor drops a prefix). So the journal holds the **operations**, not the
-//! state: every staged write becomes one entry, a `sync` appends the batch
-//! (one write, one `fdatasync`), and the boot scan reads the log back and
-//! folds it into the in-memory image the synchronous read ports answer from
-//! — the same fold the live writes go through, so the image a boot rebuilds
-//! is the image the writes left. A periodic **checkpoint** re-emits the
-//! image as one bracketed batch and lets the journal drop the whole
-//! segments before it, so the log stays proportional to the state.
+//! The journal keys an entry by a `u64` **position** and names it with an
+//! opaque identity, in any order, with overwrites: exactly a Paxos
+//! acceptor's state. So the stores keep the state itself, and a boot reads
+//! it back: no fold, no checkpoint.
 //!
-//! | Durable state | Where it lives | Entry identity (epoch kind, tag) |
-//! |---|---|---|
-//! | promise ([`HardState::max_promised_ballot`](paros_core::HardState)) + format marker and the configuration it was written under (#147, #207) | journal **metadata** (two copies, temp + fsync + rename) | — |
-//! | accepted / learned `(slot, ballot, command)` | `Accepted` entry | `(slot, ballot.round, ballot.node)` |
-//! | a faulty slot carried by a checkpoint | `Faulty` entry | `(slot, ballot.round, ballot.node)` |
-//! | chosen index | `ChosenIndex` entry (a `Relaxed` batch is deferred to the next `Sync`) | — |
-//! | truncation floor + sealed journal state | `Truncate` entry | — |
-//! | trim-point jump (point, journal state; #186) | `TrimmedTo` entry | — |
-//! | matchmaker registration | `Register` entry | `(ballot.round, ballot.node)` |
-//! | matchmaker scalars (generation, freeze, decree, watermark) | `Scalars` entry, the whole image | — |
-//! | matchmaker format marker and its configuration (#183, #207) | journal **metadata** | — |
+//! | Durable state | Where it lives |
+//! |---|---|
+//! | accepted / learned `(slot, ballot, command)` | the entry at position `slot`, the ballot in its identity |
+//! | promise, format marker and its `Config` (#147, #207), chosen index, floor, sealed journal state | the journal's **metainfo** (two local copies) |
+//! | truncation floor, trim-point jump (#186) | the journal's floor, raised in the same commit as the sealed state |
+//! | matchmaker registration | the entry at a registration number, the ballot in its identity |
+//! | matchmaker scalars and format marker (#183) | the metainfo |
 //!
-//! Every entry's epoch is its record kind, so the far identifier alone says
-//! what a damaged entry *was*; the journal itself tracks append batches and
-//! reports damage in the last one apart
-//! ([`Recovery::ambiguous_batch`](moonpool_journal::Recovery::ambiguous_batch)).
+//! The chosen index is relaxed (re-derivable after a crash): it rides the
+//! next commit that writes the metainfo for another reason, a promise, a
+//! truncation or a format, and is never a reason to write it on its own.
 //!
 //! # Corruption: what the journal reports, what paros does with it
 //!
-//! The journal tells a torn tail (no identifier: never acknowledged, cut)
-//! from a damaged entry whose identifier survived, and reports the latter
-//! with its identity. The stores run the journal with
-//! [`AmbiguousTail::Keep`]: the damaged
-//! entries of the last append batch — which a crash before the sync leaves
-//! exactly as rot would — stay in the log, marked corrupt, so their identity
-//! survives the next crash too — the CTRL undecidable row is the replication layer's to
-//! resolve, never a local truncation. What a damaged entry means is decided
-//! by its kind (`node_image` and `matchmaker` hold the per-kind table):
+//! The journal tells a torn write (discarded: never acknowledged) from a
+//! damaged entry whose persist record survived, and reports the latter with
+//! its identity: [`Corrupt`](moonpool_journal::State::Corrupt), or
+//! [`Ambiguous`](moonpool_journal::State::Ambiguous) in the last batch of a
+//! one-sync commit, where a crash and rot look alike (CTRL Theorem A.1).
+//! Both mean the same to paros:
 //!
-//! - a damaged **accepted** record is reported as
+//! - a damaged **accepted** entry is reported as
 //!   [`faulty(slot, ballot)`](paros_core::Storage::faulty_entries) from its
-//!   tag — CTRL's recoverable class, repaired from peers, never counted as
-//!   "nothing accepted here";
-//! - a damaged chosen index, truncation or trim-point jump is **forgotten**:
-//!   each is a local, re-derivable fact (the relaxed commit index, a lazy
-//!   compaction whose records the log still holds, a jump the node can be
-//!   sent again), and forgetting one leaves the store in the state it had
-//!   before it — a node behind, never a node wrong;
-//! - a damaged checkpoint header or sealed journal state whose prefix the journal
-//!   already dropped, a damaged live matchmaker record, and anything the
-//!   journal cannot open are **crash** verdicts
+//!   identity: CTRL's recoverable class, repaired from peers, never counted
+//!   as "nothing accepted here";
+//! - a damaged live **registration** is a crash verdict (a registry is
+//!   replaced, never repaired, #125), unless the GC watermark already
+//!   collected it;
+//! - anything the journal refuses to open (both metainfo copies lost, a
+//!   double fault, a lost batch, a damaged segment file) is a crash verdict
 //!   ([`StorageError::Corruption`] / [`StorageError::Metadata`]).
 //!
 //! The in-memory image is loaded once, by the boot scan, and every
-//! synchronous accessor answers from it — the contract on
+//! synchronous accessor answers from it: the contract on
 //! [`LogStorage::boot_scan`](crate::LogStorage::boot_scan).
 
-mod frame;
 mod matchmaker;
 mod node;
-mod node_image;
-mod plan;
 
 #[cfg(test)]
 mod tests;
 
 use moonpool_core::DirectIo;
-use moonpool_journal::{AmbiguousTail, Geometry, JournalConfig, JournalError};
+use moonpool_journal::{CommitError, Durable, ID_SIZE, Id, JournalConfig, OpenError};
+use paros_core::{Ballot, JournalIdentifier, NodeId};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::storage::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 
 pub use matchmaker::JournalMatchmakerStorage;
+/// The journal's commit protocol and segment shape, re-exported so a store's
+/// caller configures it without depending on `moonpool-journal`.
+pub use moonpool_journal::{Durability, Geometry};
 pub use node::{JournalBootFacts, JournalStorage};
 
-/// The index the first entry of every journal gets: a store whose log still
-/// starts here has never dropped a prefix, so its whole history is on disk.
-const GENESIS: u64 = 1;
-
-/// How a journal store lays out and maintains its journal.
+/// How a journal store lays out and writes its journal.
 ///
 /// A plain data struct, like [`DriverTunables`](crate::DriverTunables): a
-/// production deployment keeps the CLSTORE defaults, a simulation or a test
-/// shrinks the geometry so rollover and prefix truncation are cheap to
-/// reach.
+/// production deployment keeps the defaults, a simulation shrinks the
+/// geometry so rollover and prefix truncation are cheap to reach and draws
+/// the durability per seed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalStoreConfig {
-    /// The journal's segment shape. Must match what an existing store was
-    /// created with: the journal refuses a segment whose header or size
-    /// disagrees (reported as a [`MetadataFault`]).
+    /// The segment shape. Must match what an existing store was created
+    /// with: the journal refuses another one.
     pub geometry: Geometry,
     /// Direct-I/O policy for the segment files.
     pub direct_io: DirectIo,
-    /// Checkpoint once the live log holds at least this many entries: the
-    /// image is re-emitted as one bracketed batch and the whole segments
-    /// before it are dropped. Floor 1 (a checkpoint after every append is
-    /// valid, only slow); the log never needs more than one checkpoint's
-    /// worth plus this many entries of history.
-    pub checkpoint_after: u64,
+    /// One sync per commit (CLSTORE's, the last batch ambiguous) or two
+    /// (always decided). Either is safe for paros: an ambiguous entry is
+    /// reported faulty like a corrupt one. Recorded per batch, so it may
+    /// change between restarts.
+    pub durability: Durability,
 }
 
 impl Default for JournalStoreConfig {
-    /// The CLSTORE layout (64 MiB segments) and a checkpoint every 32,768
-    /// entries — one segment's slot table.
+    /// 64 MiB segments, two syncs per commit.
     fn default() -> Self {
         let config = Self {
             geometry: Geometry::default(),
             direct_io: DirectIo::Optional,
-            checkpoint_after: 32_768,
+            durability: Durability::Ordered,
         };
         config.assert_layout();
         config
@@ -125,119 +102,166 @@ impl Default for JournalStoreConfig {
 }
 
 impl JournalStoreConfig {
-    /// A small layout for simulation and tests: 256-slot, 256 KiB segments
-    /// and a checkpoint every 256 entries, so rollover, checkpoints and
-    /// prefix truncation happen within a short run.
+    /// A small layout for simulation and tests: 512 records and 64 KiB of
+    /// entries per segment, so rollover and segment deletion happen within
+    /// a short run.
     #[must_use]
     pub fn small() -> Self {
         let config = Self {
-            geometry: Geometry {
-                slot_count: 256,
-                // Two header blocks, then 256 × 64-byte slots.
-                data_start: 8 * 1024 + 16 * 1024,
-                segment_size: 256 * 1024,
-            },
-            direct_io: DirectIo::Optional,
-            checkpoint_after: 256,
+            geometry: Geometry::small(),
+            ..Self::default()
         };
         config.assert_layout();
         config
     }
 
-    /// A shipped layout is one the journal opens, and checkpoints within
-    /// one segment's slot table (the floor of `checkpoint_after` is 1).
+    /// A shipped layout is one the journal opens.
     fn assert_layout(self) {
-        assert!(
-            self.geometry.validate().is_ok(),
-            "a shipped geometry is valid"
-        );
-        assert!(
-            self.checkpoint_after >= 1,
-            "a checkpoint cadence is at least one"
-        );
-        assert!(
-            self.checkpoint_after <= u64::from(self.geometry.slot_count),
-            "a checkpoint fits within one segment's slot table"
-        );
+        assert!(self.geometry.is_valid(), "a shipped geometry is valid");
     }
 
     fn journal(self) -> JournalConfig {
         JournalConfig {
+            durability: self.durability,
             geometry: self.geometry,
             direct_io: self.direct_io,
-            first_index: GENESIS,
-            ambiguous_tail: AmbiguousTail::Keep,
         }
     }
 }
 
-/// What a journal that cannot be opened means to the driver: the store is
-/// unusable at file granularity, or a record is unreadable in a way no
-/// replay can classify. Every arm is a crash verdict.
-fn open_error(error: &JournalError) -> StorageError {
+/// The journal's own identity for a paros journal's store: the tenant in
+/// the high half, the journal in the low half, so a store of another
+/// journal is refused (`WrongJournal`) rather than read.
+fn store_id(journal: JournalIdentifier) -> moonpool_journal::JournalId {
+    let id = (u128::from(journal.tenant.0) << 64) | u128::from(journal.journal.0);
+    // Pair of the halves: the identity reads back as the journal.
+    assert!(
+        u64::try_from(id >> 64) == Ok(journal.tenant.0)
+            && u64::try_from(id & u128::from(u64::MAX)) == Ok(journal.journal.0),
+        "a store identity reads back as its journal"
+    );
+    moonpool_journal::JournalId(id)
+}
+
+// A ballot and a kind byte fit an entry's identity.
+const _: () = assert!(ID_SIZE > 8 + 8);
+
+/// An entry's identity: its ballot, and a kind byte saying what it is.
+fn ballot_id(ballot: Ballot, kind: u8) -> Id {
+    let mut id = [0; ID_SIZE];
+    id[..8].copy_from_slice(&ballot.round.to_le_bytes());
+    id[8..16].copy_from_slice(&ballot.node.0.to_le_bytes());
+    id[16] = kind;
+    // Pair of `id_ballot`: a damaged entry still names its ballot and kind.
+    assert!(
+        id_ballot(&id) == (ballot, kind),
+        "an identity reads back as its ballot"
+    );
+    id
+}
+
+/// The ballot and kind an identity names.
+fn id_ballot(id: &Id) -> (Ballot, u8) {
+    let word = |at: usize| u64::from_le_bytes(id[at..at + 8].try_into().expect("8 bytes"));
+    (
+        Ballot {
+            round: word(0),
+            node: NodeId(word(8)),
+        },
+        id[16],
+    )
+}
+
+/// Bumped when an encoding changes; bytes of another version do not decode.
+const FORMAT_VERSION: u8 = 2;
+
+/// A version byte and the value's `postcard` encoding.
+fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {
+    let mut bytes = vec![FORMAT_VERSION];
+    bytes.extend(postcard::to_stdvec(value).expect("in-memory encoding"));
+    // Pair of `decode`: what a write stores is what a boot reads.
+    assert!(
+        decode::<T>(&bytes).as_ref() == Some(value),
+        "an encoding decodes back to itself"
+    );
+    bytes
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    let (&version, body) = bytes.split_first()?;
+    (version == FORMAT_VERSION)
+        .then(|| postcard::from_bytes(body).ok())
+        .flatten()
+}
+
+/// Bytes that passed the journal's checks and still do not decode: written
+/// by something else, or for something else. A crash verdict.
+fn undecodable(record: StorageRecord) -> StorageError {
+    StorageError::Corruption {
+        record,
+        fault: IntegrityFault::Misdirected,
+        verdict: CorruptionVerdict::Corrupted,
+    }
+}
+
+/// What a journal that cannot be opened means to the driver. An I/O error
+/// is the provider failing (reopen); every other arm is a crash verdict.
+fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
+    let corrupted = |record, fault| StorageError::Corruption {
+        record,
+        fault,
+        verdict: CorruptionVerdict::Corrupted,
+    };
     match error {
-        // Neither an entry nor its slot, or neither header copy, checks out.
-        JournalError::DoubleFault { .. } | JournalError::BadSegmentHeader { .. } => {
-            StorageError::Corruption {
-                record: StorageRecord::Store,
-                fault: IntegrityFault::ChecksumMismatch,
-                verdict: CorruptionVerdict::Corrupted,
-            }
-        }
-        JournalError::MetadataCorrupt { .. } => StorageError::Corruption {
-            record: StorageRecord::Promise,
-            fault: IntegrityFault::ChecksumMismatch,
-            verdict: CorruptionVerdict::Corrupted,
-        },
-        // A segment missing between the start and the tail: the entries it
-        // held were acknowledged, and nothing on disk stands in for them.
-        JournalError::SegmentGap { .. } => StorageError::Corruption {
+        OpenError::Io(_) => StorageError::Io {
             record: StorageRecord::Store,
-            fault: IntegrityFault::LostWrite,
-            verdict: CorruptionVerdict::Corrupted,
+            outcome: WriteOutcome::Unknown,
         },
-        JournalError::SegmentSize { .. } => StorageError::Metadata {
+        // An entry and its persist record both damaged before the last
+        // batch: nothing identifies what was there.
+        OpenError::DoubleFault { .. } => {
+            corrupted(StorageRecord::Store, IntegrityFault::ChecksumMismatch)
+        }
+        // A batch the log must hold is gone: acknowledged, and nothing on
+        // disk stands in for it.
+        OpenError::LostBatch { .. } => corrupted(StorageRecord::Store, IntegrityFault::LostWrite),
+        // The node-unique state: no peer can tell a node what it promised.
+        OpenError::MetaLost => corrupted(scalars, IntegrityFault::ChecksumMismatch),
+        OpenError::WrongJournal { .. } => {
+            corrupted(StorageRecord::Store, IntegrityFault::Misdirected)
+        }
+        OpenError::BadSegment { .. } => StorageError::Metadata {
             fault: MetadataFault::WrongSize,
         },
-        JournalError::Io(_) => StorageError::Corruption {
-            record: StorageRecord::Store,
-            fault: IntegrityFault::ReadError,
-            verdict: CorruptionVerdict::Corrupted,
-        },
-        // Not damage an open reports: a shipped layout is valid
-        // (`assert_layout`), and the rest belong to reads and appends.
-        JournalError::InvalidConfig(_)
-        | JournalError::Corrupt(_)
-        | JournalError::OutOfRange { .. }
-        | JournalError::EntryTooLarge { .. }
-        | JournalError::CheckpointTooLarge { .. }
-        | JournalError::Poisoned => StorageError::Metadata {
+        OpenError::InvalidConfig(_) | OpenError::AlreadyExists => StorageError::Metadata {
             fault: MetadataFault::Missing,
         },
     }
 }
 
-/// What a failed append means: part of the batch may be on disk (the
-/// journal poisons itself for exactly that reason), so the outcome is
-/// unknown — the fsyncgate ambiguity the driver resolves by crashing.
-fn append_error(error: &JournalError) -> StorageError {
+/// What a failed commit means: before any write the batch is known absent;
+/// after, part of it may be on disk (the journal poisons itself for exactly
+/// that reason), the fsyncgate ambiguity the driver resolves by crashing.
+fn commit_error(error: &CommitError) -> StorageError {
     match error {
-        JournalError::EntryTooLarge { .. } => StorageError::Io {
-            record: StorageRecord::Batch,
-            outcome: WriteOutcome::Lost,
-        },
-        _ => StorageError::FsyncFailed {
+        CommitError::Io {
+            durable: Durable::Unknown,
+            ..
+        }
+        | CommitError::Poisoned => StorageError::FsyncFailed {
             record: StorageRecord::Batch,
             outcome: WriteOutcome::Unknown,
         },
-    }
-}
-
-/// What a failed metadata write means: the journal keeps at least one copy
-/// intact, holding the old value or the new one.
-fn meta_error(_error: &JournalError, record: StorageRecord) -> StorageError {
-    StorageError::Io {
-        record,
-        outcome: WriteOutcome::Unknown,
+        // Refused or failed before anything was written: known absent.
+        CommitError::Io {
+            durable: Durable::No,
+            ..
+        }
+        | CommitError::BelowFloor { .. }
+        | CommitError::MetaTooLarge { .. }
+        | CommitError::BatchTooLarge => StorageError::Io {
+            record: StorageRecord::Batch,
+            outcome: WriteOutcome::Lost,
+        },
     }
 }

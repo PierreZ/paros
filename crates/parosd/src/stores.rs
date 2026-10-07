@@ -135,7 +135,7 @@ impl DirStores {
         let mut resolved = false;
         for journal in found {
             let dir = path_str(&journal_dir(&self.data_dir, journal));
-            let formatted = JournalStorage::peek_formatted(&self.provider, &dir).await;
+            let formatted = JournalStorage::peek_formatted(&self.provider, &dir, journal).await;
             if formatted.unwrap_or(false) {
                 tracing::info!(journal = %journal, "created_journal_resolved");
                 self.record.journals.insert(journal);
@@ -181,7 +181,7 @@ impl JournalStores for DirStores {
         self.genesis.keys().copied().collect()
     }
 
-    fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
+    async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal) {
             return Some((
                 self.store(journal, config.clone()),
@@ -189,6 +189,19 @@ impl JournalStores for DirStores {
             ));
         }
         let config = self.created.get(&journal)?.clone();
+        if !self.record.journals.contains(&journal) {
+            // A format the record does not name may have landed anyway (its
+            // sync failed, the journal was quarantined, and this is the
+            // re-open): the disk says.
+            let dir = path_str(&journal_dir(&self.data_dir, journal));
+            if JournalStorage::peek_formatted(&self.provider, &dir, journal)
+                .await
+                .unwrap_or(false)
+            {
+                tracing::info!(journal = %journal, "created_journal_resolved");
+                self.opened(journal);
+            }
+        }
         let claim = self.created_claim(journal);
         Some((self.store(journal, config), claim))
     }
@@ -271,19 +284,19 @@ mod tests {
         let journal = JournalIdentifier::new(TenantId(0x7e), JournalId(300));
         let mut stores = load(dir.path()).await;
         assert!(stores.create(journal, config(journal)));
-        let (_, boot) = stores.open(journal).expect("open");
+        let (_, boot) = stores.open(journal).await.expect("open");
         assert_eq!(boot, BootKind::FirstBoot);
         // A re-open before the store booted (a quarantined format) is still
         // a first boot; once it booted, an existing member's, across a
         // restart too.
-        let (_, boot) = stores.open(journal).expect("open");
+        let (_, boot) = stores.open(journal).await.expect("open");
         assert_eq!(boot, BootKind::FirstBoot);
         stores.opened(journal);
-        let (_, boot) = stores.open(journal).expect("open");
+        let (_, boot) = stores.open(journal).await.expect("open");
         assert_eq!(boot, BootKind::ExistingMember);
         let mut restarted = load(dir.path()).await;
         assert!(restarted.create(journal, config(journal)));
-        let (_, boot) = restarted.open(journal).expect("open");
+        let (_, boot) = restarted.open(journal).await.expect("open");
         assert_eq!(boot, BootKind::ExistingMember);
     }
 
@@ -293,16 +306,27 @@ mod tests {
         let journal = JournalIdentifier::new(TenantId(0x7e), JournalId(300));
         let mut stores = load(dir.path()).await;
         assert!(stores.create(journal, config(journal)));
-        let (mut store, _) = stores.open(journal).expect("open");
-        // The store is formatted, and the node dies before the record.
+        let (mut store, _) = stores.open(journal).await.expect("open");
+        // The store is formatted, and the record misses it (the format's
+        // sync failed and the journal was quarantined): the re-open in the
+        // same process reads the disk.
         assert_eq!(
             paros::provision_store(&mut store).await.expect("format"),
             paros::Provisioned::Formatted
         );
-        drop((store, stores));
+        drop(store);
+        stores.record.journals.remove(&journal);
+        let (_, boot) = stores.open(journal).await.expect("open");
+        assert_eq!(
+            boot,
+            BootKind::ExistingMember,
+            "a quarantined format re-opens formatted"
+        );
+        stores.record.journals.remove(&journal);
+        drop(stores);
         let mut restarted = load(dir.path()).await;
         assert!(restarted.create(journal, config(journal)));
-        let (_, boot) = restarted.open(journal).expect("open");
+        let (_, boot) = restarted.open(journal).await.expect("open");
         assert_eq!(boot, BootKind::ExistingMember);
         // A created journal whose store never got its marker is a first
         // boot again.
@@ -310,7 +334,7 @@ mod tests {
         std::fs::create_dir_all(journal_dir(dir.path(), other)).expect("mkdir");
         let mut restarted = load(dir.path()).await;
         assert!(restarted.create(other, config(other)));
-        let (_, boot) = restarted.open(other).expect("open");
+        let (_, boot) = restarted.open(other).await.expect("open");
         assert_eq!(boot, BootKind::FirstBoot);
     }
 }

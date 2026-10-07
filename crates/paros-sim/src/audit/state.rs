@@ -201,6 +201,12 @@ pub(super) struct AuditState {
     /// can legally outrun a reordered stale truncate; see
     /// [`NodeAudit::truncated`](paros::Audit::truncated)).
     pub(super) truncate_watermark: BTreeMap<u64, u64>,
+    /// Per node: the highest floor its driver ever staged
+    /// ([`NodeAudit::floor_requested`](paros::Audit::floor_requested)),
+    /// reported or not. A crash inside the floor's commit can leave it
+    /// durable unreported; only a slot below it may be missing from a
+    /// recovered log without a corruption crash to explain it.
+    pub(super) requested_floor: BTreeMap<u64, u64>,
 
     // --- applied prefix -----------------------------------------------------
     /// Per node: the next slot expected to be newly applied.

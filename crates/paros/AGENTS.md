@@ -51,9 +51,8 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (two tenants' control journals, their identifiers drawn and named by the `SystemPlan`, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230); the cell's side of the fleet (`JoinFleet`, `HostTenant`,
   `DropTenant`, #229).
 - `corruption.rs` → `classify_log` → CTRL record classification.
-- `journal/mod.rs` → `JournalStoreConfig`, `JournalBootFacts` · `journal/node.rs` → `JournalStorage` · `journal/matchmaker.rs` → `JournalMatchmakerStorage`.
-- `journal/{frame,plan,node_image}.rs` → record ↔ entry codec, boot fold start, node records + per-kind corruption table.
-- `journal/tests.rs` → both contract suites, targeted damage, crash loop under two fault models on `SimStorageProvider`.
+- `journal/mod.rs` → `JournalStoreConfig` (geometry, direct I/O, `Durability`), the identity and error mappings · `journal/node.rs` → `JournalStorage` (slot = position, ballot in the identity, scalars in the metainfo), `JournalBootFacts` · `journal/matchmaker.rs` → `JournalMatchmakerStorage` (a registration per position, scalars in the metainfo).
+- `journal/tests.rs` → both contract suites, faulty votes from targeted damage, the floor across reboots, the format probe, lost segments, registration damage, on `SimStorageProvider` (the journal's crash physics are `moonpool-journal`'s tests and the sim's).
 - `proto/{common,paros,internal,matchmaker,system,machine,checkpoint,fleet}.proto` → compiled by `build.rs` with `prost-build`.
 
 ## Public surface
@@ -78,8 +77,6 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 ## Tests & gates
 
 - `cargo nextest run -p paros` — `rpc/tests.rs`, `client/tests.rs`, `journal/tests.rs`, inline tests.
-- `PAROS_JOURNAL_CRASH_SEED=<n>` (one seed) / `PAROS_JOURNAL_CRASH_SEEDS=<n>` (`1..=n`):
-  the journal crash loop (`journal/tests.rs:473`).
 - `cargo check --target wasm32-unknown-unknown -p paros` (CI `portability`).
 - Building needs `protoc` (`build.rs` runs `prost-build`): the flake ships `protobuf` (`flake.nix:46`);
   on the web see root *Environment & Nix* (`PROTOC`).
@@ -88,7 +85,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `160d897`: `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `abb6f7a` (moonpool#308 merged): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), dev `moonpool-sim` (`:56`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - The pin is **eight lines**: four here, `crates/paros-sim/Cargo.toml:20,29`,
