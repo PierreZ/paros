@@ -493,9 +493,9 @@ is faithful**, no mismatch found:
   plane is down"** matches the whitepaper's cell-router definition ("the thinnest possible layer,
   with the responsibility of routing requests to the right cell, and only that") and its static
   stability example (a router with an in-memory map fed from S3 keeps directing traffic "even if
-  the control plane, Amazon S3 or a zone is unavailable"). paros's proxy already does more than
-  that (naming, `Authz`), which is exactly the open question §3.5 records for M12: whether that
-  extra responsibility belongs in the proxy or splits into a separate thin router role.
+  the control plane, Amazon S3 or a zone is unavailable"). paros's frontend does more than that
+  (naming, `Authz`); the thin routing layer is a separate **resolver** role (decided 2026-10-07,
+  #233), which matches the whitepaper's thinnest-router guidance.
 - The sources list's **"migration as copy, flip, redirect, forget"** quotes the whitepaper's own
   four-phase list almost verbatim (clone/flip/redirect/forget), and §3.7's M12 "Moving a tenant"
   paragraph reuses the same four words for exactly the same sequence (reconfigure onto the target
