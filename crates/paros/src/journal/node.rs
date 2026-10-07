@@ -395,6 +395,25 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         ballot: Ballot,
         command: Command,
     ) -> Result<(), StorageError> {
+        // A re-sent `Accept` the store already holds (the same ballot and
+        // command, on disk or staged for the next sync) writes nothing: the
+        // core's sync still precedes its reply, and it finds nothing to
+        // commit. Re-committing it would cost a journal commit per re-send,
+        // and a leader re-sending a page of rounds would keep every
+        // acceptor's disk busy with copies while its tally crawled
+        // (witness 5953348164786240469: 1,073 re-sends of one slot before
+        // its quorum, the cluster stalled past the recovery tail).
+        if self
+            .accepted
+            .get(&slot)
+            .is_some_and(|(held, cmd)| *held == ballot && *cmd == command)
+        {
+            assert!(
+                !self.faulty.contains_key(&slot),
+                "a held entry is not faulty"
+            );
+            return Ok(());
+        }
         self.staged.insert(slot, (ballot, encode(&command)));
         self.faulty.remove(&slot);
         self.accepted.insert(slot, (ballot, command));

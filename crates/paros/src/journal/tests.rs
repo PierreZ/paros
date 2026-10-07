@@ -308,6 +308,46 @@ fn laggy_slots_and_the_floor_survive_a_reboot() {
     });
 }
 
+/// A re-sent `Accept` the store already holds writes nothing; the same slot
+/// at a new ballot, or with another command, is written.
+#[test]
+fn a_held_entry_re_accepted_writes_nothing() {
+    runtime().block_on(async {
+        let mut sim = sim(6);
+        run(&mut sim, |provider| async move {
+            let store = JournalStoreConfig::small();
+            let mut node = open_node(provider.clone(), "re", store)
+                .await
+                .expect("open");
+            node.format(&config()).await.expect("format");
+            node.persist_ballot(ballot(2)).await.expect("promise");
+            node.append_accepted(Slot(1), ballot(2), user(1, 0x31))
+                .await
+                .expect("accept");
+            node.sync(MustSync::Sync).await.expect("sync");
+            node.append_accepted(Slot(1), ballot(2), user(1, 0x31))
+                .await
+                .expect("re-accept");
+            assert_eq!(node.staged_entries(), 0, "a held entry stages nothing");
+            node.append_accepted(Slot(1), ballot(2), user(1, 0x32))
+                .await
+                .expect("another command");
+            assert_eq!(node.staged_entries(), 1, "another command is written");
+            node.sync(MustSync::Sync).await.expect("sync");
+            node.persist_ballot(ballot(3)).await.expect("promise");
+            node.append_accepted(Slot(1), ballot(3), user(1, 0x32))
+                .await
+                .expect("a higher ballot");
+            assert_eq!(node.staged_entries(), 1, "a new ballot is written");
+            node.sync(MustSync::Sync).await.expect("sync");
+            drop(node);
+            let node = open_node(provider, "re", store).await.expect("reboots");
+            assert_eq!(node.accepted(Slot(1)), Some((ballot(3), user(1, 0x32))));
+        })
+        .await;
+    });
+}
+
 /// One sync can stage more entries than one segment holds (a node catching
 /// up a long log after a reboot): it lands as several commits, and the
 /// floor and the metainfo, in the last, survive the reboot with every entry.
