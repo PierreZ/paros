@@ -195,11 +195,13 @@ pub(crate) fn message_to_proto(
             ballot,
             commit,
             config,
+            fence,
         } => Kind::Heartbeat(internal::Heartbeat {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             commit: commit.map(|slot| slot.0),
             config: config.as_ref().map(config_to_proto),
+            fence: fence.map(|slot| slot.0),
         }),
         Message::HeartbeatAck {
             from,
@@ -322,6 +324,7 @@ pub(crate) fn message_from_proto(
             ballot: ballot_from_proto(message.ballot)?,
             commit: message.commit.map(Slot),
             config: config_from_proto(message.config)?,
+            fence: message.fence.map(Slot),
         }),
         Kind::HeartbeatAck(message) => Ok(Message::HeartbeatAck {
             from: NodeId(message.from),

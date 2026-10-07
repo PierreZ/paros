@@ -150,8 +150,14 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 Seam::MatchAfterSyncBeforeReply => {
                     buggify_with_prob!((0.15 * self.seam_crash_bias).min(0.9))
                 }
+                // Armed only by a reconfiguring campaign's `Prepare`, a few
+                // per run, so the rate is far above the write seams' (#260):
+                // the state worth reaching is the campaign that never
+                // finishes. Kept off the write-window bias: a campaign is not
+                // a write window.
+                Seam::AfterPrepareSent => buggify_with_prob!(0.5),
             };
-        if fired && self.seam_crash_bias > 1.0 {
+        if fired && self.seam_crash_bias > 1.0 && seam != Seam::AfterPrepareSent {
             // BUGGIFY pairing: the biased write-window crash pressure genuinely
             // fires on some seed (no slot is created when it never does).
             assert_reachable!("a write-window-biased seam crash fires");

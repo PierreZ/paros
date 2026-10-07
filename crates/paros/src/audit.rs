@@ -365,6 +365,13 @@ pub trait Audit {
     /// instead: it gets no verdict.
     fn answered(&self, node: NodeId, slot: Slot, command: &Command, outcome: &Outcome) {}
 
+    /// This node opened the **quorum read** `ctx` (#143, #260): a token
+    /// unique within this incarnation, named again by
+    /// [`Audit::quorum_read_served`] if the read completes. Reported as the
+    /// core opens it, so whatever was chosen before this instant is what the
+    /// read must serve.
+    fn quorum_read_opened(&self, node: NodeId, ctx: u64) {}
+
     /// This node served a **quorum read** (#143) — the confirmation every
     /// journal `Read` waits on (#204): its row answered whole at
     /// `watermark` (the maximum vote watermark, `None` when nobody in the
@@ -373,10 +380,13 @@ pub trait Audit {
     /// `opened` is the same when the read opened (what an unconfirmed local
     /// read would have answered), `row` the grid row the
     /// read asked (`None`: the whole configuration, under a majority or a
-    /// flexible split), and `leader` whether this node led when it served.
+    /// flexible split), `leader` whether this node led when it served, and
+    /// `ctx` the token [`Audit::quorum_read_opened`] reported.
+    #[allow(clippy::too_many_arguments)]
     fn quorum_read_served(
         &self,
         node: NodeId,
+        ctx: u64,
         row: Option<usize>,
         watermark: Option<Slot>,
         served: Option<Slot>,
@@ -777,6 +787,17 @@ pub trait Audit {
     /// configuration it would have registered (a spare, or a removed node).
     /// `count` is the monotone total for this incarnation.
     fn campaign_skipped_non_member(&self, node: NodeId, count: u64) {}
+
+    /// This node opened no quorum read for want of a read basis (#260): it
+    /// has heard no won leadership since it booted, or it promised a newer
+    /// campaign than its basis. `count` is the monotone total for this
+    /// incarnation.
+    fn read_without_basis(&self, node: NodeId, count: u64) {}
+
+    /// This node left a `PreRead` unanswered because its belief was still
+    /// the bootstrap default (#260). `count` is the monotone total for this
+    /// incarnation.
+    fn pre_read_refused_unheard(&self, node: NodeId, count: u64) {}
 
     /// This leader resigned because its own reconfiguration removed it from
     /// the acceptor set and the change is complete; an ordinary election

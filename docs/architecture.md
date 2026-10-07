@@ -174,6 +174,25 @@ journal. A read there is answered **unserved**, the same answer as a read whose 
 timed out, and the client asks another server: never `Truncated` (the journal still has the
 record) and never a page (this server cannot produce it).
 
+A read is judged over the configuration of a leadership that **won** its ballot, never over a
+campaign's (decided on 2026-10-07, #260, "option A"). A node believes a campaign's configuration
+as soon as it promises its `Prepare`, but a campaign may never finish, and the older
+configurations it must cover can still hold slots its own quorums never voted: the witness was a
+leader under `{0,1,3}` with `q2 = 1` that chose a `SetLeader` with its own vote, campaigned with
+`{0,2,3}` and died, and an acceptor that promised the campaign served generation 0 for a second
+from a majority of the new configuration. So every server keeps a **read basis**: the
+configuration, the ballot and the **fence** (the highest slot the winning Phase 1 could have found
+chosen) of the last won leadership it heard, from its own election or handoff or from the leader's
+heartbeat, which now carries the fence on matchmaker deployments. A read is served once the
+server's fold covers both the row's maximum watermark and the fence. A server whose own belief
+moved above its basis (it promised a newer campaign) and a server that has heard no leader since it
+booted open no read, and the client is answered unserved; a rebooted acceptor answers no watermark
+query until it has heard what configuration is in force. Reads are unavailable during a campaign,
+never stale. Plain Multi-Paxos is unchanged: its basis is its static configuration with no fence.
+The alternatives were a basis that advances only once garbage collection of the older
+configurations is effective (longer unavailability) and asking the matchmakers for the whole
+history on every read (a round trip per page).
+
 ### 2.6 Truncation
 
 A `Truncate` is proposed through consensus and judged at apply in slot order like a `Write`: in

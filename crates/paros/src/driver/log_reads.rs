@@ -301,7 +301,15 @@ impl JournalReads {
             let Some(mut pending) = self.confirming.remove(&state.ctx) else {
                 continue;
             };
-            audit.quorum_read_served(node, pending.row, state.index, fold, pending.opened, leader);
+            audit.quorum_read_served(
+                node,
+                state.ctx,
+                pending.row,
+                state.index,
+                fold,
+                pending.opened,
+                leader,
+            );
             tracing::info!(
                 node = node.0,
                 ctx = state.ctx,

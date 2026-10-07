@@ -1193,18 +1193,26 @@ where
                     continue;
                 };
                 let ctx = rt.waiters.reads.next_ctx();
+                // The configuration the core reads over is its read basis
+                // (#260), not its belief; without one the core opens nothing
+                // and the read is answered unserved by the retry sweep — so
+                // neither the row hook nor the audit hears of it.
+                let basis = rt.node.read_basis();
                 // The row override (the Phase-1 twin of `phase2_column`) is
                 // asked only where it can have an effect: under a grid. The
                 // core's `ctx % rows` stands under `NoHooks`.
-                let row = match rt.node.acceptors().quorum_system() {
+                let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
                     QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
                     _ => None,
-                };
+                });
                 // The row the core will ask, resolved exactly as it resolves
                 // it, for the audit's report of what served it.
-                let row = rt.node.acceptors().read_row(ctx, row);
+                let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
                 let opened = fold_head(&rt.node);
                 let wait = log_reads::wait_ticks(req.wait_ms, tunables.tick_interval, tunables.read_poll_ticks);
+                if basis.is_some() {
+                    rt.audit.quorum_read_opened(NodeId(self_id), ctx);
+                }
                 rt.node.quorum_read_in(ctx, row);
                 rt.waiters.reads.park(&req, reply, wait, row, opened);
                 let outcome = shared.settle(rt).await;

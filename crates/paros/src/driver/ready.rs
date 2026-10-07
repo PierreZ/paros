@@ -242,6 +242,12 @@ where
     }
 
     // 2. Send messages — only after (1) is durable.
+    // A reconfiguring campaign's `Prepare` carries a configuration other
+    // than the one this node believes in force (its leadership adopts it only
+    // on winning): the campaign whose death the #260 seam is about.
+    let sent_prepare = messages.iter().any(|(_, msg)| {
+        matches!(msg, Message::Prepare { config: Some(config), .. } if config != node.acceptors())
+    });
     send_messages(out, hooks, audit, journal, messages);
 
     // 3. Learn the entries the chosen prefix walked over (already durable, in
@@ -268,6 +274,17 @@ where
         hooks,
         audit,
     );
+
+    // Crash seam (#260): a reconfiguring candidate dies with its `Prepare`s
+    // in flight — after the batch is durable, sent, applied and its reads
+    // answered, so all it loses is the campaign itself.
+    crash_if(
+        sent_prepare,
+        hooks,
+        audit,
+        NodeId(self_id),
+        Seam::AfterPrepareSent,
+    )?;
 
     // The previous recovery page is now fully durable, sent, and applied. Only
     // at this boundary may the core materialize the next bounded Ready page;

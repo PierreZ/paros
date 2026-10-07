@@ -3,6 +3,7 @@ use super::{
     NodeRole, Party, Slot,
 };
 use crate::membership::AcceptorConfig;
+use crate::quorum_read::ReadBasis;
 
 impl ColocatedNode {
     // ---- helpers ----------------------------------------------------------
@@ -135,6 +136,43 @@ impl ColocatedNode {
         assert!(
             self.acceptors_since > since,
             "a learned configuration is newer"
+        );
+    }
+
+    /// Learn the read basis `(config, since, fence)` of a leadership that
+    /// **won** `since` (#260): this node's own election or handoff install,
+    /// or a beat at or above its promise. Only a matchmaker deployment keeps
+    /// one; the basis only moves forward, and a configuration naming a node
+    /// outside the pool is ignored whole, as [`ColocatedNode::learn_config`]
+    /// ignores it.
+    pub(super) fn learn_read_basis(
+        &mut self,
+        config: AcceptorConfig,
+        since: Ballot,
+        fence: Option<Slot>,
+    ) {
+        if !self.config.has_matchmakers()
+            || self.read_basis.as_ref().is_some_and(|b| b.since > since)
+            || !config.is_drawn_from(&self.pool)
+        {
+            return;
+        }
+        let before = self.read_basis.as_ref().map(|b| b.since);
+        self.read_basis = Some(ReadBasis {
+            config,
+            since,
+            fence,
+        });
+        // The basis only moves forward, and lands exactly on what was learned.
+        assert!(
+            before.is_none_or(|b| b <= since),
+            "a read basis never moves back"
+        );
+        assert!(
+            self.read_basis
+                .as_ref()
+                .is_some_and(|b| b.since == since && b.fence == fence),
+            "a learned read basis binds its ballot and fence"
         );
     }
 

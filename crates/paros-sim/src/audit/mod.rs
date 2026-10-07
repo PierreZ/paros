@@ -35,6 +35,11 @@ macro_rules! reach_once {
     };
 }
 
+/// How many tokens behind a node's newest read an unserved read's floor is
+/// kept (#260): far past any read's TTL, so a dropped floor is a read that
+/// can no longer be served, never one the check skips.
+const READ_FLOOR_SPAN: u64 = 4096;
+
 mod client;
 mod journal_model;
 pub(crate) mod journals;
@@ -1133,9 +1138,30 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn quorum_read_opened(&self, node: NodeId, ctx: u64) {
+        let mut st = self.state();
+        // A token is unique within one incarnation and restarts at zero on
+        // the next, so every entry of this node at or past `ctx` is a dead
+        // incarnation's; one `READ_FLOOR_SPAN` tokens behind is a read long
+        // past its TTL that was never served. Drop both, keeping the map to
+        // the reads that can still be (a dropped entry only skips a check).
+        let stale: Vec<(u64, u64)> = st
+            .read_floors
+            .range((node.0, 0)..=(node.0, u64::MAX))
+            .map(|(key, _)| *key)
+            .filter(|(_, c)| *c >= ctx || c.saturating_add(READ_FLOOR_SPAN) < ctx)
+            .collect();
+        for key in stale {
+            st.read_floors.remove(&key);
+        }
+        let floor = st.chosen.keys().next_back().copied();
+        st.read_floors.insert((node.0, ctx), floor);
+    }
+
     fn quorum_read_served(
         &self,
         node: NodeId,
+        ctx: u64,
         row: Option<usize>,
         watermark: Option<Slot>,
         served: Option<Slot>,
@@ -1144,6 +1170,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         let now = self.now_ms();
         let mut st = self.state();
+        // The read half of linearizability where the fact arrives (#260):
+        // every slot chosen — applied anywhere — before the read opened is in
+        // the prefix it serves. Stronger than the client-history search,
+        // which needs an acknowledged write before the read: any chosen slot
+        // counts here, a no-op or a refused write included.
+        if let Some(floor) = st.read_floors.remove(&(node.0, ctx)) {
+            assert_always!(
+                served.map(|s| s.0) >= floor,
+                "quorum read: a read serves every slot chosen before it opened",
+                {
+                    "node" => node.0,
+                    "served" => crate::signed_watermark(served.map(|s| s.0)),
+                    "floor" => crate::signed_watermark(floor),
+                    "watermark" => crate::signed_watermark(watermark.map(|s| s.0))
+                }
+            );
+        }
         // The replica half of §3.4: a node answers only once its own chosen
         // prefix covers the maximum watermark its row reported — the step
         // that makes every write acked before the read visible to it.
@@ -1427,6 +1470,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 reach_once!(
                     st.crashed_after_sync,
                     "the driver crashes after sync and before sending a batch"
+                );
+            }
+            Seam::AfterPrepareSent => {
+                reach_once!(
+                    st.crashed_after_prepare,
+                    "the driver crashes with a campaign's Prepares in flight"
                 );
             }
             // The matchmaker's seams are reported through
@@ -2158,6 +2207,22 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         reach_once!(
             st.non_member_campaign_skipped,
             "reconfiguration: a node outside the acceptor set declines to campaign"
+        );
+    }
+
+    fn read_without_basis(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.read_without_basis,
+            "quorum read: a node without a read basis opens no read"
+        );
+    }
+
+    fn pre_read_refused_unheard(&self, _node: NodeId, _count: u64) {
+        let mut st = self.state();
+        reach_once!(
+            st.pre_read_refused_unheard,
+            "quorum read: a rebooted node answers no pre-read before it heard"
         );
     }
 

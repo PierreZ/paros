@@ -83,6 +83,27 @@ in its slot, so the Phase-1 quorum reports the slot, and the read waits until
 `Replica::covers` says the applied prefix reaches it. The wait resolves inside
 `advance_chosen_index`, the moment the recovered suffix decides again.
 
+## The campaign trap
+
+Reconfiguration adds a second trap. On a deployment with matchmakers, a
+configuration is bound to a ballot, and an acceptor learns the next one from
+the `Prepare` it promises. A campaign may never finish, though, and the older
+configurations it would have to cover may still hold slots that its own
+quorums never voted. In #260 a leader under `{0, 1, 3}` with a Phase-2 quorum
+of one chose a slot alone. It then campaigned with `{0, 2, 3}` and died.
+Acceptor 3 had promised the campaign, so it read over a majority of the new
+configuration, `{2, 3}`. Neither had voted the slot, and for a second every
+read it served came back without it.
+
+So a read is judged over a **read basis** (`ReadBasis`), not over the node's
+belief. A basis is the configuration of a leadership that won its ballot: its
+own election or handoff, or the leader's heartbeat. It carries that
+leadership's **fence**, the highest slot its winning Phase 1 could have found
+chosen under an older configuration. The read is served at the larger of the
+row's watermark and the fence. A node that promised a newer campaign, or has
+heard no leader since it booted, opens no read until the next beat arrives.
+Reads go unavailable during a campaign; they never go stale.
+
 ## What "linearizable" means here
 
 The word has a precise definition from Herlihy and Wing, quoted at length in the
@@ -129,6 +150,7 @@ is always one a read through this node can already see.
 | Protocol name | Symbol |
 |---|---|
 | Open a read | `ColocatedNode::quorum_read(ctx)`, `QuorumReads::open` |
+| Which configuration | `ColocatedNode::read_basis`, `ReadBasis{config, since, fence}`, `Heartbeat{fence}` |
 | The evidence | `PreRead{reply_to, ctx}`, `PreReadAck{watermark}`, `Acceptor::vote_watermark` |
 | Settle and serve | `QuorumReads::fold`, `QuorumReads::serve`, `Replica::covers` |
 | The driver seam | `Ready::read_states`, `ReadState{ctx, index}` |

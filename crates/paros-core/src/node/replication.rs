@@ -37,11 +37,15 @@ impl ColocatedNode {
             self.ballot <= self.acceptor.promised(),
             "a beat's ballot is one this node promised"
         );
+        // The leadership's fence rides beside its configuration (#260), on a
+        // matchmaker deployment only: the follower's read basis is both.
+        let fence = config.as_ref().and(self.proposer.fence());
         self.broadcast(Message::Heartbeat {
             from: self.config.id,
             ballot: self.ballot,
             commit: self.replica.chosen_index(),
             config,
+            fence,
         });
     }
 
@@ -53,6 +57,7 @@ impl ColocatedNode {
         ballot: Ballot,
         commit: Option<Slot>,
         config: Option<AcceptorConfig>,
+        fence: Option<Slot>,
     ) {
         let me = self.config.id;
         // Wire hygiene: a beat adopts its sender as leader (and triggers
@@ -73,6 +78,11 @@ impl ColocatedNode {
             }
             // The leader's configuration rides on its beats, so a follower
             // that missed the `Prepare` still learns the latest one.
+            // A beat is a won leadership's (#260): what it carries is a read
+            // basis, unlike the `Prepare` of a campaign that may never finish.
+            if let Some(basis) = config.clone() {
+                self.learn_read_basis(basis, ballot, fence);
+            }
             self.follow_ballot(ballot, config);
             // Ack the beat, echoing its ballot: the leader counts these toward
             // its `CheckQuorum` window. Below-promise beats fall through

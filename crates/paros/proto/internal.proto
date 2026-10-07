@@ -257,6 +257,10 @@ message Heartbeat {
   reserved 5; // was config_id, the dropped configuration tag
   // The leader's registered configuration (absent on plain Multi-Paxos).
   optional .paros.common.v1.AcceptorConfig config = 6;
+  // The leadership's fence (#260): with `config`, the read basis a follower
+  // judges its quorum reads over (absent on plain Multi-Paxos, or when the
+  // leadership fenced nothing).
+  optional uint64 fence = 7;
 }
 
 message HeartbeatAck {

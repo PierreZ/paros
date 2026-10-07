@@ -248,6 +248,30 @@ fn report_membership<A: Audit>(
             "campaign_skipped_non_member"
         );
     }
+    assert!(
+        membership.reads_without_basis >= last_membership.reads_without_basis,
+        "reads without a basis are counted monotonically"
+    );
+    assert!(
+        membership.pre_reads_refused_unheard >= last_membership.pre_reads_refused_unheard,
+        "unheard pre-read refusals are counted monotonically"
+    );
+    if membership.reads_without_basis != last_membership.reads_without_basis {
+        audit.read_without_basis(NodeId(self_id), membership.reads_without_basis);
+        tracing::info!(
+            node = self_id,
+            count = membership.reads_without_basis,
+            "read_without_basis"
+        );
+    }
+    if membership.pre_reads_refused_unheard != last_membership.pre_reads_refused_unheard {
+        audit.pre_read_refused_unheard(NodeId(self_id), membership.pre_reads_refused_unheard);
+        tracing::info!(
+            node = self_id,
+            count = membership.pre_reads_refused_unheard,
+            "pre_read_refused_unheard"
+        );
+    }
     if membership.step_downs != last_membership.step_downs {
         audit.non_member_leader_resigned(NodeId(self_id), membership.step_downs);
         tracing::info!(

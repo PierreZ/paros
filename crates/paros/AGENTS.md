@@ -21,7 +21,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
 - `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
-- `hooks.rs` → `DriverHooks`, `NoHooks`, `Seam` (four), `HandoffContext`, `Reply` → BUGGIFY prong-1 surface.
+- `hooks.rs` → `DriverHooks`, `NoHooks`, `Seam` (five), `HandoffContext`, `Reply` → BUGGIFY prong-1 surface.
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.

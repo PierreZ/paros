@@ -616,6 +616,9 @@ impl ColocatedNode {
         let fence = next_slot.0.checked_sub(1).map(Slot);
         self.proposer
             .open_authority(fence, self.is_acceptor().then_some(me));
+        // An installed authority is a won ballot too (#260): the inherited
+        // fence covers whatever the predecessor's own fence did.
+        self.learn_read_basis(self.acceptors.clone(), self.ballot, fence);
         self.handoff.installed = self.handoff.installed.saturating_add(1);
 
         // Learn the decided part of the tail. Trusting the predecessor here is

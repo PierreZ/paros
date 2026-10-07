@@ -15,7 +15,7 @@
 //! [`Ready::read_states`]: crate::Ready::read_states
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
-use super::{ColocatedNode, Message, NodeId, NodeRole, ReadState, Slot};
+use super::{BeliefSource, ColocatedNode, Message, NodeId, NodeRole, ReadState, Slot};
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
 use crate::{Command, Control, Delegation, ProposeResult};
@@ -84,29 +84,38 @@ impl ColocatedNode {
     pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
         let me = self.config.id;
         let marks = self.durable_marks();
+        // No basis, no read (#260): the read opens nothing, and the driver's
+        // retry sweep answers it unserved — the client asks again, here or
+        // elsewhere, once a won leadership's beat has been heard.
+        let Some(basis) = self.read_basis() else {
+            self.counters.quorum_reads_without_basis += 1;
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment reads without a basis"
+            );
+            self.assert_marks_monotone(marks);
+            self.assert_invariants();
+            return;
+        };
         // The reader is its own first answer when it sits in the row: its
         // watermark is a fact its durable log holds, exactly what a peer's
         // ack would claim.
-        let row = self.acceptors.read_row(ctx, row);
-        let own = self
-            .acceptors
+        let row = basis.config.read_row(ctx, row);
+        let own = basis
+            .config
             .is_phase1_addressee(me, row)
             .then(|| (me, self.acceptor.vote_watermark()));
-        let addressees = self.quorum_reads.open(
-            ctx,
-            row,
-            self.acceptors.clone(),
-            self.acceptors_since,
-            self.tick_count,
-            own,
-        );
+        let config = basis.config.clone();
+        let addressees = self
+            .quorum_reads
+            .open(ctx, row, basis, self.tick_count, own);
         // The row's other members, and nobody outside the configuration.
         assert!(
             !addressees.contains(&me),
             "a reader never pre-reads itself over the wire"
         );
         assert!(
-            addressees.iter().all(|to| self.acceptors.contains(*to)),
+            addressees.iter().all(|to| config.contains(*to)),
             "a pre-read addresses only members of the configuration"
         );
         for to in addressees {
@@ -133,6 +142,22 @@ impl ColocatedNode {
         // outside the pool by construction; the driver routes it through the
         // deployment map and drops an address it does not know).
         if !self.in_pool(reply_to) && !self.config.has_replicas() {
+            return;
+        }
+        // An answer carries this node's configuration ballot, which a reader
+        // reads as "no campaign above the read's basis reached me" (#260).
+        // A rebooted node's belief is the bootstrap default bound to no
+        // ballot, whatever it promised before the crash: it answers nothing
+        // until its membership probe (or a leader) has told it what is in
+        // force, or a read could complete over a promise it forgot.
+        if self.config.has_matchmakers() && self.belief_source == BeliefSource::Bootstrap {
+            self.counters.pre_reads_refused_unheard += 1;
+            // Negative space: an unheard belief is bound to no ballot, the
+            // very thing an answer would have misreported.
+            assert!(
+                self.acceptors_since == crate::types::Ballot::zero(),
+                "an unheard belief is bound to no ballot"
+            );
             return;
         }
         let writes_at_entry = self.pending_writes.len();

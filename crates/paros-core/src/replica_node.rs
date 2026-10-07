@@ -117,7 +117,7 @@ use crate::journal_state::JournalState;
 use crate::membership::{AcceptorConfig, ReplicaId};
 use crate::message::{Audience, Message};
 use crate::node::READ_TTL_TICKS;
-use crate::quorum_read::QuorumReads;
+use crate::quorum_read::{QuorumReads, ReadBasis};
 use crate::replica::Replica;
 use crate::state::Config;
 use crate::storage::Storage;
@@ -139,6 +139,9 @@ pub struct ReplicaCounters {
     pub trim_jumps: u64,
     /// Quorum reads opened here (#143 on a replica, §3.4).
     pub quorum_reads: u64,
+    /// Quorum reads not opened for want of a read basis (#260): no beat
+    /// heard yet this incarnation, on a matchmaker deployment.
+    pub reads_without_basis: u64,
     /// Messages that are not a replica's to hear (`Prepare`, `Accept`, …),
     /// or a beat from outside the pool.
     pub ignored: u64,
@@ -168,6 +171,10 @@ pub struct ReplicaNode {
     acceptors: AcceptorConfig,
     /// The ballot `acceptors` is bound to here.
     acceptors_since: Ballot,
+    /// The read basis (#260, [`ReadBasis`]): the configuration, ballot and
+    /// fence of the last won leadership whose beat this replica heard. Only
+    /// a matchmaker deployment keeps one, and reads none before it.
+    read_basis: Option<ReadBasis<NodeId>>,
     /// The open quorum reads (§3.4): a row's watermarks, then this
     /// replica's own applied prefix.
     quorum_reads: QuorumReads<NodeId>,
@@ -243,6 +250,7 @@ impl ReplicaNode {
             leader: None,
             acceptors,
             acceptors_since: Ballot::zero(),
+            read_basis: None,
             quorum_reads: QuorumReads::new(),
             tick_count: 0,
             pending_writes: Vec::new(),
@@ -321,8 +329,8 @@ impl ReplicaNode {
                 ballot,
                 commit,
                 config,
-                ..
-            } => self.on_heartbeat(from, ballot, commit, config),
+                fence,
+            } => self.on_heartbeat(from, ballot, commit, config, fence),
             Message::PreReadAck {
                 from,
                 ctx,
@@ -387,15 +395,23 @@ impl ReplicaNode {
     /// internal invariant is broken.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, ctx)))]
     pub fn quorum_read_in(&mut self, ctx: u64, row: Option<usize>) {
-        let row = self.acceptors.read_row(ctx, row);
-        let addressees = self.quorum_reads.open(
-            ctx,
-            row,
-            self.acceptors.clone(),
-            self.acceptors_since,
-            self.tick_count,
-            None,
-        );
+        // On a matchmaker deployment a read waits for a won leadership's
+        // beat (#260): the bootstrap configuration is no basis, the
+        // configurations in force since may hold slots its quorums never
+        // voted. The driver's retry sweep answers the read unserved.
+        let Some(basis) = self.read_basis() else {
+            self.counters.reads_without_basis += 1;
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment reads without a basis"
+            );
+            self.assert_invariants();
+            return;
+        };
+        let row = basis.config.read_row(ctx, row);
+        let addressees = self
+            .quorum_reads
+            .open(ctx, row, basis, self.tick_count, None);
         self.counters.quorum_reads += 1;
         // A replica votes nothing, so it is never its own row's addressee.
         assert!(
@@ -456,6 +472,7 @@ impl ReplicaNode {
         ballot: Ballot,
         commit: Option<Slot>,
         config: Option<AcceptorConfig>,
+        fence: Option<Slot>,
     ) {
         // Wire hygiene, as on a node: only a node of the pool is followed.
         if !self.in_pool(from) {
@@ -467,10 +484,73 @@ impl ReplicaNode {
             self.leader.is_some_and(|l| self.in_pool(l)),
             "a replica follows a pooled node"
         );
+        if let Some(config) = &config {
+            self.learn_read_basis(config, ballot, fence);
+        }
         self.learn_config(ballot, config);
         if commit > self.replica.chosen_index() {
             self.request_catch_up(from, self.replica.first_unchosen());
         }
+    }
+
+    /// The basis this replica's quorum reads are judged over (#260,
+    /// [`ReadBasis`]): on a matchmaker deployment the last won leadership's
+    /// beat (`None` before the first), on plain Multi-Paxos the static
+    /// configuration with no fence.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn read_basis(&self) -> Option<ReadBasis<NodeId>> {
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.read_basis.is_none(),
+                "a plain replica stores no read basis"
+            );
+            return Some(ReadBasis {
+                config: self.acceptors.clone(),
+                since: self.acceptors_since,
+                fence: None,
+            });
+        }
+        if let Some(basis) = &self.read_basis {
+            assert!(
+                basis.config.is_drawn_from(self.config.pool()),
+                "a replica's read basis is drawn from the pool"
+            );
+        }
+        self.read_basis.clone()
+    }
+
+    /// Learn the read basis a won leadership's beat carries (#260): on a
+    /// matchmaker deployment only, forward only, drawn from the pool.
+    fn learn_read_basis(&mut self, config: &AcceptorConfig, ballot: Ballot, fence: Option<Slot>) {
+        if !self.config.has_matchmakers()
+            || self.read_basis.as_ref().is_some_and(|b| b.since > ballot)
+            || !config.is_drawn_from(self.config.pool())
+        {
+            return;
+        }
+        let before = self.read_basis.as_ref().map(|b| b.since);
+        self.read_basis = Some(ReadBasis {
+            config: config.clone(),
+            since: ballot,
+            fence,
+        });
+        assert!(
+            before.is_none_or(|b| b <= ballot),
+            "a read basis never moves back"
+        );
+        assert!(
+            self.read_basis.as_ref().is_some_and(|b| b.since == ballot),
+            "a learned read basis binds its ballot"
+        );
+        assert!(
+            self.read_basis.as_ref().is_some_and(|b| b.fence == fence),
+            "a learned read basis binds its fence"
+        );
     }
 
     /// Adopt `config` when `ballot` is above the one the current belief is
