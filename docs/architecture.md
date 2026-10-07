@@ -271,7 +271,8 @@ Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, 
 - `node_id`: random, minted at format, stored beside the format marker (#147). It is the
   member's identity and the registry key. A wiped disk gets a new `node_id`, so "a wiped
   identity never rejoins" holds by construction.
-- `addr`: an attribute that may change across restarts.
+- `addr`: an attribute that may change across restarts, the machine's advertised address
+  (`PAROS_ADVERTISE`, below).
 - `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
 
 The same `node_id` with a new incarnation is a reboot: the machine rejoins in place and keeps its
@@ -292,6 +293,19 @@ at the same address removes the old member). Peers holding the old reference lea
 request, refused with `StaleIncarnation`. That pull model is sufficient: Delos clients refresh
 their cached view only when an append fails on a sealed loglet. No push detection is asked of
 moonpool.
+
+**Listen and advertised addresses** (decided on 2026-10-07, #257). A machine's configuration
+carries two addresses, as FDB's `listen_address` / `public_address` and CockroachDB's
+`--listen-addr` / `--advertise-addr` do: `PAROS_LISTEN`, what it binds (may be a wildcard), and
+`PAROS_ADVERTISE`, what peers and clients dial (may be a hostname). `PAROS_ADVERTISE` defaults to
+`PAROS_LISTEN` when that is not a wildcard, and start is refused when `PAROS_LISTEN` is a
+wildcard and `PAROS_ADVERTISE` is unset. A machine always binds `PAROS_LISTEN`, never an address
+read from the cell plan or the registry; `RegisterNode`'s `addr` is the advertised address, and
+peer address books are folds of the registry (#216), never of the plan `init` wrote. An
+advertised name is kept as a name and resolved at dial time, so a machine whose IP changes heals
+with no registry write (amends #209's "names resolved once at startup" for peer addresses; the
+listen side still resolves once). A changed `PAROS_ADVERTISE` across a restart is the
+machine-moved case above: same `node_id`, new `addr`.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
@@ -540,6 +554,12 @@ scope covers, and the frontend the journal name). Until the frontend exists (#19
 resolves with operator rights. A name is free again once its delete completes; a recreated
 tenant or journal draws a fresh id, so an old id never aliases a new name.
 
+**Display** (decided on 2026-10-07, #239). Human output prints an id as short hex, git-style
+(e.g. `cell=2c94f1`), widened when a prefix is ambiguous within the listing; `--json` keeps the
+full id, and a command that takes an id accepts a unique prefix. An internal tenant (section 3.7)
+shows a display label derived from its groups (`fleet`, `cell` with its cell), display only,
+never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
+
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
 well-known rendezvous call, section 3.2), and nodes do no authorization.
@@ -634,6 +654,12 @@ with full records and no other role (section 5). A tenant's `survives` (section 
 kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its resolvers
 (section 3.5), and every cell answers the second hop for its own tenants.
 
+**The fleet and each cell have a name** (decided on 2026-10-07, #252): a label chosen at `init`
+(`--fleet-name`, `--cell-name`) and again with `--cell-name` when a cell is added (M12); stored
+in the fleet entry and the cell entry, unique within the fleet, refused when taken. `tenant
+list`, `inspect` and `status` (section 3.6) show it beside the id. Same rule as a tenant's or a
+journal's name (section 3.5): a label, never the identity; ids stay random (section 3.8).
+
 ```
  fleet F: the fleet directory (tenant → cell), held by the fleet tenant
  ┌────────────────────────────┬────────────────────────────┬────────────────────────────┐
@@ -701,9 +727,10 @@ metadata version lets a reader refuse a format it does not understand.
   **group**; the fleet directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns the fleet tenant's `JournalIdentifier`
   when it joins the fleet, from the cell that hosts the fleet tenant.
-- The cell entries also carry the cell's `kind` and its rendezvous name, and the tenant entries
-  the tenant's `survives`, mirrored into its control journal (decided on 2026-10-07, #252), so a
-  fleet that mixes cell kinds is entries, never a new field.
+- The fleet entry carries the fleet's name; the cell entries also carry the cell's `kind`, its
+  rendezvous name and its own name, and the tenant entries the tenant's `survives`, mirrored into
+  its control journal (decided on 2026-10-07, #252), so a fleet that mixes cell kinds is entries,
+  never a new field.
 - Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through the fleet directory.
@@ -772,7 +799,10 @@ cell's log position, so nothing is renumbered when cells are added, removed or r
 on 2026-10-02, #226). **No identifier is fixed** (decided on 2026-10-04): there is no well-known
 tenant, no well-known journal and no reserved range. `0` means unset in every id space, and that
 is the only value with a meaning. **No id has a default** either: an id is drawn or read, never
-assumed, and unset is a state to refuse, not a value to fall back on.
+assumed, and unset is a state to refuse, not a value to fall back on. Names are labels beside
+these ids (decided on 2026-10-07, #252): the fleet's, a cell's, a tenant's and a journal's name
+(sections 3.5, 3.7) are chosen and unique within their scope, never derived from or reused as an
+id.
 
 - `node_id`, `cell_id`, `fleet_id`: random, minted at format, `init` and `init` respectively, and
   stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `fleet_id`). They
@@ -1242,7 +1272,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
