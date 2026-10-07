@@ -12,7 +12,7 @@ below takes the journal from `init`'s output (`journals=TENANT/JOURNAL`).
 Needs Docker with the Compose plugin; nothing else (the image is a plain Rust build).
 
 ```sh
-# Five machines: node1..node3 (storage, zones a/b/c), storage4, proxy1 (stateless).
+# Five machines: node1..node3 (storage, zones a/b/c), storage4, stateless1 (stateless).
 docker compose up -d --build
 
 # Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
