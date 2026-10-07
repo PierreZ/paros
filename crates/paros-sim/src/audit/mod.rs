@@ -315,6 +315,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]
+    fn floor_requested(&self, node: NodeId, first: Slot) {
+        let mut st = self.state();
+        let requested = st.requested_floor.entry(node.0).or_insert(0);
+        *requested = (*requested).max(first.0);
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]
     fn truncated(&self, node: NodeId, first: Slot) {
         let now = self.now_ms();
         let mut st = self.state();
@@ -1302,6 +1309,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         for slot in missing {
             let explained = st.corruption_crashed_records.contains(&(node.0, slot))
                 || st.corruption_crashed_nodes.contains(&node.0)
+                // A floor the node staged and a crash inside its commit
+                // left durable unreported: the slot was legally compacted
+                // (a floor only moves inside a walked chosen prefix, which
+                // the truncation and trim-point oracles judge).
+                || st
+                    .requested_floor
+                    .get(&node.0)
+                    .is_some_and(|floor| slot < *floor)
                 // Stage 8's second explanation: the record was classified
                 // recoverable and reported into the tri-state this boot —
                 // the peer-recovery path owns it now (#71: explained

@@ -175,6 +175,14 @@ pub trait Audit {
     /// This node durably advanced its chosen index.
     fn chosen_index(&self, node: NodeId, index: Slot) {}
 
+    /// This node is about to raise its compaction floor to `first` (a
+    /// `Truncate` or a trim-point jump, staged before its sync). A store
+    /// whose commit has an unknown outcome can make the floor durable even
+    /// when the sync never returns (a crash inside the commit), so a
+    /// recovered log may lack records below a floor that was only
+    /// requested, never reported [`truncated`](Audit::truncated).
+    fn floor_requested(&self, node: NodeId, first: Slot) {}
+
     /// This node durably truncated its log prefix; `first` is the new
     /// compaction floor (the first slot still retained).
     fn truncated(&self, node: NodeId, first: Slot) {}

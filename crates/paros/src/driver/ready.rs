@@ -404,8 +404,14 @@ pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
                     .await
             }
             WriteOp::SetChosenIndex(slot) => storage.set_chosen_index(*slot).await,
-            WriteOp::Truncate { first, sealed } => storage.truncate(*first, *sealed).await,
-            WriteOp::TrimmedTo { point, state } => storage.trimmed_to(*point, *state).await,
+            WriteOp::Truncate { first, sealed } => {
+                audit.floor_requested(NodeId(self_id), *first);
+                storage.truncate(*first, *sealed).await
+            }
+            WriteOp::TrimmedTo { point, state } => {
+                audit.floor_requested(NodeId(self_id), *point);
+                storage.trimmed_to(*point, *state).await
+            }
         };
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
