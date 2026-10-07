@@ -48,7 +48,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+    RandomProvider, SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes,
+    buggify_with_prob,
 };
 use paros::client::Writer;
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
@@ -666,6 +667,20 @@ impl FleetOps {
 /// control plane that cannot finish one operation in this long is stuck.
 const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
+/// The pause before an operator's next resumption in the recovery tail:
+/// `beat` times a factor drawn uniformly from `1..=2^min(attempt, 4)`. Two
+/// operators resuming one interrupted operation each claim its journals, so
+/// a fixed beat keeps them superseding each other in lockstep, generation
+/// after generation, past [`FLEET_SETTLE`] (witness 17409558280995831005:
+/// two clients finishing one `init` traded the fleet tenant's control
+/// journal from generation 12 to 48); a randomized, growing backoff lets one
+/// of them run its steps uncontested.
+fn settle_backoff(ctx: &SimContext, beat: Duration, attempt: u32) -> Duration {
+    let span = 1_u32 << attempt.min(4);
+    let factor = 1 + ctx.random().random_range(0..span);
+    beat * factor
+}
+
 impl FleetOps {
     /// The recovery tail's fleet half (#247): resume this client's pending
     /// operation until it ends. Liveness: once the chaos window closed, an
@@ -684,14 +699,20 @@ impl FleetOps {
         }
         let deadline = ctx.time().now() + FLEET_SETTLE;
         let mut draw = self.client_id;
+        let mut attempt = 0_u32;
         while !self.resume(ctx, nodes, policy, draw).await {
             if ctx.time().now() >= deadline
                 || ctx.shutdown().is_cancelled()
-                || ctx.time().sleep(beat).await.is_err()
+                || ctx
+                    .time()
+                    .sleep(settle_backoff(ctx, beat, attempt))
+                    .await
+                    .is_err()
             {
                 break;
             }
             draw = draw.wrapping_add(1);
+            attempt = attempt.saturating_add(1);
         }
         assert_always!(
             self.pending.is_none() || ctx.shutdown().is_cancelled(),
