@@ -85,7 +85,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `bf62287` (moonpool#308's branch until it merges): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `abb6f7a` (moonpool#308 merged): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), dev `moonpool-sim` (`:56`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - The pin is **eight lines**: four here, `crates/paros-sim/Cargo.toml:20,29`,
