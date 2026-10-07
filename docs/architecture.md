@@ -7,8 +7,8 @@ direction. Decided on 2026-09-30; the fleet, the control hierarchy, identifiers,
 recovery and the fenced `Truncate` decided on 2026-10-02; the leader-uuid API with its two
 journal modes, election over a journal, the request channel, liveness, names, trust, capacity as
 role slots, journals born with their matchmaker set, tenant modes, the data-plane limits, storage
-chaos in simulation and the deferral of recovery decided on 2026-10-04; the router and the gateway
-decided on 2026-10-07. The milestones at the end carry the issue numbers.
+chaos in simulation and the deferral of recovery decided on 2026-10-04; the router and the gateway,
+and zones inside a cell, decided on 2026-10-07. The milestones at the end carry the issue numbers.
 
 ## 1. Goal
 
@@ -405,16 +405,37 @@ default, a **redundancy mode** — `single`, `double` or `triple`, a majority ov
 five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
 (`gateways=`, `proxy_leaders=` and `batchers=` per tenant, `replicas=` per journal).
 
+**`single` survives no zone** (decided on 2026-10-07, #215): a majority over one acceptor cannot
+meet the zone rule of section 5. It stays a mode without zone survival, for development and the
+toy, shown `Degraded` in `parosctl status` (section 3.6), and it is refused for every control
+journal and every election journal. Control and election journals are born `double` (the cell's
+own on its three seeds, one per zone) and raised to `triple` by the cell coordinator, through
+ordinary reconfiguration, once five `storage` machines span three zones.
+
 **How roles are sized** (decided on 2026-10-04). Stateless roles (gateways, proxy leaders,
 batchers) are **per-tenant pools**: one pool per role, shared by all the tenant's journals and
 keyed by `JournalIdentifier` inside, so a hot journal uses every instance and a quiet one none
 (#193). Storage roles — acceptors, replicas — are **per journal**, because they hold that
 journal's data; matchmakers are one set per tenant. **Placement spreads load across the cell**
-(#212): every role's instances go to the eligible machines of its class, least-loaded slots
-first, and one journal's storage instances never share a machine. With six `storage` machines
-available, a tenant with three journals of two replicas each gets its six replicas on six
-machines; its pool of proxy leaders spreads the same way over the `stateless` machines, each
-instance serving all three journals.
+(#212): every role's instances go to the eligible machines of its class zone by zone in round
+robin, least-loaded inside a zone, ties broken by a draw seeded per tenant (shuffle sharding
+inside the cell), and one journal's storage instances never share a machine (amended on
+2026-10-07, #215: least-loaded slots first could put three of five acceptors in one zone). With
+six `storage` machines available, a tenant with three journals of two replicas each gets its six
+replicas on six machines; its pool of proxy leaders spreads the same way over the `stateless`
+machines, each instance serving all three journals.
+
+**The leader follows its writer** (decided on 2026-10-07, #215), the main latency lever inside a
+cell: with a journal's leader in its writer's zone a write costs one cross-zone round trip,
+elsewhere two. Three pieces carry the writer's zone: the rendezvous answer tags each reference
+with its zone (section 3.5), the client prefers a gateway in its own zone (client configuration,
+never drawn by the library), and the gateway stamps the origin zone on every write it forwards.
+The leader's driver in `paros`, never the core, counts origins per zone over a window and hands
+off through `relinquish_to` when another zone dominates past a hysteresis threshold (WPaxos §5.1's
+majority-zone policy). The window and the threshold are driver tunables, so `buggify_knob!`s with
+documented floors. The cost is one hop, and only a ballot's minter may relinquish, so each
+election buys one free move and the next costs a Phase 1; the hysteresis keeps it from being
+spent on noise.
 
 Flexible `{q1, q2}` quorums stay a library capability and
 are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
@@ -430,9 +451,10 @@ each hosting many tenants' sets keyed by `JournalIdentifier`, the way every role
 Reconfiguration is the operational primitive for everything, so no tenant opts out of it.
 
 Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
-tenant is created: one coordinator slot, its matchmaker set and one acceptor quorum of its
-redundancy mode. The fleet tenant and the cell tenant count too. A cell refuses a tenant whose
-footprint it cannot book.
+tenant is created: one coordinator slot, its matchmaker set, one acceptor quorum of its
+redundancy mode for data and one `double` quorum for its control journal (amended on 2026-10-07,
+#215: a `single` tenant's control journal still needs `double`). The fleet tenant and the cell
+tenant count too. A cell refuses a tenant whose footprint it cannot book.
 
 ### 3.5 The gateway and the router
 
@@ -572,12 +594,14 @@ fleet (decided on 2026-10-04).
 
 The fleet runs from M9 with one cell (decided on 2026-10-02, #226).
 
-**A cell** spans several availability zones: enough failure domains for its quorums. Zone survival
-stays a property of each journal's quorums (section 5). A cell is a blast-radius boundary for bad
-deploys, overload and poison pills, not a failover domain; the AWS cell-based architecture
-guidance says the same (cells contain overload and bad deployments and are not designed for
-failover; multi-AZ cells avoid replicating between cells). Cell creation is refused if its
-machines do not cover the required zones.
+**A cell** is one set of `parosd` machines in one region across at least three availability
+zones (decided on 2026-10-07, #215): enough failure domains for its quorums. Zone survival
+stays a property of each journal's quorums (section 5). Three boundaries nest: the zone is the
+infrastructure failure domain, the cell the blast radius, the tenant the isolation unit. A cell
+is a blast-radius boundary for bad deploys, overload and poison pills, not a failover domain;
+the AWS cell-based architecture guidance says the same (cells contain overload and bad
+deployments and are not designed for failover; multi-AZ cells avoid replicating between cells). Cell creation is refused if its
+machines span fewer than three zones.
 
 **The fleet tenant always exists** (named *meta* until 2026-10-04). It is one tenant whose control journal also holds the directory, so it is
 a single journal. In M9 it lives in the only cell; any cell may host it later. It stays small: it
@@ -658,15 +682,16 @@ never the authority: if it disagrees with the control journal's leader, the lead
 The fleet tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
 
-**Open for M12: the cell inside the configuration.** Today a matchmaker's registry binds an
-acceptor set and its quorum system to a ballot, and names no cell. Node ids are fleet-unique, so a
-reconfiguration onto another cell's machines already moves a journal's data. If a configuration
-also carried its `cell_id`, the move would itself be decided by Paxos: the effective
-configuration (the highest-ballot reconfiguration a matchmaker quorum holds) would name the cell
-that owns the journal, the directory would become a cache of that fact, and a reconfiguration
-naming another cell for a cell tenant's journal could be refused where it is registered. The
-cost is one field in `AcceptorConfig` that the core never decides on, and every node knowing its
-own cell. Recorded on #232.
+**The cell inside the configuration** (decided on 2026-10-07, #215, #232; open until then). A
+matchmaker's registry binds an acceptor set and its quorum system to a ballot, and from M11
+`AcceptorConfig` also carries the configuration's `cell_id`, in the same single format bump as
+its zone tags (section 5). Node ids are fleet-unique, so a reconfiguration onto another cell's
+machines already moves a journal's data; with the `cell_id` in the configuration the move is
+itself decided by Paxos: the effective configuration (the highest-ballot reconfiguration a
+matchmaker quorum holds) names the cell that owns the journal, the directory is a cache of that
+fact, and a reconfiguration naming another cell for a cell tenant's journal can be refused where
+it is registered. The cost is one field in `AcceptorConfig` that the core never decides on, and
+every node knowing its own cell.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
 tombstone set so it cannot silently rejoin), moving tenants between cells, moving the fleet tenant, the
@@ -692,6 +717,12 @@ assumed, and unset is a state to refuse, not a value to fall back on.
 - The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the
   leader for one term, never reused. A writer never chooses an identity that another process could
   share.
+- **Zone tags** (decided on 2026-10-07, #215): a `ZoneTag` is a pair `(region_tag, az_tag)` of
+  opaque small integers, and equality on each component is the only operation; nothing orders or
+  names them. The cell coordinator assigns a machine's tag when it applies its `RegisterNode`
+  (section 3.2), from a `failure_domain` → tag table held in the cell tenant's control journal,
+  not in the cell plan, which is written once; the tenant coordinator reads the tags from its
+  registry fold when it composes a configuration (section 5).
 - **Tombstones** (removed tenant ids, dropped tenants, deleted journal ids) are kept forever, a
   `u64` each. They are the one part of control state bounded by history rather than by live
   entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned
@@ -921,15 +952,69 @@ the WPaxos read (section 10) established for one region with several availabilit
   The grid stays the opt-in throughput mode (section 3.4), with its cost (one dead acceptor
   freezes its column until reconfiguration) stated to the tenant that picks it; the redundancy
   modes are the zone-surviving default.
-- What is adopted: zone labels live inside `AcceptorConfig`, bound to the ballot with the
-  configuration, because two nodes that disagree on a member's zone evaluate different quorums
-  (the registry's failure domain is the composer's input, never read live by a tally); the
-  coordinator's placement rule is judged through `QuorumSystem`, never a count: removing any one
-  zone must leave a Phase-1 and a Phase-2 quorum, and every Phase-2 quorum spans at least two
-  zones; a journal's leader is placed toward the zone that writes to it through `relinquish_to`,
-  which is WPaxos's steal without a Phase 1; matchmaker sets are zone-spread, since their quorums
-  are majorities; and the simulation gains a zone-kill attrition mode and a zone-aware copy
-  budget, without which it cannot prove zone survival.
+- What is adopted (decided on 2026-10-07, #215), detailed below: zone tags inside
+  `AcceptorConfig`, a placement rule judged through `QuorumSystem` and never a count, the leader
+  following its writer through `relinquish_to` (WPaxos's steal without a Phase 1, section 3.4),
+  zone-spread matchmaker sets, and in the simulation a zone-kill attrition mode and a zone-aware
+  copy budget, without which it cannot prove zone survival (section 6).
+
+**Tags in the configuration.** `AcceptorConfig` carries a vector of `ZoneTag`s (section 3.8)
+parallel to its sorted members, bound to the ballot with the configuration, because two nodes
+that disagree on a member's zone evaluate different quorums; the registry's failure domain is the
+composer's input, never read live by a tally. An empty vector is the plain arm, byte-identical
+to today's configuration, so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides
+the same single format bump (section 3.7).
+
+**The zone rule** is two predicates over a configuration's members `M`, built from
+`has_phase1_quorum` and `has_phase2_quorum` over subsets of voters, never a count:
+
+1. **It survives any one failure domain**: for every domain `d`, both `has_phase1_quorum` and
+   `has_phase2_quorum` hold on `M` minus `d`.
+2. **No domain commits alone**: for every domain `d`, `has_phase2_quorum` fails on `M`
+   intersected with `d`.
+
+The rule is valid for `Majority`, `Flexible` and `Grid` alike. It is one pure function in
+`membership.rs`, shared by the tenant coordinator's placement and the simulation's composer.
+
+**The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
+minimum production shape is two `storage` machines and one `stateless` machine per zone, nine
+machines: `triple` needs five acceptors on five distinct machines and survives a zone only when
+spread 2/2/1.
+
+- **Acceptors**: `triple` 2/2/1, the lone acceptor preferably in the zone that writes least (a
+  later reconfiguration adjusts it); `double` 1/1/1; `single` none (section 3.4); the grid is
+  unchanged and outside the rule, the risk its tenant states when it picks it (section 3.4).
+- **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
+  shares a machine with its acceptors, while capacity permits.
+- **Stateless roles**: once a tenant's pool has three instances, at least one gateway and one
+  proxy leader per zone. Coordinators run on `stateless` machines and are re-elected in a
+  surviving zone after a zone loss.
+- **Replicas** spread over the zones, and a `Read` goes to the replica in the reader's zone.
+
+**The degraded trap.** After the loss of a zone that held two of a `triple` journal's acceptors,
+three of five remain with zero slack, and the zone rule cannot be met again over two zones. The
+coordinator waits out the re-placement bound (section 3.2), the journal shows `Degraded`
+(section 3.6), and it is never re-placed into two zones; it is re-placed into a fourth zone only
+where the region has one.
+
+**A zone loss, a region loss.** A regional cell serves through the loss of one zone. The loss of
+its region takes it down by design: cells are not failover domains (section 3.7), routers
+elsewhere keep pointing at it, and nothing fails over. **Static stability** holds inside the
+cell: the data plane and the rendezvous answers come from folds, so only placement, new tenants,
+new capacity and moves wait.
+
+```
+                AZ a                   AZ b                   AZ c
+ entry          gateway T              gateway T              gateway T
+ stateless      proxy leader           proxy leader           proxy leader, coordinator T
+ journal J      acc1 (LEADER*), acc2   acc3, acc4             acc5             majority 3 of 5
+                replica r1             replica r2
+ tenant T       matchmaker m1          matchmaker m2          matchmaker m3    majority 2 of 3
+ cell tenant    registry acceptor      registry acceptor      registry acceptor
+ * the leader follows its writer's zone (relinquish_to, with hysteresis)
+ zone c lost: 4 of 5 acceptors, 2 of 3 matchmakers, serves
+ zone a lost: 3 of 5, zero slack, serves; Degraded, never re-placed into two zones
+```
 
 ## 6. Verification
 
@@ -969,6 +1054,19 @@ Simulation is the investment. Every milestone lands with its share of:
   storage chaos with replicated fault patterns (#176, #202). Gates name journal verdicts (slot
   rebuilt, double fault parked, meta repaired, ambiguous batch kept); the in-memory stores and
   their gates retire.
+- Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
+  (one zone at a time, the outage length drawn across the re-placement bound and restored inside
+  `CHAOS_DURATION_MS`); moonpool#297 gives `.processes()` groups no locality, so paros keeps its
+  own label map meanwhile, an `upstream-to-moonpool` candidate; a latency model per zone pair
+  (likely moonpool work); the zone-aware copy budget, where a zone counts as one fault; a composer
+  that draws tags per seed and applies the zone rule, with a reachable for a refused shape; the
+  client's zone and the gateway's origin stamp drawn per seed, the hysteresis knobs, a
+  `sometimes` for a leader moved toward its writer's zone and a reachable for a move the
+  hysteresis refused. Oracles: two nodes never evaluate one configuration under different tags
+  (`assert_always!`); every chosen slot's Phase-2 voters span two zones, folded from `Accepted`
+  and the tags into O(1) audit state; every journal kept committing through a one-zone kill
+  (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
+  seeds, and the canary after every new draw.
 - New BUGGIFY sites for every new decision the driver, the gateway, the router and the
   coordinators take, and the coverage-guided sweep saturating over them.
 
@@ -1010,7 +1108,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
 | M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the gateway, the gateway with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
-| M11 | Zones (#215) | zone labels in `AcceptorConfig`, the placement rule, leader placement toward the writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
+| M11 | Zones (#215) | `(region, az)` `ZoneTag` pairs in `AcceptorConfig` with its `cell_id` (one format bump), the tag table in the cell tenant's control journal, the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router (section 3.5) |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
@@ -1025,7 +1123,9 @@ deferred and carries no milestone yet. The interactive game and the lessons (`tr
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`proxy1`); the rendezvous list that names the first three is the `seeds` alias.
+`proxy1`); the rendezvous list that names the first three is the `seeds` alias. Its journals run
+`double`: four `storage` machines cannot hold `triple`'s five acceptors on distinct machines, so
+the toy cannot run `triple` (decided on 2026-10-07, #215).
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
 fleet, its one cell and the fleet tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and
@@ -1206,3 +1306,6 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
 - **A router folding every cell's registry** (rejected on 2026-10-07, #233): one hop instead of
   two, but the router is no longer thin, no cell stays statically stable without it, and it makes
   every cell depend on a fleet-level role.
+- **Chain replication inside a region** (rejected on 2026-10-07, #215), the variant DSQL's journal
+  runs across AZs: paros keeps quorum writes everywhere, because a slow or dead acceptor costs
+  nothing until reconfiguration, where a chain stalls until its membership is changed.
