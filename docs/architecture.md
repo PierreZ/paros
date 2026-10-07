@@ -1296,7 +1296,9 @@ The AWS Journal, as publicly described:
   consistency mechanism.
 - Brooker, "Wait! Isn't That Impossible?",
   <https://brooker.co.za/blog/2024/12/06/inside-dsql-cap.html>: the adjudicator holds no durable
-  state and is rebuilt from the committed transactions; the witness region.
+  state and is rebuilt from the committed transactions, so it moves cheaply to the majority side;
+  the witness region holds only a copy of the Journal; after a region loss every commit waits on
+  two of two.
 - Brooker, "Control Planes vs Data Planes", <https://brooker.co.za/blog/2019/03/17/control.html>:
   what belongs on the request path and what scales with the fleet.
 - Amazon MemoryDB, SIGMOD 2024,
@@ -1304,12 +1306,21 @@ The AWS Journal, as publicly described:
   §4.1 conditional append and leadership as one more conditional append, the lease and
   self-demotion; §7.2.1 snapshot verification by a checksum carried in the log.
 - Aurora DSQL, arXiv 2607.13276, <https://arxiv.org/html/2607.13276v2>: §5 the journal's
-  precondition on timestamp monotonicity, §6 TLA+ and P then deterministic simulation.
+  precondition on timestamp monotonicity, §6 TLA+ and P then deterministic simulation; §5.4 the
+  Journal replicates inside a region with a variant of chain replication across AZs and across
+  regions with a variant of Paxos (two of three). paros keeps quorum writes everywhere, inside a
+  region too, by choice: a slow or dead acceptor costs nothing until reconfiguration, where a chain
+  stalls until its membership is changed (section 11). Transcript:
+  `docs/references/papers/aurora-dsql/transcript.md`.
 - Demirbas's MemoryDB summary,
   <http://muratbuffalo.blogspot.com/2024/05/amazon-memorydb-fast-and-durable-memory.html>, and
   the 2025 Journal reconstruction,
   <https://ajalab.github.io/posts/2025-08-14-journal-distributed-log-replication-behind-aws/>:
   secondary readings; the latter states plainly that retention and truncation are undocumented.
+  It also reports, from re:Invent 2024, that the Journal replicates to three AZs or regions,
+  commits on two of three regions, performs reads from at least two regions, and has the third
+  region relay a write between a partitioned pair; it notes that what a region member is made of
+  is undocumented.
 
 Cells and static stability:
 
@@ -1317,7 +1328,8 @@ Cells and static stability:
   <https://docs.aws.amazon.com/wellarchitected/latest/reducing-scope-of-impact-with-cell-based-architecture/what-is-a-cell-based-architecture.html>:
   cells contain overload and bad deployments and are not a failover domain; multi-AZ cells; the
   thinnest possible router routing on its cached map; range-based mapping; migration as copy,
-  flip, redirect, forget; multiple cells and migration from day one.
+  flip, redirect, forget; multiple cells and migration from day one; shuffle sharding inside a cell
+  (its FAQ). Transcript: `docs/references/papers/aws-cell-based-architecture/transcript.md`.
 - Amazon Builders' Library, "Static stability using Availability Zones",
   <https://aws.amazon.com/builders-library/static-stability-using-availability-zones>: a data plane
   that keeps serving while its control plane is down.
@@ -1375,10 +1387,19 @@ Checkpoints:
 
 Zones:
 
-- Ailijiang, Charapko, Demirbas, Tasci, "WPaxos: Wide Area Network Flexible Consensus", IEEE
+- Ailijiang, Charapko, Demirbas, Kosar, "WPaxos: Wide Area Network Flexible Consensus", IEEE
   TPDS 2019, <https://arxiv.org/abs/1703.08905>: §3.1 the per-zone quorums `fz`, `fn`; §3.2 to
-  §4 object stealing; §5.3 degraded operation and reconfiguration. The printed TLA+ quorum
-  definition does not intersect; only the floor form the proof uses is sound.
+  §4 object stealing; §5.1 the majority-zone leader policy; §5.3 degraded operation and
+  reconfiguration. The printed TLA+ quorum definition does not intersect; only the floor form the
+  proof uses is sound (the counterexample is in section 5). Transcript:
+  `docs/references/papers/wpaxos/transcript.md`.
+- Nawab, Agrawal, El Abbadi, "DPaxos: Managing Data Closer to Users for Low-Latency and Mobile
+  Applications", SIGMOD 2018, <https://www.nawab.me/Uploads/Nawab_DPaxos_SIGMOD2018.pdf>: leader
+  handoff, adopted in a stricter form (`docs/analysis/consensus/dpaxos-leader-handoff.md`);
+  expanding quorums, which Matchmaker Paxos already provides with the intent made durable at the
+  matchmakers before Phase 1 (the matchmakers' watermark is the intent's GC); delegate and
+  leader-zone quorums, rejected (section 11). Transcript:
+  `docs/references/papers/dpaxos/transcript.md`.
 
 Tokens:
 
