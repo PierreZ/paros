@@ -40,6 +40,14 @@ we study, and analyses of external consensus codebases. This file is the map; re
 - [`papers/scaling-rsm-compartmentalization/`](papers/scaling-rsm-compartmentalization/) — Whittaker
   et al. Decouple the leader into independent roles (batchers, proxy leaders, …) for throughput.
 
+### Zones & placement
+- [`papers/wpaxos/`](papers/wpaxos/): Ailijiang, Charapko, Demirbas, Tasci. Per-zone flexible
+  quorums (`fz`, `fn`) and object stealing for wide-area deployments; the source of
+  `docs/architecture.md` §5's zone rules.
+- [`papers/dpaxos/`](papers/dpaxos/): Nawab, Agrawal, El Abbadi. Zones, delegate quorums and
+  leader zones that keep data close to users; pairs with
+  [`../analysis/consensus/dpaxos-leader-handoff.md`](../analysis/consensus/dpaxos-leader-handoff.md).
+
 ### Storage faults & recovery
 - [`papers/protocol-aware-recovery/`](papers/protocol-aware-recovery/) — Alagappan, Ganesan et al.
   (CTRL/PAR). Recovering correctly from *corrupted* storage, not just crashes — the durability edge cases.
@@ -51,6 +59,10 @@ we study, and analyses of external consensus codebases. This file is the map; re
 - [`papers/aurora-dsql/`](papers/aurora-dsql/) — Brooker et al. (AWS). Disaggregated multi-region
   OLTP: coordination deferred to commit through adjudicators and the Journal, precision
   timestamps, and the testing/correctness chapter (deterministic simulation, formal methods).
+- [`papers/aws-cell-based-architecture/`](papers/aws-cell-based-architecture/): AWS
+  Well-Architected whitepaper. Cells as blast-radius boundaries, cell sizing, the thin router,
+  partition mapping, cell migration and static stability; the source of `docs/architecture.md`
+  §3.7's cell rules.
 
 ## Code implementation analyses
 
