@@ -634,6 +634,12 @@ with full records and no other role (section 5). A tenant's `survives` (section 
 kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its resolvers
 (section 3.5), and every cell answers the second hop for its own tenants.
 
+**The fleet and each cell have a name** (decided on 2026-10-07, #252): a label chosen at `init`
+(`--fleet-name`, `--cell-name`) and again with `--cell-name` when a cell is added (M12); stored
+in the fleet entry and the cell entry, unique within the fleet, refused when taken. `tenant
+list`, `inspect` and `status` (section 3.6) show it beside the id. Same rule as a tenant's or a
+journal's name (section 3.5): a label, never the identity; ids stay random (section 3.8).
+
 ```
  fleet F: the fleet directory (tenant → cell), held by the fleet tenant
  ┌────────────────────────────┬────────────────────────────┬────────────────────────────┐
@@ -701,9 +707,10 @@ metadata version lets a reader refuse a format it does not understand.
   **group**; the fleet directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns the fleet tenant's `JournalIdentifier`
   when it joins the fleet, from the cell that hosts the fleet tenant.
-- The cell entries also carry the cell's `kind` and its rendezvous name, and the tenant entries
-  the tenant's `survives`, mirrored into its control journal (decided on 2026-10-07, #252), so a
-  fleet that mixes cell kinds is entries, never a new field.
+- The fleet entry carries the fleet's name; the cell entries also carry the cell's `kind`, its
+  rendezvous name and its own name, and the tenant entries the tenant's `survives`, mirrored into
+  its control journal (decided on 2026-10-07, #252), so a fleet that mixes cell kinds is entries,
+  never a new field.
 - Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through the fleet directory.
@@ -772,7 +779,10 @@ cell's log position, so nothing is renumbered when cells are added, removed or r
 on 2026-10-02, #226). **No identifier is fixed** (decided on 2026-10-04): there is no well-known
 tenant, no well-known journal and no reserved range. `0` means unset in every id space, and that
 is the only value with a meaning. **No id has a default** either: an id is drawn or read, never
-assumed, and unset is a state to refuse, not a value to fall back on.
+assumed, and unset is a state to refuse, not a value to fall back on. Names are labels beside
+these ids (decided on 2026-10-07, #252): the fleet's, a cell's, a tenant's and a journal's name
+(sections 3.5, 3.7) are chosen and unique within their scope, never derived from or reused as an
+id.
 
 - `node_id`, `cell_id`, `fleet_id`: random, minted at format, `init` and `init` respectively, and
   stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `fleet_id`). They
