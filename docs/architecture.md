@@ -8,13 +8,15 @@ recovery and the fenced `Truncate` decided on 2026-10-02; the leader-uuid API wi
 journal modes, election over a journal, the request channel, liveness, names, trust, capacity as
 role slots, journals born with their matchmaker set, tenant modes, the data-plane limits, storage
 chaos in simulation and the deferral of recovery decided on 2026-10-04; the router and the gateway,
-and zones inside a cell, decided on 2026-10-07. The milestones at the end carry the issue numbers.
+zones inside a cell and multi-region cells decided on 2026-10-07. The milestones at the end
+carry the issue numbers.
 
 ## 1. Goal
 
 `parosd`: one binary on N machines, started with `docker compose`, serving journals to tenants
 over a four-call data plane, healing itself through reconfiguration when a disk or a machine is
-lost. Single region, several failure domains.
+lost. One region first, several failure domains; multi-region cells are M13 (decided on
+2026-10-07).
 
 The control plane is itself stored in journals and coordinated through the same election
 primitive the tenants use: paros eats its own food. It has four levels, all built the same way:
@@ -36,7 +38,9 @@ the fleet directory, registrations are verified on both sides. The answer is alw
 today, but the code path is real and runs in every simulation. A second cell, moves between
 cells and a separate router are M12 (section 3.7). The test for every design until then: adding
 a second cell adds an entry to the fleet directory and a routing choice, never a protocol or
-data-model change.
+data-model change. That is why M9 already carries each cell entry's `kind` and rendezvous name
+and each tenant's `survives` (section 3.7): a fleet that mixes regional and multi-region cells
+adds entries, never fields.
 
 **Every tenant can be transferred** (decided on 2026-10-04): the design must be able to move any
 tenant to another cell, the fleet tenant and its fleet coordinator included, with no protocol or
@@ -62,8 +66,8 @@ decided outcomes, that a single leader appends to under its leader uuid (or that
 append to, unfenced), and that every consumer tails without a second protocol.
 
 The first deliverable is a toy: a local Docker Compose cluster an operator can initialize, create
-a tenant on, write to, read from, break and watch heal. The homelab and anything beyond one region
-are not in scope.
+a tenant on, write to, read from, break and watch heal. The homelab is not in scope, and one
+region comes first: multi-region cells are M13 (decided on 2026-10-07).
 
 ## 2. The data plane
 
@@ -156,6 +160,12 @@ acceptors for their vote watermarks, waits until its own applied prefix covers t
 answers. No read goes through the Paxos leader, so reads scale with replicas and cost the
 acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
 `CheckTail` retire.
+
+A read costs one Phase-1 round of watermarks (decided on 2026-10-07). In a multi-region cell
+`QuorumRead` asks three of five acceptors, so a page costs one cross-region round trip (the 2025
+Journal reconstruction says the same: reads are performed from at least two regions, section 10).
+There is no lease read, because paros enforces no lease (section 2.3); the page size and
+`wait_ms` (section 2.7) are the mitigations already in the API.
 
 A server answers only from records it holds (decided on 2026-10-06). A server whose floor rose
 ahead of its fold — it jumped to a peer's trim point, and the `Truncate` that let the peer's
@@ -412,6 +422,12 @@ journal and every election journal. Control and election journals are born `doub
 own on its three seeds, one per zone) and raised to `triple` by the cell coordinator, through
 ordinary reconfiguration, once five `storage` machines span three zones.
 
+**What a tenant survives** (decided on 2026-10-07, #232): a tenant's fleet directory entry carries
+`survives: az | region`, recorded at `REGISTERING` and mirrored into the tenant's control journal
+(rebuild from below, section 3.3). It constrains the kind of cell the tenant may live in, a
+regional cell for `az` and a multi-region cell for `region` (section 3.7), never whether it may
+move: the groups alone decide that.
+
 **How roles are sized** (decided on 2026-10-04). Stateless roles (gateways, proxy leaders,
 batchers) are **per-tenant pools**: one pool per role, shared by all the tenant's journals and
 keyed by `JournalIdentifier` inside, so a hot journal uses every instance and a quiet one none
@@ -424,6 +440,15 @@ inside the cell), and one journal's storage instances never share a machine (ame
 six `storage` machines available, a tenant with three journals of two replicas each gets its six
 replicas on six machines; its pool of proxy leaders spreads the same way over the `stateless`
 machines, each instance serving all three journals.
+
+**Pools per region in a multi-region cell** (decided on 2026-10-07; amends the per-tenant pools
+above): proxy leaders, batchers and gateways are pooled per `(tenant, region)`, with at least one
+gateway per AZ, and a journal's leader uses its own region's pool. `ProxyId::of(slot,
+proxy_count)` (`membership.rs`) assigns `slot_rank(slot, proxy_count)`, so one pool across
+regions would put a cross-region hop on a share of every journal's slots. The core does not
+change: `ProxyId` is a logical rank and `proxy_count` sits in `Config` under the format marker,
+so every region's pool has the same count, and the driver resolves rank `r` to the instance of
+rank `r` in the leader's region.
 
 **The leader follows its writer** (decided on 2026-10-07, #215), the main latency lever inside a
 cell: with a journal's leader in its writer's zone a write costs one cross-zone round trip,
@@ -594,17 +619,45 @@ fleet (decided on 2026-10-04).
 
 The fleet runs from M9 with one cell (decided on 2026-10-02, #226).
 
-**A cell** is one set of `parosd` machines in one region across at least three availability
-zones (decided on 2026-10-07, #215): enough failure domains for its quorums. Zone survival
-stays a property of each journal's quorums (section 5). Three boundaries nest: the zone is the
-infrastructure failure domain, the cell the blast radius, the tenant the isolation unit. A cell
-is a blast-radius boundary for bad deploys, overload and poison pills, not a failover domain;
-the AWS cell-based architecture guidance says the same (cells contain overload and bad
-deployments and are not designed for failover; multi-AZ cells avoid replicating between cells). Cell creation is refused if its
-machines span fewer than three zones.
+**A cell** is one set of `parosd` machines. A **regional** cell lives in one region across at
+least three availability zones (decided on 2026-10-07, #215): enough failure domains for its
+quorums. Zone survival stays a property of each journal's quorums (section 5). Three boundaries
+nest: the zone is the infrastructure failure domain, the cell the blast radius, the tenant the
+isolation unit. A cell is a blast-radius boundary for bad deploys, overload and poison pills, not
+a failover domain; the AWS cell-based architecture guidance says the same (cells contain
+overload and bad deployments and are not designed for failover; multi-AZ cells avoid replicating
+between cells). Cell creation is refused if its machines span fewer than three zones.
+
+**A fleet mixes cell kinds** (decided on 2026-10-07, #232). A cell entry in the fleet directory
+carries its `kind`, `Regional { region }` or `MultiRegion { regions, witness }`, and the cell's
+rendezvous name. A **multi-region** cell (M13, decided on 2026-10-07) spans three regions, each
+across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
+with full records and no other role (section 5). A tenant's `survives` (section 3.4) picks the
+kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its routers
+(section 3.5), and every cell answers the second hop for its own tenants.
+
+```
+ fleet F: the fleet directory (tenant → cell), held by the fleet tenant
+ ┌──────────────────────────┬──────────────────────────┬──────────────────────────┐
+ │ region W                 │ region C                 │ region N                 │
+ │ routers W (thin, cached) │ routers C                │ routers N                │
+ ├──────────────────────────┼──────────────────────────┼──────────────────────────┤
+ │ cell W1 regional, 3 AZ   │ cell C1 regional, 3 AZ   │ cell N1 regional, 3 AZ   │
+ │  cell tenant W1          │  cell tenant C1          │  cell tenant N1          │
+ │  tenants: survives = az  │  tenants: survives = az  │  tenants: survives = az  │
+ ├──────────────────────────┴──────────────────────────┴──────────────────────────┤
+ │ cell MR1 multi-region over W, C, N (N = witness)                               │
+ │  cell tenant MR1 (2/2/1)   fleet tenant (2/2/1)   tenants: survives = region   │
+ └────────────────────────────────────────────────────────────────────────────────┘
+ client: hop 1  router of its region → (cell id, the cell's rendezvous references)
+         hop 2  any machine of that cell → the tenant's gateways (zone-tagged, pick local)
+```
 
 **The fleet tenant always exists** (named *meta* until 2026-10-04). It is one tenant whose control journal also holds the directory, so it is
-a single journal. In M9 it lives in the only cell; any cell may host it later. It stays small: it
+a single journal. In M9 it lives in the only cell; any cell may host it later. Once a
+multi-region cell exists, the fleet tenant is hosted there (decided on 2026-10-07, #232), moved by
+its M12 move, so a region loss never stops tenant creation and moves; routers in every region
+keep routing on their folds regardless. It stays small: it
 answers only "which tenant lives in which cell" plus the cell entries. Quotas, billing and global
 status go elsewhere. When the directory grows large (M12) it is split across several journals by
 tenant range, the AWS guidance's range-based mapping.
@@ -650,6 +703,9 @@ metadata version lets a reader refuse a format it does not understand.
   **group**; the fleet directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns the fleet tenant's `JournalIdentifier`
   when it joins the fleet, from the cell that hosts the fleet tenant.
+- The cell entries also carry the cell's `kind` and its rendezvous name, and the tenant entries
+  the tenant's `survives`, mirrored into its control journal (decided on 2026-10-07, #232), so a
+  fleet that mixes cell kinds is entries, never a new field.
 - Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
 - No component assumes there is only one cell: every lookup goes through the fleet directory.
@@ -682,6 +738,15 @@ never the authority: if it disagrees with the control journal's leader, the lead
 The fleet tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
 
+**Moving between cell kinds** (M12 and M13, decided on 2026-10-07) is the same four phases.
+Copy: the tenant coordinator reconfigures each journal to a `C_new` whose members carry
+`(region, az)` tags over the target cell's machines; catch-up crosses regions and needs a
+throttle knob; the matchmaker set hands over by generation. Flip: `SetLeader` on the tenant's
+control journal. Redirect: the directory pointer, folded by the routers. Forget: the old cell
+releases the bookings. With the `cell_id` in the configuration (below), the copy itself names
+the owning cell. The reverse move, from a multi-region cell to a regional one, is the same under
+the regional rule.
+
 **The cell inside the configuration** (decided on 2026-10-07, #215, #232; open until then). A
 matchmaker's registry binds an acceptor set and its quorum system to a ballot, and from M11
 `AcceptorConfig` also carries the configuration's `cell_id`, in the same single format bump as
@@ -694,12 +759,13 @@ it is registered. The cost is one field in `AcceptorConfig` that the core never 
 every node knowing its own cell.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
-tombstone set so it cannot silently rejoin), moving tenants between cells, moving the fleet tenant, the
-router (section 3.5), splitting the fleet tenant by range, placement across cells (each cell entry with a configured
-capacity and an allocated count, an ordered index of cells with room, the fullest cell that still
-has room after a quick availability check, an optional preferred cell, a per-cell switch that
-stops new placements), and tenant locks (`UNLOCKED`, `READ_ONLY` or `LOCKED` with an owner id) to
-make a tenant read-only during a move.
+tombstone set so it cannot silently rejoin), moving tenants between cells, moving the fleet
+tenant, the router (section 3.5), splitting the fleet tenant by range, placement across cells
+(each cell entry with a configured capacity and an allocated count, an ordered index of cells
+with room, the fullest cell of the kind the tenant's `survives` asks for that still has room
+after a quick availability check (amended on 2026-10-07, #232), an optional preferred cell, a
+per-cell switch that stops new placements), and tenant locks (`UNLOCKED`, `READ_ONLY` or
+`LOCKED` with an owner id) to make a tenant read-only during a move.
 
 ### 3.8 Identifiers
 
@@ -905,7 +971,8 @@ machine is reconfigured out and its journals placed elsewhere. This is what the 
 already exercises; what changes is who drives the healing: today the harness's client composes
 the reconfigurations, in the service the tenant's coordinator does, from desired state. Losing a
 control quorum will be recoverable at both the cell and the fleet level, without touching user
-data (section 3.10, deferred). Cross-region replication and witness replicas are out of scope.
+data (section 3.10, deferred). Beyond one region, a multi-region cell survives the loss of a
+region (M13, below).
 
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
@@ -1016,6 +1083,69 @@ new capacity and moves wait.
  zone a lost: 3 of 5, zero slack, serves; Degraded, never re-placed into two zones
 ```
 
+**Multi-region cells** (M13, decided on 2026-10-07). Tags are two-level, `(region, az)`
+(section 3.8): in a regional cell every member shares one region tag and the rule runs over
+AZs; in a multi-region cell it runs at both levels. A `triple` journal is placed 2/2/1 over the
+three regions, its lone acceptor in the witness region, and each region's acceptors of one
+journal sit in distinct AZs. The rule: for every region `r`, both quorums hold on `M` minus `r`;
+for every AZ `a`, both hold on `M` minus `a`; and no region alone holds a Phase-2 quorum.
+**Region loss and AZ loss are separate guarantees, not a joint one**: a region lost together
+with an AZ elsewhere leaves two of five, and the journal stops. Joint survival needs 3/3/3 (nine
+acceptors, a majority of five), a later mode.
+
+- **Latency.** A write commits from the leader's region with its two local acceptors plus the
+  fastest remote one: one round trip to the nearest second region, DSQL's measured behaviour. A
+  read costs one cross-region round trip (section 2.5). After a region loss three of five remain,
+  with zero slack, and every slot waits for the farthest survivor (Brooker's 2-of-2, section 10).
+- **The witness region** holds acceptors and matchmakers with full records, bytes included, and
+  no other role: no gateway, replica, batcher, proxy leader or coordinator slot. A server answers
+  only from records it holds (section 2.5), and Phase-1 recovery and CTRL repair are unchanged.
+  `ColocatedNode` folds by default, so "no replica" means no `Read` routed there and no replica
+  slot booked, not a node without bytes. Any `ColocatedNode` may campaign, so keeping the leader
+  out of the witness region is a driver placement policy (an election backoff by placement),
+  never the core's.
+- **The leader moves cheaply.** It holds no durable leadership state, so it moves as cheaply as
+  DSQL's adjudicator: one `Relinquish` with its pending rounds (section 3.4).
+- **A partition through the witness.** When regions W and C cannot reach each other and both
+  reach the witness N, writers commit through N, and the far side's readers stay live and catch
+  up from N through ordinary peer catch-up (the 2025 reconstruction's third region that forwards,
+  with no relay code). The hazard: both sides can form three of five through N's acceptor, so
+  elections can duel across the partition with the witness as tiebreaker. It needs a simulation
+  shape and a liveness oracle, leadership settling after the chaos window (section 6); the
+  election backoff and the handoff hysteresis are its knobs.
+- **Control journals** of a multi-region cell (the cell tenant's, the election journals, the
+  tenant control journals) follow 2/2/1, the witness holding one acceptor, and the coordinators
+  live in the two full regions. A matchmaker quorum, two of three, needs one remote matchmaker
+  per campaign, which is rare.
+- **A region loss** leaves a multi-region cell serving, with its leaders in the surviving full
+  region; an AZ loss leaves it serving as it does a regional cell.
+
+```
+ ┌─ region W ──────────────────┐ ┌─ region C ──────────────────┐ ┌─ region N (witness) ─┐
+ │ gateways T (one per AZ)     │ │ gateways T (one per AZ)     │ │ az-a: acceptor n1    │
+ │ proxy leaders T(W)          │ │ proxy leaders T(C)          │ │       matchmaker m3  │
+ │ batchers T(W), coordinator T│ │ coordinator of cell MR1     │ │ no gateway, replica, │
+ │ az-b: acc w1 (LEADER), m1   │ │ az-b: acc c1, m2            │ │ proxy leader, batcher│
+ │ az-c: acc w2, replica r1    │ │ az-c: acc c2, replica r2    │ │ or coordinator       │
+ └─────────────────────────────┘ └─────────────────────────────┘ └──────────────────────┘
+ write from W: w1, w2 + the fastest of c1, c2, n1 = one RTT to the nearest second region
+ read from C:  replica r2 asks 3 of 5 for watermarks, so it crosses a region
+ region W lost: c1, c2, n1 = 3 of 5, zero slack, a leader elected in C
+ region N lost: 4 of 5, writes unchanged
+```
+
+**Hierarchical quorums are deferred** (decided on 2026-10-07). `QuorumSystem::Zoned { fz, fn }`
+in WPaxos's floor form (Phase 1: `fn + 1` nodes in each of `Z - fz` zones; Phase 2: `l - fn`
+nodes in each of `fz + 1` zones) is a legitimate later variant, deferred until the simulation
+runs nine acceptors. On three regions of three AZs it gives quorums of four instead of a
+majority of five: the same round trip to the nearest region, one ack fewer, and a different
+tolerance shape (better against a region plus one straggler in each survivor, worse against two
+losses inside one region). It trades acks and tolerance, never latency. The printed WPaxos
+set-builder definition does not intersect: on the paper's Figure 3b grid, with `Z = 4`, `l = 3`
+and `fz = fn = 1`, `q1 = {A1, A2, B1, C1, D1, D2}` and `q2 = {A3, B2, C2, D3}` satisfy the
+printed cardinality and per-zone cap, yet share no node. The printed form only bounds a zone's
+contribution from above, while Lemma 1's proof uses exact counts, which is the floor form.
+
 ## 6. Verification
 
 Simulation is the investment. Every milestone lands with its share of:
@@ -1067,6 +1197,11 @@ Simulation is the investment. Every milestone lands with its share of:
   and the tags into O(1) audit state; every journal kept committing through a one-zone kill
   (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
+- Regions and the router (decided on 2026-10-07): the copy budget counts a region as one fault;
+  in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
+  the witness region, after which leadership settles (a liveness oracle in recovery mode); a
+  client's two-hop resolution keeps routing through an outage of the fleet tenant. In M13: the
+  witness region, the per-region pools and a move between cell kinds.
 - New BUGGIFY sites for every new decision the driver, the gateway, the router and the
   coordinators take, and the coverage-guided sweep saturating over them.
 
@@ -1109,7 +1244,8 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the gateway, the gateway with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `ZoneTag` pairs in `AcceptorConfig` with its `cell_id` (one format bump), the tag table in the cell tenant's control journal, the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells, tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router (section 3.5) |
+| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router beside the gateway (section 3.5) |
+| M13 | Multi-region cells | the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the fleet tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
@@ -1309,3 +1445,15 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
 - **Chain replication inside a region** (rejected on 2026-10-07, #215), the variant DSQL's journal
   runs across AZs: paros keeps quorum writes everywhere, because a slow or dead acceptor costs
   nothing until reconfiguration, where a chain stalls until its membership is changed.
+- **Vote-only witnesses** (rejected on 2026-10-07): a vote without bytes is a guaranteed `faulty`
+  from Phase 1's view and contradicts "a server answers only from records it holds" (section 2.5).
+- **Two regional cells replicating to each other** (rejected on 2026-10-07, #232): a dependency
+  across cells, and a tenant lives in exactly one cell (section 3.7).
+- **Lease reads** (rejected on 2026-10-07): paros enforces no lease (section 2.3).
+- **DPaxos's expanding quorums and leader zones** (rejected on 2026-10-07): a second Paxos kernel,
+  and leader-zone quorums contradict the zone rule of section 5; Matchmaker Paxos already expands
+  quorums with the intent durable before Phase 1.
+- **WPaxos's joint reconfiguration** (rejected on 2026-10-07): matchmakers reconfigure
+  (section 4.1).
+- **Hierarchical `Zoned` quorums** (deferred on 2026-10-07): a later `QuorumSystem` variant once the
+  simulation runs nine acceptors (section 5).
