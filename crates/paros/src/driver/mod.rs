@@ -1835,7 +1835,7 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
     hooks: &H,
 ) {
     let audit = stores.audit(journal);
-    let Some((storage, boot)) = stores.open(journal) else {
+    let Some((storage, boot)) = stores.open(journal).await else {
         tracing::info!(journal = %journal, "journal_down");
         journals.park(journal, None);
         return;

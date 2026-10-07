@@ -1122,29 +1122,35 @@ fn journal_dir(journal: paros::JournalIdentifier) -> String {
 #[tracing::instrument(level = "debug", skip_all, fields(ip = %ip))]
 async fn resolve_provisioning(ctx: &SimContext, seats: &[Seat], ip: &str) {
     for seat in seats {
-        let ambiguous = seat
-            .world
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .provisioning_ambiguous(ip);
-        if !ambiguous {
-            continue;
-        }
-        // Read the marker without opening the store: a probe that recovered
-        // and repaired the journal would change what the boot it decides
-        // then finds.
-        let formatted =
-            JournalStorage::peek_formatted(ctx.storage(), &journal_dir(seat.journal), seat.journal)
-                .await
-                .unwrap_or(false);
-        let mut guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
-        if formatted {
-            guard.note_provisioned(ip);
-        } else {
-            guard.abandon_provisioning(ip);
-        }
-        assert_reachable!("journal store: an interrupted provisioning is resolved from the disk");
+        resolve_seat_provisioning(ctx, seat, ip).await;
     }
+}
+
+/// [`resolve_provisioning`] for one journal: run at the top of every
+/// incarnation and again at every open, the re-open of a quarantined journal
+/// included (a format whose sync failed may have landed anyway).
+async fn resolve_seat_provisioning(ctx: &SimContext, seat: &Seat, ip: &str) {
+    let ambiguous = seat
+        .world
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .provisioning_ambiguous(ip);
+    if !ambiguous {
+        return;
+    }
+    // Read the marker without opening the store: a probe that recovered and
+    // repaired the journal would change what the boot it decides then finds.
+    let formatted =
+        JournalStorage::peek_formatted(ctx.storage(), &journal_dir(seat.journal), seat.journal)
+            .await
+            .unwrap_or(false);
+    let mut guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
+    if formatted {
+        guard.note_provisioned(ip);
+    } else {
+        guard.abandon_provisioning(ip);
+    }
+    assert_reachable!("journal store: an interrupted provisioning is resolved from the disk");
 }
 
 impl SimStores<'_> {
@@ -1178,8 +1184,11 @@ impl JournalStores for SimStores<'_> {
             .collect()
     }
 
-    fn open(&mut self, journal: paros::JournalIdentifier) -> Option<(Self::Store, BootKind)> {
+    async fn open(&mut self, journal: paros::JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         let seat = self.seat(journal).filter(|seat| !seat.deleted)?;
+        if self.journal_store.is_some() {
+            resolve_seat_provisioning(self.ctx, seat, self.ip).await;
+        }
         let (parked, boot) = {
             let guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
             (
