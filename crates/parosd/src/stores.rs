@@ -135,7 +135,7 @@ impl DirStores {
         let mut resolved = false;
         for journal in found {
             let dir = path_str(&journal_dir(&self.data_dir, journal));
-            let formatted = JournalStorage::peek_formatted(&self.provider, &dir).await;
+            let formatted = JournalStorage::peek_formatted(&self.provider, &dir, journal).await;
             if formatted.unwrap_or(false) {
                 tracing::info!(journal = %journal, "created_journal_resolved");
                 self.record.journals.insert(journal);

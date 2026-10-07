@@ -1133,9 +1133,10 @@ async fn resolve_provisioning(ctx: &SimContext, seats: &[Seat], ip: &str) {
         // Read the marker without opening the store: a probe that recovered
         // and repaired the journal would change what the boot it decides
         // then finds.
-        let formatted = JournalStorage::peek_formatted(ctx.storage(), &journal_dir(seat.journal))
-            .await
-            .unwrap_or(false);
+        let formatted =
+            JournalStorage::peek_formatted(ctx.storage(), &journal_dir(seat.journal), seat.journal)
+                .await
+                .unwrap_or(false);
         let mut guard = seat.world.lock().unwrap_or_else(PoisonError::into_inner);
         if formatted {
             guard.note_provisioned(ip);
@@ -1216,7 +1217,7 @@ impl JournalStores for SimStores<'_> {
                 quiet_faults(self.ctx),
                 seat.checker.clone(),
             );
-            return Some((NodeStore::World(storage), boot));
+            return Some((NodeStore::World(Box::new(storage)), boot));
         }
         if let Some((provider, layout)) = &self.journal_store {
             let journal = JournalStorage::new(
@@ -1225,9 +1226,21 @@ impl JournalStores for SimStores<'_> {
                 seat.config.clone(),
                 *layout,
             );
-            let store =
-                LedgeredJournal::new(journal, Arc::downgrade(&seat.world), self.ip.to_string());
-            return Some((NodeStore::Journal(store), boot));
+            let power = crate::world::node_store::PowerCut::new(
+                self.ctx
+                    .self_crash()
+                    .expect("a node process can crash itself"),
+                self.ctx.time().clone(),
+                crate::CHAOS_DURATION,
+                true,
+            );
+            let store = LedgeredJournal::new(
+                journal,
+                Arc::downgrade(&seat.world),
+                self.ip.to_string(),
+                power,
+            );
+            return Some((NodeStore::Journal(Box::new(store)), boot));
         }
         let storage = DurableStorage::restore(
             seat.config.clone(),
@@ -1237,7 +1250,7 @@ impl JournalStores for SimStores<'_> {
             self.faults.clone(),
             seat.checker.clone(),
         );
-        Some((NodeStore::World(storage), boot))
+        Some((NodeStore::World(Box::new(storage)), boot))
     }
 
     fn audit(&self, journal: paros::JournalIdentifier) -> Self::Audit {
@@ -1833,10 +1846,7 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
         peers: vec![NodeId(0)],
         ..Config::new(NodeId(0), paros::JournalIdentifier::UNSET)
     };
-    let store = JournalStoreConfig {
-        checkpoint_after: 4,
-        ..JournalStoreConfig::small()
-    };
+    let store = JournalStoreConfig::small();
     let open_node = |provider: SimStorageProvider, dir: String, config: Config| async move {
         let mut node = JournalStorage::new(provider, dir, config, store);
         node.boot_scan().await.expect("a clean journal store boots");
@@ -1858,7 +1868,8 @@ async fn journal_contract_suites(provider: SimStorageProvider) {
     };
     Box::pin(paros::storage_contract_suite(fresh, reopen)).await;
     let open_registry = |provider: SimStorageProvider, dir: String| async move {
-        let mut registry = JournalMatchmakerStorage::new(provider, dir, store);
+        let mut registry =
+            JournalMatchmakerStorage::new(provider, dir, paros::JournalIdentifier::UNSET, store);
         registry
             .boot_scan()
             .await

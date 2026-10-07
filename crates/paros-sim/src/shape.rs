@@ -645,7 +645,21 @@ pub(crate) fn journal_store(
         }
         // BUGGIFY pairing: a seed genuinely runs its nodes on the journal.
         assert_reachable!("journal store: a seed runs its nodes on JournalStorage");
-        StoreDraw::Journal(JournalStoreConfig::small())
+        // The commit protocol, a knob whose default is production's: two
+        // syncs (always decided); the extreme is CLSTORE's one sync, whose
+        // last batch a crash can leave ambiguous. Both are valid stores.
+        let batched = buggify_knob!(0_u64, 1_u64..2_u64) == 1;
+        if batched {
+            assert_reachable!("journal store: a seed commits with one sync per batch");
+        }
+        StoreDraw::Journal(JournalStoreConfig {
+            durability: if batched {
+                paros::journal::Durability::Batched
+            } else {
+                paros::journal::Durability::Ordered
+            },
+            ..JournalStoreConfig::small()
+        })
     });
     match draw {
         StoreDraw::World => None,
