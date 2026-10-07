@@ -540,6 +540,12 @@ scope covers, and the frontend the journal name). Until the frontend exists (#19
 resolves with operator rights. A name is free again once its delete completes; a recreated
 tenant or journal draws a fresh id, so an old id never aliases a new name.
 
+**Display** (decided on 2026-10-07, #239). Human output prints an id as short hex, git-style
+(e.g. `cell=2c94f1`), widened when a prefix is ambiguous within the listing; `--json` keeps the
+full id, and a command that takes an id accepts a unique prefix. An internal tenant (section 3.7)
+shows a display label derived from its groups (`fleet`, `cell` with its cell), display only,
+never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
+
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
 well-known rendezvous call, section 3.2), and nodes do no authorization.
