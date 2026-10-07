@@ -874,6 +874,27 @@ async fn run_acceptor(
             // and re-run (rebuilding volatile state from the durable world),
             // after this crash's own restart delay (`restart_delay!`).
             Err(RunError::SeamCrash(_)) => {
+                // On a real disk a seam crash is the process dying: a power
+                // loss, through moonpool's `SelfCrash`, so every write not
+                // yet synced (a store that acknowledged one early included)
+                // resolves by the disk's crash physics, and the process
+                // restarts as attrition's would. The world store models its
+                // crash itself and restarts in place.
+                if journal_store.is_some()
+                    && ctx
+                        .crash_self(
+                            moonpool_sim::RebootKind::Crash,
+                            Some(Duration::from_millis(moonpool_sim::sim_random_range(
+                                250..3_001,
+                            ))),
+                        )
+                        .is_ok()
+                {
+                    assert_reachable!("journal store: a seam crash is a power loss");
+                    // The kill lands within a scheduler tick: wait for it.
+                    let _ = ctx.time().sleep(Duration::from_hours(1)).await;
+                    return Ok(());
+                }
                 restart_delay!(ctx, "a seam-crashed node restarts after a buggified delay");
             }
             // An injected storage fault surfaced as the driver's typed
