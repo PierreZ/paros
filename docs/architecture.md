@@ -7,9 +7,9 @@ direction. Decided on 2026-09-30; the fleet, the control hierarchy, identifiers,
 recovery and the fenced `Truncate` decided on 2026-10-02; the leader-uuid API with its two
 journal modes, election over a journal, the request channel, liveness, names, trust, capacity as
 role slots, journals born with their matchmaker set, tenant modes, the data-plane limits, storage
-chaos in simulation and the deferral of recovery decided on 2026-10-04; the router and the gateway,
-zones inside a cell and multi-region cells decided on 2026-10-07. The milestones at the end
-carry the issue numbers.
+chaos in simulation and the deferral of recovery decided on 2026-10-04; the resolver and the
+frontend, zones inside a cell and multi-region cells decided on 2026-10-07. The milestones at
+the end carry the issue numbers.
 
 ## 1. Goal
 
@@ -36,7 +36,7 @@ ordinary cell holding tenants. Every fleet behaviour exists and is exercised fro
 creates the fleet, tenants are created through the fleet tenant, routing resolves tenant → cell through
 the fleet directory, registrations are verified on both sides. The answer is always "this cell"
 today, but the code path is real and runs in every simulation. A second cell, moves between
-cells and a separate router are M12 (section 3.7). The test for every design until then: adding
+cells and a separate resolver are M12 (section 3.7). The test for every design until then: adding
 a second cell adds an entry to the fleet directory and a routing choice, never a protocol or
 data-model change. That is why M9 already carries each cell entry's `kind` and rendezvous name
 and each tenant's `survives` (section 3.7): a fleet that mixes regional and multi-region cells
@@ -123,7 +123,7 @@ can continue the sequence. Every tailer learns the leader changed in-band, witho
 
 **The leader uuid is the fence.** It is a 128-bit random value the leader draws for one
 leadership term, never per process: a process that wins again draws a new uuid, which fences its
-own older in-flight writes. It is not a secret and not an authentication token; the gateway
+own older in-flight writes. It is not a secret and not an authentication token; the frontend
 decides who may touch a tenant at all (section 3.5), the leader uuid decides which of the
 tenant's clients holds the pen. The core keeps a hidden term counter beside it, raised by every
 `SetLeader`, so a uuid that ever led can never lead again (no ABA through
@@ -331,19 +331,19 @@ the cell's are the same name.
 - **Well-known endpoints** are the bootstrap set — `Identify`, `Init`, `FormCell`, `Inspect` —
   and the **rendezvous call**, keyed by tenant: "which references serve tenant T". Everything else
   is a dynamic reference (amended on 2026-10-04: the bootstrap calls were well known already).
-  One call, two answerers (decided on 2026-10-07, #233): a router answers the cell half (the
-  tenant's cell and that cell's rendezvous references), any machine of that cell the gateway half
-  (the tenant's gateways, from its registry fold), section 3.5.
+  One call, two answerers (decided on 2026-10-07, #233): a resolver answers the cell half (the
+  tenant's cell and that cell's rendezvous references), any machine of that cell the frontend half
+  (the tenant's frontends, from its registry fold), section 3.5.
 
 The decision and its alternatives are #216. Classes are FDB's:
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
-- `stateless`: gateways, routers, proxy leaders, batchers, unbatchers, coordinators. The cell
+- `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
   and fleet coordinators run on the seeds until a `stateless` machine registers (section 3.3).
 
 **Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots of
 its class; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
-gateway, batcher or unbatcher) of one journal or tenant. A booking is keyed
+frontend, batcher or unbatcher) of one journal or tenant. A booking is keyed
 `(tenant, journal or matchmaker set, role)` and holds one slot; only the cell coordinator writes
 bookings. Bytes, IOPS and weighted roles are not modelled. Scaling a role for a tenant is adding
 machines of the right class and raising the tenant's desired counts.
@@ -413,7 +413,7 @@ retirements wait for the GC watermark (`may_retire`).
 A tenant's desired state is FDB's `configure` (decided on 2026-10-04): per journal or as a tenant
 default, a **redundancy mode** — `single`, `double` or `triple`, a majority over one, three or
 five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus per-role counts
-(`gateways=`, `proxy_leaders=` and `batchers=` per tenant, `replicas=` per journal).
+(`frontends=`, `proxy_leaders=` and `batchers=` per tenant, `replicas=` per journal).
 
 **`single` survives no zone** (decided on 2026-10-07, #215): a majority over one acceptor cannot
 meet the zone rule of section 5. It stays a mode without zone survival, for development and the
@@ -428,7 +428,7 @@ ordinary reconfiguration, once five `storage` machines span three zones.
 regional cell for `az` and a multi-region cell for `region` (section 3.7), never whether it may
 move: the groups alone decide that.
 
-**How roles are sized** (decided on 2026-10-04). Stateless roles (gateways, proxy leaders,
+**How roles are sized** (decided on 2026-10-04). Stateless roles (frontends, proxy leaders,
 batchers) are **per-tenant pools**: one pool per role, shared by all the tenant's journals and
 keyed by `JournalIdentifier` inside, so a hot journal uses every instance and a quiet one none
 (#193). Storage roles — acceptors, replicas — are **per journal**, because they hold that
@@ -442,8 +442,8 @@ replicas on six machines; its pool of proxy leaders spreads the same way over th
 machines, each instance serving all three journals.
 
 **Pools per region in a multi-region cell** (decided on 2026-10-07, #253; amends the per-tenant pools
-above): proxy leaders, batchers and gateways are pooled per `(tenant, region)`, with at least one
-gateway per AZ, and a journal's leader uses its own region's pool. `ProxyId::of(slot,
+above): proxy leaders, batchers and frontends are pooled per `(tenant, region)`, with at least one
+frontend per AZ, and a journal's leader uses its own region's pool. `ProxyId::of(slot,
 proxy_count)` (`membership.rs`) assigns `slot_rank(slot, proxy_count)`, so one pool across
 regions would put a cross-region hop on a share of every journal's slots. The core does not
 change: `ProxyId` is a logical rank and `proxy_count` sits in `Config` under the format marker,
@@ -453,8 +453,8 @@ rank `r` in the leader's region.
 **The leader follows its writer** (decided on 2026-10-07, #215), the main latency lever inside a
 cell: with a journal's leader in its writer's zone a write costs one cross-zone round trip,
 elsewhere two. Three pieces carry the writer's zone: the rendezvous answer tags each reference
-with its zone (section 3.5), the client prefers a gateway in its own zone (client configuration,
-never drawn by the library), and the gateway stamps the origin zone on every write it forwards.
+with its zone (section 3.5), the client prefers a frontend in its own zone (client configuration,
+never drawn by the library), and the frontend stamps the origin zone on every write it forwards.
 The leader's driver in `paros`, never the core, counts origins per zone over a window and hands
 off through `relinquish_to` when another zone dominates past a hysteresis threshold (WPaxos §5.1's
 majority-zone policy). The window and the threshold are driver tunables, so `buggify_knob!`s with
@@ -481,65 +481,66 @@ redundancy mode for data and one `double` quorum for its control journal (amende
 #215: a `single` tenant's control journal still needs `double`). The fleet tenant and the cell
 tenant count too. A cell refuses a tenant whose footprint it cannot book.
 
-### 3.5 The gateway and the router
+### 3.5 The frontend and the resolver
 
-Two entry roles (decided on 2026-10-07, #233): a **router** per region at the fleet level, which
-redirects a client to its tenant's cell, and a **gateway** per tenant inside that cell, which
+Two entry roles (decided on 2026-10-07, #233): a **resolver** per region at the fleet level, which
+redirects a client to its tenant's cell, and a **frontend** per tenant inside that cell, which
 forwards the client's calls.
 
-**The gateway.** A stateless process in front of the machines. **Gateways are per tenant**
+**The frontend.** A stateless process in front of the machines (Spanner's per-region API
+frontends authenticate and route the same way). **Frontends are per tenant**
 (decided on 2026-10-04): the tenant coordinator places them in role slots like any role and the
-tenant's mode sizes the pool, so a gateway folds no other tenant's control journal and one
-tenant's load never reaches another's gateways. A client finds its tenant's gateways through the
+tenant's mode sizes the pool, so a frontend folds no other tenant's control journal and one
+tenant's load never reaches another's frontends. A client finds its tenant's frontends through the
 second hop of the **rendezvous call** (below), which any machine of the tenant's cell answers from
-the cell registry it already folds (a gateway is a booked slot keyed by tenant). Administration
-(`init`, tenant create and delete, drains) is served by the fleet tenant's own gateways. It
+the cell registry it already folds (a frontend is a booked slot keyed by tenant). Administration
+(`init`, tenant create and delete, drains) is served by the fleet tenant's own frontends. It
 authorizes the caller through an `Authz` trait
 whose implementation verifies a Biscuit token (below), and it routes
 each call to the machine serving the journal, so a client never knows placement. It forwards
 calls and their answers rather than redirecting the client (decided on 2026-10-04): clients only
-ever reach gateways for data, which is what keeps the network the trust boundary. Quotas are M10
-(decided on 2026-10-04). Past the gateway nothing knows a tenant name, only
+ever reach frontends for data, which is what keeps the network the trust boundary. Quotas are M10
+(decided on 2026-10-04). Past the frontend nothing knows a tenant name, only
 `(TenantId, JournalId)`.
 
-**The router** (decided on 2026-10-07, #233). One pool per region, at the fleet level, stateless
+**The resolver** (decided on 2026-10-07, #233). One pool per region, at the fleet level, stateless
 and shared by every tenant. It answers the first hop of the rendezvous call, "which references
 serve tenant T", from its cached fold of the fleet directory: the tenant's `TenantId`, its cell id
 and that cell's rendezvous references. It **redirects**: it never carries data and never forwards
-a call. It keeps routing on its cached fold while the fleet tenant is unavailable, which is the
+a call. It keeps resolving from its cached fold while the fleet tenant is unavailable, which is the
 AWS guidance's thinnest possible router and static stability one level up (section 3.3). Before
 it answers, it verifies the token's Biscuit signature and that its scope covers the tenant asked
 for (an `admin` or `tenant-manager` token may resolve any tenant), using only the root public keys
 the fleet entry carries: it holds no private key and no state of its own, and Biscuit stays out of
-`paros` and `paros-core` as below. A router folds the fleet directory and nothing else, never a
+`paros` and `paros-core` as below. A resolver folds the fleet directory and nothing else, never a
 cell's registry, so it stays thin and every cell answers for itself.
 
-**Resolution is two hops: one call, two answerers.** A client asks a router of its region for
+**Resolution is two hops: one call, two answerers.** A client asks a resolver of its region for
 tenant T and gets T's cell id and that cell's rendezvous references; it then asks any machine of
-that cell the same call and gets T's gateways, each tagged with its zone, from that machine's
-registry fold, and it prefers a gateway in its own region and zone. Both answers are cached and
-refreshed on `StaleIncarnation` or a redirect. The router stops at the cell: inside it, the cell's
-machines answer and the gateway forwards, so forward-not-redirect stands and nodes still do no
+that cell the same call and gets T's frontends, each tagged with its zone, from that machine's
+registry fold, and it prefers a frontend in its own region and zone. Both answers are cached and
+refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: inside it, the cell's
+machines answer and the frontend forwards, so forward-not-redirect stands and nodes still do no
 authorization.
 
 ```
- client ──rendezvous(T)──► router (its region: fleet directory fold, Biscuit sig + scope)
+ client ──rendezvous(T)──► resolver (its region: fleet directory fold, Biscuit sig + scope)
         ◄── cell X, X's rendezvous refs ──┘
  client ──rendezvous(T)──► any machine of cell X (registry fold)
-        ◄── T's gateways, zone-tagged ──┘
- client ──Write/Read/...──► gateway T (Authz, names) ──forwards──► leader / replica / batcher
+        ◄── T's frontends, zone-tagged ──┘
+ client ──Write/Read/...──► frontend T (Authz, names) ──forwards──► leader / replica / batcher
 ```
 
 **Names** (decided on 2026-10-04, #239). A user addresses `paros://<tenant>/<journal>`; the URI
-names data, not a location, and the fleet endpoint (a router's rendezvous name, a gateway's
-address until the router exists) is client configuration. **Only the entry roles resolve names**:
+names data, not a location, and the fleet endpoint (a resolver's rendezvous name, a frontend's
+address until the resolver exists) is client configuration. **Only the entry roles resolve names**:
 clients send names and never read the fleet tenant, so no tenant sees another tenant's names
-(amended on 2026-10-07, #233: the router resolves the tenant name, only for a tenant the token's
-scope covers, and the gateway the journal name). Until the gateway exists (#192), `parosctl`
+(amended on 2026-10-07, #233: the resolver resolves the tenant name, only for a tenant the token's
+scope covers, and the frontend the journal name). Until the frontend exists (#192), `parosctl`
 resolves with operator rights. A name is free again once its delete completes; a recreated
 tenant or journal draws a fresh id, so an old id never aliases a new name.
 
-**Trust** (decided on 2026-10-04). The boundary is the network: only gateways and peers reach
+**Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
 well-known rendezvous call, section 3.2), and nodes do no authorization.
 
@@ -552,10 +553,10 @@ pairs and mints tokens for any role.
 - **Roles** are facts in the authority block: `admin` administers the fleet (`init`, cells,
   machines, everything below), `tenant-manager` creates, deletes and lists `users` tenants
   through the fleet tenant, and a `tenant` token is scoped to one `TenantId` for its data plane
-  and journals. The gateway's policies are Datalog, one per call.
-- **Creating a tenant returns a valid tenant token**: the gateway *attenuates* the caller's
+  and journals. The frontend's policies are Datalog, one per call.
+- **Creating a tenant returns a valid tenant token**: the frontend *attenuates* the caller's
   token with a block that restricts it to the new tenant. Attenuation needs no private key, so no
-  gateway or router holds the root key.
+  frontend or resolver holds the root key.
 - **Users attenuate offline**: a tenant can narrow its own token (read-only, one journal, an
   earlier expiry) without asking paros.
 
@@ -568,7 +569,7 @@ simulation can replay, and features that cannot are left out:
 - The authorizer's wall-clock budget (`RunLimits::max_time`, default 1 ms, checked against
   `Instant::now()`) is set out of reach; evaluation is bounded by `max_iterations` and
   `max_facts`, which count deterministically. The returned execution time is never read.
-- The current time is a `time(...)` fact the gateway or the router adds from its provider's
+- The current time is a `time(...)` fact the frontend or the resolver adds from its provider's
   clock, never `AuthorizerBuilder::time()`, which reads `SystemTime::now()`.
 - Decisions are allow or deny; no query result is consumed, because the Datalog engine's
   `HashMap` iteration order is per process. A refusal is judged by its kind, never by which
@@ -580,21 +581,21 @@ simulation can replay, and features that cannot are left out:
   Biscuit implementation is its own crate, used by `parosd`, `parosctl` and `paros-sim`.
 
 **Routing goes through the fleet tenant from M9.** The tenant name → `TenantId` → cell step is
-the router's from M12; until then the gateway resolves it from its fold of the fleet directory,
-and with one cell it always answers "this cell", and it runs anyway. The gateway then resolves the
+the resolver's from M12; until then the frontend resolves it from its fold of the fleet directory,
+and with one cell it always answers "this cell", and it runs anyway. The frontend then resolves the
 journal name → `JournalId` and its placement from its fold of the tenant's control journal.
-Routers and the cell's machines answer the same rendezvous call, "which references serve tenant
+Resolvers and the cell's machines answer the same rendezvous call, "which references serve tenant
 T", so `paros://<tenant>/<journal>` never changes when a second cell appears.
 
-Tenants are created and administered through the same gateways, with an `admin` or
+Tenants are created and administered through the same frontends, with an `admin` or
 `tenant-manager` token, through the fleet tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
 every other call.
 
-**The gateway routes to the data-plane roles** (decided on 2026-10-04).
+**The frontend routes to the data-plane roles** (decided on 2026-10-04).
 A single-writer `Write`, a `Truncate` and a `SetLeader` go to the journal's Paxos leader; a
 multi-writer `Write` goes through the tenant's batchers when it has any (section 2.4), and the
 unbatchers' answers come back through it; a `Read` goes to whatever holds the journal's replica
-state. The gateway is not the **proxy leader** of Compartmentalized Paxos, which does Phase 2 for
+state. The frontend is not the **proxy leader** of Compartmentalized Paxos, which does Phase 2 for
 the Paxos leader (section 4.1); "proxy leader" is never shortened to "proxy", and the entry role
 is never called a proxy (decided on 2026-10-07, #233).
 
@@ -630,31 +631,31 @@ carries its `kind`, `Regional { region }` or `MultiRegion { regions, witness }`,
 rendezvous name. A **multi-region** cell (M13, decided on 2026-10-07, #253) spans three regions, each
 across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
 with full records and no other role (section 5). A tenant's `survives` (section 3.4) picks the
-kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its routers
+kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its resolvers
 (section 3.5), and every cell answers the second hop for its own tenants.
 
 ```
  fleet F: the fleet directory (tenant → cell), held by the fleet tenant
- ┌──────────────────────────┬──────────────────────────┬──────────────────────────┐
- │ region W                 │ region C                 │ region N                 │
- │ routers W (thin, cached) │ routers C                │ routers N                │
- ├──────────────────────────┼──────────────────────────┼──────────────────────────┤
- │ cell W1 regional, 3 AZ   │ cell C1 regional, 3 AZ   │ cell N1 regional, 3 AZ   │
- │  cell tenant W1          │  cell tenant C1          │  cell tenant N1          │
- │  tenants: survives = az  │  tenants: survives = az  │  tenants: survives = az  │
- ├──────────────────────────┴──────────────────────────┴──────────────────────────┤
- │ cell MR1 multi-region over W, C, N (N = witness)                               │
- │  cell tenant MR1 (2/2/1)   fleet tenant (2/2/1)   tenants: survives = region   │
- └────────────────────────────────────────────────────────────────────────────────┘
- client: hop 1  router of its region → (cell id, the cell's rendezvous references)
-         hop 2  any machine of that cell → the tenant's gateways (zone-tagged, pick local)
+ ┌────────────────────────────┬────────────────────────────┬────────────────────────────┐
+ │ region W                   │ region C                   │ region N                   │
+ │ resolvers W (thin, cached) │ resolvers C                │ resolvers N                │
+ ├────────────────────────────┼────────────────────────────┼────────────────────────────┤
+ │ cell W1 regional, 3 AZ     │ cell C1 regional, 3 AZ     │ cell N1 regional, 3 AZ     │
+ │  cell tenant W1            │  cell tenant C1            │  cell tenant N1            │
+ │  tenants: survives = az    │  tenants: survives = az    │  tenants: survives = az    │
+ ├────────────────────────────┴────────────────────────────┴────────────────────────────┤
+ │ cell MR1 multi-region over W, C, N (N = witness)                                     │
+ │  cell tenant MR1 (2/2/1)   fleet tenant (2/2/1)   tenants: survives = region         │
+ └──────────────────────────────────────────────────────────────────────────────────────┘
+ client: hop 1  resolver of its region → (cell id, the cell's rendezvous references)
+         hop 2  any machine of that cell → the tenant's frontends (zone-tagged, pick local)
 ```
 
 **The fleet tenant always exists** (named *meta* until 2026-10-04). It is one tenant whose control journal also holds the directory, so it is
 a single journal. In M9 it lives in the only cell; any cell may host it later. Once a
 multi-region cell exists, the fleet tenant is hosted there (decided on 2026-10-07, #253), moved by
-its M12 move, so a region loss never stops tenant creation and moves; routers in every region
-keep routing on their folds regardless. It stays small: it
+its M12 move, so a region loss never stops tenant creation and moves; resolvers in every region
+keep resolving on their folds regardless. It stays small: it
 answers only "which tenant lives in which cell" plus the cell entries. Quotas, billing and global
 status go elsewhere. When the directory grows large (M12) it is split across several journals by
 tenant range, the AWS guidance's range-based mapping.
@@ -665,7 +666,7 @@ tenant is never split by journal.
 **Every fleet operation is an idempotent state machine** (FDB's metacluster, section 10). A
 tenant's directory entry carries a state: `REGISTERING`, `READY`, `REMOVING`,
 `UPDATING_CONFIGURATION` or `ERROR` (`RENAMING` was dropped on 2026-10-04: no milestone renames
-a tenant, and names are the gateway's). Creating a tenant (`parosctl tenant create`)
+a tenant, and names are the frontend's). Creating a tenant (`parosctl tenant create`)
 writes it into the fleet directory in `REGISTERING` with a cell assignment (always the one cell
 today), creates the tenant in its cell, then marks it `READY`. If an operation fails partway,
 re-running the same operation is allowed and resumes where it stopped; on success the tenant
@@ -715,10 +716,10 @@ without rules, may come later (decided on 2026-10-04):
 
 | Group | Rule | Members |
 |---|---|---|
-| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; reached only for administration, through the fleet tenant's gateways | the fleet tenant, every cell tenant |
+| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; reached only for administration, through the fleet tenant's frontends | the fleet tenant, every cell tenant |
 | `cell` | **never leaves its cell**: it *is* its cell (section 1); reconfigured only within it | each cell's cell tenant |
 | `fleet` | holds the fleet directory; moves with its coordinator | the fleet tenant |
-| `users` | created by the tenant API (`parosctl tenant create`, through the fleet tenant's gateways); served by its own gateways | every served tenant |
+| `users` | created by the tenant API (`parosctl tenant create`, through the fleet tenant's frontends); served by its own frontends | every served tenant |
 
 So the fleet tenant is `{internal, fleet}`, a cell tenant `{internal, cell}` and a served tenant
 `{users}`. **The groups alone decide whether a tenant moves**: it moves unless one of its groups
@@ -739,7 +740,7 @@ co-locating it with tenants.
 Copy: the tenant coordinator reconfigures each journal to a `C_new` whose members carry
 `(region, az)` tags over the target cell's machines; catch-up crosses regions and needs a
 throttle knob; the matchmaker set hands over by generation. Flip: `SetLeader` on the tenant's
-control journal. Redirect: the directory pointer, folded by the routers. Forget: the old cell
+control journal. Redirect: the directory pointer, folded by the resolvers. Forget: the old cell
 releases the bookings. With the `cell_id` in the configuration (below), the copy itself names
 the owning cell. The reverse move, from a multi-region cell to a regional one, is the same under
 the regional rule.
@@ -757,7 +758,7 @@ every node knowing its own cell.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
 tombstone set so it cannot silently rejoin), moving tenants between cells, moving the fleet
-tenant, the router (section 3.5), splitting the fleet tenant by range, placement across cells
+tenant, the resolver (section 3.5), splitting the fleet tenant by range, placement across cells
 (each cell entry with a configured capacity and an allocated count, an ordered index of cells
 with room, the fullest cell of the kind the tenant's `survives` asks for that still has room
 after a quick availability check (amended on 2026-10-07, #232), an optional preferred cell, a
@@ -891,8 +892,8 @@ scalable independently per tenant by its coordinator:
 | Batcher | stateless | to build; multi-writer journals only (section 2.4) |
 | Unbatcher | stateless | to build; multi-writer journals only |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
-| Gateway (the entry role) | stateless | to build: one pool per tenant, per `(tenant, region)` in a multi-region cell (section 3.4); authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |
-| Router | stateless | to build in M12: fleet level, one pool per region shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5) |
+| Frontend (the entry role) | stateless | to build: one pool per tenant, per `(tenant, region)` in a multi-region cell (section 3.4); authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |
+| Resolver | stateless | to build in M12: fleet level, one pool per region shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5) |
 | Coordinator (fleet, cell, tenant) | stateless, or a seed at bootstrap | to build: the election library over a multi-writer journal (#240) |
 
 ### 4.1 How the pieces fit
@@ -1050,7 +1051,7 @@ spread 2/2/1.
   unchanged and outside the rule, the risk its tenant states when it picks it (section 3.4).
 - **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
   shares a machine with its acceptors, while capacity permits.
-- **Stateless roles**: once a tenant's pool has three instances, at least one gateway and one
+- **Stateless roles**: once a tenant's pool has three instances, at least one frontend and one
   proxy leader per zone. Coordinators run on `stateless` machines and are re-elected in a
   surviving zone after a zone loss.
 - **Replicas** spread over the zones, and a `Read` goes to the replica in the reader's zone.
@@ -1062,14 +1063,14 @@ coordinator waits out the re-placement bound (section 3.2), the journal shows `D
 where the region has one.
 
 **A zone loss, a region loss.** A regional cell serves through the loss of one zone. The loss of
-its region takes it down by design: cells are not failover domains (section 3.7), routers
+its region takes it down by design: cells are not failover domains (section 3.7), resolvers
 elsewhere keep pointing at it, and nothing fails over. **Static stability** holds inside the
 cell: the data plane and the rendezvous answers come from folds, so only placement, new tenants,
 new capacity and moves wait.
 
 ```
                 AZ a                   AZ b                   AZ c
- entry          gateway T              gateway T              gateway T
+ entry          frontend T             frontend T             frontend T
  stateless      proxy leader           proxy leader           proxy leader, coordinator T
  journal J      acc1 (LEADER*), acc2   acc3, acc4             acc5             majority 3 of 5
                 replica r1             replica r2
@@ -1095,7 +1096,7 @@ acceptors, a majority of five), a later mode.
   read costs one cross-region round trip (section 2.5). After a region loss three of five remain,
   with zero slack, and every slot waits for the farthest survivor (Brooker's 2-of-2, section 10).
 - **The witness region** holds acceptors and matchmakers with full records, bytes included, and
-  no other role: no gateway, replica, batcher, proxy leader or coordinator slot. A server answers
+  no other role: no frontend, replica, batcher, proxy leader or coordinator slot. A server answers
   only from records it holds (section 2.5), and Phase-1 recovery and CTRL repair are unchanged.
   `ColocatedNode` folds by default, so "no replica" means no `Read` routed there and no replica
   slot booked, not a node without bytes. Any `ColocatedNode` may campaign, so keeping the leader
@@ -1119,9 +1120,9 @@ acceptors, a majority of five), a later mode.
 
 ```
  ┌─ region W ──────────────────┐ ┌─ region C ──────────────────┐ ┌─ region N (witness) ─┐
- │ gateways T (one per AZ)     │ │ gateways T (one per AZ)     │ │ az-a: acceptor n1    │
+ │ frontends T (one per AZ)    │ │ frontends T (one per AZ)    │ │ az-a: acceptor n1    │
  │ proxy leaders T(W)          │ │ proxy leaders T(C)          │ │       matchmaker m3  │
- │ batchers T(W), coordinator T│ │ coordinator of cell MR1     │ │ no gateway, replica, │
+ │ batchers T(W), coordinator T│ │ coordinator of cell MR1     │ │ no frontend, replica,│
  │ az-b: acc w1 (LEADER), m1   │ │ az-b: acc c1, m2            │ │ proxy leader, batcher│
  │ az-c: acc w2, replica r1    │ │ az-c: acc c2, replica r2    │ │ or coordinator       │
  └─────────────────────────────┘ └─────────────────────────────┘ └──────────────────────┘
@@ -1187,19 +1188,19 @@ Simulation is the investment. Every milestone lands with its share of:
   own label map meanwhile, an `upstream-to-moonpool` candidate; a latency model per zone pair
   (likely moonpool work); the zone-aware copy budget, where a zone counts as one fault; a composer
   that draws tags per seed and applies the zone rule, with a reachable for a refused shape; the
-  client's zone and the gateway's origin stamp drawn per seed, the hysteresis knobs, a
+  client's zone and the frontend's origin stamp drawn per seed, the hysteresis knobs, a
   `sometimes` for a leader moved toward its writer's zone and a reachable for a move the
   hysteresis refused. Oracles: two nodes never evaluate one configuration under different tags
   (`assert_always!`); every chosen slot's Phase-2 voters span two zones, folded from `Accepted`
   and the tags into O(1) audit state; every journal kept committing through a one-zone kill
   (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
-- Regions and the router (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
+- Regions and the resolver (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a
-  client's two-hop resolution keeps routing through an outage of the fleet tenant. In M13: the
+  client's two-hop resolution keeps succeeding through an outage of the fleet tenant. In M13: the
   witness region, the per-region pools and a move between cell kinds.
-- New BUGGIFY sites for every new decision the driver, the gateway, the router and the
+- New BUGGIFY sites for every new decision the driver, the frontend, the resolver and the
   coordinators take, and the coverage-guided sweep saturating over them.
 
 No new model checker and no separate specification: the two existing sans-IO model checkers
@@ -1238,10 +1239,10 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the gateway, the gateway with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `ZoneTag` pairs in `AcceptorConfig` with its `cell_id` (one format bump), the tag table in the cell tenant's control journal, the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the router beside the gateway (section 3.5) |
+| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
 | M13 | Multi-region cells (#253) | the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the fleet tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
@@ -1433,7 +1434,7 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and its
   `cell` group says so (section 3.7).
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
-  the gateway as the rendezvous: #216.
+  the frontend as the rendezvous: #216.
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
   fence suffices, and an owner id the caller chose, so two processes could share it and both pass
   the owner check once they read the public generation. A per-term random leader uuid is
@@ -1442,9 +1443,9 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
 - **A lease in the journal** (MemoryDB's lease-fenced writes). Rejected: a lease fence depends
   on clocks and pauses; the leader uuid fences without either, and the election library keeps a
   lease only as a liveness hint (section 3.3).
-- **JWT** for gateway tokens (chosen on 2026-10-04 morning, replaced the same day, #245).
+- **JWT** for frontend tokens (chosen on 2026-10-04 morning, replaced the same day, #245).
   Roles become ad-hoc claims checked by hand, a token returned at tenant creation needs a signing
-  key at the gateway or a call to an external issuer, and a holder cannot narrow its own token.
+  key at the frontend or a call to an external issuer, and a holder cannot narrow its own token.
   Biscuit gives roles as Datalog facts, attenuation without the root key (tenant creation, users
   narrowing their tokens offline) and offline minting. JWT stays the way to plug an external
   identity provider in later, as a second `Authz` implementation or a token exchange.
@@ -1456,9 +1457,9 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   to special-case. Random ids recorded where they are created, and learned from any machine of
   the cell, cost one `Inspect` at bootstrap.
 - **A single entry role** (rejected on 2026-10-07, #233): a per-tenant role cannot find the cell
-  of a tenant it does not serve, so the first hop needs a fleet-level answerer, the router.
-- **A router folding every cell's registry** (rejected on 2026-10-07, #233): one hop instead of
-  two, but the router is no longer thin, no cell stays statically stable without it, and it makes
+  of a tenant it does not serve, so the first hop needs a fleet-level answerer, the resolver.
+- **A resolver folding every cell's registry** (rejected on 2026-10-07, #233): one hop instead of
+  two, but the resolver is no longer thin, no cell stays statically stable without it, and it makes
   every cell depend on a fleet-level role.
 - **Chain replication inside a region** (rejected on 2026-10-07, #215), the variant DSQL's journal
   runs across AZs: paros keeps quorum writes everywhere, because a slow or dead acceptor costs
