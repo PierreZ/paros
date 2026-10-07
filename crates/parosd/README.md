@@ -34,7 +34,7 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 |---|---|---|---|
 | `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
-| `proxy1` | `stateless` | `zone-b` | waits for placement (M9) |
+| `stateless1` | `stateless` | `zone-b` | waits for placement (M9) |
 
 **Start and wait.** A machine starts with its listen address, its data
 directory (a named volume), its class, capacity and failure domain, and its
@@ -77,7 +77,7 @@ stands for every seed, and each server's node id is learned from its own
 generation it read), then writes at the tail.
 
 **Kill and restart.** `docker compose kill node2` (a storage machine) and
-`docker compose kill proxy1` (a stateless one): the journal keeps a majority and
+`docker compose kill stateless1` (a stateless one): the journal keeps a majority and
 keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.

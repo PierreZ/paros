@@ -485,10 +485,7 @@ tenant count too. A cell refuses a tenant whose footprint it cannot book.
 
 Two entry roles (decided on 2026-10-07, #233): a **router** per region at the fleet level, which
 redirects a client to its tenant's cell, and a **gateway** per tenant inside that cell, which
-forwards the client's calls. The gateway is the role this document called the *proxy* on
-2026-10-04 (the *front door* before that), renamed so that it is never confused with the **proxy
-leader**, which keeps its name; every decision recorded about it stands. This closes #233's open
-question, a separate router role or a proxy mode.
+forwards the client's calls.
 
 **The gateway.** A stateless process in front of the machines. **Gateways are per tenant**
 (decided on 2026-10-04): the tenant coordinator places them in role slots like any role and the
@@ -1259,7 +1256,7 @@ deferred and carries no milestone yet. The interactive game and the lessons (`tr
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`proxy1`); the rendezvous list that names the first three is the `seeds` alias. Its journals run
+`stateless1`); the rendezvous list that names the first three is the `seeds` alias. Its journals run
 `double`: four `storage` machines cannot hold `triple`'s five acceptors on distinct machines, so
 the toy cannot run `triple` (decided on 2026-10-07, #215).
 
@@ -1436,7 +1433,7 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and its
   `cell` group says so (section 3.7).
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
-  the front door (now the gateway) as the rendezvous: #216.
+  the gateway as the rendezvous: #216.
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
   fence suffices, and an owner id the caller chose, so two processes could share it and both pass
   the owner check once they read the public generation. A per-term random leader uuid is
