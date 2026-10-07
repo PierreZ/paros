@@ -738,7 +738,7 @@ co-locating it with tenants.
 
 **Moving between cell kinds** (M12 and M13, decided on 2026-10-07, #253) is the same four phases.
 Copy: the tenant coordinator reconfigures each journal to a `C_new` whose members carry
-`(region, az)` tags over the target cell's machines; catch-up crosses regions and needs a
+`(region, az)` failure domains over the target cell's machines; catch-up crosses regions and needs a
 throttle knob; the matchmaker set hands over by generation. Flip: `SetLeader` on the tenant's
 control journal. Redirect: the directory pointer, folded by the resolvers. Forget: the old cell
 releases the bookings. With the `cell_id` in the configuration (below), the copy itself names
@@ -748,7 +748,7 @@ the regional rule.
 **The cell inside the configuration** (decided on 2026-10-07, #215, #232; open until then). A
 matchmaker's registry binds an acceptor set and its quorum system to a ballot, and from M11
 `AcceptorConfig` also carries the configuration's `cell_id`, in the same single format bump as
-its zone tags (section 5). Node ids are fleet-unique, so a reconfiguration onto another cell's
+its failure domains (section 5). Node ids are fleet-unique, so a reconfiguration onto another cell's
 machines already moves a journal's data; with the `cell_id` in the configuration the move is
 itself decided by Paxos: the effective configuration (the highest-ballot reconfiguration a
 matchmaker quorum holds) names the cell that owns the journal, the directory is a cache of that
@@ -781,12 +781,8 @@ assumed, and unset is a state to refuse, not a value to fall back on.
 - The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the
   leader for one term, never reused. A writer never chooses an identity that another process could
   share.
-- **Zone tags** (decided on 2026-10-07, #215): a `ZoneTag` is a pair `(region_tag, az_tag)` of
-  opaque small integers, and equality on each component is the only operation; nothing orders or
-  names them. The cell coordinator assigns a machine's tag when it applies its `RegisterNode`
-  (section 3.2), from a `failure_domain` → tag table held in the cell tenant's control journal,
-  not in the cell plan, which is written once; the tenant coordinator reads the tags from its
-  registry fold when it composes a configuration (section 5).
+- **Failure domains** are not identifiers: `AcceptorConfig` carries the registry's
+  `failure_domain` names unchanged (section 5).
 - **Tombstones** (removed tenant ids, dropped tenants, deleted journal ids) are kept forever, a
   `u64` each. They are the one part of control state bounded by history rather than by live
   entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned
@@ -1017,18 +1013,25 @@ the WPaxos read (section 10) established for one region with several availabilit
   The grid stays the opt-in throughput mode (section 3.4), with its cost (one dead acceptor
   freezes its column until reconfiguration) stated to the tenant that picks it; the redundancy
   modes are the zone-surviving default.
-- What is adopted (decided on 2026-10-07, #215), detailed below: zone tags inside
+- What is adopted (decided on 2026-10-07, #215), detailed below: failure domains inside
   `AcceptorConfig`, a placement rule judged through `QuorumSystem` and never a count, the leader
   following its writer through `relinquish_to` (WPaxos's steal without a Phase 1, section 3.4),
   zone-spread matchmaker sets, and in the simulation a zone-kill attrition mode and a zone-aware
   copy budget, without which it cannot prove zone survival (section 6).
 
-**Tags in the configuration.** `AcceptorConfig` carries a vector of `ZoneTag`s (section 3.8)
-parallel to its sorted members, bound to the ballot with the configuration, because two nodes
-that disagree on a member's zone evaluate different quorums; the registry's failure domain is the
-composer's input, never read live by a tally. An empty vector is the plain arm, byte-identical
-to today's configuration, so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides
-the same single format bump (section 3.7).
+**Failure domains in the configuration.** `AcceptorConfig` carries a vector of
+`FailureDomain { region, az }` parallel to its sorted members, holding the names copied from the
+registry's `failure_domain` (`RegisterNode`, section 3.2, e.g. `("eu-west-1", "eu-west-1a")`):
+short bounded strings, compared for equality only, never parsed or ordered by the core. Names mean
+the same thing fleet-wide, so a move between cells (section 3.7) compares domains correctly; a
+cell-scoped pair of integers would let one cell's `az 2` equal another's and the zone rule could
+accept a placement that does not survive a zone. The cost is a few dozen bytes per member in a
+configuration of at most nine members. The vector is bound to the ballot with the
+configuration, because two nodes that disagree on a member's failure domain evaluate different
+quorums; the registry's `failure_domain` is the composer's input, copied when it composes, never
+read live by a tally. An empty vector is the plain arm, byte-identical to today's configuration,
+so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same single format bump
+(section 3.7).
 
 **The zone rule** is two predicates over a configuration's members `M`, built from
 `has_phase1_quorum` and `has_phase2_quorum` over subsets of voters, never a count:
@@ -1081,9 +1084,9 @@ new capacity and moves wait.
  zone a lost: 3 of 5, zero slack, serves; Degraded, never re-placed into two zones
 ```
 
-**Multi-region cells** (M13, decided on 2026-10-07, #253). Tags are two-level, `(region, az)`
-(section 3.8): in a regional cell every member shares one region tag and the rule runs over
-AZs; in a multi-region cell it runs at both levels. A `triple` journal is placed 2/2/1 over the
+**Multi-region cells** (M13, decided on 2026-10-07, #253). Failure domains are two-level,
+`(region, az)`: in a regional cell every member shares one region and the rule runs over AZs; in a
+multi-region cell it runs at both levels. A `triple` journal is placed 2/2/1 over the
 three regions, its lone acceptor in the witness region, and each region's acceptors of one
 journal sit in distinct AZs. The rule: for every region `r`, both quorums hold on `M` minus `r`;
 for every AZ `a`, both hold on `M` minus `a`; and no region alone holds a Phase-2 quorum.
@@ -1187,13 +1190,13 @@ Simulation is the investment. Every milestone lands with its share of:
   `CHAOS_DURATION_MS`); moonpool#297 gives `.processes()` groups no locality, so paros keeps its
   own label map meanwhile, an `upstream-to-moonpool` candidate; a latency model per zone pair
   (likely moonpool work); the zone-aware copy budget, where a zone counts as one fault; a composer
-  that draws tags per seed and applies the zone rule, with a reachable for a refused shape; the
-  client's zone and the frontend's origin stamp drawn per seed, the hysteresis knobs, a
+  that draws failure domains per seed and applies the zone rule, with a reachable for a refused
+  shape; the client's zone and the frontend's origin stamp drawn per seed, the hysteresis knobs, a
   `sometimes` for a leader moved toward its writer's zone and a reachable for a move the
-  hysteresis refused. Oracles: two nodes never evaluate one configuration under different tags
-  (`assert_always!`); every chosen slot's Phase-2 voters span two zones, folded from `Accepted`
-  and the tags into O(1) audit state; every journal kept committing through a one-zone kill
-  (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
+  hysteresis refused. Oracles: two nodes never evaluate one configuration under different failure
+  domains (`assert_always!`); every chosen slot's Phase-2 voters span two zones, folded from
+  `Accepted` and the failure domains into O(1) audit state; every journal kept committing through
+  a one-zone kill (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
 - Regions and the resolver (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
@@ -1241,7 +1244,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
 | M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
-| M11 | Zones (#215) | `(region, az)` `ZoneTag` pairs in `AcceptorConfig` with its `cell_id` (one format bump), the tag table in the cell tenant's control journal, the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
+| M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
 | M13 | Multi-region cells (#253) | the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the fleet tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
@@ -1464,6 +1467,8 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
 - **Chain replication inside a region** (rejected on 2026-10-07, #215), the variant DSQL's journal
   runs across AZs: paros keeps quorum writes everywhere, because a slow or dead acceptor costs
   nothing until reconfiguration, where a chain stalls until its membership is changed.
+- **Cell-scoped integer tags** (rejected on 2026-10-07, #215): not comparable across cells during
+  a move (section 5).
 - **Vote-only witnesses** (rejected on 2026-10-07, #253): a vote without bytes is a guaranteed `faulty`
   from Phase 1's view and contradicts "a server answers only from records it holds" (section 2.5).
 - **Two regional cells replicating to each other** (rejected on 2026-10-07, #253): a dependency
