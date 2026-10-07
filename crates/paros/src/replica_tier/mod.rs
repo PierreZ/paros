@@ -186,26 +186,33 @@ fn trace_received(self_id: u64, msg: &paros_core::Message) {
 /// force, and the read is served once the row answered whole and this
 /// replica folded the maximum watermark — parked until then. The row
 /// override is the node's hook, asked only under a grid, from the loop.
-fn open_read<H: DriverHooks>(
+fn open_read<H: DriverHooks, A: Audit>(
     replica: &mut ReplicaNode,
     reads: &mut JournalReads,
     req: &Read,
     reply: ReplySender<ReadAck>,
     tunables: &DriverTunables,
     hooks: &H,
+    audit: &A,
 ) {
     let ctx = reads.next_ctx();
-    let row = match replica.acceptors().quorum_system() {
+    // The replica reads over its basis (#260); without one it opens nothing,
+    // and neither the row hook nor the audit hears of the read.
+    let basis = replica.read_basis();
+    let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
         QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
         _ => None,
-    };
-    let row = replica.acceptors().read_row(ctx, row);
+    });
+    let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
     let opened = fold_head(replica);
     let wait = wait_ticks(
         req.wait_ms,
         tunables.tick_interval,
         tunables.read_poll_ticks,
     );
+    if basis.is_some() {
+        audit.quorum_read_opened(replica.config().id, ctx);
+    }
     replica.quorum_read_in(ctx, row);
     reads.park(req, reply, wait, row, opened);
 }
@@ -334,7 +341,7 @@ where
                     answer(hooks, audit, me_id, Reply::LogRead, reply, refused);
                     continue;
                 }
-                open_read(&mut replica, &mut reads, &req, reply, &tunables, hooks);
+                open_read(&mut replica, &mut reads, &req, reply, &tunables, hooks, audit);
                 let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
                 serve_reads(&mut reads, &served, &replica, me_id, hooks, audit);
             }

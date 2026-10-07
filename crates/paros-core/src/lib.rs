@@ -107,7 +107,7 @@ pub use node::{
     ReadState, ReconfigureRefusal, ReconfigureResult, RepairCounters,
 };
 pub use proxy_leader::{ProxyLeader, ProxyReady};
-pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads};
+pub use quorum_read::{PreReadFold, QuorumRead, QuorumReads, ReadBasis};
 pub use ready::Ready;
 pub use replica::{LogPage, LogRead};
 pub use replica_node::{ReplicaCounters, ReplicaNode, ReplicaReady};

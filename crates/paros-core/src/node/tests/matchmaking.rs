@@ -831,6 +831,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         ballot: w,
         commit: None,
         config: Some(cfg(&[1, 2, 3])),
+        fence: None,
     });
     n.ready().advance();
     assert!(n.is_acceptor());
@@ -845,6 +846,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         ballot: w,
         commit: None,
         config: Some(cfg(&[1, 2, 3])),
+        fence: None,
     });
     spare.ready().advance();
     assert!(!spare.is_acceptor());
@@ -862,6 +864,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         ballot: ballot(11, 1),
         commit: None,
         config: Some(cfg(&[0, 1, 2])),
+        fence: None,
     });
     late.ready().advance();
     assert!(!late.is_acceptor());

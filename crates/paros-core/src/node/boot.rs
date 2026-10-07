@@ -91,6 +91,7 @@ impl ColocatedNode {
             config,
             acceptors,
             acceptors_since: Ballot::zero(),
+            read_basis: None,
             belief_source: BeliefSource::Bootstrap,
             // The bootstrap configuration is bound to `Ballot::zero()`, so a
             // node that boots inside it was a member at exactly that ballot —

@@ -166,6 +166,7 @@ fn a_heard_belief_closes_an_open_probe() {
         ballot: ballot(3, 4),
         commit: None,
         config: Some(cfg(&[3, 4, 5])),
+        fence: None,
     });
     assert!(n.membership_probe().is_none());
     assert_eq!(n.belief_source(), BeliefSource::Heard);

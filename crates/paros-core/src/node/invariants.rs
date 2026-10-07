@@ -88,8 +88,32 @@ impl ColocatedNode {
             "no in-flight round survives below the compaction floor"
         );
         self.assert_deployment_invariants();
+        self.assert_read_basis_invariants();
         self.assert_role_invariants();
         self.assert_leadership_state_invariants();
+    }
+
+    /// The read basis (#260): only a matchmaker deployment stores one; it is
+    /// a won leadership's, drawn from the pool, and on a leader at least its
+    /// own ballot.
+    fn assert_read_basis_invariants(&self) {
+        let Some(basis) = &self.read_basis else {
+            return;
+        };
+        assert!(
+            self.config.has_matchmakers(),
+            "a plain deployment stores no read basis"
+        );
+        assert!(
+            basis.config.is_drawn_from(&self.pool),
+            "a read basis is drawn from the pool"
+        );
+        if self.role == NodeRole::Leader && self.proposer.election().is_none() {
+            assert!(
+                basis.since >= self.ballot,
+                "a leader's read basis is at least its own ballot"
+            );
+        }
     }
 
     /// The deployment couplings: plain Multi-Paxos never matchmakes and never

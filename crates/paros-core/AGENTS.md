@@ -22,7 +22,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `proxy_leader.rs` → `ProxyLeader`, `ProxyReady` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, `expire_stale`.
 - `replica_node.rs` → `ReplicaNode`, `ReplicaReady`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis.
 - `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
-- `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold` → the leaderless read tally (#143).
+- `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold`, `ReadBasis` → the leaderless read tally (#143) and the won leadership's configuration and fence it is judged over (#260).
 - `membership.rs` → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing.
 - `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the boot probe (#173).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).

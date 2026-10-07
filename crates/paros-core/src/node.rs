@@ -34,7 +34,7 @@ use crate::matchmaking::{Matchmaking, MembershipProbe};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId};
 use crate::message::{Audience, Message, Party};
 use crate::proposer::{Proposer, Round};
-use crate::quorum_read::QuorumReads;
+use crate::quorum_read::{QuorumReads, ReadBasis};
 use crate::ready::Ready;
 use crate::replica::Replica;
 use crate::state::{Config, HardState};
@@ -201,6 +201,15 @@ pub struct ColocatedNode {
     /// The ballot `acceptors` was registered under (`Ballot::zero()` for the
     /// bootstrap configuration).
     acceptors_since: Ballot,
+    /// The **read basis** (#260, [`ReadBasis`]): the configuration this
+    /// node's quorum reads are judged over, learned only from a leadership
+    /// that won its ballot — this node's own election or handoff install, or
+    /// a leader's beat — with that leadership's fence. Never a `Prepare`'s
+    /// configuration: a campaign may never finish, and the configurations it
+    /// must cover hold slots its own quorums never voted. Volatile (`None`
+    /// at boot, until the first beat), and only ever set on a matchmaker
+    /// deployment: plain Multi-Paxos reads over its static configuration.
+    read_basis: Option<ReadBasis<NodeId>>,
     /// Where `acceptors` came from: the bootstrap default every incarnation
     /// boots with, or something this incarnation **heard** — a leader's
     /// wire, its own election or handoff, an adopted effective configuration,
@@ -377,6 +386,11 @@ struct Counters {
     /// Slots a settled leader filled with a [`Control::Noop`] up to a vote
     /// watermark a pre-read reported past its frontier (monotone).
     watermark_fills: u64,
+    /// Quorum reads not opened for want of a read basis (#260).
+    quorum_reads_without_basis: u64,
+    /// `PreRead`s left unanswered by a node whose belief was still the
+    /// bootstrap default (#260).
+    pre_reads_refused_unheard: u64,
 }
 
 /// The repair counters ([`ColocatedNode::repair_counters`]): monotone per
@@ -406,6 +420,13 @@ pub struct MembershipCounters {
     /// Leaderships resigned once this node's own reconfiguration removed it
     /// from the acceptor set.
     pub step_downs: u64,
+    /// Quorum reads not opened for want of a read basis (#260): no won
+    /// leadership heard this incarnation, or the node's belief bound above
+    /// its basis.
+    pub reads_without_basis: u64,
+    /// `PreRead`s left unanswered while this node's belief was still the
+    /// bootstrap default (#260).
+    pub pre_reads_refused_unheard: u64,
 }
 
 impl ColocatedNode {
@@ -486,8 +507,8 @@ impl ColocatedNode {
                 ballot,
                 commit,
                 config,
-                ..
-            } => self.on_heartbeat(from, ballot, commit, config),
+                fence,
+            } => self.on_heartbeat(from, ballot, commit, config, fence),
             Message::HeartbeatAck {
                 from,
                 ballot,
@@ -1355,6 +1376,44 @@ impl ColocatedNode {
         self.acceptors_since
     }
 
+    /// The basis this node's quorum reads are judged over (#260,
+    /// [`ReadBasis`]), or `None` when it may open none: on a matchmaker
+    /// deployment, before any won leadership was heard this incarnation, or
+    /// while its own belief is bound above the basis — it promised a newer
+    /// campaign, which may have chosen under a configuration the basis's
+    /// quorums need not meet. On plain Multi-Paxos, always the static
+    /// configuration with no fence.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn read_basis(&self) -> Option<ReadBasis<NodeId>> {
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.read_basis.is_none(),
+                "a plain node stores no read basis"
+            );
+            return Some(ReadBasis {
+                config: self.acceptors.clone(),
+                since: self.acceptors_since,
+                fence: None,
+            });
+        }
+        let basis = self
+            .read_basis
+            .clone()
+            .filter(|basis| basis.since >= self.acceptors_since);
+        if let Some(basis) = &basis {
+            assert!(
+                basis.config.is_drawn_from(&self.pool),
+                "a read basis is drawn from the pool"
+            );
+        }
+        basis
+    }
+
     /// Where [`ColocatedNode::acceptors`] came from: the bootstrap default,
     /// or something this incarnation heard (#173, [`BeliefSource`]).
     ///
@@ -1448,7 +1507,17 @@ impl ColocatedNode {
         let counters = MembershipCounters {
             campaigns_skipped: self.counters.non_member_campaigns_skipped,
             step_downs: self.counters.non_member_step_downs,
+            reads_without_basis: self.counters.quorum_reads_without_basis,
+            pre_reads_refused_unheard: self.counters.pre_reads_refused_unheard,
         };
+        // Only a matchmaker deployment moves its configuration, so only one
+        // ever lacks a read basis or refuses a pre-read for an unheard belief.
+        if counters.reads_without_basis > 0 || counters.pre_reads_refused_unheard > 0 {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment reads without a basis"
+            );
+        }
         // A node is outside its configuration only on a deployment that
         // reconfigures: plain Multi-Paxos skips and resigns nothing.
         if counters.campaigns_skipped > 0 {

@@ -129,6 +129,9 @@ pub(super) struct AuditState {
     // --- Paxos safety -------------------------------------------------------
     /// Cluster-wide: the value chosen for each slot.
     pub(super) chosen: BTreeMap<u64, u64>,
+    /// Per open quorum read `(node, ctx)`: the highest slot applied anywhere
+    /// when it opened (#260) — the floor its served prefix must reach.
+    pub(super) read_floors: BTreeMap<(u64, u64), Option<u64>>,
     /// Per node: the last durable promised ballot.
     pub(super) promised: BTreeMap<u64, Ballot>,
     /// `(ballot round, ballot node, slot)` → the command that ballot proposed.
@@ -307,6 +310,12 @@ pub(super) struct AuditState {
     pub(super) waiter_superseded: bool,
     pub(super) crashed_before_sync: bool,
     pub(super) crashed_after_sync: bool,
+    /// A candidate crashed with its `Prepare`s in flight (#260).
+    pub(super) crashed_after_prepare: bool,
+    /// A node opened no quorum read for want of a read basis (#260).
+    pub(super) read_without_basis: bool,
+    /// A rebooted node left a `PreRead` unanswered before it heard (#260).
+    pub(super) pre_read_refused_unheard: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
     /// ([`Audit::storage_fault`](paros::Audit::storage_fault) with `Io`/`FsyncFailed`).
     pub(super) storage_faults_detected: u64,

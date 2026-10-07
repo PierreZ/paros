@@ -540,6 +540,9 @@ impl ColocatedNode {
         let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
         self.proposer
             .open_authority(fence, self.is_acceptor().then_some(me));
+        // The won ballot is a read basis (#260): its configuration, with the
+        // fence standing for everything the earlier configurations chose.
+        self.learn_read_basis(self.acceptors.clone(), self.ballot, fence);
         // Fresh-leader postconditions (#67/#88): the win condition demanded
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.

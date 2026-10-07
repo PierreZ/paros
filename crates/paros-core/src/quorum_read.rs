@@ -35,7 +35,7 @@
 //! value as the authoritative accepted record), which is conservative in the
 //! same direction — a longer wait, never a stale answer.
 //!
-//! # One configuration at a time
+//! # One configuration at a time, and which one (#260)
 //!
 //! The argument above is made within **one configuration**: the row asked
 //! and the column that chose the write are of the same grid. A read is
@@ -45,15 +45,31 @@
 //! asked need not intersect the successor's columns. A `PreReadAck` also
 //! carries the answering node's configuration ballot on a matchmaker
 //! deployment, so a read whose row already knows of a successor abandons on
-//! the first such answer rather than completing over a superseded belief
-//! (under a majority or a flexible split every two Phase-1 quorums
-//! intersect, so some row member always knows). What remains is a grid row
-//! *wholly* unaware of a completed successor configuration: the reader
-//! rediscovers it from the next `Prepare` or `Heartbeat`, and until then a
-//! read it serves is judged by the client-history linearizability oracle —
-//! the chain campaign's `QUORUM_READ` operation, served through the
-//! driver's `QuorumRead` RPC (the sweep's finding, not this module's
-//! claim).
+//! the first such answer rather than completing over a superseded belief.
+//! That catch needs the read's row to meet the successor's Phase-1 quorum
+//! in the old configuration: true under a majority and under the flexible
+//! splits the simulation draws (`q1 > n / 2`), not under every flexible
+//! split the library admits (Flexible Paxos never asks two Phase-1 quorums
+//! to meet), and not for a grid row *wholly* unaware of a completed
+//! successor — those reads are judged by the client-history linearizability
+//! oracle and the audit's read floor, the sweep's finding, not this
+//! module's claim. A rebooted acceptor answers no `PreRead` until it has
+//! heard what is in force, or its answer would name a ballot it forgot.
+//!
+//! *Which* configuration is the [`ReadBasis`]: never a node's belief as a
+//! `Prepare` moved it, because a campaign may never finish and every
+//! configuration in its `H_b` may still hold slots its own quorums never
+//! voted. The #260 witness: a leader under `{0, 1, 3}` with `q2 = 1` chose
+//! a slot with its own vote, campaigned at the next ballot with
+//! `{0, 2, 3}` and died; an acceptor that promised that `Prepare` served
+//! reads over a majority `{2, 3}` of the new configuration and missed the
+//! slot for a second. The basis is learned only from a leadership that won
+//! its ballot (its election, its handoff install, its beat), with that
+//! leadership's fence — everything an earlier configuration chose sits at
+//! or below it (the Phase 1 that won covered every configuration in
+//! `H_b`) — and a read is served at `max(watermark, fence)`. A node whose
+//! belief moved above its basis opens no read until the new leadership's
+//! beat arrives: reads are unavailable during a campaign, never stale.
 //!
 //! # What is deliberately not here (§3.6)
 //!
@@ -67,6 +83,32 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
+
+/// The **read basis** (#260): the configuration a node's quorum reads are
+/// judged over, the ballot it is bound to, and the fence of the leadership
+/// that put it in force — everything a Phase 1 of that ballot could have
+/// found chosen under an earlier configuration sits at or below the fence.
+///
+/// On a matchmaker deployment a node's *belief* moves on a `Prepare`, a
+/// campaign that may never finish, while an older configuration in `H_b`
+/// still holds slots the new one's quorums never voted. A read judged over
+/// such a belief misses them (the #260 witness: a slot chosen by `{0}` under
+/// `q2 = 1`, a read served by `{2, 3}` of the campaign's majority). A basis
+/// is therefore learned only from a leadership that **won** its ballot — its
+/// own election or handoff install, or its beat — and a read served under
+/// it covers `max(watermark, fence)`: the fence for what earlier
+/// configurations chose, the row's watermark for what this ballot chose. On
+/// plain Multi-Paxos the basis is the static configuration with no fence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadBasis<Id> {
+    /// The configuration reads are judged over.
+    pub config: AcceptorConfig<Id>,
+    /// The ballot `config` is bound to: an answer naming a higher one
+    /// supersedes the read.
+    pub since: Ballot,
+    /// The winning leadership's fence (`None`: nothing below it).
+    pub fence: Option<Slot>,
+}
 
 /// What folding a [`crate::Message::PreReadAck`] did to a read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +151,9 @@ pub struct QuorumRead<Id> {
     /// The ballot `config` was bound to at the reader; an answer naming a
     /// higher one supersedes the read.
     config_since: Ballot,
+    /// The basis's fence ([`ReadBasis::fence`]): the read is served only
+    /// once the replica covers it as well as the row's maximum.
+    fence: Option<Slot>,
     /// The watermark each answering acceptor reported.
     watermarks: BTreeMap<Id, Option<Slot>>,
     /// Tick the read was opened on, for TTL garbage collection.
@@ -279,11 +324,15 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         &mut self,
         ctx: u64,
         row: Option<usize>,
-        config: AcceptorConfig<Id>,
-        config_since: Ballot,
+        basis: ReadBasis<Id>,
         created_tick: u64,
         own: Option<(Id, Option<Slot>)>,
     ) -> Vec<Id> {
+        let ReadBasis {
+            config,
+            since: config_since,
+            fence,
+        } = basis;
         assert!(
             self.reads.iter().all(|r| r.ctx != ctx),
             "a quorum read token is opened at most once"
@@ -308,6 +357,7 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             row,
             config,
             config_since,
+            fence,
             watermarks,
             created_tick,
             stage: Stage::Tallying,
@@ -389,9 +439,10 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
 
     /// Advance every read: a tallying read whose row is whole (a Phase-1
     /// quorum of its configuration **in its row**) confirms at the maximum
-    /// watermark, and a confirmed read whose index `covered` — the replica's
-    /// answer, "applied at or past this index" — is served. Returns the
-    /// served `(ctx, index)` pairs in creation order and drops them.
+    /// watermark, and a confirmed read whose index — that maximum, raised to
+    /// its basis's fence — `covered` (the replica's answer, "applied at or
+    /// past this index") is served. Returns the served `(ctx, index)` pairs
+    /// in creation order and drops them.
     ///
     /// # Panics
     ///
@@ -420,6 +471,13 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             let Stage::Confirmed { index } = read.stage else {
                 unreachable!("a read past the tally is confirmed");
             };
+            // The basis's fence stands for every earlier configuration the
+            // row cannot speak for (#260): the read waits on both.
+            let index = index.max(read.fence);
+            assert!(
+                index >= read.fence,
+                "a served read covers its basis's fence"
+            );
             if !covered(index) {
                 return true;
             }
@@ -474,6 +532,14 @@ mod tests {
         )
     }
 
+    fn basis(config: AcceptorConfig, since: Ballot) -> ReadBasis<NodeId> {
+        ReadBasis {
+            config,
+            since,
+            fence: None,
+        }
+    }
+
     fn ballot(round: u64) -> Ballot {
         Ballot {
             round,
@@ -492,8 +558,7 @@ mod tests {
         let addressees = reads.open(
             1,
             Some(1),
-            grid(),
-            ballot(0),
+            basis(grid(), ballot(0)),
             0,
             Some((NodeId(5), Some(Slot(2)))),
         );
@@ -544,7 +609,7 @@ mod tests {
     fn an_answer_from_outside_the_row_is_ignored() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
         // Row 1 = {4, 5, 6}; node 1 is in row 0.
-        let _ = reads.open(1, Some(1), grid(), ballot(1), 0, None);
+        let _ = reads.open(1, Some(1), basis(grid(), ballot(1)), 0, None);
         assert_eq!(
             reads.fold(1, NodeId(1), Some(Slot(9)), None),
             PreReadFold::Ignored,
@@ -572,7 +637,13 @@ mod tests {
     fn an_unvoted_row_confirms_at_the_empty_index() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
         let majority = AcceptorConfig::new((0..3).map(NodeId).collect(), QuorumSystem::Majority);
-        let addressees = reads.open(4, None, majority, ballot(0), 0, Some((NodeId(0), None)));
+        let addressees = reads.open(
+            4,
+            None,
+            basis(majority, ballot(0)),
+            0,
+            Some((NodeId(0), None)),
+        );
         assert_eq!(addressees, vec![NodeId(1), NodeId(2)]);
         assert_eq!(reads.fold(4, NodeId(1), None, None), PreReadFold::Counted);
         assert_eq!(reads.serve(|index| index.is_none()), vec![(4, None)]);
@@ -584,7 +655,7 @@ mod tests {
     #[test]
     fn a_newer_configuration_abandons_the_read() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, Some(0), grid(), ballot(1), 0, None);
+        let _ = reads.open(0, Some(0), basis(grid(), ballot(1)), 0, None);
         assert_eq!(
             reads.fold(0, NodeId(1), Some(Slot(1)), Some(ballot(1))),
             PreReadFold::Counted,
@@ -595,8 +666,8 @@ mod tests {
             PreReadFold::Superseded
         );
         assert!(reads.is_empty());
-        let _ = reads.open(2, Some(0), grid(), ballot(1), 0, None);
-        let _ = reads.open(3, Some(1), grid(), ballot(3), 0, None);
+        let _ = reads.open(2, Some(0), basis(grid(), ballot(1)), 0, None);
+        let _ = reads.open(3, Some(1), basis(grid(), ballot(3)), 0, None);
         reads.abandon_superseded(ballot(3));
         assert_eq!(reads.pending().len(), 1);
         assert_eq!(reads.pending()[0].ctx(), 3);
@@ -607,8 +678,8 @@ mod tests {
     #[test]
     fn a_read_expires_by_ttl() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, Some(0), grid(), ballot(0), 5, None);
-        let _ = reads.open(1, Some(1), grid(), ballot(0), 9, None);
+        let _ = reads.open(0, Some(0), basis(grid(), ballot(0)), 5, None);
+        let _ = reads.open(1, Some(1), basis(grid(), ballot(0)), 9, None);
         reads.expire(15, 8);
         assert_eq!(reads.pending().len(), 1);
         assert_eq!(reads.pending()[0].ctx(), 1);
@@ -620,8 +691,8 @@ mod tests {
     #[should_panic(expected = "a quorum read token is opened at most once")]
     fn a_token_is_opened_at_most_once() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, Some(0), grid(), ballot(0), 0, None);
-        let _ = reads.open(0, Some(0), grid(), ballot(0), 0, None);
+        let _ = reads.open(0, Some(0), basis(grid(), ballot(0)), 0, None);
+        let _ = reads.open(0, Some(0), basis(grid(), ballot(0)), 0, None);
     }
 
     /// A named row: any row of the grid is honoured, a row past the last
@@ -654,7 +725,7 @@ mod tests {
         );
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
         // Row 1 of the 2x3 grid is {4, 5, 6}, although ctx 4 defaults to row 0.
-        let addressees = reads.open(4, Some(1), grid, ballot(0), 0, None);
+        let addressees = reads.open(4, Some(1), basis(grid, ballot(0)), 0, None);
         assert_eq!(addressees, vec![NodeId(4), NodeId(5), NodeId(6)]);
     }
 
@@ -662,6 +733,35 @@ mod tests {
     #[should_panic(expected = "a quorum read is opened against a row of its configuration")]
     fn a_row_the_configuration_lacks_is_refused() {
         let mut reads: QuorumReads<NodeId> = QuorumReads::new();
-        let _ = reads.open(0, Some(2), grid(), ballot(0), 0, None);
+        let _ = reads.open(0, Some(2), basis(grid(), ballot(0)), 0, None);
+    }
+
+    /// The basis's fence (#260): a row whose watermarks all sit below the
+    /// fence still waits for the replica to cover the fence — what an
+    /// earlier configuration chose is not the row's to report.
+    #[test]
+    fn a_read_waits_on_its_basis_fence() {
+        let mut reads: QuorumReads<NodeId> = QuorumReads::new();
+        let majority = AcceptorConfig::new((0..3).map(NodeId).collect(), QuorumSystem::Majority);
+        let fenced = ReadBasis {
+            config: majority,
+            since: ballot(7),
+            fence: Some(Slot(3)),
+        };
+        let addressees = reads.open(0, None, fenced, 0, Some((NodeId(0), Some(Slot(2)))));
+        assert_eq!(addressees, vec![NodeId(1), NodeId(2)]);
+        assert_eq!(
+            reads.fold(0, NodeId(1), Some(Slot(1)), Some(ballot(7))),
+            PreReadFold::Counted
+        );
+        assert!(
+            reads.serve(|index| index <= Some(Slot(2))).is_empty(),
+            "a prefix at the row's maximum is below the fence"
+        );
+        assert_eq!(
+            reads.serve(|index| index <= Some(Slot(3))),
+            vec![(0, Some(Slot(3)))],
+            "served at the fence once the replica covers it"
+        );
     }
 }

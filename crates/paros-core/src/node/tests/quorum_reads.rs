@@ -366,3 +366,132 @@ fn a_leader_fills_its_frontier_to_a_reported_vote_watermark() {
     });
     assert_eq!(nodes[0].watermark_fills(), 3);
 }
+
+/// The #260 mechanism, pinned (the sweep proved it; this pins the rule): a
+/// read is judged over a **won** leadership's basis, never over a
+/// campaign's configuration. Node 3 hears the leader of `C_6 = {0, 1, 3}`
+/// (`q2 = 1`, so `q1` is all three) beat at ballot 6, then promises a
+/// campaign at 7 for `C_7 = {0, 2, 3}`, a majority whose quorum `{2, 3}`
+/// need not hold what `C_6`'s `{0}` chose. Under the campaign it opens no
+/// read; once the leadership of 7 beats with its fence, a read over `C_7`
+/// waits for the fence even when the row's watermarks sit below it.
+#[test]
+fn a_campaign_configuration_is_no_read_basis() {
+    let c6 = AcceptorConfig::new(
+        vec![NodeId(0), NodeId(1), NodeId(3)],
+        crate::membership::QuorumSystem::Flexible { q1: 3, q2: 1 },
+    );
+    let c7 = cfg(&[0, 2, 3]);
+    let mut n = deployed_node(3, &[0, 1, 2, 3], &[0, 1, 2, 3], 1);
+
+    // No won leadership heard this incarnation: no basis, no read.
+    n.quorum_read(1);
+    assert!(n.quorum_reads().is_empty());
+    assert_eq!(n.membership_counters().reads_without_basis, 1);
+
+    // The leader of 6 beats: a read opens over `C_6`, asking 0 and 1.
+    n.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: ballot(6, 0),
+        commit: None,
+        config: Some(c6.clone()),
+        fence: Some(Slot(2)),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(
+        n.read_basis().map(|b| (b.config, b.since, b.fence)),
+        Some((c6, ballot(6, 0), Some(Slot(2))))
+    );
+    n.quorum_read(2);
+    assert_eq!(pre_read_targets(&drain(&mut n)), vec![NodeId(0), NodeId(1)]);
+
+    // A campaign at 7 for `C_7`: promising it moves the belief above the
+    // basis, which abandons the open read and opens no new one.
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: ballot(7, 0),
+        from_slot: Slot(0),
+        config: Some(c7.clone()),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(
+        *n.acceptors(),
+        c7,
+        "the campaign's configuration is believed"
+    );
+    assert!(
+        n.quorum_reads().is_empty(),
+        "the read over C_6 is abandoned"
+    );
+    assert!(n.read_basis().is_none(), "a campaign is no read basis");
+    n.quorum_read(3);
+    assert!(n.quorum_reads().is_empty());
+    assert_eq!(n.membership_counters().reads_without_basis, 2);
+
+    // The leadership of 7 won and beats with its fence, slot 3: a read over
+    // `C_7` completes on `{2, 3}` at watermark 1 but is served only once the
+    // fold covers the fence.
+    n.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: ballot(7, 0),
+        commit: None,
+        config: Some(c7),
+        fence: Some(Slot(3)),
+    });
+    let _ = drain(&mut n);
+    n.quorum_read(4);
+    assert_eq!(pre_read_targets(&drain(&mut n)), vec![NodeId(0), NodeId(2)]);
+    n.step(Message::PreReadAck {
+        from: NodeId(2),
+        ctx: 4,
+        watermark: Some(Slot(1)),
+        config_since: Some(ballot(7, 0)),
+    });
+    let _ = drain(&mut n);
+    assert!(
+        n.pending_read_states.is_empty(),
+        "a row below the fence is no answer while the fold is short of it"
+    );
+    assert_eq!(
+        n.quorum_reads().pending().len(),
+        1,
+        "the read waits on the fence"
+    );
+}
+
+/// A rebooted acceptor whose belief is still the bootstrap default answers
+/// no `PreRead` on a matchmaker deployment (#260): its configuration ballot
+/// would name nothing it promised before the crash.
+#[test]
+fn an_unheard_acceptor_answers_no_pre_read() {
+    let mut n = deployed_node(1, &[0, 1, 2], &[0, 1, 2], 1);
+    n.step(Message::PreRead {
+        reply_to: NodeId(0),
+        ctx: 7,
+    });
+    assert!(
+        drain(&mut n)
+            .iter()
+            .all(|(_, m)| !matches!(m, Message::PreReadAck { .. })),
+        "an unheard node stays silent"
+    );
+    assert_eq!(n.membership_counters().pre_reads_refused_unheard, 1);
+    n.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: ballot(2, 0),
+        commit: None,
+        config: Some(cfg(&[0, 1, 2])),
+        fence: None,
+    });
+    let _ = drain(&mut n);
+    n.step(Message::PreRead {
+        reply_to: NodeId(0),
+        ctx: 8,
+    });
+    assert!(
+        drain(&mut n)
+            .iter()
+            .any(|(_, m)| matches!(m, Message::PreReadAck { ctx: 8, .. })),
+        "a node that heard a leader answers"
+    );
+}

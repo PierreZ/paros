@@ -189,6 +189,7 @@ fn every_variant() -> Vec<Message> {
             ballot,
             commit: Some(Slot(2)),
             config: None,
+            fence: None,
         },
         Message::Heartbeat {
             from: NodeId(0),
@@ -198,6 +199,7 @@ fn every_variant() -> Vec<Message> {
                 vec![NodeId(0), NodeId(2)],
                 paros_core::QuorumSystem::Majority,
             )),
+            fence: Some(Slot(1)),
         },
         // The empty watermark is its own variant of the beat, and the one the
         // wire encoding used to be unable to say (#56): a leader that has
@@ -207,6 +209,7 @@ fn every_variant() -> Vec<Message> {
             ballot,
             commit: None,
             config: None,
+            fence: None,
         },
         Message::HeartbeatAck {
             from: NodeId(1),

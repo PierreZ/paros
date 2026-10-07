@@ -46,6 +46,16 @@ pub enum Seam {
     /// then fsync) a crash here lets a `Registered` reply escape for a ballot
     /// the restarted matchmaker no longer holds — the registry's un-promise.
     MatchAfterSyncBeforeReply,
+    /// After a batch that carried a **reconfiguring** campaign's `Prepare`
+    /// (a configuration other than the node's belief) was persisted **and
+    /// sent**: a candidate dies with its campaign in flight (#260). Nothing durable
+    /// is lost; what dies is the campaign, whose `Prepare` some acceptors
+    /// already promised — and a node that promised it believes the
+    /// campaign's configuration until a leader is elected again. The
+    /// witness of #260 was a reconfiguring leader dying here: an acceptor
+    /// that promised its `Prepare` served reads over a configuration the
+    /// slot the dead leader had just chosen was never voted in.
+    AfterPrepareSent,
 }
 
 impl Seam {
@@ -57,6 +67,7 @@ impl Seam {
             Seam::AfterSyncBeforeSend => "after_sync_before_send",
             Seam::MatchBeforeSync => "match_before_sync",
             Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
+            Seam::AfterPrepareSent => "after_prepare_sent",
         }
     }
 }

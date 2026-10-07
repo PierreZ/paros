@@ -479,6 +479,12 @@ pub enum Message {
         /// **`None` on plain Multi-Paxos**; a plain node ignores the field.
         #[cfg_attr(feature = "serde", serde(default))]
         config: Option<AcceptorConfig>,
+        /// The leadership's fence ([`crate::ReadBasis::fence`], #260): with
+        /// `config`, the read basis a follower judges its quorum reads over.
+        /// Meaningful only beside a `config`; **`None` on plain
+        /// Multi-Paxos**.
+        #[cfg_attr(feature = "serde", serde(default))]
+        fence: Option<Slot>,
     },
 
     // ---- Leaderless reads (Paxos Quorum Reads, #143) ----
