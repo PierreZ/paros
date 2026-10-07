@@ -256,7 +256,10 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 - **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
   returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
   stay synchronous, served from memory after `boot_scan`. Production stores are
-  `paros::journal` on `moonpool-journal`: a log of write operations folded at boot.
+  `paros::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot = position,
+  ballot in the entry's identity, scalars in its two-copy metainfo), no fold, no checkpoint.
+  `JournalStores::open` is async: an opener resolves an interrupted format from the disk at every
+  open, a quarantined journal's re-open included.
 - **Boot safety is the library's job.** Every store carries a format marker; `run_node` /
   `run_matchmaker` take the operator's `BootKind` as data and refuse `Amnesia` (an existing member
   with no marker), `AlreadyFormatted` and `ConfigMismatch` (the marker records the `Config`; the

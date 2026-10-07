@@ -25,7 +25,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229): `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step, target-kill (#247), changed-identity and fleet-tenant checkpoint-crash shapes, a reachable per `Stage`, and the check that the fleet directory equals the cell's tenant list — mid-run when both folds are one instant's, and on every run over the final folds, with the recovery tail's control-plane liveness (`settle`, `final_check`).
 - `world/mod.rs` → `StorageWorld`, `storage_world_for` → fake disk, copy budget, parked ids, provisioning ledger, reconfiguration ledger.
 - `world/storage.rs` → `DurableStorage` (write-path fault sites) · `world/matchmaker.rs` → `DurableMatchmakerStorage` · `world/rot.rs` → boot-rot sites.
-- `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187).
+- `world/node_store.rs` → `NodeStore`, `LedgeredJournal`, `PowerCut` → world store or `JournalStorage` on `SimStorageProvider` (#187); `PowerCut` is the BUGGIFY site that cuts a node's power mid-commit (moonpool `SelfCrash`), the cut drawn inside the node's last commit's duration.
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
 - `audit/client.rs` → `ClientHistory`, `check_control_history` (the fleet tenant's control journal, the registry and the directory, #247) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
@@ -61,7 +61,8 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
   others' identifiers are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_store` → `JournalStorage` on half the plain seeds, no
-  injected corruption. `system_journals` → the directory, the registry and the fleet tenant's control journal (#229) on half the seeds (the fleet operations too: kept at 50% from the sweep's coverage, #247), on
+  injected rot, its `Durability` a knob (two syncs by default, one at the extreme); on a journal
+  seed a seam crash is a power loss (`SelfCrash`), and moonpool's storage chaos runs under it. `system_journals` → the directory, the registry and the fleet tenant's control journal (#229) on half the seeds (the fleet operations too: kept at 50% from the sweep's coverage, #247), on
   `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
@@ -147,6 +148,8 @@ crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired
 `COVERAGE_ITERATIONS = 1024` (`:168`), `CORPUS_CI_ITERATIONS = 64` (`:170`),
 `EXPLORATION_TIMELINES_PER_SEED = 8` (`:172`). `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`),
 `SEED_COUNT = 1` (`:574`), `MIN_BOOTSTRAP = 3` (`:753`). `chaos_surfaces()` = `Network(Swarm)` +
-four per-group attritions + `BuggifyKnobs`; `BitFlip` masked; `prob_wipe = 0`.
+four per-group attritions + `BuggifyKnobs` + `Storage(Swarm)`; `BitFlip` masked; storage masked to
+crash damage, failed syncs, short transfers and lost directory entries (`storage_fault_mask()`:
+rot, phantom writes, degradation and disk failure stay out, #176); `prob_wipe = 0`.
 Deps: `paros`, `moonpool-sim` (`exploration`, `Cargo.toml:20`), `moonpool-rpc` (`:29`) — pin
 shared with `paros` and `parosd`.

@@ -853,6 +853,22 @@ gives `.processes()` groups no locality). moonpool reports no per-process damage
 closed as not planned), so the ground truth stays the ledgered injector's and the journal's
 own verdicts.
 
+**The journal is CLSTORE, and paros uses it directly** (decided on 2026-10-07, moonpool#308). The
+first moonpool-journal was a dense Raft-shaped log; paros journaled operations into it and folded
+them at boot, with checkpoint brackets. It is rewritten as a protocol-free CLSTORE journal: an entry
+is a `u64` position plus an opaque identity, written in any order (laggy slots), with overwrites,
+tombstones and a floor; a persist record far from each entry; two-copy metainfo in its own file,
+the copies written one after the other; no snapshots and no compaction. A commit is one sync
+(CLSTORE's, the last batch ambiguous) or two (always decided), recorded per batch; production
+ships two, the simulation draws either. paros stores the state itself: a slot is a position, its
+ballot the entry's identity, the promise, chosen index, floor, sealed state and format marker the
+metainfo; a matchmaker registration is a position of its own. Storage chaos on journal seeds is the
+local half of this contract: moonpool's crash damage, failed syncs, short transfers and lost
+directory entries, a seam crash as a power loss, and a power cut inside a commit; rot waits for
+replicated fault patterns. The simulation was proven to catch journal durability bugs by
+mutation (an unsynced commit, a recovery that drops an acknowledged batch, an unsynced promise:
+each red).
+
 Zones are failure domains, and a cell spans enough of them for its quorums (section 3.7). What
 the WPaxos read (section 10) established for one region with several availability zones:
 
@@ -908,7 +924,7 @@ Simulation is the investment. Every milestone lands with its share of:
   it. In M12: a second cell, a tenant move and a move of the fleet tenant. With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
 - Storage chaos on the shipped stores: every node and matchmaker runs on moonpool-journal, with a
-  journal-aware injector aimed through moonpool's `JournalAtlas` under the copy budget, corpus
+  journal-aware injector aimed through `Journal::regions` (striped by slot) under the copy budget, corpus
   masks re-expressed as journal targets, crashes inside a sync, then moonpool's environmental
   storage chaos with replicated fault patterns (#176, #202). Gates name journal verdicts (slot
   rebuilt, double fault parked, meta repaired, ambiguous batch kept); the in-memory stores and
