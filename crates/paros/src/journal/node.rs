@@ -417,27 +417,47 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         if !self.meta_dirty && self.staged.is_empty() {
             return Ok(());
         }
-        // One batch: the entries the flush's own floor leaves standing (the
-        // core may stage a slot and then jump past it in the same flush:
-        // the jump drops it, as it drops every slot below), then the floor.
+        // The entries the flush's own floor leaves standing (the core may
+        // stage a slot and then jump past it in the same flush: the jump
+        // drops it, as it drops every slot below).
         let floor = self.staged_floor.take();
+        let entries: Vec<_> = std::mem::take(&mut self.staged)
+            .into_iter()
+            .filter(|(slot, _)| floor.is_none_or(|f| *slot >= f))
+            .collect();
+        let meta = self.meta_dirty.then(|| {
+            self.meta.chosen_index = self.chosen_index;
+            encode(&self.meta)
+        });
+        // A raised promise is durable before any entry accepted under it.
+        if let Some(meta) = &meta
+            && self.promise_raised
+            && !entries.is_empty()
+        {
+            let mut promise = Batch::new();
+            promise.set_meta(meta.clone());
+            self.commit(promise).await?;
+        }
+        // Packed into batches that each fit one segment: a node catching up
+        // a long log after a reboot stages more than one holds (witness
+        // 6142474209351073489, refused `BatchTooLarge` on every boot before
+        // the split). Every batch but the last carries entries only; the
+        // last carries the floor and the metainfo, so neither is durable
+        // before the entries under it. Nothing is acknowledged before the
+        // whole sync returns.
+        let geometry = self.store.geometry;
         let mut staged = Batch::new();
-        for (slot, (ballot, payload)) in std::mem::take(&mut self.staged) {
-            if floor.is_none_or(|f| slot >= f) {
-                staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
+        for (slot, (ballot, payload)) in entries {
+            if !staged.is_empty() && !staged.fits_another(geometry, payload.len()) {
+                assert!(staged.fits(geometry), "a packed batch fits one segment");
+                self.commit(std::mem::take(&mut staged)).await?;
             }
+            staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
         }
         if let Some(floor) = floor {
             staged.truncate_prefix(floor.0);
         }
-        if self.meta_dirty {
-            self.meta.chosen_index = self.chosen_index;
-            let meta = encode(&self.meta);
-            if self.promise_raised && !staged.is_empty() {
-                let mut promise = Batch::new();
-                promise.set_meta(meta.clone());
-                self.commit(promise).await?;
-            }
+        if let Some(meta) = meta {
             staged.set_meta(meta);
         }
         self.commit(staged).await?;

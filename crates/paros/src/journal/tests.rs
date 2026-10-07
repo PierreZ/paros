@@ -308,6 +308,53 @@ fn laggy_slots_and_the_floor_survive_a_reboot() {
     });
 }
 
+/// One sync can stage more entries than one segment holds (a node catching
+/// up a long log after a reboot): it lands as several commits, and the
+/// floor and the metainfo, in the last, survive the reboot with every entry.
+#[test]
+fn a_sync_larger_than_one_segment_lands_in_several_commits() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(5);
+            run(&mut sim, |provider| async move {
+                let store = store(durability);
+                let mut node = open_node(provider.clone(), "big", store)
+                    .await
+                    .expect("open");
+                node.format(&config()).await.expect("format");
+                node.sync(MustSync::Sync).await.expect("sync");
+                node.persist_ballot(ballot(4)).await.expect("promise");
+                // Three times the small shape's 512 records per segment.
+                for slot in 0..1500 {
+                    node.append_accepted(Slot(slot), ballot(4), user(slot, 0x22))
+                        .await
+                        .expect("accept");
+                }
+                let sealed = JournalState {
+                    next_seq: Seq(10),
+                    ..JournalState::default()
+                };
+                node.set_chosen_index(Slot(1400)).await.expect("chosen");
+                node.truncate(Slot(10), sealed).await.expect("truncate");
+                node.sync(MustSync::Sync)
+                    .await
+                    .expect("a sync past one segment commits");
+                drop(node);
+                let node = open_node(provider, "big", store).await.expect("reboots");
+                let (hard, _) = node.initial_state();
+                assert_eq!(hard.max_promised_ballot, ballot(4), "{durability:?}");
+                assert_eq!(hard.chosen_index, Some(Slot(1400)), "{durability:?}");
+                assert_eq!(node.first_slot(), Slot(10), "{durability:?}");
+                assert_eq!(node.sealed_state(), sealed, "{durability:?}");
+                assert!(node.accepted(Slot(9)).is_none(), "below the floor");
+                assert!((10..1500).all(|s| node.accepted(Slot(s)).is_some()));
+                assert_eq!(node.last_slot(), Slot(1499));
+            })
+            .await;
+        }
+    });
+}
+
 /// The format probe reads the marker without opening the store: nothing
 /// where there is no journal (and nothing created), the marker once a
 /// format is synced.
