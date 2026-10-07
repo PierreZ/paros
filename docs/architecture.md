@@ -271,7 +271,8 @@ Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, 
 - `node_id`: random, minted at format, stored beside the format marker (#147). It is the
   member's identity and the registry key. A wiped disk gets a new `node_id`, so "a wiped
   identity never rejoins" holds by construction.
-- `addr`: an attribute that may change across restarts.
+- `addr`: an attribute that may change across restarts, the machine's advertised address
+  (`PAROS_ADVERTISE`, below).
 - `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
 
 The same `node_id` with a new incarnation is a reboot: the machine rejoins in place and keeps its
@@ -292,6 +293,19 @@ at the same address removes the old member). Peers holding the old reference lea
 request, refused with `StaleIncarnation`. That pull model is sufficient: Delos clients refresh
 their cached view only when an append fails on a sealed loglet. No push detection is asked of
 moonpool.
+
+**Listen and advertised addresses** (decided on 2026-10-07, #257). A machine's configuration
+carries two addresses, as FDB's `listen_address` / `public_address` and CockroachDB's
+`--listen-addr` / `--advertise-addr` do: `PAROS_LISTEN`, what it binds (may be a wildcard), and
+`PAROS_ADVERTISE`, what peers and clients dial (may be a hostname). `PAROS_ADVERTISE` defaults to
+`PAROS_LISTEN` when that is not a wildcard, and start is refused when `PAROS_LISTEN` is a
+wildcard and `PAROS_ADVERTISE` is unset. A machine always binds `PAROS_LISTEN`, never an address
+read from the cell plan or the registry; `RegisterNode`'s `addr` is the advertised address, and
+peer address books are folds of the registry (#216), never of the plan `init` wrote. An
+advertised name is kept as a name and resolved at dial time, so a machine whose IP changes heals
+with no registry write (amends #209's "names resolved once at startup" for peer addresses; the
+listen side still resolves once). A changed `PAROS_ADVERTISE` across a restart is the
+machine-moved case above: same `node_id`, new `addr`.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
@@ -1258,7 +1272,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230 and #211's core; sim first: #176, #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
