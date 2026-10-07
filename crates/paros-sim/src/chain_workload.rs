@@ -3362,6 +3362,49 @@ impl Workload for ChainWorkload {
                     .ok();
             }
         }
+        // #188: a journal no client appends to is judged by client 0 at the
+        // end (`check`) on an empty history, so client 0 also waits, to the
+        // same deadline, for each to converge on its acceptors. A storage
+        // fault can quarantine an idle journal on a node until
+        // `quarantine_ticks` past the chaos window; the final claim must find
+        // it re-opened and caught up, and nothing else keeps the run alive
+        // for it (witness 12223320876494641875: an idle journal quarantined at
+        // 3.8 s for 80 ticks, the run over at 9 s, red before, green after).
+        if converged && client_id == 0 {
+            let idle: Vec<JournalIdentifier> = self
+                .plan
+                .as_ref()
+                .map(|plan| plan.ids.iter().skip(ctx.client_count()).copied().collect())
+                .unwrap_or_default();
+            for idle in idle {
+                let mut stable: Option<(Duration, u64)> = None;
+                while in_budget() && !shutdown.is_cancelled() {
+                    let parked = crate::world::parked_nodes(ctx.state(), idle);
+                    let mut ends: Vec<u64> = Vec::with_capacity(server_count);
+                    let mut unanswered = false;
+                    for node in (0..server_count).filter(|i| !parked.contains(&servers[*i])) {
+                        let Some(reply) = readers.inspect(node, idle).await else {
+                            unanswered = true;
+                            break;
+                        };
+                        ends.push(reply.chosen_index.map_or(0, |c| c + 1));
+                    }
+                    let agreed = !unanswered && ends.windows(2).all(|w| w[0] == w[1]);
+                    match (agreed, ends.first().copied(), stable) {
+                        (true, Some(end), Some((since, held))) if held == end => {
+                            if time.now().saturating_sub(since) >= SETTLE {
+                                break;
+                            }
+                        }
+                        (true, Some(end), _) => stable = Some((time.now(), end)),
+                        _ => stable = None,
+                    }
+                    time.sleep(Duration::from_millis(config.probe_interval_ms))
+                        .await
+                        .ok();
+                }
+            }
+        }
         // The converged cluster, read the way a journal client reads it: one
         // last fold from this client's cursor to the tail, so every client's
         // fold meets every other's on the entries they share.
