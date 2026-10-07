@@ -161,7 +161,7 @@ answers. No read goes through the Paxos leader, so reads scale with replicas and
 acceptors one watermark round per page (decided on 2026-10-04). The read-index path and
 `CheckTail` retire.
 
-A read costs one Phase-1 round of watermarks (decided on 2026-10-07). In a multi-region cell
+A read costs one Phase-1 round of watermarks (decided on 2026-10-07, #253). In a multi-region cell
 `QuorumRead` asks three of five acceptors, so a page costs one cross-region round trip (the 2025
 Journal reconstruction says the same: reads are performed from at least two regions, section 10).
 There is no lease read, because paros enforces no lease (section 2.3); the page size and
@@ -625,7 +625,7 @@ a failover domain; the AWS cell-based architecture guidance says the same (cells
 overload and bad deployments and are not designed for failover; multi-AZ cells avoid replicating
 between cells). Cell creation is refused if its machines span fewer than three zones.
 
-**A fleet mixes cell kinds** (decided on 2026-10-07, #232). A cell entry in the fleet directory
+**A fleet mixes cell kinds** (decided on 2026-10-07, #253). A cell entry in the fleet directory
 carries its `kind`, `Regional { region }` or `MultiRegion { regions, witness }`, and the cell's
 rendezvous name. A **multi-region** cell (M13, decided on 2026-10-07, #253) spans three regions, each
 across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
@@ -652,7 +652,7 @@ kind of its cell: `az` a regional cell, `region` a multi-region cell. Each regio
 
 **The fleet tenant always exists** (named *meta* until 2026-10-04). It is one tenant whose control journal also holds the directory, so it is
 a single journal. In M9 it lives in the only cell; any cell may host it later. Once a
-multi-region cell exists, the fleet tenant is hosted there (decided on 2026-10-07, #232), moved by
+multi-region cell exists, the fleet tenant is hosted there (decided on 2026-10-07, #253), moved by
 its M12 move, so a region loss never stops tenant creation and moves; routers in every region
 keep routing on their folds regardless. It stays small: it
 answers only "which tenant lives in which cell" plus the cell entries. Quotas, billing and global
@@ -1131,7 +1131,7 @@ acceptors, a majority of five), a later mode.
  region N lost: 4 of 5, writes unchanged
 ```
 
-**Hierarchical quorums are deferred** (decided on 2026-10-07). `QuorumSystem::Zoned { fz, fn }`
+**Hierarchical quorums are deferred** (decided on 2026-10-07, #253). `QuorumSystem::Zoned { fz, fn }`
 in WPaxos's floor form (Phase 1: `fn + 1` nodes in each of `Z - fz` zones; Phase 2: `l - fn`
 nodes in each of `fz + 1` zones) is a legitimate later variant, deferred until the simulation
 runs nine acceptors. On three regions of three AZs it gives quorums of four instead of a
@@ -1465,13 +1465,13 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   nothing until reconfiguration, where a chain stalls until its membership is changed.
 - **Vote-only witnesses** (rejected on 2026-10-07, #253): a vote without bytes is a guaranteed `faulty`
   from Phase 1's view and contradicts "a server answers only from records it holds" (section 2.5).
-- **Two regional cells replicating to each other** (rejected on 2026-10-07, #232): a dependency
+- **Two regional cells replicating to each other** (rejected on 2026-10-07, #253): a dependency
   across cells, and a tenant lives in exactly one cell (section 3.7).
-- **Lease reads** (rejected on 2026-10-07): paros enforces no lease (section 2.3).
+- **Lease reads** (rejected on 2026-10-07, #253): paros enforces no lease (section 2.3).
 - **DPaxos's expanding quorums and leader zones** (rejected on 2026-10-07): a second Paxos kernel,
   and leader-zone quorums contradict the zone rule of section 5; Matchmaker Paxos already expands
   quorums with the intent durable before Phase 1.
 - **WPaxos's joint reconfiguration** (rejected on 2026-10-07): matchmakers reconfigure
   (section 4.1).
-- **Hierarchical `Zoned` quorums** (deferred on 2026-10-07): a later `QuorumSystem` variant once the
+- **Hierarchical `Zoned` quorums** (deferred on 2026-10-07, #253): a later `QuorumSystem` variant once the
   simulation runs nine acceptors (section 5).
