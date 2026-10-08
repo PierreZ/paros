@@ -219,8 +219,14 @@ impl LogStorage for LedgeredJournal {
             .filter_map(|region| region.stripe)
             .filter_map(|slot| self.inner.layout(Slot(slot)).map(|at| (slot, at)))
             .collect();
+        let faulty: Vec<u64> = self
+            .inner
+            .faulty_entries()
+            .iter()
+            .map(|(slot, _)| slot.0)
+            .collect();
         let (ip, node, first) = (self.ip.clone(), self.node, self.inner.first_slot().0);
-        self.with_world(|w| w.note_opened(&ip, node, layouts, first, &regions));
+        self.with_world(|w| w.note_opened(&ip, node, layouts, first, &regions, &faulty));
         let facts = self.inner.boot_facts();
         // Causes the crash physics and the small geometry make
         // likely, each paired as a reachable.

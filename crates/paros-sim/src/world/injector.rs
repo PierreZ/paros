@@ -217,7 +217,11 @@ impl StorageWorld {
     /// holds (`layouts`, every slot it reports), the floor `first` and its
     /// `regions`. A commit whose sync was cut may have landed, so a boot is
     /// where the ledger learns it; nothing is a mark's business here, since
-    /// only a rewrite clears one.
+    /// only a rewrite clears one. `faulty` are the slots the open reported
+    /// faulty: their entry is damaged on disk (a cut commit's ambiguous last
+    /// batch keeps its records and loses its entries), so until a rewrite
+    /// no family aims at them (see `rotted`): a record rot there is a
+    /// double fault no budget permitted.
     pub(crate) fn note_opened(
         &mut self,
         key: &str,
@@ -225,6 +229,7 @@ impl StorageWorld {
         layouts: Vec<(u64, Layout)>,
         first: u64,
         regions: &[LayoutRegion],
+        faulty: &[u64],
     ) {
         let custody = self.custody.entry(key.to_string()).or_default();
         let known: BTreeSet<u64> = custody.records.keys().copied().collect();
@@ -241,6 +246,13 @@ impl StorageWorld {
         self.ledger_custody(key, node, layouts, first, regions, false);
         if let Some(custody) = self.custody.get_mut(key) {
             custody.last_batch = last_batch;
+        }
+        let damaged: Vec<u64> = faulty.iter().copied().filter(|s| *s >= first).collect();
+        if !damaged.is_empty() {
+            self.rotted
+                .entry(key.to_string())
+                .or_default()
+                .extend(damaged);
         }
     }
 
