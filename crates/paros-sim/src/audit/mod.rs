@@ -44,6 +44,7 @@ mod client;
 mod journal_model;
 pub(crate) mod journals;
 mod linearizability;
+mod losses;
 mod matchmaker;
 mod state;
 pub(crate) mod system;
@@ -310,6 +311,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // ballot)` would be a ratified double-allocation), together with the
         // acceptor tally behind the quorum-decided oracle.
         st.observe_durable_accept(node.0, slot.0, ballot, vhash);
+        // An outage's losses (#263): an unrecoverable slot is never accepted
+        // again, and a lost copy rewritten is a recovery.
+        st.loss_accepted(node.0, slot.0, vhash);
         // The truncated prefix is genuinely gone: nothing below the durable
         // floor is ever written again.
         let floor = st.floor.get(&node.0).copied().unwrap_or_default();

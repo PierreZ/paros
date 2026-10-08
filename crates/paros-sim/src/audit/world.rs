@@ -187,6 +187,7 @@ impl AuditWorld {
         st.check_tier_gates();
         st.check_driver_hook_gates();
         st.matchmaker.check_gates();
+        st.check_loss_gates();
     }
 
     /// Merge one client's recorded history into the shared one and run the
@@ -371,6 +372,30 @@ impl AuditWorld {
         self.lock().matchmaker.note_in_flight(matchmaker, ops);
     }
 
+    /// A correlated outage planned to lose `slot` on `damaged` of its
+    /// `holders` (#263, `crate::world::outage`).
+    pub(crate) fn note_outage_loss(&self, slot: u64, holders: &[u64], damaged: &[u64]) {
+        self.lock().note_outage_loss(slot, holders, damaged);
+    }
+
+    /// The journal reported `node`'s copy of `slot` lost at its boot, as an
+    /// outage planned (#263).
+    pub(crate) fn note_copy_lost(&self, node: u64, slot: u64) {
+        self.lock().note_copy_lost(node, slot);
+    }
+
+    /// The slots a durable accept quorum decided (#263: what an outage
+    /// aims at), above the pruned prefix.
+    pub(crate) fn decided_slots(&self) -> BTreeSet<u64> {
+        self.lock().decided.keys().copied().collect()
+    }
+
+    /// Whether the journal holds a slot no leader can decide again (#263):
+    /// its liveness is excused, its safety never.
+    pub(crate) fn has_unrecoverable(&self) -> bool {
+        self.lock().losses.has_unrecoverable()
+    }
+
     /// Ground truth from a journal store (#264): the accepts of the commit
     /// it is about to start, `(slot, vhash)`. A store cannot know what a
     /// crash inside the commit lands, so it names what may land, and
@@ -463,13 +488,19 @@ impl AuditWorld {
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn check_final_convergence(&self, acked_max: Option<u64>) {
         let mut st = self.lock();
+        // A journal holding a slot no leader can decide again (#263) is
+        // excused from every liveness leg below: it must wait, forever. Its
+        // safety is judged all along (`AuditState::loss_accepted`), and so
+        // is the leg that is safety: nothing applied runs ahead of the
+        // decided frontier.
+        let excused = st.losses.has_unrecoverable();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),
                 "every acked slot is inside the cluster's applied prefix at the end of the tail"
             );
             assert_always!(
-                st.decided_max.is_none(),
+                excused || st.decided_max.is_none(),
                 "every quorum-decided slot is applied by the end of the tail",
                 { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => -1_i64 }
             );
@@ -484,7 +515,7 @@ impl AuditWorld {
         );
         // The decided frontier and the applied frontier coincide (see above).
         assert_always!(
-            st.decided_max.is_none_or(|decided| decided <= cluster_max),
+            excused || st.decided_max.is_none_or(|decided| decided <= cluster_max),
             "every quorum-decided slot is applied by the end of the tail",
             { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => cluster_max }
         );
@@ -525,7 +556,8 @@ impl AuditWorld {
             );
         }
         for node in cluster {
-            if st.storage_dead.contains(&node)
+            if excused
+                || st.storage_dead.contains(&node)
                 || st.wiped.contains(&node)
                 || st.retired.contains(&node)
                 || st.left_pool.contains(&node)

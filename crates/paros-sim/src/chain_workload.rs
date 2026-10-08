@@ -3439,8 +3439,11 @@ impl Workload for ChainWorkload {
         // audit's final-convergence claim is the arbiter for that run.
         let ended_by_sibling = !converged && shutdown.is_cancelled();
         let storage = crate::world::storage_fault_stats(ctx.state(), journal);
+        // A slot an outage left unrecoverable (#263) is waited on for good:
+        // the run's liveness is excused, never its safety.
+        let unrecoverable = audit.has_unrecoverable();
         assert_always!(
-            converged || ended_by_sibling || !storage.clean_quorum_everywhere,
+            converged || ended_by_sibling || unrecoverable || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
         );
         // Liveness under the budget: faults were injected and the cluster
@@ -3457,7 +3460,7 @@ impl Workload for ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling) {
+        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable) {
             // Which leg failed: the cluster, or this owner's recovery writes.
             eprintln!(
                 "chain run RED: client {client_id} converged={converged} recovery_acked={recovery_acked} reader={reader} owned={:?} next_seq={}",
@@ -3500,7 +3503,7 @@ impl Workload for ChainWorkload {
             }
         }
         assert_always!(
-            ((recovery_acked > 0 || reader) && converged) || ended_by_sibling,
+            ((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable,
             "chain: cluster converged after chaos"
         );
         assert_sometimes_greater_than!(

@@ -28,9 +28,11 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `world/registry_store.rs` → `LedgeredRegistry` → `JournalMatchmakerStorage` on `SimStorageProvider` (#176), with the provisioning ledger and the registry's in-flight writes (`AuditWorld::note_registry_in_flight`).
 - `world/power.rs` → `PowerCut`, `Owner` → the BUGGIFY site that cuts a journal store's power mid-commit (moonpool `SelfCrash`), the cut drawn inside the store's last commit's duration; one reachable per owner.
 - `world/injector.rs` → `Custody`, `Injection`, `apply`, `judge` → the ledgered journal-aware injector (#261): the custody ledger each completed sync records (`note_synced`), one family of boot-time byte damage per boot (entry rot, record rot, double fault, metainfo rot, header rot, each its own BUGGIFY location and budget), judged against the journal's verdict at open.
+- `world/outage.rs` → `CorrelatedOutage`, `Outage`, `LossShape` → the correlated outage (#263; paros-side until moonpool#311): once a slot is decided inside the chaos window, on some seeds every acceptor and proxy goes down at once, each back after its own delay (one straggler last), and a loss of one slot's copies planned for each holder's next boot (`StorageWorld::plan_outage_loss`: aimed at the most recent or a uniform slot, the usual budget or the loss budget's extreme leaving one clean copy or none, the clean copy preferably on a removed node).
 - `world/wipe.rs` → `wipe_dir` → the wipe coin's physical half on a journal seed: the journal's files deleted and the deletion synced.
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
+- `audit/losses.rs` → `Losses` → an outage's losses as the journal reports them (#263): the shape recognized (no, one, fewer than a quorum of clean copies; `faulty, faulty, none`; the only clean copy on a removed node), the CTRL rule re-derived to name a slot unrecoverable, "an unrecoverable slot is never accepted again", the four outcome gates, and the convergence excuse.
 - `audit/client.rs` → `ClientHistory`, `check_control_history` (the fleet tenant's control journal, the registry and the directory, #247) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, generation chain, monotone `first_seq`).
 - `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
@@ -44,10 +46,11 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   `ChainWorkload` clients. Zero matchmakers = the plain Multi-Paxos deployment.
 - **Bootstrap**: `bootstrap_ranks` — the whole pool, or on a matchmaker seed a subset of at least
   `MIN_BOOTSTRAP` leaving *spares* a `Reconfigure` pulls in.
-- **One campaign** (#263): the scripted CTRL corpus is folded in. Its shapes are per-seed draws
-  (a seed withholding GC for the chaos window keeps a departed straggler worth waiting for,
-  `withhold_gc`; the injector's families and the power cuts give the CTRL cases their faults),
-  judged by the same audit.
+- **One campaign** (#263): the scripted CTRL corpus is folded in. Shapes are provoked through
+  BUGGIFY and swarm, never scripted: the correlated outage and its planned losses
+  (`world/outage.rs`), aimed rot, `withhold_gc` (a removed straggler stays worth waiting for),
+  each recognized by the audit from the ledger and judged by the same oracles
+  (`audit/losses.rs`).
 
 ## Per-seed draws (`shape.rs`)
 

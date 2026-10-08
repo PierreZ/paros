@@ -290,6 +290,8 @@ pub(super) struct AuditState {
 
     // --- the matchmaker registry (#119) -------------------------------------
     pub(super) matchmaker: MatchmakerAudit,
+    /// A correlated outage's losses (#263, `super::losses`).
+    pub(super) losses: super::losses::Losses,
 
     // --- sticky coverage flags ---------------------------------------------
     pub(super) any_chosen: bool,

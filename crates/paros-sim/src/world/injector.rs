@@ -40,6 +40,7 @@ use moonpool_sim::{
 use paros::journal::{Layout, LayoutRegion};
 use paros::{JournalBootFacts, StorageError};
 
+use super::outage::{LossShape, PlannedLoss};
 use super::{ParkReason, StorageWorld};
 
 /// Per-boot firing probabilities of the injector's families, each its own
@@ -70,6 +71,8 @@ pub(crate) const REOPEN_ATTEMPTS: usize = 64;
 /// module doc).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Custody {
+    /// The node's id (the audit's key).
+    node: u64,
     /// Whether the last sync that started also completed: only then is the
     /// layout below what the disk holds.
     settled: bool,
@@ -118,6 +121,19 @@ pub(crate) enum Family {
 pub(crate) struct Injection {
     family: Family,
     regions: Vec<LayoutRegion>,
+    /// A copy a correlated outage's plan lost (#263,
+    /// [`StorageWorld::plan_outage_loss`]), not a boot's own draw.
+    outage: bool,
+}
+
+impl Injection {
+    /// The slot whose copy an outage's plan lost, if this is one.
+    pub(crate) fn outage_loss(&self) -> Option<u64> {
+        match self.family {
+            Family::EntryRot(slot) if self.outage => Some(slot),
+            _ => None,
+        }
+    }
 }
 
 impl StorageWorld {
@@ -134,11 +150,28 @@ impl StorageWorld {
     pub(crate) fn note_synced(
         &mut self,
         key: &str,
+        node: u64,
         written: Vec<(u64, Layout)>,
         first: u64,
         regions: &[LayoutRegion],
     ) {
+        self.ledger_custody(key, node, written, first, regions, true);
+    }
+
+    /// The custody ledger's update (see [`Self::note_synced`]): `rewritten`
+    /// when the slots were written by this commit, which alone clears their
+    /// marks; an open only reports what the disk holds, damage included.
+    fn ledger_custody(
+        &mut self,
+        key: &str,
+        node: u64,
+        written: Vec<(u64, Layout)>,
+        first: u64,
+        regions: &[LayoutRegion],
+        rewritten: bool,
+    ) {
         let custody = self.custody.entry(key.to_string()).or_default();
+        custody.node = node;
         if !written.is_empty() {
             custody.last_batch = written.iter().map(|(slot, _)| *slot).collect();
         }
@@ -168,19 +201,197 @@ impl StorageWorld {
         );
         let floor = custody.first;
         if let Some(marks) = self.marks.get_mut(key) {
-            for slot in slots {
-                marks.remove(&slot);
+            if rewritten {
+                for slot in slots {
+                    marks.remove(&slot);
+                }
             }
             marks.retain(|slot| *slot >= floor);
         }
     }
 
+    /// A journal store at `key` opened: its custody is what the journal now
+    /// holds (`layouts`, every slot it reports), the floor `first` and its
+    /// `regions`. A commit whose sync was cut may have landed, so a boot is
+    /// where the ledger learns it; nothing is a mark's business here, since
+    /// only a rewrite clears one.
+    pub(crate) fn note_opened(
+        &mut self,
+        key: &str,
+        node: u64,
+        layouts: Vec<(u64, Layout)>,
+        first: u64,
+        regions: &[LayoutRegion],
+    ) {
+        let custody = self.custody.entry(key.to_string()).or_default();
+        let known: BTreeSet<u64> = custody.records.keys().copied().collect();
+        let mut last_batch = std::mem::take(&mut custody.last_batch);
+        // A slot only the open found came from a cut commit: it may be the
+        // journal's last batch, which a double fault never touches.
+        last_batch.extend(
+            layouts
+                .iter()
+                .map(|(slot, _)| *slot)
+                .filter(|s| !known.contains(s)),
+        );
+        custody.records.clear();
+        self.ledger_custody(key, node, layouts, first, regions, false);
+        if let Some(custody) = self.custody.get_mut(key) {
+            custody.last_batch = last_batch;
+        }
+    }
+
     /// Plan this boot's injection for the journal store at `key` (node
-    /// `node`), if a family fires and its budget allows (see the module
-    /// doc). A permitted entry rot marks the copy lost; a permitted double
-    /// fault parks the node, before the journal ever opens.
-    pub(crate) fn plan_boot_damage(&mut self, key: &str, node: u64) -> Option<Injection> {
+    /// `node`): the copy an outage's plan lost, which every boot after it
+    /// applies, else — only `in_chaos` — a family that fires and whose
+    /// budget allows (see the module doc). A permitted entry rot marks the
+    /// copy lost; a permitted double fault parks the node, before the
+    /// journal ever opens.
+    pub(crate) fn plan_boot_damage(
+        &mut self,
+        key: &str,
+        node: u64,
+        in_chaos: bool,
+    ) -> Option<Injection> {
+        if let Some(slot) = self.pending.remove(key) {
+            // The plan's own claim: it was made on a settled custody, and
+            // nothing since (the node was down) moved it.
+            let custody = self.custody.get(key);
+            assert_always!(
+                custody.is_some_and(|c| c.settled),
+                "journal store: an outage's planned loss finds its custody settled",
+                { "node" => node, "slot" => slot }
+            );
+            if let Some(layout) = custody.and_then(|c| c.records.get(&slot)) {
+                return Some(Injection {
+                    family: Family::EntryRot(slot),
+                    regions: vec![layout.entry.clone()],
+                    outage: true,
+                });
+            }
+        }
+        if !in_chaos {
+            return None;
+        }
         self.plan_one(key, node)
+    }
+
+    /// Plan a correlated outage's loss in this journal (#263, see
+    /// [`super::outage`]): while every node is down, one slot the custody
+    /// ledger holds loses its copy on some holders, applied at each one's
+    /// next boot, aimed at a slot the audit saw `decided` (already acked:
+    /// rot after the fact is latent damage). Under the usual budget a quorum of clean copies stays;
+    /// under the loss budget's extreme only `loss.keep` clean copies do.
+    /// `None` on a journal with no budget (a quiet one) or nothing to aim
+    /// at.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub(crate) fn plan_outage_loss(
+        &mut self,
+        loss: LossShape,
+        decided: &BTreeSet<u64>,
+    ) -> Option<PlannedLoss> {
+        if self.cluster_size == 0 {
+            return None;
+        }
+        let live: Vec<(&String, &Custody)> = self
+            .custody
+            .iter()
+            .filter(|(key, _)| !self.replicas.contains(*key) && !self.parked.contains_key(*key))
+            .collect();
+        // Above every floor, so no holder answers with a trim point instead.
+        // A last batch is fair game: its persist records survive, so a
+        // damaged entry there is reported faulty like any other.
+        let floor = live.iter().map(|(_, c)| c.first).max()?;
+        let candidates: BTreeSet<u64> = live
+            .iter()
+            .filter(|(_, c)| c.settled)
+            .flat_map(|(_, c)| c.records.range(floor..).map(|(slot, _)| *slot))
+            .filter(|slot| decided.contains(slot))
+            .collect();
+        let slot = if loss.recent {
+            assert_reachable!("storage: an outage aims at the most recent slot it holds");
+            candidates.last().copied()
+        } else {
+            let all: Vec<u64> = candidates.iter().copied().collect();
+            let at = moonpool_sim::sim_random_range(0..all.len().max(1) as u64);
+            all.get(usize::try_from(at).unwrap_or(0)).copied()
+        }?;
+        let holders: Vec<(String, u64, bool)> = live
+            .iter()
+            .filter(|(_, c)| c.records.contains_key(&slot))
+            .map(|(key, c)| ((*key).clone(), c.node, c.settled))
+            .collect();
+        // The holders the plan may damage: settled ones (an unsettled
+        // custody's layout is not known), not already lost. Those outside the
+        // configuration the operator last installed go last, so a kept copy
+        // lands on them.
+        let installed = self.last_installed();
+        let mut damageable: Vec<(String, u64)> = holders
+            .iter()
+            .filter(|(key, _, settled)| {
+                *settled && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
+            })
+            .map(|(key, node, _)| (key.clone(), *node))
+            .collect();
+        if loss.prefer_removed {
+            damageable.sort_by_key(|(_, node)| {
+                installed
+                    .as_ref()
+                    .is_some_and(|members| !members.contains(node))
+            });
+        }
+        let count = match loss.keep {
+            Some(keep) if self.loss_permitted(slot, loss.loss_budget()) => {
+                holders.len().saturating_sub(keep)
+            }
+            _ => self.clean_copies(slot).saturating_sub(self.quorum()),
+        }
+        .min(damageable.len());
+        if count == 0 {
+            return None;
+        }
+        let damaged: Vec<(String, u64)> = damageable.drain(..count).collect();
+        for (key, _) in &damaged {
+            self.marks.entry(key.clone()).or_default().insert(slot);
+            self.pending.insert(key.clone(), slot);
+        }
+        if self.clean_copies(slot) < self.quorum() {
+            self.lossy.insert(slot);
+            assert_reachable!("storage: an outage spends the loss budget");
+        }
+        assert_always!(
+            self.lossy.len() <= loss.loss_budget(),
+            "storage: an outage never loses more slots than the loss budget",
+            { "slot" => slot, "lost" => u64::try_from(self.lossy.len()).unwrap_or(u64::MAX) }
+        );
+        if loss.prefer_removed
+            && let Some(members) = &installed
+            && damageable.iter().any(|(_, node)| !members.contains(node))
+        {
+            assert_reachable!("storage: an outage leaves a clean copy on a removed node");
+        }
+        Some(PlannedLoss {
+            slot,
+            holders: holders.iter().map(|(_, node, _)| *node).collect(),
+            damaged: damaged.iter().map(|(_, node)| *node).collect(),
+        })
+    }
+
+    /// Whether an outage would find a slot to lose here: a budgeted journal
+    /// whose custody ledger holds a settled copy of one.
+    pub(crate) fn has_outage_target(&self, decided: &BTreeSet<u64>) -> bool {
+        self.cluster_size > 0
+            && self.custody.iter().any(|(key, custody)| {
+                custody.settled
+                    && !self.replicas.contains(key)
+                    && custody.records.keys().any(|slot| decided.contains(slot))
+            })
+    }
+
+    /// Whether `slot` may lose its clean quorum: it already did, or the loss
+    /// budget has room (see [`LossShape::loss_budget`]).
+    fn loss_permitted(&self, slot: u64, budget: usize) -> bool {
+        self.lossy.contains(&slot) || self.lossy.len() < budget
     }
 
     /// A planned injection landed: its writes and sync confirmed. Only
@@ -203,8 +414,30 @@ impl StorageWorld {
             slots.get(usize::try_from(at).unwrap_or(0)).copied()
         };
         let held: Vec<u64> = custody.records.keys().copied().collect();
+        // Every family aims only where the entry is whole. On a slot whose
+        // entry an earlier rot (or an outage's planned loss) took and no
+        // rewrite has cleared, a record rot would be a double fault the
+        // budget never permitted, and a second flip of the entry (an entry
+        // rot, a double fault) would put the same bytes back.
+        let marked = self.marks.get(key);
+        let whole: Vec<u64> = held
+            .iter()
+            .copied()
+            .filter(|slot| !marked.is_some_and(|marks| marks.contains(slot)))
+            .collect();
+        // Aimed by what the ledger knows (#263): on some boots the most
+        // recent slot this node holds, the one a lagging peer is likeliest
+        // to still need, rather than a uniform one.
+        let aim = |held: &[u64]| {
+            if buggify_with_prob!(0.5) {
+                assert_reachable!("journal store: an entry rot aims at the most recent slot held");
+                held.last().copied()
+            } else {
+                pick(held)
+            }
+        };
         if buggify_with_prob!(P_ENTRY_ROT)
-            && let Some(slot) = pick(&held)
+            && let Some(slot) = aim(&whole)
             && self.may_corrupt_record(key, slot)
         {
             self.marks.entry(key.to_string()).or_default().insert(slot);
@@ -218,17 +451,19 @@ impl StorageWorld {
             return Some(Injection {
                 family: Family::EntryRot(slot),
                 regions: vec![custody.records[&slot].entry.clone()],
+                outage: false,
             });
         }
         if buggify_with_prob!(P_RECORD_ROT)
-            && let Some(slot) = pick(&held)
+            && let Some(slot) = pick(&whole)
         {
             return Some(Injection {
                 family: Family::RecordRot(slot),
                 regions: vec![custody.records[&slot].record.clone()],
+                outage: false,
             });
         }
-        let settled: Vec<u64> = held
+        let settled: Vec<u64> = whole
             .iter()
             .copied()
             .filter(|slot| !custody.last_batch.contains(slot))
@@ -242,6 +477,7 @@ impl StorageWorld {
             return Some(Injection {
                 family: Family::DoubleFault(slot),
                 regions: vec![layout.record.clone(), layout.entry.clone()],
+                outage: false,
             });
         }
         if buggify_with_prob!(P_META_ROT) && custody.meta.len() == 2 {
@@ -249,6 +485,7 @@ impl StorageWorld {
             return Some(Injection {
                 family: Family::MetaRot,
                 regions: vec![custody.meta[copy].clone()],
+                outage: false,
             });
         }
         if buggify_with_prob!(P_HEADER_ROT) && !custody.headers.is_empty() {
@@ -257,6 +494,7 @@ impl StorageWorld {
             return Some(Injection {
                 family: Family::HeaderRot,
                 regions: vec![header],
+                outage: false,
             });
         }
         None

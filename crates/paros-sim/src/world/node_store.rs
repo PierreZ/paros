@@ -152,12 +152,12 @@ impl LogStorage for LedgeredJournal {
         // The ledgered injector (#261): at most one family's damage,
         // aimed by the custody ledger, applied before the journal
         // opens and judged against what it reports.
-        let injection = if self.inject && self.power.in_chaos() {
-            let (ip, node) = (self.ip.clone(), self.node);
+        let injection = if self.inject {
+            let (ip, node, in_chaos) = (self.ip.clone(), self.node, self.power.in_chaos());
             self.world.upgrade().and_then(|w| {
                 w.lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .plan_boot_damage(&ip, node)
+                    .plan_boot_damage(&ip, node, in_chaos)
             })
         } else {
             None
@@ -201,8 +201,26 @@ impl LogStorage for LedgeredJournal {
             if crashed {
                 self.with_world(StorageWorld::note_injected_crash);
             }
+            // An outage's planned loss landed: the journal's own verdict is
+            // the audit's ground truth that this copy is gone (#263).
+            if let Some(slot) = injection.outage_loss()
+                && faulty.contains(&slot)
+            {
+                self.checker.note_copy_lost(self.node, slot);
+            }
         }
         self.ledger(scanned)?;
+        // The custody ledger learns what the open found, a cut commit's
+        // landing included (#263).
+        let regions = self.inner.regions();
+        let layouts: Vec<_> = regions
+            .iter()
+            .filter(|region| region.kind == paros::journal::Layout::ENTRY)
+            .filter_map(|region| region.stripe)
+            .filter_map(|slot| self.inner.layout(Slot(slot)).map(|at| (slot, at)))
+            .collect();
+        let (ip, node, first) = (self.ip.clone(), self.node, self.inner.first_slot().0);
+        self.with_world(|w| w.note_opened(&ip, node, layouts, first, &regions));
         let facts = self.inner.boot_facts();
         // Causes the crash physics and the small geometry make
         // likely, each paired as a reachable.
@@ -290,7 +308,8 @@ impl LogStorage for LedgeredJournal {
         let first = self.inner.first_slot().0;
         let regions = self.inner.regions();
         let ip = self.ip.clone();
-        self.with_world(|w| w.note_synced(&ip, written, first, &regions));
+        let node = self.node;
+        self.with_world(|w| w.note_synced(&ip, node, written, first, &regions));
         if std::mem::take(&mut self.format_pending) {
             // The marker is durable: the provisioning landed.
             let ip = self.ip.clone();

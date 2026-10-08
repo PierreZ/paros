@@ -305,6 +305,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         })
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
+        .fault_factory(|| Box::new(crate::world::outage::CorrelatedOutage))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }

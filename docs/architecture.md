@@ -1243,11 +1243,14 @@ Simulation is the investment. Every milestone lands with its share of:
   with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
   under the copy budget, power cuts inside a sync, and moonpool's environmental storage chaos
   under it; its gates name journal verdicts (slot rebuilt, double fault parked, meta repaired).
-  The in-memory stores and the scripted corpus are gone: one campaign (#263, landed 2026-10-08),
-  the corpus's shapes drawn per seed. Still to come (#263): rot aimed at a recent decided slot,
-  its holders, every copy of one slot and copies on removed nodes; a copy-budget extreme that
-  allows a bounded number of unrecoverable slots, excused from convergence and judged never
-  filled; and replicated fault patterns (#202).
+  The in-memory stores and the scripted corpus are gone: one campaign (#263, 2026-10-08). The
+  corpus's shapes are provoked, never scripted: a correlated outage of every acceptor plans one
+  slot's loss for each holder's next boot (aimed at the most recent slot, its holders, every
+  copy, or leaving the clean copy on a removed node), and a loss budget's extreme lets at most
+  two slots lose every clean copy. The audit recognizes the E1, bare-quorum and
+  departed-straggler shapes from the journal's verdicts, excuses an unrecoverable slot's journal
+  from convergence, and asserts it is never accepted again. Still to come: replicated fault
+  patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
   (one zone at a time, the outage length drawn across the re-placement bound and restored inside
   `CHAOS_DURATION_MS`); moonpool#297 gives `.processes()` groups no locality, so paros keeps its

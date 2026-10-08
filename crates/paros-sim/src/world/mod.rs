@@ -11,6 +11,7 @@
 
 pub(crate) mod injector;
 pub(crate) mod node_store;
+pub(crate) mod outage;
 pub(crate) mod power;
 pub(crate) mod registry_store;
 pub(crate) mod wipe;
@@ -146,6 +147,13 @@ pub(crate) struct StorageWorld {
     /// one's last completed sync says it holds and where
     /// ([`injector::Custody`]). The copy budget counts copies over it.
     custody: BTreeMap<String, injector::Custody>,
+    /// Copies a correlated outage's plan lost (#263), by IP: the slot each
+    /// holder's next boot damages ([`StorageWorld::plan_outage_loss`]).
+    pending: BTreeMap<String, u64>,
+    /// Slots an outage left without a clean quorum of copies, spent from the
+    /// loss budget ([`outage::LossShape::loss_budget`]): excused from the
+    /// clean-quorum gate, never healed.
+    lossy: BTreeSet<u64>,
     /// Damage the injector applied (#261), and how much of it the journal
     /// answered with a crash decision (a refused open): the
     /// exercised-detected oracle's count.
@@ -261,6 +269,8 @@ impl StorageWorld {
         }
         self.marks.remove(key);
         self.custody.remove(key);
+        // A copy an outage planned to lose goes with the whole disk.
+        self.pending.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
         tracing::info!(node, "storage_wiped");
         true
@@ -322,6 +332,17 @@ impl StorageWorld {
                 self.requested.remove(&id);
             }
         }
+    }
+
+    /// The members of the configuration an operator last saw start (the
+    /// highest round in the ledger), if any: a node outside it was removed
+    /// (#263's departed straggler).
+    fn last_installed(&self) -> Option<Vec<u64>> {
+        self.requested
+            .values()
+            .filter_map(|entry| entry.round.map(|round| (round, &entry.members)))
+            .max_by_key(|(round, _)| *round)
+            .map(|(_, members)| members.clone())
     }
 
     /// Whether some operator asked for a configuration naming `node` that
@@ -714,10 +735,13 @@ pub(crate) fn storage_fault_stats(
         clean_quorum_everywhere: true,
     };
     let quorum = guard.quorum();
+    // A slot the loss budget spent (#263) is excused: it lost its clean
+    // quorum by permission, and the audit judges what it must do instead.
     let marked: BTreeSet<u64> = guard
         .marks
         .values()
         .flat_map(|marks| marks.iter().copied())
+        .filter(|slot| !guard.lossy.contains(slot))
         .collect();
     for slot in marked {
         // The availability re-derivation deliberately differs from the
