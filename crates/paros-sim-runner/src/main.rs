@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{arg, is_clean, print_never_fired, print_seed_counts};
+use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
 use paros_sim::{AssertKind, COVERAGE_ITERATIONS, SimulationReport, explore};
 
 fn main() {
@@ -51,6 +51,7 @@ fn main() {
     if is_clean(&report) && report.coverage_violations.is_empty() && !report.convergence_timeout {
         println!("  Chain safety, recovery, coverage, and saturation gates are green");
     } else {
+        print_failed_runs(&report);
         println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
         println!("  COVERAGE VIOLATIONS: {:?}", report.coverage_violations);
         println!("  CONVERGENCE TIMEOUT: {}", report.convergence_timeout);

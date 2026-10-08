@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{arg, is_clean, print_never_fired, print_seed_counts};
+use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
 use paros_sim::{
     EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
     chain_smoke, explore_chain_seed, run_chain_seed,
@@ -43,6 +43,7 @@ fn main() {
             return;
         }
         println!("seed {seed}: RED");
+        print_failed_runs(&report);
         println!("VIOLATIONS: {:#?}", report.assertion_violations);
         std::process::exit(1);
     }
@@ -83,6 +84,7 @@ fn main() {
         println!("no violations — the hunt came back empty");
         return;
     }
+    print_failed_runs(&report);
     println!("VIOLATIONS: {:#?}", report.assertion_violations);
     println!("FAILING SEEDS: {:?}", report.seeds_failing);
     std::process::exit(1);

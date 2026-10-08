@@ -8,7 +8,7 @@ environment variables, no flags beyond the positional arguments below.
 
 - `src/main.rs` → `sim-paros-chain` → the CI gate; the only binary `cargo xtask sim` registers.
 - `src/hunt.rs` → `sim-paros-hunt` → raw seed volume and single-seed replays, coverage-blind.
-- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_never_fired` → shared parsing and printing.
+- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_never_fired` → shared parsing and printing.
 
 ## Entry points
 

@@ -20,6 +20,17 @@ pub fn print_seed_counts(report: &SimulationReport, suffix: &str) {
     );
 }
 
+/// Name every failed run with its seed and error: a process that panicked
+/// is a failed run with no assertion violation, so the violation list
+/// alone never shows it.
+pub fn print_failed_runs(report: &SimulationReport) {
+    for (seed, run) in report.seeds_used.iter().zip(&report.individual_metrics) {
+        if let Err(error) = run {
+            println!("failed run: seed {seed}: {error}");
+        }
+    }
+}
+
 /// Name the `sometimes`/`reachable` gates that never fired, if any, each line
 /// prefixed by `indent`.
 pub fn print_never_fired(report: &SimulationReport, indent: &str) {
