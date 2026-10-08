@@ -51,6 +51,7 @@ mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
+pub(crate) use matchmaker::RegistryOp;
 pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -317,6 +318,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "a node never persists an accept below its compaction floor"
         );
         st.persisted.insert((node.0, slot.0), vhash);
+        // The commit that carried it is no longer in flight for this slot.
+        if st.in_flight.get(&(node.0, slot.0)) == Some(&vhash) {
+            st.in_flight.remove(&(node.0, slot.0));
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]
@@ -1280,14 +1285,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .copied()
             .unwrap_or_default()
             .strictly_before(now);
+        // What a journal store's last commits had in flight (#264): the only
+        // values a boot may recover in place of the reported ones.
+        let in_flight = st.take_in_flight(node.0);
         for &(slot, ballot, vhash) in accepted {
-            // A synced accept is never lost or altered by a crash.
-            if let Some(&prev) = st.persisted.get(&(node.0, slot.0)) {
-                assert_always!(
-                    prev == vhash,
-                    "a restart never changes a pre-crash accepted value for a slot"
-                );
-            }
+            st.judge_recovered_value(node.0, slot.0, vhash, in_flight.get(&slot.0).copied());
             assert_always!(
                 slot.0 >= boot_floor,
                 "a truncated record is never recovered on boot (the log stays bounded)"

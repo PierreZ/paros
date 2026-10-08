@@ -9,8 +9,11 @@
 
 pub(crate) mod matchmaker;
 pub(crate) mod node_store;
+pub(crate) mod power;
+pub(crate) mod registry_store;
 pub(crate) mod rot;
 pub(crate) mod storage;
+pub(crate) mod wipe;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -374,6 +377,18 @@ pub(crate) struct StorageWorld {
     /// refuses to boot them again, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
+    /// Journal registries (#176) whose power was cut mid-commit while they
+    /// held a registration, waiting for their next boot to judge what
+    /// survived ([`registry_store::LedgeredRegistry`]).
+    registry_cuts: BTreeSet<String>,
+    /// Acceptors (#176) whose power a `Batched` commit's cut may have left
+    /// with an ambiguous last batch: lost copies, budgeted like rot (see
+    /// [`StorageWorld::permit_power_cut`]).
+    cut_nodes: BTreeSet<String>,
+    /// The matchmaker (#176) a `Batched` commit's cut may have left with an
+    /// ambiguous registration, a crash verdict: the run's one matchmaker
+    /// loss (see [`StorageWorld::permit_matchmaker_power_cut`]).
+    cut_matchmaker: Option<String>,
     /// Matchmakers whose registry fsync has failed at least once this run.
     /// The budget is what keeps the run winnable: at most `quorum - 1` of
     /// the bootstrap set, so a matchmaking quorum always survives.
@@ -404,12 +419,6 @@ pub(crate) struct StorageWorld {
 }
 
 impl StorageWorld {
-    /// Whether `ip` is down for good, whatever the reason (see
-    /// `crate::process`).
-    pub(crate) fn is_parked(&self, ip: &str) -> bool {
-        self.parked.contains_key(ip)
-    }
-
     /// Why `ip` is down for good, or `None` while it may still boot. The
     /// process reads one exit off it: a corruption park is the one it
     /// honors before touching the store (the boot scan would re-detect the
@@ -458,6 +467,18 @@ impl StorageWorld {
     /// identity is unprovisioned, and its next boot is a first boot.
     pub(crate) fn abandon_provisioning(&mut self, ip: &str) {
         self.provisioning.remove(ip);
+    }
+
+    /// Matchmaker `ip`'s journal registry lost power mid-commit holding a
+    /// registration (#176).
+    pub(crate) fn note_registry_cut(&mut self, ip: &str) {
+        self.registry_cuts.insert(ip.to_string());
+    }
+
+    /// Whether matchmaker `ip`'s journal registry was cut since its last
+    /// boot, clearing the mark.
+    pub(crate) fn take_registry_cut(&mut self, ip: &str) -> bool {
+        self.registry_cuts.remove(ip)
     }
 
     /// Whether `ip`'s registry was wiped (lost for good).
@@ -635,13 +656,57 @@ impl StorageWorld {
     /// seed. Returns whether it fired.
     #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
     pub(crate) fn wipe_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
-        if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
+        if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR
+            || !self.parked_matchmakers.is_empty()
+            || self.cut_matchmaker.is_some()
+        {
             return false;
         }
         self.matchmakers.remove(key);
         self.parked_matchmakers.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
+    }
+
+    /// Whether acceptor `key` may lose power inside a `Batched` journal
+    /// commit now (#176). Such a cut can leave the commit ambiguous, its
+    /// entries reported faulty: a lost copy of every slot the commit wrote,
+    /// which on a quorum system that tolerates no loss (`q2 = 1`, a grid)
+    /// leaves a slot that may have been chosen with no value anywhere, a
+    /// correct wait forever. So the cut nodes are budgeted like rot: at most
+    /// `tolerated` distinct acceptors per run (the floor minus the clean
+    /// copies every record keeps), a node already cut staying permitted.
+    pub(crate) fn permit_power_cut(&mut self, key: &str, tolerated: usize) -> bool {
+        if self.cut_nodes.contains(key) {
+            return true;
+        }
+        if self.cut_nodes.len() >= tolerated {
+            return false;
+        }
+        self.cut_nodes.insert(key.to_string());
+        true
+    }
+
+    /// Whether matchmaker `key` may lose power inside a `Batched` registry
+    /// commit now (#176). An ambiguous live registration is a crash verdict
+    /// (the registry is replaced, never repaired), so such a cut is the run's
+    /// one matchmaker loss: only on a bootstrap set that can spare one, never
+    /// alongside the wipe coin, and only this matchmaker from then on.
+    pub(crate) fn permit_matchmaker_power_cut(&mut self, key: &str, bootstrap: usize) -> bool {
+        if let Some(cut) = &self.cut_matchmaker {
+            return cut == key;
+        }
+        if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
+            return false;
+        }
+        self.cut_matchmaker = Some(key.to_string());
+        true
+    }
+
+    /// Whether matchmaker `key` is the one a `Batched` cut was permitted on
+    /// (#176): its registry may refuse to open for good.
+    pub(crate) fn is_cut_matchmaker(&self, key: &str) -> bool {
+        self.cut_matchmaker.as_deref() == Some(key)
     }
 
     /// Whether matchmaker `key` may fail its registry fsync now (#125).

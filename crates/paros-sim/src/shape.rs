@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
+use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
 
 use crate::world::storage::WritePathRates;
 use paros::{
@@ -614,36 +614,30 @@ impl JournalPlan {
     }
 }
 
-/// Whether the run's acceptors store on the library's `JournalStorage` over
-/// the simulated disk instead of the world-backed store (#187), and with
-/// which layout — drawn once per seed, a seeded coin on a perturbed seed
-/// without matchmakers (the only seeds that may): the world store's copy budget and fault ledger
-/// exist because the world injects disk corruption, and a journal seed
-/// injects none (no rot, no write-path coin, no wipe — a plain seed never
-/// wipes); matchmaker seeds and the corpus stay on the world store until
-/// #176. The draw is paired with a `reachable`; the layout is the library's
-/// `JournalStoreConfig::small()`. A tighter geometry (16-slot segments, a
-/// checkpoint every append) is not a knob: moonpool's `BuggifyKnobs` also
-/// slows the simulated disk (IOPS, bandwidth, stalls), and the two together
-/// held every node's sync past the end of the run (witness
-/// 2281271371631374953) — a permanent partition wearing a knob's clothes.
-#[tracing::instrument(level = "debug", skip(state), fields(matchmakers, perturb))]
-pub(crate) fn journal_store(
-    state: &StateHandle,
-    matchmakers: bool,
-    perturb: bool,
-) -> Option<JournalStoreConfig> {
+/// Whether the run's acceptors and matchmakers store on the library's
+/// journal stores (`JournalStorage`, `JournalMatchmakerStorage`) over the
+/// simulated disk instead of the world-backed stores, and with which
+/// layout: drawn once per seed, a seeded coin on every perturbed seed,
+/// plain or with matchmakers (#176). Half the seeds keep the world stores,
+/// whose corruption coins and copy budget are the CTRL coverage the
+/// journal stores do not carry yet (#261); a journal seed injects no rot,
+/// its storage faults are moonpool's crash physics on the simulated disk.
+/// The corpus (`perturb == false`) stays on the world store.
+///
+/// The layout is a draw too: the commit protocol (two syncs by default,
+/// CLSTORE's one at the extreme) and the segment geometry
+/// ([`journal_geometry`]). The draw is paired with a `reachable`.
+#[tracing::instrument(level = "debug", skip_all, fields(perturb))]
+pub(crate) fn journal_store(state: &StateHandle, perturb: bool) -> Option<JournalStoreConfig> {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let draw = *guard.journal_store.get_or_insert_with(|| {
         // Deployment shape, like the process groups' counts: a seeded coin,
-        // not a knob's extreme — half the plain seeds keep the world store,
-        // whose corruption coins and budget are the plain deployment's
-        // CTRL coverage.
-        if !perturb || matchmakers || !moonpool_sim::sim_random_bool(0.5) {
+        // not a knob's extreme.
+        if !perturb || !moonpool_sim::sim_random_bool(0.5) {
             return StoreDraw::World;
         }
-        // BUGGIFY pairing: a seed genuinely runs its nodes on the journal.
+        // BUGGIFY pairing: a seed genuinely runs its nodes on JournalStorage.
         assert_reachable!("journal store: a seed runs its nodes on JournalStorage");
         // The commit protocol, a knob whose default is production's: two
         // syncs (always decided); the extreme is CLSTORE's one sync, whose
@@ -658,6 +652,7 @@ pub(crate) fn journal_store(
             } else {
                 paros::journal::Durability::Ordered
             },
+            geometry: journal_geometry(),
             ..JournalStoreConfig::small()
         })
     });
@@ -665,6 +660,56 @@ pub(crate) fn journal_store(
         StoreDraw::World => None,
         StoreDraw::Journal(layout) => Some(layout),
     }
+}
+
+/// The fewest blocks a segment's entry log may have (floor of
+/// [`journal_geometry`]): it must hold the largest single entry a node
+/// stores, the workload's largest write (`ChainConfig`'s
+/// `MAX_BATCH_RECORDS` records of `MAX_LARGE_COMMAND_BYTES` each) plus its
+/// encoding. A smaller one refuses that entry (`BatchTooLarge`) at every
+/// sync, forever: a stalled node, not a knob.
+pub(crate) const ENTRY_BLOCKS_FLOOR: u32 = 17;
+
+/// The fewest blocks a segment's persist log may have (floor of
+/// [`journal_geometry`]): 128 records, so a segment outlives a few commits
+/// and rollover never dominates every one. Below it, with moonpool's slow
+/// disk knobs on top, the old store held every node's sync past the end of
+/// the run (witness 2281271371631374953, on the checkpointing store #256
+/// replaced).
+pub(crate) const PERSIST_BLOCKS_FLOOR: u32 = 2;
+
+// The entry log holds the largest write the workload can make, with a
+// block of slack for the encoding and the entry header.
+const _: () = assert!(
+    (ENTRY_BLOCKS_FLOOR as u64 - 1) * paros::journal::BLOCK as u64
+        >= crate::chain_workload::MAX_BATCH_RECORDS
+            * crate::chain_workload::MAX_LARGE_COMMAND_BYTES as u64
+);
+const _: () = assert!(PERSIST_BLOCKS_FLOOR >= 1);
+
+/// The journal stores' segment geometry (#176, folded from #202): a
+/// `buggify_knob!` per region, so segment rollover, prefix deletion and the
+/// batch-split path run under varied shapes. The default is the library's
+/// `Geometry::small()` persist log (512 records) with the entry log at its
+/// floor; the extremes shrink the persist log to [`PERSIST_BLOCKS_FLOOR`]
+/// or grow either region. The gap stays empty.
+fn journal_geometry() -> paros::journal::Geometry {
+    let small = paros::journal::Geometry::small();
+    let geometry = paros::journal::Geometry {
+        persist_blocks: buggify_knob!(small.persist_blocks, PERSIST_BLOCKS_FLOOR..33_u32),
+        gap_blocks: 0,
+        entry_blocks: buggify_knob!(ENTRY_BLOCKS_FLOOR, ENTRY_BLOCKS_FLOOR..65_u32),
+    };
+    // The floors, checked where the draw lands.
+    assert_always!(
+        geometry.persist_blocks >= PERSIST_BLOCKS_FLOOR,
+        "journal store: a drawn persist log is at least its floor"
+    );
+    assert_always!(
+        geometry.entry_blocks >= ENTRY_BLOCKS_FLOOR,
+        "journal store: a drawn entry log is at least its floor"
+    );
+    geometry
 }
 
 /// How many genesis nodes host the system journals (#189) — the seeds,

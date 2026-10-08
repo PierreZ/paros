@@ -140,6 +140,12 @@ pub(super) struct AuditState {
     pub(super) accepted: BTreeMap<(u64, u64, u64), u64>,
     /// Per `(node, slot)`: the last value the node made durable.
     pub(super) persisted: BTreeMap<(u64, u64), u64>,
+    /// Per `(node, slot)`: the value a journal store's commit in flight
+    /// carries (#264), reported before the commit starts and retired when
+    /// the driver reports it persisted. A crash inside the commit, or after
+    /// it and before the report, may leave it durable unreported: the next
+    /// boot may recover it in place of `persisted`, and only it.
+    pub(super) in_flight: BTreeMap<(u64, u64), u64>,
     /// The bootstrap acceptor configuration, from the boot reports (one
     /// shared deployment per run). The configuration of every ballot on plain
     /// Multi-Paxos, and of the ballots below the first registration on a
@@ -965,6 +971,47 @@ impl AuditState {
         if let Some(prev) = self.promised.insert(node, ballot) {
             assert_always!(ballot >= prev, "a node's promised ballot never decreases");
         }
+    }
+
+    /// Judge the value `node` recovered at `slot` against the one it last
+    /// reported durable there. A synced accept is never lost or altered by a
+    /// crash. A record a commit had in flight when the node died
+    /// (`in_flight`) may have landed without the driver reporting it: that
+    /// value, and no other, may replace the reported one, and becomes the
+    /// reference (witness 16805388934600808394: a promise and an accept at a
+    /// higher ballot both landed, then a power cut, #264).
+    pub(super) fn judge_recovered_value(
+        &mut self,
+        node: u64,
+        slot: u64,
+        vhash: u64,
+        in_flight: Option<u64>,
+    ) {
+        let Some(&prev) = self.persisted.get(&(node, slot)) else {
+            return;
+        };
+        let landed = in_flight == Some(vhash);
+        assert_always!(
+            prev == vhash || landed,
+            "a restart never changes a pre-crash accepted value for a slot"
+        );
+        if landed {
+            self.persisted.insert((node, slot), vhash);
+        }
+    }
+
+    /// The values `node`'s journal store had in flight when it last died, by
+    /// slot, cleared: what its boot may recover in place of the reported ones
+    /// (#264, see `in_flight`).
+    pub(super) fn take_in_flight(&mut self, node: u64) -> BTreeMap<u64, u64> {
+        let keys: Vec<(u64, u64)> = self
+            .in_flight
+            .range((node, 0)..=(node, u64::MAX))
+            .map(|(key, _)| *key)
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.in_flight.remove(&key).map(|vhash| (key.1, vhash)))
+            .collect()
     }
 
     /// Fold one durable accept into the acceptor tally and run the

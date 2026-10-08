@@ -159,6 +159,15 @@ const SHRINK_SHAPE: usize = 1;
 /// [`RECONFIGURE_SHAPES`]: a matchmaker set has no leader to remove.
 const MATCHMAKER_SHAPES: [usize; 4] = [0, 1, 2, 4];
 
+/// The most records one write carries (`ChainConfig::batch_records`'s
+/// ceiling): with [`MAX_LARGE_COMMAND_BYTES`], the largest entry a node's
+/// journal store must hold (`crate::shape::ENTRY_BLOCKS_FLOOR`).
+pub(crate) const MAX_BATCH_RECORDS: u64 = 4;
+
+/// The largest payload one record carries (`ChainConfig::large_command_bytes`'s
+/// ceiling).
+pub(crate) const MAX_LARGE_COMMAND_BYTES: usize = 16_384;
+
 /// Per-timeline client shape — every field is a `buggify_knob!` (AGENTS.md,
 /// prong 2): the default is production's ordinary client, and an activated seed
 /// draws one extreme. Each knob documents its floor: the extreme is a valid
@@ -359,10 +368,10 @@ impl ChainConfig {
     fn for_timeline() -> Self {
         Self {
             steps: buggify_knob!(32_u64, 0_u64..65_u64),
-            batch_records: buggify_knob!(1_u64, 1_u64..5_u64),
+            batch_records: buggify_knob!(1_u64, 1_u64..MAX_BATCH_RECORDS + 1),
             reader: buggify_knob!(0_u64, 0_u64..2_u64) == 1,
             command_bytes: buggify_knob!(64_usize, 1_usize..257_usize),
-            large_command_bytes: buggify_knob!(4096_usize, 512_usize..16_385_usize),
+            large_command_bytes: buggify_knob!(4096_usize, 512_usize..MAX_LARGE_COMMAND_BYTES + 1),
             request_timeout_ms: buggify_knob!(1500_u64, 1000_u64..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),

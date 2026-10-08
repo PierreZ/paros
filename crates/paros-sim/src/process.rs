@@ -39,6 +39,7 @@ use crate::roles::{
 };
 use crate::world::matchmaker::DurableMatchmakerStorage;
 use crate::world::node_store::{LedgeredJournal, NodeStore};
+use crate::world::registry_store::{LedgeredRegistry, RegistryStore};
 use crate::world::storage::{DurableStorage, StorageFaults, WritePathRates};
 use crate::world::{ParkReason, StorageWorld, storage_world, storage_world_for};
 use paros::{
@@ -148,7 +149,8 @@ enum Down {
     /// A node the operator retired (#123).
     Retired(u64),
     /// A matchmaker whose registry was wiped and whose boot the library
-    /// refused (#125, #183).
+    /// refused (#125, #183), or whose journal registry a budgeted power cut
+    /// left refusing to open (#176).
     MatchmakerLost(u64),
 }
 
@@ -647,9 +649,9 @@ async fn run_acceptor(
     // default journal alone unless the deployment is plain and the seed drew
     // more — and the one held on every node for the chaos window, if any.
     let plan = crate::shape::journals(ctx.state(), perturb);
-    // The store (#187): the world-backed store, or — on a plain seed that
-    // drew it — the library's `JournalStorage` on the simulated disk.
-    let journal_store = crate::shape::journal_store(ctx.state(), !matchmakers.is_empty(), perturb);
+    // The store (#187): the world-backed store, or, on a perturbed seed that
+    // drew it (#176), the library's `JournalStorage` on the simulated disk.
+    let journal_store = crate::shape::journal_store(ctx.state(), perturb);
     let board = journal_board(ctx.state());
     board_lock(&board).arm(&plan);
 
@@ -791,6 +793,12 @@ async fn run_acceptor(
                 .unwrap_or_else(PoisonError::into_inner)
                 .wipe(my_ip, self_rank.0)
         {
+            // On a journal seed the disk is genuinely emptied: the
+            // journal's files go, durably (#176).
+            if journal_store.is_some() {
+                crate::world::wipe::wipe_dir(ctx.storage(), &journal_dir(seats[0].journal)).await;
+                assert_reachable!("journal store: a wiped node's journal is deleted");
+            }
             // BUGGIFY pairing: the wipe coin fired within the budget.
             assert_reachable!("storage: a restarted node's disk is wiped and the identity retired");
             tracing::info!(node = self_rank.0, "storage_wiped");
@@ -915,12 +923,17 @@ async fn run_acceptor(
                 // world's dead-node budget so the cluster keeps a live
                 // quorum. A node whose every journal is parked stays down;
                 // its audits are told so convergence excuses exactly these
-                // nodes, and only these.
+                // nodes, and only these. A *wiped* identity is parked for the
+                // budget only: it boots, and the library refuses its empty
+                // store (#147). On a journal seed a transient fault (a failed
+                // sync of the boot's own writes) can reach it first, and it
+                // restarts like any other (#176).
                 let parked = seats.iter().all(|seat| {
                     seat.world
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .is_parked(my_ip)
+                        .park_reason(my_ip)
+                        .is_some_and(|reason| reason != ParkReason::Wiped)
                 });
                 if parked {
                     assert_reachable!("storage: a corruption-crashed node stays down");
@@ -1256,19 +1269,22 @@ impl JournalStores for SimStores<'_> {
                 seat.config.clone(),
                 *layout,
             );
-            let power = crate::world::node_store::PowerCut::new(
+            let power = crate::world::power::PowerCut::new(
                 self.ctx
                     .self_crash()
                     .expect("a node process can crash itself"),
                 self.ctx.time().clone(),
                 crate::CHAOS_DURATION,
-                true,
+                crate::world::power::Owner::Node,
             );
             let store = LedgeredJournal::new(
                 journal,
                 Arc::downgrade(&seat.world),
                 self.ip.to_string(),
                 power,
+                seat.checker.clone(),
+                (layout.durability == paros::journal::Durability::Batched)
+                    .then(|| seat.floor.saturating_sub(seat.clean_copies)),
             );
             return Some((NodeStore::Journal(Box::new(store)), boot));
         }
@@ -1531,6 +1547,20 @@ async fn run_matchmaker_role(
     // the same chaos window (see `world::matchmaker`): the only fault it
     // draws is the whole-batch fsync failure, budgeted by the world.
     let registry_faults = storage_faults(ctx, perturb, shape.write_rates);
+    // The store (#176): the world-backed registry, or, on a seed that drew
+    // the journal stores, the library's `JournalMatchmakerStorage` on the
+    // simulated disk, with the seed's commit protocol and the library's
+    // small geometry (a registry's installs carry every live registration
+    // in one batch; the acceptors' geometry knob is not theirs to shrink).
+    let journal_store =
+        crate::shape::journal_store(ctx.state(), perturb).map(|layout| paros::JournalStoreConfig {
+            geometry: paros::journal::Geometry::small(),
+            ..layout
+        });
+    let registry_id = crate::shape::identifiers(ctx.state()).main;
+    if journal_store.is_some() {
+        checker.note_journal_matchmakers();
+    }
     if incarnation.is_restart()
         && ctx.time().now() < crate::CHAOS_DURATION
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
@@ -1539,6 +1569,13 @@ async fn run_matchmaker_role(
             .unwrap_or_else(PoisonError::into_inner)
             .wipe_matchmaker(my_ip, bootstrap.len())
     {
+        // On a journal seed the disk is genuinely emptied: the registry's
+        // files go, durably.
+        if journal_store.is_some() {
+            crate::world::wipe::wipe_dir(ctx.storage(), crate::world::registry_store::REGISTRY_DIR)
+                .await;
+            assert_reachable!("journal store: a wiped matchmaker's registry is deleted");
+        }
         // The registry's wipe coin (#125, #183): a restart that comes back
         // on an empty disk. What happens next is the **library's** call: the
         // matchmaker boots below as an existing member on an empty store, and
@@ -1561,6 +1598,17 @@ async fn run_matchmaker_role(
             && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
     );
     loop {
+        // An interrupted provisioning on a journal registry is resolved
+        // from the disk before the claim is read (#176).
+        if journal_store.is_some() {
+            crate::world::registry_store::resolve_registry_provisioning(
+                ctx.storage(),
+                &world,
+                registry_id,
+                my_ip,
+            )
+            .await;
+        }
         // The operator's claim is the provisioning ledger (#183), kept
         // outside the disks: a wipe erases the marker, never the memory of
         // having provisioned the matchmaker.
@@ -1580,12 +1628,34 @@ async fn run_matchmaker_role(
             assert_reachable!("operator: a matchmaker restarts under an edited configuration");
             tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
         }
-        let storage = DurableMatchmakerStorage::restore(
-            Arc::downgrade(&world),
-            my_ip.to_string(),
-            registry_faults.clone(),
-            bootstrap.len(),
-        );
+        let storage = if let Some(layout) = journal_store {
+            let power = crate::world::power::PowerCut::new(
+                ctx.self_crash()
+                    .expect("a matchmaker process can crash itself"),
+                ctx.time().clone(),
+                crate::CHAOS_DURATION,
+                crate::world::power::Owner::Matchmaker,
+            );
+            RegistryStore::Journal(Box::new(LedgeredRegistry::new(
+                ctx.storage().clone(),
+                registry_id,
+                layout,
+                Arc::downgrade(&world),
+                my_ip.to_string(),
+                power,
+                checker.clone(),
+                id.0,
+                (layout.durability == paros::journal::Durability::Batched)
+                    .then_some(bootstrap.len()),
+            )))
+        } else {
+            RegistryStore::World(Box::new(DurableMatchmakerStorage::restore(
+                Arc::downgrade(&world),
+                my_ip.to_string(),
+                registry_faults.clone(),
+                bootstrap.len(),
+            )))
+        };
         match run_matchmaker(
             ctx.providers().clone(),
             storage,
@@ -1606,7 +1676,48 @@ async fn run_matchmaker_role(
             // hand the replacement to a matchmaker-set reconfiguration.
             // Its floor is structural: a matchmaker held down is a
             // matchmaking phase that waits, never a cluster that stalls.
-            Err(RunError::SeamCrash(_) | RunError::Storage(_)) => {
+            Err(failure @ (RunError::SeamCrash(_) | RunError::Storage(_))) => {
+                // On a journal seed a seam crash is the process dying, a
+                // power loss through moonpool's `SelfCrash`, like an
+                // acceptor's: every write not yet synced resolves by the
+                // disk's crash physics. A failed sync is a fail-stop the
+                // process restarts from. A journal registry the budgeted cut
+                // left with an ambiguous live registration refuses to open
+                // for good (a crash verdict): the matchmaker is the run's one
+                // matchmaker loss, down for the run and replaced by a
+                // handover, like a wiped one.
+                if journal_store.is_some()
+                    && matches!(
+                        failure,
+                        RunError::Storage(paros::StorageError::Corruption { .. })
+                    )
+                    && world
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_cut_matchmaker(my_ip)
+                {
+                    assert_reachable!(
+                        "journal store: a cut matchmaker's registry is lost for good"
+                    );
+                    stay_down(&checker, Down::MatchmakerLost(id.0));
+                    return Ok(());
+                }
+                if journal_store.is_some()
+                    && matches!(failure, RunError::SeamCrash(_))
+                    && ctx
+                        .crash_self(
+                            moonpool_sim::RebootKind::Crash,
+                            Some(Duration::from_millis(moonpool_sim::sim_random_range(
+                                250..3_001,
+                            ))),
+                        )
+                        .is_ok()
+                {
+                    assert_reachable!("journal store: a matchmaker crash is a power loss");
+                    // The kill lands within a scheduler tick: wait for it.
+                    let _ = ctx.time().sleep(Duration::from_hours(1)).await;
+                    return Ok(());
+                }
                 restart_delay!(
                     ctx,
                     "a seam-crashed matchmaker restarts after a buggified delay"

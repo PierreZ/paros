@@ -2,7 +2,7 @@
 //! workload reaches it through, and the run's final judgement
 //! ([`check_run`], [`AuditWorld::check_final_convergence`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
@@ -372,6 +372,79 @@ impl AuditWorld {
         }
         if let Some(landing) = landing {
             st.landings.entry(node).or_default().insert(landing);
+        }
+    }
+
+    /// A journal registry booted with `scalars` and `registry` (#176): fold
+    /// what its last sync had in flight and the boot shows landed, as the
+    /// driver would have reported it, before the driver reports the boot
+    /// (see `MatchmakerAudit::landed_in_flight`).
+    pub(crate) fn note_registry_recovered(
+        &self,
+        matchmaker: paros::MatchmakerId,
+        scalars: &paros::MatchmakerHardState,
+        registry: &BTreeMap<paros::Ballot, paros::Registration>,
+    ) {
+        let mut st = self.lock();
+        let ops = st
+            .matchmaker
+            .landed_in_flight(matchmaker.0, scalars, registry);
+        for op in ops {
+            match op {
+                super::matchmaker::RegistryOp::Register(ballot, registration) => {
+                    st.matchmaker.registered(matchmaker, ballot, &registration);
+                    st.bind_config(ballot, &registration.config);
+                }
+                super::matchmaker::RegistryOp::Scalars(written) => {
+                    st.matchmaker.scalars_persisted(matchmaker, &written);
+                }
+                super::matchmaker::RegistryOp::Install(installed, registrations) => {
+                    let set =
+                        paros::MatchmakerSet::new(installed.generation, installed.members.clone());
+                    st.matchmaker.activated(
+                        matchmaker,
+                        &set,
+                        installed.gc_watermark,
+                        installed.effective.as_ref(),
+                        &registrations,
+                    );
+                }
+            }
+        }
+        // The boot raised the effective scalar over the reconfigurations it
+        // keeps (`paros::journal::matchmaker`).
+        if let Some((ballot, _)) = &scalars.effective {
+            st.matchmaker.raise_effective(matchmaker, *ballot);
+        }
+    }
+
+    /// The run's matchmakers store on `JournalMatchmakerStorage` (#176): the
+    /// handover gate that names them may fire.
+    pub(crate) fn note_journal_matchmakers(&self) {
+        self.lock().matchmaker.note_journal_backed();
+    }
+
+    /// Ground truth from a journal registry (#176): the writes of the commit
+    /// matchmaker `matchmaker` is about to start, or `None` once its sync
+    /// returned (the driver reports them next, with nothing in between).
+    pub(crate) fn note_registry_in_flight(
+        &self,
+        matchmaker: u64,
+        ops: Option<Vec<super::matchmaker::RegistryOp>>,
+    ) {
+        self.lock().matchmaker.note_in_flight(matchmaker, ops);
+    }
+
+    /// Ground truth from a journal store (#264): the accepts of the commit
+    /// it is about to start, `(slot, vhash)`. The journal store's
+    /// counterpart of [`Self::note_flushed_ground_truth`]: it cannot know
+    /// what a crash inside the commit lands, so it names what may land, and
+    /// the cross-restart check admits exactly those values (see
+    /// `AuditState::in_flight`).
+    pub(crate) fn note_in_flight(&self, node: u64, accepted: &[(u64, u64)]) {
+        let mut st = self.lock();
+        for &(slot, vhash) in accepted {
+            st.in_flight.insert((node, slot), vhash);
         }
     }
 
