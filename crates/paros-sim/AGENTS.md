@@ -28,6 +28,7 @@ fault world, the one client workload, the audit and the scripted corpus. Stack: 
 - `world/node_store.rs` → `NodeStore`, `LedgeredJournal` → world store or `JournalStorage` on `SimStorageProvider` (#187); the journal store tells the audit what each commit has in flight (`AuditWorld::note_in_flight`, #264).
 - `world/registry_store.rs` → `RegistryStore`, `LedgeredRegistry` → world registry or `JournalMatchmakerStorage` on `SimStorageProvider` (#176), with the provisioning ledger and the registry's in-flight writes (`AuditWorld::note_registry_in_flight`).
 - `world/power.rs` → `PowerCut`, `Owner` → the BUGGIFY site that cuts a journal store's power mid-commit (moonpool `SelfCrash`), the cut drawn inside the store's last commit's duration; one reachable per owner.
+- `world/injector.rs` → `Custody`, `Injection`, `apply`, `judge` → the ledgered journal-aware injector (#261): the custody ledger each completed sync records (`note_synced`), one family of boot-time byte damage per boot (entry rot, record rot, double fault, metainfo rot, header rot, each its own BUGGIFY location and budget), judged against the journal's verdict at open.
 - `world/wipe.rs` → `wipe_dir` → the wipe coin's physical half on a journal seed: the journal's files deleted and the deletion synced.
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.

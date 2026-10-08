@@ -176,6 +176,24 @@ impl<P: StorageProvider> JournalStorage<P> {
         self.staged.keys().copied()
     }
 
+    /// Where `slot`'s persist record and entry live on disk, if the journal
+    /// holds it (observation: a harness aims targeted damage at it).
+    #[must_use]
+    pub fn layout(&self, slot: Slot) -> Option<moonpool_journal::Layout> {
+        self.journal.as_ref()?.layout(slot.0)
+    }
+
+    /// Every region of the journal a fault could hit: each held slot's
+    /// record and entry, the two metainfo copies, every segment's two header
+    /// copies (observation, like [`Self::layout`]). Empty before the journal
+    /// exists.
+    #[must_use]
+    pub fn regions(&self) -> Vec<moonpool_core::LayoutRegion> {
+        self.journal
+            .as_ref()
+            .map_or_else(Vec::new, Journal::regions)
+    }
+
     /// Open the journal, if there is one, and read it back. The body of
     /// [`LogStorage::boot_scan`].
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]

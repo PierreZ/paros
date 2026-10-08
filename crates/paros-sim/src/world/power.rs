@@ -58,6 +58,12 @@ impl PowerCut {
         }
     }
 
+    /// Whether the chaos window is still open: the injector's damage lands
+    /// only inside it, like the cut itself.
+    pub(crate) fn in_chaos(&self) -> bool {
+        self.time.now() < self.cutoff
+    }
+
     /// The delay after which this commit loses power, if it is one that
     /// does: uniform over the store's last commit's duration. `writes` is
     /// whether the commit carries anything a crash can tear.

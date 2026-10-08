@@ -1283,8 +1283,12 @@ impl JournalStores for SimStores<'_> {
                 self.ip.to_string(),
                 power,
                 seat.checker.clone(),
-                (layout.durability == paros::journal::Durability::Batched)
-                    .then(|| seat.floor.saturating_sub(seat.clean_copies)),
+                crate::world::node_store::DamagePolicy {
+                    cut_budget: (layout.durability == paros::journal::Durability::Batched)
+                        .then(|| seat.floor.saturating_sub(seat.clean_copies)),
+                    inject: true,
+                },
+                provider.clone(),
             );
             return Some((NodeStore::Journal(Box::new(store)), boot));
         }

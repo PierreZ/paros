@@ -79,7 +79,8 @@ use crate::storage::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 pub use matchmaker::JournalMatchmakerStorage;
 /// The journal's commit protocol and segment shape, re-exported so a store's
 /// caller configures it without depending on `moonpool-journal`.
-pub use moonpool_journal::{BLOCK, Durability, Geometry};
+pub use moonpool_core::LayoutRegion;
+pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
 pub use node::{JournalBootFacts, JournalStorage};
 
 /// How a journal store lays out and writes its journal.

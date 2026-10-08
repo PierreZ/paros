@@ -42,11 +42,26 @@ pub(crate) struct LedgeredJournal {
     checker: Arc<AuditWorld>,
     /// The node's id, the checker's key.
     node: u64,
+    /// Whether this store takes the ledgered injector's damage (#261): a
+    /// journal with a copy budget, never a quiet one.
+    inject: bool,
+    /// The simulated disk the journal lives on: the injector damages it.
+    provider: SimStorageProvider,
     /// Lost copies a power cut may leave (a `Batched` commit's ambiguous
     /// last batch) budgeted by the world: `None` on an `Ordered` store,
     /// whose cut commit is torn or whole, never ambiguous; else the
     /// distinct acceptors the journal's quorum system tolerates losing.
     cut_budget: Option<usize>,
+}
+
+/// What damage a [`LedgeredJournal`] takes: its power cuts' copy budget and
+/// whether the ledgered injector aims at it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DamagePolicy {
+    /// See [`LedgeredJournal`]'s `cut_budget`.
+    pub(crate) cut_budget: Option<usize>,
+    /// See [`LedgeredJournal`]'s `inject`.
+    pub(crate) inject: bool,
 }
 
 impl LedgeredJournal {
@@ -56,12 +71,15 @@ impl LedgeredJournal {
         ip: String,
         power: PowerCut,
         checker: Arc<AuditWorld>,
-        cut_budget: Option<usize>,
+        damage: DamagePolicy,
+        provider: SimStorageProvider,
     ) -> Self {
         let node = inner.initial_state().1.id.0;
         Self {
             node,
-            cut_budget,
+            cut_budget: damage.cut_budget,
+            inject: damage.inject,
+            provider,
             inner,
             world,
             ip,
@@ -165,7 +183,58 @@ impl LogStorage for NodeStore {
         match self {
             Self::World(s) => s.boot_scan().await,
             Self::Journal(s) => {
-                let scanned = s.inner.boot_scan().await;
+                // The ledgered injector (#261): at most one family's damage,
+                // aimed by the custody ledger, applied before the journal
+                // opens and judged against what it reports.
+                let injection = if s.inject && s.power.in_chaos() {
+                    let (ip, node) = (s.ip.clone(), s.node);
+                    s.world.upgrade().and_then(|w| {
+                        w.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .plan_boot_damage(&ip, node)
+                    })
+                } else {
+                    None
+                };
+                let confirmed = match &injection {
+                    Some(injection) => super::injector::apply(&s.provider, injection).await,
+                    None => false,
+                };
+                let mut scanned = s.inner.boot_scan().await;
+                // A transient fault in the open's own repair (a failed sync of
+                // the rewritten copy) says nothing about the damage: a boot
+                // that carried an injection re-opens, as the driver's
+                // quarantine would, until the journal gives its verdict.
+                let mut retries = 0;
+                while confirmed
+                    && retries < super::injector::REOPEN_ATTEMPTS
+                    && matches!(
+                        scanned,
+                        Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. })
+                    )
+                {
+                    retries += 1;
+                    scanned = s.inner.boot_scan().await;
+                }
+                if let Some(injection) = injection.as_ref().filter(|_| confirmed) {
+                    let faulty: Vec<u64> = s
+                        .inner
+                        .faulty_entries()
+                        .iter()
+                        .map(|(slot, _)| slot.0)
+                        .collect();
+                    let crashed = super::injector::judge(
+                        injection,
+                        &scanned,
+                        s.inner.boot_facts(),
+                        &faulty,
+                        s.node,
+                        retries > 0,
+                    );
+                    if crashed {
+                        s.with_world(StorageWorld::note_injected_crash);
+                    }
+                }
                 s.ledger(scanned)?;
                 let facts = s.inner.boot_facts();
                 // Causes the crash physics and the small geometry make
@@ -254,6 +323,9 @@ impl LogStorage for NodeStore {
             Self::Journal(s) => {
                 s.note_in_flight();
                 let writes = s.inner.staged_entries() > 0;
+                let slots: Vec<Slot> = s.inner.staged_slots().collect();
+                let ip = s.ip.clone();
+                s.with_world(|w| w.note_sync_started(&ip));
                 let (world, ip, budget) = (s.world.clone(), s.ip.clone(), s.cut_budget);
                 let permit = move || {
                     budget.is_none_or(|tolerated| {
@@ -270,6 +342,16 @@ impl LogStorage for NodeStore {
                     .around(writes, permit, || {}, s.inner.sync(must_sync))
                     .await;
                 s.ledger(synced)?;
+                // The custody ledger (#261): where what this sync wrote now
+                // lives, the floor, the metainfo and header copies.
+                let written: Vec<_> = slots
+                    .into_iter()
+                    .filter_map(|slot| s.inner.layout(slot).map(|at| (slot.0, at)))
+                    .collect();
+                let first = s.inner.first_slot().0;
+                let regions = s.inner.regions();
+                let ip = s.ip.clone();
+                s.with_world(|w| w.note_synced(&ip, written, first, &regions));
                 if std::mem::take(&mut s.format_pending) {
                     // The marker is durable: the provisioning landed.
                     let ip = s.ip.clone();

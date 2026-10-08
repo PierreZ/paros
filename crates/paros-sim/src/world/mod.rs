@@ -7,6 +7,7 @@
 //! like a real disk. Each node reaches it through a [`storage::DurableStorage`]
 //! handle; the boot-rot sites live in [`rot`].
 
+pub(crate) mod injector;
 pub(crate) mod matchmaker;
 pub(crate) mod node_store;
 pub(crate) mod power;
@@ -381,6 +382,14 @@ pub(crate) struct StorageWorld {
     /// held a registration, waiting for their next boot to judge what
     /// survived ([`registry_store::LedgeredRegistry`]).
     registry_cuts: BTreeSet<String>,
+    /// The journal stores' custody ledger (#261), keyed by IP: what each
+    /// one's last completed sync says it holds and where
+    /// ([`injector::Custody`]). The copy budget counts it beside `disks`.
+    custody: BTreeMap<String, injector::Custody>,
+    /// Injected journal damage the journal answered with a crash decision
+    /// (a refused open, #261): counted with the world store's crashed
+    /// injections by the exercised-detected oracle.
+    injected_crashes: u64,
     /// Acceptors (#176) whose power a `Batched` commit's cut may have left
     /// with an ambiguous last batch: lost copies, budgeted like rot (see
     /// [`StorageWorld::permit_power_cut`]).
@@ -469,6 +478,11 @@ impl StorageWorld {
         self.provisioning.remove(ip);
     }
 
+    /// An injected journal damage was answered with a crash decision (#261).
+    pub(crate) fn note_injected_crash(&mut self) {
+        self.injected_crashes += 1;
+    }
+
     /// Matchmaker `ip`'s journal registry lost power mid-commit holding a
     /// registration (#176).
     pub(crate) fn note_registry_cut(&mut self, ip: &str) {
@@ -501,6 +515,7 @@ impl StorageWorld {
         }
         self.disks.remove(key);
         self.marks.remove(key);
+        self.custody.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
         tracing::info!(node, "storage_wiped");
         true
@@ -825,6 +840,11 @@ impl StorageWorld {
                 unclean.insert(node);
             }
         }
+        for (node, custody) in &self.custody {
+            if custody.first() > slot {
+                unclean.insert(node);
+            }
+        }
         for node in self.parked.keys() {
             unclean.insert(node);
         }
@@ -898,16 +918,27 @@ impl StorageWorld {
             return true;
         }
         let quorum = self.quorum();
-        if let Some(disk) = self.disks.get(node_key) {
-            for slot in disk.accepted.keys() {
-                let already_unclean = self
-                    .marks
+        let held: Vec<u64> = self
+            .disks
+            .get(node_key)
+            .map(|disk| disk.accepted.keys().map(|slot| slot.0).collect::<Vec<_>>())
+            .into_iter()
+            .flatten()
+            .chain(
+                self.custody
                     .get(node_key)
-                    .is_some_and(|marks| marks.contains(&slot.0));
-                let hypothetical = usize::from(!already_unclean);
-                if self.clean_copies(slot.0).saturating_sub(hypothetical) < quorum {
-                    return false;
-                }
+                    .into_iter()
+                    .flat_map(injector::Custody::holds),
+            )
+            .collect();
+        for slot in held {
+            let already_unclean = self
+                .marks
+                .get(node_key)
+                .is_some_and(|marks| marks.contains(&slot));
+            let hypothetical = usize::from(!already_unclean);
+            if self.clean_copies(slot).saturating_sub(hypothetical) < quorum {
+                return false;
             }
         }
         // The accepted-map walk above misses slots this node no longer holds
@@ -1416,7 +1447,7 @@ pub(crate) fn corruption_stats(
     }
     CorruptionStats {
         injected: guard.corruptions.len(),
-        crashed,
+        crashed: crashed + guard.injected_crashes,
         accounted,
         parked: guard.detected_parks(),
         parked_within_budget: guard.detected_parks() <= guard.dead_budget(),
