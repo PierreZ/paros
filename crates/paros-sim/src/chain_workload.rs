@@ -2525,11 +2525,11 @@ impl Workload for ChainWorkload {
                                         "reconfiguration: a configuration that does not admit its quorum system is refused"
                                     );
                                 }
-                                nodes.observe_leader(leader);
+                                adopt_plane_leader(&nodes, has_matchmakers, leader);
                             }
                             ReconfigureOutcome::NotLeader { leader }
                             | ReconfigureOutcome::Unrecognized { leader } => {
-                                nodes.observe_leader(leader);
+                                adopt_plane_leader(&nodes, has_matchmakers, leader);
                             }
                             ReconfigureOutcome::Ambiguous => {}
                         }
@@ -3565,6 +3565,23 @@ impl Workload for ChainWorkload {
         // (Every acked slot being inside the applied prefix is the audit's
         // final claim, judged once over every client's history.)
         Ok(())
+    }
+}
+
+/// Adopt the leader a `Reconfigure` reply named as this client's journal's
+/// leader hint — only where that reply speaks for this journal. A
+/// `Reconfigure` names no journal: a node answers it from its *plane*
+/// journal (`Journals::plane`), which on a matchmaker deployment is the
+/// journal whose configuration names the matchmakers (the main one), but on
+/// a plain deployment is the node's first live user journal in id order —
+/// with system journals, possibly a journal the directory created at
+/// runtime and led by a joiner that never serves this one. Adopting that
+/// leader sends this journal's next `Write` to a node that answers
+/// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
+/// created journal led by joiner 100).
+fn adopt_plane_leader(nodes: &ChainClient, has_matchmakers: bool, leader: Option<u64>) {
+    if has_matchmakers {
+        nodes.observe_leader(leader);
     }
 }
 
