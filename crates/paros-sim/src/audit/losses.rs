@@ -122,6 +122,20 @@ impl AuditState {
             planned.shape = Some(Shape::default());
             self.recognize_loss(slot);
         }
+        self.judge_loss(slot);
+    }
+
+    /// Judge every planned loss again (a boot settled what it held).
+    pub(super) fn reevaluate_losses(&mut self) {
+        let slots: Vec<u64> = self.losses.planned.keys().copied().collect();
+        for slot in slots {
+            self.judge_loss(slot);
+        }
+    }
+
+    /// Name `slot` unrecoverable once the CTRL rule says so (sticky: no
+    /// clean copy comes back).
+    fn judge_loss(&mut self, slot: u64) {
         if !self.loss_recoverable(slot) && self.losses.unrecoverable.insert(slot) {
             assert_reachable!("storage: a decided slot becomes unrecoverable");
         }
@@ -240,10 +254,17 @@ impl AuditState {
             .into_iter()
             .filter(|node| !planned.lost.contains(node) && !down.contains(node))
             .collect();
-        let threshold = clean
+        // A clean holder whose ballot the tally never heard (a commit in
+        // flight that landed unreported, #264) may hold the best copy: no
+        // claim rests on a ballot the audit does not know.
+        let ballots: Vec<Option<(u64, u64)>> = clean
             .iter()
-            .filter_map(|node| self.accept_ballot(*node, slot))
-            .max();
+            .map(|node| self.accept_ballot(*node, slot))
+            .collect();
+        if ballots.iter().any(Option::is_none) {
+            return true;
+        }
+        let threshold = ballots.into_iter().flatten().max();
         let qualifying: BTreeSet<NodeId> = config
             .members()
             .iter()
