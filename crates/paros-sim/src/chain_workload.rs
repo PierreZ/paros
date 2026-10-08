@@ -1712,7 +1712,36 @@ impl Workload for ChainWorkload {
                                 chosen_target,
                                 nodes.leader().map(|leader| nodes.id_of(leader)),
                             );
-                            let resolved = nodes.resolve(&request, retry_target, retarget).await;
+                            // An impatient operator (#204's retry edge,
+                            // its own BUGGIFY location): the identical
+                            // write re-sent at once, before any read-back,
+                            // which a journal that committed the first must
+                            // answer from the log. `resolve` reads back
+                            // first, so without this the retry that meets a
+                            // committed write is all but never sent.
+                            let resent = if buggify_with_prob!(0.5) {
+                                assert_reachable!(
+                                    "client: an ambiguous write is re-sent before any read-back"
+                                );
+                                let again = nodes
+                                    .write_attempt(retry_target, request.clone(), None)
+                                    .await;
+                                match judged_write(again, false) {
+                                    WriteOutcome::Written { seq, count, .. } => {
+                                        Some(Resolution::Written { seq, count })
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let resolved = match resent {
+                                Some(resolution) => paros::client::ResolveReport {
+                                    resolution,
+                                    by_read_back: false,
+                                },
+                                None => nodes.resolve(&request, retry_target, retarget).await,
+                            };
                             if resolved.by_read_back {
                                 assert_reachable!(
                                     "client: a read-back alone proves an ambiguous write fenced"

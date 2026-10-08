@@ -654,8 +654,10 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
 /// once per seed, its own BUGGIFY location, it turns on together every
 /// ingredient of the rarest storage shape, so the sweep reaches it by
 /// design instead of by the product of independent coins. The nodes
-/// withhold GC ([`withhold_gc`]), the main journal's owner removes a
-/// member right after its claim (`ChainConfig::reconfigure_after_claim`),
+/// withhold GC ([`withhold_gc`]), the acceptors bootstrap on all but one
+/// of the pool on a matchmaker seed, leaving the spare a removal needs
+/// ([`bootstrap_ranks`]), the main journal's owner removes a member right
+/// after its claim (`ChainConfig::reconfigure_after_claim`),
 /// and a correlated outage that lands loses the most recent slot down to
 /// one clean copy on a member the removal superseded
 /// (`crate::world::outage`). Each ingredient keeps its own coin on the
@@ -1002,6 +1004,7 @@ pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
 /// pick — outside.
 #[tracing::instrument(level = "debug", skip(state), fields(pool, has_matchmakers))]
 pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers: bool) -> Vec<u64> {
+    let scenario = departed_straggler(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1013,7 +1016,14 @@ pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers:
             if !(has_matchmakers && pool > MIN_BOOTSTRAP) {
                 return all;
             }
-            let size = buggify_knob!(pool, MIN_BOOTSTRAP..pool);
+            // The departed-straggler scenario leaves a spare: a member
+            // removed right after the claim needs one to be replaced by
+            // when the set already sits at its floor.
+            let size = if scenario {
+                pool - 1
+            } else {
+                buggify_knob!(pool, MIN_BOOTSTRAP..pool)
+            };
             if size == pool {
                 return all;
             }
