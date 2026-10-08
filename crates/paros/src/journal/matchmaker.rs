@@ -2,11 +2,26 @@
 //! [`MatchmakerStorage`](crate::MatchmakerStorage) on `moonpool-journal`.
 //!
 //! Each registration is an entry at a registration number of its own, its
-//! ballot in the entry's identity; the scalars (generation, freeze, decree,
-//! watermark) and the format marker are the journal's metainfo, so a
-//! registration and the scalars it moves with land in one commit. A raised
-//! watermark clears the registrations below it; an install clears them all
-//! and writes the successor's, in one commit.
+//! ballot and its generation in the entry's identity; the scalars
+//! (generation, freeze, decree, watermark) and the format marker are the
+//! journal's metainfo. A raised watermark clears the registrations below it;
+//! an install clears them all and writes the successor's.
+//!
+//! **A sync is up to three commits, in an order every crash point survives**
+//! (#176): the new registrations, then the metainfo, then the clears. A
+//! journal commit is not atomic between its records and its metainfo (both
+//! are written in one unsynced window, and a crash resolves each sector on
+//! its own), so nothing may rely on one landing with the other. Instead a
+//! boot keeps only the registrations the durable metainfo vouches for: at or
+//! above its watermark and of its generation. A crash after the puts leaves
+//! registrations the old metainfo does not count yet (a register's, kept:
+//! the driver never acknowledged it, and it stands like any other; an
+//! install's, of the successor generation, dropped); a crash after the
+//! metainfo leaves the clears undone, and the boot drops what they would
+//! have cleared. The one scalar that must cover a registration, the
+//! effective configuration (at or above every reconfiguration the registry
+//! keeps), is rebuilt by the boot from the registrations it keeps, as the
+//! cut metainfo commit would have raised it.
 //!
 //! **A damaged live registration is a crash verdict**: a registry is never
 //! repaired in place, a matchmaker whose durable state is unusable is
@@ -20,9 +35,12 @@
 use std::collections::BTreeMap;
 
 use moonpool_core::StorageProvider;
-use moonpool_journal::{Batch, Journal, ReadError, State};
+use std::ops::Range;
+
+use moonpool_journal::{Batch, ID_SIZE, Id, Journal, ReadError, State};
 use paros_core::{
-    Ballot, JournalIdentifier, MatchmakerConfig, MatchmakerHardState, Registration, RegistryStorage,
+    Ballot, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
+    Registration, RegistryStorage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +54,38 @@ use crate::storage::{StorageError, StorageRecord, WriteOutcome};
 
 /// The kind byte of a registration's identity.
 const REGISTRATION: u8 = 2;
+
+/// Where a registration's generation sits in its identity: after the ballot
+/// and the kind byte, in the identity's last bytes.
+const GENERATION_AT: usize = 17;
+
+// The generation fits the identity's bytes after the ballot and kind.
+const _: () = assert!(ID_SIZE - GENERATION_AT >= 7);
+
+/// A registration's identity: its ballot, the registration kind byte and the
+/// generation it belongs to (the low 7 bytes: a generation is a handover
+/// count, far below 2^56).
+fn registration_id(ballot: Ballot, generation: MatchmakerGeneration) -> Id {
+    assert!(
+        generation.0 < 1 << 56,
+        "a generation fits a registration's identity"
+    );
+    let mut id = ballot_id(ballot, REGISTRATION);
+    id[GENERATION_AT..].copy_from_slice(&generation.0.to_le_bytes()[..ID_SIZE - GENERATION_AT]);
+    // Pair of `id_generation`.
+    assert!(
+        id_generation(&id) == generation,
+        "a registration's identity reads back as its generation"
+    );
+    id
+}
+
+/// The generation a registration's identity names.
+fn id_generation(id: &Id) -> MatchmakerGeneration {
+    let mut word = [0; 8];
+    word[..ID_SIZE - GENERATION_AT].copy_from_slice(&id[GENERATION_AT..]);
+    MatchmakerGeneration(u64::from_le_bytes(word))
+}
 
 /// The matchmaker's metainfo: the format marker (#183, #207) and the
 /// durable scalars.
@@ -57,12 +107,19 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     store: JournalStoreConfig,
     journal: Option<Journal<P>>,
     meta: MatchMeta,
+    /// The metainfo as of the last commit that wrote it (or the boot that
+    /// read it).
+    durable_meta: MatchMeta,
     meta_dirty: bool,
     registry: BTreeMap<Ballot, Registration>,
     /// Where each registration lives.
     positions: BTreeMap<Ballot, u64>,
     next_position: u64,
-    staged: Batch,
+    /// Registrations staged since the last sync, by position: the first
+    /// commit.
+    puts: BTreeMap<u64, (Id, Vec<u8>)>,
+    /// Positions staged for clearing since the last sync: the last commit.
+    clears: Vec<Range<u64>>,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for JournalMatchmakerStorage<P> {
@@ -92,11 +149,13 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             store,
             journal: None,
             meta: MatchMeta::default(),
+            durable_meta: MatchMeta::default(),
             meta_dirty: false,
             registry: BTreeMap::new(),
             positions: BTreeMap::new(),
             next_position: 0,
-            staged: Batch::new(),
+            puts: BTreeMap::new(),
+            clears: Vec::new(),
         }
     }
 
@@ -104,6 +163,41 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
     #[must_use]
     pub fn dir(&self) -> &str {
         &self.dir
+    }
+
+    /// Whether the next sync writes anything (observation: a harness aims
+    /// a power cut at a commit that writes).
+    #[must_use]
+    pub fn has_staged(&self) -> bool {
+        self.meta_dirty || !self.puts.is_empty() || !self.clears.is_empty()
+    }
+
+    /// Whether the store of the matchmaker plane `id` under `dir` carries
+    /// its format marker, read from the journal's metainfo alone
+    /// (`Journal::peek_meta`), like
+    /// [`JournalStorage::peek_formatted`](super::JournalStorage::peek_formatted):
+    /// nothing recovered, repaired or created. `false` where no journal
+    /// exists.
+    ///
+    /// # Errors
+    ///
+    /// A [`StorageError::Corruption`] when no metainfo copy is valid or it
+    /// does not decode, and the I/O verdict when the namespace cannot be
+    /// read.
+    pub async fn peek_formatted(
+        provider: &P,
+        dir: &str,
+        id: JournalIdentifier,
+    ) -> Result<bool, StorageError> {
+        let Some(bytes) = Journal::peek_meta(provider, dir, store_id(id))
+            .await
+            .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?
+        else {
+            return Ok(false);
+        };
+        let meta: MatchMeta =
+            decode(&bytes).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
+        Ok(meta.formatted.is_some())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
@@ -121,51 +215,93 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             return Ok(());
         };
         self.meta = decode(journal.meta()).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
+        self.durable_meta = self.meta.clone();
         let watermark = self.meta.scalars.gc_watermark;
+        let generation = self.meta.scalars.generation;
         let replay = journal.replay(..).await.map_err(|_| StorageError::Io {
             record: StorageRecord::Store,
             outcome: WriteOutcome::Unknown,
         })?;
         for (position, read) in replay {
             self.next_position = self.next_position.max(position + 1);
-            match read {
-                Ok(entry) => {
-                    let (ballot, _) = id_ballot(&entry.id);
-                    let registration: Registration = decode(&entry.payload)
-                        .ok_or(undecodable(StorageRecord::Registration(ballot)))?;
-                    self.registry.insert(ballot, registration);
-                    self.positions.insert(ballot, position);
-                }
-                Err(ReadError::Damaged { id, .. }) => {
-                    let (ballot, _) = id_ballot(&id);
-                    // Collected anyway: nothing it said still matters.
-                    if ballot < watermark {
-                        self.staged.clear(position..position + 1);
-                        continue;
-                    }
-                    let verdict = if matches!(journal.state(position), State::Ambiguous { .. }) {
-                        CorruptionVerdict::Undecidable
-                    } else {
-                        CorruptionVerdict::Corrupted
-                    };
-                    return Err(StorageError::Corruption {
-                        record: StorageRecord::Registration(ballot),
-                        fault: IntegrityFault::ChecksumMismatch,
-                        verdict,
-                    });
-                }
+            // What the durable metainfo does not vouch for: below its
+            // watermark, or of another generation (an install whose
+            // metainfo never landed, or whose clears did not). Dropped, and
+            // its clear staged, damaged or not: nothing it said still
+            // matters.
+            let id = match &read {
+                Ok(entry) => entry.id,
+                Err(ReadError::Damaged { id, .. }) => *id,
                 Err(ReadError::Empty { .. } | ReadError::Io(_)) => {
                     return Err(StorageError::Io {
                         record: StorageRecord::Store,
                         outcome: WriteOutcome::Unknown,
                     });
                 }
+            };
+            let (ballot, _) = id_ballot(&id);
+            if ballot < watermark || id_generation(&id) != generation {
+                self.clears.push(position..position + 1);
+                continue;
             }
+            let Ok(entry) = read else {
+                let verdict = if matches!(journal.state(position), State::Ambiguous { .. }) {
+                    CorruptionVerdict::Undecidable
+                } else {
+                    CorruptionVerdict::Corrupted
+                };
+                return Err(StorageError::Corruption {
+                    record: StorageRecord::Registration(ballot),
+                    fault: IntegrityFault::ChecksumMismatch,
+                    verdict,
+                });
+            };
+            let registration: Registration =
+                decode(&entry.payload).ok_or(undecodable(StorageRecord::Registration(ballot)))?;
+            self.registry.insert(ballot, registration);
+            self.positions.insert(ballot, position);
+        }
+        // The effective configuration covers every reconfiguration this
+        // registry keeps: a sync commits a reconfiguration's registration
+        // before the metainfo that raises the scalar over it, so a crash
+        // between the two leaves the scalar behind, and the boot raises it as
+        // that commit would have (persisted with the next metainfo write).
+        let newest = self
+            .registry
+            .iter()
+            .rev()
+            .find(|(_, registration)| registration.kind.is_reconfiguration());
+        if let Some((ballot, registration)) = newest
+            && self
+                .meta
+                .scalars
+                .effective
+                .as_ref()
+                .is_none_or(|(held, _)| held < ballot)
+        {
+            self.meta.scalars.effective = Some((*ballot, registration.config.clone()));
+            self.meta_dirty = true;
         }
         // Boot side of the watermark pair: nothing live below it.
         assert!(
             self.registry.keys().next().is_none_or(|b| *b >= watermark),
             "no registration survives below the watermark"
+        );
+        assert!(
+            self.positions.len() == self.registry.len(),
+            "every live registration has its position"
+        );
+        assert!(
+            self.registry
+                .iter()
+                .filter(|(_, registration)| registration.kind.is_reconfiguration())
+                .all(|(ballot, _)| self
+                    .meta
+                    .scalars
+                    .effective
+                    .as_ref()
+                    .is_some_and(|(held, _)| held >= ballot)),
+            "the effective configuration covers every kept reconfiguration"
         );
         self.journal = Some(journal);
         Ok(())
@@ -178,10 +314,12 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             self.next_position += 1;
             position
         });
-        self.staged.put(
+        self.puts.insert(
             position,
-            ballot_id(ballot, super::matchmaker::REGISTRATION),
-            encode(registration),
+            (
+                registration_id(ballot, self.meta.scalars.generation),
+                encode(registration),
+            ),
         );
         self.registry.insert(ballot, registration.clone());
     }
@@ -192,7 +330,8 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         let kept = self.registry.split_off(&watermark);
         for ballot in std::mem::replace(&mut self.registry, kept).into_keys() {
             if let Some(position) = self.positions.remove(&ballot) {
-                self.staged.clear(position..position + 1);
+                self.puts.remove(&position);
+                self.clears.push(position..position + 1);
             }
         }
         assert!(
@@ -283,7 +422,8 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         // Replaced whole, in the same commit: every registration goes, the
         // successor's arrive at fresh positions.
         if self.next_position > 0 {
-            self.staged.clear(0..self.next_position);
+            self.puts.clear();
+            self.clears.push(0..self.next_position);
         }
         self.registry.clear();
         self.positions.clear();
@@ -299,30 +439,75 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         Ok(())
     }
 
+    /// Up to three commits, in the order the [module docs](self) argue:
+    /// the new registrations, the metainfo, the clears. Each is durable
+    /// before the next starts.
     #[tracing::instrument(level = "trace", skip_all, fields(dir = %self.dir))]
     async fn sync(&mut self) -> Result<(), StorageError> {
-        let mut staged = std::mem::take(&mut self.staged);
-        if !self.meta_dirty && staged.is_empty() {
+        if !self.has_staged() {
             return Ok(());
         }
-        if self.meta_dirty {
-            staged.set_meta(encode(&self.meta));
+        let puts = std::mem::take(&mut self.puts);
+        let clears = std::mem::take(&mut self.clears);
+        // The registrations, packed into batches that each fit one segment.
+        let geometry = self.store.geometry;
+        let mut batch = Batch::new();
+        for (position, (id, payload)) in puts {
+            if !batch.is_empty() && !batch.fits_another(geometry, payload.len()) {
+                self.commit(std::mem::take(&mut batch)).await?;
+            }
+            batch.put(position, id, payload);
         }
+        if !batch.is_empty() {
+            self.commit(batch).await?;
+        }
+        // The metainfo, alone: what it vouches for is on disk already.
+        if self.meta_dirty {
+            let mut meta = Batch::new();
+            meta.set_meta(encode(&self.meta));
+            self.commit(meta).await?;
+            self.durable_meta = self.meta.clone();
+            self.meta_dirty = false;
+        }
+        // The clears, last: until they land a boot drops what they clear.
+        if !clears.is_empty() {
+            let mut batch = Batch::new();
+            for range in clears {
+                batch.clear(range);
+            }
+            self.commit(batch).await?;
+        }
+        assert!(
+            self.durable_meta == self.meta,
+            "a synced registry's metainfo is durable"
+        );
+        Ok(())
+    }
+}
+
+impl<P: StorageProvider> JournalMatchmakerStorage<P> {
+    /// Commit `batch`, creating the journal first if none is on disk yet,
+    /// with the last durable metainfo and the format marker: a creation
+    /// lands before the batch it opens for.
+    async fn commit(&mut self, batch: Batch) -> Result<(), StorageError> {
         if self.journal.is_none() {
+            let early = MatchMeta {
+                formatted: self.meta.formatted.clone(),
+                ..self.durable_meta.clone()
+            };
             let created = Journal::create(
                 self.provider.clone(),
                 &self.dir,
                 store_id(self.id),
                 self.store.journal(),
-                &encode(&self.meta),
+                &encode(&early),
             )
             .await
             .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?;
             self.journal = Some(created);
+            self.durable_meta = early;
         }
         let journal = self.journal.as_mut().expect("created above");
-        journal.commit(staged).await.map_err(|e| commit_error(&e))?;
-        self.meta_dirty = false;
-        Ok(())
+        journal.commit(batch).await.map_err(|e| commit_error(&e))
     }
 }
