@@ -137,5 +137,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: target/sancov
+          cache-on-failure: true
       - name: Run sancov simulation sweep
         run: nix develop --command cargo xtask sim run-all

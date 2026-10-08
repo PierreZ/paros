@@ -97,6 +97,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   seed constants, seed lists or seed-replay tests; cite a witness in a commit or doc comment
   and let it go. A test may hard-code a seed that is not a witness (a determinism replay, a
   display seed). Reach comes from volume and BUGGIFY.
+- **Amplify the worst states** (decided on 2026-10-08): a gate that needs several independent
+  coins to line up gets one per-seed scenario draw, its own BUGGIFY location, that turns its
+  ingredients on together (`shape::departed_straggler`); each ingredient keeps its own coin
+  on the other seeds. Measure a gate's per-seed rate before and after.
 - **Hunt budget** (`sim-paros-hunt`): 2,000–3,000 seeds normally, 10,000 only for a substantial
   protocol, harness or fault-model change, more only when the user asks. A hunt's deliverable
   is a failing seed and its diagnosis.
@@ -105,8 +109,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use
-  slots, ballots, request ids, seeds or hashes as identities. Exploration is in-process
-  (`workers: 0`); every workload and process is factory-created.
+  slots, ballots, request ids, seeds or hashes as identities. The sweep explores with forked
+  workers, one per core but the controller's (decided on 2026-10-08: same coverage, 1.4x
+  faster); replays and focused explorations stay in-process (`workers: 0`). Every workload
+  and process is factory-created.
 
 Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENTS.md`.
 
