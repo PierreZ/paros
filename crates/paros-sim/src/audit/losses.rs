@@ -23,6 +23,22 @@
 //! slot must be waited on: it is **never accepted again**, by anyone (a
 //! no-op fill or a fabricated value would both be an accept). Convergence
 //! excuses a journal holding one; a recoverable slot is still owed it.
+//!
+//! **Proved by mutation** (#263, 3,000-seed hunts each, every witness green
+//! unmutated): letting a sub-quorum count of qualifying answers decide a
+//! faulty slot (`slot_decidable` asking for any qualifying answer instead of
+//! a Phase-1 quorum) goes red on 12 seeds, and an acceptor that reports its
+//! faulty entries as nothing (`promise_page` dropping them) on 8. Both trip
+//! this module's "an unrecoverable slot is never accepted again" and the
+//! protocol's own value oracles ("a durable accept quorum never decides two
+//! values for a slot"); witnesses 11861972872444187227 and
+//! 7412779604769813589.
+//!
+//! **Not yet proved**: consulting only the newest prior configuration stays
+//! green over 3,000 seeds, because the departed-straggler shape it needs (a
+//! removed node holding the only clean copy) is never reached. A
+//! reconfiguration lands only after the cluster's first decisions, which
+//! come after the chaos window in which an outage may start.
 
 use std::collections::{BTreeMap, BTreeSet};
 
