@@ -642,7 +642,7 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
     *guard.withhold_gc.get_or_insert_with(|| {
         // Its fired gate sits where the answer has an effect
         // (`BuggifyHooks::withhold_gc_requests`), not at the draw.
-        moonpool_sim::buggify_with_prob!(0.25)
+        moonpool_sim::buggify_with_prob!(0.5)
     })
 }
 

@@ -199,6 +199,12 @@ pub(super) struct AuditState {
     /// (`SetChosenIndex` flushes relaxed, so a crash may legally rewind it
     /// across incarnations — within one it only advances).
     pub(super) chosen_watermark: BTreeMap<u64, u64>,
+    /// Per node: one past the chosen index it durably holds — the one its
+    /// boot recovered, raised by every durable `SetChosenIndex` and every
+    /// trim-point landing — or `0` for none. Every slot below it is one the
+    /// node knows decided, whatever its record of it says (#263,
+    /// `losses::loss_recoverable`).
+    pub(super) decided_prefix: BTreeMap<u64, u64>,
     /// Per node: the highest read index served, reset each boot.
     pub(super) read_watermark: BTreeMap<u64, Option<u64>>,
 
@@ -381,6 +387,13 @@ pub(super) struct AuditState {
     /// speaks *before* [`Audit::recovered`](paros::Audit::recovered) fires, so the swap-in happens
     /// there — the boot report is the incarnation edge.
     pub(super) faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
+    /// Per `(node, slot)`: the ballot the node's last boot reported its
+    /// faulty entry under — the identity its Phase-1 answer carries, which
+    /// is what CTRL's rule is judged on (#263, `losses::loss_recoverable`).
+    /// It may sit below the highest accept the tally heard from that node
+    /// (witness 4059871466191551614: an accept at round 3 reported, the
+    /// boot finding the round-1 record faulty).
+    pub(super) faulty_ballots: BTreeMap<(u64, u64), (u64, u64)>,
     /// Repair progress observed (from [`Audit::repair_progress`](paros::Audit::repair_progress)): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.

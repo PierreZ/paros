@@ -19,9 +19,13 @@
 //!   ([`LossShape::loss_budget`]) a bounded number of slots may keep one
 //!   clean copy or none (CTRL's E1 family: one clean copy recovers intact,
 //!   none is waited on, never fabricated);
-//! - **prefer removed**: the copy left clean is one on a node outside the
+//! - **prefer removed**: the one copy left clean is on a node outside the
 //!   configuration the operator last installed, when there is one (the
-//!   departed straggler, composed with `RECONFIGURE` and `withhold_gc`).
+//!   departed straggler, composed with the owner's reconfiguration right
+//!   after its claim, `ChainConfig::reconfigure_after_claim`, and
+//!   `withhold_gc`); a removed holder's copy kept clean beside a quorum of
+//!   clean members would be no shape, so the draw spends the loss budget
+//!   on exactly that one copy.
 //!
 //! The straggler, back last, is the one the cluster must wait for, then
 //! recover through. Each draw is its own BUGGIFY location, paired with a
@@ -38,10 +42,13 @@ use moonpool_sim::{
 };
 
 /// When an outage may strike, from the opening of the chaos window: late,
-/// because the cluster decides little early in the window (its first
-/// decisions land around 3 to 6 s), and inside it, as every new fault is.
+/// because the cluster decides little early in the window (over a thousand
+/// seeds, a tenth of the first decisions land before 3.5 s and half after
+/// 5 s; the departed-straggler shape needs a claim, a reconfiguration and
+/// its election first, 2 to 3.5 s on a kind seed), and inside it, as every
+/// new fault is.
 const START: std::ops::Range<Duration> =
-    Duration::from_millis(1_500)..Duration::from_millis(crate::CHAOS_DURATION_MS - 100);
+    Duration::from_millis(2_500)..Duration::from_millis(crate::CHAOS_DURATION_MS - 100);
 
 /// How long each victim stays down. Floor 20 ms: a reboot, and longer than
 /// [`POLL`], so the losses are planned while every victim is still down.
@@ -84,8 +91,10 @@ pub(crate) struct LossShape {
     /// The clean copies to leave under the loss budget's extreme: `0` or
     /// `1`. `None` keeps the usual budget (a quorum's copies stay clean).
     pub(crate) keep: Option<usize>,
-    /// Leave the clean copy on a node outside the last installed
-    /// configuration, when one holds the slot.
+    /// Leave the one clean copy on a node outside the last installed
+    /// configuration, when one holds the slot: the departed straggler,
+    /// CTRL Case 3 across a reconfiguration. Only then does it spend the
+    /// loss budget; with no removed holder it leaves the budget alone.
     pub(crate) prefer_removed: bool,
 }
 
@@ -97,7 +106,11 @@ impl LossShape {
     /// genesis journal ever spends it (the control journals are quiet seats
     /// with no budget), so the run's control state is never lost.
     pub(crate) fn loss_budget(&self) -> usize {
-        if self.keep.is_some() { 2 } else { 0 }
+        if self.keep.is_some() || self.prefer_removed {
+            2
+        } else {
+            0
+        }
     }
 }
 
@@ -141,7 +154,7 @@ fn draw_loss() -> LossShape {
     LossShape {
         recent: buggify_with_prob!(0.5),
         keep: lossy.then(|| usize::from(moonpool_sim::sim_random_bool(0.5))),
-        prefer_removed: buggify_with_prob!(0.5),
+        prefer_removed: buggify_with_prob!(1.0),
     }
 }
 

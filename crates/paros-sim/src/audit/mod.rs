@@ -396,6 +396,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // `SetChosenIndex` or `Truncate` report is judged against them.
         let watermark = st.chosen_watermark.entry(node.0).or_insert(0);
         *watermark = (*watermark).max(landing);
+        let prefix = st.decided_prefix.entry(node.0).or_insert(0);
+        *prefix = (*prefix).max(landing + 1);
         let was = st.truncate_watermark.get(&node.0).copied().unwrap_or(0);
         st.truncate_watermark.insert(node.0, point.0.max(was));
         st.floor.entry(node.0).or_default().raise(point.0, now);
@@ -1044,6 +1046,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "index" => index.0, "watermark" => *watermark }
         );
         *watermark = (*watermark).max(index.0);
+        let prefix = st.decided_prefix.entry(node.0).or_insert(0);
+        *prefix = (*prefix).max(index.0 + 1);
     }
 
     fn log_read_served(&self, node: NodeId, report: &LogReadReport<'_>) {
@@ -1288,6 +1292,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // watermarks from what this boot actually recovered.
         st.chosen_watermark
             .insert(node.0, chosen_index.map_or(0, |s| s.0));
+        st.decided_prefix
+            .insert(node.0, chosen_index.map_or(0, |s| s.0 + 1));
         st.read_watermark.remove(&node.0);
         let boot_floor = st
             .floor
@@ -1751,12 +1757,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {
         let mut st = self.state();
+        let st = &mut *st;
         // Staged, not live: this fires from the boot path *before* the boot's
         // `recovered` report, which swaps the staged set in as this
         // incarnation's classification (and drops the previous boot's).
         let staged = st.faulty_staged.entry(node.0).or_default();
-        for &(slot, _ballot) in entries {
+        for &(slot, ballot) in entries {
             staged.insert(slot.0);
+            st.faulty_ballots
+                .insert((node.0, slot.0), (ballot.round, ballot.node.0));
         }
     }
 

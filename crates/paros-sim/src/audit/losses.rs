@@ -35,10 +35,20 @@
 //! 7412779604769813589.
 //!
 //! **Not yet proved**: consulting only the newest prior configuration stays
-//! green over 3,000 seeds, because the departed-straggler shape it needs (a
-//! removed node holding the only clean copy) is never reached. A
-//! reconfiguration lands only after the cluster's first decisions, which
-//! come after the chaos window in which an outage may start.
+//! green over 2,000 seeds. The departed-straggler shape (a removed node
+//! holding the only clean copy) is now reached — an owner's opening claim
+//! re-asked within its patience, its member-removing reconfiguration
+//! right after (`ChainConfig::reconfigure_after_claim`), the outage
+//! striking from 2.5 s and `LossShape::prefer_removed` keeping exactly the
+//! removed node's copy — on about one seed in a thousand, and its slot is
+//! recovered (witnesses 17576998890379435130 and 15446476714419699453,
+//! both `remove-leader`). The mutation survives those witnesses all the
+//! same: the members' durable chosen indexes still covered the slot, so
+//! each repaired its faulty chosen record by catch-up from the removed
+//! node's chosen prefix, a path that consults no prior configuration at
+//! all. Catching it needs the sub-shape where the outage rewound every
+//! member's chosen index (the relaxed `SetChosenIndex` flush) below the
+//! slot, so only the cross-configuration Phase 1 can decide it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -253,6 +263,16 @@ impl AuditState {
         holders
     }
 
+    /// The ballot `node`'s lost copy of `slot` answers Phase 1 with: the
+    /// identity its boot reported the faulty entry under, or, before any
+    /// boot reported one, its highest durable accept the tally heard.
+    fn lost_ballot(&self, node: u64, slot: u64) -> Option<(u64, u64)> {
+        self.faulty_ballots
+            .get(&(node, slot))
+            .copied()
+            .or_else(|| self.accept_ballot(node, slot))
+    }
+
     /// `node`'s highest durable accept ballot at `slot`, if the tally still
     /// holds it.
     fn accept_ballot(&self, node: u64, slot: u64) -> Option<(u64, u64)> {
@@ -284,6 +304,20 @@ impl AuditState {
             .into_iter()
             .filter(|node| !planned.lost.contains(node) && !down.contains(node))
             .collect();
+        // A clean holder that durably knows the slot decided (its chosen
+        // index covers it) serves the record from its chosen prefix to any
+        // peer whose own faulty chosen record left a hole (catch-up), and
+        // re-replicates it when it leads — no tally needed (witness
+        // 4059871466191551614: the clean copy at a ballot below the two
+        // lost ones, a Phase-1 tally no leader could decide, the record
+        // repaired from the clean holder's chosen prefix all the same).
+        if clean.iter().any(|node| {
+            self.decided_prefix
+                .get(node)
+                .is_some_and(|prefix| *prefix > slot)
+        }) {
+            return true;
+        }
         // A clean holder whose ballot the tally never heard (a commit in
         // flight that landed unreported, #264) may hold the best copy: no
         // claim rests on a ballot the audit does not know.
@@ -303,7 +337,7 @@ impl AuditState {
                 !down.contains(&node)
                     && (!planned.lost.contains(&node)
                         || self
-                            .accept_ballot(node, slot)
+                            .lost_ballot(node, slot)
                             .is_some_and(|ballot| Some(ballot) <= threshold))
             })
             .copied()
@@ -352,7 +386,13 @@ impl AuditState {
             .members()
             .iter()
             .any(|member| !holders.contains(&member.0) && !down.contains(&member.0));
+        // The departed straggler: the one clean copy is on a member of the
+        // configuration the slot was decided under that the configuration
+        // in force no longer names. A spare that learned the slot (never a
+        // member) is outside too, but its copy is a learner's: CTRL's
+        // cross-configuration Phase 1 never asks it.
         let straggler = clean.len() == 1
+            && clean.iter().all(|node| config.members().contains(node))
             && in_force
                 .as_ref()
                 .is_some_and(|members| clean.iter().all(|node| !members.members().contains(node)));

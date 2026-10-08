@@ -345,10 +345,21 @@ impl StorageWorld {
                     .is_some_and(|members| !members.contains(node))
             });
         }
-        let count = match loss.keep {
-            Some(keep) if self.loss_permitted(slot, loss.loss_budget()) => {
-                holders.len().saturating_sub(keep)
+        // The departed straggler (`LossShape::prefer_removed`): a removed
+        // holder's copy is the one left clean, and the only one — kept
+        // beside a quorum of clean members it would be no shape at all.
+        let straggler = loss.prefer_removed
+            && installed
+                .as_ref()
+                .is_some_and(|members| damageable.iter().any(|(_, node)| !members.contains(node)));
+        let keep = if straggler { Some(1) } else { loss.keep };
+        let count = match keep {
+            Some(keep) if self.loss_permitted(slot, loss.loss_budget()) => if straggler {
+                damageable.len()
+            } else {
+                holders.len()
             }
+            .saturating_sub(keep),
             _ => self.clean_copies(slot).saturating_sub(self.quorum()),
         }
         .min(damageable.len());

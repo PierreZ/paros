@@ -155,6 +155,9 @@ const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-lead
 /// The `shrink` entry of [`RECONFIGURE_SHAPES`], the shape a rotation through
 /// a ring no larger than the set in force actually composes.
 const SHRINK_SHAPE: usize = 1;
+/// The shapes that move a member out, as indices into
+/// [`RECONFIGURE_SHAPES`]: every one but `grow`.
+const REMOVING_SHAPES: [usize; 4] = [1, 2, 3, 4];
 /// The shapes a [`RECONFIGURE_MATCHMAKERS`] step draws from, as indices into
 /// [`RECONFIGURE_SHAPES`]: a matchmaker set has no leader to remove.
 const MATCHMAKER_SHAPES: [usize; 4] = [0, 1, 2, 4];
@@ -347,6 +350,21 @@ struct ChainConfig {
     /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
     /// so the seed is back for the recovery tail.
     parent_hold_ms: u64,
+    /// How long an owner keeps re-asking its opening claim while the
+    /// cluster leaves it unresolved (unread, ambiguous, a redirect to
+    /// nobody), `retry_backoff_ms` apart — the patience
+    /// `paros::client::claim_cell` gives a cell's claim. Floor 0: the one
+    /// attempt, after which every write is fenced until a later `SET_LEADER`
+    /// claims again, a valid (slow) owner; ceiling 6 s, past the chaos
+    /// window, an owner that keeps asking through it.
+    claim_patience_ms: u64,
+    /// Whether the main journal's owner, on a matchmaker seed, makes a
+    /// member-removing reconfiguration its first operation once it owns the
+    /// journal (#263): an operator who rotates a node out right after
+    /// taking over, the departed-straggler shape's first half (a slot
+    /// decided under the configuration the removal supersedes). Drawn per
+    /// seed, its own BUGGIFY location; either value is a valid operator.
+    reconfigure_after_claim: bool,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -407,6 +425,8 @@ impl ChainConfig {
             fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
             parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
+            claim_patience_ms: buggify_knob!(3_000_u64, 0_u64..6_001_u64),
+            reconfigure_after_claim: buggify_with_prob!(1.0),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -1353,10 +1373,49 @@ impl Workload for ChainWorkload {
         // An owner claims the journal first (#204): read where it stands and
         // `SetLeader` against it. Losing is a valid start — another owner
         // won, and this client's writes are fenced until it claims again.
+        // A claim the cluster leaves unresolved is re-asked within the
+        // owner's patience (`claim_patience_ms`), the next server along.
+        let mut remove_next = false;
         if !reader {
-            let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-            let outcome = claim(&nodes, journal, first, (client_id, false)).await;
-            writer.claimed(&outcome);
+            let mut first =
+                usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
+            let patience = time.now() + Duration::from_millis(config.claim_patience_ms);
+            loop {
+                let outcome = claim(&nodes, journal, first, (client_id, false)).await;
+                writer.claimed(&outcome);
+                match outcome {
+                    ClaimOutcome::Won { .. } => {
+                        // An owner who reconfigures first (see
+                        // `reconfigure_after_claim`): the main journal's
+                        // alone, on a deployment that honors one.
+                        remove_next =
+                            config.reconfigure_after_claim && has_matchmakers && journal == main;
+                        break;
+                    }
+                    ClaimOutcome::Lost { .. }
+                    | ClaimOutcome::Owned { .. }
+                    | ClaimOutcome::UnknownJournal
+                    | ClaimOutcome::Malformed => break,
+                    ClaimOutcome::Redirect { leader } => {
+                        first = leader
+                            .and_then(|id| nodes.index_of(id))
+                            .unwrap_or((first + 1) % server_count);
+                    }
+                    ClaimOutcome::Unread | ClaimOutcome::Ambiguous => {
+                        first = (first + 1) % server_count;
+                    }
+                }
+                if time.now() >= patience
+                    || shutdown.is_cancelled()
+                    || time
+                        .sleep(Duration::from_millis(config.retry_backoff_ms))
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
+                assert_reachable!("chain: an owner re-asks its opening claim within its patience");
+            }
         }
 
         // Start with a small concurrent batch when writes are enabled. This
@@ -1455,8 +1514,17 @@ impl Workload for ChainWorkload {
             let raw_pause = ctx.random().random::<u64>();
             let raw_policy = ctx.random().random::<u64>();
             let after_register = std::mem::take(&mut reconfigure_next);
+            // The owner's removal stays its next operation until a request
+            // leaves (an inspect the chaos swallows, a shape nothing admits),
+            // and for the chaos window only: the tail runs the drawn mix.
+            if time.now() >= Duration::from_millis(CHAOS_DURATION_MS) {
+                remove_next = false;
+            }
+            let after_claim = remove_next;
             let op = if after_register {
                 assert_reachable!("system: a client reconfigures right after registering a joiner");
+                RECONFIGURE
+            } else if after_claim {
                 RECONFIGURE
             } else {
                 Self::choose_operation(&config, &operations, raw_op)
@@ -2261,7 +2329,14 @@ impl Workload for ChainWorkload {
                     });
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
-                    let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
+                    // The owner's first operation after its claim (see
+                    // `reconfigure_after_claim`) starts the shape ring at
+                    // one that moves a member out — never `grow`.
+                    let drawn = if after_claim {
+                        REMOVING_SHAPES[usize::try_from(raw_class % 4).unwrap_or(0)]
+                    } else {
+                        weighted_index(&config.reconfigure_shape_weights, raw_class)
+                    };
                     let leader_id = nodes.leader().map(|l| nodes.id_of(l));
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
@@ -2424,6 +2499,13 @@ impl Workload for ChainWorkload {
                                 "reconfiguration: the drawn shape is impossible and the step falls through"
                             );
                         }
+                        if after_claim && REMOVING_SHAPES.contains(&shape) {
+                            // BUGGIFY pairing: the owner's first operation
+                            // after its claim moves a member out.
+                            assert_reachable!(
+                                "reconfiguration: an owner's first operation after its claim removes a member"
+                            );
+                        }
                         let disjoint = members
                             .as_deref()
                             .is_some_and(|in_force| in_force.iter().all(|m| !next.contains(m)));
@@ -2450,6 +2532,7 @@ impl Workload for ChainWorkload {
                             system = QuorumSystem::Flexible { q1: 1, q2: 1 };
                         }
                         tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
+                        remove_next = false;
                         // The operators' ledger (#198): filed before the
                         // request leaves, answered below; a retirement reads
                         // it (`StorageWorld::retire`).
