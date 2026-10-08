@@ -200,10 +200,13 @@ impl StorageWorld {
             "journal store: the custody ledger holds nothing below its floor"
         );
         let floor = custody.first;
-        if let Some(marks) = self.marks.get_mut(key) {
+        for marks in [self.marks.get_mut(key), self.rotted.get_mut(key)]
+            .into_iter()
+            .flatten()
+        {
             if rewritten {
-                for slot in slots {
-                    marks.remove(&slot);
+                for slot in &slots {
+                    marks.remove(slot);
                 }
             }
             marks.retain(|slot| *slot >= floor);
@@ -329,7 +332,9 @@ impl StorageWorld {
         let mut damageable: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, settled)| {
-                *settled && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
+                *settled
+                    && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
+                    && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
             })
             .map(|(key, node, _)| (key.clone(), *node))
             .collect();
@@ -414,16 +419,21 @@ impl StorageWorld {
             slots.get(usize::try_from(at).unwrap_or(0)).copied()
         };
         let held: Vec<u64> = custody.records.keys().copied().collect();
-        // Every family aims only where the entry is whole. On a slot whose
-        // entry an earlier rot (or an outage's planned loss) took and no
-        // rewrite has cleared, a record rot would be a double fault the
-        // budget never permitted, and a second flip of the entry (an entry
-        // rot, a double fault) would put the same bytes back.
+        // Every family aims only where the entry and the record are whole.
+        // On a slot whose entry an earlier rot (or an outage's planned loss)
+        // took and no rewrite has cleared, a record rot would be a double
+        // fault the budget never permitted, and a second flip of the entry
+        // (an entry rot, a double fault) would put the same bytes back. A
+        // rotted record stays damaged on disk (see `rotted`): an entry rot
+        // there is the same unbudgeted double fault, a second record rot
+        // the same restoring flip.
         let marked = self.marks.get(key);
+        let rotted = self.rotted.get(key);
         let whole: Vec<u64> = held
             .iter()
             .copied()
             .filter(|slot| !marked.is_some_and(|marks| marks.contains(slot)))
+            .filter(|slot| !rotted.is_some_and(|rotted| rotted.contains(slot)))
             .collect();
         // Aimed by what the ledger knows (#263): on some boots the most
         // recent slot this node holds, the one a lagging peer is likeliest
@@ -457,6 +467,7 @@ impl StorageWorld {
         if buggify_with_prob!(P_RECORD_ROT)
             && let Some(slot) = pick(&whole)
         {
+            self.rotted.entry(key.to_string()).or_default().insert(slot);
             return Some(Injection {
                 family: Family::RecordRot(slot),
                 regions: vec![custody.records[&slot].record.clone()],

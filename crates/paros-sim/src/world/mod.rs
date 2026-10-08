@@ -106,6 +106,13 @@ pub(crate) struct StorageWorld {
     /// the node has not re-written since (a completed sync of the slot, or a
     /// floor past it, clears one). These are what the budget counts.
     marks: BTreeMap<String, BTreeSet<u64>>,
+    /// Rotted persist records per node: slots whose record a record rot
+    /// damaged and no commit has re-written since. The open rebuilds such a
+    /// record from its entry in memory only (the journal re-writes the
+    /// persist log of its last batch alone), so the damage stays on disk:
+    /// not a lost copy, but a slot no family may aim at again (an entry rot
+    /// there is a double fault, a second record rot restores the bytes).
+    rotted: BTreeMap<String, BTreeSet<u64>>,
     /// Nodes down for good, each with the reason it was parked (see
     /// [`ParkReason`]): the copy budget counts every one of them as a lost
     /// copy of every record it held, and the composer never names one. The
@@ -268,6 +275,7 @@ impl StorageWorld {
             return false;
         }
         self.marks.remove(key);
+        self.rotted.remove(key);
         self.custody.remove(key);
         // A copy an outage planned to lose goes with the whole disk.
         self.pending.remove(key);
