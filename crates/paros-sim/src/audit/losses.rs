@@ -221,7 +221,13 @@ impl AuditState {
     /// node a durable accept of it was reported from, and every node with a
     /// commit carrying it in flight (a cut commit may land unreported, #264).
     /// The custody ledger the plan read misses a commit whose sync was cut,
-    /// so the claims below never rest on it alone.
+    /// so the claims below never rest on it alone. A replica's commits are
+    /// in flight too, but a learner holds no vote and answers no Phase 1:
+    /// its copy is never one CTRL can recover from, and since no durable
+    /// accept is ever reported from it, its in-flight mark would stand for
+    /// good (witness 10778422868787336488: every acceptor's copy of slot 0
+    /// lost, the replica's mark kept the slot "recoverable" and the frozen
+    /// journal unexcused).
     fn holders_of(&self, slot: u64, planned: &Planned) -> BTreeSet<u64> {
         let mut holders = planned.holders.clone();
         for (_, nodes) in self
@@ -233,7 +239,7 @@ impl AuditState {
         holders.extend(
             self.in_flight
                 .keys()
-                .filter(|(_, at)| *at == slot)
+                .filter(|(node, at)| *at == slot && !self.replicas.contains(node))
                 .map(|(node, _)| *node),
         );
         holders
