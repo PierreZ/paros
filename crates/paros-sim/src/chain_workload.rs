@@ -1388,8 +1388,10 @@ impl Workload for ChainWorkload {
                         // An owner who reconfigures first (see
                         // `reconfigure_after_claim`): the main journal's
                         // alone, on a deployment that honors one.
-                        remove_next =
-                            config.reconfigure_after_claim && has_matchmakers && journal == main;
+                        remove_next = (config.reconfigure_after_claim
+                            || crate::shape::departed_straggler(ctx.state()))
+                            && has_matchmakers
+                            && journal == main;
                         break;
                     }
                     ClaimOutcome::Lost { .. }

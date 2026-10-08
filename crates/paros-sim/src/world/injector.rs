@@ -313,24 +313,8 @@ impl StorageWorld {
             .iter()
             .filter(|(key, _)| !self.replicas.contains(*key) && !self.parked.contains_key(*key))
             .collect();
-        // Above every floor, so no holder answers with a trim point instead.
-        // A last batch is fair game: its persist records survive, so a
-        // damaged entry there is reported faulty like any other.
-        let floor = live.iter().map(|(_, c)| c.first).max()?;
-        let candidates: BTreeSet<u64> = live
-            .iter()
-            .filter(|(_, c)| c.settled)
-            .flat_map(|(_, c)| c.records.range(floor..).map(|(slot, _)| *slot))
-            .filter(|slot| decided.contains_key(slot))
-            .collect();
-        let slot = if loss.recent {
-            assert_reachable!("storage: an outage aims at the most recent slot it holds");
-            candidates.last().copied()
-        } else {
-            let all: Vec<u64> = candidates.iter().copied().collect();
-            let at = moonpool_sim::sim_random_range(0..all.len().max(1) as u64);
-            all.get(usize::try_from(at).unwrap_or(0)).copied()
-        }?;
+        let installed = self.last_installed();
+        let slot = Self::aim_outage_loss(&live, loss, decided, installed.as_deref())?;
         let holders: Vec<(String, u64, bool)> = live
             .iter()
             .filter(|(_, c)| c.records.contains_key(&slot))
@@ -342,7 +326,6 @@ impl StorageWorld {
         // configuration that decided the slot, outside the one the operator
         // last installed. A spare no configuration named holds a copy no
         // Phase 1 asks (witness 1980540850679778313), so it is no straggler.
-        let installed = self.last_installed();
         let deciders = decided.get(&slot);
         let departed = |node: &u64| {
             installed
@@ -402,6 +385,56 @@ impl StorageWorld {
             holders: holders.iter().map(|(_, node, _)| *node).collect(),
             damaged: damaged.iter().map(|(_, node)| *node).collect(),
         })
+    }
+
+    /// The slot an outage's loss aims at (see [`Self::plan_outage_loss`]):
+    /// a decided slot above every holder's floor, the most recent or a
+    /// uniform one.
+    fn aim_outage_loss(
+        live: &[(&String, &Custody)],
+        loss: LossShape,
+        decided: &BTreeMap<u64, Vec<u64>>,
+        installed: Option<&[u64]>,
+    ) -> Option<u64> {
+        // Above every floor, so no holder answers with a trim point instead.
+        // A last batch is fair game: its persist records survive, so a
+        // damaged entry there is reported faulty like any other.
+        let floor = live.iter().map(|(_, c)| c.first).max()?;
+        let mut candidates: BTreeSet<u64> = live
+            .iter()
+            .filter(|(_, c)| c.settled)
+            .flat_map(|(_, c)| c.records.range(floor..).map(|(slot, _)| *slot))
+            .filter(|slot| decided.contains_key(slot))
+            .collect();
+        // The departed straggler aims only where it can land: a slot a
+        // settled, departed holder keeps (see `plan_outage_loss`), when one
+        // does. A slot decided under the successor has no such holder.
+        if loss.prefer_removed {
+            let departed_slots: BTreeSet<u64> = candidates
+                .iter()
+                .copied()
+                .filter(|slot| {
+                    live.iter().any(|(_, c)| {
+                        c.settled
+                            && c.records.contains_key(slot)
+                            && installed.is_some_and(|m| !m.contains(&c.node))
+                            && decided.get(slot).is_some_and(|m| m.contains(&c.node))
+                    })
+                })
+                .collect();
+            if !departed_slots.is_empty() {
+                assert_reachable!("storage: an outage aims at a slot a departed member holds");
+                candidates = departed_slots;
+            }
+        }
+        if loss.recent {
+            assert_reachable!("storage: an outage aims at the most recent slot it holds");
+            candidates.last().copied()
+        } else {
+            let all: Vec<u64> = candidates.iter().copied().collect();
+            let at = moonpool_sim::sim_random_range(0..all.len().max(1) as u64);
+            all.get(usize::try_from(at).unwrap_or(0)).copied()
+        }
     }
 
     /// Whether `slot` may lose its clean quorum: it already did, or the loss

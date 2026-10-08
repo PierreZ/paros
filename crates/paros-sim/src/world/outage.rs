@@ -100,6 +100,15 @@ pub(crate) struct LossShape {
 }
 
 impl LossShape {
+    /// The departed-straggler scenario's loss
+    /// (`crate::shape::departed_straggler`): the most recent slot, down to
+    /// one clean copy on a member a reconfiguration removed.
+    pub(crate) const DEPARTED_STRAGGLER: Self = Self {
+        recent: true,
+        keep: None,
+        prefer_removed: true,
+    };
+
     /// How many slots of one journal may lose their clean quorum: zero
     /// under the usual budget. Floor `0`: the budget a quorum of clean
     /// copies defends. Extreme `2`: one or a few slots, never more — a lost
@@ -138,7 +147,15 @@ impl FaultInjector for OutageLosses {
                     assert_reachable!(
                         "storage: a correlated outage takes every acceptor down at once"
                     );
-                    plan_losses(ctx.state(), draw_loss());
+                    let loss = if crate::shape::departed_straggler(ctx.state()) {
+                        assert_reachable!(
+                            "storage: an outage lands on a seed drawing the departed-straggler scenario"
+                        );
+                        LossShape::DEPARTED_STRAGGLER
+                    } else {
+                        draw_loss()
+                    };
+                    plan_losses(ctx.state(), loss);
                 }
                 return Ok(());
             }

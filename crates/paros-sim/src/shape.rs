@@ -493,6 +493,9 @@ struct Registry {
     /// Run-level: whether the nodes withhold their GC requests for the
     /// chaos window (see [`withhold_gc`]), fixed by the first caller.
     withhold_gc: Option<bool>,
+    /// Run-level: whether the run draws the departed-straggler scenario
+    /// (see [`departed_straggler`]), fixed by the first caller.
+    departed_straggler: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -637,13 +640,34 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
 /// never of the log, and it resumes in the recovery tail.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
+    let scenario = departed_straggler(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.withhold_gc.get_or_insert_with(|| {
         // Its fired gate sits where the answer has an effect
         // (`BuggifyHooks::withhold_gc_requests`), not at the draw.
-        moonpool_sim::buggify_with_prob!(0.5)
+        scenario || moonpool_sim::buggify_with_prob!(0.5)
     })
+}
+
+/// Whether the run draws the **departed-straggler scenario** (#263): drawn
+/// once per seed, its own BUGGIFY location, it turns on together every
+/// ingredient of the rarest storage shape, so the sweep reaches it by
+/// design instead of by the product of independent coins. The nodes
+/// withhold GC ([`withhold_gc`]), the main journal's owner removes a
+/// member right after its claim (`ChainConfig::reconfigure_after_claim`),
+/// and a correlated outage that lands loses the most recent slot down to
+/// one clean copy on a member the removal superseded
+/// (`crate::world::outage`). Each ingredient keeps its own coin on the
+/// other seeds. Its fired gate sits where the outage's loss takes the
+/// shape. Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .departed_straggler
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// The fewest blocks a segment's entry log may have (floor of
