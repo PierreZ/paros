@@ -1,4 +1,4 @@
-//! A matchmaker's store on a journal-store seed (#176): the library's
+//! A matchmaker's store (#176, #261): the library's
 //! [`JournalMatchmakerStorage`] over the simulated disk, the registry a
 //! `parosd` matchmaker ships, under protocol chaos.
 //!
@@ -10,7 +10,6 @@
 //! operator honestly unsure, which the next boot resolves by reading the disk
 //! ([`resolve_registry_provisioning`]). A commit may lose power partway
 //! through ([`PowerCut`]); a seam crash is a power loss (`crate::process`).
-//! The world-store registry's budgeted fsync failure has no counterpart:
 //! moonpool's storage chaos fails syncs on the simulated disk itself.
 
 use std::collections::BTreeMap;
@@ -249,103 +248,5 @@ impl MatchmakerStorage for LedgeredRegistry {
             self.with_world(|w| w.note_provisioned(&ip));
         }
         Ok(())
-    }
-}
-
-/// A matchmaker's store, whichever the seed drew: the world-backed registry
-/// or the journal one (see the module doc).
-pub(crate) enum RegistryStore {
-    /// The world-backed registry: its budgeted fsync failure, its ledger.
-    World(Box<super::matchmaker::DurableMatchmakerStorage<moonpool_sim::SimTimeProvider>>),
-    /// The shipped journal registry on the simulated disk (#176).
-    Journal(Box<LedgeredRegistry>),
-}
-
-impl RegistryStorage for RegistryStore {
-    fn initial_state(&self) -> MatchmakerHardState {
-        match self {
-            Self::World(s) => s.initial_state(),
-            Self::Journal(s) => s.initial_state(),
-        }
-    }
-
-    fn registration(&self, ballot: Ballot) -> Option<Registration> {
-        match self {
-            Self::World(s) => s.registration(ballot),
-            Self::Journal(s) => s.registration(ballot),
-        }
-    }
-
-    fn registered_ballots(&self) -> Vec<Ballot> {
-        match self {
-            Self::World(s) => s.registered_ballots(),
-            Self::Journal(s) => s.registered_ballots(),
-        }
-    }
-}
-
-impl MatchmakerStorage for RegistryStore {
-    async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.boot_scan().await,
-            Self::Journal(s) => s.boot_scan().await,
-        }
-    }
-
-    fn formatted_config(&self) -> Option<MatchmakerConfig> {
-        match self {
-            Self::World(s) => s.formatted_config(),
-            Self::Journal(s) => s.formatted_config(),
-        }
-    }
-
-    async fn format(&mut self, config: &MatchmakerConfig) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.format(config).await,
-            Self::Journal(s) => s.format(config).await,
-        }
-    }
-
-    async fn register(
-        &mut self,
-        ballot: Ballot,
-        registration: &Registration,
-    ) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.register(ballot, registration).await,
-            Self::Journal(s) => s.register(ballot, registration).await,
-        }
-    }
-
-    async fn set_gc_watermark(&mut self, watermark: Ballot) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.set_gc_watermark(watermark).await,
-            Self::Journal(s) => s.set_gc_watermark(watermark).await,
-        }
-    }
-
-    async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.set_scalars(scalars).await,
-            Self::Journal(s) => s.set_scalars(scalars).await,
-        }
-    }
-
-    async fn install_registry(
-        &mut self,
-        scalars: &MatchmakerHardState,
-        registrations: &BTreeMap<Ballot, Registration>,
-    ) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.install_registry(scalars, registrations).await,
-            Self::Journal(s) => s.install_registry(scalars, registrations).await,
-        }
-    }
-
-    async fn sync(&mut self) -> Result<(), StorageError> {
-        match self {
-            Self::World(s) => s.sync().await,
-            Self::Journal(s) => s.sync().await,
-        }
     }
 }

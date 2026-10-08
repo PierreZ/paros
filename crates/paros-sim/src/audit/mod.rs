@@ -530,11 +530,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Message::Promise { ballot, .. } = msg {
             self.state().observe_promise_send(node.0, *ballot);
         }
-        if let Message::CatchUpResponse { entries, .. } = msg
-            && !entries.is_empty()
-        {
-            self.state().observe_catch_up_serve(node.0);
-        }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
@@ -626,6 +621,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.replicas.insert(replica.0);
         // A replica's read frontier is per boot, as a node's.
         st.read_watermark.remove(&replica.0);
+        // So is its chosen-index watermark: the scalar is flushed relaxed
+        // (on the journal store it rides the next metainfo write, which a
+        // replica rarely makes, #261), so a crash may legally rewind it, and
+        // the boot re-walks its retained prefix from the durable index. The
+        // index reported here is the walk's, ahead of the writes that walk
+        // then persists: the watermark restarts below them.
+        st.chosen_watermark.remove(&replica.0);
         // The recovered prefix is walked, exactly as a node's boot report
         // says in `recovered`: with no application to replay (#186) the
         // walk resumes one past the durable chosen index, so a crash that

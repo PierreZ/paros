@@ -63,8 +63,7 @@ Run the `play` job whenever the change touches `crates/paros-play`, a
 Run the sim job whenever the change touches `paros-core`, the driver, the
 harness, a hook, a knob, an audit message, or the moonpool pin. It is the real
 gate: `sim-paros-chain` exits non-zero on any assertion violation, failed run,
-coverage gate that never fired, or convergence timeout, and then runs the two
-corpus axes with the same rule. A docs-only change can skip it.
+coverage gate that never fired, or convergence timeout. A docs-only change can skip it.
 
 ## How to read a failure
 
@@ -74,8 +73,7 @@ corpus axes with the same rule. A docs-only change can skip it.
 - **A public `paros-core` function that can panic needs a `# Panics` doc
   section** (pedantic `missing_panics_doc`); hard `assert!` is the house style
   there, so write the section rather than removing the assert.
-- **A nextest sim smoke failure** (`crates/paros-sim/tests/sim.rs`,
-  `tests/corpus.rs`) is a safety-oracle violation or a determinism break, never
+- **A nextest sim smoke failure** (`crates/paros-sim/tests/sim.rs`) is a safety-oracle violation or a determinism break, never
   a flake: replay the seed (`/debug-a-seed`).
 - **A wasm check failure** in `paros-core` usually means a new dependency or a
   `std::time`/`rand` use crept into the core; the core is dependency-free with

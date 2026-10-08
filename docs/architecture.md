@@ -1239,12 +1239,15 @@ Simulation is the investment. Every milestone lands with its share of:
   unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
   it. In M12: a second cell, a tenant move and a move of the fleet tenant. With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
-- Storage chaos on the shipped stores: every node and matchmaker runs on moonpool-journal, with a
-  journal-aware injector aimed through `Journal::regions` (striped by slot) under the copy budget, corpus
-  masks re-expressed as journal targets, crashes inside a sync, then moonpool's environmental
-  storage chaos with replicated fault patterns (#176, #202). Gates name journal verdicts (slot
-  rebuilt, double fault parked, meta repaired, ambiguous batch kept); the in-memory stores and
-  their gates retire.
+- Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
+  with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
+  under the copy budget, power cuts inside a sync, and moonpool's environmental storage chaos
+  under it; its gates name journal verdicts (slot rebuilt, double fault parked, meta repaired).
+  The in-memory stores and the scripted corpus are gone: one campaign (#263, landed 2026-10-08),
+  the corpus's shapes drawn per seed. Still to come (#263): rot aimed at a recent decided slot,
+  its holders, every copy of one slot and copies on removed nodes; a copy-budget extreme that
+  allows a bounded number of unrecoverable slots, excused from convergence and judged never
+  filled; and replicated fault patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
   (one zone at a time, the outage length drawn across the re-placement bound and restored inside
   `CHAOS_DURATION_MS`); moonpool#297 gives `.processes()` groups no locality, so paros keeps its
@@ -1290,8 +1293,6 @@ AGENTS.md.
   and replicas follow (#193).
 - The coordinators replace the operator's client: `parosctl` stops writing as the lowest seed's
   node id (#240, #212).
-- The in-memory "world" stores of the simulation retire; every role runs on moonpool-journal
-  under at least the same chaos (section 5, #176, #202).
 
 ## 8. Milestones
 

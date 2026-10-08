@@ -53,16 +53,6 @@ impl AuditWorld {
         self.main
     }
 
-    /// A private checker for a run with **no client** at all (the storage
-    /// contract suite drives the world-backed storage directly): every
-    /// per-transition check still runs, except the "applied command was
-    /// proposed" claim, which has no client to be proposed by.
-    pub(crate) fn client_free() -> Self {
-        let world = Self::default();
-        world.lock().client_free = true;
-        world
-    }
-
     pub(super) fn lock(&self) -> MutexGuard<'_, AuditState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -136,7 +126,7 @@ impl AuditWorld {
         );
         st.fold_agreed |= met;
         assert_always!(
-            st.client_free || st.submitted.contains(&cmd_hash),
+            st.submitted.contains(&cmd_hash),
             "chain: applied command was proposed",
             { "client" => client, "lsn" => lsn, "command" => cmd_hash }
         );
@@ -145,22 +135,6 @@ impl AuditWorld {
     /// The cluster's applied high-water mark so far (`None` before any apply).
     pub(crate) fn cluster_applied_max(&self) -> Option<u64> {
         self.lock().cluster_applied_max
-    }
-
-    /// Whether a node outside a ballot's own configuration has answered that
-    /// ballot's Phase 1 — the mechanism the departed-straggler corpus case is
-    /// named for ("removed is not shut down"), read by that case so it can
-    /// assert it actually happened.
-    pub(crate) fn removed_member_promised(&self) -> bool {
-        self.lock().removed_member_promised
-    }
-
-    /// Whether a node outside the configuration in force served a catch-up
-    /// with entries: the second way a removed member's copy reaches the
-    /// cluster, read by the departed-straggler case beside
-    /// [`AuditWorld::removed_member_promised`].
-    pub(crate) fn removed_member_served(&self) -> bool {
-        self.lock().removed_member_served
     }
 
     /// A one-line picture of the run for the red path: per-node applied
@@ -290,8 +264,8 @@ impl AuditWorld {
         self.lock().matchmaker.lost();
     }
 
-    /// A node booted again after a process-level kill (moonpool attrition on
-    /// the main campaign, the script on the corpus) while `parked_peers` other
+    /// A node booted again after a process-level kill (moonpool attrition, or
+    /// the chain client's scripted reboot) while `parked_peers` other
     /// nodes sat terminally parked. Until this very boot the node was down, so
     /// the two loss kinds — persistent (a parked disk that never comes back)
     /// and transient (a process that does) — overlapped for the whole hold-down.
@@ -343,38 +317,6 @@ impl AuditWorld {
         !self.lock().lagged.is_empty()
     }
 
-    /// Ground-truth feed from the storage world (issue #19 C). A record can
-    /// become durable through an *ambiguous* fault leg — the flush happened,
-    /// but the driver crashed on the reported error before surfacing it — so
-    /// the driver's audit stream alone would go stale and the next reboot
-    /// would trip the cross-restart checks as false positives. The world owns
-    /// the ground truth, so every flush refreshes the **reference data** those
-    /// checks compare against: the per-`(node, slot)` persisted value, the
-    /// compaction floor, and the admitted trim-point landings. Reference data
-    /// only — progress/liveness state (`applied_max`, quiescence clocks) stays
-    /// driver-reported, so this observation cannot mask a liveness bug. This
-    /// is what keeps recovered-equals-persisted checkable against *actual*
-    /// durable state (the #71 weakening is for Stage 7-8, not this).
-    pub(crate) fn note_flushed_ground_truth(
-        &self,
-        node: u64,
-        now_ms: u64,
-        accepted: &[(u64, u64)],
-        floor: Option<u64>,
-        landing: Option<u64>,
-    ) {
-        let mut st = self.lock();
-        for &(slot, vhash) in accepted {
-            st.persisted.insert((node, slot), vhash);
-        }
-        if let Some(first) = floor {
-            st.floor.entry(node).or_default().raise(first, now_ms);
-        }
-        if let Some(landing) = landing {
-            st.landings.entry(node).or_default().insert(landing);
-        }
-    }
-
     /// A journal registry booted with `scalars` and `registry` (#176): fold
     /// what its last sync had in flight and the boot shows landed, as the
     /// driver would have reported it, before the driver reports the boot
@@ -416,12 +358,6 @@ impl AuditWorld {
         if let Some((ballot, _)) = &scalars.effective {
             st.matchmaker.raise_effective(matchmaker, *ballot);
         }
-    }
-
-    /// The run's matchmakers store on `JournalMatchmakerStorage` (#176): the
-    /// handover gate that names them may fire.
-    pub(crate) fn note_journal_matchmakers(&self) {
-        self.lock().matchmaker.note_journal_backed();
     }
 
     /// Ground truth from a journal registry (#176): the writes of the commit

@@ -244,8 +244,6 @@ pub(super) struct AuditState {
     /// another journal's fence — the cross-tenant attack (#247,
     /// `AuditWorld::note_foreign`): refused at apply, never accepted.
     pub(super) foreign: BTreeSet<u64>,
-    /// This run has no client (see `AuditWorld::client_free`).
-    pub(super) client_free: bool,
     /// The client fold (#186): per client, the last position it folded (its
     /// contiguity frontier).
     pub(super) fold_lsn: BTreeMap<u64, u64>,
@@ -362,7 +360,7 @@ pub(super) struct AuditState {
     pub(super) reconfigure_matchmakers_started: bool,
     /// Some leader refused a matchmaker-set reconfiguration request.
     pub(super) reconfigure_matchmakers_refused: bool,
-    /// A process-level restart (attrition, or the corpus script) booted while
+    /// A process-level restart (attrition, or a scripted reboot) booted while
     /// at least one *other* node sat terminally parked: a transient process
     /// loss overlapped a persistent storage loss.
     pub(super) parked_overlap: bool,
@@ -499,11 +497,6 @@ pub(super) struct AuditState {
     pub(super) reconfigured_across_grid_boundary: bool,
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
-    /// A node outside the configuration bound to the highest ballot served
-    /// a catch-up — the other way a removed member's copy reaches the
-    /// cluster ("removed is not shut down"), read by the departed-straggler
-    /// corpus case.
-    pub(super) removed_member_served: bool,
     pub(super) cross_config_phase1_checked: bool,
 
     // --- proxy leaders (#142) ---------------------------------------------
@@ -608,21 +601,6 @@ impl AuditState {
     /// ballot's leader may count, and — when the node sits outside the
     /// ballot's own configuration — the proof that a removed member keeps
     /// answering Phase 1 for the ballots it took part in.
-    /// Fold one `CatchUpResponse` leaving `node`: a sender outside the
-    /// configuration bound to the highest ballot yet is a removed member
-    /// still serving what it holds.
-    pub(super) fn observe_catch_up_serve(&mut self, node: u64) {
-        let outside = self
-            .configs
-            .last_key_value()
-            .map(|(_, config)| config)
-            .or(self.bootstrap.as_ref())
-            .is_some_and(|config| !config.contains(paros::NodeId(node)));
-        if outside {
-            self.removed_member_served = true;
-        }
-    }
-
     pub(super) fn observe_promise_send(&mut self, node: u64, ballot: Ballot) {
         self.promise_senders
             .entry((ballot.round, ballot.node.0))

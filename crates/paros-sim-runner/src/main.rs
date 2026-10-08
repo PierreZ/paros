@@ -1,13 +1,11 @@
 //! Native campaign runner. `cargo xtask sim run paros-chain` drives the
-//! coverage-guided + frontier-exploration gate on the main campaign, then the
-//! two scripted corpus axes.
+//! coverage-guided + frontier-exploration gate on the one campaign (#263:
+//! no scripted side axis).
 
 mod common;
 
 use common::{arg, is_clean, print_never_fired, print_seed_counts};
-use paros_sim::{
-    AssertKind, CORPUS_CI_ITERATIONS, COVERAGE_ITERATIONS, SimulationReport, corpus_hunt, explore,
-};
+use paros_sim::{AssertKind, COVERAGE_ITERATIONS, SimulationReport, explore};
 
 fn main() {
     // Optional first arg: exploration iteration budget (defaults to the sancov
@@ -64,8 +62,6 @@ fn main() {
         // any correctness, coverage, or saturation defect must fail CI.
         std::process::exit(1);
     }
-
-    run_corpus_axes();
 }
 
 fn print_guidance(report: &SimulationReport) {
@@ -88,27 +84,4 @@ fn print_guidance(report: &SimulationReport) {
             bucket.msg, bucket.buckets_discovered, bucket.total_hits,
         );
     }
-}
-
-/// One corpus axis: fail CI on any violation or a gate that never fired.
-fn gate_corpus(name: &str, report: &SimulationReport) {
-    println!("\n--- {name} ---");
-    print_seed_counts(report, "");
-    print_never_fired(report, "  ");
-    if !is_clean(report) || !report.coverage_violations.is_empty() {
-        println!("  SAFETY VIOLATIONS: {:?}", report.assertion_violations);
-        println!("  COVERAGE VIOLATIONS: {:?}", report.coverage_violations);
-        println!("  FAILING SEEDS: {:?}", report.seeds_failing);
-        std::process::exit(1);
-    }
-    println!("  green");
-}
-
-/// The scripted evaluation corpus (E1 masks): seeded-mask sampling with the recovery gates armed. Fast per seed — every fault is a
-/// targeted injection, not swarm chaos.
-fn run_corpus_axes() {
-    gate_corpus(
-        "CTRL E1 mask corpus axis",
-        &corpus_hunt(CORPUS_CI_ITERATIONS),
-    );
 }

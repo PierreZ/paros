@@ -1,4 +1,4 @@
-//! Scripted process lifecycle for the corpus: the workload enqueues crash and
+//! Scripted process lifecycle: the workload enqueues crash and
 //! restart commands on the shared state handle, and a moonpool fault injector
 //! — factory-built per timeline, so scripted sequences replay exactly from the
 //! root seed plus recipe — executes them through
@@ -8,11 +8,10 @@
 //! process task is aborted, its connections die, its un-synced staged writes
 //! die with the storage handle, and the node stays down until the script says
 //! otherwise. A restart boots a fresh incarnation from the process factory,
-//! which restores from the durable [`StorageWorld`](crate::world::StorageWorld).
+//! which restores from its journal store on the simulated disk.
 //!
-//! The corpus scripts whole fault schedules through it. The main campaign
-//! registers it too, for the one lifecycle act its chain client takes as an
-//! operator: rebooting every member of a configuration it just installed
+//! The campaign registers it for the lifecycle acts its chain client takes as
+//! an operator: rebooting every member of a configuration it just installed
 //! (#173). Like the client's other operator acts (a reconfiguration, a
 //! retirement), that one is not bound to the chaos window, so the injector
 //! drains the queue for the whole run — more slowly once the window closed —

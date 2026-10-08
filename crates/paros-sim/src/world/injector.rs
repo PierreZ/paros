@@ -1,6 +1,5 @@
-//! The **ledgered, journal-aware injector** (#261): the corruption chaos the
-//! world store's boot-rot sites give its fake disk, given to the shipped
-//! `JournalStorage` on the simulated disk, aimed by what the journal itself
+//! The **ledgered, journal-aware injector** (#261): boot-time corruption
+//! chaos for the shipped `JournalStorage` on the simulated disk, aimed by what the journal itself
 //! says it wrote and judged by what it reports when it opens.
 //!
 //! **The ledger.** Every sync a journal store completes tells the world where
@@ -131,8 +130,7 @@ impl StorageWorld {
     /// A journal store at `key` completed a sync: `written` are the slots
     /// it wrote, with where they now live; `first` its floor; `regions` the
     /// journal's every region (for the metainfo and header copies). A
-    /// written slot is durably real again: its fault mark clears, as the
-    /// world store's flush clears it.
+    /// written slot is durably real again: its fault mark clears.
     pub(crate) fn note_synced(
         &mut self,
         key: &str,
@@ -182,6 +180,15 @@ impl StorageWorld {
     /// doc). A permitted entry rot marks the copy lost; a permitted double
     /// fault parks the node, before the journal ever opens.
     pub(crate) fn plan_boot_damage(&mut self, key: &str, node: u64) -> Option<Injection> {
+        let planned = self.plan_one(key, node);
+        if planned.is_some() {
+            self.injections += 1;
+        }
+        planned
+    }
+
+    /// [`Self::plan_boot_damage`]'s draw, before it is counted.
+    fn plan_one(&mut self, key: &str, node: u64) -> Option<Injection> {
         let custody = self.custody.get(key)?.clone();
         if !custody.settled || self.parked.contains_key(key) {
             return None;

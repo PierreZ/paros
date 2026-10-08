@@ -337,13 +337,9 @@ pub(super) struct MatchmakerAudit {
     reconfigurer_preempted: bool,
     reconfigurer_chosen: bool,
     reconfigurer_done: bool,
-    /// The run's matchmakers store on `JournalMatchmakerStorage` (#176).
-    journal_backed: bool,
     /// Per journal-backed matchmaker: the writes of the commit it has in
     /// flight, until the driver reports them or the next boot judges them.
     in_flight: BTreeMap<u64, Vec<RegistryOp>>,
-    /// A handover completed over journal-backed matchmakers (#176).
-    reconfigurer_done_on_journal: bool,
     reconfigurer_superseded: bool,
     reconfigurer_resend_skipped: bool,
     reconfigure_reply_dropped: bool,
@@ -2167,12 +2163,6 @@ impl MatchmakerAudit {
                     self.reconfigurer_done,
                     "generation: a matchmaker-set handover completes"
                 );
-                if self.journal_backed {
-                    reach_once!(
-                        self.reconfigurer_done_on_journal,
-                        "journal store: a matchmaker-set handover completes on journal-backed matchmakers"
-                    );
-                }
             }
             ReconfigurerStep::Superseded { successor } => {
                 let chosen = self.is_chosen(successor);
@@ -2298,11 +2288,6 @@ impl MatchmakerAudit {
             self.reconfigurer_bootstrapping,
             "generation: a frozen quorum is reconstructed and bootstrapped"
         );
-    }
-
-    /// The run's matchmakers store on the journal registry (#176).
-    pub(super) fn note_journal_backed(&mut self) {
-        self.journal_backed = true;
     }
 
     /// `matchmaker`'s durable effective scalar rose to `ballot` at its boot:

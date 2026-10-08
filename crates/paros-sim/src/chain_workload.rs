@@ -1109,7 +1109,7 @@ impl Workload for ChainWorkload {
         let has_matchmakers = !crate::roles::deployment(ctx.topology())
             .matchmakers()
             .is_empty();
-        let plan = crate::shape::journals(ctx.state(), true);
+        let plan = crate::shape::journals(ctx.state());
         if has_matchmakers && plan.ids.len() > 1 {
             // #201: several journals beside the matchmaker plane, the
             // composition PR #199 had withheld (a cause; the outcomes are
@@ -1154,7 +1154,7 @@ impl Workload for ChainWorkload {
         // client composes runs under, at the successor's own size. Drawn by
         // whoever asked first — a node or this client — and the same for
         // both.
-        let policy = crate::shape::quorum_policy(ctx.state(), servers.len(), true);
+        let policy = crate::shape::quorum_policy(ctx.state(), servers.len());
         // The matchmaker pool's address book and the floor no matchmaker set
         // this client asks for goes below (#125): the bootstrap set's size,
         // capped at three — the smallest set that keeps a quorum after the
@@ -1162,8 +1162,7 @@ impl Workload for ChainWorkload {
         let matchmaker_ips = deployment.matchmakers().to_vec();
         let matchmaker_floor = if has_matchmakers {
             crate::shape::matchmaker_floor(
-                crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_ips.len(), true)
-                    .len(),
+                crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_ips.len()).len(),
             )
         } else {
             1
@@ -1293,14 +1292,14 @@ impl Workload for ChainWorkload {
         let mut fleet_ops = fleet::FleetOps::new(
             &deployment,
             crate::shape::identifiers(ctx.state()),
-            crate::shape::system_journals(ctx.state(), true),
+            crate::shape::system_journals(ctx.state()),
             client_id,
             (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
             crate::shape::identifiers(ctx.state()),
-            crate::shape::system_journals(ctx.state(), true),
+            crate::shape::system_journals(ctx.state()),
             self.plan
                 .as_ref()
                 .map(|plan| plan.ids.clone())
@@ -1418,7 +1417,7 @@ impl Workload for ChainWorkload {
         // cell's control journal and the directory — down for
         // `parent_hold_ms` of the chaos window, while every tenant journal
         // keeps committing without it (the journal board's gate).
-        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state(), true))
+        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state()))
             .then(|| servers[0].clone());
         let mut parent_until: Option<Duration> = None;
         let mut parent_held_once = false;
@@ -3499,21 +3498,6 @@ impl Workload for ChainWorkload {
                     crate::audit::audit_world_for(ctx.state(), *other).diagnostics()
                 );
             }
-            for (ip, disk_journal) in journals
-                .iter()
-                .flat_map(|j| servers.iter().map(move |ip| (ip, *j)))
-            {
-                if let Some(probe) = crate::world::disk_probe_for(ctx.state(), disk_journal, ip) {
-                    eprint!("  [journal {disk_journal}]");
-                    eprintln!(
-                        "  DISK {ip}: floor={} chosen={:?} clean_slots={}..={}",
-                        probe.floor,
-                        probe.chosen_index,
-                        probe.clean_slots.first().copied().unwrap_or(0),
-                        probe.clean_slots.last().copied().unwrap_or(0),
-                    );
-                }
-            }
         }
         assert_always!(
             ((recovery_acked > 0 || reader) && converged) || ended_by_sibling,
@@ -3555,7 +3539,7 @@ impl Workload for ChainWorkload {
         // The control journals' histories (#247): every client's library
         // calls at the fleet tenant, the registry and the directory, searched once (by
         // client 0, after every run) against the journal model.
-        if self.client_id == 0 && crate::shape::system_journals(ctx.state(), true) {
+        if self.client_id == 0 && crate::shape::system_journals(ctx.state()) {
             let identifiers = crate::shape::identifiers(ctx.state());
             for journal in [
                 identifiers.fleet,

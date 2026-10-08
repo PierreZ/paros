@@ -96,7 +96,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   shifts every seed, so a "stays red/green" replay silently stops testing anything. Do not add
   seed constants, seed lists or seed-replay tests; cite a witness in a commit or doc comment
   and let it go. A test may hard-code a seed that is not a witness (a determinism replay, a
-  corpus case whose seed is its input, a display seed). Reach comes from volume and BUGGIFY.
+  display seed). Reach comes from volume and BUGGIFY.
 - **Hunt budget** (`sim-paros-hunt`): 2,000–3,000 seeds normally, 10,000 only for a substantial
   protocol, harness or fault-model change, more only when the user asks. A hunt's deliverable
   is a failing seed and its diagnosis.
@@ -112,11 +112,13 @@ Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENT
 
 ## The harness in one paragraph
 
-Two axes, one workload, two judges. The **main campaign** is a pool of
+One campaign, one workload, two judges. The **campaign** is a pool of
 `NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
-joiners, under every moonpool fault, the driver hooks and the disk's fault coins; the
-**corpus** is a scripted three-node cluster (and one four-node case) with every fault a
-targeted injection and an analytically known outcome. The one workload is `ChainWorkload`,
+joiners, every role storing on the library's journal stores over moonpool's simulated disk,
+under every moonpool fault, the driver hooks, the power cuts and the ledgered injector
+(`paros_sim::world`). There is no scripted corpus and no fake disk (#261, #263, decided on
+2026-10-08): a shape the corpus once scripted is a per-seed BUGGIFY or swarm draw, judged by the
+same oracles. The one workload is `ChainWorkload`,
 which drives every call through the library client `paros::client`; its misbehaviours (stale
 writes, duplicates, dual submits) are explicit calls, never the library's defaults. Every run is
 judged by the client's own history (`ClientHistory`, searched for a linearization against the
@@ -380,7 +382,7 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
   (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
   Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
-- `paros-sim` — the DST harness: processes, role map, fault world, workload, audit, corpus.
+- `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
 - `xtask` — `cargo xtask sim` (the sancov runner).

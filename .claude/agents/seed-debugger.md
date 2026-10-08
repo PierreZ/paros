@@ -1,6 +1,6 @@
 ---
 name: seed-debugger
-description: Root-causes one failing paros simulation seed - a red hunt seed, a nextest smoke violation, a corpus mask, or a determinism-canary trip. Delegate with the seed (or mask), the axis/command that produced it, and the first violation message; it replays through sim-paros-hunt, reads the audit oracle that fired, walks the Paxos roles back to the decision, and returns the causal chain plus a proposed fix without editing paros-core. Use whenever a sweep, hunt, or test reports an assertion violation or a red seed.
+description: Root-causes one failing paros simulation seed - a red hunt seed, a nextest smoke violation, or a determinism-canary trip. Delegate with the seed, the axis/command that produced it, and the first violation message; it replays through sim-paros-hunt, reads the audit oracle that fired, walks the Paxos roles back to the decision, and returns the causal chain plus a proposed fix without editing paros-core. Use whenever a sweep, hunt, or test reports an assertion violation or a red seed.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:

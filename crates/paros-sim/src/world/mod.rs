@@ -1,30 +1,24 @@
-//! The fake disk: every node's durable records, the fault ledgers, and the
-//! budgets that keep a run winnable.
+//! The storage ledger: what the operator knows about every identity's disk
+//! (its provisioning, a wipe, a retirement), what the journal stores hold
+//! (the custody ledger), and the budgets that keep a run winnable.
 //!
-//! The [`StorageWorld`] is **protocol-blind** — it stores records, never knowing
-//! what is committed — and outlives process crashes (owned by the `StateHandle`),
-//! so a write that reached it before a crash is read back on restart, exactly
-//! like a real disk. Each node reaches it through a [`storage::DurableStorage`]
-//! handle; the boot-rot sites live in [`rot`].
+//! The disks themselves are the simulator's: every role stores on the
+//! library's journal stores over moonpool's simulated disk (#261), through
+//! [`node_store::LedgeredJournal`] and [`registry_store::LedgeredRegistry`].
+//! The [`StorageWorld`] is **protocol-blind** and outlives process crashes
+//! (owned by the `StateHandle`); the damage it permits is the ledgered
+//! injector's ([`injector`]) and the power cuts' ([`power`]).
 
 pub(crate) mod injector;
-pub(crate) mod matchmaker;
 pub(crate) mod node_store;
 pub(crate) mod power;
 pub(crate) mod registry_store;
-pub(crate) mod rot;
-pub(crate) mod storage;
 pub(crate) mod wipe;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
-
-use paros::{
-    Ballot, Command, Config, HardState, IntegrityFault, MetadataFault, Slot, StorageRecord,
-    WitnessStatus,
-};
 
 /// Well-known [`StateHandle`] key under which the single per-iteration
 /// [`StorageWorld`] is published (shared by every node, survives restarts).
@@ -50,235 +44,6 @@ pub(crate) fn storage_world_for(
     )
 }
 
-/// Semantic health of one durable record — the world stores **records, not
-/// bytes** (#20 fixed decision), so every corruption-family member is modeled
-/// as a first-class read outcome the boot scan classifies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(super) enum RecordHealth {
-    /// The record verifies.
-    #[default]
-    Clean,
-    /// The bytes fail their checksum (bit flip, latent sector error, torn
-    /// write).
-    Faulty,
-    /// The checksum passes but the identity inside the checksummed region
-    /// names a different record (misdirected write).
-    Misdirected,
-    /// The bytes are absent where the identifier / reserved-record contract
-    /// says they must exist (lost write).
-    Lost,
-}
-
-impl RecordHealth {
-    fn integrity_fault(self) -> Option<IntegrityFault> {
-        match self {
-            RecordHealth::Clean => None,
-            RecordHealth::Faulty => Some(IntegrityFault::ChecksumMismatch),
-            RecordHealth::Misdirected => Some(IntegrityFault::Misdirected),
-            RecordHealth::Lost => Some(IntegrityFault::LostWrite),
-        }
-    }
-}
-
-/// One accepted entry's record + persist-witness health.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct SlotHealth {
-    entry: RecordHealth,
-    id: WitnessStatus,
-}
-
-impl Default for SlotHealth {
-    fn default() -> Self {
-        Self {
-            entry: RecordHealth::Clean,
-            id: WitnessStatus::Present,
-        }
-    }
-}
-
-impl SlotHealth {
-    fn clean(self) -> bool {
-        self.entry == RecordHealth::Clean && self.id == WitnessStatus::Present
-    }
-}
-
-/// One node's durable records: the scalars, the per-slot accepted log, and the
-/// compaction floor. The [`StorageWorld`] owns one of these per node IP.
-#[derive(Default)]
-pub(super) struct NodeDisk {
-    hard_state: HardState,
-    accepted: BTreeMap<Slot, (Ballot, Command)>,
-    /// The first slot still retained. Everything below it has been truncated.
-    first_slot: Slot,
-    /// The journal state sealed at the floor (#204): read back on boot so a
-    /// restart folds the retained log from it like every peer.
-    sealed: paros::JournalState,
-    /// Health of the accepted-entry records; a slot absent from this map is
-    /// clean and witnessed.
-    entry_health: BTreeMap<Slot, SlotHealth>,
-    /// The two checksummed `HardState` copies (CTRL metainfo doctrine): one
-    /// bad ⇒ repair from the twin, both bad ⇒ crash.
-    promise_health: [RecordHealth; 2],
-    chosen_health: RecordHealth,
-    truncation_health: RecordHealth,
-    /// A file-granularity FS-metadata fault on the whole store.
-    meta_fault: Option<MetadataFault>,
-    /// One pending transient read-`EIO` target, cleared when it surfaces (the
-    /// retry — the next boot — reads clean).
-    read_eio: Option<StorageRecord>,
-    /// The format marker (#147) and the configuration it was written under
-    /// (#207): written by the driver on the identity's first boot, never
-    /// cleared or edited — gone only with the whole disk (a wipe).
-    formatted: Option<Config>,
-}
-
-impl NodeDisk {
-    /// Health of the accepted record at `slot` (clean + witnessed when
-    /// untracked).
-    fn slot_health(&self, slot: Slot) -> SlotHealth {
-        self.entry_health.get(&slot).copied().unwrap_or_default()
-    }
-}
-
-/// One injected storage fault: the **ground truth** the oracles compare
-/// against. The node only ever sees the ambiguous typed error; whether the
-/// effect actually persisted lives here, in the world.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct InjectedFault {
-    pub(crate) node: u64,
-    pub(crate) record: StorageRecord,
-    pub(crate) kind: InjectedFaultKind,
-    /// The world's seeded, independent decision: did the effect reach the
-    /// durable disk despite the reported error?
-    pub(crate) persisted: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InjectedFaultKind {
-    /// A per-record write returned `EIO`.
-    WriteEio,
-    /// The staged batch's fsync failed.
-    FsyncFailed,
-}
-
-/// One Stage-7 corruption injection — the family it models (issue #20 item D;
-/// each kind is its own independent BUGGIFY location).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CorruptionKind {
-    /// Bit flip / latent sector error on a persisted record.
-    BitFlip,
-    /// A write acknowledged clean that never reached the medium.
-    LostWrite,
-    /// A block-aligned write landing on the wrong record.
-    Misdirected,
-    /// A transient `EIO` on the read path.
-    ReadEio,
-    /// A torn un-synced batch: fresh appends durable without identifiers.
-    TornTail,
-    /// One (or both) `HardState` copies rotted.
-    PromiseCopy,
-    /// A file-granularity FS-metadata fault.
-    Metadata,
-}
-
-/// What became of one Stage-7 injection — the exercised-vs-dormant tracking
-/// the injected⇔detected oracle folds (an injected fault on a never-read
-/// record is not a detection failure).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CorruptionOutcome {
-    /// Injected but not read back yet (legal only on a node that parked
-    /// before the read, or a torn tail the run ended before rebooting).
-    Dormant,
-    /// Read, detected, and surfaced as the driver's typed crash decision.
-    Crashed,
-    /// Detected in the same scan as a [`Crashed`](CorruptionOutcome::Crashed)
-    /// record and covered by that one crash decision (a block fault's other
-    /// members, the second promise copy).
-    CoDetected,
-    /// Read, detected, and repaired from the twin copy (`HardState` only).
-    Repaired,
-    /// Read, classified crash-truncatable, and discarded locally (the one
-    /// legal discard: the record was never acknowledged to anyone).
-    DiscardedTail,
-    /// Stage 8: read, classified recoverable — identity known, value lost —
-    /// and **reported** into the protocol's tri-state instead of crashing.
-    /// The record stays faulty on disk until a clean re-write resolves it to
-    /// [`Recovered`](CorruptionOutcome::Recovered) (or truncation supersedes
-    /// it); a run may legally end with a report still standing (the WAITED
-    /// leg, or a run that simply ended first).
-    Reported,
-    /// Stage 8: the faulty record was genuinely re-written by a clean flush
-    /// (an in-place repair — a re-sent `Accept`, a learned chosen value, a
-    /// decided no-op) or superseded by truncation or a trim-point jump.
-    Recovered,
-}
-
-/// Ground truth of one Stage-7 corruption injection.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CorruptionInjection {
-    pub(crate) node: u64,
-    pub(crate) record: StorageRecord,
-    pub(crate) kind: CorruptionKind,
-    /// Part of a multi-record block fault (a contiguous run of entries).
-    pub(crate) block: bool,
-    pub(crate) outcome: CorruptionOutcome,
-}
-
-impl CorruptionInjection {
-    /// A single-record injection of `kind` on `node`'s `record`, not yet
-    /// read back.
-    pub(crate) fn dormant(node: u64, record: StorageRecord, kind: CorruptionKind) -> Self {
-        Self {
-            node,
-            record,
-            kind,
-            block: false,
-            outcome: CorruptionOutcome::Dormant,
-        }
-    }
-}
-
-/// Sticky per-family / per-verdict facts for the Stage-7 coverage gates,
-/// recorded at the detection instant and read once per run by
-/// [`check_storage_gates`]. Independent bits, not a state machine (the
-/// [`crate::audit`] flag-set waiver).
-#[derive(Default, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools)]
-pub(super) struct Stage7Flags {
-    bitflip_detected: bool,
-    lost_write_detected: bool,
-    misdirected_detected: bool,
-    read_eio_detected: bool,
-    torn_tail_discarded: bool,
-    promise_repaired: bool,
-    metadata_crashed: bool,
-    corruption_below_tail: bool,
-    last_entry_ambiguity: bool,
-    identifier_lost: bool,
-    // --- Stage 8 (issue #21) sticky facts -----------------------------------
-    /// A recoverable rotted record was reported into the tri-state.
-    faulty_reported: bool,
-    /// A reported record was genuinely re-written by a clean flush.
-    record_recovered: bool,
-}
-
-/// The per-iteration durable-storage world: every node's durable records, keyed
-/// by IP. It is **protocol-blind** — it stores records, never knowing what is
-/// committed. It outlives process crashes (owned by the `StateHandle`), so a
-/// write that reached it before a crash is read back on restart, exactly like a
-/// real disk.
-///
-/// This is also where Stage 6's **budgeted** storage faults are rolled (the
-/// caller-side layer of #70/#71; moonpool's provider-level storage chaos stays
-/// on as *environmental* pressure). The budget is per-record and cluster-wide:
-/// for each accepted-log record, at most `quorum − 1` copies may be
-/// fault-suppressed across the cluster — re-counted over **live** copies at
-/// injection time (a node that truncated past a slot no longer holds a copy;
-/// the `TigerBeetle` `ClusterFaultAtlas` correction) and `assert_always!`ed
-/// rather than trusted to construction. Suppression semantics: once the chaos
-/// window closes the world refuses **new** injections but never heals the
-/// consequences of old ones (a mark clears only when the node genuinely
-/// re-writes the record through a clean flush) — recovery stays genuine.
 /// Why an identity is down for good (see [`StorageWorld::park_reason`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ParkReason {
@@ -315,12 +80,16 @@ struct RequestedConfiguration {
     round: Option<u64>,
 }
 
+/// The per-iteration storage ledger (see the module doc). The copy budget
+/// is per record and cluster-wide: for each accepted record at most
+/// `quorum − 1` copies may be lost across the cluster, re-counted over live
+/// copies at injection time (a node that truncated past a slot no longer
+/// holds a copy; `TigerBeetle`'s `ClusterFaultAtlas` correction) and
+/// `assert_always!`ed rather than trusted to construction. Once the chaos
+/// window closes nothing new is injected, and nothing old is healed: a mark
+/// clears only when the node genuinely re-writes the record.
 #[derive(Default)]
 pub(crate) struct StorageWorld {
-    disks: BTreeMap<String, NodeDisk>,
-    /// The matchmakers' durable registries, keyed by IP (see
-    /// [`matchmaker::DurableMatchmakerStorage`]); empty on a plain seed.
-    matchmakers: BTreeMap<String, matchmaker::MatchmakerDisk>,
     /// Full cluster membership size, for the quorum bound (set once at boot;
     /// zero refuses every injection). This is the run's *configuration floor*
     /// (`crate::shape::config_floor`), not the pool.
@@ -332,23 +101,16 @@ pub(crate) struct StorageWorld {
     /// deployment names, members and spares alike. The retirement budget is
     /// the difference between it and [`StorageWorld::cluster_size`].
     pool_size: usize,
-    /// Ground truth of every permitted injection, in order.
-    injected: Vec<InjectedFault>,
-    /// Lost-leg fault marks per node: accepted-log records whose most recent
-    /// write was injected-lost, torn, or corrupted, and not yet re-written by
-    /// a clean flush (or discarded as a crash tail). These are what the
-    /// budget counts.
+    /// Lost-copy marks per node: accepted records the injector damaged and
+    /// the node has not re-written since (a completed sync of the slot, or a
+    /// floor past it, clears one). These are what the budget counts.
     marks: BTreeMap<String, BTreeSet<u64>>,
-    /// Ground truth of every Stage-7 corruption injection, in order.
-    corruptions: Vec<CorruptionInjection>,
     /// Nodes down for good, each with the reason it was parked (see
     /// [`ParkReason`]): the copy budget counts every one of them as a lost
     /// copy of every record it held, and the composer never names one. The
     /// first reason wins — a corruption park on an identity already wiped
     /// or retired changes nothing.
     parked: BTreeMap<String, ParkReason>,
-    /// The same set by numeric node id, for correlating the injection ledger.
-    parked_ids: BTreeSet<u64>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -366,13 +128,11 @@ pub(crate) struct StorageWorld {
     /// I/O faults a journal store surfaced from moonpool's simulated disk
     /// (#187: a sync the disk failed, an operation the shutdown cut): the
     /// world injected none of them, so they are counted at the store
-    /// boundary and join `injected` in the one-crash-per-fault correlation.
+    /// boundary: the one-crash-per-fault correlation.
     disk_faults: usize,
     /// The replica tier's disks (#144), by IP: learners that are not
     /// acceptors. Their records are never a *copy* the budget defends — a
-    /// replica answers no Phase 1 — so the copy count never looks at them,
-    /// and their disks run fault-free (the replica's own write path is not
-    /// what the budget protects).
+    /// replica answers no Phase 1 — so nothing is injected into them.
     replicas: BTreeSet<String>,
     /// Matchmakers whose registry was wiped (#125, #183): the library
     /// refuses to boot them again, and the replacement is a matchmaker-set
@@ -386,9 +146,10 @@ pub(crate) struct StorageWorld {
     /// one's last completed sync says it holds and where
     /// ([`injector::Custody`]). The copy budget counts it beside `disks`.
     custody: BTreeMap<String, injector::Custody>,
-    /// Injected journal damage the journal answered with a crash decision
-    /// (a refused open, #261): counted with the world store's crashed
-    /// injections by the exercised-detected oracle.
+    /// Damage the injector applied (#261), and how much of it the journal
+    /// answered with a crash decision (a refused open): the
+    /// exercised-detected oracle's count.
+    injections: usize,
     injected_crashes: u64,
     /// Acceptors (#176) whose power a `Batched` commit's cut may have left
     /// with an ambiguous last batch: lost copies, budgeted like rot (see
@@ -398,12 +159,6 @@ pub(crate) struct StorageWorld {
     /// ambiguous registration, a crash verdict: the run's one matchmaker
     /// loss (see [`StorageWorld::permit_matchmaker_power_cut`]).
     cut_matchmaker: Option<String>,
-    /// Matchmakers whose registry fsync has failed at least once this run.
-    /// The budget is what keeps the run winnable: at most `quorum - 1` of
-    /// the bootstrap set, so a matchmaking quorum always survives.
-    matchmaker_sync_failures: BTreeSet<String>,
-    /// Sticky Stage-7 gate facts.
-    s7: Stage7Flags,
     /// The operators' **reconfiguration ledger** (#198): every acceptor
     /// configuration a client asked for, by request id, with the round it
     /// started at once the leader said so. Recorded *before* the request
@@ -416,15 +171,6 @@ pub(crate) struct StorageWorld {
     /// Joiners an operator reserved for retirement through the node registry
     /// (#189): no later reconfiguration names one.
     retiring_joiners: BTreeSet<u64>,
-    /// Unbudgeted mode (the scripted corpus): a targeted injection may take
-    /// every copy of a record; each slot driven to zero readable copies is
-    /// recorded in `unrecoverable`, the ground truth the corpus's analytic
-    /// derivation is cross-checked against.
-    unbudgeted: bool,
-    /// Slots with no readable copy anywhere — no clean log record on any node
-    /// and no live node trimmed past them (only ever populated in unbudgeted
-    /// runs).
-    unrecoverable: BTreeSet<u64>,
 }
 
 impl StorageWorld {
@@ -513,7 +259,6 @@ impl StorageWorld {
         if self.parked.contains_key(key) || !self.may_park(key) {
             return false;
         }
-        self.disks.remove(key);
         self.marks.remove(key);
         self.custody.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
@@ -653,7 +398,6 @@ impl StorageWorld {
             return false;
         }
         self.parked.remove(key);
-        self.parked_ids.remove(&node);
         tracing::info!(node, "node_retirement_released");
         true
     }
@@ -677,7 +421,6 @@ impl StorageWorld {
         {
             return false;
         }
-        self.matchmakers.remove(key);
         self.parked_matchmakers.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
@@ -724,28 +467,6 @@ impl StorageWorld {
         self.cut_matchmaker.as_deref() == Some(key)
     }
 
-    /// Whether matchmaker `key` may fail its registry fsync now (#125).
-    ///
-    /// **The floor is structural.** A matchmaker whose fsync fails is a
-    /// matchmaker the driver fail-stops and the process restarts — and the
-    /// restart may lose its registry for good, which is only survivable
-    /// while a quorum of the bootstrap set is intact. So at most
-    /// `quorum - 1 = bootstrap / 2` distinct matchmakers may ever fail a
-    /// sync in one run; a matchmaker already in the set keeps failing (its
-    /// disk is the sick one), and a deployment too small to spare one
-    /// never fails at all.
-    pub(crate) fn permit_matchmaker_sync_failure(&mut self, key: &str, bootstrap: usize) -> bool {
-        if self.matchmaker_sync_failures.contains(key) {
-            return true;
-        }
-        if bootstrap == 0 || self.matchmaker_sync_failures.len() >= bootstrap / 2 {
-            return false;
-        }
-        self.matchmaker_sync_failures.insert(key.to_string());
-        tracing::info!(matchmaker = %key, "matchmaker_sync_failing");
-        true
-    }
-
     /// How many nodes *other than* `ip` are terminally parked — the persistent
     /// half of the "parked peer + transient process loss" overlap a restarting
     /// node reports to the audit.
@@ -754,17 +475,6 @@ impl StorageWorld {
             .keys()
             .filter(|parked| parked.as_str() != ip)
             .count()
-    }
-
-    /// The disk under `key`, created empty on first touch.
-    pub(super) fn disk_mut(&mut self, key: &str) -> &mut NodeDisk {
-        self.disks.entry(key.to_string()).or_default()
-    }
-
-    /// Declare the unbudgeted (corpus) mode: masks may exceed the per-record
-    /// budget, and every injection records the unrecoverable ground truth.
-    pub(crate) fn set_unbudgeted(&mut self) {
-        self.unbudgeted = true;
     }
 
     /// Size the copy budget: `n` is the run's configuration floor
@@ -835,13 +545,8 @@ impl StorageWorld {
                 unclean.insert(node);
             }
         }
-        for (node, disk) in &self.disks {
-            if disk.first_slot.0 > slot && !self.replicas.contains(node) {
-                unclean.insert(node);
-            }
-        }
         for (node, custody) in &self.custody {
-            if custody.first() > slot {
+            if custody.first() > slot && !self.replicas.contains(node) {
                 unclean.insert(node);
             }
         }
@@ -919,17 +624,10 @@ impl StorageWorld {
         }
         let quorum = self.quorum();
         let held: Vec<u64> = self
-            .disks
+            .custody
             .get(node_key)
-            .map(|disk| disk.accepted.keys().map(|slot| slot.0).collect::<Vec<_>>())
             .into_iter()
-            .flatten()
-            .chain(
-                self.custody
-                    .get(node_key)
-                    .into_iter()
-                    .flat_map(injector::Custody::holds),
-            )
+            .flat_map(injector::Custody::holds)
             .collect();
         for slot in held {
             let already_unclean = self
@@ -963,32 +661,20 @@ impl StorageWorld {
         true
     }
 
-    /// Terminally park a node by a detected corruption: detect ⇒ crash, and
-    /// it stays down.
-    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, node))]
-    fn park(&mut self, key: &str, node: u64) {
-        self.park_as(key, node, ParkReason::Corruption);
-    }
-
     /// Park `key` for `reason`, unless it is already down (the first reason
     /// wins).
     fn park_as(&mut self, key: &str, node: u64, reason: ParkReason) {
         self.parked.entry(key.to_string()).or_insert(reason);
-        self.parked_ids.insert(node);
+        tracing::info!(node, reason = ?reason, "storage_parked_identity");
     }
 
     /// Whether a **recoverable** corruption of the accepted record at `slot`
     /// on `node_key` is inside the per-record budget: the record must keep a
     /// clean quorum of live copies (#70's rule, re-counted over live copies at
-    /// injection time). The unbudgeted corpus lifts the bound, and
-    /// [`StorageWorld::note_if_unrecoverable`] records the ground truth its
-    /// analytic derivation is checked against.
+    /// injection time).
     fn may_corrupt_record(&self, node_key: &str, slot: u64) -> bool {
         if self.cluster_size == 0 {
             return false;
-        }
-        if self.unbudgeted {
-            return true;
         }
         let already = self
             .marks
@@ -998,220 +684,15 @@ impl StorageWorld {
             .saturating_sub(usize::from(!already))
             >= self.quorum()
     }
-
-    /// Whether `slot` has **no readable copy anywhere**: every disk that holds
-    /// its accepted record holds it unhealthy or sits on a parked node, and no
-    /// live disk trimmed past it (a trimmed slot is chosen and needed by no
-    /// one: a laggard jumps over it with `TrimmedTo`, #186). Ground truth for
-    /// the corpus.
-    fn slot_unrecoverable(&self, slot: u64) -> bool {
-        for (key, disk) in &self.disks {
-            if self.parked.contains_key(key) {
-                continue;
-            }
-            if disk.first_slot.0 > slot {
-                return false;
-            }
-            if disk.accepted.contains_key(&Slot(slot)) && disk.slot_health(Slot(slot)).clean() {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// After an unbudgeted injection touched `slot`, record it unrecoverable if
-    /// no readable copy survives.
-    fn note_if_unrecoverable(&mut self, slot: u64) {
-        if self.unbudgeted && !self.unrecoverable.contains(&slot) && self.slot_unrecoverable(slot) {
-            self.unrecoverable.insert(slot);
-            tracing::info!(slot, "slot_unrecoverable");
-        }
-    }
-
-    /// A clean flush (or truncation custodianship) genuinely resolved the
-    /// standing report on `(node, record)`.
-    fn note_recovered(&mut self, node: u64, record: StorageRecord) {
-        for injection in &mut self.corruptions {
-            if injection.node == node
-                && injection.record == record
-                && matches!(
-                    injection.outcome,
-                    CorruptionOutcome::Dormant | CorruptionOutcome::Reported
-                )
-            {
-                injection.outcome = CorruptionOutcome::Recovered;
-                self.s7.record_recovered = true;
-            }
-        }
-    }
-
-    /// Record one Stage-7 injection's ground truth.
-    fn note_corruption(&mut self, injection: CorruptionInjection) {
-        tracing::info!(
-            node = injection.node,
-            record = %injection.record,
-            kind = ?injection.kind,
-            block = injection.block,
-            "corruption_injected"
-        );
-        self.corruptions.push(injection);
-    }
-
-    /// Resolve the dormant ledger entries matching `(node, record)` — the boot
-    /// scan read them back. The first match takes `outcome`; when `outcome` is
-    /// [`CorruptionOutcome::Crashed`], further matches co-resolve (one crash
-    /// decision covers the whole scan).
-    fn resolve_corruption(&mut self, node: u64, record: StorageRecord, outcome: CorruptionOutcome) {
-        let mut first = true;
-        for injection in &mut self.corruptions {
-            if injection.node == node
-                && injection.record == record
-                && injection.outcome == CorruptionOutcome::Dormant
-            {
-                injection.outcome = if first {
-                    outcome
-                } else {
-                    CorruptionOutcome::CoDetected
-                };
-                first = false;
-                // A resolved member of a multi-record block fault proves the
-                // contiguous-run family was genuinely read back and detected.
-                // A reachable anchor, NOT a sometimes: the composition needs a
-                // log still holding a contiguous clean run when the rot site
-                // fires, and truncation-heavy runs keep logs short — CI's
-                // coverage-guided schedule starved a per-sweep gate on it
-                // (0/452 checks, run 33117691030) even after the sub-roll was
-                // widened, while every other family gate fired. Per the
-                // assertion doctrine, a leg the sweep is not *certain* to
-                // reach anchors exploration when hit and never fails coverage.
-                if injection.block {
-                    assert_reachable!(
-                        "storage: a block fault corrupts a contiguous run of entries"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Decide one injection under the budget. `accepted_slots` are the
-    /// accepted-log records the fault would suppress on `node` when the lost
-    /// leg is taken; the check is conservative (it hypothesizes the loss even
-    /// when the seeded outcome will be "persisted anyway"). Returns whether
-    /// the injection is permitted, recording ground truth and marks if so.
-    fn permit_and_record(
-        &mut self,
-        node_key: &str,
-        fault: InjectedFault,
-        accepted_slots: &[u64],
-    ) -> bool {
-        if self.cluster_size == 0 {
-            return false;
-        }
-        let quorum = self.quorum();
-        // Per-record, cluster-wide budget over live copies: refuse an injection
-        // that would leave any touched record with fewer than `quorum` clean
-        // copies.
-        let marked = |slot: &u64| {
-            self.marks
-                .get(node_key)
-                .is_some_and(|marks| marks.contains(slot))
-        };
-        for slot in accepted_slots {
-            let hypothetical_loss = usize::from(!marked(slot));
-            if self.clean_copies(*slot).saturating_sub(hypothetical_loss) < quorum {
-                return false;
-            }
-        }
-        // Second-order cap: never fault every accepted record of one node — a
-        // fully-faulted node is permanent unavailability, not a recoverable
-        // state (`TigerBeetle`'s "never corrupt all chunks of a replica").
-        if let Some(disk) = self.disks.get(node_key)
-            && !disk.accepted.is_empty()
-        {
-            let all_marked = disk.accepted.keys().all(|slot| {
-                accepted_slots.contains(&slot.0)
-                    || self
-                        .marks
-                        .get(node_key)
-                        .is_some_and(|marks| marks.contains(&slot.0))
-            });
-            if all_marked {
-                return false;
-            }
-        }
-        if !fault.persisted {
-            let marks = self.marks.entry(node_key.to_string()).or_default();
-            marks.extend(accepted_slots.iter().copied());
-        }
-        // The injection's ground truth, surfaced for the trace (the node itself
-        // only ever learns the ambiguous error).
-        tracing::info!(
-            node = fault.node,
-            record = %fault.record,
-            kind = match fault.kind {
-                InjectedFaultKind::WriteEio => "write_eio",
-                InjectedFaultKind::FsyncFailed => "fsync_failed",
-            },
-            persisted = fault.persisted,
-            "storage_fault_injected"
-        );
-        self.injected.push(fault);
-        // The budget is asserted, not assumed: after every permitted
-        // injection, each touched record still has a clean quorum, and the
-        // node still holds at least one clean accepted record if it holds any.
-        for slot in accepted_slots {
-            let clean = self.clean_copies(*slot);
-            assert_always!(
-                clean >= quorum,
-                "storage: the per-record fault budget keeps a clean quorum of live copies",
-                { "slot" => *slot, "clean" => clean as u64, "quorum" => quorum as u64 }
-            );
-        }
-        if let Some(disk) = self.disks.get(node_key)
-            && !disk.accepted.is_empty()
-        {
-            let any_clean = disk.accepted.keys().any(|slot| {
-                !self
-                    .marks
-                    .get(node_key)
-                    .is_some_and(|marks| marks.contains(&slot.0))
-            });
-            assert_always!(
-                any_clean,
-                "storage: a fault never blankets every record of one node"
-            );
-        }
-        true
-    }
-
-    /// A clean flush re-wrote these accepted records on `node`: their lost-leg
-    /// marks clear (the copy is durably real again). This is recovery doing
-    /// its job, not the world healing anything.
-    fn clear_marks(&mut self, node_key: &str, accepted_slots: impl Iterator<Item = u64>) {
-        if let Some(marks) = self.marks.get_mut(node_key) {
-            for slot in accepted_slots {
-                marks.remove(&slot);
-            }
-        }
-    }
 }
 
 // --- storage-fault ground truth for the oracles -------------------------------
 
-/// Snapshot of the [`StorageWorld`]'s injected-fault ground truth, folded for
-/// the workload's `check()` phase.
-///
-/// The bools are independent sticky quadrant facts, not a state machine (same
-/// waiver as the audit's flag set).
-#[allow(clippy::struct_excessive_bools)]
+/// Snapshot of the [`StorageWorld`]'s fault ground truth, folded for the
+/// workload's `check()` phase.
 pub(crate) struct StorageFaultStats {
-    /// Permitted injections, in order (the ground truth ledger).
+    /// I/O faults the journal stores surfaced from the simulated disk.
     pub(crate) injected: usize,
-    /// Sticky per-quadrant facts (item C: all four ambiguity quadrants).
-    pub(crate) eio_landed: bool,
-    pub(crate) eio_lost: bool,
-    pub(crate) fsync_durable: bool,
-    pub(crate) fsync_lost: bool,
     /// Re-derived from current world state: every fault-marked accepted
     /// record still has at least a quorum of clean live copies. Under the
     /// injection-time budget this must always hold; it is re-derived
@@ -1229,21 +710,9 @@ pub(crate) fn storage_fault_stats(
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
     let mut stats = StorageFaultStats {
-        injected: guard.injected.len() + guard.disk_faults,
-        eio_landed: false,
-        eio_lost: false,
-        fsync_durable: false,
-        fsync_lost: false,
+        injected: guard.disk_faults,
         clean_quorum_everywhere: true,
     };
-    for fault in &guard.injected {
-        match (fault.kind, fault.persisted) {
-            (InjectedFaultKind::WriteEio, true) => stats.eio_landed = true,
-            (InjectedFaultKind::WriteEio, false) => stats.eio_lost = true,
-            (InjectedFaultKind::FsyncFailed, true) => stats.fsync_durable = true,
-            (InjectedFaultKind::FsyncFailed, false) => stats.fsync_lost = true,
-        }
-    }
     let quorum = guard.quorum();
     let marked: BTreeSet<u64> = guard
         .marks
@@ -1254,11 +723,10 @@ pub(crate) fn storage_fault_stats(
         // The availability re-derivation deliberately differs from the
         // injection-time budget formula: here a peer that truncated past the
         // slot counts as *clean* — its truncation was decided, so it answers a
-        // laggard with its trim point — while only a
-        // live lost-write/corruption mark or a terminally parked node makes a
-        // copy unclean. The budget stays conservative (truncated peers don't
-        // count there); this independent count is what an unavailable run is
-        // judged against.
+        // laggard with its trim point — while only a live damage mark or a
+        // terminally parked node makes a copy unclean. The budget stays
+        // conservative (truncated peers don't count there); this independent
+        // count is what an unavailable run is judged against.
         let unclean: BTreeSet<&String> = guard
             .marks
             .iter()
@@ -1278,14 +746,6 @@ pub(crate) fn storage_fault_stats(
         }
     }
     stats
-}
-
-/// Slots an unbudgeted (corpus) run drove to zero readable copies; empty on
-/// the budgeted main campaign.
-pub(crate) fn unrecoverable_slots(handle: &StateHandle) -> BTreeSet<u64> {
-    let world = storage_world(handle);
-    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.unrecoverable.clone()
 }
 
 /// The IPs of nodes that are down for good: terminally parked by a detected
@@ -1309,108 +769,17 @@ pub(crate) fn parked_matchmakers(handle: &StateHandle) -> BTreeSet<String> {
     guard.parked_matchmakers.clone()
 }
 
-// --- corpus support: world probes + targeted mask injection -------------------
-
-/// One node's durable evidence, for the corpus workloads' deterministic waits
-/// (world-truth probes: replication and floors — the corpus still verifies
-/// final outcomes over live RPC reads).
-pub(crate) struct CorpusDiskProbe {
-    /// Retained accepted slots whose record reads back clean and witnessed.
-    pub(crate) clean_slots: BTreeSet<u64>,
-    /// The durable compaction floor.
-    pub(crate) floor: u64,
-    /// The durable chosen index.
-    pub(crate) chosen_index: Option<u64>,
-}
-
-/// Whether `ip`'s durable registry still holds a registration naming `node` —
-/// the departed-straggler case's real precondition (#124): the configuration
-/// the reconfiguration left behind must still be answerable, or the case is
-/// superseded by the garbage collection it is trying to outrun. The raw
-/// watermark is not that test: an ordinary leader raises it as soon as its
-/// leadership settles, long before it collects anything the case needs.
-pub(crate) fn corpus_matchmaker_remembers(handle: &StateHandle, ip: &str, node: u64) -> bool {
-    let world = storage_world(handle);
-    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.matchmakers.get(ip).is_some_and(|disk| {
-        disk.registry
-            .values()
-            .any(|registration| registration.config.contains(paros::NodeId(node)))
-    })
-}
-
-pub(crate) fn corpus_disk_probe(handle: &StateHandle, ip: &str) -> Option<CorpusDiskProbe> {
-    disk_probe_for(handle, crate::shape::identifiers(handle).main, ip)
-}
-
-/// [`corpus_disk_probe`] of `journal`'s disk on `ip` (#188).
-pub(crate) fn disk_probe_for(
-    handle: &StateHandle,
-    journal: paros::JournalIdentifier,
-    ip: &str,
-) -> Option<CorpusDiskProbe> {
-    let world = storage_world_for(handle, journal);
-    let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.disks.get(ip).map(|disk| CorpusDiskProbe {
-        clean_slots: disk
-            .accepted
-            .keys()
-            .filter(|slot| disk.slot_health(**slot).clean())
-            .map(|slot| slot.0)
-            .collect(),
-        floor: disk.first_slot.0,
-        chosen_index: disk.hard_state.chosen_index.map(|slot| slot.0),
-    })
-}
-
-/// Targeted E1 mask corruption of one accepted record — value lost, identity
-/// preserved (the recoverable class). Deliberately unbudgeted: the world
-/// records the unrecoverable ground truth the analytic mask derivation
-/// cross-checks. Returns whether a clean record was
-/// there to corrupt.
-#[tracing::instrument(level = "debug", skip(handle), fields(ip = %ip, node, slot))]
-pub(crate) fn corpus_corrupt_entry(handle: &StateHandle, ip: &str, node: u64, slot: u64) -> bool {
-    let world = storage_world(handle);
-    let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(disk) = guard.disks.get_mut(ip) else {
-        return false;
-    };
-    if !disk.accepted.contains_key(&Slot(slot)) || !disk.slot_health(Slot(slot)).clean() {
-        return false;
-    }
-    disk.entry_health.insert(
-        Slot(slot),
-        SlotHealth {
-            entry: RecordHealth::Faulty,
-            id: WitnessStatus::Present,
-        },
-    );
-    guard.marks.entry(ip.to_string()).or_default().insert(slot);
-    guard.note_corruption(CorruptionInjection::dormant(
-        node,
-        StorageRecord::Accepted(Slot(slot)),
-        CorruptionKind::BitFlip,
-    ));
-    guard.note_if_unrecoverable(slot);
-    true
-}
-
-/// Snapshot of the Stage-7 corruption ground truth, folded for `check()`.
+/// Snapshot of the injector's ground truth (#261), folded for `check()`.
 pub(crate) struct CorruptionStats {
-    /// Corruption injections recorded this run, in total.
+    /// Damage the injector applied this run.
     pub(crate) injected: usize,
-    /// Ledger entries whose read surfaced as the one typed crash decision.
+    /// Injected damage the journal answered with the one typed crash
+    /// decision (a refused open).
     pub(crate) crashed: u64,
-    /// Every ledger entry is accounted for: resolved, or legitimately dormant
-    /// (on a parked node the scan never re-reads, or a torn tail the run
-    /// ended before rebooting).
-    pub(crate) accounted: bool,
     /// Terminally parked nodes, and whether they stayed within the dead-node
     /// budget (a live quorum survives).
     pub(crate) parked: usize,
     pub(crate) parked_within_budget: bool,
-    /// Sticky per-family / per-verdict gate facts.
-    flags: Stage7Flags,
 }
 
 pub(crate) fn corruption_stats(
@@ -1419,53 +788,26 @@ pub(crate) fn corruption_stats(
 ) -> CorruptionStats {
     let world = storage_world_for(handle, journal);
     let guard = world.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut crashed = 0_u64;
-    let mut accounted = true;
-    for injection in &guard.corruptions {
-        match injection.outcome {
-            CorruptionOutcome::Crashed => crashed += 1,
-            // Exercised-vs-dormant tracking (the oracle must not overclaim):
-            // an injected fault on a never-read record is not a detection
-            // failure — but "never read" must be genuine: the node parked
-            // before the scan could reach this record, or a torn tail the run
-            // ended before rebooting through.
-            CorruptionOutcome::Dormant => {
-                let legal = injection.kind == CorruptionKind::TornTail
-                    || guard.parked_ids.contains(&injection.node);
-                if !legal {
-                    accounted = false;
-                }
-            }
-            CorruptionOutcome::CoDetected
-            | CorruptionOutcome::Repaired
-            | CorruptionOutcome::DiscardedTail
-            // Stage 8: a standing report (a run may end mid-repair, or WAITED)
-            // and a genuinely re-written record are both fully accounted.
-            | CorruptionOutcome::Reported
-            | CorruptionOutcome::Recovered => {}
-        }
-    }
     CorruptionStats {
-        injected: guard.corruptions.len(),
-        crashed: crashed + guard.injected_crashes,
-        accounted,
+        injected: guard.injections,
+        crashed: guard.injected_crashes,
         parked: guard.detected_parks(),
         parked_within_budget: guard.detected_parks() <= guard.dead_budget(),
-        flags: guard.s7,
     }
 }
 
-/// The storage-fault coverage gates + the injected↔detected correlation,
-/// evaluated once per run from the workload's `check()` (the shared-gate
-/// doctrine in [`crate::audit`]).
+/// The storage-fault gates + the injected↔detected correlation, evaluated
+/// once per run from the workload's `check()` (the shared-gate doctrine in
+/// [`crate::audit`]). The per-family verdicts are judged at each boot
+/// ([`injector::judge`]); what is left for the end of the run is the counts.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalIdentifier) {
     let stats = storage_fault_stats(handle, journal);
     let corruption = corruption_stats(handle, journal);
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
-    // Injected fault ↔ surfaced error ↔ crash decision correlate 1:1, typed,
-    // with no string parsing: a spontaneous (non-injected) storage fault or a
-    // swallowed injection both break this count.
+    // Surfaced I/O fault ↔ crash decision correlate 1:1, typed, with no
+    // string parsing: a spontaneous storage fault or a swallowed one both
+    // break this count.
     assert_always!(
         detected == u64::try_from(stats.injected).unwrap_or(u64::MAX),
         "storage: every injected fault surfaces as exactly one typed crash decision",
@@ -1478,48 +820,9 @@ pub(crate) fn check_storage_gates(handle: &StateHandle, journal: paros::JournalI
         stats.clean_quorum_everywhere,
         "storage: injected faults never cost a record its clean quorum of live copies"
     );
-    check_corruption_gates(handle, journal, &corruption);
-    // The #71 compound gate: corruption x partition x a lagging follower
-    // reached in one run (the network swarm IS the partition; lag is the
-    // audit's observed fact). It used to ride the safety-only axis, which was
-    // the only one carrying swarm network turbulence; since #126 folded that
-    // turbulence into the main campaign, the main campaign is where the
-    // compound is reachable and where it must saturate.
-    assert_sometimes!(
-        corruption.injected > 0 && crate::audit::audit_world_for(handle, journal).lag_observed(),
-        "storage: corruption compounds with a partition and a lagging follower"
-    );
-    assert_sometimes!(
-        stats.eio_landed,
-        "storage: EIO was reported but the write landed"
-    );
-    assert_sometimes!(
-        stats.eio_lost,
-        "storage: EIO was reported and the write was lost"
-    );
-    assert_sometimes!(
-        stats.fsync_durable,
-        "storage: fsync failed but the batch was durable anyway"
-    );
-    assert_sometimes!(
-        stats.fsync_lost,
-        "storage: fsync failed and the batch was genuinely lost"
-    );
-}
-
-/// The Stage-7 half of the storage oracle (issue #20 F): the exercised ⇔
-/// detected correlation, the dead-node budget, and the per-family /
-/// per-verdict coverage gates.
-fn check_corruption_gates(
-    handle: &StateHandle,
-    journal: paros::JournalIdentifier,
-    corruption: &CorruptionStats,
-) {
-    // Every exercised corruption is detected as exactly one typed crash
-    // decision — a spontaneous corruption detection (nothing injected) or a
-    // swallowed injection both break the count — and every injection is
-    // accounted for (crashed, co-detected, repaired, discarded, or genuinely
-    // never read).
+    // Every injected damage the journal refused is exactly one typed crash
+    // decision: a spontaneous corruption detection (nothing injected) or a
+    // swallowed one both break the count.
     let corruption_crashes =
         crate::audit::audit_world_for(handle, journal).corruption_faults_detected();
     assert_always!(
@@ -1530,10 +833,6 @@ fn check_corruption_gates(
             "detected" => corruption_crashes
         }
     );
-    assert_always!(
-        corruption.accounted,
-        "storage: every corruption injection is detected, resolved, or genuinely unread"
-    );
     // The availability cost of detect ⇒ crash is bounded a priori: a
     // corruption-parked minority never costs the cluster its live quorum.
     assert_always!(
@@ -1541,60 +840,11 @@ fn check_corruption_gates(
         "storage: corruption never parks a quorum of nodes",
         { "parked" => u64::try_from(corruption.parked).unwrap_or(u64::MAX) }
     );
-    // Stage-7 family gates (issue #20 D): one per injected fault family,
-    // proving the sweep genuinely visits each detection channel.
-    let s7 = corruption.flags;
+    // The #71 compound gate: corruption x partition x a lagging follower
+    // reached in one run (the network swarm IS the partition; lag is the
+    // audit's observed fact).
     assert_sometimes!(
-        s7.bitflip_detected,
-        "storage: a bit-flip corruption is detected on read"
-    );
-    assert_sometimes!(
-        s7.lost_write_detected,
-        "storage: a lost write is detected by the reserved-record contract"
-    );
-    assert_sometimes!(
-        s7.misdirected_detected,
-        "storage: a misdirected write is caught by the identity check"
-    );
-    assert_sometimes!(
-        s7.read_eio_detected,
-        "storage: a read EIO degrades to a checksum mismatch"
-    );
-    assert_sometimes!(
-        s7.torn_tail_discarded,
-        "storage: a crash-truncatable tail is discarded on boot"
-    );
-    assert_sometimes!(
-        s7.promise_repaired,
-        "storage: one bad promise copy is repaired from its twin"
-    );
-    assert_sometimes!(
-        s7.metadata_crashed,
-        "storage: an fs-metadata fault reliably crashes the node"
-    );
-    // Per-verdict gates (issue #20 C): the disentanglement table's ambiguous
-    // rows are genuinely reached, not just the happy path.
-    assert_sometimes!(
-        s7.corruption_below_tail,
-        "storage: corruption below the tail is classified"
-    );
-    assert_sometimes!(
-        s7.last_entry_ambiguity,
-        "storage: the last-entry ambiguity is classified"
-    );
-    assert_sometimes!(
-        s7.identifier_lost,
-        "storage: an identifier lost with its entry is classified"
-    );
-    // Stage 8 (issue #21): the recover-or-wait flip is genuinely exercised —
-    // rotted-but-identified records are *reported* (the node keeps serving)
-    // and genuinely *repaired* by the cluster, not merely classified.
-    assert_sometimes!(
-        s7.faulty_reported,
-        "storage: a rotted record is reported faulty and the node keeps serving"
-    );
-    assert_sometimes!(
-        s7.record_recovered,
-        "storage: a reported faulty record is repaired by the cluster"
+        corruption.injected > 0 && crate::audit::audit_world_for(handle, journal).lag_observed(),
+        "storage: corruption compounds with a partition and a lagging follower"
     );
 }

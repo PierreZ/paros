@@ -15,7 +15,7 @@
 //! registry gives the attrition path the same guarantee.
 //!
 //! What is deliberately **not** here: durable Paxos state (that is the
-//! [`StorageWorld`](crate::world::StorageWorld)'s concern — the shape says how a
+//! journal stores' concern — the shape says how a
 //! node is perturbed, never what it has promised or accepted), and the
 //! per-*event* draws that describe one crash rather than one node — a restart
 //! delay is drawn at the crash it delays, because two crashes of the same node
@@ -26,8 +26,7 @@
 //!
 //! The registry is published on the per-iteration `StateHandle`, like the
 //! storage world and the audit: fresh per seed, shared by every node, and
-//! surviving every restart. Only a perturbing (main-campaign) node draws; the
-//! scripted corpus takes the production defaults without spending randomness.
+//! surviving every restart.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -35,7 +34,6 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
 
-use crate::world::storage::WritePathRates;
 use paros::{
     DriverTunables, JournalId, JournalIdentifier, JournalStoreConfig, QuorumSystem, TenantId,
 };
@@ -73,8 +71,6 @@ pub(crate) struct NodeShape {
     /// crash probability. The seams are only ever consulted with a batch in
     /// flight, so biasing them *is* biasing crashes into the write window.
     pub(crate) seam_crash_bias: f64,
-    /// The node's disk: its write-path fault rates.
-    pub(crate) write_rates: WritePathRates,
     /// Percent chance that a chaotic restart of this node comes back on an
     /// empty disk (#124, `crate::process`). Floor 5: the coin must stay rare
     /// enough that a run is a run and not an all-amnesia cluster (a node that
@@ -100,19 +96,7 @@ pub(crate) struct NodeShape {
 }
 
 impl NodeShape {
-    /// The production shape: every knob at its default, nothing drawn.
-    fn production() -> Self {
-        Self {
-            tunables: DriverTunables::default(),
-            seam_crash_bias: 1.0,
-            write_rates: WritePathRates::default(),
-            wipe_pct: DEFAULT_LOSS_PCT,
-            matchmaker_loss_pct: DEFAULT_LOSS_PCT,
-            config_edit_pct: DEFAULT_CONFIG_EDIT_PCT,
-        }
-    }
-
-    /// Draw one perturbing node's shape — born workload-buggified (AGENTS.md
+    /// Draw one node's shape — born workload-buggified (AGENTS.md
     /// prong 2): every default is production's constant, and an activated
     /// seed draws an extreme. One `buggify_knob!` location per knob, so a
     /// seed can be extreme in one dimension and ordinary in the next.
@@ -321,7 +305,6 @@ impl NodeShape {
         Self {
             tunables,
             seam_crash_bias,
-            write_rates: WritePathRates::draw(),
             wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),
@@ -338,8 +321,8 @@ pub(crate) struct Incarnation {
 
 impl Incarnation {
     /// Whether this boot follows a process-level kill of the same node — a
-    /// moonpool attrition restart on the main campaign, a scripted restart on
-    /// the corpus. Seam-crash restarts never leave `run()` and so never come
+    /// moonpool attrition restart, or the chain client's scripted restart.
+    /// Seam-crash restarts never leave `run()` and so never come
     /// through here.
     pub(crate) fn is_restart(&self) -> bool {
         self.number > 1
@@ -504,9 +487,12 @@ struct Registry {
     /// Run-level: the journals every node serves and the one held for the
     /// chaos window (see [`journals`]), fixed by the first caller.
     journals: Option<JournalPlan>,
-    /// Run-level: whether the nodes run on the journal store, and its
-    /// layout (see [`journal_store`]), fixed by the first caller.
-    journal_store: Option<StoreDraw>,
+    /// Run-level: the journal stores' layout (see [`journal_layout`]),
+    /// fixed by the first caller.
+    journal_store: Option<JournalStoreConfig>,
+    /// Run-level: whether the nodes withhold their GC requests for the
+    /// chaos window (see [`withhold_gc`]), fixed by the first caller.
+    withhold_gc: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -614,39 +600,23 @@ impl JournalPlan {
     }
 }
 
-/// Whether the run's acceptors and matchmakers store on the library's
-/// journal stores (`JournalStorage`, `JournalMatchmakerStorage`) over the
-/// simulated disk instead of the world-backed stores, and with which
-/// layout: drawn once per seed, a seeded coin on every perturbed seed,
-/// plain or with matchmakers (#176). Half the seeds keep the world stores,
-/// whose corruption coins and copy budget are the CTRL coverage the
-/// journal stores do not carry yet (#261); a journal seed injects no rot,
-/// its storage faults are moonpool's crash physics on the simulated disk.
-/// The corpus (`perturb == false`) stays on the world store.
-///
-/// The layout is a draw too: the commit protocol (two syncs by default,
-/// CLSTORE's one at the extreme) and the segment geometry
-/// ([`journal_geometry`]). The draw is paired with a `reachable`.
-#[tracing::instrument(level = "debug", skip_all, fields(perturb))]
-pub(crate) fn journal_store(state: &StateHandle, perturb: bool) -> Option<JournalStoreConfig> {
+/// The layout of the run's journal stores (`JournalStorage`,
+/// `JournalMatchmakerStorage`, over the simulated disk; every role stores
+/// on them since the world stores went, #261): drawn once per seed by
+/// whoever asks first. The commit protocol is a knob whose default is
+/// production's, two syncs (always decided); the extreme is CLSTORE's one
+/// sync, whose last batch a crash can leave ambiguous. Both are valid
+/// stores. The segment geometry is [`journal_geometry`].
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    let draw = *guard.journal_store.get_or_insert_with(|| {
-        // Deployment shape, like the process groups' counts: a seeded coin,
-        // not a knob's extreme.
-        if !perturb || !moonpool_sim::sim_random_bool(0.5) {
-            return StoreDraw::World;
-        }
-        // BUGGIFY pairing: a seed genuinely runs its nodes on JournalStorage.
-        assert_reachable!("journal store: a seed runs its nodes on JournalStorage");
-        // The commit protocol, a knob whose default is production's: two
-        // syncs (always decided); the extreme is CLSTORE's one sync, whose
-        // last batch a crash can leave ambiguous. Both are valid stores.
+    *guard.journal_store.get_or_insert_with(|| {
         let batched = buggify_knob!(0_u64, 1_u64..2_u64) == 1;
         if batched {
             assert_reachable!("journal store: a seed commits with one sync per batch");
         }
-        StoreDraw::Journal(JournalStoreConfig {
+        JournalStoreConfig {
             durability: if batched {
                 paros::journal::Durability::Batched
             } else {
@@ -654,12 +624,28 @@ pub(crate) fn journal_store(state: &StateHandle, perturb: bool) -> Option<Journa
             },
             geometry: journal_geometry(),
             ..JournalStoreConfig::small()
-        })
-    });
-    match draw {
-        StoreDraw::World => None,
-        StoreDraw::Journal(layout) => Some(layout),
-    }
+        }
+    })
+}
+
+/// Whether the run's nodes withhold every GC request for the chaos window
+/// (`DriverHooks::withhold_gc_requests`, #263): drawn once per seed, its own
+/// BUGGIFY location. A leader that collects nothing keeps every prior
+/// configuration answerable, which is what makes a straggler a
+/// reconfiguration removed still worth waiting for: the departed-straggler
+/// shape. Rare-but-valid: GC is liveness of space,
+/// never of the log, and it resumes in the recovery tail.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.withhold_gc.get_or_insert_with(|| {
+        let withheld = moonpool_sim::buggify_with_prob!(0.25);
+        if withheld {
+            assert_reachable!("gc: a seed withholds its GC requests for the chaos window");
+        }
+        withheld
+    })
 }
 
 /// The fewest blocks a segment's entry log may have (floor of
@@ -734,8 +720,8 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// Whether the run runs the **system journals** (#189) — the directory and
 /// the node registry on the seeds, every node following them, and the
 /// joiners joining the pool through the registry — drawn once per seed: a
-/// seeded coin on a perturbed seed. Deployment shape, like
-/// [`journal_store`]: half the seeds keep #188's static deployment. On a
+/// seeded coin. Deployment shape: half the seeds keep #188's static
+/// deployment. On a
 /// seed with matchmakers a joiner the registry admits joins the default
 /// journal as a spare a reconfiguration may pull in.
 ///
@@ -749,12 +735,12 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// gate ("a tenant removal resumed after a crash") is bounded by the
 /// `TENANT` weight, the name alphabet and the removal's own crash location
 /// in `chain_workload/fleet.rs`, not by this draw.
-#[tracing::instrument(level = "debug", skip(state), fields(perturb))]
-pub(crate) fn system_journals(state: &StateHandle, perturb: bool) -> bool {
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn system_journals(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.system.get_or_insert_with(|| {
-        if !perturb || !moonpool_sim::sim_random_bool(0.5) {
+        if !moonpool_sim::sim_random_bool(0.5) {
             return false;
         }
         // BUGGIFY pairing: a seed genuinely runs the system journals (a
@@ -795,19 +781,9 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
         .clone()
 }
 
-/// The run's store draw (see [`journal_store`]).
-#[derive(Clone, Copy, Debug)]
-enum StoreDraw {
-    /// The world-backed store.
-    World,
-    /// The journal store, with its layout.
-    Journal(JournalStoreConfig),
-}
-
 /// The run's journals (#188), drawn once per seed by whoever asks first — a
 /// node or a client. The count is a `buggify_knob!` (default 1, extreme
-/// 2..=3; floor 1, the one-journal campaign); a corpus run (`perturb ==
-/// false`) serves the default journal alone. A seed with matchmakers draws
+/// 2..=3; floor 1, the one-journal campaign). A seed with matchmakers draws
 /// the count too (#201): PR #199 restricted it to one journal after the
 /// first multi-journal hunt livelocked a matchmaker campaign under the
 /// tripled traffic (witness 7568743934611962292); the driver's election
@@ -820,19 +796,15 @@ enum StoreDraw {
 /// multi-journal seed a second location draws whether one journal is
 /// **held** on every node for the chaos window (`DriverHooks::hold_journal`):
 /// its siblings must keep committing.
-#[tracing::instrument(level = "debug", skip(state), fields(perturb))]
-pub(crate) fn journals(state: &StateHandle, perturb: bool) -> JournalPlan {
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
     let main = identifiers(state).main;
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .journals
         .get_or_insert_with(|| {
-            let count = if perturb {
-                buggify_knob!(1_u64, 2_u64..4_u64)
-            } else {
-                1
-            };
+            let count = buggify_knob!(1_u64, 2_u64..4_u64);
             // The first journal is the deployment's ([`Identifiers::main`]);
             // every other one's identifier is drawn (#235): a random journal id,
             // in the main journal's tenant or a random one — and, in another
@@ -885,19 +857,13 @@ fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
 }
 
 /// Boot `ip` once more: hand back the shape its first incarnation drew, drawing
-/// it now if this *is* the first incarnation. `perturb` selects the drawn
-/// (main-campaign) shape over the production one; it is a property of the
-/// campaign, so every incarnation of a node passes the same value.
-#[tracing::instrument(level = "debug", skip(state), fields(ip = %ip, perturb))]
-pub(crate) fn boot(state: &StateHandle, ip: &str, perturb: bool) -> Incarnation {
+/// it now if this *is* the first incarnation.
+#[tracing::instrument(level = "debug", skip(state), fields(ip = %ip))]
+pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| Entry {
-        shape: if perturb {
-            NodeShape::draw()
-        } else {
-            NodeShape::production()
-        },
+        shape: NodeShape::draw(),
         incarnations: 0,
     });
     entry.incarnations += 1;
@@ -927,14 +893,14 @@ pub(crate) fn boot(state: &StateHandle, ip: &str, perturb: bool) -> Incarnation 
 /// floor `rows >= 2` and `cols >= 2`; default no grid), so a seed can be
 /// extreme in one system and never the other. Both are opt-in configuration
 /// data on the core side, so a majority seed is byte-identical to a run
-/// before the policy existed; a corpus run (`perturb == false`) never draws.
-#[tracing::instrument(level = "debug", skip(state), fields(pool, perturb))]
-pub(crate) fn quorum_policy(state: &StateHandle, pool: usize, perturb: bool) -> QuorumPolicy {
+/// before the policy existed.
+#[tracing::instrument(level = "debug", skip(state), fields(pool))]
+pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.quorum.get_or_insert_with(|| {
         let majority = pool / 2 + 1;
-        if !perturb || pool < 2 {
+        if pool < 2 {
             return QuorumPolicy::Majority;
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
@@ -1012,13 +978,8 @@ pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
 /// a seed can bootstrap on `{2, 3, 4}` of a five-node pool and leave
 /// `{0, 1}` — the lowest ranks, the ones every "first node" heuristic would
 /// pick — outside.
-#[tracing::instrument(level = "debug", skip(state), fields(pool, has_matchmakers, perturb))]
-pub(crate) fn bootstrap_ranks(
-    state: &StateHandle,
-    pool: usize,
-    has_matchmakers: bool,
-    perturb: bool,
-) -> Vec<u64> {
+#[tracing::instrument(level = "debug", skip(state), fields(pool, has_matchmakers))]
+pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers: bool) -> Vec<u64> {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1027,7 +988,7 @@ pub(crate) fn bootstrap_ranks(
             let all: Vec<u64> = (0..pool)
                 .map(|i| u64::try_from(i).unwrap_or(u64::MAX))
                 .collect();
-            if !(perturb && has_matchmakers && pool > MIN_BOOTSTRAP) {
+            if !(has_matchmakers && pool > MIN_BOOTSTRAP) {
                 return all;
             }
             let size = buggify_knob!(pool, MIN_BOOTSTRAP..pool);
@@ -1050,22 +1011,6 @@ pub(crate) fn bootstrap_ranks(
         .clone()
 }
 
-/// A scripted case's **fixed bootstrap ranks**: `0..n`, installed by whoever
-/// asks first (every scripted node asks with the same `n`) so the corpus can
-/// stage a spare outside the bootstrap configuration without a draw.
-pub(crate) fn fixed_bootstrap_ranks(state: &StateHandle, n: usize) -> Vec<u64> {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .bootstrap
-        .get_or_insert_with(|| {
-            (0..n)
-                .map(|i| u64::try_from(i).unwrap_or(u64::MAX))
-                .collect()
-        })
-        .clone()
-}
-
 /// The run's **bootstrap matchmaker ranks** (#125): generation 0's set, drawn
 /// once per seed by whichever process or workload asks first. The default is
 /// the whole matchmaker pool; a perturbing seed with two or more matchmakers
@@ -1073,12 +1018,8 @@ pub(crate) fn fixed_bootstrap_ranks(state: &StateHandle, n: usize) -> Vec<u64> {
 /// a valid registry that tolerates no loss), leaving the rest as matchmaker
 /// *spares* a `ReconfigureMatchmakers` pulls in. Two knob locations, as for
 /// the acceptors: the subset size and the rotation that picks the spares.
-#[tracing::instrument(level = "debug", skip(state), fields(pool, perturb))]
-pub(crate) fn matchmaker_bootstrap_ranks(
-    state: &StateHandle,
-    pool: usize,
-    perturb: bool,
-) -> Vec<u64> {
+#[tracing::instrument(level = "debug", skip(state), fields(pool))]
+pub(crate) fn matchmaker_bootstrap_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1087,7 +1028,7 @@ pub(crate) fn matchmaker_bootstrap_ranks(
             let all: Vec<u64> = (0..pool)
                 .map(|i| u64::try_from(i).unwrap_or(u64::MAX))
                 .collect();
-            if !(perturb && pool >= 2) {
+            if pool < 2 {
                 return all;
             }
             let size = buggify_knob!(pool, 1_usize..pool);
@@ -1140,14 +1081,14 @@ mod tests {
     #[test]
     fn a_restart_reuses_the_first_incarnations_shape() {
         let state = StateHandle::new();
-        let first = boot(&state, "10.0.1.1", true);
+        let first = boot(&state, "10.0.1.1");
         assert_eq!(first.number, 1);
         assert!(!first.is_restart());
-        let second = boot(&state, "10.0.1.1", true);
+        let second = boot(&state, "10.0.1.1");
         assert_eq!(second.number, 2);
         assert!(second.is_restart());
         assert_eq!(second.shape, first.shape);
-        let other = boot(&state, "10.0.1.2", true);
+        let other = boot(&state, "10.0.1.2");
         assert_eq!(other.number, 1);
 
         let registry = registry(&state);
@@ -1157,22 +1098,14 @@ mod tests {
         assert_eq!(guard.nodes["10.0.1.2"].incarnations, 1);
     }
 
-    /// A scripted node takes the production shape and never draws.
-    #[test]
-    fn a_scripted_node_runs_the_production_shape() {
-        let state = StateHandle::new();
-        let shape = boot(&state, "10.0.1.1", false).shape;
-        assert_eq!(shape, NodeShape::production());
-    }
-
-    /// The policy is run-level: the first caller fixes it, a corpus run never
-    /// draws, and a majority policy is the plain system at every size.
+    /// The policy is run-level: the first caller fixes it, and a majority
+    /// policy is the plain system at every size.
     #[test]
     fn the_quorum_policy_is_fixed_by_the_first_caller() {
         let state = StateHandle::new();
-        let first = quorum_policy(&state, 5, false);
+        let first = quorum_policy(&state, 5);
         assert_eq!(first, QuorumPolicy::Majority);
-        assert_eq!(quorum_policy(&state, 5, true), first);
+        assert_eq!(quorum_policy(&state, 5), first);
         for n in 1..=6 {
             assert_eq!(first.system(n), QuorumSystem::Majority);
             assert_eq!(first.clean_copies(n, n), n / 2 + 1);

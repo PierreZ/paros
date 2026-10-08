@@ -206,9 +206,9 @@ pub trait DriverHooks {
     /// Consulted on the node loop whenever a batch carries GC requests or a
     /// re-send is due. Always safe: GC is optional work, and a floor that
     /// never becomes effective costs only the retirements it would have
-    /// licensed. Production and the main campaign answer `false`; a scripted
-    /// corpus case that must keep a prior configuration answerable answers
-    /// `true` (the departed straggler, #124).
+    /// licensed. Production answers `false`; the simulation withholds them
+    /// for the chaos window on some seeds, keeping a prior configuration
+    /// answerable (the departed straggler, #124, #263).
     fn withhold_gc_requests(&self) -> bool {
         false
     }

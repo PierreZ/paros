@@ -44,7 +44,8 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   (`crates/paros-sim/src/chain_workload.rs`); **per-node driver tunables** in
   `NodeShape::draw` (`crates/paros-sim/src/shape.rs`), which draws once per
   logical node per seed and reuses the shape across restarts; **disk fault
-  rates** in `world/storage.rs` and `world/rot.rs`.
+  rates** in the injector's families (`world/injector.rs`) and the power cut
+  (`world/power.rs`).
 - One knob is one `buggify_knob!(default, lo..hi)` call site: never a
   multiplier over a family, so a seed can be extreme in one dimension and
   ordinary in the next.
@@ -54,7 +55,7 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`).
 - Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
   `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_DURATION_MS` in `lib.rs`,
-  `SETTLE` in `chain_workload.rs`, `WAIT_SETTLE` in `corpus.rs`) or a schedule
+  `SETTLE` in `chain_workload.rs`) or a schedule
   ceiling (`*_ITERATIONS`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.
 - A new production tunable is **born** as a `DriverTunables` field with a
@@ -71,11 +72,9 @@ candidate dies after its `Prepare`s left, so its campaign never finishes). (The 
 went with the application and snapshots in #186.) A new durability boundary
 gets a new variant and its own location in `BuggifyHooks`; sharing one
 location stops the sweep from selecting the failure modes independently. If
-the swarm cannot build the seam's precondition, the corpus scripts it: a
-scripted node whose hooks answer `crash_at` for one named seam once per run
-and draw nothing, with the corpus case asserting the crash fired (#146 built
-this as `ScriptedCrash` for a chunk seam; it went with that seam, so a new
-one is a `ScriptedOptions` field in `crates/paros-sim/src/process.rs`).
+the swarm cannot build the seam's precondition, make the precondition a
+per-seed BUGGIFY draw (a `shape.rs` function, like `withhold_gc`) so the
+campaign builds it; there is no scripted corpus to fall back on (#263).
 
 ## The four questions every site must answer
 
