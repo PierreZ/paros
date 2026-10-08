@@ -3,7 +3,7 @@
 `cargo xtask sim {list|run <filter> [-- args]|run-all}` (alias in
 `.cargo/config.toml`). It builds a registered simulation binary with sancov
 instrumentation so moonpool's `until_coverage_stable` is guided by real edge
-coverage instead of the assertion fallback: `cargo run --profile sim --bin <name>
+coverage instead of the assertion fallback: `cargo run --release --bin <name>
 --target-dir target/sancov` with `SANCOV_CRATES` set, and
 `scripts/sancov-rustc.sh` as the `RUSTC_WRAPPER` (the flake's `shellHook`
 exports it).
@@ -12,8 +12,7 @@ exports it).
   `sim-paros-chain` with `sancov_crates: "paros_core,paros"`, so `run
   paros-chain` and `run-all` are the same sweep. A second campaign is a
   second entry.
-- The `sim` profile (root `Cargo.toml`) is release with debug assertions and
-  overflow checks on: a debug build ran the sweep many times slower.
+- The sweep builds in release mode: a debug build ran it many times slower.
 - Crate names in `SANCOV_CRATES` use underscores; xtask normalizes to hyphens
   for `cargo clean`.
 - `SANCOV_CRATES` is not part of cargo's fingerprint, so xtask stamps the

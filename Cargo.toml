@@ -14,12 +14,3 @@ categories = ["algorithms", "network-programming"]
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 disallowed_types = "deny"
-
-# The profile the sancov sweep (`cargo xtask sim`) builds with: optimised, since a
-# debug build runs the whole simulation (executor, simulated disk and network, the
-# audit's linearizability search) many times slower, with every check a debug build
-# carries kept on, so the sweep judges exactly what the debug suite does.
-[profile.sim]
-inherits = "release"
-debug-assertions = true
-overflow-checks = true

@@ -3,9 +3,9 @@
 //!
 //! The runner machinery (`run_binaries`) sets `SANCOV_CRATES` and a separate
 //! `--target-dir target/sancov` so cargo doesn't serve a cached
-//! non-instrumented build, and builds with the workspace's `sim` profile
-//! ([`SIM_PROFILE`]): optimised, with debug assertions and overflow checks on. `SIM_BINARIES` lists the deterministic-simulation
-//! binaries to drive under coverage.
+//! non-instrumented build, and builds in release mode: a debug build runs the
+//! whole simulation many times slower. `SIM_BINARIES` lists the
+//! deterministic-simulation binaries to drive under coverage.
 
 use std::collections::BTreeSet;
 use std::process::{self, Command};
@@ -136,10 +136,6 @@ fn sim_run(args: &[String]) {
     run_binaries(&filter_binaries(filter_args), binary_args);
 }
 
-/// The cargo profile the sweep builds with (the workspace `Cargo.toml`'s
-/// `[profile.sim]`).
-const SIM_PROFILE: &str = "sim";
-
 /// Path under the sancov target dir where we stamp the active instrumentation set.
 const SANCOV_STAMP: &str = "target/sancov/.sancov-crates";
 
@@ -179,13 +175,7 @@ fn ensure_instrumentation_fresh(sancov_crates: &str) {
              rebuild with the right instrumentation"
         );
         let mut clean = Command::new("cargo");
-        clean.args([
-            "clean",
-            "--target-dir",
-            "target/sancov",
-            "--profile",
-            SIM_PROFILE,
-        ]);
+        clean.args(["clean", "--release", "--target-dir", "target/sancov"]);
         for pkg in &flipped {
             clean.args(["-p", pkg]);
         }
@@ -215,7 +205,7 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
         let bin_start = Instant::now();
 
         let mut cmd = Command::new("cargo");
-        cmd.args(["run", "--profile", SIM_PROFILE, "--bin", bin.name]);
+        cmd.args(["run", "--release", "--bin", bin.name]);
 
         cmd.env("SANCOV_CRATES", bin.sancov_crates);
         // Use a separate target dir so cargo doesn't serve a cached
