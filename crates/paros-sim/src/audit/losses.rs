@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
-use paros::{Ballot, NodeId};
+use paros::{AcceptorConfig, Ballot, NodeId};
 
 use super::state::AuditState;
 
@@ -109,6 +109,104 @@ impl Losses {
 }
 
 impl AuditState {
+    /// Whether the journal's liveness is excused by an outage's losses: a
+    /// slot no leader can decide again, or a lost slot whose every clean
+    /// copy is out of reach.
+    pub(super) fn loss_excuses_liveness(&self) -> bool {
+        self.losses.has_unrecoverable()
+            || self.losses.planned.keys().any(|slot| self.stranded(*slot))
+    }
+
+    /// Whether the decided `slot` an outage hit is frozen because its every
+    /// clean copy is out of reach: each holder is a member of no
+    /// configuration the latest campaign asked
+    /// ([`Self::asked_configurations`]), so no Phase 1 asks it, and its
+    /// chosen prefix does not cover the slot, so no catch-up is served from
+    /// it. Without them the CTRL rule has no clean copy to qualify a lost one
+    /// against, so only the reachable members holding nothing qualify, and
+    /// they are short of a Phase-1 quorum of the decided ballot's
+    /// configuration. The
+    /// slot then freezes its journal exactly as an unrecoverable one does.
+    /// This excuses
+    /// liveness only: it is judged afresh each time it is asked (a later
+    /// configuration naming the holder brings its copy back in reach), and
+    /// it is never the unrecoverable claim, whose safety oracle a copy
+    /// brought back in reach would trip (witness 1980540850679778313: slot
+    /// 8 lost on every member of `{0, 1, 2}` and on node 4, the one clean
+    /// copy on node 3, a spare no configuration ever named).
+    fn stranded(&self, slot: u64) -> bool {
+        let (Some(planned), Some(&(round, by, _))) =
+            (self.losses.planned.get(&slot), self.decided.get(&slot))
+        else {
+            return false;
+        };
+        let Some(config) = self.config_of(Ballot {
+            round,
+            node: NodeId(by),
+        }) else {
+            return false;
+        };
+        let down = self.down_for_good();
+        let asked = self.asked_configurations();
+        let reachable = |node: u64| {
+            asked
+                .iter()
+                .any(|config| config.members().contains(&NodeId(node)))
+        };
+        let holders = self.holders_of(slot, planned);
+        let clean: Vec<u64> = holders
+            .iter()
+            .copied()
+            .filter(|node| !planned.lost.contains(node) && !down.contains(node))
+            .collect();
+        let out_of_reach = !clean.is_empty()
+            && clean.iter().all(|node| {
+                !reachable(*node)
+                    && self
+                        .decided_prefix
+                        .get(node)
+                        .is_none_or(|prefix| *prefix <= slot)
+            });
+        if !out_of_reach {
+            return false;
+        }
+        let holding_nothing: BTreeSet<NodeId> = config
+            .members()
+            .iter()
+            .filter(|member| {
+                !down.contains(&member.0) && !holders.contains(&member.0) && reachable(member.0)
+            })
+            .copied()
+            .collect();
+        !config.has_phase1_quorum(&holding_nothing)
+    }
+
+    /// The configurations the latest campaign's Phase 1 asked: its own and
+    /// the prior ones its matchmaking closed with (`H_b`), the reach of any
+    /// leader to come short of a reconfiguration naming more. A
+    /// configuration GC forgot is outside it (witness 1980540850679778313,
+    /// once aimed: the clean copy on node 1, removed from `{0, 1, 2}`, whose
+    /// history the effective GC floor had dropped). With no matchmaking
+    /// (plain Multi-Paxos), every configuration bound to a ballot.
+    fn asked_configurations(&self) -> Vec<&AcceptorConfig> {
+        let latest = self
+            .prior
+            .iter()
+            .filter(|((owner, _, by), _)| owner == by)
+            .max_by_key(|((_, round, by), _)| (*round, *by));
+        match latest {
+            Some(((_, round, by), prior)) => self
+                .config_of(Ballot {
+                    round: *round,
+                    node: NodeId(*by),
+                })
+                .into_iter()
+                .chain(prior)
+                .collect(),
+            None => self.bootstrap.iter().chain(self.configs.values()).collect(),
+        }
+    }
+
     /// An outage planned to lose `slot` on `damaged` of its `holders`.
     pub(super) fn note_outage_loss(&mut self, slot: u64, holders: &[u64], damaged: &[u64]) {
         assert_always!(
@@ -124,12 +222,44 @@ impl AuditState {
     /// The journal reported `node`'s copy of `slot` lost at its boot, as an
     /// outage planned.
     pub(super) fn note_copy_lost(&mut self, node: u64, slot: u64) {
-        let Some(planned) = self.losses.planned.get_mut(&slot) else {
+        if !self.losses.planned.contains_key(&slot) {
             assert_always!(
                 false,
                 "storage: a lost copy was planned by an outage",
                 { "node" => node, "slot" => slot }
             );
+            return;
+        }
+        self.land_loss(node, slot);
+    }
+
+    /// The journal reported `node`'s entries at `faulty` slots at its open,
+    /// whatever damaged them. A faulty copy of a slot an outage planned to
+    /// lose is lost all the same: the CTRL rule reads the answer, not its
+    /// cause (witness 6839930092088337217: node 0's copy of slot 0 rotted
+    /// at an earlier boot, the outage then took the other two, and the
+    /// audit, hearing only of the outage's losses, owed the frozen slot a
+    /// recovery no leader could make). A learner's copy is never one.
+    pub(super) fn note_faulty_copies(&mut self, node: u64, faulty: &[u64]) {
+        if self.replicas.contains(&node) {
+            return;
+        }
+        for slot in faulty {
+            if self
+                .losses
+                .planned
+                .get(slot)
+                .is_some_and(|planned| !planned.lost.contains(&node))
+            {
+                self.land_loss(node, *slot);
+            }
+        }
+    }
+
+    /// `node`'s copy of the planned `slot` is lost: recognize the shape once
+    /// every planned loss landed, and judge the slot.
+    fn land_loss(&mut self, node: u64, slot: u64) {
+        let Some(planned) = self.losses.planned.get_mut(&slot) else {
             return;
         };
         planned.lost.insert(node);

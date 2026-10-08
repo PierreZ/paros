@@ -3522,9 +3522,10 @@ impl Workload for ChainWorkload {
         // audit's final-convergence claim is the arbiter for that run.
         let ended_by_sibling = !converged && shutdown.is_cancelled();
         let storage = crate::world::storage_fault_stats(ctx.state(), journal);
-        // A slot an outage left unrecoverable (#263) is waited on for good:
-        // the run's liveness is excused, never its safety.
-        let unrecoverable = audit.has_unrecoverable();
+        // A slot an outage left unrecoverable, or with every clean copy out
+        // of reach (#263), is waited on for good: the run's liveness is
+        // excused, never its safety.
+        let unrecoverable = audit.loss_excuses_liveness();
         assert_always!(
             converged || ended_by_sibling || unrecoverable || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"

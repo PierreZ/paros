@@ -19,8 +19,9 @@
 //!   ([`LossShape::loss_budget`]) a bounded number of slots may keep one
 //!   clean copy or none (CTRL's E1 family: one clean copy recovers intact,
 //!   none is waited on, never fabricated);
-//! - **prefer removed**: the one copy left clean is on a node outside the
-//!   configuration the operator last installed, when there is one (the
+//! - **prefer removed**: the one copy left clean is on a member of the
+//!   configuration that decided the slot, outside the one the operator last
+//!   installed, when there is one (the
 //!   departed straggler, composed with the owner's reconfiguration right
 //!   after its claim, `ChainConfig::reconfigure_after_claim`, and
 //!   `withhold_gc`); a removed holder's copy kept clean beside a quorum of

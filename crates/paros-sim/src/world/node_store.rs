@@ -225,6 +225,7 @@ impl LogStorage for LedgeredJournal {
             .iter()
             .map(|(slot, _)| slot.0)
             .collect();
+        self.checker.note_faulty_copies(self.node, &faulty);
         let (ip, node, first) = (self.ip.clone(), self.node, self.inner.first_slot().0);
         self.with_world(|w| w.note_opened(&ip, node, layouts, first, &regions, &faulty));
         let facts = self.inner.boot_facts();

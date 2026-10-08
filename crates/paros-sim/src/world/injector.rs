@@ -303,7 +303,7 @@ impl StorageWorld {
     pub(crate) fn plan_outage_loss(
         &mut self,
         loss: LossShape,
-        decided: &BTreeSet<u64>,
+        decided: &BTreeMap<u64, Vec<u64>>,
     ) -> Option<PlannedLoss> {
         if self.cluster_size == 0 {
             return None;
@@ -321,7 +321,7 @@ impl StorageWorld {
             .iter()
             .filter(|(_, c)| c.settled)
             .flat_map(|(_, c)| c.records.range(floor..).map(|(slot, _)| *slot))
-            .filter(|slot| decided.contains(slot))
+            .filter(|slot| decided.contains_key(slot))
             .collect();
         let slot = if loss.recent {
             assert_reachable!("storage: an outage aims at the most recent slot it holds");
@@ -337,10 +337,19 @@ impl StorageWorld {
             .map(|(key, c)| ((*key).clone(), c.node, c.settled))
             .collect();
         // The holders the plan may damage: settled ones (an unsettled
-        // custody's layout is not known), not already lost. Those outside the
-        // configuration the operator last installed go last, so a kept copy
-        // lands on them.
+        // custody's layout is not known), not already lost. The departed
+        // ones go last, so a kept copy lands on them: a member of the
+        // configuration that decided the slot, outside the one the operator
+        // last installed. A spare no configuration named holds a copy no
+        // Phase 1 asks (witness 1980540850679778313), so it is no straggler.
         let installed = self.last_installed();
+        let deciders = decided.get(&slot);
+        let departed = |node: &u64| {
+            installed
+                .as_ref()
+                .is_some_and(|members| !members.contains(node))
+                && deciders.is_some_and(|members| members.contains(node))
+        };
         let mut damageable: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, settled)| {
@@ -351,19 +360,12 @@ impl StorageWorld {
             .map(|(key, node, _)| (key.clone(), *node))
             .collect();
         if loss.prefer_removed {
-            damageable.sort_by_key(|(_, node)| {
-                installed
-                    .as_ref()
-                    .is_some_and(|members| !members.contains(node))
-            });
+            damageable.sort_by_key(|(_, node)| departed(node));
         }
         // The departed straggler (`LossShape::prefer_removed`): a removed
         // holder's copy is the one left clean, and the only one — kept
         // beside a quorum of clean members it would be no shape at all.
-        let straggler = loss.prefer_removed
-            && installed
-                .as_ref()
-                .is_some_and(|members| damageable.iter().any(|(_, node)| !members.contains(node)));
+        let straggler = loss.prefer_removed && damageable.iter().any(|(_, node)| departed(node));
         let keep = if straggler { Some(1) } else { loss.keep };
         let count = match keep {
             Some(keep) if self.loss_permitted(slot, loss.loss_budget()) => if straggler {
@@ -392,10 +394,7 @@ impl StorageWorld {
             "storage: an outage never loses more slots than the loss budget",
             { "slot" => slot, "lost" => u64::try_from(self.lossy.len()).unwrap_or(u64::MAX) }
         );
-        if loss.prefer_removed
-            && let Some(members) = &installed
-            && damageable.iter().any(|(_, node)| !members.contains(node))
-        {
+        if straggler {
             assert_reachable!("storage: an outage leaves a clean copy on a removed node");
         }
         Some(PlannedLoss {

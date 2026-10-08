@@ -384,16 +384,39 @@ impl AuditWorld {
         self.lock().note_copy_lost(node, slot);
     }
 
-    /// The slots a durable accept quorum decided (#263: what an outage
-    /// aims at), above the pruned prefix.
-    pub(crate) fn decided_slots(&self) -> BTreeSet<u64> {
-        self.lock().decided.keys().copied().collect()
+    /// The journal reported `node`'s entries at `faulty` slots at its open
+    /// (#263): a faulty copy of an outage-planned slot is lost, whatever
+    /// damaged it.
+    pub(crate) fn note_faulty_copies(&self, node: u64, faulty: &[u64]) {
+        self.lock().note_faulty_copies(node, faulty);
     }
 
-    /// Whether the journal holds a slot no leader can decide again (#263):
-    /// its liveness is excused, its safety never.
-    pub(crate) fn has_unrecoverable(&self) -> bool {
-        self.lock().losses.has_unrecoverable()
+    /// The slots a durable accept quorum decided (#263: what an outage
+    /// aims at), above the pruned prefix, each with the members of the
+    /// configuration its deciding ballot was bound to (the departed
+    /// straggler's copy is kept on one of them).
+    pub(crate) fn decided_slots(&self) -> BTreeMap<u64, Vec<u64>> {
+        let st = self.lock();
+        st.decided
+            .iter()
+            .map(|(slot, (round, by, _))| {
+                let members = st
+                    .config_of(paros::Ballot {
+                        round: *round,
+                        node: paros::NodeId(*by),
+                    })
+                    .map(|config| config.members().iter().map(|member| member.0).collect())
+                    .unwrap_or_default();
+                (*slot, members)
+            })
+            .collect()
+    }
+
+    /// Whether an outage's losses excuse the journal's liveness (#263): a
+    /// slot no leader can decide again, or one whose every clean copy is out
+    /// of reach. Its safety is never excused.
+    pub(crate) fn loss_excuses_liveness(&self) -> bool {
+        self.lock().loss_excuses_liveness()
     }
 
     /// Ground truth from a journal store (#264): the accepts of the commit
@@ -493,7 +516,7 @@ impl AuditWorld {
         // safety is judged all along (`AuditState::loss_accepted`), and so
         // is the leg that is safety: nothing applied runs ahead of the
         // decided frontier.
-        let excused = st.losses.has_unrecoverable();
+        let excused = st.loss_excuses_liveness();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),
