@@ -323,6 +323,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
         st.persisted.insert((node.0, slot.0), vhash);
         // The commit that carried it is no longer in flight for this slot.
+        st.dropped_in_flight.remove(&(node.0, slot.0));
         if st.in_flight.get(&(node.0, slot.0)) == Some(&vhash) {
             st.in_flight.remove(&(node.0, slot.0));
         }
@@ -1317,6 +1318,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // record is idempotent.
             st.observe_durable_accept(node.0, slot.0, ballot, vhash);
         }
+        st.settle_dropped_in_flight(node.0, chosen_index);
         // A boot settles what its in-flight commits landed (#263): an
         // outage's loss is judged again over what the tally now knows.
         st.reevaluate_losses();

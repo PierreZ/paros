@@ -146,6 +146,17 @@ pub(super) struct AuditState {
     /// it and before the report, may leave it durable unreported: the next
     /// boot may recover it in place of `persisted`, and only it.
     pub(super) in_flight: BTreeMap<(u64, u64), u64>,
+    /// The accepts a commit carried that its own floor dropped (the core
+    /// staged a slot and a truncation past it in one flush), keyed
+    /// `(node, slot)`, until the driver reports them or a boot settles
+    /// them. The record is never written, but a boot whose durable chosen
+    /// index covers the slot proves the commit landed, so the accept counts
+    /// as a vote: on a quorum of one it *is* the decision (witness
+    /// 6582812142291039425: a leader alone a Phase-2 quorum accepted slot
+    /// 27, its truncation dropped the record in the same flush, and the
+    /// power went before the driver reported the accept; the boot's chosen
+    /// index 27 then stood past every decision the tally knew).
+    pub(super) dropped_in_flight: BTreeMap<(u64, u64), (Ballot, u64)>,
     /// The bootstrap acceptor configuration, from the boot reports (one
     /// shared deployment per run). The configuration of every ballot on plain
     /// Multi-Paxos, and of the ballots below the first registration on a
@@ -1005,6 +1016,35 @@ impl AuditState {
         keys.into_iter()
             .filter_map(|key| self.in_flight.remove(&key).map(|vhash| (key.1, vhash)))
             .collect()
+    }
+
+    /// Settle `node`'s accepts its own commit's floor dropped, unreported,
+    /// at its boot: the durable chosen index covering one proves the
+    /// commit landed, so it counts as the vote it was (see
+    /// `dropped_in_flight`); one it does not cover never landed.
+    pub(super) fn settle_dropped_in_flight(&mut self, node: u64, chosen_index: Option<Slot>) {
+        let dropped: Vec<(u64, (Ballot, u64))> = self
+            .dropped_in_flight
+            .range((node, 0)..=(node, u64::MAX))
+            .map(|((_, slot), entry)| (*slot, *entry))
+            .collect();
+        for (slot, (ballot, vhash)) in dropped {
+            self.dropped_in_flight.remove(&(node, slot));
+            if chosen_index.is_some_and(|ci| slot <= ci.0) {
+                assert_reachable!(
+                    "storage: a boot counts an accept its own commit's floor dropped"
+                );
+                self.observe_durable_accept(node, slot, ballot, vhash);
+            }
+        }
+        assert_always!(
+            self.dropped_in_flight
+                .range((node, 0)..=(node, u64::MAX))
+                .next()
+                .is_none(),
+            "storage: a boot settles every dropped accept it had in flight",
+            { "node" => node }
+        );
     }
 
     /// Fold one durable accept into the acceptor tally and run the

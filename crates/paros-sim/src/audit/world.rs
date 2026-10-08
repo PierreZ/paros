@@ -431,6 +431,17 @@ impl AuditWorld {
         }
     }
 
+    /// The accepts of the commit a journal store is about to start that the
+    /// commit's own floor drops, `(slot, ballot, vhash)`: never written, yet
+    /// the metainfo the commit lands decides them (see
+    /// `AuditState::dropped_in_flight`).
+    pub(crate) fn note_dropped_in_flight(&self, node: u64, dropped: &[(u64, paros::Ballot, u64)]) {
+        let mut st = self.lock();
+        for &(slot, ballot, vhash) in dropped {
+            st.dropped_in_flight.insert((node, slot), (ballot, vhash));
+        }
+    }
+
     /// A fold of the run's end state for the determinism proof: the chosen
     /// log, every node's applied prefix, and the leadership history. Two runs
     /// of one seed must agree on it bit for bit.

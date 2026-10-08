@@ -11,6 +11,7 @@
 //! honestly unsure, which the next boot resolves by reading the disk
 //! (`crate::process`).
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use moonpool_sim::{SimStorageProvider, assert_reachable};
@@ -47,6 +48,10 @@ pub(crate) struct LedgeredJournal {
     /// whose cut commit is torn or whole, never ambiguous; else the
     /// distinct acceptors the journal's quorum system tolerates losing.
     cut_budget: Option<usize>,
+    /// The accepts staged for the next sync, `slot -> (ballot, vhash)`:
+    /// the ones its own floor drops are reported apart (see
+    /// [`AuditWorld::note_dropped_in_flight`]).
+    staged_accepts: BTreeMap<u64, (Ballot, u64)>,
 }
 
 /// What damage a [`LedgeredJournal`] takes: its power cuts' copy budget and
@@ -81,6 +86,7 @@ impl LedgeredJournal {
             format_pending: false,
             power,
             checker,
+            staged_accepts: BTreeMap::new(),
         }
     }
 
@@ -97,6 +103,20 @@ impl LedgeredJournal {
                     .map(|(_, command)| (slot.0, paros::command_hash(&command)))
             })
             .collect();
+        // An accept the flush's own floor drops (the core staged a slot and
+        // a truncation past it in one flush) is never written, yet the
+        // landed metainfo makes it count: the floor and chosen index it
+        // carries say the slot was decided, and on a quorum of one that
+        // accept was the decision.
+        let dropped: Vec<(u64, Ballot, u64)> = self
+            .staged_accepts
+            .iter()
+            .filter(|(slot, _)| self.inner.accepted(Slot(**slot)).is_none())
+            .map(|(slot, (ballot, vhash))| (*slot, *ballot, *vhash))
+            .collect();
+        if !dropped.is_empty() {
+            self.checker.note_dropped_in_flight(self.node, &dropped);
+        }
         if !accepted.is_empty() {
             self.checker.note_in_flight(self.node, &accepted);
         }
@@ -275,7 +295,11 @@ impl LogStorage for LedgeredJournal {
         ballot: Ballot,
         command: Command,
     ) -> Result<(), StorageError> {
+        let vhash = paros::command_hash(&command);
         let result = self.inner.append_accepted(slot, ballot, command).await;
+        if result.is_ok() {
+            self.staged_accepts.insert(slot.0, (ballot, vhash));
+        }
         self.ledger(result)
     }
 
@@ -305,6 +329,8 @@ impl LogStorage for LedgeredJournal {
             .power
             .around(writes, permit, || {}, self.inner.sync(must_sync))
             .await;
+        // The sync consumed what was staged, landed or not.
+        self.staged_accepts.clear();
         self.ledger(synced)?;
         // The custody ledger (#261): where what this sync wrote now
         // lives, the floor, the metainfo and header copies.
