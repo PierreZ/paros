@@ -4,7 +4,8 @@
 //! The node driver itself lives in `paros` (provider-generic, runs in production
 //! *or* simulation). This crate adapts it to a moonpool [`Process`] under
 //! `SimProviders`, drives it with one randomized client workload, perturbs it
-//! through the driver's hooks and a budgeted fake disk, and judges it from two
+//! through the driver's hooks and the ledgered storage faults on moonpool's
+//! simulated disk, and judges it from two
 //! perspectives only: the client's own history and the audit's fold of every
 //! driver transition.
 //!
@@ -208,10 +209,12 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// leader (#142) is the fault the leader's take-back exists for: every slot
 /// delegated to it stalls until the leader runs it colocated, and a proxy
 /// killed at the chaos cutoff stays down for the whole recovery tail.
-/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
-/// wipes its own storage provider, which paros does not use (the fake disk is
-/// the `StorageWorld`), so the amnesia fault is the world's own coin, drawn at
-/// a restart in `crate::process` (#124) and answered by replacement through
+/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe` now reaches
+/// the disk paros stores on, but it wipes a whole machine without asking the
+/// copy budget, so it could lose a quorum's copies at once. The amnesia fault
+/// is the storage ledger's own coin instead, drawn at a restart in
+/// `crate::process` (#124) under the dead-node budget and the provisioning
+/// ledger, and executed on the simulated disk (`world::wipe`) and answered by replacement through
 /// reconfiguration, never by a rejoin. The recovery window is
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
@@ -417,12 +420,10 @@ pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
         .run_configured()
 }
 
-/// Run the shared `LogStorage` behavioral contract suite against the
-/// simulation's world-backed storage, inside one quiet iteration. `MemStorage`
-/// runs the identical suite as a `paros` unit test; together they keep the fake
-/// and the trait contract from drifting apart. The same iteration runs both
+/// Run the shared `LogStorage` and `MatchmakerStorage` behavioral contract
 /// suites against the library's journal stores (`paros::journal`) on the
-/// simulation's own disk.
+/// simulation's own disk, inside one quiet iteration. `MemStorage` runs the
+/// identical suites as a `paros` unit test.
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_storage_contract_suite() -> SimulationReport {

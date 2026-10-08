@@ -372,9 +372,8 @@ impl AuditWorld {
     }
 
     /// Ground truth from a journal store (#264): the accepts of the commit
-    /// it is about to start, `(slot, vhash)`. The journal store's
-    /// counterpart of [`Self::note_flushed_ground_truth`]: it cannot know
-    /// what a crash inside the commit lands, so it names what may land, and
+    /// it is about to start, `(slot, vhash)`. A store cannot know what a
+    /// crash inside the commit lands, so it names what may land, and
     /// the cross-restart check admits exactly those values (see
     /// `AuditState::in_flight`).
     pub(crate) fn note_in_flight(&self, node: u64, accepted: &[(u64, u64)]) {

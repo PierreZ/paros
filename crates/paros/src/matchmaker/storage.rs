@@ -283,8 +283,8 @@ fn suite_belief(n: u64) -> Registration {
 
 /// The behavioral **contract suite** every [`MatchmakerStorage`] implementation
 /// must pass, run against [`MemMatchmakerStorage`] here and against the
-/// simulation's world-backed store in `paros-sim`, so a fake can never drift
-/// from the trait contract. `fresh` returns (a future of) an empty store;
+/// journal store ([`crate::journal`]) in its tests and in `paros-sim`, so no
+/// implementation drifts from the trait contract. `fresh` returns (a future of) an empty store;
 /// `reopen` simulates a clean reboot of the same store (asynchronously: a
 /// disk-backed store opens and scans on the way up) — every read-back goes through it and
 /// through the [`RegistryStorage`] port, because that is how the core reads

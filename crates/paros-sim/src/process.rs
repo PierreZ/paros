@@ -103,7 +103,6 @@ fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
     let hooks = BuggifyHooks::new(
         ctx.time().clone(),
         crate::CHAOS_DURATION,
-        true,
         incarnation.shape.seam_crash_bias,
     );
     let checker = audit_world(ctx.state());
@@ -524,7 +523,7 @@ async fn run_acceptor(
             .collect();
     // The quorum system is protocol data too (#140): the run's policy, drawn
     // once per seed, applied to the bootstrap configuration's own size. A
-    // majority on a plain or unperturbed seed; a flexible split on the seeds
+    // majority on a plain seed or one the swarm leaves alone; a flexible split on the seeds
     // the swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len());
     let quorum_system = policy.system(bootstrap.len());
@@ -654,10 +653,10 @@ async fn run_acceptor(
             );
         }
         // The disk's wipe coin (#124): a restart that comes back on an empty
-        // disk. Moonpool's own `prob_wipe` reaches only its storage provider,
-        // which paros does not use (the fake disk is the world), so the
-        // amnesia fault is the world's, drawn here at the one place a lost
-        // disk shows — a reboot. What happens next is the **library's**
+        // disk. Moonpool's own `prob_wipe` wipes without asking the copy
+        // budget, so the amnesia fault is the ledger's, drawn here at the one
+        // place a lost disk shows — a reboot — and executed on the simulated
+        // disk (`world::wipe`). What happens next is the **library's**
         // call (#147): the identity boots below as an existing member on an
         // empty store, and `run_node` refuses the amnesiac store. A wiped
         // node is replaced through an acceptor reconfiguration, never
@@ -948,9 +947,9 @@ struct Seat {
     /// numbers its storage world was sized by).
     floor: usize,
     clean_copies: usize,
-    /// A system journal or a journal the directory created (#189): stored on
-    /// a fault-free world-backed disk, outside the copy budget — the storage
-    /// fault model is the genesis journals' business.
+    /// A system journal or a journal the directory created (#189): stored
+    /// ordered, with the power cut and the injector dark, outside the copy
+    /// budget — the storage fault model is the genesis journals' business.
     quiet: bool,
     /// Created at runtime by the directory (#189): opened only when the
     /// directory names it, never at boot.
@@ -960,8 +959,8 @@ struct Seat {
 }
 
 impl Seat {
-    /// A fault-free seat for a system journal or a created one (#189): its
-    /// own storage world (unbudgeted, nothing is injected into it) and its
+    /// A quiet seat for a system journal or a created one (#189): its
+    /// own storage world (no budget is set, so nothing is injected) and its
     /// own audit world and port, reporting to the system board too.
     fn quiet(
         ctx: &SimContext,

@@ -119,8 +119,8 @@ durable promise and voted history can regress a promise it once made, and no sna
 restores a promise. paros's answer is the same as for a retired node — **a wiped identity
 never rejoins**; the acceptor set heals around it by reconfiguration.
 
-- moonpool's `prob_wipe` stays `0`: it wipes moonpool's disk, which the harness's
-  world-backed stores do not live on (AGENTS.md, *Storage direction*). The storage world draws its own wipe coin at a
+- moonpool's `prob_wipe` stays `0`: since #261 every store lives on moonpool's disk, but its
+  wipe takes a whole machine without asking the copy budget. The storage ledger draws its own wipe coin at a
   chaotic restart on a matchmaker seed, within the same dead-node budget as a corruption
   park (a wipe is one more way to lose every copy a node holds).
 - **The library keeps it down (#147), not the harness.** Every store carries a durable

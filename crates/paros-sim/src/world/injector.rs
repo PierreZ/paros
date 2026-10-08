@@ -180,14 +180,16 @@ impl StorageWorld {
     /// doc). A permitted entry rot marks the copy lost; a permitted double
     /// fault parks the node, before the journal ever opens.
     pub(crate) fn plan_boot_damage(&mut self, key: &str, node: u64) -> Option<Injection> {
-        let planned = self.plan_one(key, node);
-        if planned.is_some() {
-            self.injections += 1;
-        }
-        planned
+        self.plan_one(key, node)
     }
 
-    /// [`Self::plan_boot_damage`]'s draw, before it is counted.
+    /// A planned injection landed: its writes and sync confirmed. Only
+    /// damage that landed counts toward the exercised-corruption gates.
+    pub(crate) fn note_injected(&mut self) {
+        self.injections += 1;
+    }
+
+    /// [`Self::plan_boot_damage`]'s draw.
     fn plan_one(&mut self, key: &str, node: u64) -> Option<Injection> {
         let custody = self.custody.get(key)?.clone();
         if !custody.settled || self.parked.contains_key(key) {

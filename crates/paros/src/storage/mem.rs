@@ -12,9 +12,10 @@ use super::{LogStorage, StorageError};
 /// while draining a [`paros_core::Ready`]. The durable scalars and the per-slot
 /// accepted log are stored separately (never a single blob).
 ///
-/// The crash-testable faulty store (fail-stop, corruption, protocol-aware
-/// recovery) is the harness's world-backed disk in `paros-sim`; the driver is
-/// generic over [`LogStorage`], so it swaps in without touching the loop.
+/// The crash-testable store (fail-stop, corruption, protocol-aware recovery)
+/// is the journal store ([`crate::journal`]) on a real or simulated disk; the
+/// driver is generic over [`LogStorage`], so it swaps in without touching the
+/// loop.
 #[derive(Clone, Debug)]
 pub struct MemStorage {
     hard_state: HardState,
@@ -173,7 +174,7 @@ mod tests {
     use paros_core::NodeId;
 
     /// The shared behavioral contract, against the library's default storage.
-    /// The simulation runs the same suite against its world-backed storage.
+    /// The journal store runs the same suite (here and in the simulation).
     #[test]
     fn mem_storage_passes_the_contract_suite() {
         futures::executor::block_on(storage_contract_suite(

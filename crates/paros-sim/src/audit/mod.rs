@@ -609,7 +609,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn replica_booted(&self, replica: NodeId, chosen_index: Option<Slot>, _floor: Slot) {
+    fn replica_booted(&self, replica: NodeId, chosen_index: Option<Slot>, floor: Slot) {
         let mut st = self.state();
         // A replica's id is outside the pool by construction; a collision
         // would fold a replica's reports into an acceptor's state.
@@ -626,8 +626,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // replica rarely makes, #261), so a crash may legally rewind it, and
         // the boot re-walks its retained prefix from the durable index. The
         // index reported here is the walk's, ahead of the writes that walk
-        // then persists: the watermark restarts below them.
-        st.chosen_watermark.remove(&replica.0);
+        // then persists: the watermark restarts below them, at the one bound
+        // a crash cannot rewind: everything below the durable floor is
+        // chosen.
+        st.chosen_watermark
+            .insert(replica.0, floor.0.saturating_sub(1));
         // The recovered prefix is walked, exactly as a node's boot report
         // says in `recovered`: with no application to replay (#186) the
         // walk resumes one past the durable chosen index, so a crash that

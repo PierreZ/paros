@@ -183,6 +183,7 @@ impl LogStorage for LedgeredJournal {
             scanned = self.inner.boot_scan().await;
         }
         if let Some(injection) = injection.as_ref().filter(|_| confirmed) {
+            self.with_world(StorageWorld::note_injected);
             let faulty: Vec<u64> = self
                 .inner
                 .faulty_entries()

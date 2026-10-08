@@ -1,10 +1,10 @@
 //! Driver fault-injection hooks.
 //!
-//! `drain_ready` awaits the storage seam, but the simulation's world-backed
-//! stores complete every operation on the poll that started it, so a batch never
-//! yields part-way and process-granularity chaos (moonpool's attrition) can only
-//! crash a node *between* batches — never at the persist/send seam within one;
-//! [`Seam`] is how those points become reachable. [`DriverHooks`] also exposes
+//! `drain_ready` awaits the storage seam, and process-granularity chaos
+//! (moonpool's attrition) lands wherever a task happens to yield, which a
+//! sweep cannot aim: the persist/send boundaries inside one batch are narrow
+//! windows it rarely hits. [`Seam`] names those points, so each becomes its
+//! own reachable crash. [`DriverHooks`] also exposes
 //! the driver's optional policy decisions: delaying an `Accept` re-send,
 //! resigning leadership, choosing the shortest valid election timeout, the peer mailbox's
 //! choices (overtake the queue, evict across kinds, and — armed at enqueue,

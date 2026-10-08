@@ -30,8 +30,8 @@ pub(crate) fn storage_world(state: &StateHandle) -> Arc<Mutex<StorageWorld>> {
     storage_world_for(state, crate::shape::identifiers(state).main)
 }
 
-/// `journal`'s own [`StorageWorld`] (#188): its disks, its copy budget, its
-/// fault ledger and its parked identities — one per journal, so the budget
+/// `journal`'s own [`StorageWorld`] (#188): its custody ledger, its copy
+/// budget and its parked identities — one per journal, so the budget
 /// is per journal and a journal's faults never excuse another's.
 pub(crate) fn storage_world_for(
     state: &StateHandle,
@@ -144,7 +144,7 @@ pub(crate) struct StorageWorld {
     registry_cuts: BTreeSet<String>,
     /// The journal stores' custody ledger (#261), keyed by IP: what each
     /// one's last completed sync says it holds and where
-    /// ([`injector::Custody`]). The copy budget counts it beside `disks`.
+    /// ([`injector::Custody`]). The copy budget counts copies over it.
     custody: BTreeMap<String, injector::Custody>,
     /// Damage the injector applied (#261), and how much of it the journal
     /// answered with a crash decision (a refused open): the

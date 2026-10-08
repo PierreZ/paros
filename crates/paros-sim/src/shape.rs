@@ -640,11 +640,9 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.withhold_gc.get_or_insert_with(|| {
-        let withheld = moonpool_sim::buggify_with_prob!(0.25);
-        if withheld {
-            assert_reachable!("gc: a seed withholds its GC requests for the chaos window");
-        }
-        withheld
+        // Its fired gate sits where the answer has an effect
+        // (`BuggifyHooks::withhold_gc_requests`), not at the draw.
+        moonpool_sim::buggify_with_prob!(0.25)
     })
 }
 
@@ -884,8 +882,8 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
 /// every later caller (an attrition restart must boot the same node under
 /// the same system, and every client must compose successors under it).
 ///
-/// The default is the majority, the plain deployment's system. A perturbing
-/// seed may instead draw a **flexible split**: one `buggify_knob!` location
+/// The default is the majority, the plain deployment's system. A seed
+/// may instead draw a **flexible split**: one `buggify_knob!` location
 /// for `q2` over the pool (default the majority, extreme `1..=pool/2`), with
 /// `q1 = n - q2 + 1` derived per configuration ([`QuorumPolicy::system`]);
 /// or, on a pool whose size tiles a grid, an **acceptor grid**: its own
@@ -967,8 +965,8 @@ pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
 /// boot the same node into the same bootstrap configuration).
 ///
 /// The default is the whole pool: every node an acceptor, the plain
-/// Multi-Paxos deployment and the shape of every existing axis. A perturbing
-/// seed that deploys matchmakers may instead draw a **subset** (a run with
+/// Multi-Paxos deployment and the shape of every existing axis. A seed that
+/// deploys matchmakers may instead draw a **subset** (a run with
 /// `has_matchmakers == false` never draws — a plain deployment's membership
 /// must include every node, per `paros::Config::peers`), leaving the other
 /// nodes as *spares*: addressable pool members outside every configuration
@@ -1013,7 +1011,7 @@ pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers:
 
 /// The run's **bootstrap matchmaker ranks** (#125): generation 0's set, drawn
 /// once per seed by whichever process or workload asks first. The default is
-/// the whole matchmaker pool; a perturbing seed with two or more matchmakers
+/// the whole matchmaker pool; a seed with two or more matchmakers
 /// may draw a **subset** (any size from one up — a one- or two-member set is
 /// a valid registry that tolerates no loss), leaving the rest as matchmaker
 /// *spares* a `ReconfigureMatchmakers` pulls in. Two knob locations, as for
