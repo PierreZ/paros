@@ -172,10 +172,18 @@ impl AuditState {
         let Some(planned) = self.losses.planned.get_mut(&slot) else {
             return;
         };
-        if !planned.lost.remove(&node) || decided != Some(vhash) {
+        // A lost copy rewritten is a lost copy no longer.
+        planned.lost.remove(&node);
+        // A recovery is the decided value accepted again once the shape was
+        // recognized, on any node: a leader's re-proposal reaches the
+        // configuration in force, whose members may never have held the
+        // slot, so a recovery is not only a lost copy rewritten.
+        let Some(shape) = planned.shape else {
+            return;
+        };
+        if decided != Some(vhash) {
             return;
         }
-        let shape = planned.shape.unwrap_or_default();
         if shape.one_copy {
             self.losses.one_copy_recovered = true;
         }

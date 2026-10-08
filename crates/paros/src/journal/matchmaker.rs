@@ -7,13 +7,13 @@
 //! journal's metainfo. A raised watermark clears the registrations below it;
 //! an install clears them all and writes the successor's.
 //!
-//! **A sync is up to three commits, in an order every crash point survives**
-//! (#176): the new registrations, then the metainfo, then the clears. A
-//! journal commit is not atomic between its records and its metainfo (both
-//! are written in one unsynced window, and a crash resolves each sector on
-//! its own), so nothing may rely on one landing with the other. Instead a
-//! boot keeps only the registrations the durable metainfo vouches for: at or
-//! above its watermark and of its generation. A crash after the puts leaves
+//! **A sync is up to two commits, in an order every crash point survives**
+//! (#176): the new registrations with the metainfo, then the clears. The
+//! journal writes a batch's metainfo only once the batch is durable
+//! (moonpool#309), so a durable metainfo vouches for its registrations; the
+//! reverse does not hold, so a boot keeps only the registrations the durable
+//! metainfo vouches for: at or above its watermark and of its generation. A
+//! crash after the puts leaves
 //! registrations the old metainfo does not count yet (a register's, kept:
 //! the driver never acknowledged it, and it stands like any other; an
 //! install's, of the successor generation, dropped); a crash after the
@@ -439,8 +439,8 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         Ok(())
     }
 
-    /// Up to three commits, in the order the [module docs](self) argue:
-    /// the new registrations, the metainfo, the clears. Each is durable
+    /// Up to two commits, in the order the [module docs](self) argue: the
+    /// new registrations with the metainfo, then the clears. Each is durable
     /// before the next starts.
     #[tracing::instrument(level = "trace", skip_all, fields(dir = %self.dir))]
     async fn sync(&mut self) -> Result<(), StorageError> {
@@ -458,14 +458,16 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
             }
             batch.put(position, id, payload);
         }
-        if !batch.is_empty() {
+        // The metainfo rides the last registrations batch: the journal
+        // writes it only once that batch is durable (moonpool#309), and the
+        // earlier batches were synced before it.
+        if self.meta_dirty {
+            batch.set_meta(encode(&self.meta));
+        }
+        if !batch.is_empty() || self.meta_dirty {
             self.commit(batch).await?;
         }
-        // The metainfo, alone: what it vouches for is on disk already.
         if self.meta_dirty {
-            let mut meta = Batch::new();
-            meta.set_meta(encode(&self.meta));
-            self.commit(meta).await?;
             self.durable_meta = self.meta.clone();
             self.meta_dirty = false;
         }

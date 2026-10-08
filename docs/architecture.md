@@ -1030,11 +1030,10 @@ does not cover; if paros does not stay live on them, that is a finding, not a kn
 Matchmaker stores take damage too, under a minority or rolling pattern counted as the run's one
 matchmaker loss and exclusive with the matchmaker wipe; matchmakers get their failure domains
 as a second `.cluster()` group with its own `replicated_storage_faults` call (moonpool#297
-gives `.processes()` groups no locality). Until moonpool lets a `.cluster()` group be empty
-(its `LocalityConfig` clamps every dimension to at least one process, and zero matchmakers is
-the plain deployment every seed may draw; moonpool#310), matchmakers stay a `.processes()` group
-(an implementation deferral of 2026-10-08, #176, not a change of direction); the move
-lands with the replicated fault patterns that need it (#261). moonpool reports no per-process damage (moonpool#295,
+gives `.processes()` groups no locality). moonpool now lets a `.cluster()` group draw zero
+processes (moonpool#310, pinned since 0a68199), so nothing blocks the move; matchmakers stay a
+`.processes()` group until the replicated fault patterns that need them land (#202; an
+implementation deferral of 2026-10-08, #176, not a change of direction). moonpool reports no per-process damage (moonpool#295,
 closed as not planned), so the ground truth stays the ledgered injector's and the journal's
 own verdicts.
 
@@ -1048,11 +1047,13 @@ the copies written one after the other; no snapshots and no compaction. A commit
 ships two, the simulation draws either. paros stores the state itself: a slot is a position, its
 ballot the entry's identity, the promise, chosen index, floor, sealed state and format marker the
 metainfo; a matchmaker registration is a position of its own, its generation in its identity.
-**A commit is not atomic between its records and its metainfo** (both are written in one
-unsynced window, and a crash resolves each sector on its own; moonpool#309), so paros orders dependent state
-across commits, each durable before the next (#264, #176): a node commits a raised promise
-alone, then its entries, then its floor and metainfo (a chosen index never lands ahead of the
-entry that makes its slot chosen); a matchmaker commits its new registrations, then its
+**A commit is atomic one way only**: the journal writes a commit's metainfo only once its batch
+is durable (moonpool#309, pinned since 0a68199), so a durable metainfo vouches for its batch,
+but a crash between the two lands the batch without its metainfo. paros puts a batch and the
+metainfo that depends on it in one commit, and orders the reverse across commits, each durable
+before the next (#264, #176): a node commits a raised promise alone (an entry never lands above
+its promise), then its entries with its floor and metainfo (a chosen index never lands ahead of
+the entry that makes its slot chosen); a matchmaker commits its new registrations with its
 metainfo, then its clears, and a boot keeps only the registrations the durable metainfo vouches
 for (at or above its watermark, of its generation). Storage chaos on journal seeds is the
 local half of this contract: moonpool's crash damage, failed syncs, short transfers and lost

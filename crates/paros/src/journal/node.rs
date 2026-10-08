@@ -531,25 +531,21 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             }
             staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
         }
-        if !staged.is_empty() {
-            self.commit(staged).await?;
-        }
-        // The floor and the metainfo last, in a commit of their own, once
-        // every entry under them is durable: a journal commit is not atomic
-        // between its records and its metainfo (one unsynced window, each
-        // sector resolved on its own by a crash), so a chosen index sharing a
-        // commit with the entry it covers could land without it — the #264
-        // shape through the second window (#176).
-        if floor.is_some() || meta.is_some() {
-            let mut last = Batch::new();
+        // The floor and the metainfo ride the last batch: the journal writes
+        // a batch's metainfo only once the batch is durable (moonpool#309),
+        // so a durable chosen index always covers its entries, and every
+        // earlier batch was synced before this one started. A chosen index
+        // landing ahead of the entry that makes its slot chosen was the #264
+        // shape (#176).
+        if floor.is_some() || meta.is_some() || !staged.is_empty() {
             if let Some(floor) = floor {
-                last.truncate_prefix(floor.0);
+                staged.truncate_prefix(floor.0);
             }
             let wrote_meta = meta.is_some();
             if let Some(meta) = meta {
-                last.set_meta(meta);
+                staged.set_meta(meta);
             }
-            self.commit(last).await?;
+            self.commit(staged).await?;
             if wrote_meta {
                 self.durable_meta = self.meta.clone();
             }

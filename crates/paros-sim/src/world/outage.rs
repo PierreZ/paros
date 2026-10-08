@@ -1,17 +1,16 @@
-//! The **correlated outage** (#263): on some seeds, once inside the chaos
-//! window, every acceptor and every proxy leader loses power at the same
-//! instant, and each comes back after its own delay. It is the power loss of
-//! a whole rack, valid at any moment, and the one environmental fault that
-//! empties every memory at once: what survives is exactly what the disks
-//! hold. moonpool's attrition never takes more than `max_dead` processes of a
-//! group, so this injector is paros-side until moonpool has a correlated
-//! group outage (moonpool#311).
+//! The **correlated outage**'s losses (#263). moonpool's `Chaos::Outage`
+//! (moonpool#311, registered by [`regime`]) takes every acceptor and every
+//! proxy leader down at one instant on some seeds, each back after its own
+//! delay, one straggler last: the power loss of a whole rack, the one
+//! environmental fault that empties every memory at once, so what survives
+//! is exactly what the disks hold.
 //!
-//! The outage is what makes the CTRL shapes reachable without a script. While
-//! every holder of a slot is down, latent damage aimed by the custody ledger
-//! ([`super::StorageWorld::plan_outage_loss`]) is planned for each holder's next
-//! boot, so no peer can repair a copy from memory before the last one is
-//! lost. The [`LossShape`] drawn per seed says how much is lost:
+//! That is what makes the CTRL shapes reachable without a script. The
+//! moment every victim is down (moonpool's `OutageLanded`), [`OutageLosses`]
+//! plans latent damage aimed by the custody ledger
+//! ([`super::StorageWorld::plan_outage_loss`]) for each holder's next boot,
+//! so no peer can repair a copy from memory before the last one is lost.
+//! The [`LossShape`] drawn then says how much is lost:
 //!
 //! - **aim**: the slot is the most recent one the ledger holds, or one drawn
 //!   uniformly among them;
@@ -24,36 +23,58 @@
 //!   configuration the operator last installed, when there is one (the
 //!   departed straggler, composed with `RECONFIGURE` and `withhold_gc`).
 //!
-//! A holder that comes back long after the others is the straggler: the
-//! cluster must wait for it, then recover through it. Each draw is its own
-//! BUGGIFY location, paired with a reachable where it takes effect; the audit
-//! recognizes the shapes from what the losses leave ([`crate::audit`]).
+//! The straggler, back last, is the one the cluster must wait for, then
+//! recover through. Each draw is its own BUGGIFY location, paired with a
+//! reachable where it takes effect; the audit recognizes the shapes from what
+//! the losses leave ([`crate::audit`]).
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, SimulationResult, StateHandle, TimeProvider, assert_reachable,
-    buggify_knob, buggify_with_prob,
+    Chaos, ChaosMode, FaultContext, FaultInjector, OUTAGE_STATE_KEY, Outage, OutageLanded,
+    SimulationResult, StateHandle, TimeProvider, assert_reachable, buggify_with_prob,
 };
 
-/// The well-known key of the run's outage draw.
-const OUTAGE_KEY: &str = "paros-outage";
+/// When an outage may strike, from the opening of the chaos window: late,
+/// because the cluster decides little early in the window (its first
+/// decisions land around 3 to 6 s), and inside it, as every new fault is.
+const START: std::ops::Range<Duration> =
+    Duration::from_millis(1_500)..Duration::from_millis(crate::CHAOS_DURATION_MS - 100);
 
-/// The latest an outage starts: inside the chaos window, as every new fault
-/// is (an oracle constant's derivative, never buggified). The cluster
-/// decides little early in the window, so the outage leans late.
-const LATEST_START_MS: u64 = crate::CHAOS_DURATION_MS - 100;
+/// How long each victim stays down. Floor 20 ms: a reboot, and longer than
+/// [`POLL`], so the losses are planned while every victim is still down.
+const DOWN: std::ops::Range<Duration> = Duration::from_millis(20)..Duration::from_millis(600);
 
-/// When every node is back at the latest: early in the recovery tail, which
-/// then still has its whole settle budget to converge in.
-const BACK_BY_MS: u64 = crate::CHAOS_DURATION_MS + 2_000;
+/// How long the straggler stays down: back last, early in the recovery
+/// tail, which then still has its whole settle budget to converge in.
+const STRAGGLER: std::ops::Range<Duration> =
+    Duration::from_millis(600)..Duration::from_millis(2_500);
 
-const _: () = assert!(LATEST_START_MS < BACK_BY_MS);
+/// How often [`OutageLosses`] looks for the outage's landing.
+const POLL: Duration = Duration::from_millis(5);
 
-/// How often a drawn outage looks for a decided slot to lose.
-const POLL: Duration = Duration::from_millis(10);
+const _: () = assert!(POLL.as_millis() < DOWN.start.as_millis());
+
+/// The outage regime of [`crate::chaos_surfaces`]: every acceptor and proxy
+/// leader, swarm-masked per seed (moonpool keeps it on half the seeds and
+/// its straggler on half of those).
+pub(crate) fn regime() -> Chaos {
+    Chaos::Outage {
+        config: Outage {
+            groups: vec![
+                crate::roles::ACCEPTOR_GROUP.to_string(),
+                crate::roles::PROXY_GROUP.to_string(),
+            ],
+            probability: 1.0,
+            start: START,
+            down: DOWN,
+            straggler: Some(STRAGGLER),
+        },
+        mode: ChaosMode::Swarm,
+    }
+}
 
 /// How a seed's outage loses copies (see the module doc).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,153 +101,48 @@ impl LossShape {
     }
 }
 
-/// The run's outage, drawn once per seed by whoever asks first.
-#[derive(Clone, Debug)]
-pub(crate) struct Outage {
-    /// When every node loses power, from the start of the run.
-    at: Duration,
-    /// How long each node stays down, by its rank among the outage's
-    /// victims (the acceptors, then the proxies, each in IP order); a rank
-    /// past the list stays down for the first entry.
-    down: Vec<Duration>,
-    /// How the outage loses copies.
-    pub(crate) loss: LossShape,
-}
-
-/// The run's outage, if it has one (see the module doc).
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn outage(state: &StateHandle) -> Option<Outage> {
-    let draw: Arc<Mutex<Option<Option<Outage>>>> =
-        crate::state::published_arc(state, OUTAGE_KEY, || Mutex::new(None));
-    let mut guard = draw.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.get_or_insert_with(draw_outage).clone()
-}
-
-fn draw_outage() -> Option<Outage> {
-    if !buggify_with_prob!(0.5) {
-        return None;
-    }
-    // The earliest start is a knob (the outage then waits for a slot to
-    // lose); its ceiling keeps it inside the chaos window.
-    let at = buggify_knob!(500_u64, 100_u64..LATEST_START_MS);
-    // Each victim's downtime: one knob for the common return, and a
-    // straggler (its own location) that returns last, long after. Floor
-    // 10 ms: a reboot, not a skipped outage; the ceiling is `BACK_BY_MS`.
-    let common = buggify_knob!(100_u64, 10_u64..600_u64);
-    let straggler = buggify_with_prob!(0.5);
-    let late = buggify_knob!(1_500_u64, 600_u64..(BACK_BY_MS - LATEST_START_MS));
-    let victims = 2 * *crate::PROCESS_POOL_RANGE.end() + *crate::PROXY_POOL_RANGE.end();
-    let straggler_rank = moonpool_sim::sim_random_range(0..*crate::PROCESS_POOL_RANGE.start());
-    let down = (0..victims)
-        .map(|rank| {
-            let jitter = moonpool_sim::sim_random_range(0..common.max(1));
-            let ms = if straggler && rank == straggler_rank {
-                late
-            } else {
-                common + jitter
-            };
-            Duration::from_millis(ms.min(BACK_BY_MS - at))
-        })
-        .collect();
-    let lossy = buggify_with_prob!(0.4);
-    let loss = LossShape {
-        recent: buggify_with_prob!(0.5),
-        keep: lossy.then(|| usize::from(moonpool_sim::sim_random_bool(0.5))),
-        prefer_removed: buggify_with_prob!(0.5),
-    };
-    Some(Outage {
-        at: Duration::from_millis(at),
-        down,
-        loss,
-    })
-}
-
-/// The injector (see the module doc): a fresh one per timeline.
-pub(crate) struct CorrelatedOutage;
+/// The injector that plans an outage's losses (see the module doc): a
+/// fresh one per timeline.
+pub(crate) struct OutageLosses;
 
 #[async_trait]
-impl FaultInjector for CorrelatedOutage {
+impl FaultInjector for OutageLosses {
     fn name(&self) -> &'static str {
-        "paros-correlated-outage"
+        "paros-outage-losses"
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-        let Some(outage) = outage(ctx.state()) else {
-            return Ok(());
-        };
         let time = ctx.time();
-        let wait = outage.at.saturating_sub(time.now());
-        if time.sleep(wait).await.is_err() {
-            return Ok(());
-        }
-        // The cluster decides little under chaos: the outage waits, from
-        // its drawn start, for a decided slot to lose, and is skipped when
-        // none comes before the window closes.
-        let latest = Duration::from_millis(LATEST_START_MS);
-        while !has_target(ctx.state()) {
-            if time.now() >= latest
-                || ctx.chaos_shutdown().is_cancelled()
-                || time.sleep(POLL).await.is_err()
-            {
+        loop {
+            if let Some(landed) = ctx.state().get::<OutageLanded>(OUTAGE_STATE_KEY) {
+                if landed
+                    .victims
+                    .iter()
+                    .any(|ip| ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP).contains(ip))
+                {
+                    assert_reachable!(
+                        "storage: a correlated outage takes every acceptor down at once"
+                    );
+                    plan_losses(ctx.state(), draw_loss());
+                }
+                return Ok(());
+            }
+            if ctx.chaos_shutdown().is_cancelled() || time.sleep(POLL).await.is_err() {
                 return Ok(());
             }
         }
-        let victims: Vec<String> = ctx
-            .ips_in_group(crate::roles::ACCEPTOR_GROUP)
-            .into_iter()
-            .chain(ctx.ips_in_group(crate::roles::PROXY_GROUP))
-            .collect();
-        if victims.is_empty() {
-            return Ok(());
-        }
-        for ip in &victims {
-            ctx.crash(ip)?;
-        }
-        // The kills land at the next step: plan once every memory is gone.
-        if time.sleep(Duration::from_millis(1)).await.is_err() {
-            return Ok(());
-        }
-        assert_reachable!("storage: a correlated outage takes every acceptor down at once");
-        plan_losses(ctx.state(), outage.loss);
-        let start = time.now();
-        let mut order: Vec<(Duration, &String)> = victims
-            .iter()
-            .enumerate()
-            .map(|(rank, ip)| {
-                let down = outage
-                    .down
-                    .get(rank)
-                    .or(outage.down.first())
-                    .copied()
-                    .unwrap_or(Duration::from_millis(10));
-                (start + down, ip)
-            })
-            .collect();
-        order.sort();
-        for (back, ip) in order {
-            // Restarts are owed even once the window closed: a victim left
-            // down would be a partition the recovery tail never heals.
-            let _ = time.sleep(back.saturating_sub(time.now())).await;
-            ctx.restart(ip)?;
-        }
-        Ok(())
     }
 }
 
-/// Whether some genesis journal's custody ledger holds a decided slot an
-/// outage could lose.
-fn has_target(state: &StateHandle) -> bool {
-    crate::shape::journals(state)
-        .ids
-        .into_iter()
-        .any(|journal| {
-            let decided = crate::audit::audit_world_for(state, journal).decided_slots();
-            super::storage_world_for(state, journal)
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .has_outage_target(&decided)
-        })
+/// The outage's loss shape, drawn when it lands (see the module doc).
+fn draw_loss() -> LossShape {
+    let lossy = buggify_with_prob!(0.4);
+    LossShape {
+        recent: buggify_with_prob!(0.5),
+        keep: lossy.then(|| usize::from(moonpool_sim::sim_random_bool(0.5))),
+        prefer_removed: buggify_with_prob!(0.5),
+    }
 }
 
 /// Plan the outage's losses in every genesis journal (see the module doc).

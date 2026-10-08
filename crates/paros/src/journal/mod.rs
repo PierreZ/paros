@@ -23,19 +23,20 @@
 //! next commit that writes the metainfo for another reason, a promise, a
 //! truncation or a format, and is never a reason to write it on its own.
 //!
-//! # Ordering: a commit is not atomic
+//! # Ordering: a commit is atomic one way only
 //!
-//! A journal commit writes its records and its metainfo in one unsynced
-//! window, and a crash resolves each sector on its own: the metainfo can
-//! land without the records, or the records without the metainfo. So a
-//! store never puts in one commit two things one of which is only true with
-//! the other; it orders them across commits, each durable before the next
-//! starts (#264, #176). [`JournalStorage`] commits a raised promise alone
-//! (before any entry it covers), then the entries, then the floor and the
-//! metainfo (never a chosen index ahead of the entry that makes its slot
-//! chosen); [`JournalMatchmakerStorage`] commits its new registrations,
-//! then the metainfo, then its clears, and its boot keeps only what the
-//! durable metainfo vouches for.
+//! The journal writes a commit's metainfo only once its batch is durable
+//! (moonpool#309): a durable metainfo vouches for its batch, but a crash
+//! between the two can land the batch without its metainfo. So a store puts
+//! in one commit a batch and the metainfo that depends on it, never a batch
+//! that depends on the metainfo; that order goes across commits, each
+//! durable before the next starts (#264, #176). [`JournalStorage`] commits a
+//! raised promise alone (before any entry it covers: an entry durable above
+//! its promise would be an accept the node never promised), then the
+//! entries with the floor and the metainfo (a chosen index never ahead of
+//! the entry that makes its slot chosen); [`JournalMatchmakerStorage`]
+//! commits its new registrations with the metainfo, then its clears, and its
+//! boot keeps only what the durable metainfo vouches for.
 //!
 //! # Corruption: what the journal reports, what paros does with it
 //!

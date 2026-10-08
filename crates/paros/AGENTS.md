@@ -51,7 +51,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (two tenants' control journals, their identifiers drawn and named by the `SystemPlan`, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230); the cell's side of the fleet (`JoinFleet`, `HostTenant`,
   `DropTenant`, #229).
 - `corruption.rs` → `IntegrityFault`, `CorruptionVerdict` → the typed corruption verdict a store surfaces (the journal classifies).
-- `journal/mod.rs` → `JournalStoreConfig` (geometry, direct I/O, `Durability`), the identity and error mappings · `journal/node.rs` → `JournalStorage` (slot = position, ballot in the identity, scalars in the metainfo; a sync commits a raised promise, then the entries, then the floor and metainfo, #264), `JournalBootFacts` · `journal/matchmaker.rs` → `JournalMatchmakerStorage` (a registration per position, its generation in the identity, scalars in the metainfo; a sync commits the registrations, then the metainfo, then the clears; a boot keeps what the metainfo vouches for and raises the effective scalar over the reconfigurations it keeps, #176).
+- `journal/mod.rs` → `JournalStoreConfig` (geometry, direct I/O, `Durability`), the identity and error mappings · `journal/node.rs` → `JournalStorage` (slot = position, ballot in the identity, scalars in the metainfo; a sync commits a raised promise, then the entries with the floor and metainfo: the journal writes metainfo only after its batch, moonpool#309, #264), `JournalBootFacts` · `journal/matchmaker.rs` → `JournalMatchmakerStorage` (a registration per position, its generation in the identity, scalars in the metainfo; a sync commits the registrations with the metainfo, then the clears; a boot keeps what the metainfo vouches for and raises the effective scalar over the reconfigurations it keeps, #176).
 - `journal/tests.rs` → both contract suites, faulty votes from targeted damage, the floor across reboots, the format probe, lost segments, registration damage, on `SimStorageProvider` (the journal's crash physics are `moonpool-journal`'s tests and the sim's).
 - `proto/{common,paros,internal,matchmaker,system,machine,checkpoint,fleet}.proto` → compiled by `build.rs` with `prost-build`.
 
@@ -85,7 +85,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `abb6f7a` (moonpool#308 merged): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `0a68199` (moonpool#312 merged: #309, #310, #311): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), dev `moonpool-sim` (`:56`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - The pin is **eight lines**: four here, `crates/paros-sim/Cargo.toml:20,29`,

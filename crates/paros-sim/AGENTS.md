@@ -28,7 +28,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `world/registry_store.rs` → `LedgeredRegistry` → `JournalMatchmakerStorage` on `SimStorageProvider` (#176), with the provisioning ledger and the registry's in-flight writes (`AuditWorld::note_registry_in_flight`).
 - `world/power.rs` → `PowerCut`, `Owner` → the BUGGIFY site that cuts a journal store's power mid-commit (moonpool `SelfCrash`), the cut drawn inside the store's last commit's duration; one reachable per owner.
 - `world/injector.rs` → `Custody`, `Injection`, `apply`, `judge` → the ledgered journal-aware injector (#261): the custody ledger each completed sync records (`note_synced`), one family of boot-time byte damage per boot (entry rot, record rot, double fault, metainfo rot, header rot, each its own BUGGIFY location and budget), judged against the journal's verdict at open.
-- `world/outage.rs` → `CorrelatedOutage`, `Outage`, `LossShape` → the correlated outage (#263; paros-side until moonpool#311): once a slot is decided inside the chaos window, on some seeds every acceptor and proxy goes down at once, each back after its own delay (one straggler last), and a loss of one slot's copies planned for each holder's next boot (`StorageWorld::plan_outage_loss`: aimed at the most recent or a uniform slot, the usual budget or the loss budget's extreme leaving one clean copy or none, the clean copy preferably on a removed node).
+- `world/outage.rs` → `regime`, `OutageLosses`, `LossShape` → the correlated outage (#263): moonpool's `Chaos::Outage` (moonpool#311) takes every acceptor and proxy down at once on some seeds, each back after its own delay (one straggler last); at its `OutageLanded` notice, a loss of one slot's copies planned for each holder's next boot (`StorageWorld::plan_outage_loss`: aimed at the most recent or a uniform slot, the usual budget or the loss budget's extreme leaving one clean copy or none, the clean copy preferably on a removed node).
 - `world/wipe.rs` → `wipe_dir` → the wipe coin's physical half on a journal seed: the journal's files deleted and the deletion synced.
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
@@ -157,7 +157,7 @@ crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired
 `COVERAGE_ITERATIONS = 1024` (`:161`), `EXPLORATION_TIMELINES_PER_SEED = 8` (`:163`).
 `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`), `ENTRY_BLOCKS_FLOOR = 17` (`:657`),
 `PERSIST_BLOCKS_FLOOR = 2` (`:665`), `SEED_COUNT = 1` (`:712`), `MIN_BOOTSTRAP = 3` (`:939`). `chaos_surfaces()` = `Network(Swarm)` +
-four per-group attritions + `BuggifyKnobs` + `Storage(Swarm)`; `BitFlip` masked; storage masked to
+four per-group attritions + the acceptor-and-proxy `Outage(Swarm)` + `BuggifyKnobs` + `Storage(Swarm)`; `BitFlip` masked; storage masked to
 crash damage, failed syncs, short transfers and lost directory entries (`storage_fault_mask()`:
 rot, phantom writes, degradation and disk failure stay out, #176); `prob_wipe = 0`.
 Deps: `paros`, `moonpool-sim` (`exploration`, `Cargo.toml:20`), `moonpool-rpc` (`:29`) — pin

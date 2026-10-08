@@ -382,17 +382,6 @@ impl StorageWorld {
         })
     }
 
-    /// Whether an outage would find a slot to lose here: a budgeted journal
-    /// whose custody ledger holds a settled copy of one.
-    pub(crate) fn has_outage_target(&self, decided: &BTreeSet<u64>) -> bool {
-        self.cluster_size > 0
-            && self.custody.iter().any(|(key, custody)| {
-                custody.settled
-                    && !self.replicas.contains(key)
-                    && custody.records.keys().any(|slot| decided.contains(slot))
-            })
-    }
-
     /// Whether `slot` may lose its clean quorum: it already did, or the loss
     /// budget has room (see [`LossShape::loss_budget`]).
     fn loss_permitted(&self, slot: u64, budget: usize) -> bool {

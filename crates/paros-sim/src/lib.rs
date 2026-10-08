@@ -226,7 +226,7 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// transfers; lost unsynced directory entries), swarm-masked per seed by
 /// moonpool. A world-store seed has no files and is untouched. See
 /// [`storage_fault_mask`] for what is masked.
-fn chaos_surfaces() -> [Chaos; 7] {
+fn chaos_surfaces() -> [Chaos; 8] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -255,6 +255,7 @@ fn chaos_surfaces() -> [Chaos; 7] {
             config: regime(AttritionVictims::group(REPLICA_GROUP)),
             mode: ChaosMode::Swarm,
         },
+        crate::world::outage::regime(),
         Chaos::BuggifyKnobs,
         Chaos::Storage(ChaosMode::Swarm),
     ]
@@ -305,7 +306,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         })
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
-        .fault_factory(|| Box::new(crate::world::outage::CorrelatedOutage))
+        .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }
