@@ -81,5 +81,5 @@ coverage gate that never fired, or convergence timeout. A docs-only change can s
 - **A coverage gate that never fired** in the sweep is a finding about reach,
   not noise; do not delete the gate (`/adding-an-audit-check`).
 
-The book is built by `pages.yml`, not by `rust.yml`; if you touched
-`book/src/`, also run `RUN mdbook build` (`/update-the-book`).
+The site is built by `pages.yml`, not by `rust.yml`; if you touched
+`web/site/`, also run `RUN web/site/build.sh` (`/update-the-site`).

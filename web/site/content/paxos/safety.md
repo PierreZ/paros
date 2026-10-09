@@ -1,4 +1,8 @@
-# Why one value is safe
++++
+title = "Why one value is safe"
+weight = 3
+aliases = ["/safety.html"]
++++
 
 The previous chapter shows *how* a value gets chosen. This chapter shows *why*
 nothing can contradict that choice. Single-decree Paxos is famous because nobody
@@ -9,18 +13,17 @@ is a consequence of it.
 
 > **Play it.** Three Act I levels put you on the wrong side of this argument.
 >
-> - [`act1/adopt-the-value`](play/#act1/adopt-the-value) — choose what a second
+> - [`act1/adopt-the-value`](../../play/#act1/adopt-the-value) — choose what a second
 >   proposer puts in its Accept, after a lower ballot already accepted a value.
 >   Choose its own value and the game explains the double choice.
-> - [`act1/quorum-intersection`](play/#act1/quorum-intersection) — pick the Phase-1
+> - [`act1/quorum-intersection`](../../play/#act1/quorum-intersection) — pick the Phase-1
 >   and Phase-2 reach sets, and try to choose a value with a Phase-1 quorum that
 >   misses the acceptor that voted. The set does not exist, and the explanation of
 >   *why* is the win.
-> - [`act1/recovery-is-not-catch-up`](play/#act1/recovery-is-not-catch-up) — adopt
+> - [`act1/recovery-is-not-catch-up`](../../play/#act1/recovery-is-not-catch-up) — adopt
 >   a value that one acceptor accepted, when nothing is chosen and nobody is
 >   behind.
 
-<!-- toc -->
 
 ## The three properties
 
@@ -44,7 +47,7 @@ argument, because:
 Take three acceptors. The majority that chose `SET x=1` is a set of two; any later
 majority is also a set of two; two sets of two drawn from three must share one:
 
-```mermaid
+{% mermaid() %}
 flowchart TD
     M1["Majority that chose<br/>SET x=1: A0 and A1"]
     M2["Any later majority:<br/>A1 and A2"]
@@ -56,7 +59,7 @@ flowchart TD
     M2 --- A1
     M2 --- A2
     classDef shared fill:#c97a2b,stroke:#7a4718,color:#fff
-```
+{% end %}
 
 That shared acceptor (A1) is the pivot: it saw `SET x=1` get chosen, and it will be
 consulted by anyone who tries to choose later. Force every later proposal to respect
@@ -74,7 +77,7 @@ that instant arrives (the proposer might still be collecting replies), so no rul
 trigger "on chosen". Lamport instead strengthens a single invariant down a ladder
 until it becomes a rule a proposer can follow *before* it acts:
 
-```mermaid
+{% mermaid() %}
 flowchart TD
     SAFE["Goal: only a single value is ever chosen"]
     P2["P2: if v is chosen, every higher-numbered<br/>chosen proposal also has value v"]
@@ -83,7 +86,7 @@ flowchart TD
     P2C["P2c: before issuing (n, v), some majority S has either<br/>(a) accepted nothing numbered below n, or<br/>(b) v is the highest-numbered value accepted below n in S<br/>(e.g. n=(4,2), v=SET x=1)"]
     PROTO["The two-phase protocol:<br/>Phase 1 reads the constraint, Phase 2 proposes the safe value"]
     SAFE --> P2 --> P2A --> P2B --> P2C --> PROTO
-```
+{% end %}
 
 Each step implies the one above it. `P2` is what we want. `P2a` makes it about
 *accepted* (not just chosen) proposals, because an acceptor that never heard about `v`
@@ -147,4 +150,4 @@ every transition of every seed — **"at most one value is ever chosen for a slo
 the property `P2` names, beside **"a durable accept quorum never decides two values
 for a slot"**, the same claim read off the disks rather than off the decisions
 (`crates/paros-sim/src/audit/`). The [crash and restart
-safety](restart-safety.md) chapter shows it catching a real bug.
+safety](@/paxos/restart-safety.md) chapter shows it catching a real bug.

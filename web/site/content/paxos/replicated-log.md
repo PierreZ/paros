@@ -1,4 +1,8 @@
-# From one value to a log
++++
+title = "From one value to a log"
+weight = 4
+aliases = ["/replicated-log.html"]
++++
 
 Single-decree Paxos agrees on **one** value, and a real system needs a *sequence*.
 Every node applies that sequence in the same order, so every replica of a
@@ -10,13 +14,12 @@ log only as a contiguous prefix.
 
 > **Play it.**
 >
-> - [`act2/a-log-of-decisions`](play/#act2/a-log-of-decisions) — propose three
+> - [`act2/a-log-of-decisions`](../../play/#act2/a-log-of-decisions) — propose three
 >   commands, deliver their Accepts and Accepteds by hand, and deliver slot 3's
 >   Accepted before slot 2's. Then answer the apply question: slot 4 is chosen and
 >   `chosen_index` is 2, so may it apply? The level ends when a hole stops the walk
 >   and you fill it.
 
-<!-- toc -->
 
 ## A single decision never changes
 
@@ -51,7 +54,7 @@ pub struct Entry {
 
 The `(client, seq)` tag rides along with every command so a node can recognise a
 request it has already placed and never execute it twice, even across a leader change
-or a restart (see [Crash and restart safety](restart-safety.md)).
+or a restart (see [Crash and restart safety](@/paxos/restart-safety.md)).
 
 ## The log is a gapless prefix plus the future
 
@@ -72,7 +75,7 @@ pub struct HardState {
 boundary between the log that is safe to apply and the log still being decided. It
 exists because consensus can choose slots out of order, leaving a **hole**:
 
-```mermaid
+{% mermaid() %}
 flowchart TD
     s5["slot 5<br/>SET x=1<br/>chosen"]:::done
     s6["slot 6<br/>SET y=2<br/>chosen"]:::done
@@ -85,14 +88,14 @@ flowchart TD
     classDef gap fill:#7a2f2f,stroke:#4d1f1f,color:#fff
     classDef open fill:#5a5a5a,stroke:#333,color:#fff
     classDef ci fill:#2f4f6e,stroke:#1f3147,color:#fff
-```
+{% end %}
 
 Slots 5 and 6 may apply; slot 8 **must not**, because applying it before slot 7 would
 execute commands in an order no other node will reproduce. In paros the walk is the
 `Replica` role (`crates/paros-core/src/replica.rs`): `advance_chosen_index` steps it
 forward one slot at a time, surfacing each newly applied `(slot, command)` in order,
 and a hole stops the walk until it is filled. A hole that *never* fills is a permanent
-cluster-wide wedge — see [The stable leader](stable-leader.md). The audit pins the walk:
+cluster-wide wedge — see [The stable leader](@/paxos/stable-leader.md). The audit pins the walk:
 **"a node's applied prefix advances one slot at a time (a forward jump only at the
 compaction floor or a snapshot install)"** (`crates/paros-sim/src/audit/`), and each
 journal client's fold of what it reads must visit LSNs in increasing order (the message
@@ -100,7 +103,7 @@ journal client's fold of what it reads must visit LSNs in increasing order (the 
 application). Both keep their old wording because an assertion's identity is the hash of
 its message; the only
 forward jump left today is the
-[trim-point jump](truncation-and-snapshots.md#the-node-below-the-floor-and-the-trim-point-jump).
+[trim-point jump](@/paxos/truncation-and-snapshots.md#the-node-below-the-floor-and-the-trim-point-jump).
 
 ## Five roles, collapsed into one node
 
@@ -126,4 +129,4 @@ PMMC's central correctness invariant is **R1**: "no two different commands decid
 the same slot" — single-decree safety applied per slot, which is precisely what the
 previous two chapters built. The log adds no new safety argument, only many independent
 instances of the same one. What it *does* add is who proposes, and how a leader avoids
-paying for Phase 1 on every slot: the [stable leader](stable-leader.md), next.
+paying for Phase 1 on every slot: the [stable leader](@/paxos/stable-leader.md), next.

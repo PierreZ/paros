@@ -89,7 +89,7 @@ See also the sibling sans-IO core model:
   ["The Paxos Algorithm"](https://www.youtube.com/watch?v=d7nAGI_NZPk). A gentle,
   diagram-driven walkthrough of single-decree Paxos (Prepare/Promise/Accept, the dueling
   proposers cured by exponential backoff) and a Megastore-style replicated log. The source
-  of the book's bank-balance example ([`../../book/src/replicated-log.md`](../../book/src/replicated-log.md)).
+  of the book's bank-balance example ([`../../web/site/content/paxos/replicated-log.md`](../../web/site/content/paxos/replicated-log.md)).
 
 ## Suggested reading order (for the sans-IO Multi-Paxos goal)
 

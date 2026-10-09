@@ -1,4 +1,8 @@
-# How Paxos chooses one value
++++
+title = "How Paxos chooses one value"
+weight = 2
+aliases = ["/choose-one-value.html"]
++++
 
 Single-decree Paxos agrees on one value over a network that drops, delays and
 reorders messages, while several proposers compete. It needs two round trips over
@@ -10,15 +14,14 @@ change.
 > **Play it.** Act I runs this by hand: three acceptors, one slot, no clock and no
 > disk.
 >
-> - [`act1/choose-a-value`](play/#act1/choose-a-value) — deliver the Prepare,
+> - [`act1/choose-a-value`](../../play/#act1/choose-a-value) — deliver the Prepare,
 >   Promise, Accept and Accepted one message at a time, with one acceptor silent,
 >   until two of three choose a value.
-> - [`act1/be-the-acceptor`](play/#act1/be-the-acceptor) — answer every Prepare and
+> - [`act1/be-the-acceptor`](../../play/#act1/be-the-acceptor) — answer every Prepare and
 >   every Accept yourself. The acceptor rule below is the whole level.
-> - [`act1/the-duel`](play/#act1/the-duel) — run two proposers that preempt each
+> - [`act1/the-duel`](../../play/#act1/the-duel) — run two proposers that preempt each
 >   other, get a value chosen anyway, and count the rounds it costs.
 
-<!-- toc -->
 
 ## Ballots
 
@@ -42,7 +45,7 @@ Each phase is one round trip needing a **majority** (2 of 3):
 Two of three means the proposer makes progress while one acceptor is slow, crashed
 or unreachable. Why a *majority* specifically: any two majorities share an acceptor,
 and that overlap is what makes two different values impossible.
-[Why one value is safe](safety.md) turns that into the argument.
+[Why one value is safe](@/paxos/safety.md) turns that into the argument.
 
 ## The value-selection rule
 
@@ -50,8 +53,8 @@ A proposer does not always get to propose its own value. If any Promise reports 
 already-accepted value, the proposer must **adopt the highest-ballot value it saw**
 — a later proposer, forced to re-propose the same value, can never change the
 choice. Precisely stated this is Lamport's `P2c`, the whole reason Phase 1 exists;
-[Why one value is safe](safety.md) derives it and
-[`act1/adopt-the-value`](play/#act1/adopt-the-value) makes you obey it.
+[Why one value is safe](@/paxos/safety.md) derives it and
+[`act1/adopt-the-value`](../../play/#act1/adopt-the-value) makes you obey it.
 
 The mechanism has a name from the literature: **piggybacking** — attaching extra
 information to a message already being sent, so it travels at no extra cost. A
@@ -61,7 +64,7 @@ the ballot it was accepted at. In paros those ride in `Message::Promise`
 (`acceptor.rs`). It is also how a node that *missed* a decision catches up: it
 proposes, the chosen value comes back piggybacked, and it is forced to adopt it —
 learning the consensus in the act of trying to overwrite it. That is narrower than
-it looks; see [Recovery, not catch-up](safety.md#recovery-not-catch-up).
+it looks; see [Recovery, not catch-up](@/paxos/safety.md#recovery-not-catch-up).
 
 ## What each acceptor remembers
 
@@ -80,8 +83,8 @@ acceptor has accepted at or above the slot in question — the report P2c is bui
 on — and closes the door on every lower ballot for good. A **vote records**: it
 writes down a `(ballot, value)` that some later ballot's Phase 1 will find and be
 obliged to re-propose. That split is what
-[`act1/be-the-acceptor`](play/#act1/be-the-acceptor) is built around; the "before
-the reply leaves" is where [persist before send](restart-safety.md) bites.
+[`act1/be-the-acceptor`](../../play/#act1/be-the-acceptor) is built around; the "before
+the reply leaves" is where [persist before send](@/paxos/restart-safety.md) bites.
 
 In paros the role is `Acceptor` (`crates/paros-core/src/acceptor.rs`):
 `Acceptor::promised` is the promise, durable as `HardState.max_promised_ballot`
@@ -99,4 +102,4 @@ every seed, in CI (`crates/paros-sim/src/audit/`). What it *will* show is propos
 dueling without converging — every node has promised a different high ballot, so no
 ballot wins a promise quorum and nothing is chosen. That is a livelock: annoying,
 never unsafe, and it has a level of its own. Randomized election timeouts cure it
-once we elect a [stable leader](stable-leader.md); they were never needed for safety.
+once we elect a [stable leader](@/paxos/stable-leader.md); they were never needed for safety.

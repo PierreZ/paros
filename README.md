@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="book/src/paros-logo.png" alt="paros" width="200" />
+  <img src="web/site/static/paros-logo.png" alt="paros" width="200" />
   <h1>paros</h1>
   <p><strong>Paxos, in Rust.</strong> A learning implementation of the Paxos family of
   consensus algorithms, built and validated with deterministic simulation testing.</p>
@@ -26,7 +26,7 @@ The same code runs in production and in **deterministic simulation**: every seed
 bit-for-bit, network chaos is injected, and an audit asserts on every transition that no two
 acceptors ever choose different values.
 
-👉 **[Read the book](https://pierrez.github.io/paros/)**
+👉 **[Read the site](https://pierrez.github.io/paros/)**
 
 ## At a glance
 

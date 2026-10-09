@@ -45,6 +45,6 @@ one place. Keeping it current is part of landing a PR, not a follow-up.
 3. **`AGENTS.md`**: the root file if a rule, a gate or the workflow changed;
    the crate's own map (`crates/<crate>/AGENTS.md`) if a module, a role, an
    operation id, a knob family or a file it names moved or was renamed.
-4. **The book**: if the merge changed a protocol rule, a message, a call of
+4. **The site**: if the merge changed a protocol rule, a message, a call of
    the journal API, a read or recovery path or a game level, update the
-   chapter that explains it (`/update-the-book`).
+   page that explains it (`/update-the-site`).

@@ -1,4 +1,8 @@
-# Why reads are not free
++++
+title = "Why reads are not free"
+weight = 8
+aliases = ["/linearizable-reads.html"]
++++
 
 Writes go through consensus, so a read looks like the easy half: a node holds the
 log, and it can answer from local state. It cannot. A node does not know on its
@@ -10,17 +14,16 @@ checker over the client's own history.
 
 > **Play it.** One Act II level and three Act III levels build the read path.
 >
-> - [`act2/the-read-that-lies`](play/#act2/the-read-that-lies) — ask a follower
+> - [`act2/the-read-that-lies`](../../play/#act2/the-read-that-lies) — ask a follower
 >   that missed a leader change for a read, and decide if it can answer now.
-> - [`act3/the-fresh-leader-trap`](play/#act3/the-fresh-leader-trap) — hold a
+> - [`act3/the-fresh-leader-trap`](../../play/#act3/the-fresh-leader-trap) — hold a
 >   read at a new leader while the slot that it inherited is not decided again.
-> - [`act3/linearizable-or-not`](play/#act3/linearizable-or-not) — make a
+> - [`act3/linearizable-or-not`](../../play/#act3/linearizable-or-not) — make a
 >   history with a read across a leader change, and let the three conditions
 >   judge it.
-> - [`act3/chosen-is-not-applied`](play/#act3/chosen-is-not-applied) — answer a
+> - [`act3/chosen-is-not-applied`](../../play/#act3/chosen-is-not-applied) — answer a
 >   client retry for a slot that is chosen above a hole, two times.
 
-<!-- toc -->
 
 ## The strawman: write a no-op to read
 
@@ -63,7 +66,7 @@ when the `ReadState` arrives. paros holds no application state machine, so the
 state a read serves is the **applied log prefix itself**: the `ReadState`'s
 `index` is the watermark, and `None` is the empty prefix. Every public `Read`
 (#204) is a quorum read, served by any node or replica; the grid version is in
-[Beyond Multi-Paxos](beyond-multi-paxos.md#quorum-reads).
+[Beyond Multi-Paxos](@/paxos/beyond-multi-paxos.md#quorum-reads).
 
 paros once also had the leader-side path that etcd-raft exposes as
 `ReadIndex`: the leader captured its applied watermark, proved it still led with
@@ -188,5 +191,5 @@ committed write ack names a slot the acking node had already applied"**. It went
 red on twelve seeds in the first two thousand.
 
 A quorum read also buys locality: any replica serves it, and no read waits on
-the leader. The [optimizations table](stable-leader.md#optimizations-at-a-glance)
+the leader. The [optimizations table](@/paxos/stable-leader.md#optimizations-at-a-glance)
 keeps the score.
