@@ -62,11 +62,24 @@ impl FormedCell {
     }
 
     /// Phase 2b from a formed member: acked for the plan it holds, at any
-    /// ballot; refused for any other.
+    /// ballot. Another plan below its vote's ballot is a preemption, as at
+    /// any acceptor: a proposer whose prepare finished before this member
+    /// voted still sends its own plan, and must reopen above the vote to
+    /// hear it. Another plan at or above it is another cell's. Witness: two
+    /// concurrent `cell init`s, the slower one's prepare done before the
+    /// faster one's vote, were refused `other_cell_init` over the very cell
+    /// they formed (seed 9979247141707847612 on #319's branch).
     pub(super) fn form_ack(&self, request: &wire::FormCell) -> wire::FormCellAck {
         assert_eq!(self.facts.class, Class::Storage, "only storage forms");
         let refusal = match CellPlan::from_form(request) {
             Ok(plan) if plan == self.plan => "",
+            Ok(_) if vote_ballot(request).is_some_and(|ballot| ballot < self.ballot) => {
+                return wire::FormCellAck {
+                    formed: false,
+                    refusal: "promised_higher".into(),
+                    promise: Some(super::ballot_to_wire(self.ballot)),
+                };
+            }
             Ok(_) => "other_cell",
             Err(_) => "malformed",
         };
