@@ -372,6 +372,10 @@ impl ColocatedNode {
             self.matchmaking.is_none(),
             "a probe never overlaps a campaign"
         );
+        assert!(
+            self.role == NodeRole::Follower,
+            "a probe opens only on a follower"
+        );
         if self.probe.is_some() {
             // The clock is the probe's retry cadence, as it is a
             // matchmaking's: re-ask whoever has not answered.
