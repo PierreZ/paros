@@ -75,8 +75,8 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 - **Faults are inline, in this crate** (root *Simulation rules*, #294). A new driver decision is
   an inline `buggify_with_prob!` / `buggify_pick!` at the line that makes it, consulted only where
   its answer is observable. A moment where a crash is interesting (staged not synced, durable not
-  sent) is `hint!("label").await` at that line. Never add a hook trait (the deleted `DriverHooks`), a `Seam`
-  variant, a hook trait (`ClientHooks`, commit hooks), or a store or disk trait whose only second
+  sent) is `hint!("label").await` at that line. Never add a hook trait (the deleted `DriverHooks`, `ClientHooks`, commit hooks), a `Seam`
+  variant, or a store or disk trait whose only second
   implementation would be a sim wrapper. A path the code walks gets a `reachable!` probe, with
   the message the sim's gate already uses, never reworded.
 - A new tunable is a `DriverTunables` field with a default (`driver/config.rs`) and a

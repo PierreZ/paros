@@ -62,7 +62,7 @@ fn same_seed_replays_identically() {
 /// says the two runs *ended* the same, this says they never differed — and
 /// on a divergence it names the draw. Everything the campaign has — swarmed
 /// network faults, attrition of both process groups, buggify knobs, the
-/// operation swarm, the driver hooks and the storage world's coins — is under
+/// operation swarm, the driver's BUGGIFY sites and the storage world's coins — is under
 /// it. The seeds are arbitrary samples, as above.
 #[test]
 fn same_seed_replays_under_the_canary() {

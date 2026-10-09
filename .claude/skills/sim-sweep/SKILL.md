@@ -49,7 +49,7 @@ while moonpool's sim subscriber stays floored at INFO.
 - Normal evidence for a hunt: 2,000 to 3,000 seeds. Raise to 10,000 only for
   a substantial protocol, harness or fault-model change. Larger only on an
   explicit request.
-- After any change to the harness's randomness, the driver hooks or the
+- After any change to the harness's randomness, the driver's BUGGIFY sites or the
   process lifecycle, run a few hundred seeds of `canary`.
 - Saturation belongs to xtask and is not replaced by raw volume, however
   large.

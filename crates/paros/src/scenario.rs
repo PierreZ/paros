@@ -19,7 +19,8 @@
 /// GC is optional work, and a floor that never becomes effective costs only
 /// the retirements it would have licensed. The simulation couples it to the
 /// departed-straggler scenario, which needs a prior configuration to stay
-/// answerable (#124, #263).
+/// answerable (#124, #263). Recovery gate: "storage: a departed straggler's
+/// slot is recovered through the prior configuration".
 pub const WITHHOLD_GC: &str = "paros: a node withholds its garbage-collection requests";
 
 /// The node holds one of its journals (#188): the journal's beat is skipped
@@ -27,7 +28,8 @@ pub const WITHHOLD_GC: &str = "paros: a node withholds its garbage-collection re
 /// slow, partitioned journal, and its siblings on the same node must not
 /// notice (the non-interference claim). The held journal is the highest
 /// user journal of a node that boots serving several. Always safe: a slow
-/// node and a lossy network are both within the model.
+/// node and a lossy network are both within the model. Recovery gate: "journal:
+/// a journal keeps committing while a sibling on its nodes is held".
 pub const HOLD_JOURNAL: &str = "paros: a node holds one of its journals";
 
 /// The node drops a write's verdict (#204) at its own rate, on top of the
@@ -35,7 +37,8 @@ pub const HOLD_JOURNAL: &str = "paros: a node holds one of its journals";
 /// meet the write already in the log: the idempotent `Duplicate` path. The
 /// simulation couples it to the workload's lost-verdict scenario, which
 /// re-sends an ambiguous write at once. Always safe: a client-facing RPC
-/// response can be lost in production at any time.
+/// response can be lost in production at any time. Recovery gate: the
+/// client's retry takes the dedup path.
 pub const LOSE_VERDICTS: &str = "paros: a node loses write verdicts";
 
 /// Whether this node withholds its garbage-collection requests now

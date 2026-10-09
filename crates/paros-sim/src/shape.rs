@@ -991,8 +991,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 /// multi-journal seed a second location draws whether the driver's named
 /// location holds one journal on every node for the chaos window
 /// (`paros::scenario::HOLD_JOURNAL`): its siblings must keep committing.
-/// Every node holds the same journal, the highest of the ones it serves;
-/// a single-journal seed holds none.
+/// Each node holds the highest user journal it boots serving: the same one
+/// on every acceptor, possibly a lower one on a joiner that serves fewer.
+/// The driver reports each hold (`Audit::journal_held`), so the journal
+/// board knows every held journal. A single-journal seed holds none.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
     let main = identifiers(state).main;
