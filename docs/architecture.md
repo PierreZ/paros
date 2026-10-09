@@ -18,8 +18,9 @@ over a four-call data plane, healing itself through reconfiguration when a disk 
 lost. One region first, several failure domains; multi-region cells are M13 (decided on
 2026-10-07, #253).
 
-**First principle: paros eats its own food** (decided on 2026-10-09). Every hard problem paros
-has is solved with paros's own pieces, never with a side mechanism: state lives in **journals**,
+**Core tenet: paros eats its own food** (decided on 2026-10-09). Journals, leader election and
+the Paxos flavors are first-class citizens of paros itself, not only products it offers: every
+hard problem paros has is solved with them, never with a side mechanism: state lives in **journals**,
 who acts is decided by **leader election** over a journal, and agreement comes from one of the
 **Paxos flavors** already in `paros-core`: Multi-Paxos for logs, single-decree Paxos for one-shot
 decisions (the matchmaker handover's decree, the cell plan at `cell init`), Matchmaker Paxos for
