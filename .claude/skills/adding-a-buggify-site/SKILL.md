@@ -1,6 +1,6 @@
 ---
 name: adding-a-buggify-site
-description: Add fault injection to paros the right way - a DriverHooks method with its BuggifyHooks call site (prong 1, the driver's rare-but-valid decisions, consulted only from the node loop), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability Seam, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
+description: Add fault injection to paros the right way - an inline buggify_with_prob!/buggify_pick! at the line of paros that makes the choice, or a hint!("moment") where a crash is interesting (never a new DriverHooks method, Seam or sim wrapper, #294), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability Seam, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
 ---
 
 # Adding a BUGGIFY site
@@ -9,6 +9,13 @@ Three layers, nothing crosses them: moonpool owns environmental faults,
 `paros-core` is never buggified (perturbed only through its public API), and
 the driver's own decisions plus the harness's tunables are where paros plants
 its sites. Pick the prong first.
+
+**Hard rule (#294, 2026-10-09):** the site goes inline in the shipped code
+(`paros`, `parosd`) at the line that makes the choice, never in a sim wrapper.
+A choice is `buggify_with_prob!` or `buggify_pick!`; a moment where a crash is
+interesting is `hint!("label").await`. Add no new `DriverHooks` method or
+`Seam`: prong 1 below describes the code being migrated
+(`docs/analysis/simulation/production-fault-hints.md`).
 
 ## Prong 1: a driver decision → `DriverHooks`
 

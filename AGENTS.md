@@ -98,6 +98,17 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Simulation rules
 
+- **Hard rule: the shipped code injects its own faults** (decided on 2026-10-09, #294). A choice
+  the code makes is an inline `buggify_with_prob!` / `buggify_pick!` at the line that makes it. A
+  moment where an environmental fault is interesting is a hint at that line:
+  `hint!("batch durable, not sent").await`. The code names the moment, never the fault; moonpool
+  decides whether and how to strike, under the seed's own chaos. Both are inert in production.
+  Never a sim wrapper around shipped code (`SimDisk`, `LedgeredJournal`, `PowerCut`), never a
+  `SimMachine`: the sim runs the same machine and disk as `parosd`. A sim wrapper only observes,
+  through `Audit` or a `reachable!` probe. `is_simulated()` tilts rates, cadences and checks,
+  never an outcome a client sees. `paros-core` stays sans-IO: no buggify, hint or
+  `is_simulated()`. Add no new `DriverHooks` method or `Seam`; the existing ones, `PowerCut` and
+  `SimDisk` migrate per #294 (`docs/analysis/simulation/production-fault-hints.md`).
 - **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
   as possible in the simulation, setup included. Always BUGGIFY your way into the complex
   situations rather than script them. Test several behaviours through the one workload with
@@ -145,7 +156,8 @@ Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENT
 One campaign, one workload, two judges. The **campaign** is a pool of
 `NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
 joiners, every role storing on the library's journal stores over moonpool's simulated disk,
-under every moonpool fault, the driver hooks, the power cuts and the ledgered injector
+under every moonpool fault, the driver hooks, the power cuts and the ledgered injector (the
+hooks and the power cuts migrating to `hint!` and inline buggify in `paros`, #294)
 (`paros_sim::world`). There is no scripted corpus and no fake disk (#261, #263, decided on
 2026-10-08): a shape the corpus once scripted is a per-seed BUGGIFY or swarm draw, judged by the
 same oracles. The one workload is `ChainWorkload`,
@@ -326,7 +338,8 @@ Three layers, and nothing crosses them:
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
-- **Prong 1, `DriverHooks`**: the driver's rare-but-valid choices, one `buggify_with_prob!`
+- **Prong 1, `DriverHooks`** (retiring, #294: each method becomes an inline site per the hard
+  rule above): the driver's rare-but-valid choices, one `buggify_with_prob!`
   location each in `paros-sim` (`NoHooks` in production). Consult a hook only where its answer
   has an observable effect, trace what happened, quiet disruptive hooks after the chaos window.
   Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`
@@ -349,7 +362,10 @@ Depth: the `adding-a-buggify-site` skill, `crates/paros/src/hooks.rs`.
   meaningful transition once, typed, where its `tracing` event is; it returns nothing, draws no
   randomness, reads no clock.
 - **Correctness lives in `paros_sim::audit` and the workload's `check()`**, folded into O(1)
-  incremental state — never a scan of the trace. A missing fact gets a new `Audit` callback.
+  incremental state — never a scan of the trace. A missing fact gets a new `Audit` callback
+  only when a cross-node or harness oracle needs it (decided on 2026-10-09, #294): a fact that
+  only fires a gate is an inline `reachable!`/`sometimes!` in paros, and a gate-only callback
+  moves inline (and is deleted) in the PR that touches its site.
 - **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
   on external input (operating errors are results). `ColocatedNode::assert_invariants` runs at
   boot and every public mutating entry; public functions that assert document `# Panics`.
@@ -401,7 +417,8 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 The deterministic simulation is the source of truth. For a suspected safety or liveness bug:
 
 1. State the invariant it would violate.
-2. Make it reachable (chaos, `buggify!`/`buggify_knob!`); build a missing harness capability.
+2. Make it reachable (chaos, inline `buggify!`/`hint!` in `paros`, `buggify_knob!`); build a
+   missing harness capability, never a sim wrapper around shipped code.
 3. Put the check where the fact arrives (audit, workload `check()`, storage callbacks).
 4. Run the sweep: **red** on the unfixed code; replay that seed while working.
 5. Fix `paros-core`.

@@ -21,7 +21,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
 - `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
-- `hooks.rs` → `DriverHooks`, `NoHooks`, `Seam` (five), `HandoffContext`, `Reply` → BUGGIFY prong-1 surface.
+- `hooks.rs` → `DriverHooks`, `NoHooks`, `Seam`, `HandoffContext`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294): add nothing to it.
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.
@@ -71,10 +71,15 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 ## Local rules
 
-- A new driver decision is a `DriverHooks` method, consulted only on the node loop where its
-  answer is observable; `H: DriverHooks` is deliberately not `Send + 'static` (`hooks.rs`).
+- **Faults are inline, in this crate** (root *Simulation rules*, #294). A new driver decision is
+  an inline `buggify_with_prob!` / `buggify_pick!` at the line that makes it, consulted only where
+  its answer is observable. A moment where a crash is interesting (staged not synced, durable not
+  sent) is `hint!("label").await` at that line. Never add a `DriverHooks` method, a `Seam`
+  variant, a hook trait (`ClientHooks`, commit hooks), or a store or disk trait whose only second
+  implementation would be a sim wrapper. A path the code walks gets a `reachable!` probe, with
+  the message the sim's gate already uses, never reworded.
 - A new tunable is a `DriverTunables` field with a default (`driver/config.rs`) and a
-  `buggify_knob!` in `paros-sim`'s `NodeShape`; a new durability boundary is a `Seam` variant.
+  `buggify_knob!` in `paros-sim`'s `NodeShape`; a new durability boundary is a `hint!`.
 - Every call is one at-most-once attempt (`try_get_reply`), never `get_reply`.
 - `paros::client` draws no randomness: every choice is the caller's.
 - Storage implementations pass both contract suites.
