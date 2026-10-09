@@ -28,10 +28,9 @@ pub(crate) fn audit_world_for(
     journal: paros::JournalIdentifier,
 ) -> Arc<AuditWorld> {
     let main = crate::shape::identifiers(state).main;
-    // The writer mode the journal was created with (#241), drawn with the
-    // run's journals: a journal outside the plan (a system journal) is
-    // single-writer.
-    let mode = crate::shape::journals(state).mode(journal);
+    // The writer mode the journal was created with (#241): drawn with the
+    // run's journals, or by the client that created it.
+    let mode = crate::shape::writer_mode(state, journal);
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),

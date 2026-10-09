@@ -350,7 +350,15 @@ impl SystemOps {
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
-        let mut claim: Option<(LeaderUuid, u64)> = None;
+        // A multi-writer journal (#241) takes unfenced writes and no claim:
+        // its seq is assigned at apply.
+        let unfenced = (crate::shape::writer_mode(ctx.state(), journal)
+            == paros::WriterMode::Multi)
+            .then_some((LeaderUuid::UNSET, 0));
+        if unfenced.is_some() {
+            assert_reachable!("system: a client appends unfenced to a multi-writer journal");
+        }
+        let mut claim: Option<(LeaderUuid, u64)> = unfenced;
         for _ in 0..APPEND_ATTEMPTS {
             let node = targets[target % targets.len()] % nodes.server_count();
             let Some((leader, position)) = claim else {
@@ -411,10 +419,10 @@ impl SystemOps {
             match within(ctx, self.timeout, WriteOutcome::Ambiguous, write).await {
                 WriteOutcome::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
-                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = None,
+                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = unfenced,
                 WriteOutcome::WrongMode { .. } => {
                     system_never_of_wrong_mode();
-                    claim = None;
+                    claim = unfenced;
                 }
                 WriteOutcome::Redirect { leader } => {
                     target = leader
@@ -580,6 +588,11 @@ impl SystemOps {
         };
         let mode = drawn_mode(payload);
         for attempt in 0..2_u64 {
+            crate::shape::note_created_mode(
+                ctx.state(),
+                JournalIdentifier::new(self.directory.tenant, id),
+                mode,
+            );
             let command = SystemCommand::CreateJournal {
                 id,
                 name: name.clone(),
