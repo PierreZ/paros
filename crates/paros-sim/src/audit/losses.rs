@@ -472,6 +472,17 @@ impl AuditState {
             .max()
     }
 
+    /// A boot of `node` recovered a clean record of `slot`: a lost copy
+    /// rewritten (a commit that landed unreported) is a lost copy no
+    /// longer, as in [`AuditState::loss_accepted`]'s live report. Without
+    /// it, the claim moved to the rewritten holder's next boot, whose
+    /// in-flight commits were already taken.
+    pub(super) fn loss_rewritten_at_boot(&mut self, node: u64, slot: u64) {
+        if let Some(planned) = self.losses.planned.get_mut(&slot) {
+            planned.lost.remove(&node);
+        }
+    }
+
     /// The CTRL rule over the decided ballot's configuration (see the
     /// module doc): an undecided slot, or one whose tally was pruned, is
     /// never claimed unrecoverable.
@@ -488,6 +499,19 @@ impl AuditState {
             return true;
         };
         let down = self.down_for_good();
+        // A lost holder with a commit of the slot in flight may have
+        // rewritten its copy durably, unreported (#264): no claim rests on
+        // it (hunt seed 16212343262911210763: a leader's re-proposal of the
+        // decided value landed unreported on a lost holder, which booted
+        // with a clean copy at the higher ballot, and a later leader's
+        // accepts of the decided value tripped the claim).
+        if planned
+            .lost
+            .iter()
+            .any(|node| !down.contains(node) && self.in_flight.contains_key(&(*node, slot)))
+        {
+            return true;
+        }
         let clean: Vec<u64> = self
             .holders_of(slot, planned)
             .into_iter()
