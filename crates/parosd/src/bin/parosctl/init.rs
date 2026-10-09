@@ -9,6 +9,9 @@
 //! already serves the cell is asked for it, and the claim is made if it is
 //! still missing.
 //!
+//! The whole operation is `paros::client::initialize` (#246), which the
+//! simulation runs too; this command prints what it came to.
+//!
 //! Then the fleet steps (#229, `paros::client::fleet`): the fleet tenant (served by the
 //! cell's seeds) records the fleet's id — drawn here, kept on a re-run — and
 //! adds the cell with its cell tenant, the cell records the fleet on its
@@ -25,14 +28,11 @@ use clap::Args;
 use moonpool_core::TokioProviders;
 use moonpool_rpc::RpcHandle;
 use paros::client::Client;
-use paros::client::bootstrap::{self, ClaimCellOutcome, InitOutcome};
-use paros::client::fleet::Step;
-use paros::machine::ControlJournals;
-use paros::{JournalIdentifier, NodeId};
+use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initialized, Unreachable};
 use serde_json::json;
 
 use crate::Ending;
-use crate::fleet::{interrupted, nonzero, refusal_text, session, steps};
+use crate::fleet::{interrupted, nonzero, refusal_text, steps};
 use crate::output::{Printer, note};
 
 /// `parosctl init`.
@@ -44,8 +44,9 @@ pub struct InitArgs {
     patience_ms: u64,
 }
 
-/// `parosctl init`: form the cell at `addrs[0]`, then claim its control
-/// journal through a client `connect` builds over its members.
+/// `parosctl init`: form the cell at `addrs[0]`, claim its control journal
+/// and run the fleet steps, through a client `connect` builds over its
+/// members (`paros::client::initialize`).
 pub async fn run(
     providers: &TokioProviders,
     rpc: &RpcHandle<TokioProviders>,
@@ -54,175 +55,41 @@ pub async fn run(
     out: &Printer,
     args: InitArgs,
 ) -> Ending {
-    let Some(&target) = addrs.first() else {
-        note("no server to send init to");
-        return Ending::Unreachable;
+    let params = InitParams {
+        patience: Duration::from_millis(args.patience_ms),
+        fleet_id: nonzero(providers),
     };
-    let patience = Duration::from_millis(args.patience_ms);
-    let (servers, coordinator, journals, users) =
-        match bootstrap::init(providers, rpc, target, patience).await {
-            InitOutcome::Formed(plan) => {
+    match initialize::initialize(providers, rpc, addrs, connect, params).await {
+        InitRun::Initialized(done) => {
+            if !done.users.is_empty() {
                 note(&format!(
                     "formed cell {} over {} seeds",
-                    plan.cell_id,
-                    plan.members.len()
+                    done.journals.cell_id,
+                    done.servers.len()
                 ));
-                let servers: Vec<(u64, SocketAddr)> = plan
-                    .members
-                    .iter()
-                    .map(|(id, addr)| (id.0, *addr))
-                    .collect();
-                let Some(fleet_control) = plan.fleet else {
-                    note("the seed formed a cell that hosts no fleet tenant");
-                    return Ending::Unreachable;
-                };
-                // The static assignment's user journals, drawn at `init` like
-                // every identifier: the only time they are printed.
-                let users: Vec<JournalIdentifier> = plan
-                    .journals
-                    .iter()
-                    .copied()
-                    .filter(|j| *j != plan.control && *j != fleet_control)
-                    .collect();
-                (servers, plan.coordinator(), plan.control_journals(), users)
             }
-            InitOutcome::Refused(refusal) => {
-                out.emit(
-                    || format!("init refused: {refusal}"),
-                    || json!({ "outcome": "refused", "refusal": refusal }),
-                );
-                return Ending::Refused;
-            }
-            InitOutcome::Malformed => {
-                note("the seed answered with a plan that does not decode");
-                return Ending::Unreachable;
-            }
-            InitOutcome::Unreachable => {
-                note(&format!(
-                    "init at {target} decided nothing in time: a seed is not up yet; run it again"
-                ));
-                return Ending::Unreachable;
-            }
-            // No machine endpoint: the target serves a cell already (a re-run
-            // after its formation), or nothing listens there.
-            InitOutcome::NotWaiting => {
-                let servers = bootstrap::discover(providers, rpc, addrs, patience).await;
-                if servers.is_empty() {
-                    note(&format!("nothing answered init or inspect at {target}"));
-                    return Ending::Unreachable;
-                }
-                let client = connect(&servers);
-                // No identifier is fixed (§3.8): the cell's are learned from it.
-                let Some(journals) = bootstrap::control_journals(&client).await else {
-                    note("no server named its cell's control journals");
-                    return Ending::Unreachable;
-                };
-                let Some(view) = client.inspect(0, journals.cell).await else {
-                    note("no server described the cell control journal");
-                    return Ending::Unreachable;
-                };
-                let Some(coordinator) = view.members.iter().copied().min() else {
-                    note("the cell control journal names no member");
-                    return Ending::Unreachable;
-                };
-                (servers, NodeId(coordinator), journals, Vec::new())
-            }
-        };
-    let client = connect(&servers);
-    let claimed = match bootstrap::claim_cell(&client, journals.cell, coordinator, patience).await {
-        ClaimCellOutcome::Claimed { generation } => Some(generation),
-        // Claimed by an earlier run: the fleet steps resume, and decide
-        // whether anything was left to do.
-        ClaimCellOutcome::AlreadyInitialized { .. } => None,
-        ClaimCellOutcome::Unavailable => {
-            note("the cell did not confirm its control journal in time: run init again");
-            return Ending::Unreachable;
+            print_initialized(out, &done);
+            Ending::Success
         }
-        ClaimCellOutcome::Ambiguous => {
-            note("the claim's answer never came: it may have won; run init again");
-            return Ending::Ambiguous;
-        }
-    };
-    fleet_steps(
-        providers,
-        &client,
-        &servers,
-        (coordinator, journals),
-        &users,
-        (claimed, patience),
-        out,
-    )
-    .await
-}
-
-/// `init`'s fleet half, after the cell step, over the cell's `identifiers` as
-/// its `coordinator`: `users` are the user journals this run's formation
-/// drew (printed once), `claimed` the generation when this run claimed the
-/// cell control journal, and `patience` how long a step a moving leader
-/// interrupted is retried.
-async fn fleet_steps(
-    providers: &TokioProviders,
-    client: &Client<TokioProviders>,
-    servers: &[(u64, SocketAddr)],
-    (coordinator, journals): (NodeId, ControlJournals),
-    users: &[JournalIdentifier],
-    (claimed, patience): (Option<u64>, Duration),
-    out: &Printer,
-) -> Ending {
-    let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-    let (Some(fleet_control), Some(mut fleet)) =
-        (journals.fleet, session(client, journals, coordinator, &ids))
-    else {
-        note("the cell names no fleet journal");
-        return Ending::Refused;
-    };
-    let run = fleet.init(client, 0, nonzero(providers), patience).await;
-    match run.outcome {
-        Step::Done { .. } if claimed.is_none() && run.steps.is_empty() => {
+        InitRun::AlreadyInitialized(_) => {
             out.emit(
                 || "init refused: the fleet is already initialized".to_string(),
                 || json!({ "outcome": "refused", "refusal": "already_initialized" }),
             );
             Ending::Refused
         }
-        Step::Done {
-            result: fleet_id, ..
-        } => {
-            let cell_id = journals.cell_id;
-            let users: Vec<String> = users.iter().map(ToString::to_string).collect();
+        InitRun::Refused(InitRefusal::Formation(refusal)) => {
             out.emit(
-                || {
-                    format!(
-                        "initialized fleet={fleet_id} cell={cell_id} coordinator={} members={} control={} fleet_control={} journals={} steps={}",
-                        coordinator.0,
-                        servers.len(),
-                        journals.cell,
-                        fleet_control,
-                        users.join(","),
-                        steps(&run.steps).join(",")
-                    )
-                },
-                || {
-                    json!({
-                        "outcome": "initialized",
-                        "fleet": fleet_id,
-                        "cell": cell_id,
-                        "coordinator": coordinator.0,
-                        "generation": claimed,
-                        "steps": steps(&run.steps),
-                        "control": journals.cell.to_string(),
-                        "fleet_control": fleet_control.to_string(),
-                        "journals": users,
-                        "members": servers
-                            .iter()
-                            .map(|(id, addr)| json!({ "node": id, "addr": addr.to_string() }))
-                            .collect::<Vec<_>>(),
-                    })
-                },
+                || format!("init refused: {refusal}"),
+                || json!({ "outcome": "refused", "refusal": refusal }),
             );
-            Ending::Success
+            Ending::Refused
         }
-        Step::Refused(refusal) => {
+        InitRun::Refused(InitRefusal::NoFleet) => {
+            note("the cell names no fleet journal");
+            Ending::Refused
+        }
+        InitRun::Refused(InitRefusal::Fleet(refusal)) => {
             let text = refusal_text(&refusal);
             out.emit(
                 || format!("init refused: {text}"),
@@ -230,7 +97,75 @@ async fn fleet_steps(
             );
             Ending::Refused
         }
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
+        InitRun::Unreachable(why) => {
+            note(&unreachable_text(why, addrs.first()));
+            Ending::Unreachable
+        }
+        InitRun::Ambiguous => {
+            note("the claim's answer never came: it may have won; run init again");
+            Ending::Ambiguous
+        }
+        InitRun::Interrupted(stop) => interrupted(&stop),
     }
+}
+
+/// What `init` waited on in vain, for the operator.
+fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
+    let target = target.map_or_else(|| "?".to_string(), ToString::to_string);
+    match why {
+        Unreachable::NoTarget => "no server to send init to".into(),
+        Unreachable::Malformed => "the seed answered with a plan that does not decode".into(),
+        Unreachable::Formation => {
+            format!("init at {target} decided nothing in time: a seed is not up yet; run it again")
+        }
+        Unreachable::NothingAnswered => format!("nothing answered init or inspect at {target}"),
+        Unreachable::NoControlJournals => "no server named its cell's control journals".into(),
+        Unreachable::NoCoordinator => {
+            "no server described the cell control journal's members".into()
+        }
+        Unreachable::Claim => {
+            "the cell did not confirm its control journal in time: run init again".into()
+        }
+    }
+}
+
+/// Print an initialized fleet: every identifier, the only time the user
+/// journals are named.
+fn print_initialized(out: &Printer, done: &Initialized) {
+    let journals = done.journals;
+    let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
+    let users: Vec<String> = done.users.iter().map(ToString::to_string).collect();
+    out.emit(
+        || {
+            format!(
+                "initialized fleet={} cell={} coordinator={} members={} control={} fleet_control={} journals={} steps={}",
+                done.fleet_id,
+                journals.cell_id,
+                done.coordinator.0,
+                done.servers.len(),
+                journals.cell,
+                fleet_control,
+                users.join(","),
+                steps(&done.steps).join(",")
+            )
+        },
+        || {
+            json!({
+                "outcome": "initialized",
+                "fleet": done.fleet_id,
+                "cell": journals.cell_id,
+                "coordinator": done.coordinator.0,
+                "generation": done.claimed,
+                "steps": steps(&done.steps),
+                "control": journals.cell.to_string(),
+                "fleet_control": fleet_control,
+                "journals": users,
+                "members": done
+                    .servers
+                    .iter()
+                    .map(|(id, addr)| json!({ "node": id, "addr": addr.to_string() }))
+                    .collect::<Vec<_>>(),
+            })
+        },
+    );
 }

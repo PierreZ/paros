@@ -45,6 +45,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
 - `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `control_journals`, `control_journals_of` → `parosctl init`'s calls; server ids and the control journals learned from a node-only `Inspect` (#196, §3.8, #243).
+- `client/initialize.rs` → `initialize`, `InitRun`, `Initialized`, `InitRefusal`, `Unreachable`, `InitParams` → `init` whole (the cell step, the claim, the fleet steps) as one resumable operation, typed; `parosctl init` prints it and the simulation runs it (#246).
 - `fleet.rs` → `FleetEntry`, `FleetCommand`, `FleetDirectory`, `FleetEvent`, `FleetDirectoryRefusal`, `Group`, `Groups` (a tenant's set of groups; only `cell` forbids a move), `CellState`, `TenantState` → the
   fleet tenant's pure fold, the fleet directory (#229): the fleet, cell and tenant entries, every entry fenced by its
   fleet id and metadata version, ids checked at apply, `Checkpointable`.
