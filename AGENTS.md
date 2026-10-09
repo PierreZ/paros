@@ -203,7 +203,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   (`MatchStep::StaleConfiguration`); beliefs never trigger that.
 - **Membership probe** (`MembershipProbe`): every incarnation boots believing the bootstrap
   configuration and asks a matchmaker quorum for the effective one, registering nothing, before
-  its first campaign or skip. A node only registers a belief it heard.
+  its first campaign or skip. A node only registers a belief it heard. A node whose heard belief
+  leaves it outside re-probes on every election timeout, and a probe adopts only a strictly
+  newer configuration (#270).
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are

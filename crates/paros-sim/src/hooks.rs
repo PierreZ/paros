@@ -495,7 +495,13 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         match reply {
             // On a lost-verdict seed every node drops at the same rate,
             // so a retry meets a committed write wherever it lands.
-            paros::Reply::Write if self.lose_verdicts => moonpool_sim::sim_random_bool(0.10),
+            paros::Reply::Write if self.lose_verdicts => {
+                let lost = moonpool_sim::sim_random_bool(0.10);
+                if lost {
+                    assert_reachable!("client: a write's verdict is lost on a lost-verdict seed");
+                }
+                lost
+            }
             paros::Reply::Write => buggify_with_prob!(0.10),
             // A lost claim: the owner does not know it won, and its next
             // write names its old generation — refused, naming itself as

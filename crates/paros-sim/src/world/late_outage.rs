@@ -21,11 +21,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_sim::{
-    FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable, sim_random_range,
-};
+use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
 
-use super::outage::{DOWN, LossShape, POLL, STRAGGLER, plan_losses};
+use super::outage::{LossShape, POLL, STRAGGLER, plan_losses, strike};
 
 /// How far into the recovery tail the late outage may still strike. Far
 /// below the workload's recovery budget (45 s at its floor), so a straggler
@@ -77,44 +75,4 @@ impl FaultInjector for LateOutage {
         let kept = plan_losses(ctx.state(), LossShape::DEPARTED_STRAGGLER);
         strike(ctx, &kept)
     }
-}
-
-/// Take every acceptor and proxy leader down now, each back after its own
-/// delay in [`DOWN`], one acceptor straggling in [`STRAGGLER`]: the one
-/// clean copy the loss left (`kept`, node ids, which are ranks in the
-/// acceptor group), so the cluster must recover through the prior
-/// configuration while it is still down (#267), else a random acceptor.
-pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
-    let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
-    let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);
-    let clean = match kept {
-        [node] => usize::try_from(*node)
-            .ok()
-            .filter(|rank| *rank < acceptors.len()),
-        _ => None,
-    };
-    if clean.is_some() {
-        assert_reachable!("outage: the departed straggler's clean holder is back last");
-    }
-    let straggler = clean.unwrap_or_else(|| {
-        usize::try_from(sim_random_range(0..acceptors.len().max(1) as u64)).unwrap_or(0)
-    });
-    let millis = |range: &std::ops::Range<Duration>| {
-        Duration::from_millis(sim_random_range(
-            u64::try_from(range.start.as_millis()).unwrap_or(0)
-                ..u64::try_from(range.end.as_millis()).unwrap_or(1),
-        ))
-    };
-    for (rank, ip) in acceptors.iter().enumerate() {
-        let down = if rank == straggler {
-            millis(&STRAGGLER)
-        } else {
-            millis(&DOWN)
-        };
-        ctx.crash_for(ip, down)?;
-    }
-    for ip in &proxies {
-        ctx.crash_for(ip, millis(&DOWN))?;
-    }
-    Ok(())
 }

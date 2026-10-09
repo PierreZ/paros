@@ -40,6 +40,7 @@ use async_trait::async_trait;
 use moonpool_sim::{
     Chaos, ChaosMode, FaultContext, FaultInjector, OUTAGE_STATE_KEY, Outage, OutageLanded,
     SimulationResult, StateHandle, TimeProvider, assert_reachable, buggify_with_prob,
+    sim_random_range,
 };
 
 /// When an outage may strike, from the opening of the chaos window: late,
@@ -168,6 +169,9 @@ impl FaultInjector for OutageLosses {
                         );
                         LossShape::DEPARTED_STRAGGLER
                     } else if crate::shape::bare_quorum(ctx.state()) {
+                        assert_reachable!(
+                            "storage: an outage lands on a seed drawing the bare-quorum scenario"
+                        );
                         LossShape::BARE_QUORUM
                     } else {
                         draw_loss()
@@ -240,4 +244,44 @@ pub(crate) struct PlannedLoss {
     pub(crate) holders: Vec<u64>,
     /// The holders whose copy is damaged at their next boot.
     pub(crate) damaged: Vec<u64>,
+}
+
+/// Take every acceptor and proxy leader down now, each back after its own
+/// delay in [`DOWN`], one acceptor straggling in [`STRAGGLER`]: the one
+/// clean copy the loss left (`kept`, node ids, which are ranks in the
+/// acceptor group), so the cluster must recover through the prior
+/// configuration while it is still down (#267), else a random acceptor.
+pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
+    let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
+    let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);
+    let clean = match kept {
+        [node] => usize::try_from(*node)
+            .ok()
+            .filter(|rank| *rank < acceptors.len()),
+        _ => None,
+    };
+    if clean.is_some() {
+        assert_reachable!("outage: the departed straggler's clean holder is back last");
+    }
+    let straggler = clean.unwrap_or_else(|| {
+        usize::try_from(sim_random_range(0..acceptors.len().max(1) as u64)).unwrap_or(0)
+    });
+    let millis = |range: &std::ops::Range<Duration>| {
+        Duration::from_millis(sim_random_range(
+            u64::try_from(range.start.as_millis()).unwrap_or(0)
+                ..u64::try_from(range.end.as_millis()).unwrap_or(1),
+        ))
+    };
+    for (rank, ip) in acceptors.iter().enumerate() {
+        let down = if rank == straggler {
+            millis(&STRAGGLER)
+        } else {
+            millis(&DOWN)
+        };
+        ctx.crash_for(ip, down)?;
+    }
+    for ip in &proxies {
+        ctx.crash_for(ip, millis(&DOWN))?;
+    }
+    Ok(())
 }

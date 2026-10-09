@@ -62,7 +62,9 @@ impl ColocatedNode {
             // the same clock (#270): a probe may have adopted a
             // reconfiguration only one matchmaker held, which no quorum ever
             // completes. Its members never hear of it and stay out on the
-            // bootstrap; without the re-probe, nobody campaigned again.
+            // bootstrap; without the re-probe, nobody campaigned again (the
+            // sweep went red on "cluster converged after chaos", and green
+            // with it).
             self.probe_membership();
             return;
         }

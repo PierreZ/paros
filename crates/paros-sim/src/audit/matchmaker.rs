@@ -1246,6 +1246,9 @@ impl MatchmakerAudit {
     /// at round 2 again; one more refusal re-floors it).
     pub(super) fn node_booted(&mut self, node: NodeId) {
         self.refused_floor.remove(&node.0);
+        // A fresh incarnation probes from the bootstrap: naming it is not
+        // a re-probe's work.
+        self.probed_outside.remove(&node.0);
     }
 
     /// A candidate opened matchmaking for `ballot`, registering `config`

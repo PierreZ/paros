@@ -18,8 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
 
-use super::late_outage::strike;
-use super::outage::{LossShape, POLL, plan_losses};
+use super::outage::{LossShape, POLL, plan_losses, strike};
 
 /// The bare-quorum injector (see the module doc): a fresh one per timeline.
 pub(crate) struct BareOutage;

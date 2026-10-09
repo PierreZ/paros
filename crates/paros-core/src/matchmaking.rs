@@ -56,8 +56,9 @@
 //! # The membership probe
 //!
 //! [`MembershipProbe`] is the phase's registration-free sibling (#173): the
-//! tally of a node that is *not* campaigning — a non-member whose belief is
-//! only the bootstrap default — and asks a matchmaker quorum for nothing but
+//! tally of a node that is *not* campaigning — one whose belief is only the
+//! bootstrap default, or a heard belief that leaves it outside (#270) — and
+//! asks a matchmaker quorum for nothing but
 //! the effective configuration. It shares the phase's intersection argument
 //! and none of its registrations.
 
@@ -599,7 +600,9 @@ impl Matchmaking {
 /// Who probes: a node on a matchmaker deployment whose belief about the
 /// configuration in force is only the bootstrap default — it has heard
 /// nothing since it booted — at its first election timeout, before it
-/// either campaigns or skips. Two wedges came from acting on the default:
+/// either campaigns or skips; and a node whose **heard** belief leaves it
+/// outside, at every election timeout (#270). Three wedges came from acting
+/// on a belief unasked:
 ///
 /// - **Outside it**, a node never campaigns (leadership belongs inside the
 ///   acceptor set), so it could never learn that a reconfiguration moved it
@@ -611,14 +614,24 @@ impl Matchmaking {
 ///   covered (below). A flexible split with `q1 = 5` over a five-node
 ///   bootstrap, one member retired and the rest of the successor rebooted,
 ///   asked every later campaign for a promise nobody could give.
+/// - **Outside a heard belief** (#270), a node once never asked again: a
+///   reconfiguration that reached one matchmaker of three raised that
+///   matchmaker's effective scalar alone, so the old members' probes
+///   adopted it and left them outside, the new members' probes missed it
+///   and left them outside the bootstrap, and nobody campaigned. So a node
+///   outside its heard belief re-probes on its election clock, and a probe
+///   adopts only a strictly newer configuration: a quorum that misses the
+///   one holder never moves a belief backwards. The sweep went red on
+///   "cluster converged after chaos" without the re-probe and green with it.
 ///
 /// Why a quorum of effective configurations suffices: a reconfiguration is
 /// honored once its registration landed at a matchmaker quorum, which raised
 /// the durable effective scalar at every matchmaker of that quorum; any
 /// quorum of answers intersects it, so the maximum effective configuration
 /// they report is at least that one. A reconfiguration registered at a
-/// minority may be missed, exactly as a campaign may miss it — a later
-/// wire message or campaign corrects the belief then.
+/// minority may be missed, exactly as a campaign may miss it, or adopted
+/// from its one holder; a later wire message, campaign or re-probe corrects
+/// the belief then.
 ///
 /// Why a probe and not a campaign: a campaign registers its belief, and a
 /// registered belief is a configuration every later campaign's `H_b` must
