@@ -36,7 +36,7 @@
 //! instant are concurrent: a call event sorts before a return event at the
 //! same time, which can only drop a precedence edge, never invent one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use paros::{JournalView, LeaderUuid};
@@ -547,7 +547,15 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
 /// stand wherever the later one could):
 ///
 /// - **Identical calls.** Two unknown attempts asking the same thing are the
-///   same step.
+///   same step, when the call can take effect at most once. A write can:
+///   its position is taken once and `next_seq` only grows. A
+///   `SetLeader(new, old)` cannot, because a reinstated uuid wins again
+///   (§2.3, decided on 2026-10-09): the swap wins once, and once more each
+///   time some attempt reinstalls `old`. So identical unknown claims keep
+///   their earliest `1 + installs(old)` copies, and one copy when `old` is
+///   `None` (witness 16550793748011305905: a claim retried 17 times, its
+///   one kept copy spent on the first swap, refuted a history whose read
+///   saw the second).
 /// - **Unobserved bytes.** Two unknown writes with the same
 ///   `(leader, seq, count)` change the scalars identically, and
 ///   differ only in bytes. When no answered attempt can tell those bytes
@@ -590,6 +598,15 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..attempts.len()).collect();
     order.sort_by_key(|&i| (attempts[i].inv, i));
     let mut unknown: BTreeSet<&Call> = BTreeSet::new();
+    // How many attempts install each uuid: the most times an identical
+    // claim swapping it out can win.
+    let mut installs: BTreeMap<LeaderUuid, usize> = BTreeMap::new();
+    for attempt in attempts {
+        if let Call::SetLeader { new, .. } = &attempt.call {
+            *installs.entry(*new).or_insert(0) += 1;
+        }
+    }
+    let mut claim_copies: BTreeMap<&Call, usize> = BTreeMap::new();
     let mut unobserved: BTreeSet<(LeaderUuid, u64, usize)> = BTreeSet::new();
     let mut keep: Vec<usize> = order
         .into_iter()
@@ -616,6 +633,12 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
                         || records.iter().any(|r| seen_records.contains(r));
                     unknown.insert(call)
                         && (observed || unobserved.insert((*leader, *seq, records.len())))
+                }
+                call @ Call::SetLeader { old, .. } => {
+                    let copies = claim_copies.entry(call).or_insert(0);
+                    *copies += 1;
+                    let wins = 1 + old.map_or(0, |old| installs.get(&old).copied().unwrap_or(0));
+                    *copies <= wins
                 }
                 call => unknown.insert(call),
             }
@@ -1004,6 +1027,35 @@ mod tests {
                 Some((5, Seen::Won(state(Some(0), 0, 0)))),
             ),
             at(0, 6, write(0, 0, &[7]), Some((7, written(0, 1, false)))),
+        ];
+        assert!(linearizable(&history));
+    }
+
+    /// An unknown claim retried with the identical call may win twice when
+    /// its `old` uuid is reinstated in between: two reads see the swap twice.
+    #[test]
+    fn a_retried_claim_wins_again_after_a_reinstatement() {
+        let led_by = |leader| Seen::Page {
+            records: vec![],
+            state: state(Some(leader), 0, 0),
+        };
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(1, 2, claim(1, Some(0)), None),
+            at(0, 3, Call::Read { from: 0, limit: 0 }, Some((4, led_by(1)))),
+            at(
+                0,
+                5,
+                claim(0, Some(1)),
+                Some((6, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(1, 7, claim(1, Some(0)), None),
+            at(0, 8, Call::Read { from: 0, limit: 0 }, Some((9, led_by(1)))),
         ];
         assert!(linearizable(&history));
     }
