@@ -894,15 +894,7 @@ impl FleetOps {
         };
         let cell = cell.state();
         let cell_id = known.journals.cell_id;
-        // An admitted machine is a registered one (#216): `cell add-machine`
-        // writes `RegisterNode` before its `Admit`.
-        for node in crate::machine::admitted_into(ctx.state(), cell_id) {
-            assert_always!(
-                cell.get(NodeId(node)).is_some(),
-                "admit: every admitted machine is registered in its cell",
-                { "node" => node, "cell" => cell_id }
-            );
-        }
+        admit::admitted_registered(ctx, cell, cell_id);
         assert_reachable!("fleet: the final folds of the directory and the cell are compared");
         if let Some(fleet) = directory.fleet() {
             let ready = directory.cell(cell_id).map(|c| c.state);

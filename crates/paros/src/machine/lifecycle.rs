@@ -303,9 +303,7 @@ where
         joined
     };
     match joined {
-        Joined::Founded(cell) => {
-            serve(providers, disk, audits, cell, tunables, shutdown).await
-        }
+        Joined::Founded(cell) => serve(providers, disk, audits, cell, tunables, shutdown).await,
         Joined::Admitted(admitted) => admitted
             .serve(&providers, &tunables, shutdown)
             .await

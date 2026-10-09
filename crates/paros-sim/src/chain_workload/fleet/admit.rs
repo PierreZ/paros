@@ -15,6 +15,7 @@ use paros::NodeId;
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::{FleetRefusal, Run, Stage, Step};
+use paros::system::Registry;
 
 use super::{FleetOps, reach};
 
@@ -137,5 +138,18 @@ impl FleetOps {
             }
             Step::Advanced(_) => {}
         }
+    }
+}
+
+/// An admitted machine is a registered one (#216): `cell add-machine` writes
+/// `RegisterNode` before its `Admit`. Judged over the final fold of cell
+/// `cell_id`'s control journal.
+pub(super) fn admitted_registered(ctx: &SimContext, cell: &Registry, cell_id: u64) {
+    for node in crate::machine::admitted_into(ctx.state(), cell_id) {
+        assert_always!(
+            cell.get(NodeId(node)).is_some(),
+            "admit: every admitted machine is registered in its cell",
+            { "node" => node, "cell" => cell_id }
+        );
     }
 }
