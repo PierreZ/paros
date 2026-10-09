@@ -88,9 +88,8 @@ impl ColocatedNode {
                 // ballot.
                 if ballot.node != me && self.role != NodeRole::Follower {
                     probe!(
-                        sometimes,
-                        !raised,
-                        "acceptor: a same-ballot Prepare continuation closes a live campaign"
+                        reachable,
+                        "acceptor: another proposer's Prepare closes a live campaign"
                     );
                     self.become_follower(None);
                 }
