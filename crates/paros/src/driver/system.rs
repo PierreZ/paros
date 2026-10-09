@@ -67,6 +67,10 @@ const FOLLOW_READ_RECORDS: u64 = 256;
 // A follow read that asks for no record never moves its cursor.
 const _: () = assert!(FOLLOW_READ_RECORDS > 0);
 
+/// The record bytes one local follow read takes: the default `Read` page's
+/// budget. Local, so no frame bounds it; a lone larger record still comes.
+const FOLLOW_READ_BYTES: usize = 64 * 1024;
+
 /// What a deployment that runs **system journals** (#189) tells a node's
 /// driver. `None` is the static deployment of #188: no directory, no
 /// registry, a pool fixed at boot.
@@ -163,11 +167,9 @@ impl<P: Providers> SystemFollower<P> {
             ));
         }
         let (replies, inbox) = mpsc::channel(4);
-        // A long-poll answers empty after `read_poll_ticks`: the follow's
-        // deadline covers it and one delivery either way.
-        let poll = tunables
-            .tick_interval
-            .saturating_mul(u32::try_from(tunables.read_poll_ticks).unwrap_or(u32::MAX));
+        // A tail wait answers empty after at most `max_wait_ms` (#241): the
+        // follow's deadline covers it and one delivery either way.
+        let poll = super::log_reads::ReadLimits::of(tunables).longest_wait();
         let timeout = poll + tunables.delivery_timeout.saturating_mul(2);
         let mut fixed: BTreeSet<NodeId> = fixed.into_iter().collect();
         fixed.extend(plan.genesis_pool.iter().copied());
@@ -506,10 +508,7 @@ pub(crate) fn follow_local<P: Providers, S, A>(
         let mut events = Vec::new();
         loop {
             let from = follower.cursor(journal);
-            match rt
-                .node
-                .read_log(Seq(from), page_records, super::log_reads::READ_PAGE_BYTES)
-            {
+            match rt.node.read_log(Seq(from), page_records, FOLLOW_READ_BYTES) {
                 LogRead::Page(page) if page.next().0 > from => {
                     events.extend(follower.fold_local(journal, &page));
                 }

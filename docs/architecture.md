@@ -94,7 +94,7 @@ walk.
 | Call | Single-writer | Multi-writer |
 |---|---|---|
 | `Write` | `Write(leader_uuid, expected_seq, batch) -> seq`: fenced by the leader uuid, contiguous by `expected_seq`, idempotent on retry, pipelineable. | `Write(batch) -> seq`: unfenced; the journal orders writes and assigns `seq` at apply. At-least-once on an ambiguous retry. |
-| `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. `wait_ms` is a field only, capped and floored (section 2.7); the long-poll at the tail comes later. | The same. |
+| `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. `wait_ms` is capped and floored (section 2.7); a read at the tail waits up to it. | The same. |
 | `Truncate` | `Truncate(leader_uuid, up_to_seq)`: fenced like `Write`. | `Truncate(up_to_seq)`: anyone may truncate. |
 | `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns the journal's view after it: the leader uuid, `next_seq`, `first_seq`. | Refused: a multi-writer journal has no leader. |
 
@@ -205,7 +205,7 @@ A read costs one Phase-1 round of watermarks (decided on 2026-10-07, #253). In a
 `QuorumRead` asks three of five acceptors, so a page costs one cross-region round trip (the 2025
 Journal reconstruction says the same: reads are performed from at least two regions, section 10).
 There is no lease read, because paros enforces no lease (section 2.3). The page size (section 2.7)
-is the mitigation already in the API; the long-poll on `wait_ms` comes later.
+is the mitigation already in the API, with the tail wait on `wait_ms`.
 
 A server answers only from records it holds (decided on 2026-10-06). A server whose floor rose
 ahead of its fold — it jumped to a peer's trim point, and the `Truncate` that let the peer's
@@ -258,9 +258,11 @@ The limits are part of the API, not a driver detail (decided on 2026-10-04): a m
 (bytes and records) refused at the edge before it reaches consensus, a maximum `Read` page
 (records and bytes), and a maximum and a minimum `wait_ms`. Each value is a tunable with a
 documented floor and a `buggify_knob!` in simulation; the toy's values are today's (a 256-record,
-64 KiB page, a batch well under the 4 MiB RPC frame). **`wait_ms` is a field only** (decided on
-2026-10-09, #241): the node caps it at the maximum and raises it to the minimum, and does not
-wait at the tail yet. The long-poll comes later. An `Inline`
+64 KiB page, a batch well under the 4 MiB RPC frame). **`wait_ms` is a capped and floored field
+only** (decided on 2026-10-09, #241): the node caps it at the maximum and raises a non-zero one
+to the minimum (the maximum wins when the two cross; 0 still answers at once). #241 builds no
+new long-poll: the tail wait of #185 stays as it was, a confirmed read at or past `next_seq`
+re-served after every batch until its capped wait runs out, then answered empty. An `Inline`
 checkpoint (section 3.9) must fit one batch. Every id, `seq` and the term counter are `u64`; the
 leader uuid is 128 bits.
 
@@ -269,6 +271,13 @@ The batch limits are `DriverTunables::max_batch_records` (1,024 by default) and
 `Write` checks them before it proposes anything. A batch over either limit gets the answer
 `TooLarge`, which names the two limits. That write is in no slot. Different nodes can have
 different limits, so a retry to another node can get a different answer (#241).
+
+The read limits are `DriverTunables::max_read_records` (256 by default, floor 1: a `limit` of 0
+or above it is cut to it), `max_read_bytes` (64 KiB, floor 1: a page always holds one record,
+whatever its size), `max_wait_ms` (400 ms in the simulation's baseline, 1 s in `parosd`, floor 0)
+and `min_wait_ms` (0, floor 0). They are `PAROS_*` overrides in `parosd`. The node applies them
+when it parks the read (`paros::driver::log_reads::ReadLimits`); a page shorter than the
+client's `limit` is the server's limit, and the client reads on from the page's end.
 
 ### 2.8 Underneath
 
@@ -1495,8 +1504,8 @@ AGENTS.md.
   `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow. The single-writer half (PR #281), the writer mode
-  (PR #296) and the batch limits landed; the `Read` page and the capped and floored `wait_ms`
-  remain, and `parosctl journal create --mode` moves to #210.
+  (PR #296), the batch limits and the read limits landed (#241 is done); `parosctl journal
+  create --mode` moves to #210.
 - The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
   levels: tenant names and desired state move into each tenant's control journal, capacity is
   owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).

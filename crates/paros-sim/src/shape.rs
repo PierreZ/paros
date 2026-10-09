@@ -165,9 +165,24 @@ impl NodeShape {
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(2 * floor_ticks),
             // Floor 0: a zero wait answers every journal read at the end at
             // once, empty, and the client re-asks; the ceiling crosses the
-            // client's deadline, where a long-poll the client stops waiting
-            // for is an ambiguous read, never a wrong one (#185).
-            read_poll_ticks: buggify_knob!(8_u64, 0_u64..41_u64),
+            // client's deadline, where a tail wait the client stops waiting
+            // for is an ambiguous read, never a wrong one (#185, #241).
+            max_wait_ms: buggify_knob!(400_u64, 0_u64..2001_u64),
+            // Floor 0: no minimum. The extreme raises a client's short wait
+            // well past it, still inside the client's read deadline (its
+            // floor is 1 s), and a crossed maximum caps it (#241).
+            min_wait_ms: buggify_knob!(0_u64, 0_u64..301_u64),
+            // Floor 1: a one-record page still moves every reader. The
+            // ceiling is the default, the cap the linearizability model
+            // knows (`MAX_READ_RECORDS`), so a shorter page than the client
+            // asked is the server's limit, never a lost record (#241).
+            max_read_records: buggify_knob!(
+                paros::MAX_READ_RECORDS,
+                1_u64..paros::MAX_READ_RECORDS + 1
+            ),
+            // Floor 1: a page that can hold a record always holds one, so a
+            // tiny budget serves one record per page (#241).
+            max_read_bytes: buggify_knob!(64 * 1024_u64, 1_u64..65_537_u64),
             // Floor 1: the client inboxes are the RPC runtime's per-endpoint
             // queues, which refuse a request beyond capacity as `Overloaded`
             // (never admitted, so never a lost *executed* request); the loop

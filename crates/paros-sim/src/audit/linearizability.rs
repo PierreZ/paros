@@ -54,10 +54,11 @@ use paros::{JournalView, LeaderUuid, WriterMode};
 
 use crate::chain::splitmix;
 
-/// The records a page carries when the client names no limit, and the cap
-/// on any limit (`paros::driver`'s `READ_PAGE_RECORDS`): a page is never
-/// longer, whatever the limit asked.
-const PAGE_RECORDS: u64 = 256;
+/// The records a page carries at most, whatever the limit asked: the
+/// largest `max_read_records` a node draws (`paros::MAX_READ_RECORDS`,
+/// #241). A node with a smaller maximum serves a shorter page, which the
+/// model accepts like any page cut by the tail.
+const PAGE_RECORDS: u64 = paros::MAX_READ_RECORDS;
 
 /// One call a client made of its journal: what it asked.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

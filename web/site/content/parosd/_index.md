@@ -23,6 +23,7 @@ must carry it. `SetLeader(new, old)` replaces the uuid only if the current one i
 `parosd` uses paros's own journals, leader election and Paxos flavors for its control plane.
 For example, `cell init` is a single-decree Paxos over the founding members.
 
-`parosd` is a work in progress. The pages of this part will describe the journal API, the
-control hierarchy, the bootstrap, multi-tenancy, the cell design and how to run the Compose
-demo (`DEMO.md` in the repository).
+[The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
+the limits. `parosd` is a work in progress. Later pages of this part will describe the control
+hierarchy, the bootstrap, multi-tenancy, the cell design and how to run the Compose demo
+(`DEMO.md` in the repository).

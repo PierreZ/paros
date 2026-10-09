@@ -59,7 +59,7 @@ mod system;
 pub(crate) mod transport;
 mod tunables;
 
-pub use config::{BootKind, BootRefusal, DriverTunables, RunError, parse_addr};
+pub use config::{BootKind, BootRefusal, DriverTunables, MAX_READ_RECORDS, RunError, parse_addr};
 pub use events::{command_hash, message_kind, registration_history_hash};
 pub use journals::JournalStores;
 pub use system::SystemPlan;
@@ -1351,12 +1351,11 @@ where
                 // it, for the audit's report of what served it.
                 let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
                 let opened = fold_head(&rt.node);
-                let wait = log_reads::wait_ticks(req.wait_ms, tunables.tick_interval, tunables.read_poll_ticks);
                 if basis.is_some() {
                     rt.audit.quorum_read_opened(NodeId(self_id), ctx);
                 }
                 rt.node.quorum_read_in(ctx, row);
-                rt.waiters.reads.park(&req, reply, wait, row, opened);
+                rt.waiters.reads.park(&req, reply, log_reads::ReadLimits::of(&tunables), row, opened);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }

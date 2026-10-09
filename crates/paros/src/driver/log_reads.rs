@@ -13,9 +13,11 @@
 //!
 //! A confirmed read with nothing to return yet — it starts at or past the
 //! journal's `next_seq` — waits here for as long as the client asked
-//! (`wait_ms`, capped by `read_poll_ticks`), re-served after every batch (the
-//! fold only grows inside one), and is answered empty when its wait runs
-//! out. A read whose confirmation does not arrive within `read_retry_ticks`
+//! (`wait_ms`, capped at `max_wait_ms` and a non-zero one raised to
+//! `min_wait_ms`, #241), re-served after every batch (the fold only grows
+//! inside one), and is answered empty when its wait runs out. A page holds
+//! at most `max_read_records` records and `max_read_bytes` record bytes
+//! ([`ReadLimits`], `docs/architecture.md` §2.7). A read whose confirmation does not arrive within `read_retry_ticks`
 //! is answered `served: false`: the client retries, here or elsewhere.
 //!
 //! Every driver that serves `Read` (the node's and the replica's) holds one
@@ -30,25 +32,98 @@ use paros_core::{JournalIdentifier, LogRead, NodeId, ReadState, Seq, Slot};
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
 
+use super::DriverTunables;
 use super::reply::{Reply, answer};
 
-/// The records one page carries when the client names no limit.
-pub(crate) const READ_PAGE_RECORDS: usize = 256;
+/// The limits a serving process puts on a `Read` (#241,
+/// `docs/architecture.md` §2.7), taken from its [`DriverTunables`]: the page
+/// (records and bytes) and the tail wait (a maximum and a minimum).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReadLimits {
+    records: usize,
+    bytes: usize,
+    min_wait_ms: u64,
+    max_wait_ms: u64,
+    tick: Duration,
+}
 
-/// The byte budget of one page: far below the frame limit. A page that can
-/// hold a record always holds one, whatever its size.
-pub(crate) const READ_PAGE_BYTES: usize = 64 * 1024;
+impl ReadLimits {
+    /// The limits `tunables` name.
+    pub(crate) fn of(tunables: &DriverTunables) -> Self {
+        let limits = Self {
+            records: usize::try_from(tunables.max_read_records).unwrap_or(usize::MAX),
+            bytes: usize::try_from(tunables.max_read_bytes).unwrap_or(usize::MAX),
+            min_wait_ms: tunables.min_wait_ms,
+            max_wait_ms: tunables.max_wait_ms,
+            tick: tunables.tick_interval,
+        };
+        // The floors `check_floors` names: a page always moves a reader.
+        assert!(limits.records >= 1, "a page holds at least one record");
+        assert!(limits.bytes >= 1, "a page holds at least one byte");
+        limits
+    }
 
-// A page carries at least one record and always fits one RPC frame (a lone
-// record above the budget is the page's one exception, bounded by the write
-// that carried it).
-const _: () = assert!(READ_PAGE_RECORDS > 0);
-const _: () = assert!(READ_PAGE_BYTES < crate::rpc::MAX_FRAME_BYTES as usize);
+    /// The records a page asked with `limit` carries at most: the maximum
+    /// when the client names none (0) or a larger one.
+    pub(crate) fn page(&self, limit: u64) -> usize {
+        let page = match usize::try_from(limit).unwrap_or(usize::MAX) {
+            0 => self.records,
+            limit => limit.min(self.records),
+        };
+        assert!(page >= 1, "a page holds at least one record");
+        assert!(page <= self.records, "a page never passes the maximum");
+        page
+    }
+
+    /// The tail wait `wait_ms` gets, in milliseconds: 0 stays 0 (answer at
+    /// once), a non-zero one is raised to the minimum, and the maximum caps
+    /// it (the cap wins when the two cross).
+    pub(crate) fn wait_ms(&self, wait_ms: u64) -> u64 {
+        if wait_ms == 0 {
+            return 0;
+        }
+        let wait = wait_ms.max(self.min_wait_ms).min(self.max_wait_ms);
+        assert!(
+            wait <= self.max_wait_ms,
+            "a read never outwaits the maximum"
+        );
+        assert!(
+            wait >= self.min_wait_ms.min(self.max_wait_ms),
+            "a read that waits waits at least the minimum"
+        );
+        wait
+    }
+
+    /// The tail wait `wait_ms` gets, in driver ticks (rounded up).
+    pub(crate) fn wait_ticks(&self, wait_ms: u64) -> u64 {
+        let wait = self.wait_ms(wait_ms);
+        let tick_ms = u64::try_from(self.tick.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let ticks = wait.div_ceil(tick_ms);
+        if wait == 0 {
+            assert!(ticks == 0, "a read that asks no wait never waits");
+        } else {
+            assert!(ticks >= 1, "a read that waits waits at least a tick");
+        }
+        ticks
+    }
+
+    /// The longest tail wait, as a duration: what a follower's deadline
+    /// must cover (one tick of rounding included).
+    pub(crate) fn longest_wait(&self) -> Duration {
+        Duration::from_millis(self.max_wait_ms).saturating_add(self.tick)
+    }
+}
 
 /// One journal read, from its arrival to its answer.
 struct PendingRead {
     from: Seq,
+    /// The records its page may carry: the client's limit, cut to the
+    /// maximum.
     limit: usize,
+    /// The record bytes its page may carry.
+    bytes: usize,
     /// The ticks the client lets the read wait at the tail.
     wait_ticks: u64,
     /// The driver tick it arrived at (its confirmation deadline), then the
@@ -125,6 +200,25 @@ fn read_ack_unchecked(read: &LogRead) -> ReadAck {
             ..ReadAck::default()
         },
     }
+}
+
+/// The page `pending` gets from `read` now, inside its limits.
+fn page_for(pending: &PendingRead, read: &impl Fn(Seq, usize, usize) -> LogRead) -> LogRead {
+    let page = read(pending.from, pending.limit, pending.bytes);
+    // Paired with the cut at `park`: what the fold serves stays inside the
+    // page limit the read was parked with.
+    if let LogRead::Page(p) = &page {
+        assert!(
+            p.records.len() <= pending.limit,
+            "a page never carries more records than its limit"
+        );
+        assert!(
+            p.records.len() <= 1
+                || p.records.iter().map(|r| r.0.len()).sum::<usize>() <= pending.bytes,
+            "a page of several records stays inside its byte budget"
+        );
+    }
+    page
 }
 
 /// Hand one read's answer to the reply seam, reporting it first.
@@ -211,17 +305,6 @@ pub(crate) fn next_row(ctx: u64, rows: usize) -> usize {
     row
 }
 
-/// How many ticks `wait_ms` is at `tick`, capped at `cap`.
-pub(crate) fn wait_ticks(wait_ms: u64, tick: Duration, cap: u64) -> u64 {
-    let tick_ms = u64::try_from(tick.as_millis()).unwrap_or(u64::MAX).max(1);
-    let ticks = wait_ms.div_ceil(tick_ms).min(cap);
-    assert!(ticks <= cap, "a long-poll never outwaits its cap");
-    if wait_ms == 0 {
-        assert!(ticks == 0, "a read that asks no wait never waits");
-    }
-    ticks
-}
-
 impl JournalReads {
     /// The read tally's own invariants: every token was minted here, every
     /// page is bounded, and only a read that may wait is parked.
@@ -234,7 +317,7 @@ impl JournalReads {
             self.confirming
                 .values()
                 .chain(&self.parked)
-                .all(|p| p.limit > 0 && p.limit <= READ_PAGE_RECORDS),
+                .all(|p| p.limit > 0 && p.bytes > 0),
             "every pending read's page is bounded"
         );
         assert!(
@@ -262,27 +345,25 @@ impl JournalReads {
 
     /// Park `req` on the quorum read the caller just opened at
     /// [`JournalReads::next_ctx`] (asking `row`, with the fold head at
-    /// `opened`), until the core confirms it.
+    /// `opened`), until the core confirms it. Its page and its tail wait
+    /// are cut to `limits`.
     pub(crate) fn park(
         &mut self,
         req: &Read,
         reply: ReplySender<ReadAck>,
-        wait_ticks: u64,
+        limits: ReadLimits,
         row: Option<usize>,
         opened: Option<Slot>,
     ) {
         let ctx = self.next_ctx;
         self.next_ctx += 1;
-        let limit = match usize::try_from(req.limit).unwrap_or(usize::MAX) {
-            0 => READ_PAGE_RECORDS,
-            limit => limit.min(READ_PAGE_RECORDS),
-        };
         self.confirming.insert(
             ctx,
             PendingRead {
                 from: Seq(req.from_seq),
-                limit,
-                wait_ticks,
+                limit: limits.page(req.limit),
+                bytes: limits.bytes,
+                wait_ticks: limits.wait_ticks(req.wait_ms),
                 parked_at: self.now,
                 row,
                 opened,
@@ -329,7 +410,7 @@ impl JournalReads {
                 leader,
                 "quorum_read_served"
             );
-            let page = read(pending.from, pending.limit, READ_PAGE_BYTES);
+            let page = page_for(&pending, &read);
             if at_end(&page) && pending.wait_ticks > 0 {
                 pending.parked_at = self.now;
                 self.parked.push(pending);
@@ -366,7 +447,7 @@ impl JournalReads {
         let before = self.parked.len();
         let mut still = Vec::with_capacity(before);
         for parked in std::mem::take(&mut self.parked) {
-            let page = read(parked.from, parked.limit, READ_PAGE_BYTES);
+            let page = page_for(&parked, &read);
             if at_end(&page) {
                 still.push(parked);
             } else {
@@ -443,7 +524,7 @@ impl JournalReads {
             .partition(|parked| ticks.saturating_sub(parked.parked_at) >= parked.wait_ticks);
         self.parked = still;
         for parked in overdue {
-            let page = read(parked.from, parked.limit, READ_PAGE_BYTES);
+            let page = page_for(&parked, &read);
             send(
                 &page,
                 parked.from,
@@ -466,5 +547,49 @@ impl JournalReads {
     /// Whether any read is still waiting on its confirmation.
     pub(crate) fn has_confirming(&self) -> bool {
         !self.confirming.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits(records: u64, min_wait_ms: u64, max_wait_ms: u64) -> ReadLimits {
+        ReadLimits::of(&DriverTunables {
+            max_read_records: records,
+            min_wait_ms,
+            max_wait_ms,
+            ..DriverTunables::default()
+        })
+    }
+
+    #[test]
+    fn a_page_is_cut_to_the_maximum() {
+        let l = limits(16, 0, 400);
+        assert_eq!(l.page(0), 16);
+        assert_eq!(l.page(3), 3);
+        assert_eq!(l.page(16), 16);
+        assert_eq!(l.page(u64::MAX), 16);
+    }
+
+    #[test]
+    fn a_wait_is_capped_and_floored_but_zero_stays_zero() {
+        let l = limits(16, 120, 400);
+        assert_eq!(l.wait_ms(0), 0);
+        assert_eq!(l.wait_ms(1), 120);
+        assert_eq!(l.wait_ms(200), 200);
+        assert_eq!(l.wait_ms(10_000), 400);
+        // At the default 50 ms tick, rounded up.
+        assert_eq!(l.wait_ticks(0), 0);
+        assert_eq!(l.wait_ticks(1), 3);
+        assert_eq!(l.wait_ticks(10_000), 8);
+    }
+
+    #[test]
+    fn the_maximum_wins_when_the_limits_cross() {
+        let l = limits(16, 500, 100);
+        assert_eq!(l.wait_ms(1), 100);
+        assert_eq!(l.wait_ms(1000), 100);
+        assert_eq!(limits(16, 0, 0).wait_ticks(1000), 0);
     }
 }

@@ -95,13 +95,32 @@ pub struct DriverTunables {
     /// read is ever served. A client whose deadline is shorter
     /// than the wait simply times out (ambiguous, never wrong).
     pub read_retry_ticks: u64,
-    /// Ticks a journal `Read` at or past the serving node's end may wait
-    /// (the long-poll, #185) for something to be chosen before the driver
-    /// answers an empty page. Floor 0: a zero wait answers every such read
+    /// The longest `wait_ms` a journal `Read` gets (#241,
+    /// `docs/architecture.md` §2.7): a larger one is capped to this. A read
+    /// at or past the serving node's end waits up to the capped value (the
+    /// tail wait, #185) for something to be chosen before the driver
+    /// answers an empty page. Floor 0: a zero cap answers every such read
     /// at once, empty, and the client simply re-asks — a busier client,
     /// never a wrong one. A client whose deadline is shorter than the wait
-    /// times out (ambiguous, never wrong).
-    pub read_poll_ticks: u64,
+    /// times out (ambiguous, never wrong). The cap wins over
+    /// `min_wait_ms`.
+    pub max_wait_ms: u64,
+    /// The shortest wait a journal `Read` that asks to wait gets (#241,
+    /// §2.7): a non-zero `wait_ms` below it is raised to it, so a client
+    /// cannot turn the tail wait into a busy poll. A `wait_ms` of 0 still
+    /// answers at once. Floor 0 (no minimum); a minimum above the client's
+    /// deadline times the client out (ambiguous, never wrong).
+    pub min_wait_ms: u64,
+    /// The most records one `Read` page carries (#241, §2.7): a `limit` of
+    /// 0 or above it is cut to it. Floor 1: a one-record page always moves
+    /// a reader forward.
+    pub max_read_records: u64,
+    /// The record bytes one `Read` page may carry (#241, §2.7). A page that
+    /// can hold a record always holds one, whatever its size, so a record
+    /// above the budget is a one-record page. Floor 1; keep it below the
+    /// RPC frame (`MAX_FRAME_BYTES`), or a full page is a reply the
+    /// transport refuses (the client's read is ambiguous, never wrong).
+    pub max_read_bytes: u64,
     /// Ticks a journal quarantined by a storage fault (#188) stays down on
     /// this node before the driver re-opens it from its store — the
     /// per-journal twin of a crashed process's restart delay. Floor 1: a
@@ -235,7 +254,10 @@ impl Default for DriverTunables {
             connection_timeout: DELIVERY_TIMEOUT,
             delivery_timeout: DELIVERY_TIMEOUT,
             read_retry_ticks: READ_RETRY_TICKS,
-            read_poll_ticks: READ_POLL_TICKS,
+            max_wait_ms: MAX_WAIT_MS,
+            min_wait_ms: 0,
+            max_read_records: MAX_READ_RECORDS,
+            max_read_bytes: MAX_READ_BYTES,
             quarantine_ticks: QUARANTINE_TICKS,
             election_backoff_doublings: ELECTION_BACKOFF_DOUBLINGS,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
@@ -284,10 +306,25 @@ const _: () = assert!(MAX_BATCH_RECORDS >= 1);
 /// answer just finds the ctx gone and is ignored).
 const READ_RETRY_TICKS: u64 = 10;
 
-/// Ticks a journal `Read` above the end long-polls before an empty answer
-/// (#185): 400 ms at the default tick, inside the sim client's 1000 ms
-/// deadline.
-const READ_POLL_TICKS: u64 = 8;
+/// The longest tail wait a journal `Read` gets (#185, #241): 400 ms, eight
+/// ticks at the default tick, inside the sim client's 1000 ms deadline.
+const MAX_WAIT_MS: u64 = 400;
+
+/// The records one `Read` page carries at most (#241): the page a client
+/// that names no limit gets.
+pub const MAX_READ_RECORDS: u64 = 256;
+
+/// The record bytes one `Read` page carries at most (#241): 64 KiB, far
+/// below the RPC frame.
+const MAX_READ_BYTES: u64 = 64 * 1024;
+
+// A page carries at least one record and always fits one RPC frame (a lone
+// record above the budget is the page's one exception, bounded by the write
+// that carried it).
+const _: () = assert!(MAX_READ_RECORDS >= 1);
+const _: () = assert!(MAX_READ_BYTES >= 1);
+const _: () = assert!(MAX_READ_BYTES < crate::rpc::MAX_FRAME_BYTES as u64);
+const _: () = assert!(MAX_BATCH_BYTES < crate::rpc::MAX_FRAME_BYTES as u64);
 /// Default [`DriverTunables::quarantine_ticks`]: eight election timeouts —
 /// long enough that a journal's re-open is not a restart loop against a
 /// still-faulty device, short enough that the node rejoins the journal well

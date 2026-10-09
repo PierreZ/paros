@@ -193,7 +193,10 @@ Each field has an environment override named after it, `_MS` for a duration:
 | `PAROS_CONNECTION_TIMEOUT_MS` | 3000 | 1 |
 | `PAROS_DELIVERY_TIMEOUT_MS` | 2000 | 1 |
 | `PAROS_READ_RETRY_TICKS` | 20 | 1 |
-| `PAROS_READ_POLL_TICKS` | 10 | 0 |
+| `PAROS_MAX_WAIT_MS` (the longest tail wait of a `Read`) | 1000 | 0 |
+| `PAROS_MIN_WAIT_MS` (the shortest non-zero tail wait) | 0 | 0 |
+| `PAROS_MAX_READ_RECORDS` (records per `Read` page) | 256 | 1 |
+| `PAROS_MAX_READ_BYTES` (record bytes per `Read` page) | 65536 | 1 |
 | `PAROS_QUARANTINE_TICKS` | 80 | 1 |
 | `PAROS_CLIENT_INBOX_CAPACITY` | 256 | 1 |
 | `PAROS_PEER_INBOX_CAPACITY` | 1024 | 1 |
