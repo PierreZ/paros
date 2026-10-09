@@ -462,9 +462,16 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
         let Some(round) = self.by_slot.get_mut(&slot) else {
             return false;
         };
-        if round.ballot != ballot || round.command.fingerprint() != vhash {
+        if round.ballot != ballot {
             return false;
         }
+        // One command per (slot, ballot) (P2b): an `Accepted` at the open
+        // round's own ballot names the round's command. A mismatch is a
+        // broken invariant, never a vote to ignore.
+        assert!(
+            round.command.fingerprint() == vhash,
+            "an Accepted at an open round's ballot names the round's command"
+        );
         match &mut round.custody {
             Custody::Colocated { accepted_by } => {
                 accepted_by.insert(from);
@@ -936,6 +943,16 @@ mod tests {
         })
     }
 
+    /// One command per (slot, ballot) (P2b, #317): a vote at the round's own
+    /// ballot for another value is a broken invariant, never ignored.
+    #[test]
+    #[should_panic(expected = "an Accepted at an open round's ballot names the round's command")]
+    fn a_same_ballot_vote_for_another_value_panics() {
+        let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+        rounds.open(Slot(5), ballot(1, 0), cmd(1), Some(NodeId(0)), None);
+        let _ = rounds.fold_accepted(NodeId(1), ballot(1, 0), Slot(5), 0);
+    }
+
     /// The tally stands on its own: opened, folded, decided and closed
     /// with no proposer around it — the shape the proxy leader embeds.
     #[test]
@@ -949,10 +966,6 @@ mod tests {
         rounds.open(Slot(5), ballot(1, 0), cmd(1), Some(NodeId(0)), None);
         assert_eq!(rounds.column(Slot(5)), Some(None));
         assert!(rounds.decided(Slot(5), &config).is_none());
-        assert!(
-            !rounds.fold_accepted(NodeId(1), ballot(1, 0), Slot(5), 0),
-            "a vote for another value never counts"
-        );
         assert!(
             !rounds.fold_accepted(
                 NodeId(1),

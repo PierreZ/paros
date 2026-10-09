@@ -77,7 +77,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (all ten lines).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (all eleven lines).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
 - **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture.md` §1): solve
@@ -216,7 +216,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
 `HardState` or the role map:
 
 - The static case is the **`None` arm of the same state machine**: never a cargo feature, never
-  conditional compilation (`serde` and `tracing` are paros-core's only features, observation-only).
+  conditional compilation (`serde`, `tracing` and `assertions` are paros-core's only features, all observation-only).
 - No matchmaker message, no `HardState` field and no extra round trip enters the plain path;
   `ColocatedNode` never steps a matchmaker message. Removing every opt-in feature must leave the
   plain program's behaviour unchanged.
@@ -380,6 +380,13 @@ Depth: the `adding-a-buggify-site` skill, `crates/paros/src/hooks.rs`.
   assert!(..)`); split compound conditions into one assertion each. Every assertion is a
   simulation oracle for free. The external-input rule above still holds: a bad request is a
   result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
+- **Coverage probes in `paros-core`** (decided on 2026-10-09, #317): a rare protocol branch the
+  sweep must reach is a `probe!(reachable, "..")` or `probe!(sometimes, cond, "..")` at the line
+  (`paros-core/src/probe.rs`, the `assertions` feature, default on, backed by
+  `moonpool-assertions`). A probe only observes: no buggify, hint, RNG, clock or knob; with the
+  feature off it compiles to nothing. A probe is not an invariant: an impossible state is still
+  a hard `assert!`. A core probe and a sim `assert_reachable!` with the same message share one
+  slot; reuse the sim wording when a probe replaces a `reach_once!` relay.
 - **Sim layers use moonpool macros, never plain `assert!`**: `assert_always!` with a detail map
   (record and continue), `assert_sometimes!` for an **outcome** the run must reach,
   `reach_once!`/`assert_reachable!` for a **cause** that fired. A perturbation never gets a
@@ -442,7 +449,8 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 `paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`. Each crate's `AGENTS.md` is its map.
 
 - `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
-  `default-features = false`, wasm-safe; sancov crate-under-test.
+  `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
+  `assertions` feature (#317) adds `moonpool-assertions` for coverage probes only.
 - `paros` — the library: provider-generic drivers, RPC contract (`proto/`, built by
   `prost-build`), stores, `paros::client`; wasm-safe and provider-free.
 - `parosd` — the uniform `parosd` daemon over Tokio (one binary per machine: `PAROS_*` config,
@@ -461,5 +469,6 @@ references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-t
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
 `CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (ten lines across their `Cargo.toml`s, advanced together), so only
-`paros-core` is truly publishable.
+moonpool by **git** rev (eleven lines across their `Cargo.toml`s, advanced together), so only
+`paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
+carries a crates.io `version`, which a publish resolves instead of the git rev.

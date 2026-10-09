@@ -211,6 +211,10 @@ impl ColocatedNode {
                 // the slot and `serve_catchup` stopped at it forever —
                 // freezing any follower whose own prefix needs it.
                 if slot < self.first_unchosen() && !self.replica.is_chosen(slot) {
+                    probe!(
+                        reachable,
+                        "acceptor: an Accept inside the chosen prefix heals a faulty chosen record"
+                    );
                     self.mark_chosen(slot, &command, ballot);
                 } else {
                     self.record_accepted(slot, ballot, command);
