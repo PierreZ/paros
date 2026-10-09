@@ -19,7 +19,9 @@
 //! independently of `paros-core` (`qualifying answers` over the decided
 //! ballot's configuration): a slot is **recoverable** while a Phase-1
 //! quorum of its members could qualify (a `none`, a clean copy, or a lost
-//! one at a ballot no higher than the best clean copy). An unrecoverable
+//! one at a ballot no higher than the best clean copy). Liveness is also
+//! excused while a configuration the latest campaign asked has no
+//! qualifying quorum, the core's rule over every configuration in `H_b`. An unrecoverable
 //! slot must be waited on: it is **never accepted again**, by anyone (a
 //! no-op fill or a fabricated value would both be an accept). Convergence
 //! excuses a journal holding one; a recoverable slot is still owed it.
@@ -56,6 +58,14 @@ use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{AcceptorConfig, Ballot, NodeId};
 
 use super::state::AuditState;
+
+/// The CTRL threshold of a lost slot's clean copies.
+enum Threshold {
+    /// The best clean copy's ballot (`None`: no clean copy).
+    Best(Option<(u64, u64)>),
+    /// A clean holder's ballot the tally never heard.
+    Unheard,
+}
 
 /// One outage-planned loss of a slot (see the module doc).
 #[derive(Debug, Default)]
@@ -115,6 +125,55 @@ impl AuditState {
     pub(super) fn loss_excuses_liveness(&self) -> bool {
         self.losses.has_unrecoverable()
             || self.losses.planned.keys().any(|slot| self.stranded(*slot))
+            || self
+                .losses
+                .planned
+                .keys()
+                .any(|slot| self.blocked_in_asked(*slot))
+    }
+
+    /// Whether the decided `slot` an outage hit is frozen because some
+    /// configuration the latest campaign asked ([`Self::asked_configurations`])
+    /// has no qualifying Phase-1 quorum for it. The core's CTRL rule (#267)
+    /// needs a qualifying quorum of **every** configuration in `H_b`, while
+    /// [`Self::loss_recoverable`] judges only the decided ballot's: a
+    /// re-proposal into a successor configuration, itself lost above the
+    /// best clean copy, with another successor member down for good, blocks
+    /// every repair although the decided configuration still qualifies
+    /// (witness 4265196232306395188: slot 0 decided at `(3, 2)` in
+    /// `{0, 1, 2}`, re-proposed at `(5, 4)` into `{2, 3, 4}` and lost on node
+    /// 4, node 2 wiped; red on "every quorum-decided slot is applied by the
+    /// end of the tail", green with this excuse). Like
+    /// [`Self::stranded`], it excuses liveness only and is judged afresh each
+    /// time it is asked.
+    fn blocked_in_asked(&self, slot: u64) -> bool {
+        let (Some(planned), true) = (
+            self.losses.planned.get(&slot),
+            self.decided.contains_key(&slot),
+        ) else {
+            return false;
+        };
+        let down = self.down_for_good();
+        let clean: Vec<u64> = self
+            .holders_of(slot, planned)
+            .into_iter()
+            .filter(|node| !planned.lost.contains(node) && !down.contains(node))
+            .collect();
+        // The escapes `loss_recoverable` takes: a clean holder serving the
+        // slot from its chosen prefix, or a ballot the tally never heard.
+        if clean.iter().any(|node| {
+            self.decided_prefix
+                .get(node)
+                .is_some_and(|prefix| *prefix > slot)
+        }) {
+            return false;
+        }
+        let Threshold::Best(threshold) = self.clean_threshold(slot, &clean) else {
+            return false;
+        };
+        self.asked_configurations().iter().any(|config| {
+            !config.has_phase1_quorum(&self.qualifying(config, slot, planned, &down, threshold))
+        })
     }
 
     /// Whether the decided `slot` an outage hit is frozen because its every
@@ -451,15 +510,39 @@ impl AuditState {
         // A clean holder whose ballot the tally never heard (a commit in
         // flight that landed unreported, #264) may hold the best copy: no
         // claim rests on a ballot the audit does not know.
+        let Threshold::Best(threshold) = self.clean_threshold(slot, &clean) else {
+            return true;
+        };
+        config.has_phase1_quorum(&self.qualifying(config, slot, planned, &down, threshold))
+    }
+
+    /// The best ballot among `slot`'s `clean` copies, the CTRL threshold a
+    /// lost copy qualifies under, or [`Threshold::Unheard`] when a clean
+    /// holder's ballot is one the tally never heard (a commit in flight that
+    /// landed unreported, #264), on which no claim rests.
+    fn clean_threshold(&self, slot: u64, clean: &[u64]) -> Threshold {
         let ballots: Vec<Option<(u64, u64)>> = clean
             .iter()
             .map(|node| self.accept_ballot(*node, slot))
             .collect();
         if ballots.iter().any(Option::is_none) {
-            return true;
+            return Threshold::Unheard;
         }
-        let threshold = ballots.into_iter().flatten().max();
-        let qualifying: BTreeSet<NodeId> = config
+        Threshold::Best(ballots.into_iter().flatten().max())
+    }
+
+    /// The members of `config` whose Phase-1 answer for `slot` qualifies
+    /// under the CTRL rule: not down for good, and holding nothing, a clean
+    /// copy, or a lost one at a ballot no higher than `threshold`.
+    fn qualifying(
+        &self,
+        config: &AcceptorConfig,
+        slot: u64,
+        planned: &Planned,
+        down: &BTreeSet<u64>,
+        threshold: Option<(u64, u64)>,
+    ) -> BTreeSet<NodeId> {
+        config
             .members()
             .iter()
             .filter(|member| {
@@ -471,8 +554,7 @@ impl AuditState {
                             .is_some_and(|ballot| Some(ballot) <= threshold))
             })
             .copied()
-            .collect();
-        config.has_phase1_quorum(&qualifying)
+            .collect()
     }
 
     /// Recognize the shape the landed losses of `slot` left (see the module
