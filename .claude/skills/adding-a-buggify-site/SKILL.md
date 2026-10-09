@@ -13,8 +13,8 @@ its sites. Pick the prong first.
 **Hard rule (#294, 2026-10-09):** the site goes inline in the shipped code
 (`paros`, `parosd`) at the line that makes the choice, never in a sim wrapper.
 A choice is `buggify_with_prob!` or `buggify_pick!`; a moment where a crash is
-interesting is `hint!("label").await`. Add no new `DriverHooks` method or
-`Seam`: prong 1 below describes the code being migrated
+interesting is `hint!("label").await`. Add no new `DriverHooks` method (the
+`Seam`s are gone): prong 1 below describes the code being migrated
 (`docs/analysis/simulation/production-fault-hints.md`).
 
 ## Prong 1: a driver decision → `DriverHooks`

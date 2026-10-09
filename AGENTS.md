@@ -107,8 +107,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   `SimMachine`: the sim runs the same machine and disk as `parosd`. A sim wrapper only observes,
   through `Audit` or a `reachable!` probe. `is_simulated()` tilts rates, cadences and checks,
   never an outcome a client sees. `paros-core` stays sans-IO: no buggify, hint or
-  `is_simulated()`. Add no new `DriverHooks` method or `Seam`; the existing ones, `PowerCut` and
-  `SimDisk` migrate per #294 (`docs/analysis/simulation/production-fault-hints.md`).
+  `is_simulated()`. Add no new `DriverHooks` method; the existing ones and `PowerCut`
+  migrate per #294 (the `Seam`s and `SimDisk` are gone) (`docs/analysis/simulation/production-fault-hints.md`).
 - **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
   as possible in the simulation, setup included. Always BUGGIFY your way into the complex
   situations rather than script them. Test several behaviours through the one workload with
