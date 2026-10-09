@@ -234,13 +234,13 @@ impl JournalModel {
             self.trimmed_any = true;
             assert_always!(
                 leads,
-                "journal: a Truncate is accepted only from the current leader",
+                "journal: a Truncate is accepted only from the current owner",
                 { "slot" => slot }
             );
         } else {
             assert_always!(
                 !leads,
-                "journal: a Truncate is refused only from a caller that is not the leader",
+                "journal: a Truncate is refused only from a caller that is not the owner",
                 { "slot" => slot }
             );
         }
@@ -356,7 +356,7 @@ impl JournalModel {
 
     /// The journal's coverage gates, once the slot-ordered checks ran.
     fn gates(&self, stale_truncate_refused: bool) {
-        assert_sometimes!(self.won_any, "journal: a SetLeader wins a term");
+        assert_sometimes!(self.won_any, "journal: a SetLeader wins a generation");
         assert_sometimes!(self.accepted_any, "journal: a write is accepted");
         assert_sometimes!(
             self.duplicate_any,
@@ -389,7 +389,7 @@ impl JournalModel {
         }
         if self.superseded_write_answered {
             moonpool_sim::assert_reachable!(
-                "journal: a superseded writer is told the leader that fenced it"
+                "journal: a superseded writer is told the generation that fenced it"
             );
         }
     }

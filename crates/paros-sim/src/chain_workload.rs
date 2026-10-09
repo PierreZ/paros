@@ -222,8 +222,8 @@ struct ChainConfig {
     /// Requests per compaction storm. Floor 1.
     compact_storm_attempts: usize,
     /// Percent chance a `TRUNCATE` step of a superseded owner (one that
-    /// owned a generation once and owns none now) sends its truncation
-    /// under the old generation anyway (#228, `Writer::
+    /// led a term once and leads none now) sends its truncation under its
+    /// old uuid anyway (#228, `Writer::
     /// stale_truncate_request`) — the deliberate misbehaviour the fence
     /// refuses. Floor 0: such an owner sends nothing, as the library's
     /// writer does; ceiling 100: it always tries. Either extreme is valid,
@@ -600,13 +600,6 @@ fn weighted_index(weights: &[u64], draw: u64) -> usize {
     0
 }
 
-/// Where a client sends its next attempt after a redirect, a transport error,
-/// or an ambiguous outcome (the library's [`Retarget`]). Drawn per step, so a
-/// seed can be a client that always follows the hint, one that stubbornly
-/// re-asks the same node (the dedup path on the node that may have
-/// committed the abandoned attempt), or one that walks the ring. Two bits
-/// of `draw` pick it; the hint-following default keeps half the mass so the
-/// ordinary client stays the common shape.
 /// Fresh leader seeds for a client's library writers (#241): every session,
 /// checkpointer and claim a workload starts leads under uuids of its own, so
 /// a well-behaved client never reinstates a uuid that led before.
@@ -647,6 +640,13 @@ fn absorb_truncate(writer: &mut Writer, outcome: Option<&TruncateOutcome>) {
     }
 }
 
+/// Where a client sends its next attempt after a redirect, a transport error,
+/// or an ambiguous outcome (the library's [`Retarget`]). Drawn per step, so a
+/// seed can be a client that always follows the hint, one that stubbornly
+/// re-asks the same node (the dedup path on the node that may have
+/// committed the abandoned attempt), or one that walks the ring. Two bits
+/// of `draw` pick it; the hint-following default keeps half the mass so the
+/// ordinary client stays the common shape.
 fn retarget_from_draw(draw: u64) -> Retarget {
     match draw % 4 {
         0 | 1 => Retarget::FollowHint,

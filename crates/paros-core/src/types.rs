@@ -230,8 +230,10 @@ pub enum Control {
     /// Change the journal's leader (#241, `SetLeader(new_uuid, old_uuid)`):
     /// a pure compare-and-set, judged at apply — it succeeds iff `old` is the
     /// current leader uuid (`None` on a journal that never had one) and `new`
-    /// never led it, and then `new` leads from the next term. No lease and no
-    /// clock.
+    /// is set and not the current leader, and then `new` leads from the next
+    /// term. A uuid that led before wins again: the journal trusts its
+    /// clients to draw fresh ones (`docs/architecture.md` §2.3). No lease and
+    /// no clock.
     SetLeader {
         /// The leader uuid that should lead from the next term.
         new: LeaderUuid,

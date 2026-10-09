@@ -87,7 +87,10 @@ pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
 pub fn command_hash(command: &Command) -> u64 {
     match command {
         Command::Write(entry) => {
-            let mut bytes = Vec::new();
+            // A write's own tag: a control command's encoding starts `0xfd`,
+            // `0xfe` or `0xff`, so no write encodes to one whatever its length
+            // (a one-record write can be as long as a `SetLeader`, #241).
+            let mut bytes = vec![0x00_u8];
             bytes.extend_from_slice(&entry.leader.0.to_le_bytes());
             bytes.extend_from_slice(&entry.seq.0.to_le_bytes());
             for record in &entry.records {

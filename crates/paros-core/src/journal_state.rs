@@ -19,9 +19,11 @@
 //!   per-client session ledger and nothing to expire.
 //! - **`SetLeader(new_uuid, old_uuid)`** ([`Control::SetLeader`]) is a pure
 //!   compare-and-set: it wins iff `old_uuid` is the current leader (`None` on
-//!   a journal that never had one), and the term then rises by one. A uuid
-//!   leads at most once: `new_uuid` equal to the current leader is refused.
-//!   No lease, no clock.
+//!   a journal that never had one), and the term then rises by one. It is
+//!   refused when `new_uuid` is the current leader or the unset uuid; a uuid
+//!   that led before wins again (decided on 2026-10-09: the journal trusts
+//!   its clients to draw fresh uuids, `docs/architecture.md` §2.3). No lease,
+//!   no clock.
 //! - **`Truncate(leader_uuid, up_to_seq)`** ([`Control::Truncate`], #228) is
 //!   fenced like a `Write`: it is accepted iff `leader_uuid` is current, and
 //!   then raises `first_seq` to `up_to_seq`, clamped to `next_seq`. Monotone.
@@ -37,8 +39,7 @@
 //!
 //! The term (#241, §2.3) is the core's own: raised by every won `SetLeader`,
 //! carried by the store's sealed state and a trim-point jump, and never
-//! answered to a client. Two leaderships are two terms, so the audit can say
-//! "a uuid leads at most one term".
+//! answered in a data-plane reply (only an operator's `Inspect` shows it).
 //!
 //! The state machine is pure: it reads the command and, for a retry, the
 //! write accepted at the retried position (handed in as a lookup, so the

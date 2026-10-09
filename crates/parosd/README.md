@@ -53,7 +53,7 @@ prints them (`control=`, `fleet_control=`, `journals=`); afterwards any machine'
 node-only `Inspect` names the cell's control journal and the fleet tenant's, which is how
 `parosctl tenant` finds them. Then the first cell coordinator — the lowest seed
 id, until the coordinator election of #225 — claims the cell control journal
-with `SetLeader(expected_gen = 0)`. Last come the **fleet steps** (#229): the
+with `SetLeader(new, old = none)`, under a leader uuid `init` draws (#241). Last come the **fleet steps** (#229): the
 cell records the fleet's id (minted by `init`) on its side, and the fleet tenant records
 the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 `init` resumes an interrupted one, and on an initialized fleet it is refused

@@ -75,11 +75,11 @@ re-implement a policy loop in the workload.
   dropped (timeout, abandoned observation, shutdown) stays unknown, never
   aborted. `CallLog` also holds the **retry-identity oracle**: between
   `open_write(op)` and `close_write()` every `Write` attempt the library makes
-  must carry the request the first one did — generation, owner, position and
+  must carry the request the first one did — leader uuid, position and
   bytes. Wrap every write operation in that pair.
 - **Deliberate misbehaviours are explicit calls**, never a client default:
   `Writer::stale_entry` (a superseded owner writing under its old
-  generation), `Client::write_attempt` with a `listen` bound
+  uuid), a reinstated uuid (`reinstate_pct`, #241), `Client::write_attempt` with a `listen` bound
   (`rpc::write_once` with `abandon`: stop listening before the ack),
   `DUAL_SUBMIT` (one `write_attempt` to two servers), `DUP_WRITE` (re-send a
   write this client saw written; it must fold as `Duplicate`). The one-attempt
@@ -108,7 +108,7 @@ re-implement a policy loop in the workload.
 4. Make the call through the library client (above); record the operation in
    `ClientHistory` (`audit/client.rs`) too, for the counts and gates. A retry
    is the same write, so the log answers it as a `Duplicate`; changing any of
-   generation, owner, position or bytes makes it a new write.
+   leader uuid, position or bytes makes it a new write.
 5. Tunables the operation introduces (attempts, beats, sleeps) are
    `buggify_knob!` fields in `ChainConfig` with a documented floor; a constant
    buried in the operation is invisible to the swarm.

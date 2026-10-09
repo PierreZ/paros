@@ -247,8 +247,11 @@ pub enum Resolution {
         count: u64,
     },
     /// The journal does not hold the write, and never will: the position
-    /// holds another write, or a newer owner fenced the generation before
-    /// the journal reached the position.
+    /// holds another write, or another leader fenced the write's uuid before
+    /// the journal reached the position. "Never" holds for a caller that
+    /// never reinstates a uuid (the library's writer never does): one that
+    /// reinstates the write's uuid lets a delayed copy land again
+    /// (`docs/architecture.md` §2.3).
     NotWritten {
         /// The journal state that proves it.
         state: JournalView,
@@ -883,8 +886,9 @@ impl<P: Providers> Client<P> {
     /// `SetLeader` down the same dead link and came back ambiguous at
     /// once).
     ///
-    /// A uuid leads at most one term, so a read already naming `uuid` is a
-    /// claim that won and whose answer was lost: it is adopted as
+    /// A well-behaved writer leads under a uuid for one term only, so a read
+    /// already naming `uuid` is a claim that won and whose answer was lost:
+    /// it is adopted as
     /// [`ClaimOutcome::Owned`]. A writer that wants a new term asks with a
     /// new uuid ([`Writer::claim`]).
     pub async fn claim(

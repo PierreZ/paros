@@ -270,11 +270,16 @@ impl Writer {
     /// claim named a state.
     pub fn claimed(&mut self, outcome: &ClaimOutcome) -> Option<Learned> {
         match outcome {
-            ClaimOutcome::Won { state } => {
+            // A won claim names this writer's uuid; a reply that names
+            // another (a server's answer, never trusted to panic on) is
+            // learned like any other view.
+            ClaimOutcome::Won { state } if state.leader == Some(self.mine) => {
                 self.won(state);
                 Some(Learned::Owner)
             }
-            ClaimOutcome::Lost { state } | ClaimOutcome::Owned { state } => Some(self.learn(state)),
+            ClaimOutcome::Won { state }
+            | ClaimOutcome::Lost { state }
+            | ClaimOutcome::Owned { state } => Some(self.learn(state)),
             _ => None,
         }
     }

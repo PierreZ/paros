@@ -93,7 +93,7 @@ walk.
 | `Write` | `Write(leader_uuid, expected_seq, batch) -> seq`: fenced by the leader uuid, contiguous by `expected_seq`, idempotent on retry, pipelineable. | `Write(batch) -> seq`: unfenced; the journal orders writes and assigns `seq` at apply. At-least-once on an ambiguous retry. |
 | `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. Long-polls at the tail for `wait_ms`. | The same. |
 | `Truncate` | `Truncate(leader_uuid, up_to_seq)`: fenced like `Write`. | `Truncate(up_to_seq)`: anyone may truncate. |
-| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns `{ old_uuid, next_seq, first_seq }`. | Refused: a multi-writer journal has no leader. |
+| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns the journal's view after it: the leader uuid, `next_seq`, `first_seq`. | Refused: a multi-writer journal has no leader. |
 
 The API is Brooker's fourth MemoryDB journal API (section 10): `set_leader_uuid(new, old)`,
 `write(payload, leader_uuid)`, `read()`, plus the expected-sequence precondition of DSQL's
@@ -128,7 +128,8 @@ pipelined burst does not burn slots. That is an optimisation; the apply-time che
 
 Leadership is a pure compare-and-set, no lease and no clock. `SetLeader(new_uuid, old_uuid)`
 succeeds iff `old_uuid` is the current leader (unset on a fresh journal); the journal records the
-change as an ordinary log entry and answers `{ old_uuid, next_seq, first_seq }` so the new leader
+change as an ordinary log entry and answers the view after it (the leader uuid, `next_seq`,
+`first_seq`) so the new leader
 can continue the sequence. Every tailer learns the leader changed in-band, without a side channel.
 
 **The leader uuid is the fence.** It is a 128-bit random value the leader draws for one
@@ -136,7 +137,7 @@ leadership term, never per process: a process that wins again draws a new uuid, 
 own older in-flight writes. It is not a secret and not an authentication token; the frontend
 decides who may touch a tenant at all (section 3.5), the leader uuid decides which of the
 tenant's clients holds the pen. The core keeps a hidden term counter beside it, raised by every
-`SetLeader`, that never leaves `paros-core`.
+`SetLeader`, that never reaches a data-plane reply (only an operator's `Inspect` shows it).
 
 **The journal trusts its clients to draw fresh uuids** (decided on 2026-10-09, #241). A
 `SetLeader` is refused only when `old_uuid` is not the current leader, when `new_uuid` is the
