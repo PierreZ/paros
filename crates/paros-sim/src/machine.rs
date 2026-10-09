@@ -131,7 +131,7 @@ pub(crate) fn machine_addrs(deployment: &Deployment) -> SimulationResult<Vec<Soc
 /// One machine: the shipped lifecycle on this process's simulated disk, in
 /// the seam-crash recovery loop every role with a disk runs. A process kill
 /// aborts it; the next incarnation reads its record back.
-#[tracing::instrument(level = "debug", skip_all, fields(rank))]
+#[tracing::instrument(level = "debug", skip_all, fields(rank = rank))]
 async fn run_machine_role(
     ctx: &SimContext,
     deployment: &Deployment,
@@ -172,7 +172,6 @@ async fn run_machine_role(
             ctx,
             disk: ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
         };
-        note_boot(&disk.disk).await;
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),
             disk,
@@ -235,17 +234,23 @@ fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
         .collect()
 }
 
-/// What this incarnation boots from, as a reachable each: an empty disk, a
-/// record still waiting for its cell, or a formed one about to serve it.
-async fn note_boot(disk: &ProviderDisk<SimStorageProvider>) {
-    match disk.read_record().await {
-        Ok(None) => assert_reachable!("machine: a machine formats an empty disk"),
-        Ok(Some(text)) => match MachineRecord::parse(&text).map(|record| record.formed().is_some())
-        {
-            Ok(true) => assert_reachable!("machine: a formed machine restarts and serves its cell"),
-            Ok(false) => assert_reachable!("machine: a formatted machine restarts and waits"),
-            Err(_) => {}
-        },
+/// What a boot reads, as a reachable each: an empty disk, a record still
+/// waiting for its cell, or a formed one about to serve it — judged on the
+/// lifecycle's own read, never a read of the harness's.
+fn note_boot(read: &Result<Option<String>, String>) {
+    let formed = match read {
+        Ok(None) => {
+            assert_reachable!("machine: a machine formats an empty disk");
+            return;
+        }
+        Ok(Some(text)) => MachineRecord::parse(text).map(|record| record.formed().is_some()),
+        Err(_) => return,
+    };
+    match formed {
+        Ok(true) => {
+            assert_reachable!("machine: a formed machine restarts and serves its cell");
+        }
+        Ok(false) => assert_reachable!("machine: a formatted machine restarts and waits"),
         Err(_) => {}
     }
 }
@@ -261,7 +266,9 @@ impl<'a> MachineDisk for SimDisk<'a> {
     type Stores = SimMachineStores<'a>;
 
     async fn read_record(&mut self) -> Result<Option<String>, String> {
-        self.disk.read_record().await
+        let read = self.disk.read_record().await;
+        note_boot(&read);
+        read
     }
 
     async fn write_record(&mut self, text: &str) -> Result<(), String> {
@@ -302,7 +309,11 @@ impl<'a> MachineDisk for SimDisk<'a> {
         node_id: NodeId,
         genesis: BTreeMap<JournalIdentifier, Config>,
     ) -> Result<SimMachineStores<'a>, String> {
-        assert!(!genesis.is_empty(), "a formed machine serves journals");
+        assert_always!(
+            !genesis.is_empty(),
+            "machine: a formed machine serves journals",
+            { "node" => node_id.0 }
+        );
         Ok(SimMachineStores {
             ctx: self.ctx,
             disk: self.disk.clone(),
@@ -331,7 +342,11 @@ impl JournalStores for SimMachineStores<'_> {
 
     async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         let config = self.genesis.get(&journal)?.clone();
-        assert_eq!(config.id, self.node, "a store is opened as its machine");
+        assert_always!(
+            config.id == self.node,
+            "machine: a store is opened as its machine",
+            { "node" => self.node.0, "config" => config.id.0 }
+        );
         Some((
             JournalStorage::new(
                 self.disk.provider().clone(),
@@ -354,15 +369,10 @@ impl JournalStores for SimMachineStores<'_> {
     /// The node's own facts report to its first journal's audit world (the
     /// plan's lowest identifier), on no journal's board.
     fn node_audit(&self) -> Self::Audit {
-        let first = self
-            .genesis
-            .keys()
-            .next()
-            .copied()
-            .expect("a formed machine serves journals");
-        NodeAudit::new(
-            self.ctx.time().clone(),
-            crate::audit::audit_world_for(self.ctx.state(), first),
-        )
+        let world = match self.genesis.keys().next() {
+            Some(first) => crate::audit::audit_world_for(self.ctx.state(), *first),
+            None => crate::audit::audit_world(self.ctx.state()),
+        };
+        NodeAudit::new(self.ctx.time().clone(), world)
     }
 }

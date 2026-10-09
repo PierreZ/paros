@@ -94,7 +94,11 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
     ///
     /// # Errors
     ///
-    /// The record exists and cannot be read.
+    /// The record exists and the disk failed to read it: an I/O failure,
+    /// which a restart may not meet again. Bytes that are not text are no
+    /// error here: they come back as text the record's parser refuses, a
+    /// damage no restart repairs.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_record(&self) -> Result<Option<String>, String> {
         let file = match self
             .provider
@@ -106,9 +110,7 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
             Err(error) => return Err(error.to_string()),
         };
         let bytes = read_all(&file).await.map_err(|e| e.to_string())?;
-        String::from_utf8(bytes)
-            .map(Some)
-            .map_err(|e| format!("not text: {e}"))
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     /// Replace the machine record with `text`, whole and durably.
@@ -121,6 +123,7 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
     /// # Panics
     ///
     /// When `text` is empty: a record always names its machine.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
     pub async fn write_record(&self, text: &str) -> Result<(), String> {
         assert!(!text.is_empty(), "a machine record is never empty");
         self.write(text).await.map_err(|e| e.to_string())
@@ -148,8 +151,13 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
 
     /// Whether the disk holds anything of a journal store: with no record,
     /// a machine that lost its identity.
+    ///
+    /// Fails closed: a disk that cannot say counts as holding stores. The
+    /// two mistakes are not alike — a refused start is an operator's to
+    /// resolve, while a new identity minted over an old machine's stores
+    /// rejoins as a machine it is not, which no one can undo.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn holds_journals(&self) -> bool {
-        // An unreadable directory is not proof of absence: it counts.
         self.provider
             .exists(&self.path("journals"))
             .await
@@ -167,6 +175,7 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
     /// # Panics
     ///
     /// When `node_id` is not a member of `plan`.
+    #[tracing::instrument(level = "debug", skip_all, fields(node = node_id.0, cell = plan.cell_id))]
     pub async fn format(&self, node_id: NodeId, plan: &CellPlan) -> Result<(), String> {
         assert!(
             plan.members.iter().any(|(id, _)| *id == node_id),

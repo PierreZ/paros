@@ -128,7 +128,11 @@ type Found = (
 
 /// A cell an earlier run formed, learned from its servers: their ids and
 /// its control journals from a node-only `Inspect` (no identifier is fixed,
-/// §3.8), its members from the cell control journal's.
+/// §3.8), its members from the cell control journal's. The fleet steps fold
+/// the cell control journal over its genesis pool, the cell's members — the
+/// pool the run that formed the cell folds it over — never over whichever
+/// servers answered this time (not reproduced in the simulation: a fold's
+/// pool must not depend on who was up).
 async fn found<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,

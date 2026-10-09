@@ -160,7 +160,10 @@ impl Connector {
     /// The library client of `servers` (`(node id, address)`, in the order
     /// the client indexes them).
     pub(crate) fn client(&self, servers: &[(u64, std::net::SocketAddr)]) -> ChainClient {
-        assert!(!servers.is_empty(), "a client needs at least one server");
+        moonpool_sim::assert_always!(
+            !servers.is_empty(),
+            "client: a client over learned servers names at least one"
+        );
         let servers = servers
             .iter()
             .map(|(id, addr)| Server {
