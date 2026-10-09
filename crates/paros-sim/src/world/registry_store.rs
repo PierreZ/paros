@@ -36,8 +36,9 @@ pub(crate) struct LedgeredRegistry {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
-    /// How this matchmaker can lose power in the middle of a commit.
-    power: PowerCut,
+    /// How this matchmaker can lose power in the middle of a commit: the
+    /// journal's commit hooks, armed around each sync.
+    power: Arc<PowerCut>,
     /// The shared checker, told what each commit has in flight.
     checker: Arc<AuditWorld>,
     /// This matchmaker's id, the checker's key.
@@ -60,13 +61,14 @@ impl LedgeredRegistry {
         layout: paros::JournalStoreConfig,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        power: PowerCut,
+        power: Arc<PowerCut>,
         checker: Arc<AuditWorld>,
         matchmaker: u64,
         cut_budget: Option<usize>,
     ) -> Self {
         Self {
-            inner: JournalMatchmakerStorage::new(provider, REGISTRY_DIR, id, layout),
+            inner: JournalMatchmakerStorage::new(provider, REGISTRY_DIR, id, layout)
+                .with_commit_hooks(power.clone()),
             world,
             ip,
             format_pending: false,
@@ -207,7 +209,6 @@ impl MatchmakerStorage for LedgeredRegistry {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn sync(&mut self) -> Result<(), StorageError> {
-        let writes = self.inner.has_staged();
         let held = !self.inner.registered_ballots().is_empty();
         let (budget_world, budget_ip, budget) =
             (self.world.clone(), self.ip.clone(), self.cut_budget);
@@ -237,9 +238,10 @@ impl MatchmakerStorage for LedgeredRegistry {
             self.checker
                 .note_registry_in_flight(self.matchmaker, Some(ops));
         }
-        self.power
-            .around(writes, permit, on_cut, self.inner.sync())
-            .await?;
+        self.power.arm(permit, on_cut);
+        let synced = self.inner.sync().await;
+        self.power.disarm();
+        synced?;
         // Synced: the driver reports the commit next, with nothing between.
         self.checker.note_registry_in_flight(self.matchmaker, None);
         if std::mem::take(&mut self.format_pending) {

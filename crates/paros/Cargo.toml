@@ -23,13 +23,13 @@ paros-core = { path = "../paros-core", version = "0.2.0", features = ["tracing",
 # `paros` stays wasm-safe; the `parosd` crate layers tokio back on (#206).
 # Pinned to a commit on moonpool's `main` (it evolves fast; not
 # the crates.io release) — same rev as paros-sim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "607f4041364de9f0847668e32c9e12f03acba337", default-features = false, features = ["select"] }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "d62ac60ff25e4e8bda68f94004e6900f598388f2", default-features = false, features = ["select"] }
 # Typed request/reply RPC over the provider traits, protobuf bodies (prost).
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "607f4041364de9f0847668e32c9e12f03acba337", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "d62ac60ff25e4e8bda68f94004e6900f598388f2", default-features = false, features = ["prost"] }
 # The durable store behind `JournalStorage` / `JournalMatchmakerStorage`: the
 # CLSTORE write-ahead journal over moonpool's `BlockFile`, generic over the
 # provider's `StorageProvider` — the same bytes on Tokio and on the simulator.
-moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "607f4041364de9f0847668e32c9e12f03acba337" }
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "d62ac60ff25e4e8bda68f94004e6900f598388f2" }
 
 prost = "0.14"
 # The journal stores' record codec (paros-core's `serde` derives, one compact
@@ -53,7 +53,7 @@ tokio-util = "0.7"
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 # The journal stores' tests run on the simulator's storage (the provider the
 # harness ships), stepped by hand beside a current-thread runtime.
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "607f4041364de9f0847668e32c9e12f03acba337", default-features = false }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "d62ac60ff25e4e8bda68f94004e6900f598388f2", default-features = false }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 
 [build-dependencies]

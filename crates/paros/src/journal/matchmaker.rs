@@ -33,11 +33,12 @@
 //! [`Corrupted`](crate::CorruptionVerdict::Corrupted).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use moonpool_core::StorageProvider;
 use std::ops::Range;
 
-use moonpool_journal::{Batch, ID_SIZE, Id, Journal, ReadError, State};
+use moonpool_journal::{Batch, CommitHooks, ID_SIZE, Id, Journal, NoCommitHooks, ReadError, State};
 use paros_core::{
     Ballot, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
     Registration, RegistryStorage,
@@ -106,6 +107,9 @@ pub struct JournalMatchmakerStorage<P: StorageProvider> {
     id: JournalIdentifier,
     store: JournalStoreConfig,
     journal: Option<Journal<P>>,
+    /// Asked at every point inside a commit (`moonpool_journal::CommitHooks`,
+    /// [`Self::with_commit_hooks`]); `NoCommitHooks` in production.
+    hooks: Arc<dyn CommitHooks>,
     meta: MatchMeta,
     /// The metainfo as of the last commit that wrote it (or the boot that
     /// read it).
@@ -148,6 +152,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             id,
             store,
             journal: None,
+            hooks: Arc::new(NoCommitHooks),
             meta: MatchMeta::default(),
             durable_meta: MatchMeta::default(),
             meta_dirty: false,
@@ -157,6 +162,24 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             puts: BTreeMap::new(),
             clears: Vec::new(),
         }
+    }
+
+    /// Ask `hooks` at every point inside every later commit (see
+    /// `moonpool_journal::CommitHooks`): a simulation cuts the power there.
+    /// Production keeps `NoCommitHooks`.
+    ///
+    /// # Panics
+    ///
+    /// If the journal is open already: hooks are installed before the boot
+    /// scan, so every commit asks them.
+    #[must_use]
+    pub fn with_commit_hooks(mut self, hooks: Arc<dyn CommitHooks>) -> Self {
+        assert!(
+            self.journal.is_none(),
+            "commit hooks are installed before the boot scan"
+        );
+        self.hooks = hooks;
+        self
     }
 
     /// The directory the journal lives in.
@@ -211,7 +234,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
         .await
         .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?;
         *self = Self::new(self.provider.clone(), self.dir.clone(), self.id, self.store);
-        let Some((journal, _recovery)) = opened else {
+        let Some((mut journal, _recovery)) = opened else {
             return Ok(());
         };
         self.meta = decode(journal.meta()).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
@@ -303,6 +326,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                     .is_some_and(|(held, _)| held >= ballot)),
             "the effective configuration covers every kept reconfiguration"
         );
+        journal.set_hooks(self.hooks.clone());
         self.journal = Some(journal);
         Ok(())
     }
@@ -497,7 +521,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
                 formatted: self.meta.formatted.clone(),
                 ..self.durable_meta.clone()
             };
-            let created = Journal::create(
+            let mut created = Journal::create(
                 self.provider.clone(),
                 &self.dir,
                 store_id(self.id),
@@ -506,6 +530,7 @@ impl<P: StorageProvider> JournalMatchmakerStorage<P> {
             )
             .await
             .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?;
+            created.set_hooks(self.hooks.clone());
             self.journal = Some(created);
             self.durable_meta = early;
         }

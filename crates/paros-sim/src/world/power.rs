@@ -6,20 +6,27 @@
 //! unsynced window (entries written, records or the sync not yet done) is
 //! microseconds wide, so the journal's crash recovery (torn records, records
 //! rebuilt from their entries, an ambiguous last batch) would almost never
-//! run. This BUGGIFY site makes it likely: a buggified commit races a random
-//! timer spanning a commit's duration, and when the timer wins the process
-//! cuts its own power through moonpool's [`SelfCrash`]: the kill lands
-//! before the commit's next storage completion, every unsynced sector
-//! resolves by the disk's crash physics, and the process restarts after a
-//! delay. Only inside the chaos window, so the tail is a genuine recovery.
+//! run. The commit itself names the moments: `moonpool_journal` asks its
+//! `CommitHooks` at each `CommitPoint`, with writes issued and not yet
+//! synced (fault injection lives in the shipped code, decided on
+//! 2026-10-09). [`PowerCut`] is those hooks under simulation: one BUGGIFY
+//! location per owner and point, and when one fires the process cuts its own
+//! power through moonpool's [`SelfCrash`]. The kill lands before the
+//! commit's next storage completion, every unsynced sector resolves by the
+//! disk's crash physics, and the process restarts after a delay. Only inside
+//! the chaos window, so the tail is a genuine recovery.
+//!
+//! The store arms the cut around each sync ([`PowerCut::arm`]) with the
+//! world's damage budget and what to note when the power goes; a point
+//! reached with nothing armed (a boot's own repairs) never cuts.
 
-use std::future::Future;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use futures::future::{Either, select};
 use moonpool_sim::{
     RebootKind, SelfCrash, SimTimeProvider, TimeProvider, assert_reachable, buggify_with_prob,
 };
+use paros::journal::{CommitHooks, CommitPoint};
 
 /// Whose store a [`PowerCut`] cuts: each owner's cut is its own reachable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,16 +37,21 @@ pub(crate) enum Owner {
     Matchmaker,
 }
 
-/// The power-cut site of one process's journal store (see the module doc).
+/// What one sync's cut asks of its store: the budget, asked only once a
+/// location fired (a refusal is the budget's, not the coin's), and what to
+/// note before the kill.
+struct Armed {
+    permit: Box<dyn FnOnce() -> bool + Send>,
+    on_cut: Box<dyn FnOnce() + Send>,
+}
+
+/// The power-cut hooks of one process's journal store (see the module doc).
 pub(crate) struct PowerCut {
     crash: SelfCrash,
     time: SimTimeProvider,
     cutoff: Duration,
     owner: Owner,
-    /// How long this store's last whole commit took: the span a cut is
-    /// drawn in, so it lands between a write and the sync that would have
-    /// covered it.
-    last_commit: Duration,
+    armed: Mutex<Option<Armed>>,
 }
 
 impl PowerCut {
@@ -54,7 +66,7 @@ impl PowerCut {
             time,
             cutoff,
             owner,
-            last_commit: Duration::from_millis(1),
+            armed: Mutex::new(None),
         }
     }
 
@@ -64,74 +76,90 @@ impl PowerCut {
         self.time.now() < self.cutoff
     }
 
-    /// The delay after which this commit loses power, if it is one that
-    /// does: uniform over the store's last commit's duration. `writes` is
-    /// whether the commit carries anything a crash can tear.
-    fn draw(&self, writes: bool, permit: impl FnOnce() -> bool) -> Option<Duration> {
-        // A commit without entries (a format, a promise) has no persist
-        // record to tear: the metainfo's own copies cover it. The permit is
-        // asked only once the site fired: it draws nothing, and a refusal
-        // is the budget's, not the coin's.
-        if !writes || self.time.now() >= self.cutoff {
-            return None;
-        }
-        // One location per owner, so the sweep can select a node's cuts and
-        // a matchmaker's apart.
-        let fired = match self.owner {
-            Owner::Node => buggify_with_prob!(0.25),
-            Owner::Matchmaker => buggify_with_prob!(0.25),
-        };
-        if !fired || !permit() {
-            return None;
-        }
-        let span = u64::try_from(self.last_commit.as_micros())
-            .unwrap_or(u64::MAX)
-            .max(1);
-        Some(Duration::from_micros(moonpool_sim::sim_random_range(
-            0..span,
-        )))
+    /// Arm the next commit points, up to [`Self::disarm`]: a cut there asks
+    /// `permit` (the store's damage budget, see
+    /// [`super::StorageWorld::permit_power_cut`]) and runs `on_cut` before
+    /// the kill (nothing after the commit's await is sure to run).
+    pub(crate) fn arm(
+        &self,
+        permit: impl FnOnce() -> bool + Send + 'static,
+        on_cut: impl FnOnce() + Send + 'static,
+    ) {
+        *self.armed.lock().unwrap_or_else(PoisonError::into_inner) = Some(Armed {
+            permit: Box::new(permit),
+            on_cut: Box::new(on_cut),
+        });
     }
 
-    /// Run `commit`, cutting the process's power partway through it when
-    /// the site fires and `permit` (the store's damage budget, see
-    /// [`super::StorageWorld::permit_power_cut`]) allows (`on_cut` runs then,
-    /// before the kill: nothing after the commit's await is sure to). The
-    /// commit is awaited either way: the kill lands before its next storage
-    /// completion, and an uncut commit times the next draw's span.
-    #[tracing::instrument(level = "trace", skip_all, fields(owner = ?self.owner, writes))]
-    pub(crate) async fn around<F: Future>(
-        &mut self,
-        writes: bool,
-        permit: impl FnOnce() -> bool,
-        on_cut: impl FnOnce(),
-        commit: F,
-    ) -> F::Output {
-        let Some(after) = self.draw(writes, permit) else {
-            let start = self.time.now();
-            let done = commit.await;
-            self.last_commit = self.time.now().saturating_sub(start);
-            return done;
+    /// The sync returned: no later point is this sync's.
+    pub(crate) fn disarm(&self) {
+        self.armed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+
+    fn armed(&self) -> bool {
+        self.armed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// Whether this point's location fires. One location per owner and
+    /// point, so the sweep can select each apart; three points per commit at
+    /// most, so each fires about a third as often as the one per-commit site
+    /// it replaced.
+    fn fires(&self, point: CommitPoint) -> bool {
+        match (self.owner, point) {
+            (Owner::Node, CommitPoint::EntriesWritten) => buggify_with_prob!(0.1),
+            (Owner::Node, CommitPoint::RecordsWritten) => buggify_with_prob!(0.1),
+            (Owner::Node, CommitPoint::BeforeMeta) => buggify_with_prob!(0.1),
+            (Owner::Matchmaker, CommitPoint::EntriesWritten) => buggify_with_prob!(0.1),
+            (Owner::Matchmaker, CommitPoint::RecordsWritten) => buggify_with_prob!(0.1),
+            (Owner::Matchmaker, CommitPoint::BeforeMeta) => buggify_with_prob!(0.1),
+        }
+    }
+}
+
+impl CommitHooks for PowerCut {
+    #[tracing::instrument(level = "trace", skip_all, fields(owner = ?self.owner, point = ?point))]
+    fn at(&self, point: CommitPoint) {
+        if !self.in_chaos() || !self.armed() || !self.fires(point) {
+            return;
+        }
+        let Some(armed) = self
+            .armed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
         };
-        let commit = Box::pin(commit);
-        let timer = Box::pin(self.time.sleep(after));
-        match select(commit, timer).await {
-            Either::Left((done, _)) => done,
-            Either::Right((_, commit)) => {
-                // Paired with the recovery gates the journal reports at
-                // the next boot.
-                match self.owner {
-                    Owner::Node => {
-                        assert_reachable!("journal store: a node loses power mid-commit");
-                    }
-                    Owner::Matchmaker => {
-                        assert_reachable!("journal store: a matchmaker loses power mid-commit");
-                    }
-                }
-                on_cut();
-                let restart = Duration::from_millis(moonpool_sim::sim_random_range(500..2500));
-                let _ = self.crash.crash(RebootKind::Crash, Some(restart));
-                commit.await
+        if !(armed.permit)() {
+            return;
+        }
+        // Paired with the recovery gates the journal reports at the next
+        // boot.
+        match self.owner {
+            Owner::Node => assert_reachable!("journal store: a node loses power mid-commit"),
+            Owner::Matchmaker => {
+                assert_reachable!("journal store: a matchmaker loses power mid-commit");
             }
         }
+        match point {
+            CommitPoint::EntriesWritten => {
+                assert_reachable!("journal store: the power goes with a commit's entries written");
+            }
+            CommitPoint::RecordsWritten => {
+                assert_reachable!("journal store: the power goes with a commit's records written");
+            }
+            CommitPoint::BeforeMeta => {
+                assert_reachable!("journal store: the power goes before a commit's metainfo");
+            }
+        }
+        (armed.on_cut)();
+        let restart = Duration::from_millis(moonpool_sim::sim_random_range(500..2500));
+        let _ = self.crash.crash(RebootKind::Crash, Some(restart));
     }
 }

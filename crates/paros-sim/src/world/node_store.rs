@@ -32,8 +32,9 @@ pub(crate) struct LedgeredJournal {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
-    /// How this node can lose power in the middle of a commit.
-    power: PowerCut,
+    /// How this node can lose power in the middle of a commit: the
+    /// journal's commit hooks, armed around each sync.
+    power: Arc<PowerCut>,
     /// The shared checker, told what each commit has in flight (#264).
     checker: Arc<AuditWorld>,
     /// The node's id, the checker's key.
@@ -69,7 +70,7 @@ impl LedgeredJournal {
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        power: PowerCut,
+        power: Arc<PowerCut>,
         checker: Arc<AuditWorld>,
         damage: DamagePolicy,
         provider: SimStorageProvider,
@@ -80,7 +81,7 @@ impl LedgeredJournal {
             cut_budget: damage.cut_budget,
             inject: damage.inject,
             provider,
-            inner,
+            inner: inner.with_commit_hooks(power.clone()),
             world,
             ip,
             format_pending: false,
@@ -319,7 +320,6 @@ impl LogStorage for LedgeredJournal {
 
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
         self.note_in_flight();
-        let writes = self.inner.staged_entries() > 0;
         let slots: Vec<Slot> = self.inner.staged_slots().collect();
         let ip = self.ip.clone();
         self.with_world(|w| w.note_sync_started(&ip));
@@ -334,10 +334,9 @@ impl LogStorage for LedgeredJournal {
                 })
             })
         };
-        let synced = self
-            .power
-            .around(writes, permit, || {}, self.inner.sync(must_sync))
-            .await;
+        self.power.arm(permit, || {});
+        let synced = self.inner.sync(must_sync).await;
+        self.power.disarm();
         // The sync consumed what was staged, landed or not.
         self.staged_accepts.clear();
         self.ledger(synced)?;

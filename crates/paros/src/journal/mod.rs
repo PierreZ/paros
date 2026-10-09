@@ -82,6 +82,7 @@ pub use matchmaker::JournalMatchmakerStorage;
 /// caller configures it without depending on `moonpool-journal`.
 pub use moonpool_core::LayoutRegion;
 pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
+pub use moonpool_journal::{CommitHooks, CommitPoint, NoCommitHooks};
 pub use node::{JournalBootFacts, JournalStorage};
 
 /// How a journal store lays out and writes its journal.

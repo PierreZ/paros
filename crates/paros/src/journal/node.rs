@@ -1,9 +1,10 @@
 //! [`JournalStorage`]: the node's [`LogStorage`] on `moonpool-journal`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use moonpool_core::StorageProvider;
-use moonpool_journal::{Batch, Journal, ReadError, Recovery};
+use moonpool_journal::{Batch, CommitHooks, Journal, NoCommitHooks, ReadError, Recovery};
 use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,9 @@ pub struct JournalStorage<P: StorageProvider> {
     store: JournalStoreConfig,
     config: Config,
     journal: Option<Journal<P>>,
+    /// Asked at every point inside a commit (`moonpool_journal::CommitHooks`,
+    /// [`Self::with_commit_hooks`]); `NoCommitHooks` in production.
+    hooks: Arc<dyn CommitHooks>,
     meta: NodeMeta,
     /// The metainfo as of the last commit that wrote it (or the boot that
     /// read it): what a crash leaves on disk until the next one lands.
@@ -112,6 +116,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             store,
             config,
             journal: None,
+            hooks: Arc::new(NoCommitHooks),
             meta: NodeMeta::default(),
             durable_meta: NodeMeta::default(),
             meta_dirty: false,
@@ -155,6 +160,24 @@ impl<P: StorageProvider> JournalStorage<P> {
     #[must_use]
     pub fn boot_facts(&self) -> &JournalBootFacts {
         &self.boot_facts
+    }
+
+    /// Ask `hooks` at every point inside every later commit (see
+    /// `moonpool_journal::CommitHooks`): a simulation cuts the power there.
+    /// Production keeps `NoCommitHooks`.
+    ///
+    /// # Panics
+    ///
+    /// If the journal is open already: hooks are installed before the boot
+    /// scan, so every commit asks them.
+    #[must_use]
+    pub fn with_commit_hooks(mut self, hooks: Arc<dyn CommitHooks>) -> Self {
+        assert!(
+            self.journal.is_none(),
+            "commit hooks are installed before the boot scan"
+        );
+        self.hooks = hooks;
+        self
     }
 
     /// The directory the journal lives in.
@@ -212,7 +235,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             self.config.clone(),
             self.store,
         );
-        let Some((journal, recovery)) = opened else {
+        let Some((mut journal, recovery)) = opened else {
             // No journal on disk: an empty, unformatted store.
             *self = fresh;
             return Ok(());
@@ -278,6 +301,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             truncated: self.first.0 > 0,
             recovery,
         };
+        journal.set_hooks(self.hooks.clone());
         self.journal = Some(journal);
         Ok(())
     }
@@ -320,7 +344,7 @@ impl<P: StorageProvider> JournalStorage<P> {
     async fn commit(&mut self, batch: Batch) -> Result<(), StorageError> {
         if self.journal.is_none() {
             let early = self.early_meta();
-            let created = Journal::create(
+            let mut created = Journal::create(
                 self.provider.clone(),
                 &self.dir,
                 store_id(self.config.journal),
@@ -329,6 +353,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             )
             .await
             .map_err(|e| open_error(&e, StorageRecord::Promise))?;
+            created.set_hooks(self.hooks.clone());
             self.journal = Some(created);
             self.durable_meta = early;
         }

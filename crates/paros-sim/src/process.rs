@@ -1152,14 +1152,14 @@ impl JournalStores for SimStores<'_> {
             seat.config.clone(),
             layout,
         );
-        let power = crate::world::power::PowerCut::new(
+        let power = Arc::new(crate::world::power::PowerCut::new(
             self.ctx
                 .self_crash()
                 .expect("a node process can crash itself"),
             self.ctx.time().clone(),
             cutoff,
             crate::world::power::Owner::Node,
-        );
+        ));
         let store = LedgeredJournal::new(
             journal,
             Arc::downgrade(&seat.world),
@@ -1459,13 +1459,13 @@ async fn run_matchmaker_role(
             assert_reachable!("operator: a matchmaker restarts under an edited configuration");
             tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
         }
-        let power = crate::world::power::PowerCut::new(
+        let power = Arc::new(crate::world::power::PowerCut::new(
             ctx.self_crash()
                 .expect("a matchmaker process can crash itself"),
             ctx.time().clone(),
             crate::CHAOS_DURATION,
             crate::world::power::Owner::Matchmaker,
-        );
+        ));
         let storage = LedgeredRegistry::new(
             ctx.storage().clone(),
             registry_id,
@@ -1729,13 +1729,13 @@ async fn run_replica_role(
         } else {
             BootKind::FirstBoot
         };
-        let power = crate::world::power::PowerCut::new(
+        let power = Arc::new(crate::world::power::PowerCut::new(
             ctx.self_crash()
                 .expect("a replica process can crash itself"),
             ctx.time().clone(),
             Duration::ZERO,
             crate::world::power::Owner::Node,
-        );
+        ));
         let storage = LedgeredJournal::new(
             JournalStorage::new(
                 ctx.storage().clone(),
