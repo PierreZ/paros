@@ -311,8 +311,8 @@ list and no rendezvous name. The same rule holds at two levels:
   interrupted admission is finished by the coordinator like any in-flight entry (section 3.7).
 - **`universe init`** creates the universe tenant inside that cell (the universe tenant is a
   tenant, so the cell must exist first to grant it capacity), mints `universe_id` and the universe
-  tenant's `JournalIdentifier`, both random, recorded in the cell plan of the cell that hosts the
-  universe tenant, then registers the cell as the first entry in the universe directory and
+  tenant's `JournalIdentifier`, both random, recorded in the cell plan of the admitted cell
+  (`universe add-cell` records the same two in each cell it admits later), then registers the cell as the first entry in the universe directory and
   writes the matching registration on the cell side (section 3.7).
 - Each step is idempotent and is a step of an operation state machine (section 3.7): re-running a
   call after a crash resumes it, learning the ids back through `Inspect`.
@@ -413,8 +413,9 @@ there it calls `Resolve` (below).
   static-stability requirement, not an optimisation.
 - **No journal is found by convention** (decided on 2026-10-04, section 3.8): there is no
   well-known tenant or journal id. Every machine of a formed cell answers `Inspect` (and
-  `Resolve`) with its `cell_id`, the cell tenant's control `JournalIdentifier` and, on the cell that
-  hosts it, the universe tenant's `JournalIdentifier`, all read from its durable cell plan. A client or an operator handed
+  `Resolve`) with its `cell_id`, the cell tenant's control `JournalIdentifier` and, once the cell is
+  admitted, the universe tenant's `JournalIdentifier`, all read from its durable cell plan, plus the
+  cell that hosts the universe tenant now, read from its universe pointer (section 3.7). A client or an operator handed
   only addresses learns the control `JournalIdentifier`s from any machine, then resolves everything else
   through them: the universe directory gives a tenant's cell and the `JournalIdentifier` of its control journal, and
   that control journal gives the tenant's journals. A re-run of an admin call learns the cell's
@@ -814,7 +815,7 @@ metadata version lets a reader refuse a format it does not understand.
   journal, the cell assignment, the state, a configuration sequence number, the tenant's
   **group**; the universe directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
   the metadata version. No id is well known (section 3.8): a second cell learns the universe tenant's `JournalIdentifier`
-  when it joins the universe, from the cell that hosts the universe tenant.
+  when it is admitted, from the universe tenant, and records it in its cell plan.
 - The universe entry carries the universe's name; the cell entries also carry the cell's `kind`, its
   entry endpoint and its own name, and the tenant entries the tenant's `survives`, mirrored into
   its control journal (decided on 2026-10-07, #252), so a universe that mixes cell kinds is entries,
@@ -850,6 +851,34 @@ guidance's four migration phases, copy, flip, redirect, forget. The directory en
 never the authority: if it disagrees with the control journal's leader, the leader wins.
 The universe tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
+
+**Moving the universe tenant** (decided on 2026-10-09). The universe information and the tenant
+list are tenant data, so they move like the data of any user tenant. The universe tenant's
+control journal holds the universe entry, the cell entries and the tenant entries (the universe
+directory). A move of the universe tenant moves all of them, with the same four phases and no
+new message or field:
+
+- **Who drives it.** The universe coordinator drives its own move. It writes each step in its own
+  control journal, so the move is an operation state machine like any other and resumes after a
+  crash.
+- **Copy.** It reconfigures its journals and its matchmaker set onto the target cell, inside
+  capacity that the target cell grants.
+- **Flip.** `SetLeader` on its control journal. From then on, its leader runs in the target cell.
+- **Redirect.** It writes its own tenant entry with the target cell. Then it tells every `READY`
+  cell the new host. Each cell records it in its **universe pointer**, a durable cached value
+  beside its registry fold. Resolvers fold the tenant entry like any other.
+- **Forget.** The old cell releases the bookings. Its tenant list keeps a moved entry that names
+  the target cell, so a caller with a stale pointer is redirected, never left without an answer.
+
+These values do not change when the universe tenant moves: `universe_id`, its `TenantId` and the
+`JournalIdentifier` of its control journal. Every admitted cell records them in its cell plan at
+admission, so a move writes no cell plan. Only the universe pointer changes. The hosting cell is
+a location, not an identity, and no component finds the universe tenant by the cell it was born
+in. Admin calls (`universe add-cell`, `tenant create`, drains) follow the pointer like any client.
+
+The same rule covers every future universe-level tenant (for example quotas or billing): it is
+in `internal` and not in `cell`, so it moves. Only a cell's own cell tenant stays in its cell
+(section 1).
 
 **Moving between cell kinds** (M12 and M13, decided on 2026-10-07, #253) is the same four phases.
 Copy: the tenant coordinator reconfigures each journal to a `C_new` whose members carry
@@ -926,12 +955,13 @@ the frontend, section 3.5, and `parosctl` for administration), and an id never b
   coordinator, the single writer of the tenant's control journal; a duplicate is refused and the
   creator redraws. A tenant's **control journal** has a random id too, drawn with the tenant and
   recorded where the tenant is recorded: in the universe directory's tenant entry, and for the two system tenants
-  in the cell plan. A journal's id never changes when its tenant moves; a control journal that
+  in the cell plan (the cell tenant's in its own cell's plan, the universe tenant's in the plan of
+  every admitted cell). A journal's id never changes when its tenant moves; a control journal that
   recovery rebuilds (section 3.10) gets a new one, so the old and the new can never be mistaken
   for each other.
 - **Discovery replaces convention.** The only fixed starting points are a machine's addresses:
   the `JournalIdentifier`s of the cell's and the universe tenant's control journals are learned from any machine of the cell
-  (section 3.2), and everything below them through their folds.
+  (section 3.2), with the cell that hosts the universe tenant now, and everything below them through their folds.
 - **Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)`** (named `JournalKey` in the code until #244), riding the `Deliver`
   envelope where `JournalId` alone rides it today, so uniqueness is only ever needed where it can
   be checked. A tenant's matchmaker set is named by its `TenantId`.
@@ -1315,7 +1345,8 @@ Simulation is the investment. Every milestone lands with its share of:
   creation, each step with its own reachable; a crash between a checkpoint's write and its
   truncate, for the registry and for the universe tenant; a truncate refused from a stale leader; the universe tenant
   unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
-  it. In M12: a second cell, a tenant move and a move of the universe tenant. With recovery (deferred): a lost cell
+  it. In M12: a second cell, a tenant move and a move of the universe tenant (a crash at each phase, then
+  a cell with a stale universe pointer still reaches it). With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
 - Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
   with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
