@@ -107,8 +107,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   `SimMachine`: the sim runs the same machine and disk as `parosd`. A sim wrapper only observes,
   through `Audit` or a `reachable!` probe. `is_simulated()` tilts rates, cadences and checks,
   never an outcome a client sees. `paros-core` stays sans-IO: no buggify, hint or
-  `is_simulated()`. Add no new `DriverHooks` method; the existing ones and `PowerCut`
-  migrate per #294 (the `Seam`s and `SimDisk` are gone) (`docs/analysis/simulation/production-fault-hints.md`).
+  `is_simulated()`. Add no new `DriverHooks` method; the existing ones migrate per #294 (the
+  `Seam`s, `SimDisk` and `PowerCut` are gone) (`docs/analysis/simulation/production-fault-hints.md`).
 - **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
   as possible in the simulation, setup included. Always BUGGIFY your way into the complex
   situations rather than script them. Test several behaviours through the one workload with
@@ -156,8 +156,8 @@ Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENT
 One campaign, one workload, two judges. The **campaign** is a pool of
 `NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
 joiners, every role storing on the library's journal stores over moonpool's simulated disk,
-under every moonpool fault, the driver hooks, the power cuts and the ledgered injector (the
-hooks and the power cuts migrating to `hint!` and inline buggify in `paros`, #294)
+under every moonpool fault, the driver hooks, the stores' own mid-commit `hint!`s and the
+ledgered injector (the hooks migrating to inline buggify in `paros`, #294)
 (`paros_sim::world`). There is no scripted corpus and no fake disk (#261, #263, decided on
 2026-10-08): a shape the corpus once scripted is a per-seed BUGGIFY or swarm draw, judged by the
 same oracles. The one workload is `ChainWorkload`,

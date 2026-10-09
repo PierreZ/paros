@@ -51,8 +51,8 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   (`crates/paros-sim/src/chain_workload.rs`); **per-node driver tunables** in
   `NodeShape::draw` (`crates/paros-sim/src/shape.rs`), which draws once per
   logical node per seed and reuses the shape across restarts; **disk fault
-  rates** in the injector's families (`world/injector.rs`) and the power cut
-  (`world/power.rs`).
+  rates** in the injector's families (`world/injector.rs`); a cut mid-commit is a
+  journal store's `hint!` rate, its copy budget in `world/cut.rs`.
 - One knob is one `buggify_knob!(default, lo..hi)` call site: never a
   multiplier over a family, so a seed can be extreme in one dimension and
   ordinary in the next.

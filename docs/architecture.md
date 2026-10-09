@@ -1196,7 +1196,8 @@ the entry that makes its slot chosen); a matchmaker commits its new registration
 metainfo, then its clears, and a boot keeps only the registrations the durable metainfo vouches
 for (at or above its watermark, of its generation). Storage chaos on journal seeds is the
 local half of this contract: moonpool's crash damage, failed syncs, short transfers and lost
-directory entries, a seam crash as a power loss, and a power cut inside a commit; rot waits for
+directory entries, a crash at a driver `hint!`, and a power loss inside a commit (the journal's
+own `hint!`s, #294); rot waits for
 replicated fault patterns. The simulation was proven to catch journal durability bugs by
 mutation (an unsynced commit, a recovery that drops an acknowledged batch, an unsynced promise:
 each red).
@@ -1383,7 +1384,8 @@ Simulation is the investment. Every milestone lands with its share of:
   control quorum recovered by `init --recover`.
 - Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
   with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
-  under the copy budget, power cuts inside a sync, and moonpool's environmental storage chaos
+  under the copy budget, power losses inside a sync (the stores' own `hint!`s, under the same
+  budget, #294), and moonpool's environmental storage chaos
   under it; its gates name journal verdicts (slot rebuilt, double fault parked, meta repaired).
   The in-memory stores and the scripted corpus are gone: one campaign (#263, 2026-10-08). The
   corpus's shapes are provoked, never scripted: a correlated outage of every acceptor plans one

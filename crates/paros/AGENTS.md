@@ -21,7 +21,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
 - `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
-- `hooks.rs` → `DriverHooks`, `NoHooks`, `HandoffContext`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294): add nothing to it. The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs` and `replica_tier/mod.rs` (#297).
+- `hooks.rs` → `DriverHooks`, `NoHooks`, `HandoffContext`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294): add nothing to it. The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs`, `replica_tier/mod.rs` (#297) and the journal stores (#294).
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.
@@ -59,7 +59,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `system.rs` → `SystemCommand`, `Directory`, `Registry` → pure folds of the directory and the registry (two tenants' control journals, their identifiers drawn and named by the `SystemPlan`, #235); a create carries its drawn id; the registry is keyed by `node_id` with class, capacity and bookings (#211) and is `Checkpointable` (#230); the cell's side of the fleet (`JoinFleet`, `HostTenant`,
   `DropTenant`, #229).
 - `corruption.rs` → `IntegrityFault`, `CorruptionVerdict` → the typed corruption verdict a store surfaces (the journal classifies).
-- `journal/mod.rs` → `JournalStoreConfig` (geometry, direct I/O, `Durability`), the identity and error mappings · `journal/node.rs` → `JournalStorage` (slot = position, ballot in the identity, scalars in the metainfo; a sync commits a raised promise, then the entries with the floor and metainfo: the journal writes metainfo only after its batch, moonpool#309, #264), `JournalBootFacts` · `journal/matchmaker.rs` → `JournalMatchmakerStorage` (a registration per position, its generation in the identity, scalars in the metainfo; a sync commits the registrations with the metainfo, then the clears; a boot keeps what the metainfo vouches for and raises the effective scalar over the reconfigurations it keeps, #176).
+- `journal/mod.rs` → `JournalStoreConfig` (geometry, direct I/O, `Durability`), the identity and error mappings · `journal/node.rs` → `JournalStorage` (slot = position, ballot in the identity, scalars in the metainfo; a sync commits a raised promise, then the entries with the floor and metainfo: the journal writes metainfo only after its batch, moonpool#309, #264; a `hint!` after the promise commit and after each packed entry batch, #294), `JournalBootFacts` · `journal/matchmaker.rs` → `JournalMatchmakerStorage` (a registration per position, its generation in the identity, scalars in the metainfo; a sync commits the registrations with the metainfo, then the clears, with a `hint!` between, #294; a boot keeps what the metainfo vouches for and raises the effective scalar over the reconfigurations it keeps, #176).
 - `journal/tests.rs` → both contract suites, faulty votes from targeted damage, the floor across reboots, the format probe, lost segments, registration damage, on `SimStorageProvider` (the journal's crash physics are `moonpool-journal`'s tests and the sim's).
 - `proto/{common,paros,internal,matchmaker,system,machine,checkpoint,fleet}.proto` → compiled by `build.rs` with `prost-build`.
 
@@ -99,7 +99,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `a187053` (moonpool#316 merged: `hint!`, `reachable!`, `buggify_range!`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `31c206e` (moonpool#317: `HintVeto` and `moonpool-journal`'s own commit `hint!`s, after moonpool#316's `hint!`, `reachable!`, `buggify_range!`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - The pin is **ten lines**: six here, `crates/paros-sim/Cargo.toml:20,29`,

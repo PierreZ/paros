@@ -37,6 +37,7 @@ use std::collections::BTreeMap;
 use moonpool_core::StorageProvider;
 use std::ops::Range;
 
+use moonpool_buggify::hint::Strike;
 use moonpool_journal::{Batch, ID_SIZE, Id, Journal, ReadError, State};
 use paros_core::{
     Ballot, JournalIdentifier, MatchmakerConfig, MatchmakerGeneration, MatchmakerHardState,
@@ -473,6 +474,15 @@ impl<P: StorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
         }
         // The clears, last: until they land a boot drops what they clear.
         if !clears.is_empty() {
+            // The registrations are durable and the clears are not: a boot
+            // must drop what the clears would have cleared.
+            let hinted = moonpool_buggify::hint!("registrations durable, clears staged");
+            if hinted.strike() == Strike::Killed {
+                moonpool_assertions::reachable!(
+                    "a matchmaker crashes between its registrations and its clears"
+                );
+            }
+            hinted.await;
             let mut batch = Batch::new();
             for range in clears {
                 batch.clear(range);
