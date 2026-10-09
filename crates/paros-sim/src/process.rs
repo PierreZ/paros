@@ -540,6 +540,7 @@ async fn run_acceptor(
         matchmaker_pool,
         proxy_count: proxies.len(),
         replica_count: deployment.replica_count(),
+        writer_mode: paros::WriterMode::Single,
     };
     // The run's journals (#188): the static list every node serves — the
     // default journal alone unless the deployment is plain and the seed drew
@@ -599,6 +600,7 @@ async fn run_acceptor(
                     matchmaker_pool: Vec::new(),
                     proxy_count: 0,
                     replica_count: 0,
+                    writer_mode: plan.mode(journal),
                     ..config.clone()
                 }
             };
@@ -1352,6 +1354,7 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
         matchmaker_pool: (0..matchmaker_len as u64).map(MatchmakerId).collect(),
         proxy_count: 0,
         replica_count: 0,
+        writer_mode: paros::WriterMode::Single,
     })
 }
 

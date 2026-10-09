@@ -28,12 +28,20 @@ pub(crate) fn audit_world_for(
     journal: paros::JournalIdentifier,
 ) -> Arc<AuditWorld> {
     let main = crate::shape::identifiers(state).main;
+    // The writer mode the journal was created with (#241), drawn with the
+    // run's journals: a journal outside the plan (a system journal) is
+    // single-writer.
+    let mode = crate::shape::journals(state).mode(journal);
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
         || AuditWorld {
+            state: Mutex::new(AuditState {
+                journal: super::journal_model::JournalModel::new(mode),
+                ..AuditState::default()
+            }),
             main: Some(main),
-            ..AuditWorld::default()
+            mode,
         },
     )
 }
@@ -45,12 +53,19 @@ pub(crate) struct AuditWorld {
     /// The run's deployment journal ([`crate::shape::Identifiers::main`]); `None`
     /// for a private checker outside any run.
     main: Option<paros::JournalIdentifier>,
+    /// This journal's writer mode (#241).
+    mode: paros::WriterMode,
 }
 
 impl AuditWorld {
     /// The run's deployment journal, when this checker belongs to a run.
     pub(crate) fn main(&self) -> Option<paros::JournalIdentifier> {
         self.main
+    }
+
+    /// This journal's writer mode (#241).
+    pub(crate) fn mode(&self) -> paros::WriterMode {
+        self.mode
     }
 
     pub(super) fn lock(&self) -> MutexGuard<'_, AuditState> {

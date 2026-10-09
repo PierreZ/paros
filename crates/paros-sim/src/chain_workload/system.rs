@@ -388,6 +388,7 @@ impl SystemOps {
                     SetLeaderOutcome::Won { state } => {
                         claim = Some((uuid, state.next_seq.0));
                     }
+                    SetLeaderOutcome::WrongMode { .. } => system_never_of_wrong_mode(),
                     SetLeaderOutcome::Lost { .. }
                     | SetLeaderOutcome::UnknownJournal
                     | SetLeaderOutcome::Malformed
@@ -411,6 +412,10 @@ impl SystemOps {
                 WriteOutcome::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
                 WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = None,
+                WriteOutcome::WrongMode { .. } => {
+                    system_never_of_wrong_mode();
+                    claim = None;
+                }
                 WriteOutcome::Redirect { leader } => {
                     target = leader
                         .and_then(|l| targets.iter().position(|t| *t as u64 == l))
@@ -573,11 +578,19 @@ impl SystemOps {
         } else {
             drawn_id(payload ^ class)
         };
+        // The writer mode is fixed at creation (#241): a create draws it.
+        let mode = if (payload >> 7) & 1 == 1 {
+            assert_reachable!("system: a client creates a multi-writer journal");
+            paros::WriterMode::Multi
+        } else {
+            paros::WriterMode::Single
+        };
         for attempt in 0..2_u64 {
             let command = SystemCommand::CreateJournal {
                 id,
                 name: name.clone(),
                 config: config.clone(),
+                mode,
             };
             let Appended::At(position) = self
                 .append(ctx, nodes, self.directory, &command, payload)
@@ -978,4 +991,13 @@ impl SystemOps {
             self.booked.push(booking);
         }
     }
+}
+
+/// A system journal is single-writer, and its writers fence every call: a
+/// wrong-mode refusal (#241) there is a bug.
+fn system_never_of_wrong_mode() {
+    assert_always!(
+        false,
+        "system: a system journal call is never refused as of the wrong mode"
+    );
 }

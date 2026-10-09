@@ -32,6 +32,17 @@
 //! is dropped; of two identical unknown attempts the later-invoked one is
 //! dropped too, since the earlier one can stand wherever it could.
 //!
+//! **The writer mode** (#241) is the model's too. A multi-writer journal
+//! has no leader: a write with records is accepted at the next position
+//! whatever position it names, with no deduplication, so every attempt can
+//! land once and identical attempts are never one step; anyone truncates;
+//! a fenced call and a `SetLeader` are refused as of the wrong mode. Of
+//! the unknown multi-writer writes that are interchangeable (the same call,
+//! or the same record count with bytes no page shows), the search only
+//! lands one after every earlier-invoked one landed: any linearization can
+//! be reordered so, since an earlier invocation stands wherever a later one
+//! could.
+//!
 //! **Time** is simulated nanoseconds. Two attempts whose spans share an
 //! instant are concurrent: a call event sorts before a return event at the
 //! same time, which can only drop a precedence edge, never invent one.
@@ -39,7 +50,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use paros::{JournalView, LeaderUuid};
+use paros::{JournalView, LeaderUuid, WriterMode};
 
 use crate::chain::splitmix;
 
@@ -100,6 +111,9 @@ pub(crate) enum Seen {
     /// The truncation was refused against `state` (#228): its fence is not
     /// the writer in force.
     TruncateRefused(JournalView),
+    /// The call is shaped for the other writer mode (#241), refused against
+    /// `state`.
+    WrongMode(JournalView),
 }
 
 /// One attempt: who made it, when, what it asked and — when it was
@@ -142,6 +156,13 @@ struct Undo {
 /// The sequential journal the search walks.
 struct Model<'a> {
     attempts: &'a [Attempt],
+    /// The journal's writer mode (#241).
+    mode: WriterMode,
+    /// Per attempt, the earlier-invoked unknown multi-writer write it is
+    /// interchangeable with: it lands only once that one landed.
+    after: Vec<Option<usize>>,
+    /// Per attempt, whether it is an accepted write in `writes`.
+    landed: Vec<bool>,
     scalars: Scalars,
     /// The accepted writes, as attempt indices, in position order (each
     /// accepted at its own `seq`, so their starts are strictly increasing).
@@ -153,9 +174,12 @@ struct Model<'a> {
 }
 
 impl<'a> Model<'a> {
-    fn new(attempts: &'a [Attempt]) -> Self {
+    fn new(attempts: &'a [Attempt], mode: WriterMode, after: Vec<Option<usize>>) -> Self {
         Self {
             attempts,
+            mode,
+            after,
+            landed: vec![false; attempts.len()],
             scalars: Scalars::default(),
             writes: Vec::new(),
             records: Vec::new(),
@@ -170,6 +194,9 @@ impl<'a> Model<'a> {
 
     fn undo(&mut self, undo: Undo) {
         self.scalars = undo.scalars;
+        for &w in &self.writes[undo.writes.min(self.writes.len())..] {
+            self.landed[w] = false;
+        }
         self.writes.truncate(undo.writes);
         self.chain.truncate(undo.writes + 1);
         self.records.truncate(undo.records);
@@ -211,6 +238,9 @@ impl<'a> Model<'a> {
         let attempt = &self.attempts[i];
         let seen = attempt.seen.as_ref().map(|(_, seen)| seen);
         let s = self.scalars;
+        if let Some(ok) = self.step_mode(i) {
+            return ok.then_some(undo);
+        }
         let ok = match &attempt.call {
             Call::Write {
                 leader,
@@ -244,11 +274,7 @@ impl<'a> Model<'a> {
                         Some(_) => false,
                     };
                     if answered {
-                        let link = mix128(self.chain.last().copied().unwrap_or(0) ^ i as u128);
-                        self.writes.push(i);
-                        self.chain.push(link);
-                        self.records.extend_from_slice(records);
-                        self.scalars.next_seq = s.next_seq + count;
+                        self.land(i, records);
                     }
                     answered
                 } else {
@@ -294,6 +320,69 @@ impl<'a> Model<'a> {
         ok.then_some(undo)
     }
 
+    /// Accept write `i` of `records` at the next position.
+    fn land(&mut self, i: usize, records: &[u64]) {
+        let link = mix128(self.chain.last().copied().unwrap_or(0) ^ i as u128);
+        self.writes.push(i);
+        self.landed[i] = true;
+        self.chain.push(link);
+        self.records.extend_from_slice(records);
+        self.scalars.next_seq += records.len() as u64;
+    }
+
+    /// The writer mode's own rules (#241): `Some(ok)` when attempt `i` is
+    /// a call of the wrong mode, or any call on a multi-writer journal but
+    /// a read; `None` for the single-writer rules below.
+    fn step_mode(&mut self, i: usize) -> Option<bool> {
+        let attempt = &self.attempts[i];
+        let seen = attempt.seen.as_ref().map(|(_, seen)| seen);
+        let s = self.scalars;
+        let wrong = || matches!(seen, Some(Seen::WrongMode(state)) if s.is(state));
+        let fence = match &attempt.call {
+            Call::Read { .. } => return None,
+            Call::Write { leader, .. } | Call::Truncate { leader, .. } => Some(*leader),
+            Call::SetLeader { .. } => None,
+        };
+        match self.mode {
+            WriterMode::Single => fence.is_some_and(|f| !f.is_set()).then(wrong),
+            WriterMode::Multi => Some(match (&attempt.call, fence) {
+                (_, None) => wrong(),
+                (_, Some(fence)) if fence.is_set() => wrong(),
+                (Call::Truncate { up_to, .. }, _) => {
+                    let up_to = *up_to;
+                    let seen = seen.cloned();
+                    self.trim(up_to, seen.as_ref())
+                }
+                (Call::Write { records, .. }, _) => {
+                    if records.is_empty() {
+                        return Some(matches!(seen, Some(Seen::Refused(state)) if s.is(state)));
+                    }
+                    // Interchangeable unknown writes land in invocation
+                    // order.
+                    if self.after[i].is_some_and(|before| !self.landed[before]) {
+                        return Some(false);
+                    }
+                    let count = records.len() as u64;
+                    let answered = match seen {
+                        None => true,
+                        Some(Seen::Written {
+                            seq,
+                            count: n,
+                            duplicate: false,
+                        }) => *seq == s.next_seq && *n == count,
+                        Some(_) => false,
+                    };
+                    if answered {
+                        let records = records.clone();
+                        self.land(i, &records);
+                    }
+                    answered
+                }
+                (Call::Read { .. } | Call::SetLeader { .. }, _) => unreachable!("handled above"),
+            }),
+        }
+    }
+
     /// Linearize a `Truncate`: fenced like a write (#228) — only the writer
     /// in force truncates, anyone else is refused against the state.
     fn step_truncate(&mut self, leader: LeaderUuid, up_to: u64, seen: Option<&Seen>) -> bool {
@@ -301,6 +390,13 @@ impl<'a> Model<'a> {
         if s.leader != Some(leader) {
             return matches!(seen, Some(Seen::TruncateRefused(state)) if s.is(state));
         }
+        self.trim(up_to, seen)
+    }
+
+    /// An accepted `Truncate` of either mode: raise the floor to `up_to`,
+    /// clamped to the tail, never lowered.
+    fn trim(&mut self, up_to: u64, seen: Option<&Seen>) -> bool {
+        let s = self.scalars;
         let after = Scalars {
             first_seq: s.first_seq.max(up_to.min(s.next_seq)),
             ..s
@@ -455,10 +551,10 @@ impl Timeline {
 
 /// Decide whether `attempts` (the merged history of every client of one
 /// journal) is linearizable, within `budget` steps.
-pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
-    let keep = judged(attempts);
+pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verdict {
+    let keep = judged(attempts, mode);
     let mut timeline = Timeline::new(attempts, &keep);
-    let mut model = Model::new(attempts);
+    let mut model = Model::new(attempts, mode, interchangeable(attempts, &keep, mode));
     let mut remaining = keep.iter().filter(|i| attempts[**i].seen.is_some()).count();
     let mut linearized: u128 = 0;
     let mut cache: BTreeSet<u128> = BTreeSet::new();
@@ -579,7 +675,10 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
 ///   made both writes steppable at every position, doubling the search per
 ///   position into the same dead end (hunt seed 6883584563191284886: 16
 ///   positions, past a 5M-step budget).
-fn judged(attempts: &[Attempt]) -> Vec<usize> {
+fn judged(attempts: &[Attempt], mode: WriterMode) -> Vec<usize> {
+    if mode == WriterMode::Multi {
+        return judged_multi(attempts);
+    }
     let mut seen_records: BTreeSet<u64> = BTreeSet::new();
     let mut answered_writes: BTreeSet<&Call> = BTreeSet::new();
     let mut taken: Vec<(Range<u64>, &Call)> = Vec::new();
@@ -617,6 +716,11 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
             }
             match &attempt.call {
                 Call::Read { .. } => false,
+                // An unfenced call on a single-writer journal is refused as of
+                // the wrong mode (#241): it moves nothing.
+                Call::Write { leader, .. } | Call::Truncate { leader, .. } if !leader.is_set() => {
+                    false
+                }
                 call @ Call::Write {
                     leader,
                     seq,
@@ -648,6 +752,78 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
     keep
 }
 
+/// The attempts the search judges on a multi-writer journal (#241): every
+/// answered one, every unknown unfenced write with records (each can land
+/// once, wherever it lands, so none dominates another), and the unknown
+/// unfenced truncations, one per identical call. An unknown read, claim or
+/// fenced call moves nothing and is dropped.
+fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..attempts.len()).collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut unknown: BTreeSet<&Call> = BTreeSet::new();
+    let mut keep: Vec<usize> = order
+        .into_iter()
+        .filter(|&i| {
+            let attempt = &attempts[i];
+            if attempt.seen.is_some() {
+                return true;
+            }
+            match &attempt.call {
+                Call::Write { leader, records, .. } => !leader.is_set() && !records.is_empty(),
+                call @ Call::Truncate { leader, .. } => !leader.is_set() && unknown.insert(call),
+                Call::Read { .. } | Call::SetLeader { .. } => false,
+            }
+        })
+        .collect();
+    keep.sort_unstable();
+    keep
+}
+
+/// Per attempt, the earlier-invoked kept unknown multi-writer write it is
+/// interchangeable with (#241): the same call, or, when no page shows any of
+/// their records, the same record count. Such writes change the state alike
+/// and nobody can tell their bytes apart, so the search lands them in
+/// invocation order. `None` everywhere on a single-writer journal.
+fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Vec<Option<usize>> {
+    let mut after = vec![None; attempts.len()];
+    if mode == WriterMode::Single {
+        return after;
+    }
+    let seen_records: BTreeSet<u64> = attempts
+        .iter()
+        .filter_map(|attempt| match &attempt.seen {
+            Some((_, Seen::Page { records, .. })) => Some(records.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Key<'c> {
+        Call(&'c Call),
+        Count(usize),
+    }
+    let mut order: Vec<usize> = keep
+        .iter()
+        .copied()
+        .filter(|&i| attempts[i].seen.is_none())
+        .filter(|&i| matches!(attempts[i].call, Call::Write { .. }))
+        .collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut last: BTreeMap<Key<'_>, usize> = BTreeMap::new();
+    for i in order {
+        let Call::Write { records, .. } = &attempts[i].call else {
+            continue;
+        };
+        let key = if records.iter().any(|r| seen_records.contains(r)) {
+            Key::Call(&attempts[i].call)
+        } else {
+            Key::Count(records.len())
+        };
+        after[i] = last.insert(key, i);
+    }
+    after
+}
+
 /// The Zobrist key of attempt `i` in the linearized set.
 fn zobrist(i: usize) -> u128 {
     mix128(
@@ -667,7 +843,7 @@ fn mix128(x: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{Attempt, Call, Seen, check, judged};
-    use paros::{JournalView, LeaderUuid, Seq};
+    use paros::{JournalView, LeaderUuid, Seq, WriterMode};
 
     /// Client `k`'s leader uuid (the unset uuid is never one).
     fn u(k: u64) -> LeaderUuid {
@@ -715,7 +891,7 @@ mod tests {
     }
 
     fn linearizable(history: &[Attempt]) -> bool {
-        let verdict = check(history, 1_000_000);
+        let verdict = check(history, WriterMode::Single, 1_000_000);
         assert!(!verdict.exhausted);
         verdict.linearizable
     }
@@ -932,7 +1108,7 @@ mod tests {
                 },
             )),
         ));
-        let kept = judged(&history);
+        let kept = judged(&history, WriterMode::Single);
         // The claim, the read, the observed write (bytes 130) and one
         // representative of the 49 others.
         assert_eq!(kept.len(), 4);
@@ -961,7 +1137,7 @@ mod tests {
                 Some((900, written(k, 1, false))),
             ));
         }
-        let kept = judged(&history);
+        let kept = judged(&history, WriterMode::Single);
         // The claim and the sixteen answered rewrites.
         assert_eq!(kept.len(), 17);
         assert!(linearizable(&history));
@@ -997,7 +1173,7 @@ mod tests {
                 )),
             ));
         }
-        let verdict = check(&history, 1_000_000);
+        let verdict = check(&history, WriterMode::Single, 1_000_000);
         assert!(verdict.linearizable);
         assert!(verdict.steps < 20_000, "steps: {}", verdict.steps);
     }
@@ -1058,5 +1234,109 @@ mod tests {
             at(0, 8, Call::Read { from: 0, limit: 0 }, Some((9, led_by(1)))),
         ];
         assert!(linearizable(&history));
+    }
+
+    /// A multi-writer write (#241): unfenced, no position.
+    fn append(records: &[u64]) -> Call {
+        Call::Write {
+            leader: LeaderUuid(0),
+            seq: 0,
+            records: records.to_vec(),
+        }
+    }
+
+    fn multi_state(next: u64, first: u64) -> JournalView {
+        JournalView {
+            leader: None,
+            next_seq: Seq(next),
+            first_seq: Seq(first),
+        }
+    }
+
+    #[test]
+    fn a_multi_writer_retry_may_land_twice_and_a_claim_is_refused() {
+        let history = vec![
+            at(0, 1, append(&[7]), Some((2, written(0, 1, false)))),
+            // The same bytes again: a second position, never a duplicate.
+            at(0, 3, append(&[7]), Some((4, written(1, 1, false)))),
+            at(
+                1,
+                5,
+                claim(1, None),
+                Some((6, Seen::WrongMode(multi_state(2, 0)))),
+            ),
+            at(
+                1,
+                7,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    8,
+                    Seen::Page {
+                        records: vec![7, 7],
+                        state: multi_state(2, 0),
+                    },
+                )),
+            ),
+        ];
+        let verdict = check(&history, WriterMode::Multi, 1_000_000);
+        assert!(verdict.linearizable);
+        // The same history is not a single-writer one.
+        assert!(!check(&history, WriterMode::Single, 1_000_000).linearizable);
+    }
+
+    #[test]
+    fn unknown_multi_writer_writes_each_land_at_most_once() {
+        // Two unknown writes of one record and a read that sees three: no
+        // linearization lands a third.
+        let history = vec![
+            at(0, 1, append(&[1]), None),
+            at(0, 2, append(&[2]), None),
+            at(
+                1,
+                3,
+                Call::Read { from: 0, limit: 0 },
+                Some((4, Seen::Page {
+                    records: vec![1, 2],
+                    state: multi_state(2, 0),
+                })),
+            ),
+        ];
+        assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
+        let mut three = history.clone();
+        three[2].seen = Some((
+            4,
+            Seen::Page {
+                records: vec![1, 2, 2],
+                state: multi_state(3, 0),
+            },
+        ));
+        assert!(!check(&three, WriterMode::Multi, 1_000_000).linearizable);
+    }
+
+    #[test]
+    fn anyone_truncates_a_multi_writer_journal_but_a_fenced_call_is_refused() {
+        let history = vec![
+            at(0, 1, append(&[1, 2]), Some((2, written(0, 2, false)))),
+            at(
+                1,
+                3,
+                Call::Truncate {
+                    leader: LeaderUuid(0),
+                    up_to: 1,
+                },
+                Some((4, Seen::Trimmed(multi_state(2, 1)))),
+            ),
+            at(
+                1,
+                5,
+                Call::Write {
+                    leader: u(1),
+                    seq: 2,
+                    records: vec![3],
+                },
+                Some((6, Seen::WrongMode(multi_state(2, 1)))),
+            ),
+        ];
+        assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
     }
 }

@@ -1446,6 +1446,10 @@ impl Workload for ChainWorkload {
                             && journal == main;
                         break;
                     }
+                    ClaimOutcome::WrongMode { .. } => {
+                        owner_never_of_wrong_mode();
+                        break;
+                    }
                     ClaimOutcome::Lost { .. }
                     | ClaimOutcome::Owned { .. }
                     | ClaimOutcome::UnknownJournal
@@ -1897,6 +1901,10 @@ impl Workload for ChainWorkload {
                             );
                             self.history.record_write_failed(submission.op);
                         }
+                        WriteOutcome::WrongMode { .. } => {
+                            owner_never_of_wrong_mode();
+                            self.history.record_write_failed(submission.op);
+                        }
                         WriteOutcome::UnknownJournal
                         | WriteOutcome::Malformed
                         | WriteOutcome::Ambiguous => {
@@ -2018,6 +2026,7 @@ impl Workload for ChainWorkload {
                             WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
                             // A node with smaller limits than the first
                             // attempt's refuses the identical retry.
+                            WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                             WriteOutcome::TooLarge { .. }
                             | WriteOutcome::Truncated { .. }
                             | WriteOutcome::UnknownJournal
@@ -2088,6 +2097,7 @@ impl Workload for ChainWorkload {
                                     refused = Some(state);
                                 }
                                 WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
+                                WriteOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                                 WriteOutcome::TooLarge { .. }
                                 | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed
@@ -2228,6 +2238,7 @@ impl Workload for ChainWorkload {
                                 // Superseded mid-storm: the rest of the
                                 // storm is refused alike, and the writer
                                 // learns it from its next write.
+                                TruncateOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                                 TruncateOutcome::Refused { .. }
                                 | TruncateOutcome::UnknownJournal
                                 | TruncateOutcome::Malformed
@@ -3351,6 +3362,7 @@ impl Workload for ChainWorkload {
                                 .and_then(|id| nodes.index_of(id))
                                 .unwrap_or((target + 1) % server_count);
                         }
+                        ClaimOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                         ClaimOutcome::UnknownJournal
                         | ClaimOutcome::Malformed
                         | ClaimOutcome::Unread
@@ -3426,6 +3438,10 @@ impl Workload for ChainWorkload {
                             .await
                             .ok();
                         continue;
+                    }
+                    WriterOutcome::WrongMode { .. } => {
+                        owner_never_of_wrong_mode();
+                        self.history.record_write_failed(submission.op);
                     }
                     WriterOutcome::Refused { .. }
                     | WriterOutcome::Truncated { .. }
@@ -3843,6 +3859,15 @@ impl Workload for ChainWorkload {
 /// leader sends this journal's next `Write` to a node that answers
 /// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
 /// created journal led by joiner 100).
+/// An owner fences every call it makes of its single-writer journal: a
+/// wrong-mode refusal (#241) there is a bug.
+fn owner_never_of_wrong_mode() {
+    assert_always!(
+        false,
+        "chain: an owner's call is never refused as of the wrong mode"
+    );
+}
+
 fn adopt_plane_leader(nodes: &ChainClient, has_matchmakers: bool, leader: Option<u64>) {
     if has_matchmakers {
         nodes.observe_leader(leader);
