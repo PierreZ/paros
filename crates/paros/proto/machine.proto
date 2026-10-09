@@ -28,6 +28,14 @@ service Machine {
   // Resumable: a plan any listed machine accepted is finished, never
   // redrawn.
   rpc CellInit(.paros.machine.v1.CellInit) returns (.paros.machine.v1.CellInitAck);
+  // `cell add-machine` (#216): join the cell `cell_id` as an admitted machine.
+  // The admin call is the authority: an idle machine never joins on its own.
+  // The caller registered the machine in the cell control journal first
+  // (`RegisterNode`), so an admitted machine is always a registered one. The
+  // machine records the cell durably before it answers, and finds the cell
+  // from that record on every later start. Idempotent for the same cell;
+  // refused by a machine of another cell, or one promised in a `cell init`.
+  rpc Admit(.paros.machine.v1.Admit) returns (.paros.machine.v1.AdmitAck);
 }
 
 message Identify {}
@@ -42,6 +50,9 @@ message IdentifyAck {
   string addr = 5;
   // 6 was `seed` (the rendezvous join list, retired by #277).
   reserved 6;
+  // The cell this machine belongs to, founded or admitted (#216); 0 while it
+  // is idle.
+  uint64 cell_id = 7;
 }
 
 // One member of a cell's bootstrap: its identity and address.
@@ -108,7 +119,8 @@ message CellInitAck {
   bool initialized = 1;
   // Why not, when not: "not_a_member", "malformed", "stateless_member",
   // "member_unreachable", "contended", "other_cell_init", "cell_lost" (a
-  // majority of the accepted plan's members were wiped), "storage".
+  // majority of the accepted plan's members were wiped), "cell_exists" (a
+  // member is admitted into a cell already, #216), "storage".
   string refusal = 2;
   uint64 cell_id = 3;
   repeated Member members = 4;
@@ -119,4 +131,24 @@ message CellInitAck {
   // The cell tenant's control journal, and the fleet tenant's (see `FormCell`).
   JournalIdentifier control = 7;
   JournalIdentifier fleet = 8;
+}
+
+message Admit {
+  // The cell, and its control journals: the cell tenant's and, on the cell
+  // that hosts it, the fleet tenant's.
+  uint64 cell_id = 1;
+  JournalIdentifier control = 2;
+  JournalIdentifier fleet = 3;
+  // The cell's machines the caller knows, by id and address: the founding
+  // members and the registered machines. The admitted machine caches them
+  // (its cached registry fold, `docs/architecture.md` §3.2).
+  repeated Member members = 4;
+}
+
+message AdmitAck {
+  bool admitted = 1;
+  // Why not, when not: "malformed", "other_cell" (the machine belongs to
+  // another cell), "in_cell_init" (it promised in a `cell init` and has no
+  // cell: admitting it could put it in two cells), "storage".
+  string refusal = 2;
 }

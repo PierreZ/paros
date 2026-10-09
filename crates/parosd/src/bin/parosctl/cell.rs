@@ -1,0 +1,125 @@
+//! `parosctl cell add-machine <addr>` (#216): admit an idle machine into the
+//! cell the servers belong to, through `paros::client::cell`. The machine
+//! is registered in the cell control journal, then told its cell with
+//! `Admit`. A machine never joins a cell on its own: this call is the
+//! authority. A re-run resumes, and a machine already in the cell is left
+//! unchanged.
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use clap::{Args, Subcommand};
+use moonpool_core::TokioProviders;
+use moonpool_rpc::RpcHandle;
+use paros::NodeId;
+use paros::client::Client;
+use paros::client::bootstrap::{cell_members, control_journals};
+use paros::client::cell::CellSession;
+use paros::client::fleet::Step;
+use serde_json::json;
+
+use crate::fleet::{interrupted, leader_seed, refused, steps};
+use crate::output::{Printer, note};
+use crate::{Ending, resolve};
+
+/// `parosctl cell`.
+#[derive(Args, Debug)]
+pub struct CellArgs {
+    /// How long a step interrupted by a moving leader or a machine still
+    /// starting is retried, in milliseconds.
+    #[arg(long, default_value = "30000")]
+    patience_ms: u64,
+    #[command(subcommand)]
+    command: CellAdminCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum CellAdminCommand {
+    /// Admit an idle machine into the cell: register it in the cell control
+    /// journal, then send it `Admit`. Send it to any member (`--servers`).
+    AddMachine {
+        /// The idle machine's address, `HOST:PORT`.
+        addr: String,
+    },
+}
+
+/// `parosctl cell …`, through `client` (the cell's `servers`, id and address
+/// each).
+pub async fn run(
+    providers: &TokioProviders,
+    rpc: &RpcHandle<TokioProviders>,
+    client: &Client<TokioProviders>,
+    servers: &[(u64, SocketAddr)],
+    out: &Printer,
+    args: CellArgs,
+) -> Ending {
+    let CellAdminCommand::AddMachine { addr } = args.command;
+    let target = match resolve::resolve(&addr) {
+        Ok(target) => target,
+        Err(error) => {
+            note(&format!("bad machine address {addr:?}: {error}"));
+            return Ending::Refused;
+        }
+    };
+    let Some(journals) = control_journals(client).await else {
+        note("no server named its cell's control journals: is the cell initialized?");
+        return Ending::Unreachable;
+    };
+    // The founding members: the cell control journal's members, with the
+    // addresses of the servers named among them.
+    let Some(members) = cell_members(client, journals.cell).await else {
+        note("no server served the cell control journal");
+        return Ending::Unreachable;
+    };
+    let founders: Vec<(NodeId, SocketAddr)> = servers
+        .iter()
+        .filter(|(id, _)| members.contains(id))
+        .map(|(id, addr)| (NodeId(*id), *addr))
+        .collect();
+    let mut session = CellSession::new(
+        journals,
+        founders,
+        leader_seed(providers),
+        client.tunables().checkpoint_policy(),
+    );
+    let patience = Duration::from_millis(args.patience_ms);
+    let run = session
+        .add_machine(providers, rpc, client, 0, target, patience)
+        .await;
+    match run.outcome {
+        Step::Done { result, .. } => {
+            let outcome = if run.steps.is_empty() {
+                "unchanged"
+            } else {
+                "admitted"
+            };
+            out.emit(
+                || {
+                    format!(
+                        "{outcome} node={} cell={} addr={target}{}",
+                        result.0,
+                        journals.cell_id,
+                        if run.steps.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" steps={}", steps(&run.steps).join(","))
+                        }
+                    )
+                },
+                || {
+                    json!({
+                        "outcome": outcome,
+                        "node": result.0,
+                        "cell": journals.cell_id,
+                        "addr": target.to_string(),
+                        "steps": steps(&run.steps),
+                    })
+                },
+            );
+            Ending::Success
+        }
+        Step::Refused(refusal) => refused(out, &refusal),
+        Step::Interrupted(stop) => interrupted(&stop),
+        Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}

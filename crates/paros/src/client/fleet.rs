@@ -57,10 +57,11 @@
 //! caller's draws, and [`FleetSession::create_tenant`] moves to the next one
 //! when the fleet tenant holds a draw already.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::Providers;
-use paros_core::{JournalIdentifier, TenantId};
+use paros_core::{JournalIdentifier, NodeId, TenantId};
 
 use super::Client;
 use super::checkpoint::{
@@ -99,6 +100,10 @@ pub enum Stage {
     DropTenant,
     /// The fleet tenant removed the tenant.
     RemoveTenant,
+    /// The cell registered a machine it admits (`RegisterNode`, #216).
+    RegisterMachine,
+    /// The machine recorded its admission (`Admit`, #216).
+    Admit,
 }
 
 /// Why a fleet operation cannot go on: running it again changes nothing
@@ -130,6 +135,26 @@ pub enum FleetRefusal {
         tenant: TenantId,
         /// Its state.
         state: TenantState,
+    },
+    /// The machine being admitted belongs to another cell (#216): founded
+    /// or admitted there.
+    OtherCell {
+        /// The machine.
+        node: NodeId,
+        /// Its cell, when it said (0 when its `Admit` refusal named none).
+        cell_id: u64,
+    },
+    /// The machine being admitted promised in a `cell init` and has no cell
+    /// (#216): a cell may still form over it, so it is admitted nowhere.
+    InCellInit {
+        /// The machine.
+        node: NodeId,
+    },
+    /// The machine being admitted was retired from this cell: a retired id
+    /// never comes back (#216).
+    Retired {
+        /// The machine.
+        node: NodeId,
     },
     /// The tenant being created was removed meanwhile: a removal overtook
     /// the creation (the fleet tenant holds it `REMOVING`, or the cell dropped it, and
@@ -165,6 +190,12 @@ pub enum Interrupted {
         journal: JournalIdentifier,
         /// The write's verdict.
         outcome: WriterOutcome,
+    },
+    /// The machine being admitted did not answer, or failed to record its
+    /// admission (#216). Its admission may have landed.
+    MachineUnreachable {
+        /// The machine's address.
+        addr: SocketAddr,
     },
     /// The run took its step budget without ending: other operators keep
     /// moving the journals under it.
@@ -804,14 +835,18 @@ impl FleetSession {
 /// decided, a leader not ready yet, a write fenced by another operator) and
 /// the run's patience allows one more `retry_backoff`. The step is decided
 /// afresh from the journals, so a retry is always a resumption.
-async fn retry<P: Providers, T>(client: &Client<P>, step: &Step<T>, deadline: Duration) -> bool {
+pub(super) async fn retry<P: Providers, T>(
+    client: &Client<P>,
+    step: &Step<T>,
+    deadline: Duration,
+) -> bool {
     matches!(step, Step::Interrupted(_))
         && client.now() < deadline
         && client.pause(client.tunables().retry_backoff).await
 }
 
 /// Fold one step into a run: `None` to take the next, or the run's end.
-fn settle<T>(step: Step<T>, steps: &mut Vec<Stage>) -> Option<Run<T>> {
+pub(super) fn settle<T>(step: Step<T>, steps: &mut Vec<Stage>) -> Option<Run<T>> {
     match step {
         Step::Advanced(stage) => {
             steps.push(stage);
@@ -835,7 +870,7 @@ fn settle<T>(step: Step<T>, steps: &mut Vec<Stage>) -> Option<Run<T>> {
 }
 
 /// A run that took [`MAX_STEPS`] steps without ending.
-fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
+pub(super) fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
     Run {
         outcome: Step::Interrupted(Interrupted::GoingRound { steps: steps.len() }),
         steps,
@@ -844,7 +879,7 @@ fn going_round<T>(steps: Vec<Stage>) -> Run<T> {
 
 /// Claim `owner`'s journal and fold it to its tail: the first checkpoint
 /// the fold found diverged, if any.
-async fn open<P: Providers, S: crate::client::checkpoint::Checkpointable>(
+pub(super) async fn open<P: Providers, S: crate::client::checkpoint::Checkpointable>(
     owner: &mut Checkpointer<S>,
     client: &Client<P>,
     first: usize,
@@ -861,7 +896,7 @@ async fn open<P: Providers, S: crate::client::checkpoint::Checkpointable>(
 /// journal took at another position than the fold's next (a resolved
 /// ambiguity) is folded by reading up to it — the first checkpoint that
 /// read found diverged, if any.
-async fn append<P: Providers, S: crate::client::checkpoint::Checkpointable>(
+pub(super) async fn append<P: Providers, S: crate::client::checkpoint::Checkpointable>(
     owner: &mut Checkpointer<S>,
     client: &Client<P>,
     first: usize,

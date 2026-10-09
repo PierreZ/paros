@@ -148,7 +148,12 @@ const FLEET_INIT: u8 = 25;
 /// Create or remove a tenant through the fleet directory and the cell (#229),
 /// or resume one this client stopped in the middle of.
 const TENANT: u8 = 26;
-const OP_COUNT: u8 = 27;
+/// Admit an idle machine into the cell (#216) through
+/// `paros::client::cell` — `cell add-machine`: register it in the cell
+/// control journal, then `Admit` it — or resume an admission this client
+/// stopped after its registration.
+const ADMIT: u8 = 27;
+const OP_COUNT: u8 = 28;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -453,7 +458,7 @@ impl ChainConfig {
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
             // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
-            // TENANT
+            // TENANT, ADMIT
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -512,6 +517,10 @@ impl ChainConfig {
                 // writes up to three steps; the ceiling is a client that
                 // mostly manages tenants, fencing every other operator.
                 buggify_knob!(4_u64, 0_u64..21_u64),
+                // An admission is one append and one call to the machine,
+                // then nothing to do; the ceiling is an operator admitting
+                // machines all run long, fencing the fleet operators.
+                buggify_knob!(3_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -3181,6 +3190,11 @@ impl Workload for ChainWorkload {
                             config.tunables().checkpoint_policy(),
                             (raw_class, raw_payload),
                         )
+                        .await;
+                }
+                ADMIT => {
+                    fleet_ops
+                        .admit(ctx, config.tunables().checkpoint_policy(), raw_payload)
                         .await;
                 }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),

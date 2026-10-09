@@ -9,7 +9,10 @@
 //!    ([`super::wait_for_cell`]): an acceptor of any `cell init` that lists
 //!    it, and the proposer of one sent to it (#277). It never forms a cell
 //!    on its own (#216).
-//! 3. **Serve.** A formed machine runs [`crate::run_journals`] over its
+//! 3. **Serve.** A machine that `cell add-machine` admitted (#216) serves
+//!    the machine contract and a node-only `Inspect` with its cell
+//!    ([`super::AdmittedMachine`]), and no journal until placement (#212).
+//!    A formed machine runs [`crate::run_journals`] over its
 //!    cell's plan, every journal plain Multi-Paxos over the founding members
 //!    ([`journal_config`]), and keeps answering the decree from its record
 //!    ([`super::FormedCell`]). Every start after formation is an existing
@@ -36,7 +39,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
-use super::{CellLedger, CellPlan, Class, FormedCell, MachineFacts, ProviderDisk};
+use super::{
+    Admission, AdmittedMachine, CellLedger, CellPlan, Class, FormedCell, Joined, MachineFacts,
+    ProviderDisk,
+};
 use crate::{Audit, DriverTunables, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
@@ -158,6 +164,30 @@ impl<S: StorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S, A> {
         );
         Ok(())
     }
+
+    async fn admit(&mut self, admission: &Admission) -> Result<(), String> {
+        assert!(
+            self.record.plan.is_none(),
+            "a formed machine is admitted nowhere"
+        );
+        assert!(
+            self.record.admitted.is_none(),
+            "an admitted machine waits no more"
+        );
+        assert!(
+            self.record.promised == Ballot::default(),
+            "a machine promised in cell init is not admitted"
+        );
+        let mut record = self.record.clone();
+        record.admitted = Some(admission.clone());
+        self.commit(record).await?;
+        assert_eq!(
+            self.record.admitted.as_ref(),
+            Some(admission),
+            "the admission is the record"
+        );
+        Ok(())
+    }
 }
 
 /// The longest a machine's boot is held back in a simulation: long enough
@@ -227,12 +257,17 @@ where
         class = facts.class.as_str(),
         "machine_starting"
     );
-    let cell = if let Some((ballot, plan)) = &record.plan {
-        FormedCell {
+    let joined = if let Some((ballot, plan)) = &record.plan {
+        Joined::Founded(FormedCell {
             facts,
             plan: plan.clone(),
             ballot: *ballot,
-        }
+        })
+    } else if let Some(admission) = &record.admitted {
+        Joined::Admitted(AdmittedMachine {
+            facts,
+            admission: admission.clone(),
+        })
     } else {
         let mut ledger = DiskLedger {
             disk: &disk,
@@ -250,17 +285,32 @@ where
         )
         .await
         .map_err(MachineError::Run)?;
-        let Some(cell) = waited else {
+        let Some(joined) = waited else {
             return Ok(());
         };
-        assert_eq!(
-            ledger.record.formed(),
-            Some(&cell.plan),
-            "a wait ends formed"
-        );
-        cell
+        match &joined {
+            Joined::Founded(cell) => assert_eq!(
+                ledger.record.formed(),
+                Some(&cell.plan),
+                "a wait ends formed"
+            ),
+            Joined::Admitted(admitted) => assert_eq!(
+                ledger.record.admitted.as_ref(),
+                Some(&admitted.admission),
+                "a wait ends admitted"
+            ),
+        }
+        joined
     };
-    serve(providers, disk, audits, cell, tunables, shutdown).await
+    match joined {
+        Joined::Founded(cell) => {
+            serve(providers, disk, audits, cell, tunables, shutdown).await
+        }
+        Joined::Admitted(admitted) => admitted
+            .serve(&providers, &tunables, shutdown)
+            .await
+            .map_err(MachineError::Run),
+    }
 }
 
 /// The machine's record: read, or minted on an empty disk; the
@@ -301,6 +351,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
             failure_domain: settings.failure_domain.clone(),
             promised: Ballot::default(),
             plan: None,
+            admitted: None,
         };
         disk.write_record(&record.render()).await.map_err(failed)?;
         audit.machine_recorded(&record);
@@ -312,6 +363,8 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
     audit.machine_booted(addr, Some(&record));
     if record.formed().is_some() {
         moonpool_assertions::reachable!("machine: a formed machine restarts and serves its cell");
+    } else if record.admitted.is_some() {
+        moonpool_assertions::reachable!("machine: an admitted machine restarts into its cell");
     } else {
         moonpool_assertions::reachable!("machine: a formatted machine restarts and waits");
         if record.promised != Ballot::default() {

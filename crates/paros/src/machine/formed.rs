@@ -13,9 +13,9 @@ use moonpool_rpc::RpcHandle;
 use paros_core::Ballot;
 use tokio_util::sync::CancellationToken;
 
-use super::{CellPlan, Class, ControlJournals, MachineFacts};
+use super::{Admission, CellPlan, Class, ControlJournals, MachineFacts};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{FormCellRpc, IdentifyRpc, PrepareCellRpc};
+use crate::rpc::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, serve_well_known};
 
 /// A machine of a cell: what it knows of itself, the plan it accepted and
@@ -53,7 +53,7 @@ impl FormedCell {
             "a formed member is a member of its plan"
         );
         wire::PrepareCellAck {
-            identity: Some(self.facts.identify_ack()),
+            identity: Some(self.facts.identify_ack(self.plan.cell_id)),
             promised: true,
             promise: None,
             vote: Some(self.vote()),
@@ -77,7 +77,22 @@ impl FormedCell {
         }
     }
 
-    /// Answer the decree's calls (and `Identify`) on `rpc` until `shutdown`,
+    /// `Admit` at a founding member (#216): it is in its cell already, so an
+    /// admission into that cell is acked and changes nothing; any other is
+    /// refused.
+    pub(super) fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
+        let refusal = match Admission::from_wire(request) {
+            Ok(admission) if admission.cell == self.control_journals() => "",
+            Ok(_) => "other_cell",
+            Err(_) => "malformed",
+        };
+        wire::AdmitAck {
+            admitted: refusal.is_empty(),
+            refusal: refusal.into(),
+        }
+    }
+
+    /// Answer the decree's calls (and `Identify`, `Admit`) on `rpc` until `shutdown`,
     /// in a task of its own: every answer is a pure function of the record,
     /// so nothing here touches the node loop.
     ///
@@ -94,6 +109,7 @@ impl FormedCell {
         let mut identify = Inbound::plain(serve_well_known::<P, IdentifyRpc>(rpc)?);
         let mut prepare = Inbound::plain(serve_well_known::<P, PrepareCellRpc>(rpc)?);
         let mut form = Inbound::plain(serve_well_known::<P, FormCellRpc>(rpc)?);
+        let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(rpc)?);
         providers
             .task()
             .spawn_task("paros-machine-formed", async move {
@@ -102,13 +118,16 @@ impl FormedCell {
                         biased;
                         () = shutdown.cancelled() => return,
                         Some((_, reply)) = identify.recv() => {
-                            reply.send(self.facts.identify_ack());
+                            reply.send(self.facts.identify_ack(self.plan.cell_id));
                         }
                         Some((_, reply)) = prepare.recv() => {
                             reply.send(self.prepare_ack());
                         }
                         Some((request, reply)) = form.recv() => {
                             reply.send(self.form_ack(&request));
+                        }
+                        Some((request, reply)) = admit.recv() => {
+                            reply.send(self.admit_ack(&request));
                         }
                         else => return,
                     }

@@ -202,6 +202,8 @@ async fn attempt<P: Providers>(
         match ack.refusal.as_str() {
             "" => {}
             "stateless" => return Attempt::Failed("stateless_member"),
+            // A machine a cell admitted (#216): it is in a cell already.
+            "in_cell" => return Attempt::Failed("cell_exists"),
             // That member's disk failed under it: nothing was decided.
             _ => return Attempt::Failed("member_unreachable"),
         }

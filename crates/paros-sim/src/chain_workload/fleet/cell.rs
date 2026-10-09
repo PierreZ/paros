@@ -104,16 +104,11 @@ impl FleetOps {
             );
             return self.cell.clone();
         };
-        let mut members = client
-            .inspect(0, journals.cell)
-            .await
-            .map(|view| view.members)
-            .unwrap_or_default();
-        members.sort_unstable();
-        members.dedup();
-        if members.is_empty() {
+        // An admitted machine serves no journal (#216): the first server
+        // that serves the cell control journal names its members.
+        let Some(members) = bootstrap::cell_members(&client, journals.cell).await else {
             return self.cell.clone();
-        }
+        };
         assert_always!(
             crate::machine::formed_cell(ctx.state()) == Some(journals),
             "fleet: the control journals Inspect names are the ones init formed",

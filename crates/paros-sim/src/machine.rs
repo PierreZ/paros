@@ -86,6 +86,9 @@ pub(crate) struct MachineBoard {
     first_promiser: Option<u64>,
     /// The ballots each plan was accepted at, by cell id.
     votes: BTreeMap<u64, BTreeSet<Ballot>>,
+    /// The machines `cell add-machine` admitted (#216), still on their
+    /// disks, by minted id: the cell each recorded.
+    admitted: BTreeMap<u64, ControlJournals>,
 }
 
 const MACHINE_BOARD_KEY: &str = "paros-machine-board";
@@ -125,6 +128,28 @@ fn wiped_members(board: &MachineBoard, plan: &CellPlan) -> usize {
         .iter()
         .filter(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
         .count()
+}
+
+/// The machines admitted into cell `cell_id` (#216) whose admission is still
+/// on their disks, by minted id.
+pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
+    lock(&machine_board(state))
+        .admitted
+        .iter()
+        .filter(|(_, cell)| cell.cell_id == cell_id)
+        .map(|(node, _)| *node)
+        .collect()
+}
+
+/// Whether the machine at `addr` is a founding member `init` lists.
+pub(crate) fn is_founder(state: &StateHandle, addr: SocketAddr) -> bool {
+    lock(&machine_board(state)).founders.contains(&addr)
+}
+
+/// Whether any machine was wiped this run: the one way a machine can hold
+/// another cell than the operator's.
+pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
+    !lock(&machine_board(state)).wiped.is_empty()
 }
 
 /// Whether the run's cell is lost (#246): a vote still on a disk names a
@@ -353,6 +378,9 @@ pub(crate) fn booted(
         if board.voters.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's vote with its disk");
         }
+        if board.admitted.remove(&old).is_some() {
+            assert_reachable!("machine: a wipe takes a machine's admission with its disk");
+        }
         if founder && board.init_sent && unformed {
             assert_reachable!("machine: a founding member is wiped during init");
         }
@@ -365,7 +393,7 @@ pub(crate) fn booted(
         "machine: a machine boots with the id it minted",
         { "node" => record.node_id.0 }
     );
-    if record.formed().is_none() && !board.founders.contains(&addr) {
+    if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(&addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
 }
@@ -391,6 +419,25 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
             if before.node != record.promised.node {
                 assert_reachable!("machine: two cell init ballots meet at one machine");
             }
+        }
+    }
+    if let Some(admission) = &record.admitted {
+        // An admission names a cell some `cell init` formed (#216): the
+        // operator learned it from `init` or through `Inspect`, never
+        // from the harness. A wiped one-founder cell's successor may form
+        // since, so every cell a vote ever named counts.
+        assert_always!(
+            board.votes.contains_key(&admission.cell.cell_id),
+            "machine: an admission names a cell init formed",
+            { "node" => node, "cell" => admission.cell.cell_id }
+        );
+        assert_always!(
+            record.plan.is_none() && record.promised == Ballot::default(),
+            "machine: an admitted machine holds no vote and no promise",
+            { "node" => node }
+        );
+        if board.admitted.insert(node, admission.cell).is_none() {
+            assert_reachable!("machine: a machine is admitted into the cell");
         }
     }
     if let Some((ballot, plan)) = &record.plan {

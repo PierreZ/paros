@@ -361,6 +361,16 @@ list and no rendezvous name. The same rule holds at two levels:
   journal, with the machine's advertised address (section 3.2, #257), then sends it `Admit` with the `cell_id`, the
   control `JournalIdentifier`s and a registry snapshot, which the machine caches durably. An
   interrupted admission is finished by the coordinator like any in-flight entry (section 3.7).
+  *Landed* (#216, 2026-10-09): until the cell coordinator exists (#225, #240), the admin's own
+  call takes these steps, as `paros::client::cell::CellSession`, an operation state machine like
+  the fleet operations: it claims the cell control journal with `SetLeader`, writes
+  `RegisterNode` unless the registry holds the machine, then sends `Admit`. Each step is decided
+  from what the journal and the machine hold, so a re-run resumes. The snapshot is the founding
+  members and every registered machine, by id and address. An admitted machine serves `Identify`
+  and a node-only `Inspect` with its cell, and no journal until placement (#212). A machine that
+  promised in a `cell init` and has no vote refuses `Admit` (`in_cell_init`): that `cell init`
+  can still form a cell over it, and a stalled `cell init` is safer than a machine in two cells.
+  An admitted machine refuses every `cell init` that lists it (`cell_exists`).
 - **`universe init`** creates the universe tenant inside that cell (the universe tenant is a
   tenant, so the cell must exist first to grant it capacity), mints `universe_id` and the universe
   tenant's `JournalIdentifier`, both random, recorded in the cell plan of the admitted cell

@@ -10,7 +10,7 @@
 # A machine mints its node id on
 # its first start and waits, configured with no peer; `init` forms the cell over the
 # three nodes the `members` alias resolves to (`cell init`'s founding members, #277)
-# and claims its control journal. `storage4` and `stateless1` wait for placement,
+# and claims its control journal. `storage4` and `stateless1` idle until `parosctl cell add-machine` admits them, then wait for placement,
 # which is M9 (#211, #212). No restart policy: exit 78 means "do not restart" (an operator acts),
 # and `docker compose start <machine>` brings a killed machine back.
 #

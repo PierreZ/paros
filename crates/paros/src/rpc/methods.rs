@@ -144,3 +144,9 @@ well_known_method!(
     PrepareCellRpc, 0x5041_0305, machine::PrepareCell => machine::PrepareCellAck,
     "paros.machine.PrepareCell"
 );
+well_known_method!(
+    /// `cell add-machine`'s last step: admit an idle machine into a cell
+    /// that registered it (#216).
+    AdmitRpc, 0x5041_0306, machine::Admit => machine::AdmitAck,
+    "paros.machine.Admit"
+);

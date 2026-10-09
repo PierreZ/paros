@@ -30,6 +30,11 @@ docker compose run --rm parosctl tenant create globex
 docker compose run --rm parosctl tenant list
 docker compose run --rm parosctl tenant delete acme
 
+# Admit the two idle machines into the cell (#216): each is registered in the cell
+# control journal, then records its cell. A re-run prints `unchanged`.
+docker compose run --rm parosctl cell add-machine storage4:4500
+docker compose run --rm parosctl cell add-machine stateless1:4500
+
 # What each machine is (node id, cell, control journals), then its view of the journal.
 docker compose run --rm parosctl inspect
 docker compose run --rm parosctl inspect --journal "$J"

@@ -62,6 +62,7 @@
 //! RPC runtime, and nothing else.
 
 pub mod bootstrap;
+pub mod cell;
 pub mod checkpoint;
 pub mod fleet;
 pub mod initialize;

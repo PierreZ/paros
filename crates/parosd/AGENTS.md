@@ -29,6 +29,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   what it came to (`cell init`, the claim, the fleet steps; #229, #246, #277).
 - `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete|list` over
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
+- `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
 - `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`);
@@ -60,7 +61,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 - **Interim (M8 → M9)**: the cell's journals are the cell control journal, the fleet tenant's, plus one
   static user journal (every identifier drawn at `init` and printed), plain Multi-Paxos over the founding members; any other
-  machine and every `stateless` one wait for placement (#211, #212); the first cell coordinator
+  machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #212); the first cell coordinator
   is the lowest founding member id (#225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.
 - `parosctl` holds **no client policy**: redirects, retries, claims, ambiguity, reader resume
