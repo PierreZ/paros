@@ -201,13 +201,27 @@ impl ColocatedNode {
         // chosen record leaves a hole this node may be the only one able to
         // ask about — the Promise response IS the recovery query, so the
         // node's own Phase 1 covers the hole and the quorum's reports heal it
-        // (see the prefix-heal step in `try_become_leader`).
-        let from_slot = self
-            .acceptor
-            .first_faulty()
-            .map_or(self.first_unchosen(), |first_faulty| {
-                first_faulty.min(self.first_unchosen())
-            });
+        // (see the prefix-heal step in `try_become_leader`). It starts at
+        // the fold's hole too: an accept that rewrote the rotted record
+        // cleared its faulty mark but not the hole, which no catch-up heals
+        // once no node holds the slot chosen (witness 11946559099387280463:
+        // a leader's own re-proposal repaired its record of slot 0, its
+        // next election opened at slot 1, and every node's prefix froze
+        // below slot 0 for good).
+        let from_slot = [self.acceptor.first_faulty(), self.replica.fold_hole()]
+            .into_iter()
+            .flatten()
+            .fold(self.first_unchosen(), Slot::min);
+        assert!(
+            from_slot <= self.first_unchosen(),
+            "a campaign's recovery range starts at or below the chosen prefix"
+        );
+        assert!(
+            self.replica
+                .fold_hole()
+                .is_none_or(|hole| from_slot <= hole),
+            "a campaign's recovery range covers the fold's hole"
+        );
         let wire_config = self.wire_config_of(&config);
         // The candidate is its own first acceptor: its records seed the P2c
         // tally, its faulty entries the tri-state tally, and its promise

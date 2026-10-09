@@ -11,8 +11,10 @@
 //! of the bootstrap one ([`crate::audit::AuditWorld::has_departure`]), at most
 //! [`LATE_WINDOW`] into the tail, then takes every acceptor and proxy leader
 //! down at one instant, each back after its own delay and one straggler
-//! last, and plans the straggler's loss while every victim is down
-//! (`super::outage::plan_losses`). The rest of the tail, the workload's
+//! last, with the straggler's loss planned at that instant
+//! (`super::outage::plan_losses`). The straggler is the one clean copy the
+//! loss left, so the successor must campaign, and judge the slot through
+//! the prior configuration, while it is still down (#267). The rest of the tail, the workload's
 //! whole recovery budget, is still a genuine recovery that every liveness
 //! oracle judges. Every other seed keeps a quiet tail.
 
@@ -69,19 +71,34 @@ impl FaultInjector for LateOutage {
         if time.now() >= Duration::from_millis(crate::CHAOS_DURATION_MS) {
             assert_reachable!("outage: a departed straggler's outage strikes in the recovery tail");
         }
-        strike(ctx)?;
-        plan_losses(ctx.state(), LossShape::DEPARTED_STRAGGLER);
-        Ok(())
+        // The loss is planned at the instant of the strike, with no await
+        // between them, so no peer repairs a copy from memory first; it is
+        // planned first so the straggler is the holder it left clean.
+        let kept = plan_losses(ctx.state(), LossShape::DEPARTED_STRAGGLER);
+        strike(ctx, &kept)
     }
 }
 
 /// Take every acceptor and proxy leader down now, each back after its own
-/// delay in [`DOWN`], one acceptor straggling in [`STRAGGLER`].
-fn strike(ctx: &FaultContext) -> SimulationResult<()> {
+/// delay in [`DOWN`], one acceptor straggling in [`STRAGGLER`]: the one
+/// clean copy the loss left (`kept`, node ids, which are ranks in the
+/// acceptor group), so the cluster must recover through the prior
+/// configuration while it is still down (#267), else a random acceptor.
+fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
     let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
     let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);
-    let straggler =
-        usize::try_from(sim_random_range(0..acceptors.len().max(1) as u64)).unwrap_or(0);
+    let clean = match kept {
+        [node] => usize::try_from(*node)
+            .ok()
+            .filter(|rank| *rank < acceptors.len()),
+        _ => None,
+    };
+    if clean.is_some() {
+        assert_reachable!("outage: the departed straggler's clean holder is back last");
+    }
+    let straggler = clean.unwrap_or_else(|| {
+        usize::try_from(sim_random_range(0..acceptors.len().max(1) as u64)).unwrap_or(0)
+    });
     let millis = |range: &std::ops::Range<Duration>| {
         Duration::from_millis(sim_random_range(
             u64::try_from(range.start.as_millis()).unwrap_or(0)

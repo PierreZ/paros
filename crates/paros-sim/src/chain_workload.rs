@@ -155,6 +155,9 @@ const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-lead
 /// The `shrink` entry of [`RECONFIGURE_SHAPES`], the shape a rotation through
 /// a ring no larger than the set in force actually composes.
 const SHRINK_SHAPE: usize = 1;
+/// The `rotate` entry of [`RECONFIGURE_SHAPES`], the departed-straggler
+/// scenario's removal.
+const ROTATE_SHAPE: usize = 4;
 /// The shapes that move a member out, as indices into
 /// [`RECONFIGURE_SHAPES`]: every one but `grow`.
 const REMOVING_SHAPES: [usize; 4] = [1, 2, 3, 4];
@@ -2371,7 +2374,17 @@ impl Workload for ChainWorkload {
                     // The owner's first operation after its claim (see
                     // `reconfigure_after_claim`) starts the shape ring at
                     // one that moves a member out — never `grow`.
-                    let drawn = if after_claim {
+                    // On a departed-straggler seed it is a `rotate`, whole
+                    // when the spares allow: the successor's fresh members
+                    // never held the departed members' slots, so the newest
+                    // configuration alone may hold a quorum of `none`
+                    // answers where the prior one does not, the sub-shape
+                    // only the cross-configuration Phase 1 decides (#267).
+                    let scenario_rotation =
+                        after_claim && crate::shape::departed_straggler(ctx.state());
+                    let drawn = if scenario_rotation {
+                        ROTATE_SHAPE
+                    } else if after_claim {
                         REMOVING_SHAPES[usize::try_from(raw_class % 4).unwrap_or(0)]
                     } else {
                         weighted_index(&config.reconfigure_shape_weights, raw_class)
@@ -2412,7 +2425,7 @@ impl Workload for ChainWorkload {
                     // spares alone. The ring's random start lands there only
                     // by luck, and it is the shape that leaves every
                     // rebooted member outside the bootstrap belief.
-                    let whole_rotation = buggify_with_prob!(0.5);
+                    let whole_rotation = scenario_rotation || buggify_with_prob!(0.5);
                     // The successor's quorum system (#140, #141): the seed's
                     // policy at the successor's own size — or, on a flexible
                     // or a grid seed, a coin that composes a *majority*

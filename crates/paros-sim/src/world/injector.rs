@@ -426,6 +426,23 @@ impl StorageWorld {
                 assert_reachable!("storage: an outage aims at a slot a departed member holds");
                 candidates = departed_slots;
             }
+            // Among those, a slot a majority of the successor never held:
+            // only there does the newest configuration alone hold a quorum
+            // of `none` answers, so only there is the cross-configuration
+            // Phase 1 the one thing standing between the slot and a no-op
+            // fill (#267). An unsettled custody may hold anything, so it
+            // counts as a holder.
+            let never_held: BTreeSet<u64> = candidates
+                .iter()
+                .copied()
+                .filter(|slot| Self::successor_never_held(live, *slot, installed))
+                .collect();
+            if !never_held.is_empty() {
+                assert_reachable!(
+                    "storage: an outage aims at a departed slot most of the successor never held"
+                );
+                candidates = never_held;
+            }
         }
         if loss.recent {
             assert_reachable!("storage: an outage aims at the most recent slot it holds");
@@ -435,6 +452,27 @@ impl StorageWorld {
             let at = moonpool_sim::sim_random_range(0..all.len().max(1) as u64);
             all.get(usize::try_from(at).unwrap_or(0)).copied()
         }
+    }
+
+    /// Whether a strict majority of `installed` never held `slot`: no
+    /// custody of theirs that is settled holds it, and none is unsettled.
+    fn successor_never_held(
+        live: &[(&String, &Custody)],
+        slot: u64,
+        installed: Option<&[u64]>,
+    ) -> bool {
+        let Some(installed) = installed else {
+            return false;
+        };
+        let never = installed
+            .iter()
+            .filter(|member| {
+                live.iter()
+                    .filter(|(_, c)| c.node == **member)
+                    .all(|(_, c)| c.settled && !c.records.contains_key(&slot))
+            })
+            .count();
+        never > installed.len() / 2
     }
 
     /// Whether `slot` may lose its clean quorum: it already did, or the loss

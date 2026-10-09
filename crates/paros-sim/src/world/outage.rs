@@ -164,7 +164,7 @@ impl FaultInjector for OutageLosses {
                     } else {
                         draw_loss()
                     };
-                    plan_losses(ctx.state(), loss);
+                    let _ = plan_losses(ctx.state(), loss);
                 }
                 return Ok(());
             }
@@ -194,8 +194,11 @@ fn draw_loss() -> LossShape {
 }
 
 /// Plan the outage's losses in every genesis journal (see the module doc).
-pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) {
+/// Returns the holders the main journal's plan left clean: the copies the
+/// cluster must wait for.
+pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) -> Vec<u64> {
     let plan = crate::shape::journals(state);
+    let mut kept = Vec::new();
     for journal in plan.ids {
         let audit = crate::audit::audit_world_for(state, journal);
         let decided = audit.decided_slots();
@@ -206,8 +209,17 @@ pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) {
             .plan_outage_loss(loss, &decided);
         if let Some(planned) = planned {
             audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
+            if journal == plan.main {
+                kept = planned
+                    .holders
+                    .iter()
+                    .copied()
+                    .filter(|node| !planned.damaged.contains(node))
+                    .collect();
+            }
         }
     }
+    kept
 }
 
 /// What [`super::StorageWorld::plan_outage_loss`] planned for one journal.

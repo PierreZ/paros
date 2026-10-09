@@ -992,6 +992,13 @@ impl AuditState {
         in_flight: Option<u64>,
     ) {
         let Some(&prev) = self.persisted.get(&(node, slot)) else {
+            // A record no report announced, recovered all the same: a commit
+            // that landed unreported (#264). It is durable from here on, so
+            // every claim over durable records counts it (witness
+            // 253576668717333800: a leader of a whole rotation recovered
+            // slot 0 this way, and the GC licence's custody check, which
+            // read only reported accepts, called its own copy missing).
+            self.persisted.insert((node, slot), vhash);
             return;
         };
         let landed = in_flight == Some(vhash);

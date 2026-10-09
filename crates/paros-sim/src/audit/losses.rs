@@ -34,21 +34,21 @@
 //! values for a slot"); witnesses 11861972872444187227 and
 //! 7412779604769813589.
 //!
-//! **Not yet proved**: consulting only the newest prior configuration stays
-//! green over 2,000 seeds. The departed-straggler shape (a removed node
-//! holding the only clean copy) is now reached — an owner's opening claim
-//! re-asked within its patience, its member-removing reconfiguration
-//! right after (`ChainConfig::reconfigure_after_claim`), the outage
-//! striking from 2.5 s and `LossShape::prefer_removed` keeping exactly the
-//! removed node's copy — on about one seed in a thousand, and its slot is
-//! recovered (witnesses 17576998890379435130 and 15446476714419699453,
-//! both `remove-leader`). The mutation survives those witnesses all the
-//! same: the members' durable chosen indexes still covered the slot, so
-//! each repaired its faulty chosen record by catch-up from the removed
-//! node's chosen prefix, a path that consults no prior configuration at
-//! all. Catching it needs the sub-shape where the outage rewound every
-//! member's chosen index (the relaxed `SetChosenIndex` flush) below the
-//! slot, so only the cross-configuration Phase 1 can decide it.
+//! **Proved by mutation, the departed straggler** (#267): consulting only
+//! the newest prior configuration (`slot_decidable` checking `prior.last()`
+//! instead of every configuration in `H_b`) goes red in the sweep (3 of 157
+//! seeds, 13 exploration bugs) and on 36 of 1,200 hunt seeds, on "a durable
+//! accept quorum never decides two values for a slot" and "an accept at or
+//! above a decided ballot carries the decided value" (witness
+//! 9147512841470386050); it stayed green over 2,000 seeds before.
+//! The members' durable chosen indexes used to cover the slot, so each
+//! repaired its faulty record by catch-up, and the successor held it too,
+//! so the newest configuration alone never had a quorum of `none` answers.
+//! The scenario now rotates the set onto spares, aims the loss at a slot
+//! most of the successor never held, and keeps the one clean holder down
+//! last: a leader of the successor then sees its own configuration's
+//! quorum answer `none` while the prior one's cannot qualify without the
+//! straggler, and only the cross-configuration rule makes it wait.
 
 use std::collections::{BTreeMap, BTreeSet};
 
