@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, Command, Control, Entry, Generation, JournalState, NodeId,
+    AcceptorConfig, Ballot, Command, Control, Entry, JournalState, JournalView, LeaderUuid, NodeId,
     Party, ProxyId, QuorumSystem, Seq, Value,
 };
 
@@ -196,27 +196,23 @@ pub(crate) fn config_from_proto(
 pub(super) fn command_to_proto(command: &Command) -> internal::Command {
     let kind = match command {
         Command::Write(entry) => internal::command::Kind::Write(internal::WriteEntry {
-            generation: entry.generation.0,
-            owner: entry.owner.0,
+            leader: Some(leader_uuid_to_proto(entry.leader)),
             seq: entry.seq.0,
             records: entry.records.iter().map(|r| r.0.clone()).collect(),
         }),
         Command::Control(control) => {
             let kind = match control {
-                Control::Truncate {
-                    generation,
-                    owner,
-                    up_to,
-                } => internal::control_command::Kind::Truncate(internal::Truncate {
-                    up_to: up_to.0,
-                    generation: generation.0,
-                    owner: owner.0,
-                }),
+                Control::Truncate { leader, up_to } => {
+                    internal::control_command::Kind::Truncate(internal::Truncate {
+                        up_to: up_to.0,
+                        leader: Some(leader_uuid_to_proto(*leader)),
+                    })
+                }
                 Control::Noop => internal::control_command::Kind::Noop(internal::Noop {}),
-                Control::SetLeader { expected, owner } => {
+                Control::SetLeader { new, old } => {
                     internal::control_command::Kind::SetLeader(internal::SetLeader {
-                        expected: expected.0,
-                        owner: owner.0,
+                        new: Some(leader_uuid_to_proto(*new)),
+                        old: old.map(leader_uuid_to_proto),
                     })
                 }
             };
@@ -235,22 +231,20 @@ pub(super) fn command_from_proto(
         .ok_or("missing command kind")?
     {
         internal::command::Kind::Write(entry) => Ok(Command::Write(Entry {
-            generation: Generation(entry.generation),
-            owner: ClientId(entry.owner),
+            leader: leader_uuid_from_proto(entry.leader),
             seq: Seq(entry.seq),
             records: entry.records.into_iter().map(Value).collect(),
         })),
         internal::command::Kind::Control(control) => {
             let control = match control.kind.ok_or("missing control command kind")? {
                 internal::control_command::Kind::Truncate(truncate) => Control::Truncate {
-                    generation: Generation(truncate.generation),
-                    owner: ClientId(truncate.owner),
+                    leader: leader_uuid_from_proto(truncate.leader),
                     up_to: Seq(truncate.up_to),
                 },
                 internal::control_command::Kind::Noop(_) => Control::Noop,
                 internal::control_command::Kind::SetLeader(set) => Control::SetLeader {
-                    expected: Generation(set.expected),
-                    owner: ClientId(set.owner),
+                    new: leader_uuid_from_proto(set.new),
+                    old: leader_from_proto(set.old),
                 },
             };
             Ok(Command::Control(control))
@@ -258,22 +252,47 @@ pub(super) fn command_from_proto(
     }
 }
 
-/// The wire form of a journal's control state (#204), shared by the
-/// consensus wire (a `TrimmedTo`'s sealed state) and the client API (every
-/// verdict names the state it was judged against).
+/// The wire form of a leader uuid (#241): its high and low halves.
+#[must_use]
+pub fn leader_uuid_to_proto(uuid: LeaderUuid) -> common::LeaderUuid {
+    let half = |bits: u128| u64::try_from(bits & u128::from(u64::MAX)).unwrap_or_default();
+    common::LeaderUuid {
+        hi: half(uuid.0 >> 64),
+        lo: half(uuid.0),
+    }
+}
+
+/// Decode a leader uuid; a missing one is the unset uuid, which never leads
+/// (a fence naming it is refused at apply, never at decode).
+#[must_use]
+pub fn leader_uuid_from_proto(uuid: Option<common::LeaderUuid>) -> LeaderUuid {
+    uuid.map_or(LeaderUuid(0), |uuid| {
+        LeaderUuid((u128::from(uuid.hi) << 64) | u128::from(uuid.lo))
+    })
+}
+
+/// Decode an optional leader: absent or all zero is none.
+#[must_use]
+pub fn leader_from_proto(uuid: Option<common::LeaderUuid>) -> Option<LeaderUuid> {
+    Some(leader_uuid_from_proto(uuid)).filter(|uuid| uuid.is_set())
+}
+
+/// The wire form of a journal's control state (#204, #241) between nodes: a
+/// `TrimmedTo`'s sealed state, a heartbeat's fold. A client is answered a
+/// [`journal_view_to_proto`], never the term.
 #[must_use]
 pub fn journal_state_to_proto(state: JournalState) -> common::JournalState {
     common::JournalState {
-        owner: state.owner.map(|o| o.0),
-        generation: state.generation.0,
+        leader: state.leader.map(leader_uuid_to_proto),
+        term: state.term,
         next_seq: state.next_seq.0,
         first_seq: state.first_seq.0,
     }
 }
 
 /// Decode a journal state off the wire. A missing one is the journal's
-/// birth; an ill-formed one (an owner without a generation, a first
-/// position past the next) is refused.
+/// birth; an ill-formed one (a leader without a term, a first position past
+/// the next) is refused.
 ///
 /// # Errors
 ///
@@ -285,14 +304,47 @@ pub fn journal_state_from_proto(
         return Ok(JournalState::default());
     };
     let decoded = JournalState {
-        owner: state.owner.map(ClientId),
-        generation: Generation(state.generation),
+        leader: leader_from_proto(state.leader),
+        term: state.term,
         next_seq: Seq(state.next_seq),
         first_seq: Seq(state.first_seq),
     };
-    if decoded.first_seq > decoded.next_seq || decoded.owner.is_some() != (decoded.generation.0 > 0)
-    {
+    if decoded.first_seq > decoded.next_seq || decoded.leader.is_some() != (decoded.term > 0) {
         return Err("ill-formed journal state");
+    }
+    Ok(decoded)
+}
+
+/// The wire form of what a client learns of a journal (#241): every verdict
+/// names the view it was judged against.
+#[must_use]
+pub fn journal_view_to_proto(view: JournalView) -> common::JournalView {
+    common::JournalView {
+        leader: view.leader.map(leader_uuid_to_proto),
+        next_seq: view.next_seq.0,
+        first_seq: view.first_seq.0,
+    }
+}
+
+/// Decode a journal view off the wire. A missing one is the journal's birth;
+/// a first position past the next is refused.
+///
+/// # Errors
+///
+/// A view that breaks its own ordering.
+pub fn journal_view_from_proto(
+    view: Option<common::JournalView>,
+) -> Result<JournalView, &'static str> {
+    let Some(view) = view else {
+        return Ok(JournalView::default());
+    };
+    let decoded = JournalView {
+        leader: leader_from_proto(view.leader),
+        next_seq: Seq(view.next_seq),
+        first_seq: Seq(view.first_seq),
+    };
+    if decoded.first_seq > decoded.next_seq {
+        return Err("ill-formed journal view");
     }
     Ok(decoded)
 }

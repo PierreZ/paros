@@ -505,18 +505,19 @@ pub struct Checkpointer<S> {
 }
 
 impl<S: Checkpointable> Checkpointer<S> {
-    /// An owner of `journal` as client `owner` over the empty `state`.
+    /// An owner of `journal` over the empty `state`, leading under uuids
+    /// drawn from `seed` ([`Writer::new`]).
     #[must_use]
-    pub fn new(journal: JournalIdentifier, owner: u64, state: S, policy: CheckpointPolicy) -> Self {
+    pub fn new(journal: JournalIdentifier, seed: u128, state: S, policy: CheckpointPolicy) -> Self {
         Self {
-            writer: Writer::new(journal, owner),
+            writer: Writer::new(journal, seed),
             folder: Folder::new(state),
             policy,
             last: Duration::ZERO,
         }
     }
 
-    /// The writer (its generation and next position).
+    /// The writer (its leader uuid and next position).
     #[must_use]
     pub fn writer(&self) -> &Writer {
         &self.writer

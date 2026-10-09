@@ -4,36 +4,33 @@
 //! The policy loops are judged by the simulation, which runs them.
 
 use moonpool_rpc::{ErrorReason, RpcError};
-use paros_core::{
-    ClientId, Generation, JournalIdentifier, JournalState, ReconfigureRefusal, Seq, Value,
-};
+use paros_core::{JournalIdentifier, JournalView, LeaderUuid, ReconfigureRefusal, Seq, Value};
 
 use super::outcome::{
     MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome, ReconfigureOutcome,
     RetireOutcome, RetireRefusal, SetLeaderOutcome, TruncateOutcome, WriteOutcome,
 };
-use super::{ClaimOutcome, Learned, Reader, ReaderOutcome, Writer};
+use super::{ClaimOutcome, Learned, Reader, ReaderOutcome, Writer, leader_uuid};
 use crate::rpc::public::WriteOutcome as Wire;
 use crate::rpc::{
     ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck, SetLeaderAck, TruncateAck,
-    WriteAck, journal_state_to_proto,
+    WriteAck, journal_view_to_proto, leader_uuid_from_proto,
 };
 
-fn state(owner: Option<u64>, generation: u64, next: u64, first: u64) -> JournalState {
-    JournalState {
-        owner: owner.map(ClientId),
-        generation: Generation(generation),
+fn state(leader: Option<LeaderUuid>, next: u64, first: u64) -> JournalView {
+    JournalView {
+        leader,
         next_seq: Seq(next),
         first_seq: Seq(first),
     }
 }
 
-fn write_ack(outcome: Wire, state: Option<JournalState>) -> WriteAck {
+fn write_ack(outcome: Wire, state: Option<JournalView>) -> WriteAck {
     WriteAck {
         outcome: outcome as i32,
         seq: 4,
         count: 2,
-        state: state.map(journal_state_to_proto),
+        state: state.map(journal_view_to_proto),
         ..WriteAck::default()
     }
 }
@@ -59,7 +56,7 @@ fn a_transport_error_is_ambiguous_never_a_refusal() {
 
 #[test]
 fn a_write_reply_is_judged_by_its_outcome() {
-    let s = state(Some(7), 2, 6, 0);
+    let s = state(Some(LeaderUuid(7)), 6, 0);
     assert_eq!(
         WriteOutcome::judge(&Ok(write_ack(Wire::Accepted, None))),
         WriteOutcome::Written {
@@ -100,9 +97,9 @@ fn a_write_reply_is_judged_by_its_outcome() {
         WriteOutcome::judge(&Ok(unknown)),
         WriteOutcome::UnknownJournal
     );
-    // An owner without a generation is no journal state.
-    let mut bad = journal_state_to_proto(s);
-    bad.owner = None;
+    // A floor past the next position is no journal view.
+    let mut bad = journal_view_to_proto(s);
+    bad.first_seq = bad.next_seq + 1;
     let malformed = WriteAck {
         state: Some(bad),
         ..write_ack(Wire::Refused, None)
@@ -112,12 +109,12 @@ fn a_write_reply_is_judged_by_its_outcome() {
 
 #[test]
 fn a_set_leader_reply_wins_loses_or_redirects() {
-    let s = state(Some(1), 3, 0, 0);
+    let s = state(Some(LeaderUuid(1)), 0, 0);
     let ack = |decided, won| SetLeaderAck {
         decided,
         won,
         leader: Some(2),
-        state: Some(journal_state_to_proto(s)),
+        state: Some(journal_view_to_proto(s)),
         ..SetLeaderAck::default()
     };
     assert_eq!(
@@ -140,7 +137,7 @@ fn a_set_leader_reply_wins_loses_or_redirects() {
 
 #[test]
 fn a_read_reply_is_a_page_a_truncation_or_unserved() {
-    let s = state(None, 0, 9, 5);
+    let s = state(None, 9, 5);
     let ack = |served, truncated| ReadAck {
         served,
         truncated,
@@ -150,7 +147,7 @@ fn a_read_reply_is_a_page_a_truncation_or_unserved() {
         } else {
             vec![b"a".to_vec()]
         },
-        state: Some(journal_state_to_proto(s)),
+        state: Some(journal_view_to_proto(s)),
         ..ReadAck::default()
     };
     assert_eq!(
@@ -175,10 +172,10 @@ fn a_read_reply_is_a_page_a_truncation_or_unserved() {
 
 #[test]
 fn a_truncation_is_applied_refused_or_redirected() {
-    let s = state(None, 0, 9, 5);
+    let s = state(None, 9, 5);
     let applied = TruncateAck {
         decided: true,
-        state: Some(journal_state_to_proto(s)),
+        state: Some(journal_view_to_proto(s)),
         ..TruncateAck::default()
     };
     assert_eq!(
@@ -196,7 +193,7 @@ fn a_truncation_is_applied_refused_or_redirected() {
     let refused = TruncateAck {
         decided: true,
         refused: true,
-        state: Some(journal_state_to_proto(s)),
+        state: Some(journal_view_to_proto(s)),
         ..TruncateAck::default()
     };
     assert_eq!(
@@ -296,26 +293,29 @@ fn every_refusal_label_the_node_sends_is_typed() {
 fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     let journal = JournalIdentifier::new(paros_core::TenantId(7), paros_core::JournalId(9));
     let mut writer = Writer::new(journal, 7);
+    let first = leader_uuid(7, 0);
+    assert_eq!(writer.uuid(), first);
     assert_eq!(writer.entry(vec![Value(b"x".to_vec())]), None);
 
-    writer.won(&state(Some(7), 3, 10, 0));
+    writer.won(&state(Some(first), 10, 0));
     let entry = writer
         .entry(vec![Value(b"x".to_vec())])
-        .expect("an owner builds a write");
-    assert_eq!(
-        (entry.generation, entry.owner, entry.seq),
-        (Generation(3), ClientId(7), Seq(10))
-    );
+        .expect("a leader builds a write");
+    assert_eq!((entry.leader, entry.seq), (first, Seq(10)));
     let request = writer.request(&entry);
     assert_eq!(
-        (request.journal, request.generation, request.seq),
-        (journal.journal.0, 3, 10)
+        (
+            request.journal,
+            leader_uuid_from_proto(request.leader),
+            request.seq
+        ),
+        (journal.journal.0, first, 10)
     );
-    // A truncation carries the owner's own fence (#228).
-    let truncate = writer.truncate_request(5).expect("an owner truncates");
+    // A truncation carries the leader's own fence (#228).
+    let truncate = writer.truncate_request(5).expect("a leader truncates");
     assert_eq!(
-        (truncate.generation, truncate.owner, truncate.up_to),
-        (3, 7, 5)
+        (leader_uuid_from_proto(truncate.leader), truncate.up_to),
+        (first, 5)
     );
 
     // A written batch moves the position past it, never back.
@@ -334,44 +334,66 @@ fn a_writer_owns_only_what_it_claimed_and_stops_when_superseded() {
     // A refusal naming itself corrects its position.
     assert_eq!(
         writer.absorb(&WriteOutcome::Refused {
-            state: state(Some(7), 3, 14, 0)
+            state: state(Some(first), 14, 0)
         }),
         Some(Learned::Owner)
     );
     assert_eq!(writer.next_seq(), 14);
 
-    // Another owner supersedes it: it owns nothing, and only the explicit
-    // misbehaviour still writes under the old generation.
+    // Another leader supersedes it: it leads nothing, its next claim asks
+    // under a new uuid, and only the explicit misbehaviour still writes
+    // under the old one.
+    let other = LeaderUuid(8);
     assert_eq!(
         writer.absorb(&WriteOutcome::Refused {
-            state: state(Some(8), 4, 14, 0)
+            state: state(Some(other), 14, 0)
         }),
         Some(Learned::Superseded)
     );
     assert_eq!(writer.owned(), None);
     assert_eq!(writer.entry(vec![]), None);
-    assert_eq!(writer.stale_entry(vec![]).generation, Generation(3));
+    let second = writer.uuid();
+    assert_ne!(second, first, "a new term, a new uuid");
+    assert_eq!(second, leader_uuid(7, 1));
+    assert_eq!(writer.stale_entry(vec![]).leader, first);
     assert_eq!(
         writer.truncate_request(1),
         None,
         "a superseded writer truncates nothing"
     );
-    assert_eq!(writer.stale_truncate_request(1).generation, 3);
     assert_eq!(
-        writer.learn(&state(Some(8), 4, 14, 0)),
+        leader_uuid_from_proto(writer.stale_truncate_request(1).leader),
+        first
+    );
+    assert_eq!(
+        writer.learn(&state(Some(other), 14, 0)),
         Learned::NotOwner,
         "superseded once, reported once"
     );
+    assert_eq!(writer.uuid(), second, "a uuid is spent once per term");
 
-    // A claim that finds it already the owner adopts the state.
+    // A claim that finds its uuid already leading adopts the state.
     assert_eq!(
         writer.claimed(&ClaimOutcome::Owned {
-            state: state(Some(7), 5, 20, 0)
+            state: state(Some(second), 20, 0)
         }),
         Some(Learned::Owner)
     );
-    assert_eq!((writer.owned(), writer.next_seq()), (Some(5), 20));
+    assert_eq!((writer.owned(), writer.next_seq()), (Some(second), 20));
     assert_eq!(writer.claimed(&ClaimOutcome::Unread), None);
+}
+
+#[test]
+fn derived_leader_uuids_are_set_and_distinct() {
+    let uuids: std::collections::BTreeSet<LeaderUuid> = (0..64)
+        .flat_map(|seed| (0..64).map(move |k| leader_uuid(seed, k)))
+        .collect();
+    assert_eq!(
+        uuids.len(),
+        64 * 64,
+        "no two (seed, term) pairs collide here"
+    );
+    assert!(uuids.iter().all(|uuid| uuid.is_set()));
 }
 
 #[test]
@@ -389,7 +411,7 @@ fn a_reader_resumes_at_the_floor_and_reports_the_gap() {
         (journal.journal.0, 3, 16, 50)
     );
 
-    let floor = state(None, 0, 20, 8);
+    let floor = state(None, 20, 8);
     assert_eq!(
         reader.absorb(ReadOutcome::Truncated { state: floor }),
         ReaderOutcome::Gap {

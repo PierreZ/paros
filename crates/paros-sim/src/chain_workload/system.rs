@@ -7,7 +7,7 @@
 //! the directory refuses it as taken.
 //!
 //! A system journal is written like any journal (#204): a writer claims it
-//! with `SetLeader` against the generation it read, then `Write`s at the
+//! with `SetLeader` against the leader it read, then `Write`s at the
 //! position the claim answered. Several clients contend for the same
 //! journal, so a claim may lose and a write may be fenced by a later claim;
 //! both are retried a bounded number of times, and what never lands is
@@ -44,7 +44,7 @@ use paros::system::{
     SystemCommand, SystemEvent, registry_event,
 };
 use paros::{
-    AcceptorConfig, Command, Entry, Generation, JournalId, JournalIdentifier, NodeId, QuorumSystem,
+    AcceptorConfig, Command, Entry, JournalId, JournalIdentifier, LeaderUuid, NodeId, QuorumSystem,
     Seq, Value,
 };
 
@@ -107,6 +107,8 @@ pub(super) struct SystemOps {
     /// so a reconfiguration may name one.
     spares: bool,
     client_id: u64,
+    /// A fresh seed per claim and checkpointer (#241).
+    leader_seeds: super::LeaderSeeds,
     /// Journals this client created (ids in the directory's tenant) and has
     /// not asked to delete.
     created: Vec<JournalId>,
@@ -207,8 +209,7 @@ impl CallObserver for Announce {
                 audit.note_submitted(user_command_hash(record));
             }
             let entry = Entry {
-                generation: Generation(write.generation),
-                owner: paros::ClientId(write.owner),
+                leader: paros::leader_uuid_from_proto(write.leader),
                 seq: Seq(write.seq),
                 records: write.records.iter().cloned().map(Value).collect(),
             };
@@ -242,7 +243,7 @@ impl SystemOps {
         active: bool,
         genesis: Vec<JournalIdentifier>,
         machines: &[JoinerMachine],
-        client_id: u64,
+        (client_id, leader_seeds): (u64, super::LeaderSeeds),
         timeout: Duration,
     ) -> Self {
         let pool = deployment.acceptors().len();
@@ -270,6 +271,7 @@ impl SystemOps {
                 && deployment.proxies().is_empty()
                 && deployment.replicas().is_empty(),
             client_id,
+            leader_seeds,
             created: Vec::new(),
             ever_created: Vec::new(),
             booked: Vec::new(),
@@ -321,7 +323,7 @@ impl SystemOps {
 
     /// Claim `journal` and write `record` to it (#204), asking the nodes
     /// `targets` names from the one `draw` picks: read the tail's state,
-    /// `SetLeader` against its generation, then `Write` at the position the
+    /// `SetLeader` against its leader, then `Write` at the position the
     /// claim answered. A lost claim, a fenced write and a redirect are
     /// retried within [`APPEND_ATTEMPTS`] asks. On a journal `created` at
     /// runtime (every journal here but a system one) a member that has not
@@ -348,10 +350,10 @@ impl SystemOps {
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
-        let mut claim: Option<(u64, u64)> = None;
+        let mut claim: Option<(LeaderUuid, u64)> = None;
         for _ in 0..APPEND_ATTEMPTS {
             let node = targets[target % targets.len()] % nodes.server_count();
-            let Some((generation, position)) = claim else {
+            let Some((leader, position)) = claim else {
                 // Read where the journal stands, then claim it.
                 let read = read_once(nodes, node, journal, 0, 1, 0);
                 let answer = within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await;
@@ -380,16 +382,11 @@ impl SystemOps {
                     target += 1;
                     continue;
                 };
-                let ask = set_leader_once(
-                    nodes,
-                    journal,
-                    node,
-                    (tail.generation.0, self.client_id),
-                    created,
-                );
+                let uuid = paros::client::leader_uuid(self.leader_seeds.next(), 0);
+                let ask = set_leader_once(nodes, journal, node, (uuid, tail.leader), created);
                 match within(ctx, self.timeout, SetLeaderOutcome::Ambiguous, ask).await {
                     SetLeaderOutcome::Won { state } => {
-                        claim = Some((state.generation.0, state.next_seq.0));
+                        claim = Some((uuid, state.next_seq.0));
                     }
                     SetLeaderOutcome::Lost { .. }
                     | SetLeaderOutcome::UnknownJournal
@@ -404,8 +401,7 @@ impl SystemOps {
                 continue;
             };
             let entry = Entry {
-                generation: Generation(generation),
-                owner: paros::ClientId(self.client_id),
+                leader,
                 seq: Seq(position),
                 records: vec![Value(record.clone())],
             };
@@ -837,8 +833,12 @@ impl SystemOps {
         }
         let client = self.seed_client(ctx, nodes, self.registry);
         let first = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
-        let mut owner =
-            Checkpointer::new(self.registry, self.client_id, self.empty_registry(), policy);
+        let mut owner = Checkpointer::new(
+            self.registry,
+            self.leader_seeds.next(),
+            self.empty_registry(),
+            policy,
+        );
         match owner.open(&client, first).await {
             OpenOutcome::Open {
                 restarted,
@@ -876,7 +876,7 @@ impl SystemOps {
             let Ok(seq) = owner.write_checkpoint(&client, first).await else {
                 return;
             };
-            let mut rival = Writer::new(self.registry, self.client_id | 1 << 40);
+            let mut rival = Writer::new(self.registry, self.leader_seeds.next());
             if !matches!(
                 rival.claim(&client, first, true).await,
                 ClaimOutcome::Won { .. }

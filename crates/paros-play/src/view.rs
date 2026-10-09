@@ -62,9 +62,10 @@ pub fn value_text(command: &Command) -> String {
         Command::Control(Control::Truncate { up_to, .. }) => {
             format!("Truncate before {}", up_to.0)
         }
-        Command::Control(Control::SetLeader { expected, owner }) => {
-            format!("SetLeader {} after generation {}", owner.0, expected.0)
-        }
+        Command::Control(Control::SetLeader { new, old }) => match old {
+            Some(old) => format!("SetLeader {new} after {old}"),
+            None => format!("SetLeader {new}"),
+        },
     }
 }
 

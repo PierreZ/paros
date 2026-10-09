@@ -12,8 +12,8 @@
 use moonpool_core::TokioStorageProvider;
 use paros::journal::Durability;
 use paros::{
-    Ballot, ClientId, Command, Config, Entry, Generation, JournalMatchmakerStorage, JournalStorage,
-    JournalStoreConfig, LogStorage, MatchmakerStorage, MustSync, NodeId, Seq, Slot, Storage, Value,
+    Ballot, Command, Config, Entry, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig,
+    LeaderUuid, LogStorage, MatchmakerStorage, MustSync, NodeId, Seq, Slot, Storage, Value,
     matchmaker_storage_contract_suite, storage_contract_suite,
 };
 
@@ -118,8 +118,7 @@ fn ballot(round: u64) -> Ballot {
 
 fn user(seq: u64) -> Command {
     Command::Write(Entry {
-        generation: Generation(1),
-        owner: ClientId(7),
+        leader: LeaderUuid(7),
         seq: Seq(seq),
         records: vec![Value(seq.to_le_bytes().to_vec())],
     })

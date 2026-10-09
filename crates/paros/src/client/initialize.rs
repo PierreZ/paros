@@ -4,8 +4,9 @@
 //!
 //! Sent to the first address — a waiting seed every seed's join list names
 //! — which identifies every seed, mints the cell's id and forms every seed
-//! ([`crate::machine`]); then the first cell coordinator claims the cell
-//! control journal with `SetLeader(expected_gen = 0)`
+//! ([`crate::machine`]); then `init` claims the cell control journal with
+//! `SetLeader(new, old = none)`, under a leader uuid drawn from the caller's
+//! seed
 //! ([`super::bootstrap::claim_cell`]). A re-run resumes: a seed that already
 //! serves the cell is asked for it, and the claim is made if it is still
 //! missing.
@@ -16,7 +17,8 @@
 //! fleet on its side, and the fleet tenant marks the cell `READY`. No
 //! identifier is fixed (§3.8): a first run takes them from the plan it
 //! formed, a re-run learns them from the seeds' `Inspect`. Both journals are
-//! written as the cell coordinator. Every step is idempotent: `init` is
+//! written under the run's leader uuids: a re-run, with a seed of its own,
+//! takes them over (#241). Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
 
 use std::net::SocketAddr;
@@ -24,7 +26,7 @@ use std::time::Duration;
 
 use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, NodeId};
+use paros_core::{JournalIdentifier, LeaderUuid, NodeId};
 
 use super::Client;
 use super::bootstrap::{self, ClaimCellOutcome, InitOutcome};
@@ -54,7 +56,7 @@ pub enum InitRun {
 pub struct Initialized {
     /// The fleet's id.
     pub fleet_id: u64,
-    /// The cell coordinator, which wrote both control journals.
+    /// The cell coordinator: the lowest member id.
     pub coordinator: NodeId,
     /// The cell's members by id, in id order: the cell control journal's
     /// genesis pool, whether or not each answered this run.
@@ -66,9 +68,9 @@ pub struct Initialized {
     /// The static assignment's user journals, known only to the run that
     /// formed the cell (the only time they are printed).
     pub users: Vec<JournalIdentifier>,
-    /// The generation this run claimed the cell control journal at, if it
-    /// did.
-    pub claimed: Option<u64>,
+    /// The leader uuid this run claimed the cell control journal under, if
+    /// it did.
+    pub claimed: Option<LeaderUuid>,
     /// The fleet steps this run wrote, in order.
     pub steps: Vec<Stage>,
 }
@@ -103,9 +105,9 @@ pub enum Unreachable {
     Claim,
 }
 
-/// The caller's half of `init`: how long a step may take, and the fleet id
-/// a first run records (drawn by the caller: `paros::client` draws no
-/// randomness).
+/// The caller's half of `init`: how long a step may take, the fleet id a
+/// first run records and the seed of the run's leader uuids (both drawn by
+/// the caller: `paros::client` draws no randomness).
 #[derive(Clone, Copy, Debug)]
 pub struct InitParams {
     /// How long the seed may take to form the cell, the cell to elect its
@@ -113,6 +115,9 @@ pub struct InitParams {
     pub patience: Duration,
     /// The fleet id a first run records; a re-run keeps the recorded one.
     pub fleet_id: u64,
+    /// The seed of this run's leader uuids ([`super::Writer::new`]): every
+    /// run draws its own.
+    pub leader_seed: u128,
 }
 
 /// What a found cell is: its servers, its members, its coordinator, its
@@ -227,22 +232,22 @@ pub async fn initialize<P: Providers>(
         "the coordinator is a member of its cell"
     );
     let client = connect(&servers);
-    let claimed = match bootstrap::claim_cell(&client, journals.cell, coordinator, patience).await {
-        ClaimCellOutcome::Claimed { generation } => Some(generation),
+    let Some(mut fleet) = FleetSession::new(
+        journals,
+        params.leader_seed,
+        Registry::new(members.iter().copied().map(NodeId)),
+        client.tunables().checkpoint_policy(),
+    ) else {
+        return InitRun::Refused(InitRefusal::NoFleet);
+    };
+    let leader = fleet.writers().1.uuid();
+    let claimed = match bootstrap::claim_cell(&client, journals.cell, leader, patience).await {
+        ClaimCellOutcome::Claimed { leader } => Some(leader),
         // Claimed by an earlier run: the fleet steps resume, and decide
         // whether anything was left to do.
         ClaimCellOutcome::AlreadyInitialized { .. } => None,
         ClaimCellOutcome::Unavailable => return InitRun::Unreachable(Unreachable::Claim),
         ClaimCellOutcome::Ambiguous => return InitRun::Ambiguous,
-    };
-    let Some(mut fleet) = FleetSession::new(
-        journals,
-        coordinator.0,
-        coordinator,
-        Registry::new(members.iter().copied().map(NodeId)),
-        client.tunables().checkpoint_policy(),
-    ) else {
-        return InitRun::Refused(InitRefusal::NoFleet);
     };
     let run = fleet.init(&client, 0, params.fleet_id, patience).await;
     match run.outcome {

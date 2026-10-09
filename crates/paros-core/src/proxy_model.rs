@@ -52,9 +52,7 @@ use crate::node::{ColocatedNode, Delegation, ProposeResult};
 use crate::proxy_leader::ProxyLeader;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{
-    Ballot, ClientId, Command, Generation, NodeId, Seq, Slot, Value, command_fingerprint,
-};
+use crate::types::{Ballot, Command, LeaderUuid, NodeId, Seq, Slot, Value, command_fingerprint};
 use crate::write::{AcceptorWrite, WriteOp};
 
 /// Seeds per campaign (`PROXY_MODEL_SEEDS` overrides; a long run is
@@ -698,8 +696,7 @@ impl World {
         let node = self.site(leader).live.as_mut().expect("a leader is live");
         let result = node.propose_in(
             crate::types::Entry {
-                generation: Generation(0),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 seq: Seq(seq),
                 records: vec![value],
             },

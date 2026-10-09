@@ -225,12 +225,11 @@ use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, Command, Entry, Fingerprint, Generation,
-    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker,
-    MatchmakerConfig, MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer,
-    MatchmakerSet, MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigurerPhase, ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq,
-    Slot, Value,
+    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, LeaderUuid, MatchOutcome,
+    MatchPurpose, MatchRefusal, MatchReply, MatchRequest, Matchmaker, MatchmakerConfig,
+    MatchmakerGeneration, MatchmakerId, MatchmakerPhase, MatchmakerReconfigurer, MatchmakerSet,
+    MemRegistry, NodeId, QuorumSystem, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
+    ReconfigurerStep, Registration, RegistrationKind, RegistryStorage, Seq, Slot, Value,
 };
 
 const N1: NodeId = NodeId(1);
@@ -292,8 +291,7 @@ fn config(members: &[NodeId]) -> AcceptorConfig {
 
 fn command(text: &str) -> Command {
     Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         seq: Seq(0),
         records: vec![Value(text.as_bytes().to_vec())],
     })

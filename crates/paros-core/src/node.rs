@@ -568,7 +568,7 @@ impl ColocatedNode {
     ///
     /// If an internal invariant is broken (a programmer error, never an
     /// operating condition).
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, owner = entry.owner.0, seq = entry.seq.0)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, leader = %entry.leader, seq = entry.seq.0)))]
     pub fn propose(&mut self, entry: Entry) -> ProposeResult {
         let result = self.propose_in(entry, None, Delegation::Auto);
         if let ProposeResult::Accepted(slot) = result {
@@ -620,7 +620,7 @@ impl ColocatedNode {
     /// overrides from [`ColocatedNode::acceptors`] and
     /// [`ColocatedNode::config`], so this is a programmer error, never an
     /// operating condition. Also if an internal invariant is broken.
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, owner = entry.owner.0, seq = entry.seq.0, column = ?column, delegation = ?delegation)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, leader = %entry.leader, seq = entry.seq.0, column = ?column, delegation = ?delegation)))]
     pub fn propose_in(
         &mut self,
         entry: Entry,
@@ -1667,7 +1667,7 @@ impl ColocatedNode {
         // A read is served from the fold's head, as it stands.
         if let crate::LogRead::Page(page) = &read {
             assert!(
-                page.state == self.replica.journal(),
+                page.state == self.replica.journal().view(),
                 "a page names the fold's head"
             );
             assert!(page.from == from, "a page starts where the read asked");

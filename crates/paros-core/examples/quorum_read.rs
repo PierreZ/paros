@@ -71,8 +71,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ColocatedNode, Command, Config, Entry, Generation, HardState, Message,
-    NodeId, QuorumSystem, ReadState, Seq, Slot, Storage, Value,
+    Ballot, ColocatedNode, Command, Config, Entry, HardState, LeaderUuid, Message, NodeId,
+    QuorumSystem, ReadState, Seq, Slot, Storage, Value,
 };
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
@@ -266,8 +266,7 @@ fn elect_and_stream(cluster: &mut Cluster, leader: NodeId) {
     cluster.deliver_all();
     for (seq, text) in [(1, "alpha"), (2, "bravo"), (3, "charlie")] {
         let _ = cluster.node(leader).propose(Entry {
-            generation: Generation(0),
-            owner: ClientId(7),
+            leader: LeaderUuid(7),
             seq: Seq(seq),
             records: vec![command(text, seq)],
         });
@@ -290,8 +289,7 @@ fn half_a_column(cluster: &mut Cluster, leader: NodeId) {
     // ---- 2. a fourth command, half-way through its column -------------------
     println!("\n-- 2. node 5 proposes \"delta\" for slot 3 → column 0 = {{0, 3}}");
     let _ = cluster.node(leader).propose(Entry {
-        generation: Generation(0),
-        owner: ClientId(7),
+        leader: LeaderUuid(7),
         seq: Seq(4),
         records: vec![command("delta", 4)],
     });

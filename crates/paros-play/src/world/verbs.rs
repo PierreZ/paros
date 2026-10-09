@@ -7,8 +7,8 @@
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
 use paros_core::{
-    Ballot, ClientId, ColocatedNode, Command, Control, Entry, Generation, HANDOFF_BATCH,
-    LeadershipOrigin, MatchmakerId, Message, NodeId, ProposeResult, QuorumSystem, Seq, Slot, Value,
+    Ballot, ColocatedNode, Command, Control, Entry, HANDOFF_BATCH, LeadershipOrigin, MatchmakerId,
+    Message, NodeId, ProposeResult, QuorumSystem, Seq, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode};
@@ -18,7 +18,9 @@ use crate::view::show_ballot;
 use crate::world::disk::Disk;
 use crate::world::drain::Paused;
 use crate::world::history::Proposal;
-use crate::world::{Envelope, NO_CHECK_QUORUM, Party, World, name, not_leader, unknown_node};
+use crate::world::{
+    ClientId, Envelope, NO_CHECK_QUORUM, Party, World, name, not_leader, unknown_node,
+};
 
 /// What a leader answered one `Compact` request with.
 ///
@@ -489,12 +491,11 @@ impl World {
     ) -> Result<(), ActionError> {
         let slot = self.require_client(client)?;
         let seq = self.clients[slot].next_seq;
-        // The level's writer holds generation 1 from the start (see
+        // The level's writer leads from the start (see
         // `Disk::provision_owner`); its write asks for the position after its
         // last admitted one, and the journal judges it when its slot folds.
         let entry = Entry {
-            generation: Generation(1),
-            owner: ClientId(client),
+            leader: ClientId(client).uuid(),
             seq: Seq(self.clients[slot].next_position),
             records: vec![Value(value.as_bytes().to_vec())],
         };
@@ -753,19 +754,21 @@ impl World {
                 "a compaction request goes to",
             ));
         }
-        // The level's writer holds generation 1 (see `Disk::provision_owner`),
-        // and a `Truncate` is fenced like its writes (#228): the compaction
-        // is asked under the journal's current writer.
-        let fence = node.replica().journal();
-        let generation = fence.generation;
-        let owner = fence.owner.unwrap_or(ClientId(0));
+        // The level's writer leads from the start (see
+        // `Disk::provision_owner`), and a `Truncate` is fenced like its
+        // writes (#228): the compaction is asked under the journal's current
+        // leader.
+        let leader = node
+            .replica()
+            .journal()
+            .leader
+            .unwrap_or(ClientId(0).uuid());
         let mark = self.narration.len();
         let accepted = self
             .drive(id, index, move |node| {
                 matches!(
                     node.propose_control(Control::Truncate {
-                        generation,
-                        owner,
+                        leader,
                         up_to: Seq(up_to),
                     }),
                     ProposeResult::Accepted(_)

@@ -130,27 +130,36 @@ impl core::str::FromStr for JournalIdentifier {
     }
 }
 
-/// The identity of a journal **client**: a writer that may own a journal
-/// (#204, the `owner` of a [`Entry`] and of a [`Control::SetLeader`]) or a
-/// reader. Opaque to paros; the journal state machine only compares it.
-/// Like every id, it has no default: a client is named, never assumed.
+/// A single-writer journal's **leader uuid** (#241, `docs/architecture.md`
+/// §2.3): the one fence a `Write` and a `Truncate` are judged against. A
+/// 128-bit random value the leader draws for one leadership term, never per
+/// process, so a process that wins again fences its own older in-flight
+/// writes. Not a secret. Like every id it has no default: `0` is unset and
+/// never a leader (§3.8). Invisible to Paxos — the ballot says which
+/// *machine* runs a journal's consensus leader, the leader uuid which
+/// *client* may write, and the two never meet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ClientId(pub u64);
+pub struct LeaderUuid(pub u128);
 
-/// A journal's **writer generation** (#204): which client may write, bumped
-/// by one at every successful [`Control::SetLeader`]. `0` is the journal's
-/// birth, owned by nobody. Invisible to Paxos — the ballot says which
-/// *machine* runs a journal's leader, the generation which *client* may
-/// write, and the two never meet.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Generation(pub u64);
+impl LeaderUuid {
+    /// Whether this names a leader: `0` is unset.
+    #[must_use]
+    pub const fn is_set(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl core::fmt::Display for LeaderUuid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:032x}", self.0)
+    }
+}
 
 /// A **position** in a journal (#204): the dense index of an accepted
 /// record, assigned at apply. A batch of `n` records accepted at `seq`
 /// occupies `[seq, seq + n)`, in one Paxos slot; a refused write, a `Noop`,
-/// a control command and a generation change consume a slot and no `Seq`,
+/// a control command and a leadership change consume a slot and no `Seq`,
 /// so a reader never sees a hole. Slots stay internal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -163,8 +172,8 @@ pub struct Seq(pub u64);
 pub struct Value(pub Vec<u8>);
 
 /// A journal **`Write`** as it is decided into one slot (#204): the batch
-/// `records`, to be accepted at position `seq` iff `(generation, owner)` is
-/// the journal's current writer and `seq` its next position — judged at
+/// `records`, to be accepted at position `seq` iff `leader` is the
+/// journal's current leader uuid and `seq` its next position — judged at
 /// apply, in slot order, by the journal state machine
 /// ([`crate::journal_state::JournalState::apply`]). That apply-time
 /// judgement is the safety rule: a propose-time refusal from the leader's
@@ -175,10 +184,8 @@ pub struct Value(pub Vec<u8>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Entry {
-    /// The writer generation the client wrote under.
-    pub generation: Generation,
-    /// The client that wrote it.
-    pub owner: ClientId,
+    /// The leader uuid the client wrote under.
+    pub leader: LeaderUuid,
     /// The position the batch's first record asks for.
     pub seq: Seq,
     /// The records, in order. Accepted or refused whole.
@@ -205,33 +212,31 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Control {
-    /// Truncate the journal (#228, `Truncate(generation, owner, up_to_seq)`):
-    /// drop every record below `up_to`. Fenced like a `Write`: it applies iff
-    /// `(generation, owner)` is the journal's current writer, judged at apply
+    /// Truncate the journal (#228, `Truncate(leader_uuid, up_to_seq)`): drop
+    /// every record below `up_to`. Fenced like a `Write`: it applies iff
+    /// `leader` is the journal's current leader uuid, judged at apply
     /// in slot order, and is otherwise refused in place. Monotone, clamped to
     /// the journal's next position. Every node applies an accepted one when
     /// its contiguous walk reaches this slot, and drops the log slots whose
     /// records all lie below the new first position — forwarded by normal
     /// replication + catch-up.
     Truncate {
-        /// The writer generation the caller truncates under.
-        generation: Generation,
-        /// The client truncating: the writer of that generation.
-        owner: ClientId,
+        /// The leader uuid the caller truncates under.
+        leader: LeaderUuid,
         /// The first position the client still needs (every record below it
         /// may go).
         up_to: Seq,
     },
-    /// Change the journal's writer (#204, `SetLeader(expected_gen,
-    /// new_owner)`): a pure compare-and-swap, judged at apply — it succeeds
-    /// iff `expected` is the current generation, and then the journal's
-    /// generation becomes `expected + 1` and its owner `owner`. No lease and
-    /// no clock.
+    /// Change the journal's leader (#241, `SetLeader(new_uuid, old_uuid)`):
+    /// a pure compare-and-set, judged at apply — it succeeds iff `old` is the
+    /// current leader uuid (`None` on a journal that never had one) and `new`
+    /// never led it, and then `new` leads from the next term. No lease and no
+    /// clock.
     SetLeader {
-        /// The generation the caller believes current.
-        expected: Generation,
-        /// The client that should own the journal from the next generation.
-        owner: ClientId,
+        /// The leader uuid that should lead from the next term.
+        new: LeaderUuid,
+        /// The leader uuid the caller believes current, `None` for none.
+        old: Option<LeaderUuid>,
     },
     /// A **no-op**: decides the slot without doing anything at apply time.
     ///
@@ -291,7 +296,7 @@ impl Fingerprint for Command {
 /// A stable fingerprint of the complete consensus value identity.
 ///
 /// Unlike application-level value hashes, this includes the command variant,
-/// the writer's generation and identity, the position, every record's length
+/// the leader uuid, the position, every record's length
 /// and bytes, and control metadata. It
 /// is carried by [`crate::Message::Accepted`] so a leader never credits an ack
 /// for a different command at the same `(slot, ballot)`.
@@ -300,8 +305,7 @@ pub fn command_fingerprint(command: &Command) -> u64 {
     match command {
         Command::Write(entry) => {
             let hash = fnv1a(FNV_OFFSET, &[0]);
-            let hash = fnv1a(hash, &entry.generation.0.to_le_bytes());
-            let hash = fnv1a(hash, &entry.owner.0.to_le_bytes());
+            let hash = fnv1a(hash, &entry.leader.0.to_le_bytes());
             let mut hash = fnv1a(hash, &entry.seq.0.to_le_bytes());
             hash = fnv1a(hash, &entry.count().to_le_bytes());
             for record in &entry.records {
@@ -310,21 +314,17 @@ pub fn command_fingerprint(command: &Command) -> u64 {
             }
             hash
         }
-        Command::Control(Control::Truncate {
-            generation,
-            owner,
-            up_to,
-        }) => {
+        Command::Control(Control::Truncate { leader, up_to }) => {
             let hash = fnv1a(FNV_OFFSET, &[1]);
-            let hash = fnv1a(hash, &generation.0.to_le_bytes());
-            let hash = fnv1a(hash, &owner.0.to_le_bytes());
+            let hash = fnv1a(hash, &leader.0.to_le_bytes());
             fnv1a(hash, &up_to.0.to_le_bytes())
         }
         Command::Control(Control::Noop) => fnv1a(FNV_OFFSET, &[2]),
-        Command::Control(Control::SetLeader { expected, owner }) => {
+        Command::Control(Control::SetLeader { new, old }) => {
             let hash = fnv1a(FNV_OFFSET, &[3]);
-            let hash = fnv1a(hash, &expected.0.to_le_bytes());
-            fnv1a(hash, &owner.0.to_le_bytes())
+            let hash = fnv1a(hash, &new.0.to_le_bytes());
+            // `None` folds as the unset uuid, which no `new` can be.
+            fnv1a(hash, &old.map_or(0, |old| old.0).to_le_bytes())
         }
     }
 }

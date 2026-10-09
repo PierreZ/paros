@@ -29,7 +29,7 @@ use paros_core::{JournalIdentifier, LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
 use crate::hooks::{DriverHooks, Reply};
-use crate::rpc::{Read, ReadAck, ReplySender, journal_state_to_proto};
+use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
 
 use super::reply::answer;
 
@@ -115,14 +115,14 @@ fn read_ack_unchecked(read: &LogRead) -> ReadAck {
         LogRead::Truncated(state) => ReadAck {
             served: true,
             truncated: true,
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..ReadAck::default()
         },
         LogRead::Page(page) => ReadAck {
             served: true,
             from_seq: page.from.0,
             records: page.records.iter().map(|r| r.0.clone()).collect(),
-            state: Some(journal_state_to_proto(page.state)),
+            state: Some(journal_view_to_proto(page.state)),
             ..ReadAck::default()
         },
     }

@@ -14,12 +14,12 @@
 //! gets no verdict ([`Call::no_verdict`]) — ambiguous to the client, which
 //! retries, and a retried `Write` is answered from the log itself.
 
-use paros_core::{ClientId, Command, Control, Entry, Generation, NodeId, Outcome, Seq};
+use paros_core::{Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
 use crate::rpc::{
-    ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_state_to_proto,
+    ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_view_to_proto,
 };
 
 use super::reply::answer;
@@ -33,14 +33,13 @@ pub(crate) enum Call {
     },
     /// A `SetLeader`.
     SetLeader {
-        expected: Generation,
-        owner: ClientId,
+        new: LeaderUuid,
+        old: Option<LeaderUuid>,
         reply: ReplySender<SetLeaderAck>,
     },
-    /// A `Truncate`, fenced by its writer (#228).
+    /// A `Truncate`, fenced by its leader uuid (#228, #241).
     Truncate {
-        generation: Generation,
-        owner: ClientId,
+        leader: LeaderUuid,
         up_to: Seq,
         reply: ReplySender<TruncateAck>,
     },
@@ -70,20 +69,12 @@ impl Call {
     fn command_unchecked(&self) -> Command {
         match self {
             Call::Write { entry, .. } => Command::Write(entry.clone()),
-            Call::SetLeader {
-                expected, owner, ..
-            } => Command::Control(Control::SetLeader {
-                expected: *expected,
-                owner: *owner,
+            Call::SetLeader { new, old, .. } => Command::Control(Control::SetLeader {
+                new: *new,
+                old: *old,
             }),
-            Call::Truncate {
-                generation,
-                owner,
-                up_to,
-                ..
-            } => Command::Control(Control::Truncate {
-                generation: *generation,
-                owner: *owner,
+            Call::Truncate { leader, up_to, .. } => Command::Control(Control::Truncate {
+                leader: *leader,
                 up_to: *up_to,
             }),
         }
@@ -237,12 +228,12 @@ fn write_ack_unchecked(outcome: &Outcome) -> WriteAck {
         },
         Outcome::Refused(state) => WriteAck {
             outcome: WriteOutcome::Refused.into(),
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..WriteAck::default()
         },
         Outcome::Truncated(state) => WriteAck {
             outcome: WriteOutcome::Truncated.into(),
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..WriteAck::default()
         },
         // A write's slot applies to a write's verdict; anything else is no
@@ -276,13 +267,13 @@ fn set_leader_ack_unchecked(outcome: &Outcome) -> SetLeaderAck {
         Outcome::Leader(state) => SetLeaderAck {
             decided: true,
             won: true,
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..SetLeaderAck::default()
         },
         Outcome::LeaderRefused(state) => SetLeaderAck {
             decided: true,
             won: false,
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..SetLeaderAck::default()
         },
         _ => SetLeaderAck::default(),
@@ -312,13 +303,13 @@ fn truncate_ack_unchecked(outcome: &Outcome) -> TruncateAck {
     match outcome {
         Outcome::Trimmed(state) => TruncateAck {
             decided: true,
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..TruncateAck::default()
         },
         Outcome::TruncateRefused(state) => TruncateAck {
             decided: true,
             refused: true,
-            state: Some(journal_state_to_proto(*state)),
+            state: Some(journal_view_to_proto(*state)),
             ..TruncateAck::default()
         },
         _ => TruncateAck::default(),

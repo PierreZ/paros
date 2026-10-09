@@ -47,12 +47,32 @@ message AcceptorConfig {
   uint64 cols = 6;
 }
 
-// A journal's control state (#204): who may write under which generation,
-// and where its dense positions stand. `owner` is absent until the first
-// `SetLeader` (generation zero is owned by nobody).
+// A single-writer journal's leader uuid (#241, `docs/architecture.md`
+// §2.3): 128 random bits, `hi` the high half. All zero is unset, never a
+// leader.
+message LeaderUuid {
+  fixed64 hi = 1;
+  fixed64 lo = 2;
+}
+
+// A journal's control state (#204, #241) as the nodes exchange it: the
+// current leader uuid, the hidden term, and where its dense positions stand.
+// `leader` is absent until the first `SetLeader` (term zero is led by
+// nobody). Internal only: a client is answered a `JournalView`.
 message JournalState {
-  optional uint64 owner = 1;
-  uint64 generation = 2;
+  // 1 and 2 were the M7 writer `(owner, generation)`, replaced by the leader
+  // uuid (#241).
+  reserved 1, 2;
   uint64 next_seq = 3;
   uint64 first_seq = 4;
+  LeaderUuid leader = 5;
+  uint64 term = 6;
+}
+
+// What a client learns of a journal's state (#241): the leader uuid and the
+// positions, never the term.
+message JournalView {
+  LeaderUuid leader = 1;
+  uint64 next_seq = 2;
+  uint64 first_seq = 3;
 }

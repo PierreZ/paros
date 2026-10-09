@@ -4,7 +4,9 @@
 //! The client is the only party that knows its own program order, so this is
 //! recorded client-side and judged client-side.
 
-use paros_core::{ClientId, Entry, NodeId, Slot};
+use paros_core::{Entry, NodeId, Slot};
+
+use super::ClientId;
 
 use crate::narration::prefix_at as at;
 use crate::world::World;

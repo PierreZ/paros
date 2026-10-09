@@ -6,13 +6,13 @@
 //! **ambiguous**, never "not done": the node may have run the call.
 
 use moonpool_rpc::RpcError;
-use paros_core::{JournalState, ReconfigureRefusal};
+use paros_core::{JournalView, ReconfigureRefusal};
 
 use crate::rpc::public::WriteOutcome as WireWriteOutcome;
 pub use crate::rpc::{MatchmakersRefusal, RetireRefusal};
 use crate::rpc::{
     ReadAck, ReconfigureAck, ReconfigureMatchmakersAck, RetireAck, SetLeaderAck, TruncateAck,
-    WriteAck, journal_state_from_proto,
+    WriteAck, journal_view_from_proto,
 };
 
 /// One `Write` attempt's outcome (#204).
@@ -34,13 +34,13 @@ pub enum WriteOutcome {
     /// journal's writer and next position.
     Refused {
         /// The journal state the write was judged against.
-        state: JournalState,
+        state: JournalView,
     },
     /// The position is below `first_seq`: whether it was written is
     /// unknowable, and `state` says where the journal stands.
     Truncated {
         /// The journal state the write was judged against.
-        state: JournalState,
+        state: JournalView,
     },
     /// No verdict: the node does not lead the journal (`leader` is its
     /// hint, when it has one).
@@ -66,7 +66,7 @@ impl WriteOutcome {
         if ack.unknown_journal {
             return Self::UnknownJournal;
         }
-        let state = || journal_state_from_proto(ack.state).ok();
+        let state = || journal_view_from_proto(ack.state).ok();
         match ack.outcome() {
             WireWriteOutcome::Accepted | WireWriteOutcome::Duplicate => Self::Written {
                 seq: ack.seq,
@@ -100,12 +100,12 @@ pub enum SetLeaderOutcome {
     /// The compare-and-swap won: `state` is the new generation.
     Won {
         /// The journal state after the swap.
-        state: JournalState,
+        state: JournalView,
     },
     /// It lost: `state` names the current writer.
     Lost {
         /// The journal state it lost against.
-        state: JournalState,
+        state: JournalView,
     },
     /// No verdict: the node does not lead the journal.
     Redirect {
@@ -133,7 +133,7 @@ impl SetLeaderOutcome {
         if !ack.decided {
             return Self::Redirect { leader: ack.leader };
         }
-        let Ok(state) = journal_state_from_proto(ack.state) else {
+        let Ok(state) = journal_view_from_proto(ack.state) else {
             return Self::Malformed;
         };
         if ack.won {
@@ -151,19 +151,19 @@ pub enum ClaimOutcome {
     /// The claim won: `state` is the generation it minted.
     Won {
         /// The journal state after the swap.
-        state: JournalState,
+        state: JournalView,
     },
     /// It lost: another owner's claim was decided first.
     Lost {
         /// The journal state it lost against.
-        state: JournalState,
+        state: JournalView,
     },
     /// Not asked: the read already names the claimant the owner (an
     /// earlier claim of its own won and its answer was lost), so it adopts
     /// `state` instead of superseding itself.
     Owned {
         /// The journal state the read was served from.
-        state: JournalState,
+        state: JournalView,
     },
     /// The `SetLeader` was not decided by the node asked.
     Redirect {
@@ -204,13 +204,13 @@ pub enum ReadOutcome {
         /// The records, in position order.
         records: Vec<Vec<u8>>,
         /// The journal state the page was served from.
-        state: JournalState,
+        state: JournalView,
     },
     /// The position asked for is below `first_seq`: nothing is served, and
     /// `state.first_seq` is where a reader resumes.
     Truncated {
         /// The journal state the read was judged against.
-        state: JournalState,
+        state: JournalView,
     },
     /// Not served: the node's quorum read did not confirm in time. An
     /// honest unavailability — ask another server.
@@ -236,7 +236,7 @@ impl ReadOutcome {
         if !ack.served {
             return Self::Unserved;
         }
-        let Ok(state) = journal_state_from_proto(ack.state) else {
+        let Ok(state) = journal_view_from_proto(ack.state) else {
             return Self::Malformed;
         };
         if ack.truncated {
@@ -259,7 +259,7 @@ impl ReadOutcome {
 
     /// The journal state the answer was served from, when it was.
     #[must_use]
-    pub fn state(&self) -> Option<JournalState> {
+    pub fn state(&self) -> Option<JournalView> {
         match self {
             Self::Page { state, .. } | Self::Truncated { state } => Some(*state),
             _ => None,
@@ -273,13 +273,13 @@ pub enum TruncateOutcome {
     /// The leader decided it: `state.first_seq` is the floor now.
     Applied {
         /// The journal state after the truncation.
-        state: JournalState,
+        state: JournalView,
     },
     /// Judged and refused (#228): the request's `(generation, owner)` is
     /// not the journal's current writer. Nothing moved.
     Refused {
         /// The journal state it was judged against, naming the writer.
-        state: JournalState,
+        state: JournalView,
     },
     /// Not decided by the node asked.
     Redirect {
@@ -307,7 +307,7 @@ impl TruncateOutcome {
         if !ack.decided {
             return Self::Redirect { leader: ack.leader };
         }
-        journal_state_from_proto(ack.state).map_or(Self::Malformed, |state| {
+        journal_view_from_proto(ack.state).map_or(Self::Malformed, |state| {
             if ack.refused {
                 Self::Refused { state }
             } else {

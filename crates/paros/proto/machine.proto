@@ -78,7 +78,7 @@ message InitAck {
   repeated Member members = 4;
   repeated JournalIdentifier journals = 5;
   // The first cell coordinator (#225), which claims the cell control
-  // journal with `SetLeader(expected_gen = 0)`.
+  // journal with `SetLeader(its fresh uuid, unset)`.
   uint64 coordinator = 6;
   // The cell tenant's control journal, and the fleet tenant's (see `FormCell`).
   JournalIdentifier control = 7;

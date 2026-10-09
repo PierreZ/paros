@@ -57,7 +57,8 @@ pub use rpc::{
     NodeClient, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
     ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader, SetLeaderAck, Truncate,
     TruncateAck, WireQuorumSystem, Write, WriteAck, journal_state_from_proto,
-    journal_state_to_proto, quorum_system_from_proto, quorum_system_to_proto,
+    journal_state_to_proto, journal_view_from_proto, journal_view_to_proto, leader_from_proto,
+    leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_from_proto, quorum_system_to_proto,
 };
 /// The wire contract: the RPC method markers ([`rpc::methods`]) and the
 /// generated protobuf bodies.

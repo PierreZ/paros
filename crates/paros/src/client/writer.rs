@@ -1,16 +1,24 @@
-//! The writer session (#204): a client's belief about its own ownership of
-//! one journal — the generation it owns and the position it writes next —
-//! and the calls that keep that belief honest.
+//! The writer session (#204, #241): a client's belief about its own
+//! leadership of one journal — the leader uuid it leads under and the
+//! position it writes next — and the calls that keep that belief honest.
 //!
-//! Every verdict corrects the belief: a refusal names the journal's writer
+//! Every verdict corrects the belief: a refusal names the journal's leader
 //! and next position, so a wrong belief costs a refused write, never a
-//! wrong one. A writer another owner superseded **stops**: its
+//! wrong one. A writer another leader superseded **stops**: its
 //! [`Writer::write`] sends nothing until its caller claims again — the
 //! journal would refuse the write anyway, and a writer that kept trying
 //! would only be asking the journal to fence it again.
+//!
+//! **Leader uuids** (§2.3): one per leadership term, never per process. The
+//! library draws no randomness, so the caller hands each writer a random
+//! 128-bit seed and the writer derives its uuids from it, one per term
+//! ([`leader_uuid`]): a writer that led and was superseded claims again
+//! under the next one, which fences its own older in-flight writes. A claim
+//! whose answer was lost is asked again under the same uuid, and a journal
+//! already naming it is adopted, never claimed twice.
 
 use moonpool_core::Providers;
-use paros_core::{ClientId, Entry, Generation, JournalIdentifier, JournalState, Seq, Value};
+use paros_core::{Entry, JournalIdentifier, JournalView, LeaderUuid, Seq, Value};
 
 use super::outcome::{ClaimOutcome, TruncateOutcome, WriteOutcome};
 use super::{Client, Resolution, WriteOptions};
@@ -19,12 +27,12 @@ use crate::rpc::{Truncate, Write};
 /// What a writer learned from a journal state a verdict named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Learned {
-    /// The state names this writer the owner: adopted whole.
+    /// The view names this writer's uuid the leader: adopted whole.
     Owner,
-    /// It names another owner, and this writer believed it owned the
+    /// It names another leader, and this writer believed it led the
     /// journal: it has been superseded and stops.
     Superseded,
-    /// It names another owner; this writer did not believe it owned it.
+    /// It names another leader; this writer did not believe it led.
     NotOwner,
 }
 
@@ -43,30 +51,30 @@ pub enum WriterOutcome {
         /// it as written.
         resolved: bool,
     },
-    /// Nothing was sent: this writer owns no generation (it never claimed,
-    /// or it was superseded). Claim first.
+    /// Nothing was sent: this writer leads no term (it never claimed, or
+    /// it was superseded). Claim first.
     NotOwner,
-    /// Another owner's generation fenced this write: the writer stops.
+    /// Another leader uuid fenced this write: the writer stops.
     Superseded {
-        /// The journal state naming the new owner.
-        state: JournalState,
+        /// The journal view naming the new leader.
+        state: JournalView,
     },
     /// Refused for another reason (a position that is not the next one);
     /// the writer's position is corrected from `state`.
     Refused {
         /// The journal state the write was judged against.
-        state: JournalState,
+        state: JournalView,
     },
     /// The position is below the journal's floor.
     Truncated {
         /// The journal state the write was judged against.
-        state: JournalState,
+        state: JournalView,
     },
     /// The first answer was ambiguous and the journal proved the write is
     /// not in it, and never will be.
     NotWritten {
         /// The journal state that proves it.
-        state: JournalState,
+        state: JournalView,
     },
     /// No server gave a verdict (`leader` is the last hint).
     Unavailable {
@@ -79,16 +87,41 @@ pub enum WriterOutcome {
     Ambiguous,
 }
 
-/// One client's ownership of one journal. `Copy`: a caller that pipelines
+/// The `k`th leader uuid of a writer seeded with `seed` (#241): a fixed
+/// mixing of the two (splitmix64 on each half), never the unset uuid. A
+/// random seed makes every derived uuid as random as one drawn directly; two
+/// writers collide only if their seeds do.
+#[must_use]
+pub fn leader_uuid(seed: u128, k: u64) -> LeaderUuid {
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let half = |bits: u128| u64::try_from(bits & u128::from(u64::MAX)).unwrap_or_default();
+    let hi = mix(half(seed >> 64) ^ k);
+    let lo = mix(half(seed) ^ k.rotate_left(32));
+    // The unset uuid never leads: a derivation that lands on it moves on.
+    LeaderUuid(((u128::from(hi) << 64) | u128::from(lo)).max(1))
+}
+
+/// One client's leadership of one journal. `Copy`: a caller that pipelines
 /// takes a copy, advances it per write, and folds the verdicts back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Writer {
     journal: JournalIdentifier,
-    owner: ClientId,
-    /// The generation it believes it owns (`None`: it does not).
-    owned: Option<u64>,
-    /// The last generation it owned.
-    last: u64,
+    /// The caller's seed every uuid of this writer derives from.
+    seed: u128,
+    /// How many uuids it has spent: `mine` is the `terms`th.
+    terms: u64,
+    /// The uuid it claims and writes under in its current (or next) term.
+    mine: LeaderUuid,
+    /// Whether `mine` leads the journal, as far as it knows.
+    owned: bool,
+    /// The last uuid it led under, once superseded (what
+    /// [`Writer::stale_entry`] writes under).
+    last: Option<LeaderUuid>,
     /// The position it writes next.
     next_seq: u64,
 }
@@ -99,23 +132,41 @@ pub fn write_request(journal: JournalIdentifier, entry: &Entry) -> Write {
     Write {
         journal: journal.journal.0,
         tenant: journal.tenant.0,
-        generation: entry.generation.0,
-        owner: entry.owner.0,
+        leader: Some(crate::rpc::leader_uuid_to_proto(entry.leader)),
         seq: entry.seq.0,
         records: entry.records.iter().map(|r| r.0.clone()).collect(),
     }
 }
 
 impl Writer {
-    /// A writer of `journal` as client `owner`, owning nothing yet.
+    /// A writer of `journal` whose leader uuids derive from the caller's
+    /// random `seed`, leading nothing yet.
     #[must_use]
-    pub fn new(journal: JournalIdentifier, owner: u64) -> Self {
+    pub fn new(journal: JournalIdentifier, seed: u128) -> Self {
         Self {
             journal,
-            owner: ClientId(owner),
-            owned: None,
-            last: 0,
+            seed,
+            terms: 0,
+            mine: leader_uuid(seed, 0),
+            owned: false,
+            last: None,
             next_seq: 0,
+        }
+    }
+
+    /// A writer of `journal` whose first uuid is `uuid` itself — an
+    /// operator naming the uuid to lead under (`parosctl --leader`); its
+    /// later terms derive from it as from a seed.
+    ///
+    /// # Panics
+    ///
+    /// If `uuid` is the unset uuid, which never leads.
+    #[must_use]
+    pub fn with_uuid(journal: JournalIdentifier, uuid: LeaderUuid) -> Self {
+        assert!(uuid.is_set(), "the unset uuid never leads");
+        Self {
+            mine: uuid,
+            ..Self::new(journal, uuid.0)
         }
     }
 
@@ -125,23 +176,28 @@ impl Writer {
         self.journal
     }
 
-    /// The client it writes as.
+    /// The uuid it claims and writes under: the one it leads with, or the
+    /// one its next claim asks for.
     #[must_use]
-    pub fn owner(&self) -> u64 {
-        self.owner.0
+    pub fn uuid(&self) -> LeaderUuid {
+        self.mine
     }
 
-    /// The generation it believes it owns.
+    /// The uuid it believes leads the journal, when it believes it leads.
     #[must_use]
-    pub fn owned(&self) -> Option<u64> {
-        self.owned
+    pub fn owned(&self) -> Option<LeaderUuid> {
+        self.owned.then_some(self.mine)
     }
 
-    /// The generation its next write names: the one it owns, or the last
-    /// one it owned (what [`Writer::stale_entry`] writes under).
+    /// The uuid a stale write names: the one it leads with, or the last one
+    /// it led with (what [`Writer::stale_entry`] writes under).
     #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.owned.unwrap_or(self.last)
+    pub fn fence(&self) -> LeaderUuid {
+        if self.owned {
+            self.mine
+        } else {
+            self.last.unwrap_or(self.mine)
+        }
     }
 
     /// The position it writes next.
@@ -155,26 +211,58 @@ impl Writer {
         self.next_seq = self.next_seq.max(next);
     }
 
-    /// Learn from a state a verdict named. A state naming this client the
-    /// owner (a claim whose answer was lost, a position it had wrong) is
-    /// adopted whole; any other owner supersedes it.
-    pub fn learn(&mut self, state: &JournalState) -> Learned {
-        if state.owner == Some(self.owner) {
-            self.owned = Some(state.generation.0);
-            self.last = state.generation.0;
+    /// Spend the current uuid: it led (or may have), so the next claim asks
+    /// under a fresh one.
+    fn next_term(&mut self) {
+        self.last = Some(self.mine);
+        self.terms += 1;
+        self.mine = leader_uuid(self.seed, self.terms);
+        assert!(
+            Some(self.mine) != self.last,
+            "a writer's next uuid is not its last"
+        );
+    }
+
+    /// Spend the uuid it leads with, on purpose: it leads nothing until its
+    /// next claim, which asks under its next uuid and supersedes its own
+    /// term. A writer that leads nothing keeps the unspent uuid it has.
+    pub fn begin_term(&mut self) {
+        if self.owned {
+            self.owned = false;
+            self.next_term();
+        }
+    }
+
+    /// Learn from a view a verdict named. A view naming this writer's uuid
+    /// the leader (a claim whose answer was lost, a position it had wrong)
+    /// is adopted whole; any other leader supersedes it, and its next claim
+    /// asks under a fresh uuid.
+    pub fn learn(&mut self, state: &JournalView) -> Learned {
+        if state.leader == Some(self.mine) {
+            self.owned = true;
             self.next_seq = state.next_seq.0;
             Learned::Owner
-        } else if self.owned.take().is_some() {
+        } else if self.owned {
+            self.owned = false;
+            self.next_term();
             Learned::Superseded
         } else {
             Learned::NotOwner
         }
     }
 
-    /// A claim won: own `state`'s generation and continue at its position.
-    pub fn won(&mut self, state: &JournalState) {
-        self.owned = Some(state.generation.0);
-        self.last = state.generation.0;
+    /// A claim won: lead under its uuid and continue at its position.
+    ///
+    /// # Panics
+    ///
+    /// If `state` names another leader (a programmer error: a won claim
+    /// names its own uuid).
+    pub fn won(&mut self, state: &JournalView) {
+        assert!(
+            state.leader == Some(self.mine),
+            "a won claim names the writer's uuid"
+        );
+        self.owned = true;
         self.next_seq = state.next_seq.0;
     }
 
@@ -191,48 +279,45 @@ impl Writer {
         }
     }
 
-    /// The write of `records` at its next position under the generation it
-    /// owns; `None` when it owns none.
+    /// The write of `records` at its next position under the uuid it leads
+    /// with; `None` when it leads no term.
     #[must_use]
     pub fn entry(&self, records: Vec<Value>) -> Option<Entry> {
-        self.owned.map(|generation| Entry {
-            generation: Generation(generation),
-            owner: self.owner,
+        self.owned().map(|leader| Entry {
+            leader,
             seq: Seq(self.next_seq),
             records,
         })
     }
 
     /// **Deliberate misbehaviour, for a harness:** the write of `records`
-    /// at its next position under the generation it last owned, whether or
-    /// not it still owns it. A superseded writer's write, which the journal
-    /// must refuse; never what [`Writer::write`] sends.
+    /// at its next position under the uuid it last led with, whether or not
+    /// it still leads. A superseded writer's write, which the journal must
+    /// refuse; never what [`Writer::write`] sends.
     #[must_use]
     pub fn stale_entry(&self, records: Vec<Value>) -> Entry {
         Entry {
-            generation: Generation(self.generation()),
-            owner: self.owner,
+            leader: self.fence(),
             seq: Seq(self.next_seq),
             records,
         }
     }
 
     /// The fenced `Truncate` (#228) of this writer's journal below `up_to`,
-    /// under the generation it owns; `None` when it owns none.
+    /// under the uuid it leads with; `None` when it leads no term.
     #[must_use]
     pub fn truncate_request(&self, up_to: u64) -> Option<Truncate> {
-        self.owned.map(|generation| Truncate {
+        self.owned().map(|leader| Truncate {
             journal: self.journal.journal.0,
             tenant: self.journal.tenant.0,
             up_to,
-            generation,
-            owner: self.owner.0,
+            leader: Some(crate::rpc::leader_uuid_to_proto(leader)),
         })
     }
 
     /// **Deliberate misbehaviour, for a harness:** the `Truncate` below
-    /// `up_to` under the generation it last owned, whether or not it still
-    /// owns it. A superseded owner's truncation, which the journal must
+    /// `up_to` under the uuid it last led with, whether or not it still
+    /// leads. A superseded leader's truncation, which the journal must
     /// refuse; never what [`Writer::truncate`] sends.
     #[must_use]
     pub fn stale_truncate_request(&self, up_to: u64) -> Truncate {
@@ -240,13 +325,12 @@ impl Writer {
             journal: self.journal.journal.0,
             tenant: self.journal.tenant.0,
             up_to,
-            generation: self.generation(),
-            owner: self.owner.0,
+            leader: Some(crate::rpc::leader_uuid_to_proto(self.fence())),
         }
     }
 
     /// Fold a truncation's verdict into the belief: a refusal names the
-    /// current writer. What it learned, when the verdict named a state.
+    /// current leader. What it learned, when the verdict named a state.
     pub fn absorb_truncate(&mut self, outcome: &TruncateOutcome) -> Option<Learned> {
         match outcome {
             TruncateOutcome::Refused { state } => Some(self.learn(state)),
@@ -254,9 +338,9 @@ impl Writer {
         }
     }
 
-    /// Truncate the journal below `up_to` as its owner (#228): the request
+    /// Truncate the journal below `up_to` as its leader (#228): the request
     /// carries this writer's own fence, to the believed leader (or
-    /// `first`), following redirects. `None` when it owns no generation:
+    /// `first`), following redirects. `None` when it leads no term:
     /// nothing is sent. A refusal is folded back (a superseded writer
     /// stops).
     pub async fn truncate<P: Providers>(
@@ -294,20 +378,25 @@ impl Writer {
         }
     }
 
-    /// Claim the journal (see [`Client::claim`]) and fold the outcome.
+    /// Claim the journal under this writer's uuid (see [`Client::claim`])
+    /// and fold the outcome. `fresh` asks for a new term on purpose: a
+    /// writer that leads spends its uuid first, so it supersedes itself.
     pub async fn claim<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
-        let outcome = client.claim(self.journal, self.owner.0, first, fresh).await;
+        if fresh {
+            self.begin_term();
+        }
+        let outcome = client.claim(self.journal, self.mine, first).await;
         self.claimed(&outcome);
         outcome
     }
 
-    /// Write `records` at the tail as the owner: see [`Writer::write_entry`].
-    /// Sends nothing when it owns no generation.
+    /// Write `records` at the tail as the leader: see [`Writer::write_entry`].
+    /// Sends nothing when it leads no term.
     pub async fn write<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -321,17 +410,17 @@ impl Writer {
     }
 
     /// Write `entry` — built by [`Writer::entry`], or a retry of one whose
-    /// generation and position still stand — to the believed leader (or
-    /// `first`), following redirects; an ambiguous answer is settled by
+    /// uuid and position still stand — to the believed leader (or `first`),
+    /// following redirects; an ambiguous answer is settled by
     /// [`Client::resolve`] before this returns. Sends nothing when the
-    /// writer does not own `entry`'s generation: a superseded writer stops.
+    /// writer does not lead under `entry`'s uuid: a superseded writer stops.
     pub async fn write_entry<P: Providers>(
         &mut self,
         client: &Client<P>,
         entry: &Entry,
         first: usize,
     ) -> WriterOutcome {
-        if self.owned != Some(entry.generation.0) || entry.owner != self.owner {
+        if self.owned() != Some(entry.leader) {
             return WriterOutcome::NotOwner;
         }
         let request = self.request(entry);

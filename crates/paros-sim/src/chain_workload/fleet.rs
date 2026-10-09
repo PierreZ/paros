@@ -107,6 +107,8 @@ pub(super) struct FleetOps {
     /// reaches its tail after chaos.
     registry: Option<(JournalIdentifier, usize)>,
     client_id: u64,
+    /// A fresh seed per session and checkpointer (#241).
+    leader_seeds: super::LeaderSeeds,
     /// This client saw an `init` end.
     initialized: bool,
     /// Tenant identifiers this client had created: a deliberate reuse names one.
@@ -127,6 +129,7 @@ impl FleetOps {
         connector: Connector,
         patience: Duration,
         client_id: u64,
+        leader_seeds: super::LeaderSeeds,
         kill_ms: (u64, u64),
     ) -> moonpool_sim::SimulationResult<Self> {
         let machines = crate::machine::machine_addrs(deployment)?;
@@ -145,6 +148,7 @@ impl FleetOps {
             patience,
             registry,
             client_id,
+            leader_seeds,
             initialized: false,
             ever_created: Vec::new(),
             pending: None,
@@ -153,10 +157,9 @@ impl FleetOps {
         })
     }
 
-    /// A session over `journals` of `cell` writing both journals as this
-    /// client: the fleet tenant's as its operator, the cell's as its
-    /// coordinator. `None` only for journals that name no fleet tenant,
-    /// which a learned cell's never do.
+    /// A session over `journals` of `cell` writing both journals under
+    /// leader uuids of its own (#241). `None` only for journals that name no
+    /// fleet tenant, which a learned cell's never do.
     fn session(
         &self,
         cell: &Cell,
@@ -165,8 +168,7 @@ impl FleetOps {
     ) -> Option<FleetSession> {
         FleetSession::new(
             journals,
-            self.client_id,
-            NodeId(self.client_id),
+            self.leader_seeds.next(),
             Registry::new(cell.members.iter().copied().map(NodeId)),
             policy,
         )
@@ -304,7 +306,12 @@ impl FleetOps {
         policy: CheckpointPolicy,
         first: usize,
     ) {
-        let mut owner = Checkpointer::new(fleet, self.client_id, FleetDirectory::default(), policy);
+        let mut owner = Checkpointer::new(
+            fleet,
+            self.leader_seeds.next(),
+            FleetDirectory::default(),
+            policy,
+        );
         let OpenOutcome::Open { diverged, .. } = owner.open(client, first).await else {
             return;
         };
@@ -991,8 +998,6 @@ async fn still(
     folded: u64,
 ) -> Option<u64> {
     let state = client.journal_state(journal, first).await?;
-    (writer.owned() == Some(state.generation.0)
-        && state.owner.is_some_and(|o| o.0 == writer.owner())
-        && state.next_seq.0 == folded)
+    (writer.owned().is_some() && writer.owned() == state.leader && state.next_seq.0 == folded)
         .then_some(state.first_seq.0)
 }

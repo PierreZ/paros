@@ -147,8 +147,7 @@ fn propose_control_is_leader_only() {
     let mut nodes = cluster_with_three_chosen();
     // A follower refuses to admit a control command and redirects to the leader.
     let r = nodes[1].propose_control(Control::Truncate {
-        generation: Generation(1),
-        owner: ClientId(7),
+        leader: LeaderUuid(7),
         up_to: Seq(1),
     });
     assert!(
@@ -415,11 +414,10 @@ fn settle(nodes: &mut [ColocatedNode]) {
     deliver_all(nodes, q);
 }
 
-/// A `Write` by `owner` under `generation` at `seq`.
-fn write(generation: u64, owner: u64, seq: u64, b: u8) -> Entry {
+/// A `Write` by leader uuid `leader` at `seq`.
+fn write(leader: u128, seq: u64, b: u8) -> Entry {
     Entry {
-        generation: Generation(generation),
-        owner: ClientId(owner),
+        leader: LeaderUuid(leader),
         seq: Seq(seq),
         records: vec![val(b)],
     }
@@ -434,19 +432,19 @@ fn a_write_is_judged_at_apply_on_every_node() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     let ProposeResult::Accepted(claim) = nodes[0].propose_control(Control::SetLeader {
-        expected: Generation(0),
-        owner: ClientId(7),
+        new: LeaderUuid(7),
+        old: None,
     }) else {
         panic!("the leader admits a SetLeader");
     };
     settle(&mut nodes);
     let mut slots = Vec::new();
     for e in [
-        write(1, 7, 0, 1),
-        write(1, 7, 1, 2),
-        write(1, 7, 0, 1), // a retry of position 0
-        write(1, 7, 0, 9), // position 0 with other bytes
-        write(1, 8, 2, 3), // a foreign writer
+        write(7, 0, 1),
+        write(7, 1, 2),
+        write(7, 0, 1), // a retry of position 0
+        write(7, 0, 9), // position 0 with other bytes
+        write(8, 2, 3), // a foreign writer
     ] {
         let ProposeResult::Accepted(slot) = nodes[0].propose(e) else {
             panic!("the leader admits a write");
@@ -457,7 +455,7 @@ fn a_write_is_judged_at_apply_on_every_node() {
     for n in &nodes {
         assert!(matches!(
             n.replica().outcome_at(claim),
-            Some(crate::Outcome::Leader(s)) if s.generation == Generation(1)
+            Some(crate::Outcome::Leader(s)) if s.leader == Some(LeaderUuid(7))
         ));
         assert_eq!(
             n.replica().outcome_at(slots[0]),
@@ -493,17 +491,16 @@ fn a_truncation_seals_the_journal_state_a_restart_folds_from() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     let _ = nodes[0].propose_control(Control::SetLeader {
-        expected: Generation(0),
-        owner: ClientId(7),
+        new: LeaderUuid(7),
+        old: None,
     });
     settle(&mut nodes);
     for seq in 0..3 {
-        let _ = nodes[0].propose(write(1, 7, seq, 10 + u8::try_from(seq).expect("small")));
+        let _ = nodes[0].propose(write(7, seq, 10 + u8::try_from(seq).expect("small")));
         settle(&mut nodes);
     }
     let _ = nodes[0].propose_control(Control::Truncate {
-        generation: Generation(1),
-        owner: ClientId(7),
+        leader: LeaderUuid(7),
         up_to: Seq(2),
     });
     settle(&mut nodes);

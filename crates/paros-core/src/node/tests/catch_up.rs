@@ -194,16 +194,15 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
     let mut nodes = cluster::<3>();
     make_leader(&mut nodes, 0);
     let _ = nodes[0].propose_control(Control::SetLeader {
-        expected: Generation(0),
-        owner: ClientId(1),
+        new: LeaderUuid(1),
+        old: None,
     });
     let q = drain(&mut nodes[0]);
     deliver_all(&mut nodes, q);
     // Slots 1..=3 hold positions 0..=2.
     for seq in 0..3u64 {
         let _ = nodes[0].propose(Entry {
-            generation: Generation(1),
-            owner: ClientId(1),
+            leader: LeaderUuid(1),
             seq: Seq(seq),
             records: vec![val(u8::try_from(seq).expect("small"))],
         });
@@ -217,8 +216,7 @@ fn truncate_control_command_raises_the_floor_cluster_wide_on_apply() {
 
     // The leader admits the truncate as a control command at the next slot (4).
     let r = nodes[0].propose_control(Control::Truncate {
-        generation: Generation(1),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         up_to: Seq(2),
     });
     assert!(
@@ -405,8 +403,8 @@ fn a_trim_point_jump_moves_the_prefix_and_never_the_promise() {
         from: NodeId(0),
         point: Slot(6),
         state: crate::JournalState {
-            owner: Some(ClientId(7)),
-            generation: Generation(1),
+            leader: Some(LeaderUuid(7)),
+            term: 1,
             next_seq: Seq(4),
             first_seq: Seq(2),
         },

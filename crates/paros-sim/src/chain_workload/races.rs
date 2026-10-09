@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use futures::future::join_all;
 use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
-use paros::ClientId;
 use paros::client::{ClaimOutcome, WriteOutcome, Writer};
 
 use super::rpc::{self, within};
@@ -27,9 +26,9 @@ impl ChainWorkload {
     /// journal stood.
     ///
     /// With `race` (a delay and a node to ask), **race 1 of #205**: this
-    /// owner claims the journal again while its burst is in flight. The
-    /// writes whose slots the claim lands behind are fenced — refused,
-    /// naming the generation the claim minted — and the ones ahead of it
+    /// owner claims the journal again, under its next uuid, while its burst
+    /// is in flight. The writes whose slots the claim lands behind are
+    /// fenced — refused, naming the uuid the claim installed — and the ones ahead of it
     /// are written; which is which is the slot order's alone, and the
     /// linearizability check judges both halves.
     #[allow(clippy::too_many_arguments)]
@@ -44,8 +43,11 @@ impl ChainWorkload {
     ) {
         let time = ctx.time().clone();
         let journal = self.journal;
-        let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
+        // The uuid the racing claim asks under: the writer's next term.
+        let mut racer = *writer;
+        racer.begin_term();
+        let next_term = racer.uuid();
         // A raced burst is spread over the claim's span (`burst_spacing_ms`),
         // so the claim lands inside it rather than behind every write.
         let spacing = if race.is_some() {
@@ -68,7 +70,7 @@ impl ChainWorkload {
             let (delay, via) = race?;
             assert_reachable!("chain: a claim races an owner's pipelined burst");
             time.sleep(delay).await.ok()?;
-            Some(claim(nodes, journal, via % nodes.server_count(), (me, true)).await)
+            Some(claim(nodes, journal, via % nodes.server_count(), next_term).await)
         };
         let (results, claimed) = futures::join!(sends, claimed);
         let mut next = writer.next_seq();
@@ -86,8 +88,12 @@ impl ChainWorkload {
                 }
                 WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
                     self.history.record_write_failed(submission.op);
-                    fenced |= state.generation.0 > submission.entry.generation.0;
-                    if state.owner == Some(ClientId(me)) {
+                    fenced |= state
+                        .leader
+                        .is_some_and(|leader| leader != submission.entry.leader);
+                    if state.leader == Some(submission.entry.leader)
+                        || state.leader == Some(next_term)
+                    {
                         next = next.max(state.next_seq.0);
                     } else {
                         writer.learn(&state);
@@ -109,10 +115,15 @@ impl ChainWorkload {
         writer.advance_to(next);
         match claimed {
             Some(ClaimOutcome::Won { state }) => {
+                writer.begin_term();
                 writer.won(&state);
                 // A fenced write names a state at or past the claim's.
                 writer.advance_to(next);
                 self.adversarial.burst_fenced |= landed && fenced;
+            }
+            Some(outcome @ ClaimOutcome::Owned { .. }) => {
+                writer.begin_term();
+                writer.claimed(&outcome);
             }
             Some(outcome) => {
                 writer.claimed(&outcome);
@@ -124,7 +135,7 @@ impl ChainWorkload {
     /// **Race 2 of #205**: `submission`'s first attempt times out before its
     /// ack can come back (`ack_race_timeout_ms`), so the write may still
     /// land; the owner, not knowing, claims the journal again, and only then
-    /// retries the same write — under the generation it was built with. The
+    /// retries the same write — under the uuid it was built with. The
     /// retry crosses the ownership change its own claim made: answered from
     /// the log when the first attempt landed ahead of the claim, refused as
     /// superseded when it did not.
@@ -139,7 +150,6 @@ impl ChainWorkload {
         writer: &mut Writer,
     ) -> WriteOutcome {
         let journal = self.journal;
-        let me = self.client_id;
         let timeout = Duration::from_millis(config.request_timeout_ms);
         let send = |target: usize| {
             rpc::write_once(nodes, journal, target, &submission.entry, false, false)
@@ -150,19 +160,20 @@ impl ChainWorkload {
             return first;
         }
         assert_reachable!("chain: a write's timeout is shorter than its ack");
-        let moved = match claim(nodes, journal, target, (me, true)).await {
+        writer.begin_term();
+        let moved = match claim(nodes, journal, target, writer.uuid()).await {
             ClaimOutcome::Won { state } => {
                 writer.won(&state);
                 true
             }
             // Another owner's claim overtook this one: the ownership
             // changed all the same.
-            // Already the owner: an earlier claim of its own won. The
-            // ownership changed only if that claim minted a generation past
-            // the one this write was built under.
+            // Already the leader: an earlier claim of its own won. The
+            // leadership changed only if that claim installed another uuid
+            // than the one this write was built under.
             ClaimOutcome::Owned { state } => {
                 writer.learn(&state);
-                state.generation.0 > submission.entry.generation.0
+                state.leader != Some(submission.entry.leader)
             }
             ClaimOutcome::Lost { state } => {
                 writer.learn(&state);
@@ -191,7 +202,9 @@ impl ChainWorkload {
                     self.adversarial.retry_acked_across_claim = true;
                 }
                 WriteOutcome::Refused { state }
-                    if state.generation.0 > submission.entry.generation.0 =>
+                    if state
+                        .leader
+                        .is_some_and(|leader| leader != submission.entry.leader) =>
                 {
                     self.adversarial.retry_superseded = true;
                 }

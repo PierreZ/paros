@@ -15,8 +15,8 @@ use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::Durability;
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, Command, Config, Entry, Generation, JournalState, MustSync,
-    NodeId, QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
+    AcceptorConfig, Ballot, Command, Config, Entry, JournalState, LeaderUuid, MustSync, NodeId,
+    QuorumSystem, Registration, RegistryStorage, Seq, Slot, Storage, Value,
 };
 
 use super::{JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode};
@@ -107,8 +107,7 @@ fn ballot(round: u64) -> Ballot {
 /// A command whose bytes are `byte` repeated, easy to find on disk.
 fn user(seq: u64, byte: u8) -> Command {
     Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(7),
+        leader: LeaderUuid(7),
         seq: Seq(seq),
         records: vec![Value(vec![byte; 48])],
     })

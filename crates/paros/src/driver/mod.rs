@@ -69,10 +69,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
-    ClientId, ColocatedNode, Control, Delegation, Entry, GcAck, Generation, JournalId,
-    JournalIdentifier, MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId,
-    MatchmakerSet, Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem,
-    ReconfigureReply, ReconfigureRequest, ReconfigurerStep, Seq, TenantId, Value,
+    ColocatedNode, Control, Delegation, Entry, GcAck, JournalId, JournalIdentifier, MatchRefusal,
+    MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet, Message, NodeId,
+    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
+    ReconfigurerStep, Seq, TenantId, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -82,7 +82,8 @@ use crate::hooks::{DriverHooks, Reply};
 use crate::machine::ControlJournals;
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
-    ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck,
+    ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
+    leader_uuid_from_proto,
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
@@ -1091,8 +1092,7 @@ where
                     continue;
                 };
                 let entry = Entry {
-                    generation: Generation(req.generation),
-                    owner: ClientId(req.owner),
+                    leader: leader_uuid_from_proto(req.leader),
                     seq: Seq(req.seq),
                     records: req.records.into_iter().map(Value).collect(),
                 };
@@ -1118,7 +1118,7 @@ where
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.set_leader.recv() => {
-                // A journal `SetLeader` (#204): a compare-and-swap decided
+                // A journal `SetLeader` (#241): a compare-and-set decided
                 // into the log and judged at apply, like a `Write`.
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
                 let Some(rt) = journals.live.get_mut(&journal) else {
@@ -1131,19 +1131,19 @@ where
                     }
                     continue;
                 };
-                let expected = Generation(req.expected);
-                let owner = ClientId(req.owner);
+                let new = leader_uuid_from_proto(req.new);
+                let old = leader_from_proto(req.old);
                 let delegation = delegation_choice(&rt.node, hooks);
                 let result = rt
                     .node
-                    .propose_control_in(Control::SetLeader { expected, owner }, delegation);
-                park_call(rt, result, Call::SetLeader { expected, owner, reply }, &shared);
+                    .propose_control_in(Control::SetLeader { new, old }, delegation);
+                park_call(rt, result, Call::SetLeader { new, old, reply }, &shared);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }
             Some((req, reply)) = rpc.truncate.recv() => {
                 // A journal `Truncate` (#204): decided into the log, judged
-                // at apply (fenced by the writer like a `Write`, #228;
+                // at apply (fenced by the leader uuid like a `Write`, #228, #241;
                 // monotone, clamped to `next_seq`), and every node
                 // drops the slots whose records all lie below the new
                 // `first_seq` when its walk reaches it. A control journal is
@@ -1162,14 +1162,13 @@ where
                     continue;
                 };
                 let up_to = Seq(req.up_to);
-                let generation = Generation(req.generation);
-                let owner = ClientId(req.owner);
+                let leader = leader_uuid_from_proto(req.leader);
                 let delegation = delegation_choice(&rt.node, hooks);
                 let result = rt.node.propose_control_in(
-                    Control::Truncate { generation, owner, up_to },
+                    Control::Truncate { leader, up_to },
                     delegation,
                 );
-                park_call(rt, result, Call::Truncate { generation, owner, up_to, reply }, &shared);
+                park_call(rt, result, Call::Truncate { leader, up_to, reply }, &shared);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;
             }

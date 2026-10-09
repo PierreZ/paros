@@ -46,7 +46,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::journal_state::{JournalState, Outcome};
+use crate::journal_state::{JournalState, JournalView, Outcome};
 use crate::types::{Command, Entry, Seq, Slot, Value};
 use crate::write::WriteOp;
 
@@ -62,8 +62,8 @@ const _: () = assert!(APPLY_BATCH > 0);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogRead {
     /// The read started below `first_seq`: those records are gone, and the
-    /// state names where the journal now starts.
-    Truncated(JournalState),
+    /// view names where the journal now starts.
+    Truncated(JournalView),
     /// A page of records.
     Page(LogPage),
     /// The read starts at a position the journal at this fold's head still
@@ -87,10 +87,10 @@ pub struct LogPage {
     pub from: Seq,
     /// The records, dense from `from`.
     pub records: Vec<Value>,
-    /// The journal state at the fold's head the page was served from: its
-    /// `next_seq` is the committed end, its generation and owner the current
-    /// writer — how every tailer learns the owner changed, in-band.
-    pub state: JournalState,
+    /// The journal view at the fold's head the page was served from: its
+    /// `next_seq` is the committed end, its leader uuid the current leader —
+    /// how every tailer learns the leader changed, in-band.
+    pub state: JournalView,
 }
 
 impl LogPage {
@@ -297,8 +297,8 @@ impl Replica {
             "the fold's head never lies behind its base: first_seq"
         );
         assert!(
-            self.base.generation <= self.state.generation,
-            "the fold's head never lies behind its base: generation"
+            self.base.term <= self.state.term,
+            "the fold's head never lies behind its base: term"
         );
         // The positions index names only retained, folded, accepted writes.
         assert!(
@@ -747,7 +747,7 @@ impl Replica {
     /// base's `next_seq` and below `next_seq` (a programmer error).
     #[must_use]
     pub fn read(&self, from: Seq, limit: usize, max_bytes: usize) -> LogRead {
-        let state = self.state;
+        let state = self.state.view();
         if from < state.first_seq {
             return LogRead::Truncated(state);
         }
@@ -1089,14 +1089,11 @@ mod tests {
 
     use super::{LogRead, Replica};
     use crate::journal_state::{JournalState, Outcome};
-    use crate::types::{
-        Ballot, ClientId, Command, Control, Entry, Generation, NodeId, Seq, Slot, Value,
-    };
+    use crate::types::{Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
 
     fn write(seq: u64, records: &[&[u8]]) -> Command {
         Command::Write(Entry {
-            generation: Generation(1),
-            owner: ClientId(1),
+            leader: LeaderUuid(1),
             seq: Seq(seq),
             records: records.iter().map(|r| Value(r.to_vec())).collect(),
         })
@@ -1104,8 +1101,8 @@ mod tests {
 
     fn claim() -> Command {
         Command::Control(Control::SetLeader {
-            expected: Generation(0),
-            owner: ClientId(1),
+            new: LeaderUuid(1),
+            old: None,
         })
     }
 
@@ -1146,15 +1143,14 @@ mod tests {
             write(1, &[b"b"]),
             write(2, &[b"c"]),
             Command::Control(Control::Truncate {
-                generation: Generation(1),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 up_to: Seq(1),
             }),
         ];
         let mut r = replica(&commands[..1]);
         let base = JournalState {
-            owner: Some(ClientId(1)),
-            generation: Generation(1),
+            leader: Some(LeaderUuid(1)),
+            term: 1,
             next_seq: Seq(1),
             first_seq: Seq(0),
         };
@@ -1187,8 +1183,7 @@ mod tests {
             write(1, &[b"b"]),
             write(0, &[b"a"]), // a retry of position 0
             Command::Control(Control::Truncate {
-                generation: Generation(1),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 up_to: Seq(1),
             }),
         ];
@@ -1218,8 +1213,8 @@ mod tests {
         // and 1 lie in slots it never saw. A `Truncate` to position 1 folded
         // after the jump names a record that is already gone here.
         let base = JournalState {
-            owner: Some(ClientId(1)),
-            generation: Generation(1),
+            leader: Some(LeaderUuid(1)),
+            term: 1,
             next_seq: Seq(2),
             first_seq: Seq(0),
         };
@@ -1228,8 +1223,7 @@ mod tests {
             write(0, &[b"a"]),
             write(2, &[b"c"]),
             Command::Control(Control::Truncate {
-                generation: Generation(1),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 up_to: Seq(1),
             }),
         ];
@@ -1279,8 +1273,7 @@ mod tests {
             write(0, &[b"a"]),
             write(1, &[b"b"]),
             Command::Control(Control::Truncate {
-                generation: Generation(1),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 up_to: Seq(1),
             }),
         ]);
@@ -1298,8 +1291,7 @@ mod tests {
             write(0, &[b"a"]),
             write(1, &[b"b", b"c"]),
             Command::Control(Control::Truncate {
-                generation: Generation(1),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 up_to: Seq(2),
             }),
         ]);
@@ -1307,7 +1299,7 @@ mod tests {
         assert_eq!(r.compaction_target(), Some(Slot(1)));
         let base = r.truncate(Slot(2));
         assert_eq!(base.next_seq, Seq(1));
-        assert_eq!(base.generation, Generation(1));
+        assert_eq!(base.term, 1);
         let p = page(r.read(Seq(2), 64, 64));
         assert_eq!(bytes(&p), vec![b"c".to_vec()]);
         // A reboot from the sealed base folds to the same head.

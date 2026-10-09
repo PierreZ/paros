@@ -20,9 +20,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::{
-    Ballot, ClientId, Command, Entry, Generation, NodeId, QuorumSystem, Seq, Slot, Value,
-};
+use paros_core::{Ballot, Command, Entry, LeaderUuid, NodeId, QuorumSystem, Seq, Slot, Value};
 
 use crate::action::{Action, ActionKind, Seam};
 use crate::auto::AutomationFlag;
@@ -91,8 +89,7 @@ fn with_history(
 /// the old.
 fn carried_over(text: &str) -> Command {
     Command::Write(Entry {
-        generation: Generation(1),
-        owner: ClientId(9),
+        leader: LeaderUuid(9),
         seq: Seq(0),
         records: vec![Value(text.as_bytes().to_vec())],
     })

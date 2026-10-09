@@ -21,12 +21,12 @@ use moonpool_sim::{
 };
 use paros::client::{
     ClaimOutcome, ClientTunables, MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome,
-    ReconfigureOutcome, Resolution, Retarget, RetireOutcome, TruncateOutcome, WriteOptions,
-    WriteOutcome, Writer, WriterOutcome,
+    ReconfigureOutcome, Resolution, Retarget, RetireOutcome, SetLeaderOutcome, TruncateOutcome,
+    WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
 use paros::{
-    Command, Entry, JournalIdentifier, JournalState, QuorumSystem, ReconfigureRefusal,
-    RetireRequest, TenantId, Truncate, Value, WireQuorumSystem, command_hash,
+    Command, Entry, JournalIdentifier, LeaderUuid, QuorumSystem, ReconfigureRefusal, RetireRequest,
+    TenantId, Truncate, Value, WireQuorumSystem, command_hash, leader_uuid_to_proto,
     quorum_system_from_proto,
 };
 
@@ -229,6 +229,14 @@ struct ChainConfig {
     /// writer does; ceiling 100: it always tries. Either extreme is valid,
     /// since a refused truncation moves nothing.
     stale_truncate_pct: u64,
+    /// Percent chance a `SET_LEADER` step of a superseded writer reinstates
+    /// the uuid it last led with instead of claiming a new term — the
+    /// misbehaviour the journal does not refuse (§2.3: it trusts its
+    /// clients to draw fresh uuids, decided on 2026-10-09). Floor 0: no
+    /// writer misbehaves, as the library's never does; ceiling 100: every
+    /// superseded one does. Either extreme is valid: the journal's
+    /// guarantees hold under any client.
+    reinstate_pct: u64,
     /// The recovery tail, an order of magnitude past the 4 s chaos window and
     /// past the longest attrition restart (5 s after swarm rescaling) plus
     /// the below-floor snapshot recovery it forces. **Never below 45 s**.
@@ -406,6 +414,7 @@ impl ChainConfig {
             pipeline_depth: buggify_knob!(8_usize, 1_usize..17_usize),
             compact_storm_attempts: buggify_knob!(6_usize, 1_usize..13_usize),
             stale_truncate_pct: buggify_knob!(50_u64, 0_u64..101_u64),
+            reinstate_pct: buggify_knob!(0_u64, 0_u64..101_u64),
             recovery_budget_ms: buggify_knob!(60_000_u64, 45_000_u64..90_001_u64),
             recovery_proposals: buggify_knob!(12_u64, 1_u64..25_u64),
             abandon_pct: buggify_knob!(15_u64, 0_u64..61_u64),
@@ -598,12 +607,36 @@ fn weighted_index(weights: &[u64], draw: u64) -> usize {
 /// committed the abandoned attempt), or one that walks the ring. Two bits
 /// of `draw` pick it; the hint-following default keeps half the mass so the
 /// ordinary client stays the common shape.
-/// The writer fence an owner truncates under (#228): the generation it owns
-/// and its id, or `None` when it owns none (it sends nothing).
-fn fence(writer: &Writer) -> Option<(u64, u64)> {
-    writer
-        .truncate_request(0)
-        .map(|request| (request.generation, request.owner))
+/// Fresh leader seeds for a client's library writers (#241): every session,
+/// checkpointer and claim a workload starts leads under uuids of its own, so
+/// a well-behaved client never reinstates a uuid that led before.
+#[derive(Debug)]
+pub(super) struct LeaderSeeds {
+    base: u128,
+    drawn: std::sync::atomic::AtomicU64,
+}
+
+impl LeaderSeeds {
+    pub(super) fn new(base: u128) -> Self {
+        Self {
+            base,
+            drawn: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// The next seed, never handed out before.
+    pub(super) fn next(&self) -> u128 {
+        let k = self
+            .drawn
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        paros::client::leader_uuid(self.base, k).0
+    }
+}
+
+/// The writer fence an owner truncates under (#228): the uuid it leads
+/// with, or `None` when it leads no term (it sends nothing).
+fn fence(writer: &Writer) -> Option<LeaderUuid> {
+    writer.owned()
 }
 
 /// Fold a truncation's verdict back into the writer: a refusal names the
@@ -904,6 +937,8 @@ struct AdversarialCoverage {
     /// A superseded writer's write was refused, naming the generation that
     /// fenced it.
     fenced: bool,
+    /// A superseded writer reinstated its old uuid (`reinstate_pct`).
+    reinstated: bool,
     /// Race 2 (#205): a retry that crossed an ownership change was answered
     /// from the log, or refused as superseded.
     retry_acked_across_claim: bool,
@@ -1030,8 +1065,8 @@ impl ChainWorkload {
             audit.note_submitted(user_command_hash(&record.0));
         }
         // An owner's write; a superseded writer's is the deliberate
-        // misbehaviour (#204: under its old generation, which the journal
-        // must refuse).
+        // misbehaviour (#204: under its old uuid, which the journal must
+        // refuse unless a reinstatement made it lead again).
         let entry = writer.stale_entry(records);
         let cmd_hash = command_hash(&Command::Write(entry.clone()));
         // The non-interference oracle's ground truth (#188): this write
@@ -1042,7 +1077,7 @@ impl ChainWorkload {
             cmd = %hash_text(cmd_hash),
             op,
             seq = entry.seq.0,
-            generation = entry.generation.0,
+            leader = %entry.leader,
             records = count,
             "chain_command_submitted"
         );
@@ -1094,22 +1129,22 @@ impl ChainWorkload {
 /// confirm, a slow link to its row, must not also fence every claim sent
 /// its way — witness seed 13376948288886643991, where two owners' claims
 /// read at such a leader for the whole recovery tail) — then `SetLeader`
-/// against the generation read, asked of `nodes[target]`.
+/// against the leader read, asked of `nodes[target]`, under `uuid`.
 ///
-/// A claim against its own generation would supersede this client's own
-/// ownership: with a request timeout under the claim's answer, every claim
+/// A claim against its own uuid would supersede this client's own
+/// leadership: with a request timeout under the claim's answer, every claim
 /// won and every answer was lost, and the client re-claimed forever, one
-/// generation a claim (witness seed 3544251723324122292, #205: generations
-/// 1–58 all its own, no write in 60 s) — the library adopts such a read as
-/// `Owned`. `fresh` is the deliberate exception: an owner minting a new
-/// generation of its own (the races of #205).
+/// term a claim (witness seed 3544251723324122292, #205: generations 1–58
+/// all its own, no write in 60 s) — the library adopts a read naming `uuid`
+/// as `Owned`. A writer that wants a new term asks under a new uuid
+/// ([`Writer::claim`] with `fresh`, the races of #205).
 async fn claim(
     nodes: &ChainClient,
     journal: JournalIdentifier,
     target: usize,
-    (me, fresh): (u64, bool),
+    uuid: LeaderUuid,
 ) -> ClaimOutcome {
-    let outcome = nodes.claim(journal, me, target, fresh).await;
+    let outcome = nodes.claim(journal, uuid, target).await;
     assert_always!(
         outcome != ClaimOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
@@ -1315,7 +1350,8 @@ impl Workload for ChainWorkload {
         // journal would have nothing for its tail to converge on.
         let journal_count = self.plan.as_ref().map_or(1, |plan| plan.ids.len().max(1));
         let reader = config.reader && usize::try_from(client_id).unwrap_or(0) >= journal_count;
-        let mut writer = Writer::new(journal, client_id);
+        // Its leader uuids derive from a random seed of its own (#241).
+        let mut writer = Writer::new(journal, ctx.random().random::<u128>());
         // The system-journal operations (#189), and whether the run runs
         // the system journals at all (a seed that does not must refuse them).
         // The fleet operations (#229): the fleet tenant and the cell's tenant list.
@@ -1325,6 +1361,7 @@ impl Workload for ChainWorkload {
             runtime.connector(ctx, config.tunables()),
             Duration::from_millis(config.init_patience_ms),
             client_id,
+            LeaderSeeds::new(ctx.random().random::<u128>()),
             (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
         )?;
         let mut system_ops = system::SystemOps::new(
@@ -1336,7 +1373,7 @@ impl Workload for ChainWorkload {
                 .map(|plan| plan.ids.clone())
                 .unwrap_or_default(),
             &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
-            client_id,
+            (client_id, LeaderSeeds::new(ctx.random().random::<u128>())),
             request_timeout,
         );
 
@@ -1355,16 +1392,15 @@ impl Workload for ChainWorkload {
             let truncator = truncator.clone();
             async move { judged_truncate(truncator.truncate(&request, target).await) }
         };
-        let truncate_traced = |target: usize, fence: Option<(u64, u64)>, up_to: u64| {
-            let attempt = fence.and_then(|(generation, owner)| {
+        let truncate_traced = |target: usize, fence: Option<LeaderUuid>, up_to: u64| {
+            let attempt = fence.and_then(|leader| {
                 fold::clamp(ctx.state(), journal, up_to).map(|up_to| {
-                    trace_truncate(generation, owner, up_to);
+                    trace_truncate(leader, up_to);
                     let request = Truncate {
                         journal: journal.journal.0,
                         tenant: journal.tenant.0,
                         up_to,
-                        generation,
-                        owner,
+                        leader: Some(leader_uuid_to_proto(leader)),
                     };
                     (up_to, truncate_once(target, request))
                 })
@@ -1392,7 +1428,7 @@ impl Workload for ChainWorkload {
                 usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
             let patience = time.now() + Duration::from_millis(config.claim_patience_ms);
             loop {
-                let outcome = claim(&nodes, journal, first, (client_id, false)).await;
+                let outcome = claim(&nodes, journal, first, writer.uuid()).await;
                 writer.claimed(&outcome);
                 match outcome {
                     ClaimOutcome::Won { .. } => {
@@ -1827,7 +1863,9 @@ impl Workload for ChainWorkload {
                         WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
                             self.history.record_write_failed(submission.op);
                             if writer.owned().is_none()
-                                && state.generation.0 > submission.entry.generation.0
+                                && state
+                                    .leader
+                                    .is_some_and(|leader| leader != submission.entry.leader)
                             {
                                 self.adversarial.fenced = true;
                             }
@@ -1851,19 +1889,40 @@ impl Workload for ChainWorkload {
                         self.adversarial.set_leader_executed = true;
                     }
                     let via = nodes.leader().unwrap_or(target);
-                    let outcome = claim(&nodes, journal, via, (client_id, false)).await;
+                    // The deliberate misbehaviour (§2.3, decided on
+                    // 2026-10-09): a superseded writer reinstates the uuid
+                    // it last led with, which the journal does not refuse —
+                    // it trusts its clients to draw fresh ones. Its stale
+                    // writes then land; the journal's guarantees hold all
+                    // the same.
+                    let former = writer.fence();
+                    if writer.owned().is_none()
+                        && former != writer.uuid()
+                        && raw_policy % 100 < config.reinstate_pct
+                    {
+                        assert_reachable!("chain: a superseded writer reinstates its old uuid");
+                        if let Some(state) = nodes.journal_state(journal, via).await {
+                            let outcome =
+                                nodes.set_leader(journal, former, state.leader, via).await;
+                            if matches!(outcome, SetLeaderOutcome::Won { .. }) {
+                                self.adversarial.reinstated = true;
+                            }
+                        }
+                        continue;
+                    }
+                    let outcome = claim(&nodes, journal, via, writer.uuid()).await;
                     writer.claimed(&outcome);
                     match outcome {
                         ClaimOutcome::Won { state } => {
                             self.adversarial.claim_won = true;
                             tracing::info!(
-                                generation = state.generation.0,
+                                leader = %writer.uuid(),
                                 next_seq = state.next_seq.0,
                                 "chain_claim_won"
                             );
                         }
                         ClaimOutcome::Lost { state } | ClaimOutcome::Owned { state } => {
-                            tracing::info!(generation = state.generation.0, "chain_claim_lost");
+                            tracing::info!(next_seq = state.next_seq.0, "chain_claim_lost");
                         }
                         _ => {}
                     }
@@ -1982,7 +2041,7 @@ impl Workload for ChainWorkload {
                         });
                         let results = join_all(attempts).await;
                         let mut committed: Option<(u64, u64, usize)> = None;
-                        let mut refused: Option<JournalState> = None;
+                        let mut refused: Option<paros::JournalView> = None;
                         for (attempt_target, result) in targets.into_iter().zip(results) {
                             match result {
                                 WriteOutcome::Written { seq, count, .. } => {
@@ -2042,15 +2101,14 @@ impl Workload for ChainWorkload {
                         let up_to = writer.next_seq().max(fold.cursor());
                         // The owner truncates under its own fence (#228). A
                         // superseded owner sends nothing — or, as the
-                        // deliberate misbehaviour, its old generation, which
-                        // the journal must refuse.
+                        // deliberate misbehaviour, its old uuid, which the
+                        // journal must refuse.
                         let stale = writer.owned().is_none()
-                            && writer.generation() > 0
+                            && writer.fence() != writer.uuid()
                             && raw_policy % 100 < config.stale_truncate_pct;
                         let fence = if stale {
                             assert_reachable!("chain: a superseded owner sends a stale truncate");
-                            let request = writer.stale_truncate_request(up_to);
-                            Some((request.generation, request.owner))
+                            Some(writer.fence())
                         } else {
                             fence(&writer)
                         };
@@ -2063,9 +2121,7 @@ impl Workload for ChainWorkload {
                     let base = writer.next_seq().max(fold.cursor());
                     // A storm is the owner's (#228): a writer that owns no
                     // generation sends none.
-                    if let (true, Some((generation, owner))) =
-                        (config.compaction && base > 0, fence(&writer))
-                    {
+                    if let (true, Some(leader)) = (config.compaction && base > 0, fence(&writer)) {
                         let first_mode = usize::try_from(raw_pause % 3).unwrap_or(0);
                         for attempt in 0..config.compact_storm_attempts {
                             let mode = (first_mode + attempt) % 3;
@@ -2099,7 +2155,7 @@ impl Workload for ChainWorkload {
                             let Some(up_to) = fold::clamp(ctx.state(), journal, up_to) else {
                                 continue;
                             };
-                            trace_truncate(generation, owner, up_to);
+                            trace_truncate(leader, up_to);
                             tracing::info!(
                                 up_to,
                                 target = request_target,
@@ -2130,8 +2186,7 @@ impl Workload for ChainWorkload {
                                 journal: journal.journal.0,
                                 tenant: journal.tenant.0,
                                 up_to,
-                                generation,
-                                owner,
+                                leader: Some(leader_uuid_to_proto(leader)),
                             };
                             match truncate_once(request_target, request).await {
                                 TruncateOutcome::Applied { state } => {
@@ -3040,6 +3095,9 @@ impl Workload for ChainWorkload {
         if self.adversarial.claim_won {
             assert_reachable!("chain: a client claims the journal mid-run");
         }
+        if self.adversarial.reinstated {
+            assert_reachable!("chain: a reinstated uuid leads again");
+        }
         if self.adversarial.fenced {
             assert_reachable!("chain: a superseded writer learns the generation that fenced it");
         }
@@ -3243,7 +3301,7 @@ impl Workload for ChainWorkload {
                 // nothing, write as the owner, and stop — send nothing —
                 // the moment a newer owner supersedes it.
                 if writer.owned().is_none() {
-                    match claim(&nodes, journal, target, (client_id, false)).await {
+                    match claim(&nodes, journal, target, writer.uuid()).await {
                         outcome @ (ClaimOutcome::Won { .. }
                         | ClaimOutcome::Lost { .. }
                         | ClaimOutcome::Owned { .. }) => {
@@ -3270,7 +3328,7 @@ impl Workload for ChainWorkload {
                 }
                 let submission = match pending.take() {
                     Some(retry)
-                        if retry.entry.generation.0 == writer.generation()
+                        if writer.owned() == Some(retry.entry.leader)
                             && retry.entry.seq.0 == writer.next_seq() =>
                     {
                         retry
@@ -3307,9 +3365,8 @@ impl Workload for ChainWorkload {
                         self.history.record_write_failed(submission.op);
                         assert_always!(
                             writer.owned().is_none()
-                                && state.owner.is_some_and(|owner| owner.0 != client_id),
-                            "client: a superseded writer owns nothing",
-                            { "generation" => state.generation.0 }
+                                && state.leader != Some(submission.entry.leader),
+                            "client: a superseded writer owns nothing"
                         );
                         superseded_stopped = true;
                     }

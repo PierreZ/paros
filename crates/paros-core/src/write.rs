@@ -198,7 +198,7 @@ impl WriteOp {
 #[cfg(test)]
 mod tests {
     use super::{AcceptorWrite, WriteOp};
-    use crate::types::{Ballot, ClientId, Command, Entry, Generation, NodeId, Seq, Slot, Value};
+    use crate::types::{Ballot, Command, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
 
     fn ballot() -> Ballot {
         Ballot {
@@ -212,8 +212,7 @@ mod tests {
             slot: Slot(slot),
             ballot: ballot(),
             value: Command::Write(Entry {
-                generation: Generation(0),
-                owner: ClientId(1),
+                leader: LeaderUuid(1),
                 seq: Seq(1),
                 records: vec![Value(vec![7])],
             }),

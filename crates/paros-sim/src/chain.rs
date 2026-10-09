@@ -9,7 +9,7 @@
 //! on the state after every record, and the audit checks exactly that
 //! (`AuditWorld::fold_applied`).
 
-use paros::{ClientId, Command, Control, Generation, Seq};
+use paros::{Command, Control, LeaderUuid, Seq};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -72,10 +72,9 @@ pub(crate) fn hash_text(hash: u64) -> String {
 }
 
 /// Log the fenced `Truncate` control command a truncation asks for (#228).
-pub(crate) fn trace_truncate(generation: u64, owner: u64, up_to: u64) {
+pub(crate) fn trace_truncate(leader: LeaderUuid, up_to: u64) {
     let command = Command::Control(Control::Truncate {
-        generation: Generation(generation),
-        owner: ClientId(owner),
+        leader,
         up_to: Seq(up_to),
     });
     tracing::info!(

@@ -642,7 +642,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
 mod tests {
     use super::*;
     use crate::journal_state::JournalState;
-    use crate::types::{ClientId, Command, Entry, Generation, NodeId, Seq, Value};
+    use crate::types::{Command, Entry, LeaderUuid, NodeId, Seq, Value};
     use crate::write::WriteOp;
 
     fn ballot(round: u64) -> Ballot {
@@ -654,8 +654,7 @@ mod tests {
 
     fn command(byte: u8) -> Command {
         Command::Write(Entry {
-            generation: Generation(0),
-            owner: ClientId(1),
+            leader: LeaderUuid(1),
             seq: Seq(u64::from(byte)),
             records: vec![Value(vec![byte])],
         })

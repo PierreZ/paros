@@ -20,7 +20,9 @@ use paros::client::{
     Answered, Attempted, CallObserver, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
     WriteOutcome, write_request,
 };
-use paros::{Entry, JournalIdentifier, Read};
+use paros::{
+    Entry, JournalIdentifier, LeaderUuid, Read, leader_from_proto, leader_uuid_from_proto,
+};
 
 use crate::audit::{Attempt, Call, Seen};
 use crate::chain::user_command_hash;
@@ -131,22 +133,20 @@ impl CallObserver for CallLog {
         }
         let call = match attempt {
             Attempted::Write(w) => Call::Write {
-                generation: w.generation,
-                owner: w.owner,
+                leader: leader_uuid_from_proto(w.leader),
                 seq: w.seq,
                 records: w.records.iter().map(|r| user_command_hash(r)).collect(),
             },
             Attempted::SetLeader(s) => Call::SetLeader {
-                expected: s.expected,
-                owner: s.owner,
+                new: leader_uuid_from_proto(s.new),
+                old: leader_from_proto(s.old),
             },
             Attempted::Read(r) => Call::Read {
                 from: r.from_seq,
                 limit: r.limit,
             },
             Attempted::Truncate(t) => Call::Truncate {
-                generation: t.generation,
-                owner: t.owner,
+                leader: leader_uuid_from_proto(t.leader),
                 up_to: t.up_to,
             },
         };
@@ -314,16 +314,16 @@ pub(super) fn write_once(
     async move { judged_write(attempt.await, created) }
 }
 
-/// One `SetLeader(expected, owner)` asked of server `target`; `created` as
-/// for [`judged_write`].
+/// One `SetLeader(new, old)` asked of server `target`; `created` as for
+/// [`judged_write`].
 pub(super) fn set_leader_once(
     nodes: &ChainClient,
     journal: JournalIdentifier,
     target: usize,
-    (expected, owner): (u64, u64),
+    (new, old): (LeaderUuid, Option<LeaderUuid>),
     created: bool,
 ) -> impl Future<Output = SetLeaderOutcome> + use<> {
-    let attempt = nodes.set_leader_attempt(target, journal, expected, owner);
+    let attempt = nodes.set_leader_attempt(target, journal, new, old);
     async move { judged_set_leader(attempt.await, created) }
 }
 

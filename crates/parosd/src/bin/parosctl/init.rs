@@ -3,8 +3,8 @@
 //!
 //! Sent to the first server — a waiting seed every seed's join list names —
 //! which identifies every seed, mints the cell's id and forms every seed
-//! (`paros::machine`); then the first cell coordinator claims the cell
-//! control journal with `SetLeader(expected_gen = 0)`
+//! (`paros::machine`); then `init` claims the cell control journal with
+//! `SetLeader(new, old = none)` under a leader uuid of its own
 //! (`paros::client::bootstrap::claim_cell`). A re-run resumes: a seed that
 //! already serves the cell is asked for it, and the claim is made if it is
 //! still missing.
@@ -17,8 +17,8 @@
 //! adds the cell with its cell tenant, the cell records the fleet on its
 //! side, and the fleet tenant marks the cell `READY`. No identifier is fixed (§3.8): a first
 //! run takes them from the plan it formed and prints them, a re-run learns
-//! them from the seeds' `Inspect`. Both journals are written as the cell
-//! coordinator. Every step is idempotent: `init` is refused only when it
+//! them from the seeds' `Inspect`. Both journals are written under this
+//! run's leader uuids (#241). Every step is idempotent: `init` is refused only when it
 //! found nothing left to do.
 
 use std::net::SocketAddr;
@@ -32,7 +32,7 @@ use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initiali
 use serde_json::json;
 
 use crate::Ending;
-use crate::fleet::{interrupted, nonzero, refusal_text, steps};
+use crate::fleet::{interrupted, leader_seed, nonzero, refusal_text, steps};
 use crate::output::{Printer, note};
 
 /// `parosctl init`.
@@ -58,6 +58,7 @@ pub async fn run(
     let params = InitParams {
         patience: Duration::from_millis(args.patience_ms),
         fleet_id: nonzero(providers),
+        leader_seed: leader_seed(providers),
     };
     match initialize::initialize(providers, rpc, addrs, connect, params).await {
         InitRun::Initialized(done) => {
@@ -155,7 +156,7 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                 "fleet": done.fleet_id,
                 "cell": journals.cell_id,
                 "coordinator": done.coordinator.0,
-                "generation": done.claimed,
+                "leader": done.claimed.map(|leader| leader.to_string()),
                 "steps": steps(&done.steps),
                 "control": journals.cell.to_string(),
                 "fleet_control": fleet_control,

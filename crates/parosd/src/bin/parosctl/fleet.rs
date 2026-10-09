@@ -5,10 +5,10 @@
 //!
 //! No identifier is fixed (`docs/architecture.md` §3.8): the cell's and the fleet tenant's
 //! control journals are learned from the servers' `Inspect`
-//! (`paros::client::bootstrap::cell_frames`). The cell coordinator is
-//! whoever owns the cell control journal (claimed at `init`), and in M9 it
-//! coordinates the fleet tenant too (§3.7: the fleet's one cell hosts it): every
-//! operation here writes both journals under its id. An interrupted `init`
+//! (`paros::client::bootstrap::cell_frames`). Every operation here claims
+//! both journals under a leader uuid of its own (#241), drawn per run, so it
+//! fences whatever run led them before (the cell coordinator of #225 is not
+//! built; §3.7: the fleet's one cell hosts the fleet tenant). An interrupted `init`
 //! or `delete` is resumed by running the same command again; a tenant is
 //! created once, so a second `create` of a name is refused, and an
 //! interrupted creation stays `REGISTERING` until it is deleted (or, with
@@ -80,25 +80,29 @@ pub fn nonzero(providers: &TokioProviders) -> u64 {
     }
 }
 
-/// The cell coordinator: the owner of the cell control journal.
-pub async fn coordinator(client: &ParosClient, journals: &ControlJournals) -> Option<NodeId> {
+/// A random leader seed: every run leads its own terms (#241).
+pub fn leader_seed(providers: &TokioProviders) -> u128 {
+    providers.random().random()
+}
+
+/// Whether `init` has claimed the cell control journal: someone leads it.
+async fn initialized(client: &ParosClient, journals: &ControlJournals) -> Option<bool> {
     let state = client.journal_state(journals.cell, 0).await?;
-    state.owner.map(|owner| NodeId(owner.0))
+    Some(state.leader.is_some())
 }
 
 /// A fleet session over `identifiers` writing both control journals as
-/// `coordinator`, folding the cell's journal over the genesis pool `servers`;
+/// leader uuids drawn from `seed`, folding the cell's journal over the genesis pool `servers`;
 /// `None` when `identifiers` names no fleet journal.
 pub fn session(
     client: &ParosClient,
     journals: ControlJournals,
-    coordinator: NodeId,
+    seed: u128,
     servers: &[u64],
 ) -> Option<FleetSession> {
     FleetSession::new(
         journals,
-        coordinator.0,
-        coordinator,
+        seed,
         Registry::new(servers.iter().copied().map(NodeId)),
         client.tunables().checkpoint_policy(),
     )
@@ -178,11 +182,18 @@ pub async fn run(
     if let TenantCommand::List = args.command {
         return list(client, fleet_journal, out).await;
     }
-    let Some(coordinator) = coordinator(client, &journals).await else {
-        note("the cell control journal has no owner: run parosctl init first");
-        return Ending::Refused;
-    };
-    let Some(mut fleet) = session(client, journals, coordinator, servers) else {
+    match initialized(client, &journals).await {
+        Some(true) => {}
+        Some(false) => {
+            note("the cell control journal has no leader: run parosctl init first");
+            return Ending::Refused;
+        }
+        None => {
+            note("no server served the cell control journal's state");
+            return Ending::Unreachable;
+        }
+    }
+    let Some(mut fleet) = session(client, journals, leader_seed(providers), servers) else {
         note("the cell names no fleet journal");
         return Ending::Refused;
     };

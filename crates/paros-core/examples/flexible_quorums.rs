@@ -79,8 +79,8 @@ use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
 use paros_core::replica::Replica;
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, Command, Control, Entry, Fingerprint, Generation, NodeId,
-    QuorumSystem, Seq, Slot, Value, WriteOp,
+    AcceptorConfig, Ballot, Command, Control, Entry, Fingerprint, LeaderUuid, NodeId, QuorumSystem,
+    Seq, Slot, Value, WriteOp,
 };
 
 const N1: NodeId = NodeId(1);
@@ -97,8 +97,7 @@ fn ballot(round: u64, node: NodeId) -> Ballot {
 
 fn command(text: &str, seq: u64) -> Command {
     Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         seq: Seq(seq),
         records: vec![Value(text.as_bytes().to_vec())],
     })

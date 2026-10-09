@@ -79,7 +79,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, JournalState, QuorumSystem};
+use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem};
 use tokio_util::sync::CancellationToken;
 
 pub use observer::{Answered, Attempted, CallObserver, NoObserver};
@@ -89,11 +89,11 @@ pub use outcome::{
     WriteOutcome,
 };
 pub use reader::{Reader, ReaderOutcome};
-pub use writer::{Learned, Writer, WriterOutcome, write_request};
+pub use writer::{Learned, Writer, WriterOutcome, leader_uuid, write_request};
 
 use crate::rpc::{
     InspectReply, NodeClient, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, SetLeader,
-    Truncate, Write, quorum_system_to_proto,
+    Truncate, Write, leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_to_proto,
 };
 
 /// The client's tunables, one plain field each so a harness can push any
@@ -251,13 +251,13 @@ pub enum Resolution {
     /// the journal reached the position.
     NotWritten {
         /// The journal state that proves it.
-        state: JournalState,
+        state: JournalView,
     },
     /// The position is below the journal's floor: whether it was written is
     /// unknowable.
     Truncated {
         /// The journal state that says so.
-        state: JournalState,
+        state: JournalView,
     },
     /// Still unknown: no server answered within the budget, or the write
     /// is ahead of the journal's tail and may still land.
@@ -581,21 +581,21 @@ impl<P: Providers> Client<P> {
         }
     }
 
-    /// One `SetLeader(expected → owner)` on `journal`, asked of `target`.
+    /// One `SetLeader(old → new)` on `journal`, asked of `target`.
     pub fn set_leader_attempt(
         &self,
         target: usize,
         journal: JournalIdentifier,
-        expected: u64,
-        owner: u64,
+        new: LeaderUuid,
+        old: Option<LeaderUuid>,
     ) -> impl Future<Output = SetLeaderOutcome> + Send + use<P> {
         let node = self.node(target).clone();
         let observer = self.observer.clone();
         let request = SetLeader {
             journal: journal.journal.0,
             tenant: journal.tenant.0,
-            expected,
-            owner,
+            new: Some(leader_uuid_to_proto(new)),
+            old: old.map(leader_uuid_to_proto),
         };
         let token = observer.invoked(Attempted::SetLeader(&request));
         async move {
@@ -716,8 +716,8 @@ impl<P: Providers> Client<P> {
     }
 
     /// Settle a write whose answer never came. First read the position
-    /// back: a journal whose tail has not reached it under a newer
-    /// generation proves the write fenced for good. Otherwise re-send the
+    /// back: a journal whose tail has not reached it under another leader
+    /// proves the write fenced for good. Otherwise re-send the
     /// identical write — the journal answers a write it holds from the log
     /// (`Duplicate`) and refuses one whose position another write took —
     /// up to `retry_budget` times, `retry_backoff` apart.
@@ -728,6 +728,7 @@ impl<P: Providers> Client<P> {
         retarget: Retarget,
     ) -> ResolveReport {
         let count = request.records.len() as u64;
+        let leader = leader_uuid_from_proto(request.leader);
         let back = self
             .read_any(
                 &Read {
@@ -747,7 +748,7 @@ impl<P: Providers> Client<P> {
                     by_read_back: true,
                 };
             }
-            if state.next_seq.0 <= request.seq && state.generation.0 > request.generation {
+            if state.next_seq.0 <= request.seq && state.leader != Some(leader) {
                 return ResolveReport {
                     resolution: Resolution::NotWritten { state },
                     by_read_back: true,
@@ -771,12 +772,11 @@ impl<P: Providers> Client<P> {
                 WriteOutcome::Written { seq, count, .. } => Resolution::Written { seq, count },
                 WriteOutcome::Truncated { state } => Resolution::Truncated { state },
                 // Refused: the log does not hold this write at its
-                // position. For good when a newer generation fenced it or
+                // position. For good when another leader fenced it or
                 // another write took the position; a write ahead of the
-                // tail under the generation in force may still land.
+                // tail under the leader in force may still land.
                 WriteOutcome::Refused { state }
-                    if state.generation.0 != request.generation
-                        || state.next_seq.0 > request.seq =>
+                    if state.leader != Some(leader) || state.next_seq.0 > request.seq =>
                 {
                     Resolution::NotWritten { state }
                 }
@@ -868,32 +868,30 @@ impl<P: Providers> Client<P> {
         &self,
         journal: JournalIdentifier,
         first: usize,
-    ) -> Option<JournalState> {
+    ) -> Option<JournalView> {
         self.read_any(&state_read(journal), first)
             .await
             .outcome
             .state()
     }
 
-    /// Claim `journal` for `owner` (#204): read where it stands — from
+    /// Claim `journal` for `uuid` (#204, #241): read where it stands — from
     /// server `first` on, see [`Client::read_any`] — then `SetLeader`
-    /// against the generation read, asked of the server that served the
+    /// against the leader read, asked of the server that served the
     /// read, the one just proven reachable (asked of `first` instead, a
     /// claim whose read had moved past an unreachable `first` sent its
     /// `SetLeader` down the same dead link and came back ambiguous at
     /// once).
     ///
-    /// A claim against the claimant's own generation would supersede its
-    /// own ownership (a claim that won and whose answer was lost, asked
-    /// again, re-claims forever), so a read already naming `owner` is
-    /// adopted as [`ClaimOutcome::Owned`] — unless `fresh` asks for a new
-    /// generation of its own on purpose.
+    /// A uuid leads at most one term, so a read already naming `uuid` is a
+    /// claim that won and whose answer was lost: it is adopted as
+    /// [`ClaimOutcome::Owned`]. A writer that wants a new term asks with a
+    /// new uuid ([`Writer::claim`]).
     pub async fn claim(
         &self,
         journal: JournalIdentifier,
-        owner: u64,
+        uuid: LeaderUuid,
         first: usize,
-        fresh: bool,
     ) -> ClaimOutcome {
         let report = self.read_any(&state_read(journal), first).await;
         let state = match report.outcome {
@@ -902,25 +900,25 @@ impl<P: Providers> Client<P> {
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
             ReadOutcome::Unserved | ReadOutcome::Ambiguous => return ClaimOutcome::Unread,
         };
-        if !fresh && state.owner.is_some_and(|current| current.0 == owner) {
+        if state.leader == Some(uuid) {
             return ClaimOutcome::Owned { state };
         }
-        self.set_leader(journal, state.generation.0, owner, report.server)
+        self.set_leader(journal, uuid, state.leader, report.server)
             .await
             .into()
     }
 
-    /// `SetLeader(expected → owner)` on `journal`, starting at server
+    /// `SetLeader(old → new)` on `journal`, starting at server
     /// `first`: a redirect naming another server is followed, one naming
     /// none is re-asked of the next server `redirect_backoff` later, for at
     /// most `redirect_limit` redirects, all inside one `request_timeout`.
     /// Only a redirect is re-asked — a node that redirects proposed
-    /// nothing — so this never mints two generations.
+    /// nothing — so this never mints two terms.
     pub async fn set_leader(
         &self,
         journal: JournalIdentifier,
-        expected: u64,
-        owner: u64,
+        new: LeaderUuid,
+        old: Option<LeaderUuid>,
         first: usize,
     ) -> SetLeaderOutcome {
         let deadline = self.time.now() + self.tunables.request_timeout;
@@ -931,7 +929,7 @@ impl<P: Providers> Client<P> {
             if remaining.is_zero() {
                 return SetLeaderOutcome::Ambiguous;
             }
-            let ask = self.set_leader_attempt(server, journal, expected, owner);
+            let ask = self.set_leader_attempt(server, journal, new, old);
             let outcome = self
                 .bounded(remaining, SetLeaderOutcome::Ambiguous, ask)
                 .await;

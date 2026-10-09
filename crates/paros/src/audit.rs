@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalState,
+    AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalView,
     LogRead, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     Message, NodeId, Outcome, Party, PendingBootstrap, ProxyId, ReconfigureReply,
     ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration, RegistrationKind, Seq,
@@ -102,7 +102,7 @@ pub struct LogReadReport<'a> {
     /// The records, dense from `from`.
     pub records: &'a [Value],
     /// The journal state the page was served from.
-    pub state: JournalState,
+    pub state: JournalView,
     /// How it was answered.
     pub answer: LogReadAnswer,
 }

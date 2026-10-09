@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::proposer::{Campaign, Proposer};
 use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, Command, Entry, Fingerprint, Generation,
-    Message, NodeId, QuorumSystem, Seq, Slot, Value,
+    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, LeaderUuid, Message,
+    NodeId, QuorumSystem, Seq, Slot, Value,
 };
 
 use crate::action::{ActionError, ActionErrorCode, Phase};
@@ -128,8 +128,9 @@ fn actor(id: NodeId) -> String {
 #[must_use]
 pub fn value(proposer: u64, round: u64, text: &str) -> Command {
     Command::Write(Entry {
-        generation: Generation(round),
-        owner: ClientId(proposer),
+        // The proposer and its round, so two rounds' values never compare
+        // equal (the unset uuid is never one).
+        leader: LeaderUuid(((u128::from(proposer) << 64) | u128::from(round)) + 1),
         seq: Seq(0),
         records: vec![Value(text.as_bytes().to_vec())],
     })

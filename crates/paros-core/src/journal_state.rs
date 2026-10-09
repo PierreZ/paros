@@ -1,35 +1,44 @@
-//! The **journal state machine** (#204): one per journal, judged at apply.
+//! The **journal state machine** (#204, #241): one per journal, judged at
+//! apply.
 //!
 //! A journal exposes four calls — `Write`, `Read`, `Truncate`, `SetLeader`
 //! (`docs/architecture.md`, section 2) — and every rule behind them is
 //! judged here, when the replica's contiguous walk reaches the slot that
 //! decided the call, in slot order, on every node alike. The state is four
-//! scalars, [`JournalState`]: the current writer `(owner, generation)`, the
-//! next position `next_seq` and the first retained position `first_seq`.
+//! scalars, [`JournalState`]: the current leader uuid, the hidden term
+//! counter, the next position `next_seq` and the first retained position
+//! `first_seq`. A client sees the [`JournalView`]: the same without the term.
 //!
-//! - **`Write(generation, owner, seq, batch)`** ([`Command::Write`]) is
-//!   accepted iff `(generation, owner)` is current and `seq == next_seq`; a
-//!   batch of `n` records then occupies `[seq, seq + n)`. A retry with
-//!   `seq < next_seq` that is *exactly* the write accepted at `seq` — same
-//!   writer, same records — is an idempotent ack ([`Outcome::Duplicate`]);
+//! - **`Write(leader_uuid, seq, batch)`** ([`Command::Write`]) is accepted
+//!   iff `leader_uuid` is the current leader and `seq == next_seq`; a batch of
+//!   `n` records then occupies `[seq, seq + n)`. A retry with `seq <
+//!   next_seq` that is *exactly* the write accepted at `seq` — same leader
+//!   uuid, same records — is an idempotent ack ([`Outcome::Duplicate`]);
 //!   anything else below `next_seq` is refused, and below `first_seq` it is
 //!   [`Outcome::Truncated`]. The log is the deduplication table: there is no
 //!   per-client session ledger and nothing to expire.
-//! - **`SetLeader(expected_gen, new_owner)`** ([`Control::SetLeader`]) is a
-//!   pure compare-and-swap: it wins iff `expected_gen` is current, and the
-//!   generation becomes `expected_gen + 1`. No lease, no clock.
-//! - **`Truncate(generation, owner, up_to_seq)`** ([`Control::Truncate`],
-//!   #228) is fenced like a `Write`: it is accepted iff `(generation, owner)`
-//!   is current, and then raises `first_seq` to `up_to_seq`, clamped to
-//!   `next_seq`. Monotone. A superseded or foreign caller is refused
-//!   ([`Outcome::TruncateRefused`]) and nothing moves: anyone holding the
-//!   tenant could otherwise truncate to a position that is not the owner's
-//!   checkpoint.
+//! - **`SetLeader(new_uuid, old_uuid)`** ([`Control::SetLeader`]) is a pure
+//!   compare-and-set: it wins iff `old_uuid` is the current leader (`None` on
+//!   a journal that never had one), and the term then rises by one. A uuid
+//!   leads at most once: `new_uuid` equal to the current leader is refused.
+//!   No lease, no clock.
+//! - **`Truncate(leader_uuid, up_to_seq)`** ([`Control::Truncate`], #228) is
+//!   fenced like a `Write`: it is accepted iff `leader_uuid` is current, and
+//!   then raises `first_seq` to `up_to_seq`, clamped to `next_seq`. Monotone.
+//!   A superseded or foreign caller is refused ([`Outcome::TruncateRefused`])
+//!   and nothing moves: anyone holding the tenant could otherwise truncate to
+//!   a position that is not the leader's checkpoint.
 //!
-//! A refusal is answered in place and names the state it was judged against,
-//! so an owner learns where the journal is (the next position) or that it was
-//! superseded (a newer generation). Refusals, `Noop`s, control commands and
-//! generation changes consume a slot and no position: positions are dense.
+//! A refusal is answered in place and names the view it was judged against,
+//! so a leader learns where the journal is (the next position) or that it
+//! was superseded (another leader uuid). Refusals, `Noop`s, control commands
+//! and leadership changes consume a slot and no position: positions are
+//! dense.
+//!
+//! The term (#241, §2.3) is the core's own: raised by every won `SetLeader`,
+//! carried by the store's sealed state and a trim-point jump, and never
+//! answered to a client. Two leaderships are two terms, so the audit can say
+//! "a uuid leads at most one term".
 //!
 //! The state machine is pure: it reads the command and, for a retry, the
 //! write accepted at the retried position (handed in as a lookup, so the
@@ -42,19 +51,20 @@
 //! own ordering (`first_seq <= next_seq`) and its monotonicity are pinned at
 //! every transition.
 
-use crate::types::{ClientId, Command, Control, Entry, Generation, Seq};
+use crate::types::{Command, Control, Entry, LeaderUuid, Seq};
 
-/// The per-journal control state (#204): who may write, and where the
+/// The per-journal control state (#204, #241): who may write, and where the
 /// journal's dense positions stand. Folded from the log in slot order; the
 /// same prefix folds to the same state on every node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournalState {
-    /// The client that may write under [`JournalState::generation`], `None`
-    /// until the first `SetLeader` (generation zero is owned by nobody).
-    pub owner: Option<ClientId>,
-    /// The current writer generation.
-    pub generation: Generation,
+    /// The leader uuid that may write in the current term, `None` until the
+    /// first `SetLeader` (term zero is led by nobody).
+    pub leader: Option<LeaderUuid>,
+    /// The hidden term counter (§2.3): raised by every won `SetLeader`.
+    /// Never answered to a client ([`JournalState::view`] drops it).
+    pub term: u64,
     /// The position the next accepted record takes.
     pub next_seq: Seq,
     /// The first position a reader may start at: every record below it was
@@ -62,8 +72,21 @@ pub struct JournalState {
     pub first_seq: Seq,
 }
 
+/// What a client learns of a journal's state (#241): the [`JournalState`]
+/// without its hidden term. Every refusal and every reply names one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct JournalView {
+    /// The current leader uuid, `None` while the journal never had one.
+    pub leader: Option<LeaderUuid>,
+    /// The position the next accepted record takes.
+    pub next_seq: Seq,
+    /// The first position a reader may start at.
+    pub first_seq: Seq,
+}
+
 /// What applying one decided slot did to the journal (#204). A driver answers
-/// the call that proposed the slot from it; the refusals carry the state they
+/// the call that proposed the slot from it; the refusals carry the view they
 /// were judged against.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -82,32 +105,42 @@ pub enum Outcome {
         /// How many records it holds.
         count: u64,
     },
-    /// The write was refused: a stale or foreign writer, a position that is
-    /// not the next one, a retry whose records differ from what was accepted
-    /// there, or an empty batch. The state names the current writer and the
-    /// next position.
-    Refused(JournalState),
+    /// The write was refused: a stale or foreign leader uuid, a position
+    /// that is not the next one, a retry whose records differ from what was
+    /// accepted there, or an empty batch. The view names the current leader
+    /// and the next position.
+    Refused(JournalView),
     /// The write asked for a position below `first_seq`: the records there
-    /// are gone, so whether it was accepted is unknowable here. The owner
+    /// are gone, so whether it was accepted is unknowable here. The leader
     /// treats it as ambiguous and reads the tail.
-    Truncated(JournalState),
-    /// The `SetLeader` won: the state after it (the new generation, the new
-    /// owner, the next position the owner continues from).
-    Leader(JournalState),
-    /// The `SetLeader` lost: its expected generation is not current. The
-    /// state names the current writer.
-    LeaderRefused(JournalState),
-    /// The `Truncate` applied: the state after it (`first_seq` raised, or
+    Truncated(JournalView),
+    /// The `SetLeader` won: the view after it (the new leader, the next
+    /// position it continues from).
+    Leader(JournalView),
+    /// The `SetLeader` lost: its `old` is not the current leader, or its
+    /// `new` already leads. The view names the current leader.
+    LeaderRefused(JournalView),
+    /// The `Truncate` applied: the view after it (`first_seq` raised, or
     /// left where a higher truncation already put it).
-    Trimmed(JournalState),
-    /// The `Truncate` was refused (#228): its `(generation, owner)` is not
-    /// the current writer. Nothing moved; the state names the current writer.
-    TruncateRefused(JournalState),
+    Trimmed(JournalView),
+    /// The `Truncate` was refused (#228): its leader uuid is not the current
+    /// one. Nothing moved; the view names the current leader.
+    TruncateRefused(JournalView),
     /// A `Noop`: nothing moved.
     Noop,
 }
 
 impl JournalState {
+    /// What a client learns of this state: everything but the term.
+    #[must_use]
+    pub fn view(&self) -> JournalView {
+        JournalView {
+            leader: self.leader,
+            next_seq: self.next_seq,
+            first_seq: self.first_seq,
+        }
+    }
+
     /// Apply one decided `command`. `accepted_at(seq)` answers "which write
     /// was accepted with its first record at `seq`?" for a retry below
     /// `next_seq`; it is only asked for a position at or above `first_seq`.
@@ -125,22 +158,15 @@ impl JournalState {
         let before = *self;
         let outcome = match command {
             Command::Write(entry) => self.apply_write(entry, accepted_at),
-            Command::Control(Control::SetLeader { expected, owner }) => {
-                self.apply_set_leader(*expected, *owner)
+            Command::Control(Control::SetLeader { new, old }) => self.apply_set_leader(*new, *old),
+            Command::Control(Control::Truncate { leader, up_to }) => {
+                self.apply_truncate(*leader, *up_to)
             }
-            Command::Control(Control::Truncate {
-                generation,
-                owner,
-                up_to,
-            }) => self.apply_truncate(*generation, *owner, *up_to),
             Command::Control(Control::Noop) => Outcome::Noop,
         };
-        // Monotone in every scalar but the owner, and the owner moves only
-        // with the generation.
-        assert!(
-            self.generation >= before.generation,
-            "a journal's generation never decreases"
-        );
+        // Monotone in every scalar but the leader, and the leader moves only
+        // with the term.
+        assert!(self.term >= before.term, "a journal's term never decreases");
         assert!(
             self.next_seq >= before.next_seq,
             "a journal's next position never decreases"
@@ -149,10 +175,10 @@ impl JournalState {
             self.first_seq >= before.first_seq,
             "a journal's first position never decreases"
         );
-        if self.owner != before.owner {
+        if self.leader != before.leader {
             assert!(
-                self.generation > before.generation,
-                "a journal's owner changes only with its generation"
+                self.term > before.term,
+                "a journal's leader changes only with its term"
             );
         }
         // Negative space, per outcome: a refusal, a duplicate and a `Noop`
@@ -177,10 +203,7 @@ impl JournalState {
                     self.next_seq.0 == seq.0 + count,
                     "a write advances by its records"
                 );
-                assert!(
-                    self.generation == before.generation,
-                    "a write never moves the generation"
-                );
+                assert!(self.term == before.term, "a write never moves the term");
                 assert!(
                     self.first_seq == before.first_seq,
                     "a write never truncates"
@@ -188,12 +211,16 @@ impl JournalState {
             }
             Outcome::Leader(after) => {
                 assert!(
-                    *after == *self,
+                    *after == self.view(),
                     "a won SetLeader reports the state after it"
                 );
                 assert!(
-                    self.generation.0 == before.generation.0 + 1,
-                    "a won SetLeader bumps the generation by one"
+                    self.term == before.term + 1,
+                    "a won SetLeader raises the term by one"
+                );
+                assert!(
+                    self.leader != before.leader,
+                    "a won SetLeader changes the leader"
                 );
                 assert!(
                     self.next_seq == before.next_seq,
@@ -201,25 +228,25 @@ impl JournalState {
                 );
             }
             Outcome::Trimmed(after) => {
-                assert!(*after == *self, "a truncation reports the state after it");
+                assert!(
+                    *after == self.view(),
+                    "a truncation reports the state after it"
+                );
                 assert!(
                     self.next_seq == before.next_seq,
                     "a truncation never moves next_seq"
                 );
-                assert!(
-                    self.generation == before.generation,
-                    "a truncation keeps the writer"
-                );
+                assert!(self.term == before.term, "a truncation keeps the leader");
             }
         }
-        // The refusals name the state they were judged against.
+        // The refusals name the view they were judged against.
         if let Outcome::Refused(judged)
         | Outcome::Truncated(judged)
         | Outcome::LeaderRefused(judged)
         | Outcome::TruncateRefused(judged) = &outcome
         {
             assert!(
-                *judged == before,
+                *judged == before.view(),
                 "a refusal names the state it was judged against"
             );
         }
@@ -233,12 +260,12 @@ impl JournalState {
         accepted_at: impl Fn(Seq) -> Option<&'a Entry>,
     ) -> Outcome {
         if entry.seq < self.first_seq {
-            return Outcome::Truncated(*self);
+            return Outcome::Truncated(self.view());
         }
         if entry.seq < self.next_seq {
             // A retry is answered from the log itself: exactly the write
-            // accepted at this position — same writer, same records — is an
-            // ack; anything else is a write that lost the position.
+            // accepted at this position — same leader uuid, same records — is
+            // an ack; anything else is a write that lost the position.
             return match accepted_at(entry.seq) {
                 Some(original) if original == entry => {
                     assert!(
@@ -250,12 +277,12 @@ impl JournalState {
                         count: entry.count(),
                     }
                 }
-                _ => Outcome::Refused(*self),
+                _ => Outcome::Refused(self.view()),
             };
         }
-        let current = self.is_current(entry.generation, entry.owner);
+        let current = self.is_current(entry.leader);
         if !current || entry.seq != self.next_seq || entry.records.is_empty() {
-            return Outcome::Refused(*self);
+            return Outcome::Refused(self.view());
         }
         assert!(entry.count() > 0, "an accepted write carries records");
         let seq = self.next_seq;
@@ -270,26 +297,26 @@ impl JournalState {
         }
     }
 
-    fn apply_set_leader(&mut self, expected: Generation, owner: ClientId) -> Outcome {
-        if expected != self.generation {
-            return Outcome::LeaderRefused(*self);
+    fn apply_set_leader(&mut self, new: LeaderUuid, old: Option<LeaderUuid>) -> Outcome {
+        // The unset uuid never leads, and the current leader cannot win its
+        // own term again.
+        if old != self.leader || !new.is_set() || Some(new) == self.leader {
+            return Outcome::LeaderRefused(self.view());
         }
-        self.generation = Generation(self.generation.0 + 1);
-        self.owner = Some(owner);
+        let before = self.term;
+        self.term += 1;
+        self.leader = Some(new);
         assert!(
-            self.generation > expected,
-            "a won SetLeader moves past the expected generation"
+            self.term > before,
+            "a won SetLeader moves past the term it was judged in"
         );
-        assert!(
-            self.is_current(self.generation, owner),
-            "the new owner is the current writer"
-        );
-        Outcome::Leader(*self)
+        assert!(self.is_current(new), "the new leader is the current one");
+        Outcome::Leader(self.view())
     }
 
-    fn apply_truncate(&mut self, generation: Generation, owner: ClientId, up_to: Seq) -> Outcome {
-        if !self.is_current(generation, owner) {
-            return Outcome::TruncateRefused(*self);
+    fn apply_truncate(&mut self, leader: LeaderUuid, up_to: Seq) -> Outcome {
+        if !self.is_current(leader) {
+            return Outcome::TruncateRefused(self.view());
         }
         let before = self.first_seq;
         self.first_seq = self.first_seq.max(up_to.min(self.next_seq));
@@ -301,23 +328,24 @@ impl JournalState {
             self.first_seq <= self.next_seq,
             "a truncation is clamped to next_seq"
         );
-        Outcome::Trimmed(*self)
+        Outcome::Trimmed(self.view())
     }
 
-    /// Whether `(generation, owner)` is the journal's current writer: the
-    /// fence a `Write` and a `Truncate` are both judged against.
+    /// Whether `leader` is the journal's current leader uuid: the fence a
+    /// `Write` and a `Truncate` are both judged against.
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn is_current(&self, generation: Generation, owner: ClientId) -> bool {
-        let current = self.owner == Some(owner) && self.generation == generation;
-        // Paired with `assert_invariants`: a current writer exists only from
-        // the first generation on.
+    pub fn is_current(&self, leader: LeaderUuid) -> bool {
+        let current = self.leader == Some(leader);
+        // Paired with `assert_invariants`: a current leader exists only from
+        // the first term on, and is never the unset uuid.
         if current {
-            assert!(self.generation.0 > 0, "a current writer holds a generation");
+            assert!(self.term > 0, "a current leader holds a term");
+            assert!(leader.is_set(), "the unset uuid never leads");
         }
         current
     }
@@ -326,16 +354,20 @@ impl JournalState {
     ///
     /// # Panics
     ///
-    /// If `first_seq` passed `next_seq`, or a journal with a generation has
-    /// no owner (or the reverse).
+    /// If `first_seq` passed `next_seq`, or a journal with a term has no
+    /// leader (or the reverse), or the unset uuid leads.
     pub fn assert_invariants(&self) {
         assert!(
             self.first_seq <= self.next_seq,
             "a journal's first position never passes its next one"
         );
         assert!(
-            self.owner.is_some() == (self.generation.0 > 0),
-            "a journal has an owner exactly from its first generation"
+            self.leader.is_some() == (self.term > 0),
+            "a journal has a leader exactly from its first term"
+        );
+        assert!(
+            self.leader.is_none_or(LeaderUuid::is_set),
+            "the unset uuid never leads"
         );
     }
 }
@@ -343,29 +375,27 @@ impl JournalState {
 #[cfg(test)]
 mod tests {
     use super::{JournalState, Outcome};
-    use crate::types::{ClientId, Command, Control, Entry, Generation, Seq, Value};
+    use crate::types::{Command, Control, Entry, LeaderUuid, Seq, Value};
 
-    fn write(generation: u64, owner: u64, seq: u64, records: &[&[u8]]) -> Command {
+    fn write(leader: u128, seq: u64, records: &[&[u8]]) -> Command {
         Command::Write(Entry {
-            generation: Generation(generation),
-            owner: ClientId(owner),
+            leader: LeaderUuid(leader),
             seq: Seq(seq),
             records: records.iter().map(|r| Value(r.to_vec())).collect(),
         })
     }
 
-    fn truncate(generation: u64, owner: u64, up_to: u64) -> Command {
+    fn truncate(leader: u128, up_to: u64) -> Command {
         Command::Control(Control::Truncate {
-            generation: Generation(generation),
-            owner: ClientId(owner),
+            leader: LeaderUuid(leader),
             up_to: Seq(up_to),
         })
     }
 
-    fn set_leader(expected: u64, owner: u64) -> Command {
+    fn set_leader(new: u128, old: Option<u128>) -> Command {
         Command::Control(Control::SetLeader {
-            expected: Generation(expected),
-            owner: ClientId(owner),
+            new: LeaderUuid(new),
+            old: old.map(LeaderUuid),
         })
     }
 
@@ -387,17 +417,17 @@ mod tests {
 
     #[test]
     fn nobody_writes_before_the_first_set_leader() {
-        let (state, outcomes) = fold(&[write(0, 1, 0, &[b"a"])]);
+        let (state, outcomes) = fold(&[write(1, 0, &[b"a"])]);
         assert!(matches!(outcomes[0], Outcome::Refused(_)));
         assert_eq!(state.next_seq, Seq(0));
     }
 
     #[test]
-    fn an_owner_writes_dense_positions_and_a_batch_takes_one_per_record() {
+    fn a_leader_writes_dense_positions_and_a_batch_takes_one_per_record() {
         let (state, outcomes) = fold(&[
-            set_leader(0, 1),
-            write(1, 1, 0, &[b"a", b"b"]),
-            write(1, 1, 2, &[b"c"]),
+            set_leader(1, None),
+            write(1, 0, &[b"a", b"b"]),
+            write(1, 2, &[b"c"]),
         ]);
         assert_eq!(
             outcomes[1],
@@ -417,26 +447,26 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_a_stale_generation_and_a_foreign_owner_are_refused() {
+    fn a_gap_a_superseded_leader_and_a_foreign_uuid_are_refused() {
         let (_, outcomes) = fold(&[
-            set_leader(0, 1),
-            write(1, 1, 1, &[b"gap"]),
-            write(1, 2, 0, &[b"foreign"]),
-            set_leader(1, 2),
-            write(1, 1, 0, &[b"stale"]),
+            set_leader(1, None),
+            write(1, 1, &[b"gap"]),
+            write(2, 0, &[b"foreign"]),
+            set_leader(2, Some(1)),
+            write(1, 0, &[b"stale"]),
         ]);
         assert!(matches!(outcomes[1], Outcome::Refused(_)));
         assert!(matches!(outcomes[2], Outcome::Refused(_)));
-        assert!(matches!(outcomes[4], Outcome::Refused(s) if s.generation == Generation(2)));
+        assert!(matches!(outcomes[4], Outcome::Refused(v) if v.leader == Some(LeaderUuid(2))));
     }
 
     #[test]
     fn a_retry_is_acked_only_with_the_same_bytes() {
         let (state, outcomes) = fold(&[
-            set_leader(0, 1),
-            write(1, 1, 0, &[b"a"]),
-            write(1, 1, 0, &[b"a"]),
-            write(1, 1, 0, &[b"other"]),
+            set_leader(1, None),
+            write(1, 0, &[b"a"]),
+            write(1, 0, &[b"a"]),
+            write(1, 0, &[b"other"]),
         ]);
         assert_eq!(
             outcomes[2],
@@ -450,36 +480,54 @@ mod tests {
     }
 
     #[test]
-    fn a_retry_survives_an_ownership_change_but_not_a_truncation() {
+    fn a_retry_survives_a_leadership_change_but_not_a_truncation() {
         let (_, outcomes) = fold(&[
-            set_leader(0, 1),
-            write(1, 1, 0, &[b"a"]),
-            set_leader(1, 2),
-            write(1, 1, 0, &[b"a"]),
-            truncate(2, 2, 1),
-            write(1, 1, 0, &[b"a"]),
+            set_leader(1, None),
+            write(1, 0, &[b"a"]),
+            set_leader(2, Some(1)),
+            write(1, 0, &[b"a"]),
+            truncate(2, 1),
+            write(1, 0, &[b"a"]),
         ]);
         assert!(matches!(outcomes[3], Outcome::Duplicate { .. }));
-        assert!(matches!(outcomes[5], Outcome::Truncated(s) if s.first_seq == Seq(1)));
+        assert!(matches!(outcomes[5], Outcome::Truncated(v) if v.first_seq == Seq(1)));
     }
 
     #[test]
-    fn set_leader_is_a_compare_and_swap() {
-        let (state, outcomes) = fold(&[set_leader(0, 1), set_leader(0, 2), set_leader(1, 2)]);
-        assert!(matches!(outcomes[0], Outcome::Leader(s) if s.generation == Generation(1)));
-        assert!(matches!(outcomes[1], Outcome::LeaderRefused(s) if s.owner == Some(ClientId(1))));
+    fn set_leader_is_a_compare_and_set_and_raises_the_term() {
+        let (state, outcomes) = fold(&[
+            set_leader(1, None),
+            set_leader(2, None),
+            set_leader(2, Some(1)),
+        ]);
+        assert!(matches!(outcomes[0], Outcome::Leader(v) if v.leader == Some(LeaderUuid(1))));
+        assert!(
+            matches!(outcomes[1], Outcome::LeaderRefused(v) if v.leader == Some(LeaderUuid(1)))
+        );
         assert!(matches!(outcomes[2], Outcome::Leader(_)));
-        assert_eq!(state.owner, Some(ClientId(2)));
-        assert_eq!(state.generation, Generation(2));
+        assert_eq!(state.leader, Some(LeaderUuid(2)));
+        assert_eq!(state.term, 2);
+    }
+
+    #[test]
+    fn the_unset_uuid_and_the_current_leader_never_win() {
+        let (state, outcomes) = fold(&[
+            set_leader(0, None),
+            set_leader(1, None),
+            set_leader(1, Some(1)),
+        ]);
+        assert!(matches!(outcomes[0], Outcome::LeaderRefused(v) if v.leader.is_none()));
+        assert!(matches!(outcomes[2], Outcome::LeaderRefused(_)));
+        assert_eq!(state.term, 1);
     }
 
     #[test]
     fn truncate_is_monotone_and_clamped_to_the_next_position() {
         let (state, _) = fold(&[
-            set_leader(0, 1),
-            write(1, 1, 0, &[b"a", b"b"]),
-            truncate(1, 1, 9),
-            truncate(1, 1, 1),
+            set_leader(1, None),
+            write(1, 0, &[b"a", b"b"]),
+            truncate(1, 9),
+            truncate(1, 1),
         ]);
         assert_eq!(state.first_seq, Seq(2));
     }
@@ -487,20 +535,20 @@ mod tests {
     #[test]
     fn truncate_is_fenced_like_a_write() {
         let (state, outcomes) = fold(&[
-            truncate(0, 1, 0),
-            set_leader(0, 1),
-            write(1, 1, 0, &[b"a", b"b"]),
-            truncate(1, 2, 1),
-            set_leader(1, 2),
-            truncate(1, 1, 2),
-            truncate(2, 2, 1),
+            truncate(1, 0),
+            set_leader(1, None),
+            write(1, 0, &[b"a", b"b"]),
+            truncate(2, 1),
+            set_leader(2, Some(1)),
+            truncate(1, 2),
+            truncate(2, 1),
         ]);
-        assert!(matches!(outcomes[0], Outcome::TruncateRefused(s) if s.owner.is_none()));
-        assert!(matches!(outcomes[3], Outcome::TruncateRefused(s) if s.first_seq == Seq(0)));
+        assert!(matches!(outcomes[0], Outcome::TruncateRefused(v) if v.leader.is_none()));
+        assert!(matches!(outcomes[3], Outcome::TruncateRefused(v) if v.first_seq == Seq(0)));
         assert!(
-            matches!(outcomes[5], Outcome::TruncateRefused(s) if s.generation == Generation(2))
+            matches!(outcomes[5], Outcome::TruncateRefused(v) if v.leader == Some(LeaderUuid(2)))
         );
-        assert!(matches!(outcomes[6], Outcome::Trimmed(s) if s.first_seq == Seq(1)));
+        assert!(matches!(outcomes[6], Outcome::Trimmed(v) if v.first_seq == Seq(1)));
         assert_eq!(state.first_seq, Seq(1));
     }
 }
