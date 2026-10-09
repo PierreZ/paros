@@ -65,6 +65,16 @@ impl ColocatedNode {
             // bootstrap; without the re-probe, nobody campaigned again (the
             // sweep went red on "cluster converged after chaos", and green
             // with it).
+            if self.role != NodeRole::Follower {
+                // A removed leader's own reconfiguration campaign timed out:
+                // give it up, as a member's timed-out campaign is given up,
+                // before the probe opens (a probe never overlaps a campaign).
+                self.become_follower(None);
+            }
+            assert!(
+                self.role == NodeRole::Follower,
+                "a non-member steps down before it probes"
+            );
             self.probe_membership();
             return;
         }
