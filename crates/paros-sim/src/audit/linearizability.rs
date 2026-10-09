@@ -575,6 +575,16 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
     let mut deepest: Option<(usize, usize)> = None;
     let mut steps = 0_u64;
     let mut node = timeline.first();
+    // Identical unknown attempts are interchangeable: they have no response
+    // and make the same step, and the earlier-invoked one can stand wherever
+    // a later one could. So the search takes them in invocation order: a
+    // copy steps only once the copy before it (`twin`) is linearized.
+    // Without this, every subset of two families of retried claims was a
+    // separate state (hunt seed 4349432526857375247: 36 kept copies of
+    // `B <- A` and `A <- B` around a reinstatement ran past the budget on a
+    // linearizable history).
+    let twin = twins(attempts, &keep);
+    let mut done = vec![false; attempts.len()];
     let verdict = |linearizable, exhausted, steps, stuck| Verdict {
         linearizable,
         exhausted,
@@ -598,6 +608,9 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
             if deepest.is_none_or(|(depth, _)| stack.len() >= depth) {
                 deepest = Some((stack.len(), i));
             }
+        } else if twin[i].is_some_and(|t| !done[t]) {
+            node = timeline.next[node];
+            continue;
         } else if let Some(undo) = model.step(i) {
             let forced = attempts[i].seen.is_some() && model.unchanged(undo);
             pending.remove(attempts, i);
@@ -615,6 +628,7 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
             let key = linearized ^ zobrist(i) ^ model.hash();
             if cache.insert(key) {
                 stack.push((i, undo, forced));
+                done[i] = true;
                 linearized ^= zobrist(i);
                 if timeline.lift(i) {
                     remaining -= 1;
@@ -641,6 +655,7 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
             };
             model.undo(undo);
             pending.add(attempts, j);
+            done[j] = false;
             linearized ^= zobrist(j);
             if timeline.unlift(j) {
                 remaining += 1;
@@ -710,6 +725,24 @@ impl Pending {
     fn lowest(&self) -> Option<u64> {
         self.0.keys().next().copied()
     }
+}
+
+/// For each kept unknown attempt, the kept unknown attempt with the
+/// identical call invoked just before it, if any ([`check`]'s invocation
+/// order over interchangeable copies).
+fn twins(attempts: &[Attempt], keep: &[usize]) -> Vec<Option<usize>> {
+    let mut order: Vec<usize> = keep
+        .iter()
+        .copied()
+        .filter(|&i| attempts[i].seen.is_none())
+        .collect();
+    order.sort_by_key(|&i| (attempts[i].inv, i));
+    let mut twin = vec![None; attempts.len()];
+    let mut last: BTreeMap<&Call, usize> = BTreeMap::new();
+    for i in order {
+        twin[i] = last.insert(&attempts[i].call, i);
+    }
+    twin
 }
 
 /// The attempts the search judges, by index: every answered one, and every
@@ -1420,5 +1453,62 @@ mod tests {
             ),
         ];
         assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
+    }
+
+    /// Two families of identical unknown claims, `1 <- 0` and `0 <- 1`
+    /// (a retried claim and a reinstatement retried), around reads that
+    /// pin the leader: the copies are taken in invocation order, not as
+    /// every subset of each family.
+    fn claim_families(seen_by_last: u64) -> Vec<Attempt> {
+        let led_by = |leader| Seen::Page {
+            records: vec![],
+            state: state(Some(leader), 0, 0),
+        };
+        let mut history = vec![at(
+            0,
+            0,
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
+        )];
+        for k in 0..20 {
+            history.push(at(1, 2 + k, claim(1, Some(0)), None));
+            history.push(at(0, 2 + k, claim(0, Some(1)), None));
+        }
+        history.push(at(
+            2,
+            30,
+            Call::Read { from: 0, limit: 0 },
+            Some((31, led_by(1))),
+        ));
+        history.push(at(
+            2,
+            32,
+            Call::Read { from: 0, limit: 0 },
+            Some((33, led_by(0))),
+        ));
+        history.push(at(
+            2,
+            34,
+            Call::Read { from: 0, limit: 0 },
+            Some((35, led_by(seen_by_last))),
+        ));
+        history
+    }
+
+    #[test]
+    fn families_of_identical_unknown_claims_are_not_a_subset_explosion() {
+        let verdict = check(&claim_families(1), WriterMode::Single, 50_000);
+        assert!(!verdict.exhausted, "steps: {}", verdict.steps);
+        assert!(verdict.linearizable);
+    }
+
+    /// A refutation explores every order, so it pins the mechanism: taking
+    /// each family's copies as distinct runs past a million steps here, in
+    /// invocation order it ends well inside.
+    #[test]
+    fn a_leader_no_claim_installs_is_still_refuted_among_copies() {
+        let verdict = check(&claim_families(2), WriterMode::Single, 1_000_000);
+        assert!(!verdict.exhausted, "steps: {}", verdict.steps);
+        assert!(!verdict.linearizable);
     }
 }
