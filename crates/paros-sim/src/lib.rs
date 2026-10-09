@@ -23,7 +23,6 @@ mod audit;
 mod chain;
 mod chain_workload;
 mod client;
-mod hooks;
 mod lifecycle;
 mod machine;
 mod process;
@@ -368,7 +367,7 @@ fn sweep_workers() -> usize {
 }
 
 /// Run the DST bug-finding sweep: regional latency, swarm network turbulence,
-/// attrition, driver hooks, operation swarm, and the safety/recovery checks under
+/// attrition, the driver's BUGGIFY sites, operation swarm, and the safety/recovery checks under
 /// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
 /// coverage plateaus, capped at `max_iterations`). The cap is a parameter so the
 /// caller owns the schedule: the sancov runner (`cargo xtask sim`) passes

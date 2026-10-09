@@ -23,7 +23,7 @@ not yet have a bug.
 The scenario needs a fault and an interleaving. Environmental faults (drop,
 delay, reorder, partition, crash/restart, disk corruption) are moonpool's and
 already ride the combined campaign; do not re-implement one at the protocol
-layer. What you add is *likelihood*: a `DriverHooks` BUGGIFY location for a
+layer. What you add is *likelihood*: an inline BUGGIFY site in `paros` for a
 rare-but-valid driver decision, or a `buggify_knob!` extreme for a tunable
 (`/adding-a-buggify-site`). If the harness lacks a capability the scenario
 needs (a durability seam, a fault the world cannot inject yet), build the

@@ -32,7 +32,6 @@ use moonpool_sim::{
 
 use crate::audit::journals::{journal_board, lock as board_lock};
 use crate::audit::{AuditWorld, NodeAudit, audit_world, audit_world_for};
-use crate::hooks::BuggifyHooks;
 use crate::roles::{
     ACCEPTOR_GROUP, Deployment, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP, Role, replica_node_id,
 };
@@ -82,13 +81,11 @@ fn bootstrap_config(ctx: &SimContext, pool: usize, has_matchmakers: bool) -> Acc
 /// One role incarnation's harness rig, armed the same way for every role:
 /// the incarnation and its shape (`crate::shape::boot` — the rig's **only**
 /// draw, so a caller keeps it exactly where its own registry draws expect
-/// it), the driver hooks over the chaos window at the shape's crash bias,
-/// and the per-iteration audit — the shared checker every role folds into,
+/// it), and the per-iteration audit — the shared checker every role folds into,
 /// and this incarnation's port. The disk's fault layer is not here: a proxy
 /// has no disk.
 pub(crate) struct RoleRig {
     pub(crate) incarnation: crate::shape::Incarnation,
-    pub(crate) hooks: BuggifyHooks<SimTimeProvider>,
     pub(crate) checker: Arc<AuditWorld>,
     pub(crate) audit: NodeAudit<SimTimeProvider>,
 }
@@ -99,15 +96,13 @@ pub(crate) struct RoleRig {
 /// state is the world's business, never the shape's. The audit is pure
 /// observation, published beside the storage world so every node folds its
 /// transitions into one incremental checker — it never influences the
-/// driver; that is the hooks' job.
+/// driver; that is the inline BUGGIFY sites' job.
 pub(crate) fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
     let incarnation = crate::shape::boot(ctx.state(), my_ip);
-    let hooks = BuggifyHooks::new(ctx.time().clone(), crate::CHAOS_DURATION);
     let checker = audit_world(ctx.state());
     let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
     RoleRig {
         incarnation,
-        hooks,
         checker,
         audit,
     }
@@ -249,9 +244,7 @@ async fn run_joiner(
     let plan = crate::shape::journals(ctx.state());
     let board = crate::audit::system::system_board(ctx.state());
     let (system_plan, _) = system_plan(ctx, deployment, &members, &plan, id);
-    let RoleRig {
-        incarnation, hooks, ..
-    } = arm_role(ctx, my_ip);
+    let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
     let layout = crate::shape::journal_layout(ctx.state());
     let mut seats: Vec<Seat> = Vec::new();
@@ -278,7 +271,6 @@ async fn run_joiner(
             None,
             tunables,
             ctx.shutdown().clone(),
-            &hooks,
         ))
         .await
         {
@@ -523,14 +515,14 @@ async fn run_acceptor(
     // seed's draw schedule keeps its order.
     let RoleRig {
         incarnation,
-        hooks,
         checker: _,
         audit: _,
     } = arm_role(ctx, my_ip);
-    let hooks = hooks
-        .holding_journal(plan.held)
-        .withholding_gc(crate::shape::withhold_gc(ctx.state()))
-        .losing_verdicts(crate::shape::lost_verdict(ctx.state()));
+    // The seed's scenarios decide the driver's named BUGGIFY locations
+    // (`paros::scenario`) before the node's first beat; each draw is fixed
+    // by its first caller.
+    crate::shape::withhold_gc(ctx.state());
+    crate::shape::lost_verdict(ctx.state());
     let shape = incarnation.shape;
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the
@@ -723,7 +715,6 @@ async fn run_acceptor(
             None,
             tunables,
             ctx.shutdown().clone(),
-            &hooks,
         ))
         .await
         {

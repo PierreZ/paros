@@ -47,7 +47,7 @@ use std::time::Duration;
 use clap::Parser;
 use moonpool_core::{TokioProviders, TokioStorageProvider};
 use paros::machine::{MachineError, MachineSettings, ProviderDisk};
-use paros::{BootRefusal, NoAudit, NoHooks, RunError};
+use paros::{BootRefusal, NoAudit, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -118,7 +118,6 @@ async fn run(settings: Settings) -> ExitCode {
         1,
         tunables,
         shutdown_on_signal(),
-        &NoHooks,
     )
     .await;
     match ran {

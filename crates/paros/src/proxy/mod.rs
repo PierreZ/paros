@@ -17,8 +17,8 @@
 //! answer ([`ProxyLeader::expire_stale`] — bounded retention: a slot every
 //! acceptor compacted past is never answered, and an eviction is not a
 //! decision), then asks the core to re-fan-out the rest
-//! ([`ProxyLeader::resend_pending`]; the driver's [`DriverHooks`] may skip
-//! a beat).
+//! ([`ProxyLeader::resend_pending`]; an inline BUGGIFY site may skip a
+//! beat).
 //!
 //! **Nothing here is durable.** A proxy has no storage seam, no boot scan,
 //! no format marker and no crash seam: it reboots empty, and the leader's

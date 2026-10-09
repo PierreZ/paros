@@ -1,7 +1,7 @@
 //! The **audit port**: the driver's provider-generic observation seam.
 //!
-//! [`Audit`] is the mirror image of [`DriverHooks`](crate::DriverHooks). Hooks
-//! *perturb* the driver — they answer "should I take this rare-but-valid
+//! [`Audit`] is the mirror image of the driver's inline BUGGIFY sites. A site
+//! *perturbs* the driver — it answers "should I take this rare-but-valid
 //! alternative?" and the driver's behavior changes with the answer. The audit
 //! only *observes*: the driver reports every externally meaningful state
 //! transition, typed, at the instant it happens, and nothing it returns (it
@@ -161,7 +161,7 @@ pub struct HistoryPage<'a> {
 /// Provider-generic observation port for [`run_node`](crate::run_node).
 ///
 /// Pure observation: implementations must not influence the driver (that is
-/// [`DriverHooks`](crate::DriverHooks)' job) and must not block — a callback
+/// the inline BUGGIFY sites' job) and must not block — a callback
 /// runs inline on the node loop.
 #[allow(unused_variables)]
 pub trait Audit {
@@ -234,6 +234,13 @@ pub trait Audit {
     /// This node started serving `journal`, a journal the directory created
     /// naming it (#189).
     fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {}
+
+    /// This node held this port's journal for one beat
+    /// (`crate::scenario::HOLD_JOURNAL`, #188): it skipped the journal's
+    /// tick, and it drops the journal's inbound peer messages while the
+    /// hold lasts. The non-interference oracle keys on it: the journal's
+    /// siblings must keep committing.
+    fn journal_held(&self, node: NodeId) {}
 
     /// This node stopped serving `journal` for good (#189): its tombstone was
     /// folded, or this node's own retirement was.
@@ -462,9 +469,9 @@ pub trait Audit {
 
     /// The driver deliberately dropped this one client-facing reply after the
     /// server state advanced (the reply seam's inline location for its kind,
-    /// #318, or the lost-verdict latch,
-    /// [`DriverHooks::drop_client_reply`](crate::DriverHooks)).
-    fn client_reply_dropped(&self, node: NodeId, reply: crate::hooks::Reply) {}
+    /// #318, or for a write the lost-verdict scenario's named location,
+    /// [`LOSE_VERDICTS`](crate::scenario::LOSE_VERDICTS)).
+    fn client_reply_dropped(&self, node: NodeId, reply: crate::Reply) {}
 
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.

@@ -483,8 +483,8 @@ struct Registry {
     /// Run-level: the bootstrap matchmaker ranks (see
     /// [`matchmaker_bootstrap_ranks`]), fixed by the first caller.
     matchmaker_bootstrap: Option<Vec<u64>>,
-    /// Run-level: the journals every node serves and the one held for the
-    /// chaos window (see [`journals`]), fixed by the first caller.
+    /// Run-level: the journals every node serves (see [`journals`]), fixed
+    /// by the first caller.
     journals: Option<JournalPlan>,
     /// Run-level: the journal stores' layout (see [`journal_layout`]),
     /// fixed by the first caller.
@@ -529,12 +529,10 @@ pub(crate) struct JoinerMachine {
 }
 
 /// The run's journals (#188): the static list every node serves, in id
-/// order, and the journal held on every node for the chaos window (the
-/// non-interference stall), if the seed drew one.
+/// order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct JournalPlan {
     pub(crate) ids: Vec<JournalIdentifier>,
-    pub(crate) held: Option<JournalIdentifier>,
     /// The journals that run the multi-writer mode (#241): never the main
     /// one, whose owners claim, reconfigure and drive the scenarios; each
     /// other journal on a coin of its own.
@@ -652,8 +650,8 @@ pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
 }
 
 /// Whether the run's nodes withhold every GC request for the chaos window
-/// (`DriverHooks::withhold_gc_requests`, #263): drawn once per seed, its own
-/// BUGGIFY location. A leader that collects nothing keeps every prior
+/// (`paros::scenario::WITHHOLD_GC`, #263): drawn once per seed, its own
+/// BUGGIFY location, which decides the driver's named location. A leader that collects nothing keeps every prior
 /// configuration answerable, which is what makes a straggler a
 /// reconfiguration removed still worth waiting for: the departed-straggler
 /// shape. Rare-but-valid: GC is liveness of space,
@@ -664,9 +662,11 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.withhold_gc.get_or_insert_with(|| {
-        // Its fired gate sits where the answer has an effect
-        // (`BuggifyHooks::withhold_gc_requests`), not at the draw.
-        scenario || moonpool_sim::buggify_with_prob!(0.5)
+        // Its fired gate sits where the answer has an effect (the driver's
+        // named location), not at the draw.
+        let withhold = scenario || moonpool_sim::buggify_with_prob!(0.5);
+        moonpool_sim::set_activation(paros::scenario::WITHHOLD_GC, withhold);
+        withhold
     })
 }
 
@@ -723,16 +723,18 @@ pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
 /// write before any read-back, two locations whose product fired the gate
 /// on 9 of 2,929 checks (1,400 hunt seeds on `main`). On a scenario seed
 /// every node drops write replies at the location's rate
-/// (`BuggifyHooks::losing_verdicts`) and every ambiguous write is re-sent
+/// (`paros::scenario::LOSE_VERDICTS`) and every ambiguous write is re-sent
 /// at once (`ChainWorkload`). Each ingredient keeps its own coin on the
 /// other seeds. Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .lost_verdict
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+    *guard.lost_verdict.get_or_insert_with(|| {
+        let lose = moonpool_sim::buggify_with_prob!(1.0);
+        moonpool_sim::set_activation(paros::scenario::LOSE_VERDICTS, lose);
+        lose
+    })
 }
 
 /// Whether the run draws the **wiped-founder scenario** (#246): drawn once
@@ -986,9 +988,13 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 /// replicas and bootstrap; every other journal is a plain Multi-Paxos
 /// journal over the whole pool (`crate::process`: the matchmaker plane, the
 /// proxy leaders and the replica tier serve one journal each). On a
-/// multi-journal seed a second location draws whether one journal is
-/// **held** on every node for the chaos window (`DriverHooks::hold_journal`):
-/// its siblings must keep committing.
+/// multi-journal seed a second location draws whether the driver's named
+/// location holds one journal on every node for the chaos window
+/// (`paros::scenario::HOLD_JOURNAL`): its siblings must keep committing.
+/// Each node holds the highest user journal it boots serving: the same one
+/// on every acceptor, possibly a lower one on a joiner that serves fewer.
+/// The driver reports each hold (`Audit::journal_held`), so the journal
+/// board knows every held journal. A single-journal seed holds none.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
     let main = identifiers(state).main;
@@ -1024,9 +1030,9 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             }
             ids.sort_unstable();
             if ids.len() < 2 {
+                moonpool_sim::set_activation(paros::scenario::HOLD_JOURNAL, false);
                 return JournalPlan {
                     ids,
-                    held: None,
                     multi: Vec::new(),
                     main,
                 };
@@ -1034,13 +1040,12 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             // BUGGIFY pairing: a seed genuinely runs several journals (a
             // cause; the outcomes are the non-interference gates).
             assert_reachable!("journal: a seed runs more than one journal");
-            let held = moonpool_sim::buggify_with_prob!(0.5).then(|| {
-                // BUGGIFY pairing: the hold genuinely fires on some seed.
-                assert_reachable!(
-                    "journal: one journal is held on every node for the chaos window"
-                );
-                ids[usize::try_from(count - 1).unwrap_or(0)]
-            });
+            // Its fired gate sits where the hold has an effect (the driver's
+            // named location), not at the draw.
+            moonpool_sim::set_activation(
+                paros::scenario::HOLD_JOURNAL,
+                moonpool_sim::buggify_with_prob!(0.5),
+            );
             // The writer mode is fixed when a journal is created (#241): each
             // journal beside the main one draws it once per seed.
             let multi: Vec<JournalIdentifier> = ids
@@ -1052,12 +1057,7 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
                 // BUGGIFY pairing: a multi-writer journal runs on some seed.
                 assert_reachable!("journal: a seed runs a multi-writer journal");
             }
-            JournalPlan {
-                ids,
-                held,
-                multi,
-                main,
-            }
+            JournalPlan { ids, multi, main }
         })
         .clone()
 }

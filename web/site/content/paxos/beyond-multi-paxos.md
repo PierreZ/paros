@@ -646,5 +646,5 @@ board carries what no single journal can see:
 
 **In the code.** `run_journals`, `JournalStores` (`crates/paros/src/driver/`,
 `journals.rs`); `PeerMailbox` (`crates/paros/src/driver/transport.rs`);
-`DriverHooks::hold_journal`, `Audit::journal_quarantined`;
+`paros::scenario::HOLD_JOURNAL`, `Audit::journal_held`, `Audit::journal_quarantined`;
 `crates/paros-sim/src/audit/journals.rs`; `paros_sim::shape::journals`.

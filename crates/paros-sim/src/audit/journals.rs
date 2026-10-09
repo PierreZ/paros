@@ -13,7 +13,7 @@
 //!   journal's identity), and a journal a storage fault quarantined on a node
 //!   sends nothing from that node until it re-opens;
 //! - **liveness** — a journal keeps committing while a sibling on the same
-//!   nodes is held for the chaos window (`DriverHooks::hold_journal`) or
+//!   nodes is held for the chaos window (`paros::scenario::HOLD_JOURNAL`) or
 //!   still recovering from the hold, and a node keeps running its other
 //!   journals' protocol (it sends their beats, votes and acks) while one is
 //!   quarantined;
@@ -40,8 +40,8 @@ const JOURNAL_BOARD_KEY: &str = "paros-journal-board";
 pub(crate) struct JournalBoard {
     /// The run serves more than one journal.
     multi: bool,
-    /// The journal held on every node for the chaos window, if any.
-    held: Option<JournalIdentifier>,
+    /// The journals some node held for a beat (`JournalBoard::held`).
+    held: BTreeSet<JournalIdentifier>,
     /// `(node, journal)` pairs quarantined right now.
     quarantined: BTreeSet<(u64, JournalIdentifier)>,
     /// A journal committed while a sibling was held or not yet caught up.
@@ -74,7 +74,6 @@ impl JournalBoard {
     /// Record the run's journal plan (idempotent: every node arms the same).
     pub(crate) fn arm(&mut self, plan: &JournalPlan) {
         self.multi = plan.is_multi();
-        self.held = plan.held;
         self.tenants = plan.ids.iter().copied().collect();
     }
 
@@ -122,6 +121,13 @@ impl JournalBoard {
         }
     }
 
+    /// Some node held `journal` for a beat (#188,
+    /// `paros::scenario::HOLD_JOURNAL`): the driver reports it, so the
+    /// board knows the held journal without a copy of the driver's choice.
+    pub(crate) fn held(&mut self, journal: JournalIdentifier) {
+        self.held.insert(journal);
+    }
+
     /// Whether `journal` is quarantined on `node` right now.
     pub(crate) fn is_quarantined(&self, node: u64, journal: JournalIdentifier) -> bool {
         self.quarantined.contains(&(node, journal))
@@ -133,10 +139,10 @@ impl JournalBoard {
     /// counts until then: commits inside the 4 s window alone are rare
     /// (a run's first leaders are still being elected).
     pub(crate) fn applied(&mut self, journal: JournalIdentifier, in_chaos: bool) {
-        let Some(held) = self.held else {
+        if self.held.is_empty() {
             return;
-        };
-        if held == journal {
+        }
+        if self.held.contains(&journal) {
             self.held_caught_up |= !in_chaos;
         } else if in_chaos || !self.held_caught_up {
             if !self.committed_while_held {
@@ -172,7 +178,7 @@ impl JournalBoard {
         if !self.multi {
             return;
         }
-        if self.held.is_some() {
+        if !self.held.is_empty() {
             assert_sometimes!(
                 self.committed_while_held,
                 "journal: a journal keeps committing while a sibling on its nodes is held"

@@ -57,10 +57,9 @@ use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
 use crate::driver::ready::{persist_writes, report_applied, storage_fault_crash};
-use crate::driver::reply::answer_read;
+use crate::driver::reply::{Reply, answer};
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
-use crate::hooks::Reply;
 use crate::rpc::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, ReplySender,
     journal_state_to_proto, quorum_system_to_proto,
@@ -331,7 +330,7 @@ where
                 // asked only under a grid, from the loop.
                 if refuse_journal(journal, JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
                     let refused = ReadAck { unknown_journal: true, ..ReadAck::default() };
-                    answer_read(audit, me_id, Reply::LogRead, reply, refused);
+                    answer(audit, me_id, Reply::LogRead, reply, refused);
                     continue;
                 }
                 open_read(&mut replica, &mut reads, &req, reply, &tunables, audit);

@@ -19,9 +19,9 @@ paros = { path = "../paros", version = "0.2.0" }
 # `nextest`), cargo unifies moonpool-core's features and this binary gets
 # moonpool-sim's deterministic `select!` expansion; `cargo build -p parosd`
 # alone — the shipped build — keeps tokio's macro verbatim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "31c206ef0982765410cfe527bcdfbd70c1364217", features = ["tokio-providers", "select"] }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "1112d5ea5787f7a7b51d979bf543cbef77604681", features = ["tokio-providers", "select"] }
 # `parosctl`'s client-only RPC runtime, under `paros::client`.
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "31c206ef0982765410cfe527bcdfbd70c1364217", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "1112d5ea5787f7a7b51d979bf543cbef77604681", default-features = false, features = ["prost"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

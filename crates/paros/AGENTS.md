@@ -21,7 +21,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
 - `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
-- `hooks.rs` → `DriverHooks` (three per-seed latches left: `withhold_gc_requests`, `hold_journal`, the lost-verdict `drop_client_reply`), `NoHooks`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294, #318 E): add nothing to it. Every per-call choice is an inline `buggify_fault_with_prob!` (send seam `driver/transport.rs`, reply seam `driver/reply.rs`, picks and handoff `driver/mod.rs`, #318). The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs`, `replica_tier/mod.rs` (#297) and the journal stores (#294).
+- `scenario.rs` → `WITHHOLD_GC`, `HOLD_JOURNAL`, `LOSE_VERDICTS` → the named BUGGIFY locations a harness forces per seed (`buggify_named!`, `set_activation`, #318 E). Every other choice is an inline `buggify_fault_with_prob!` (send seam `driver/transport.rs`, reply seam `driver/reply.rs`, picks and handoff `driver/mod.rs`, #318). The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs`, `replica_tier/mod.rs` (#297) and the journal stores (#294).
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.
@@ -75,8 +75,8 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 - **Faults are inline, in this crate** (root *Simulation rules*, #294). A new driver decision is
   an inline `buggify_with_prob!` / `buggify_pick!` at the line that makes it, consulted only where
   its answer is observable. A moment where a crash is interesting (staged not synced, durable not
-  sent) is `hint!("label").await` at that line. Never add a `DriverHooks` method, a `Seam`
-  variant, a hook trait (`ClientHooks`, commit hooks), or a store or disk trait whose only second
+  sent) is `hint!("label").await` at that line. Never add a hook trait (the deleted `DriverHooks`, `ClientHooks`, commit hooks), a `Seam`
+  variant, or a store or disk trait whose only second
   implementation would be a sim wrapper. A path the code walks gets a `reachable!` probe, with
   the message the sim's gate already uses, never reworded.
 - A new tunable is a `DriverTunables` field with a default (`driver/config.rs`) and a
@@ -99,7 +99,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `31c206e` (moonpool#317: `HintVeto` and `moonpool-journal`'s own commit `hint!`s, after moonpool#316's `hint!`, `reachable!`, `buggify_range!`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `1112d5e` (moonpool#318: `buggify_named!` and `set_activation`, after moonpool#317's `HintVeto` and moonpool#316's `hint!`, `reachable!`, `buggify_range!`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - The pin is **eleven lines**: six here, `crates/paros-core/Cargo.toml` (`moonpool-assertions`),

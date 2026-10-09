@@ -29,8 +29,8 @@
 //!   (#204).
 //! - [`ready`] — the `Ready` handshake's durability pipeline and the held
 //!   client replies it answers.
-//! - [`reply`] — the one client-reply seam (the drop and duplicate hooks,
-//!   each consulted exactly once per reply) every driver answers through.
+//! - [`reply`] — the one client-reply seam (the drop and duplicate
+//!   locations, each drawn exactly once per reply) every driver answers through.
 //! - [`matchmaking`] — the matchmaker links, the requests a drained batch hands
 //!   the loop, and the reports of what each answer did.
 //! - [`handover`] — the driver-side policy around the matchmaker-set handover.
@@ -78,7 +78,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::hooks::{DriverHooks, Reply};
 use crate::machine::{ControlJournals, FormedCell};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
@@ -87,6 +86,7 @@ use crate::rpc::{
 };
 use crate::storage::LogStorage;
 use crate::system::{DirectoryEvent, NodeStanding, RegistryEvent, SystemEvent};
+use reply::Reply;
 
 use calls::Call;
 use edge::{NodeInbox, RpcEdge, edge_reporter};
@@ -107,17 +107,16 @@ use transport::{LaneOpener, Outbound, peer_address};
 /// and none of them change across an incarnation. Bundled so the tail is one
 /// call instead of four repeated at every arm, and so the steps the arms share
 /// take one handle.
-struct NodeLoop<'a, P: Providers, H: DriverHooks, A: Audit> {
+struct NodeLoop<'a, P: Providers, A: Audit> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
-    hooks: &'a H,
     audit: &'a A,
     self_id: u64,
     tunables: DriverTunables,
 }
 
-impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
+impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
     /// The **settle tail**: every arm that feeds the core ends here, in this
     /// order — drain the `Ready` batch (persist → send → apply), surface a
     /// matchmaking phase it opened *before* the requests leave, put the
@@ -142,9 +141,8 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         );
         let promised = node.hard_state().max_promised_ballot;
         let chosen = node.hard_state().chosen_index;
-        let mut outbox =
-            drain_ready(node, storage, self.out, waiters, self.hooks, self.audit).await?;
-        if !outbox.gc_requests.is_empty() && self.hooks.withhold_gc_requests() {
+        let mut outbox = drain_ready(node, storage, self.out, waiters, self.audit).await?;
+        if !outbox.gc_requests.is_empty() && crate::scenario::withhold_gc() {
             tracing::info!(node = self.self_id, "gc_requests_withheld");
             outbox.gc_requests.clear();
         }
@@ -185,14 +183,7 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     /// Answer one client-facing reply through the reply seam
     /// ([`reply::answer`]).
     fn answer<T>(&self, kind: Reply, waiter: ReplySender<T>, ack: T) {
-        reply::answer(
-            self.hooks,
-            self.audit,
-            NodeId(self.self_id),
-            kind,
-            waiter,
-            ack,
-        );
+        reply::answer(self.audit, NodeId(self.self_id), kind, waiter, ack);
     }
 
     /// Put matchmaker-set handover requests on the matchmaker wire.
@@ -451,23 +442,21 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
 
 /// What every journal's steps share on this node: the handles a
 /// [`NodeLoop`] needs apart from the journal's own audit port.
-struct Shared<'a, P: Providers, H: DriverHooks> {
+struct Shared<'a, P: Providers> {
     providers: &'a P,
     links: &'a MatchmakerLinks<P>,
     out: &'a Outbound,
-    hooks: &'a H,
     self_id: u64,
     tunables: DriverTunables,
 }
 
-impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
+impl<P: Providers> Shared<'_, P> {
     /// The node loop's steps, reporting to `audit` (a journal's port).
-    fn with<'b, A: Audit>(&'b self, audit: &'b A) -> NodeLoop<'b, P, H, A> {
+    fn with<'b, A: Audit>(&'b self, audit: &'b A) -> NodeLoop<'b, P, A> {
         NodeLoop {
             providers: self.providers,
             links: self.links,
             out: self.out,
-            hooks: self.hooks,
             audit,
             self_id: self.self_id,
             tunables: self.tunables,
@@ -494,7 +483,8 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         self.with(audit).settle(node, storage, waiters, last).await
     }
 
-    /// One journal's beat: the core's tick, the re-sends and their hooks, the
+    /// One journal's beat: the core's tick, the re-sends and their BUGGIFY
+    /// sites, the
     /// handover's pacing (the one journal of a matchmaker deployment), the
     /// leadership's give-up, the read expiries, the settle tail, and the
     /// stranded-slot report.
@@ -508,7 +498,7 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         handover: &mut HandoverDriver,
         ticks: u64,
     ) -> Result<(), RunError> {
-        let (hooks, self_id, tunables) = (self.hooks, self.self_id, self.tunables);
+        let (self_id, tunables) = (self.self_id, self.tunables);
         let JournalRt {
             node,
             storage,
@@ -570,7 +560,7 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         // The open GC request's re-send (#123): its own cadence
         // (`gc_resend_ticks`) and its own BUGGIFY location.
         if gc_resend.tick_if(node.gc_pending(), tunables.gc_resend_ticks) {
-            if hooks.withhold_gc_requests() {
+            if crate::scenario::withhold_gc() {
                 tracing::info!(node = self_id, "gc_requests_withheld");
             } else if moonpool_buggify::buggify_fault_with_prob!(0.5) {
                 // Skipping a due re-send is always safe: a skipped beat
@@ -802,17 +792,17 @@ fn stretch_tick() -> bool {
 /// Park `call` on the slot its proposal took (`result`), to be answered
 /// when that slot applies, or redirect it at once when this node does not
 /// lead.
-fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
+fn park_call<S, A: Audit, P: Providers>(
     rt: &mut JournalRt<S, A>,
     result: ProposeResult,
     call: Call,
-    shared: &Shared<'_, P, H>,
+    shared: &Shared<'_, P>,
 ) {
     match result {
         // A lost redirect is a legal outcome: the client's deadline turns it
         // into a retry elsewhere.
         ProposeResult::NotLeader(hint) => {
-            call.no_verdict(hint.map(|n| n.0), shared.hooks, &rt.audit, shared.self_id);
+            call.no_verdict(hint.map(|n| n.0), &rt.audit, shared.self_id);
         }
         ProposeResult::Accepted(slot) => {
             // A held call waits on a slot this leader just allocated.
@@ -871,11 +861,11 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
 /// production passes [`DriverTunables::default()`] (the historical constants);
 /// the sim harness buggifies it per seed, FDB knob style.
 ///
-/// `hooks` carries the per-seed latches left in [`DriverHooks`] (#318 E).
-/// Production passes [`NoHooks`](crate::NoHooks), whose default methods are
-/// inert. Every other rare-but-valid choice is an inline BUGGIFY site.
+/// Every rare-but-valid choice of the driver is an inline BUGGIFY site, inert
+/// in production (#294, #318); a simulation harness forces the per-seed ones
+/// by name ([`crate::scenario`]).
 ///
-/// `audit` is the pure-observation mirror of `hooks`: the driver reports every
+/// `audit` is pure observation: the driver reports every
 /// externally meaningful transition to it, and nothing it does can change the
 /// run. Production passes [`NoAudit`](crate::NoAudit).
 ///
@@ -891,10 +881,10 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
 /// a deliberate crash and must propagate.
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
 // The parameters are the node's complete wiring (providers, storage,
-// addressing, tunables, lifecycle, hooks, audit) — a bundle would only rename
+// addressing, tunables, lifecycle, audit) — a bundle would only rename
 // the same things.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_node<P, S, H, A>(
+pub async fn run_node<P, S, A>(
     providers: P,
     storage: S,
     local_addr: String,
@@ -905,19 +895,11 @@ pub async fn run_node<P, S, H, A>(
     boot: BootKind,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
     audit: &A,
 ) -> Result<(), RunError>
 where
     P: Providers,
     S: LogStorage,
-    // Deliberately *not* `Send + 'static`, unlike the audit below. Every hook
-    // is consulted from the node loop, never from a spawned task, and keeping
-    // the bound this narrow is what *enforces* that: `hooks` arrives as a
-    // borrow, so it cannot be captured by a `spawn_task` future, and a future
-    // attempt to consult a hook from a detached task is a compile error rather
-    // than a determinism bug found on CI months later. See [`PeerMailbox`].
-    H: DriverHooks,
     // `Clone + Send + Sync + 'static` because each peer-delivery task carries
     // its own handle to the audit: the bounded-mailbox drops happen inside
     // those tasks, and reporting them (`Audit::dropped_at_mailbox`) is part of
@@ -944,7 +926,6 @@ where
         None,
         tunables,
         shutdown,
-        hooks,
     ))
     .await
 }
@@ -995,7 +976,7 @@ where
 // same drain/maintain tail; splitting arms out would only scatter the loop's
 // shared state. The parameters are the node's complete wiring.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub async fn run_journals<P, J, H>(
+pub async fn run_journals<P, J>(
     providers: P,
     mut stores: J,
     node: NodeId,
@@ -1008,12 +989,10 @@ pub async fn run_journals<P, J, H>(
     formed: Option<FormedCell>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
 ) -> Result<(), RunError>
 where
     P: Providers,
     J: JournalStores,
-    H: DriverHooks,
 {
     let ids = stores.journals();
     if ids.is_empty() && system.is_none() {
@@ -1050,9 +1029,11 @@ where
     // (a joiner waits for the directory to name it) and exits only when a
     // fault took the last one.
     let follows = system.is_some();
-    // Whether the hold hook (#188) may be asked at all: a node that serves
-    // several journals, or may start more at runtime.
-    let multi = ids.len() > 1 || follows;
+    // The journal this node may hold for a scenario (#188,
+    // `crate::scenario::HOLD_JOURNAL`): the highest of the user journals it
+    // boots serving, when there are several.
+    let hold_candidate =
+        crate::scenario::hold_candidate(ids.iter().filter(|id| !control.contains(id)));
 
     // Stage 7 per journal, before the core reads a byte: the boot scan and
     // the format marker (#147). A journal that fails to boot is quarantined
@@ -1202,7 +1183,6 @@ where
         providers: &providers,
         links: &links,
         out: &out,
-        hooks,
         self_id,
         tunables,
     };
@@ -1399,7 +1379,7 @@ where
                     tracing::info!(node = self_id, journal = %journal, from = %from, "unpooled_message_refused");
                     continue;
                 }
-                let held = multi && hooks.hold_journal(journal);
+                let held = crate::scenario::hold_journal(hold_candidate, journal);
                 let Some(rt) = journals.live.get_mut(&journal).filter(|_| !held) else {
                     tracing::info!(node = self_id, journal = %journal, held, "journal_message_dropped");
                     continue;
@@ -1643,11 +1623,12 @@ where
                 // Every live journal's beat, in id order.
                 let live: Vec<JournalIdentifier> = journals.live.keys().copied().collect();
                 for journal in live {
-                    if multi && hooks.hold_journal(journal) {
+                    let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                    if crate::scenario::hold_journal(hold_candidate, journal) {
+                        rt.audit.journal_held(NodeId(self_id));
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
                         continue;
                     }
-                    let Some(rt) = journals.live.get_mut(&journal) else { continue };
                     let outcome = shared.beat(rt, &mut handover, ticks).await;
                     journals.fold(journal, outcome, ticks, self_id)?;
                 }

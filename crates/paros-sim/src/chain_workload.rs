@@ -3890,11 +3890,7 @@ impl Workload for ChainWorkload {
                 .as_ref()
                 .map(|plan| plan.ids.clone())
                 .unwrap_or_default();
-            eprintln!(
-                "  JOURNAL {} of {journals:?} (held {:?})",
-                journal,
-                self.plan.as_ref().and_then(|plan| plan.held)
-            );
+            eprintln!("  JOURNAL {journal} of {journals:?}");
             for other in &journals {
                 eprintln!(
                     "  AUDIT[{}] {}",

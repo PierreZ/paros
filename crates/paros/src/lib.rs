@@ -32,7 +32,6 @@ pub mod client;
 mod corruption;
 mod driver;
 pub mod fleet;
-mod hooks;
 pub mod journal;
 pub mod machine;
 mod matchmaker;
@@ -40,6 +39,7 @@ mod provision;
 mod proxy;
 mod replica_tier;
 mod rpc;
+pub mod scenario;
 mod storage;
 pub mod system;
 
@@ -48,6 +48,7 @@ pub use audit::{
     StorageFaultDecision,
 };
 pub use corruption::{CorruptionVerdict, IntegrityFault};
+pub use driver::reply::Reply;
 pub use driver::{
     BelowFloor, BootKind, BootRefusal, DriverTunables, JournalStores, RunError, SystemPlan,
     command_hash, message_kind, parse_addr, registration_history_hash, run_journals, run_node,
@@ -68,7 +69,6 @@ pub mod wire {
         checkpoint, common, fleet, internal, machine, matchmaker, public, system,
     };
 }
-pub use hooks::{DriverHooks, NoHooks, Reply};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,

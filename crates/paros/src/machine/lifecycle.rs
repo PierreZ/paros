@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
 use super::{CellLedger, CellPlan, Class, FormedCell, MachineFacts, ProviderDisk};
-use crate::{Audit, DriverHooks, DriverTunables, RunError};
+use crate::{Audit, DriverTunables, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,7 +181,7 @@ const LATE_BOOT_MS: u64 = 2_500;
 /// plan the wait formed, or a plan this machine is not a member of.
 #[tracing::instrument(level = "debug", skip_all, fields(addr = %addr))]
 #[allow(clippy::too_many_arguments)]
-pub async fn run_machine<P, S, A, F, H>(
+pub async fn run_machine<P, S, A, F>(
     providers: P,
     disk: ProviderDisk<S>,
     audits: F,
@@ -190,14 +190,12 @@ pub async fn run_machine<P, S, A, F, H>(
     assignment: usize,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
 ) -> Result<(), MachineError>
 where
     P: Providers,
     S: StorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A,
-    H: DriverHooks,
 {
     // A machine that starts late (#246), so a `cell init` meets a founding
     // member that is not up yet. Always safe: a late machine is a slow one.
@@ -262,7 +260,7 @@ where
         );
         cell
     };
-    serve(providers, disk, audits, cell, tunables, shutdown, hooks).await
+    serve(providers, disk, audits, cell, tunables, shutdown).await
 }
 
 /// The machine's record: read, or minted on an empty disk; the
@@ -341,21 +339,19 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
 }
 
 /// Serve the cell's journals until shutdown.
-async fn serve<P, S, A, F, H>(
+async fn serve<P, S, A, F>(
     providers: P,
     disk: ProviderDisk<S>,
     audits: F,
     cell: FormedCell,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
 ) -> Result<(), MachineError>
 where
     P: Providers,
     S: StorageProvider + Clone + 'static,
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A,
-    H: DriverHooks,
 {
     let node_id = cell.facts.node_id;
     let plan = &cell.plan;
@@ -393,7 +389,6 @@ where
         Some(cell.clone()),
         tunables,
         shutdown,
-        hooks,
     )
     .await
     .map_err(MachineError::Run)

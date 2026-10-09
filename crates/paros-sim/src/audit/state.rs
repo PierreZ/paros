@@ -907,7 +907,7 @@ impl AuditState {
         );
     }
 
-    /// The driver-hook outcomes a sweep must be proven to reach. The hooks'
+    /// The driver-site outcomes a sweep must be proven to reach. The sites'
     /// own firings (a seam crash, a dropped or duplicated message, a skipped
     /// re-send, a resignation) are recorded as `reachable` at the transition
     /// that observes them, in [`super::NodeAudit`]; only the *outcomes* that

@@ -360,12 +360,12 @@ if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
 | `skip_*_resend`, `resign_leadership`, `stretch_tick_interval`, `expire_parked_read_early`, `skip_delegation`, mailbox hooks (`overtake`, `hold`, `reverse`, `evict`), election-timeout extremes, `abandon_reconfigurer` per phase | `buggify_with_prob!(p)` inline, same rates as `BuggifyHooks` | inline |
 | `drop_outgoing`, `duplicate_outgoing`, `drop_client_reply`, `duplicate_client_reply` | `buggify_with_prob!` at the send and the reply, one site per message kind that has its own gate | inline |
 | `handoff_target`, `phase2_column`, `read_row`, `proxy_for`, `initiate_handoff` | `buggify_pick!(p, n)` inline; `HandoffContext` stays as the tilt's input | inline |
-| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_with_prob!(1.0)` at the site: activation is the per-seed draw | inline, scenario |
+| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_named!(label, p)` at the site; the scenario draw decides it with `set_activation` (done, #318 E: `paros::scenario`) | inline, scenario |
 | `DriverTunables` draws (`NodeShape`) | stay knobs, drawn by the harness: configuration, not a decision | unchanged |
 | `world/injector.rs` boot damage | stays: storage chaos aimed by `FaultFocus`; `upstream-to-moonpool` candidate | environment |
 | `ScriptedLifecycle`, `fleet.rs` target kill, late and bare outages | stay harness injectors over audit facts (FDB's `MachineAttrition`) | environment |
 | fleet "stop after one step", checkpoint-then-stop | stay: an operator's explicit misbehaviour in the workload | operator |
-| `DriverHooks`, `NoHooks`, `BuggifyHooks`, `RunError::SeamCrash`, `SimDisk`, `DirDisk` | deleted, one family per PR | — |
+| `DriverHooks`, `NoHooks`, `BuggifyHooks`, `RunError::SeamCrash`, `SimDisk`, `DirDisk` | deleted, one family per PR (all done; `DriverHooks` with #318) | — |
 
 Two rules fall out. A **hint** is a moment where an *environmental* fault would be
 interesting. An **inline buggify** is a *decision of the code* that needs no

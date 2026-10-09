@@ -16,8 +16,8 @@
 
 use paros_core::{Command, Control, Entry, LeaderUuid, NodeId, Outcome, Seq};
 
+use super::reply::Reply;
 use crate::audit::Audit;
-use crate::hooks::{DriverHooks, Reply};
 use crate::rpc::{
     ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_view_to_proto,
 };
@@ -82,13 +82,7 @@ impl Call {
     }
 
     /// Answer the call with the verdict its slot applied to.
-    pub(crate) fn answer<H: DriverHooks, A: Audit>(
-        self,
-        outcome: &Outcome,
-        self_id: u64,
-        hooks: &H,
-        audit: &A,
-    ) {
+    pub(crate) fn answer<A: Audit>(self, outcome: &Outcome, self_id: u64, audit: &A) {
         let me = NodeId(self_id);
         // A verdict answers the call whose command its slot decided: the
         // outcome is always of the call's own kind.
@@ -121,43 +115,22 @@ impl Call {
         }
         match self {
             Call::Write { reply, .. } => {
-                answer(hooks, audit, me, Reply::Write, reply, write_ack(outcome));
+                answer(audit, me, Reply::Write, reply, write_ack(outcome));
             }
             Call::SetLeader { reply, .. } => {
-                answer(
-                    hooks,
-                    audit,
-                    me,
-                    Reply::SetLeader,
-                    reply,
-                    set_leader_ack(outcome),
-                );
+                answer(audit, me, Reply::SetLeader, reply, set_leader_ack(outcome));
             }
             Call::Truncate { reply, .. } => {
-                answer(
-                    hooks,
-                    audit,
-                    me,
-                    Reply::Truncate,
-                    reply,
-                    truncate_ack(outcome),
-                );
+                answer(audit, me, Reply::Truncate, reply, truncate_ack(outcome));
             }
         }
     }
 
     /// Answer the call with no verdict, naming `leader` as a hint.
-    pub(crate) fn no_verdict<H: DriverHooks, A: Audit>(
-        self,
-        leader: Option<u64>,
-        hooks: &H,
-        audit: &A,
-        self_id: u64,
-    ) {
+    pub(crate) fn no_verdict<A: Audit>(self, leader: Option<u64>, audit: &A, self_id: u64) {
         let me = NodeId(self_id);
         match self {
             Call::Write { reply, .. } => answer(
-                hooks,
                 audit,
                 me,
                 Reply::Redirect,
@@ -168,7 +141,6 @@ impl Call {
                 },
             ),
             Call::SetLeader { reply, .. } => answer(
-                hooks,
                 audit,
                 me,
                 Reply::Redirect,
@@ -179,7 +151,6 @@ impl Call {
                 },
             ),
             Call::Truncate { reply, .. } => answer(
-                hooks,
                 audit,
                 me,
                 Reply::Redirect,
