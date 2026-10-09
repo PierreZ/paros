@@ -587,7 +587,7 @@ mod tests {
         );
         // The row is whole: confirmed at max(2, 3, nothing) = 3, but the
         // replica has not applied slot 3 yet.
-        assert!(reads.serve(|index| index <= Some(Slot(2))).is_empty());
+        assert_eq!(reads.serve(|index| index <= Some(Slot(2))), []);
         assert_eq!(reads.pending()[0].confirmed_index(), Some(Some(Slot(3))));
         assert_eq!(
             reads.fold(1, NodeId(5), Some(Slot(7)), None),

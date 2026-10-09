@@ -1075,27 +1075,27 @@ impl<T: TimeProvider> LogStorage for DurableStorage<T> {
         Ok(())
     }
 
-    async fn persist_ballot(&mut self, ballot: Ballot) -> Result<(), StorageError> {
-        self.write_record(StorageRecord::Promise, |s| {
+    fn persist_ballot(&mut self, ballot: Ballot) -> impl Future<Output = Result<(), StorageError>> {
+        std::future::ready(self.write_record(StorageRecord::Promise, |s| {
             s.staged_ballot = Some(ballot);
-        })
+        }))
     }
 
-    async fn append_accepted(
+    fn append_accepted(
         &mut self,
         slot: Slot,
         ballot: Ballot,
         command: Command,
-    ) -> Result<(), StorageError> {
-        self.write_record(StorageRecord::Accepted(slot), |s| {
+    ) -> impl Future<Output = Result<(), StorageError>> {
+        std::future::ready(self.write_record(StorageRecord::Accepted(slot), |s| {
             s.staged_accepted.insert(slot, (ballot, command));
-        })
+        }))
     }
 
-    async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
-        self.write_record(StorageRecord::ChosenIndex, |s| {
+    fn set_chosen_index(&mut self, slot: Slot) -> impl Future<Output = Result<(), StorageError>> {
+        std::future::ready(self.write_record(StorageRecord::ChosenIndex, |s| {
             s.staged_chosen = Some(slot);
-        })
+        }))
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(must_sync = ?must_sync))]

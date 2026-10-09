@@ -768,7 +768,9 @@ impl SystemOps {
                 SystemCommand::DrainNode { .. } => {
                     assert_reachable!("system: a client drains a joiner");
                 }
-                _ => assert_reachable!("system: a client retires a joiner"),
+                _ => {
+                    assert_reachable!("system: a client retires a joiner");
+                }
             }
         }
         false

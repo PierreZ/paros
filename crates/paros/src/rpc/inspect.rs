@@ -156,7 +156,7 @@ mod tests {
             (9, 7, 4)
         );
         assert!(!refused.leader);
-        assert!(refused.members.is_empty());
+        assert_eq!(refused.members, Vec::<u64>::new());
         assert_eq!(refused.first_slot, 0);
     }
 }

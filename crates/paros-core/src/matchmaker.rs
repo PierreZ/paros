@@ -1090,7 +1090,7 @@ mod tests {
         let (writes, replies) = drain_reconfigure(&mut member);
         assert!(matches!(&replies[0], ReconfigureReply::Refused { .. }));
         assert!(writes.is_empty(), "a settled proposal is not stored");
-        assert!(member.hard_state().pending.is_empty());
+        assert_eq!(member.hard_state().pending, []);
     }
 
     #[test]
@@ -1171,7 +1171,7 @@ mod tests {
         drain(&mut mm);
         mm.step(request(1, ballot(1, 1), &[0, 1]));
         let (writes, replies) = drain(&mut mm);
-        assert!(writes.is_empty());
+        assert_eq!(writes, []);
         assert_eq!(
             replies[0].outcome,
             MatchOutcome::Refused(MatchRefusal::Stale {
@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(spare.phase(), MatchmakerPhase::Inactive);
         spare.step(request(1, ballot(1, 1), &[0, 1, 2]));
         let (writes, replies) = drain(&mut spare);
-        assert!(writes.is_empty());
+        assert_eq!(writes, []);
         assert_eq!(
             replies[0].outcome,
             MatchOutcome::Refused(MatchRefusal::Inactive)
@@ -1379,7 +1379,7 @@ mod tests {
             MatchmakerGeneration(3),
         ));
         let (writes, replies) = drain(&mut mm);
-        assert!(writes.is_empty());
+        assert_eq!(writes, []);
         assert_eq!(
             replies[0].outcome,
             MatchOutcome::Refused(MatchRefusal::Generation {
@@ -1431,7 +1431,7 @@ mod tests {
         ] {
             mm.step(request(1, ballot(2, 1), &[0, 1, 2]));
             let (writes, replies) = drain(mm);
-            assert!(writes.is_empty());
+            assert_eq!(writes, []);
             assert_eq!(
                 replies[0].outcome,
                 MatchOutcome::Refused(MatchRefusal::Stopped { successor: None })
@@ -1483,7 +1483,7 @@ mod tests {
             },
         });
         let (writes, replies) = drain_reconfigure(&mut mm);
-        assert!(writes.is_empty());
+        assert_eq!(writes, []);
         assert!(matches!(replies[0], ReconfigureReply::Refused { .. }));
         mm.step_reconfigure(ReconfigureRequest::Bootstrap {
             from: NodeId(5),
@@ -1625,7 +1625,7 @@ mod tests {
             successor: set(1, &[4, 5, 6]),
         });
         let (writes, _) = drain_reconfigure(&mut mm);
-        assert!(writes.is_empty());
+        assert_eq!(writes, []);
         assert_eq!(mm.successor(), Some(&successor));
     }
 }

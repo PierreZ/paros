@@ -141,7 +141,7 @@ fn a_quorum_read_waits_for_the_replica_to_cover_the_watermark() {
         }
         true
     });
-    assert!(nodes[4].pending_read_states.is_empty());
+    assert_eq!(nodes[4].pending_read_states, []);
     for (to, m) in held.into_inner() {
         step_at(&mut nodes, to, m);
     }
@@ -226,7 +226,7 @@ fn a_quorum_read_survives_a_role_change_and_expires_by_ttl() {
         nodes[0].quorum_reads().is_empty(),
         "one tick past the window the read is gone"
     );
-    assert!(nodes[0].pending_read_states.is_empty());
+    assert_eq!(nodes[0].pending_read_states, []);
 }
 
 /// Under a majority the "row" is the whole membership and any majority of
@@ -281,7 +281,7 @@ fn learning_a_newer_configuration_abandons_open_quorum_reads() {
         nodes[1].quorum_reads().is_empty(),
         "a row member that knows a successor configuration abandons the read"
     );
-    assert!(nodes[1].pending_read_states.is_empty());
+    assert_eq!(nodes[1].pending_read_states, []);
 }
 
 /// The driver's named row (`quorum_read_in`): a read whose token defaults

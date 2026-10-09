@@ -2330,8 +2330,8 @@ mod tests {
     struct FrozenClock;
 
     impl TimeProvider for FrozenClock {
-        async fn sleep(&self, _duration: Duration) -> Result<(), TimeError> {
-            Ok(())
+        fn sleep(&self, _duration: Duration) -> impl Future<Output = Result<(), TimeError>> {
+            std::future::ready(Ok(()))
         }
 
         fn now(&self) -> Duration {

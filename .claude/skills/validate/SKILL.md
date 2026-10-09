@@ -8,7 +8,7 @@ description: Run paros's full local gate the way CI's seven jobs do - cargo fmt,
 `.github/workflows/rust.yml` has seven jobs (`clippy`, `fmt`, `test`,
 `examples`, `portability`, `play`, `sim`) and every one runs through
 `nix develop --command`. The sandbox's `/root/.cargo` toolchain is off-limits
-in this project: the pinned toolchain is `rust-toolchain.toml` (1.95.0 with
+in this project: the pinned toolchain is `rust-toolchain.toml` (1.99.0 with
 `wasm32-unknown-unknown`), and results from anything else do not predict CI.
 
 ## Pick the runner

@@ -127,7 +127,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
         vec![self.journal]
     }
 
-    async fn open(&mut self, journal: JournalIdentifier) -> Option<(S, BootKind)> {
+    fn open(&mut self, journal: JournalIdentifier) -> impl Future<Output = Option<(S, BootKind)>> {
         // The driver opens only what `journals` listed: the one journal.
         assert!(
             journal == self.journal,
@@ -135,7 +135,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> JournalStores for 
         );
         let store = self.store.take();
         assert!(self.store.is_none(), "a single store is handed out once");
-        store
+        std::future::ready(store)
     }
 
     fn audit(&self, journal: JournalIdentifier) -> A {

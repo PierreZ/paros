@@ -215,5 +215,5 @@ fn a_stale_trim_point_never_rewinds_a_frontier() {
     });
     assert_eq!(nodes[1].hard_state(), before);
     assert_eq!(nodes[1].acceptor().first_slot(), floor);
-    assert!(nodes[1].pending_writes.is_empty());
+    assert_eq!(nodes[1].pending_writes, []);
 }

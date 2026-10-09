@@ -1285,7 +1285,7 @@ mod tests {
             }),
         ]);
         let p = page(r.read(Seq(2), 64, 64));
-        assert!(p.records.is_empty());
+        assert_eq!(p.records, []);
         let p = page(r.read(Seq(7), 64, 64));
         assert_eq!(p.next(), Seq(7));
         assert!(matches!(r.read(Seq(0), 64, 64), LogRead::Truncated(s) if s.first_seq == Seq(1)));

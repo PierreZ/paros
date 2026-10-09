@@ -50,7 +50,7 @@ fn a_plain_deployment_never_delegates() {
         nodes[0].propose_in(entry(1, 1, 1), None, Delegation::Auto),
         ProposeResult::Accepted(Slot(0))
     ));
-    assert!(nodes[0].delegated_rounds().is_empty());
+    assert_eq!(nodes[0].delegated_rounds(), []);
     let out = raw(&mut nodes[0]);
     assert!(out.iter().all(|(audience, m)| {
         !matches!(audience, Audience::Proxy(_))
@@ -136,7 +136,7 @@ fn a_delegated_round_is_handed_to_the_proxy_and_closed_by_its_commit() {
         command: ucmd(1, 1, 1),
     });
     assert!(nodes[0].proposer().rounds().is_empty());
-    assert!(nodes[0].delegated_rounds().is_empty());
+    assert_eq!(nodes[0].delegated_rounds(), []);
     assert_eq!(nodes[0].replica().chosen_index(), Some(Slot(0)));
 }
 

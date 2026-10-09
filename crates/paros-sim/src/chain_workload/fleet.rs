@@ -854,23 +854,33 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
 /// state machine's every step is proven written by some run.
 fn reach(stage: Stage) {
     match stage {
-        Stage::FormFleet => assert_reachable!("fleet: a step forms the fleet in the directory"),
-        Stage::AddCell => assert_reachable!("fleet: a step adds the cell to the directory"),
-        Stage::JoinFleet => assert_reachable!("fleet: a step joins the cell to the fleet"),
+        Stage::FormFleet => {
+            assert_reachable!("fleet: a step forms the fleet in the directory");
+        }
+        Stage::AddCell => {
+            assert_reachable!("fleet: a step adds the cell to the directory");
+        }
+        Stage::JoinFleet => {
+            assert_reachable!("fleet: a step joins the cell to the fleet");
+        }
         Stage::CellReady => {
             assert_reachable!("fleet: a step marks the cell READY in the directory");
         }
         Stage::RegisterTenant => {
             assert_reachable!("fleet: a step registers a tenant in the directory");
         }
-        Stage::HostTenant => assert_reachable!("fleet: a step hosts a tenant on the cell"),
+        Stage::HostTenant => {
+            assert_reachable!("fleet: a step hosts a tenant on the cell");
+        }
         Stage::TenantReady => {
             assert_reachable!("fleet: a step marks a tenant READY in the directory");
         }
         Stage::TenantRemoving => {
             assert_reachable!("fleet: a step marks a tenant REMOVING in the directory");
         }
-        Stage::DropTenant => assert_reachable!("fleet: a step drops a tenant from the cell"),
+        Stage::DropTenant => {
+            assert_reachable!("fleet: a step drops a tenant from the cell");
+        }
         Stage::RemoveTenant => {
             assert_reachable!("fleet: a step removes a tenant from the directory");
         }

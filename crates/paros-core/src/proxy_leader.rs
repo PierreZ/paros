@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(proxy.counters().decided, 1);
         // The closed round is remembered: a late re-delegation is ignored.
         proxy.step(delegation(1, 0, ballot(3, 0), 7, cmd(7)));
-        assert!(drain(&mut proxy).is_empty());
+        assert_eq!(drain(&mut proxy), []);
         assert_eq!(proxy.counters().ignored, 1);
     }
 

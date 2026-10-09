@@ -1143,9 +1143,9 @@ mod tests {
     /// over the sizes in force is what the budget keeps.
     #[test]
     fn a_grid_policy_tiles_or_switches_and_tolerates_no_loss() {
-        assert!(grid_layouts(3).is_empty());
+        assert_eq!(grid_layouts(3), []);
         assert_eq!(grid_layouts(4), vec![(2, 2)]);
-        assert!(grid_layouts(5).is_empty());
+        assert_eq!(grid_layouts(5), []);
         assert_eq!(grid_layouts(6), vec![(2, 3), (3, 2)]);
         assert_eq!(grid_layouts(12), vec![(2, 6), (3, 4), (4, 3), (6, 2)]);
         let policy = QuorumPolicy::Grid { rows: 3, cols: 2 };

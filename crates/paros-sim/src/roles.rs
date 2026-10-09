@@ -251,8 +251,8 @@ mod tests {
     #[test]
     fn an_empty_matchmaker_group_is_the_plain_deployment() {
         let map = Deployment::from_groups(pool(3), Vec::new(), Vec::new(), Vec::new());
-        assert!(map.matchmakers().is_empty());
-        assert!(map.proxies().is_empty());
+        assert_eq!(map.matchmakers(), Vec::<String>::new());
+        assert_eq!(map.proxies(), Vec::<String>::new());
         assert_eq!(map.replica_count(), 0);
         assert_eq!(map.acceptors().len(), 3);
     }

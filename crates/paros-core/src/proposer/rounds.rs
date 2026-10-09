@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(rounds.by_slot().len(), 2);
         rounds.clear();
         assert!(rounds.is_empty());
-        assert!(rounds.resend_page().is_empty());
+        assert_eq!(rounds.resend_page(), []);
     }
 
     /// A delegated round is remembered, never counted and never decided
@@ -1029,13 +1029,13 @@ mod tests {
         );
         assert!(rounds.decided(Slot(3), &config).is_none());
         assert!(rounds.is_open_at(Slot(3), ballot(1, 0)));
-        assert!(rounds.stalled_delegations(1).is_empty());
-        assert!(rounds.stalled(1).is_empty());
+        assert_eq!(rounds.stalled_delegations(1), []);
+        assert_eq!(rounds.stalled(1), []);
         let page = rounds.resend_page();
         assert_eq!(page[0].proxy, Some(ProxyId(1)));
         assert_eq!(rounds.by_slot()[&Slot(3)].resends(), 1);
         assert_eq!(rounds.stalled_delegations(1), vec![Slot(3)]);
-        assert!(rounds.stalled_delegations(2).is_empty());
+        assert_eq!(rounds.stalled_delegations(2), []);
         assert_eq!(rounds.stalled(1), vec![Slot(3)]);
         assert!(rounds.take_back(Slot(3), Some(NodeId(0))));
         assert!(

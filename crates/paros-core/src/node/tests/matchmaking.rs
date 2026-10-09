@@ -147,7 +147,7 @@ fn a_campaign_registers_before_it_prepares() {
     assert!(!plain.matchmaking_pending());
     let msgs = drain(&mut plain);
     assert_eq!(prepares(&msgs).len(), 2);
-    assert!(drain_match_requests(&mut plain).is_empty());
+    assert_eq!(drain_match_requests(&mut plain), []);
     assert!(msgs.iter().all(|(_, m)| !matches!(
         m,
         Message::Prepare {
@@ -170,7 +170,7 @@ fn a_matchmaker_quorum_opens_phase_one() {
     let step = n.on_match_reply(replies[0].clone());
     assert_eq!(step, MatchStep::Registered { remaining: 1 });
     assert!(n.matchmaking_pending());
-    assert!(prepares(&drain(&mut n)).is_empty());
+    assert_eq!(prepares(&drain(&mut n)), []);
     let step = n.on_match_reply(replies[1].clone());
     assert!(matches!(
         step,
@@ -218,7 +218,7 @@ fn a_refused_registration_never_becomes_a_leadership() {
     ));
     assert_eq!(n.role(), NodeRole::Follower);
     assert!(!n.matchmaking_pending());
-    assert!(prepares(&drain(&mut n)).is_empty());
+    assert_eq!(prepares(&drain(&mut n)), []);
     // The refusal's `highest` lifts the next campaign strictly above the
     // round that refused this one — never one round up from our own, which
     // the same registration would refuse again (the leapfrog livelock).
@@ -339,7 +339,7 @@ fn resend_targets_only_the_unanswered_matchmakers() {
     n.on_match_reply(registered(2, b, &[], Ballot::zero()));
     assert!(!n.matchmaking_pending());
     n.resend_matchmaking();
-    assert!(drain_match_requests(&mut n).is_empty());
+    assert_eq!(drain_match_requests(&mut n), []);
 }
 
 /// The election timeout does **not** abandon a campaign stuck in
