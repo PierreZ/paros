@@ -558,6 +558,10 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
     let mut remaining = keep.iter().filter(|i| attempts[**i].seen.is_some()).count();
     let mut linearized: u128 = 0;
     let mut cache: BTreeSet<u128> = BTreeSet::new();
+    let mut pending = Pending::default();
+    for &i in &keep {
+        pending.add(attempts, i);
+    }
     // Each frame: the attempt, its undo, and whether it was **forced** — an
     // answered attempt that moved nothing (a read, a refusal, a lost claim,
     // a duplicate, a truncation below the floor). Such a step legal now is
@@ -596,6 +600,15 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
             }
         } else if let Some(undo) = model.step(i) {
             let forced = attempts[i].seen.is_some() && model.unchanged(undo);
+            pending.remove(attempts, i);
+            if pending.lowest().is_some_and(|lowest| lowest < model.scalars.next_seq) {
+                // `next_seq` only grows: an answered attempt still to place
+                // saw it lower, so no order from here places it.
+                pending.add(attempts, i);
+                model.undo(undo);
+                node = timeline.next[node];
+                continue;
+            }
             let key = linearized ^ zobrist(i) ^ model.hash();
             if cache.insert(key) {
                 stack.push((i, undo, forced));
@@ -606,6 +619,7 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
                 node = timeline.first();
                 continue;
             }
+            pending.add(attempts, i);
             model.undo(undo);
             // A forced step into a configuration already explored: that
             // configuration failed, and so does this one.
@@ -623,6 +637,7 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
                 return verdict(false, false, steps, deepest.map(|(d, a)| (a, d)));
             };
             model.undo(undo);
+            pending.add(attempts, j);
             linearized ^= zobrist(j);
             if timeline.unlift(j) {
                 remaining += 1;
@@ -632,6 +647,65 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
                 break;
             }
         }
+    }
+}
+
+/// The `next_seq` each answered attempt not yet linearized saw, as a
+/// multiset: the search places none of them past a state whose `next_seq`
+/// is higher. Without it, a multi-writer client's long run of unknown
+/// writes (#241) was tried in every combination before the first answer
+/// that refutes them all (hunt seed 13713880158750275224: 36 unknown
+/// writes ahead of a `Written { seq: 0 }`, past a 5M-step budget).
+#[derive(Default)]
+struct Pending(BTreeMap<u64, usize>);
+
+impl Pending {
+    /// The `next_seq` attempt `i`'s answer fixes: where a fresh write
+    /// landed, or the state any other answer carries. `None` for an
+    /// unknown attempt and a duplicate (answered from the log, any time
+    /// after its position).
+    fn bound(attempt: &Attempt) -> Option<u64> {
+        match &attempt.seen.as_ref()?.1 {
+            Seen::Written {
+                seq,
+                duplicate: false,
+                ..
+            } => Some(*seq),
+            Seen::Written {
+                duplicate: true, ..
+            } => None,
+            Seen::Refused(state)
+            | Seen::WriteTruncated(state)
+            | Seen::Page { state, .. }
+            | Seen::ReadTruncated(state)
+            | Seen::Won(state)
+            | Seen::Lost(state)
+            | Seen::Trimmed(state)
+            | Seen::TruncateRefused(state)
+            | Seen::WrongMode(state) => Some(state.next_seq.0),
+        }
+    }
+
+    fn add(&mut self, attempts: &[Attempt], i: usize) {
+        if let Some(bound) = Self::bound(&attempts[i]) {
+            *self.0.entry(bound).or_insert(0) += 1;
+        }
+    }
+
+    fn remove(&mut self, attempts: &[Attempt], i: usize) {
+        let Some(bound) = Self::bound(&attempts[i]) else {
+            return;
+        };
+        if let Some(count) = self.0.get_mut(&bound) {
+            *count -= 1;
+            if *count == 0 {
+                self.0.remove(&bound);
+            }
+        }
+    }
+
+    fn lowest(&self) -> Option<u64> {
+        self.0.keys().next().copied()
     }
 }
 
