@@ -80,7 +80,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   moonpool PR, merge it once its CI is green, then advance paros's pin (all eight lines).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
-- **Eat your own food** (decided on 2026-10-09, `docs/architecture.md` §1): solve
+- **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture.md` §1): solve
   every control-plane problem with paros's own journals, leader election and Paxos flavors;
   ask "which journal, which election, which flavor?" before building anything new.
 - **Write documents in ASD-STE100 Simplified Technical English, most of the time** (decided on
