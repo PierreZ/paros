@@ -128,6 +128,11 @@ pub(super) struct SystemOps {
 /// journal's shared history (#247, [`super::rpc::control_attempts`]), which
 /// `check()` searches for a linearization against the journal model, as a
 /// tenant journal's history is.
+///
+/// Over the machines it also holds **no unlearned id** (#246): with
+/// [`Announce::learned_only`], every attempt names a journal its operator
+/// learned from `init`'s reply or through `Inspect`, never one the harness
+/// knows (§3.8: no identifier is fixed).
 pub(super) struct Announce {
     /// The journals announced; `None` announces every journal the client
     /// calls — a client over the machines (#246), whose control journals
@@ -139,7 +144,13 @@ pub(super) struct Announce {
     /// Each announced journal's audit world and shared log, in first-call
     /// order: an attempt token names its index.
     journals: Mutex<Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>, CallLog)>>,
+    /// The journals its operator learned, when every call must name one.
+    learned: Option<Learned>,
 }
+
+/// The journal identifiers one operator learned (#246): from `init`'s reply
+/// or through `Inspect`.
+pub(super) type Learned = Arc<Mutex<std::collections::BTreeSet<JournalIdentifier>>>;
 
 /// An attempt token names its journal in the high bits: a token is one
 /// journal's [`CallLog`] index.
@@ -164,6 +175,16 @@ impl Announce {
             time: ctx.time().clone(),
             client: u64::try_from(ctx.client_id()).unwrap_or(0),
             journals: Mutex::new(Vec::new()),
+            learned: None,
+        }
+    }
+
+    /// This observer, holding every attempt to a journal in `learned`: the
+    /// "no unlearned id" oracle (#246).
+    pub(super) fn learned_only(self, learned: Learned) -> Self {
+        Self {
+            learned: Some(learned),
+            ..self
         }
     }
 
@@ -203,6 +224,17 @@ impl Announce {
 
 impl CallObserver for Announce {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
+        if let Some(learned) = &self.learned {
+            let journal = attempt.journal();
+            assert_always!(
+                learned
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&journal),
+                "fleet: an operator calls only a journal it learned",
+                { "client" => self.client, "journal" => journal.to_string() }
+            );
+        }
         let (index, audit, log) = self.entry(attempt.journal())?;
         if let Attempted::Write(write) = attempt {
             for record in &write.records {

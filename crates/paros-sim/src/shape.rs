@@ -501,6 +501,9 @@ struct Registry {
     /// Run-level: whether the run draws the lost-verdict scenario (see
     /// [`lost_verdict`]), fixed by the first caller.
     lost_verdict: Option<bool>,
+    /// Run-level: whether the run draws the wiped-founder scenario (see
+    /// [`wiped_founder`]), fixed by the first caller.
+    wiped_founder: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -729,6 +732,31 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .lost_verdict
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **wiped-founder scenario** (#246): drawn once
+/// per seed, its own BUGGIFY location. A founding member wiped during
+/// `init` needs `init` inside the chaos window, the machines' attrition
+/// on, its wipe weight on, and a reboot that lands on a founder between
+/// two steps of the cell decree. `init` mostly starts in the recovery tail,
+/// so the product almost never lines up: 2 wipes during `init` and no
+/// `cell_exists` in 500 hunt seeds without the scenario; 37 and 9 with it.
+/// On a scenario
+/// seed, client 0 runs `init` first (`crate::chain_workload`), and
+/// `crate::world::wiped_founder` wipes a founder through moonpool's
+/// `CrashAndWipe` at one of two moments: once every founder promised and
+/// none voted, or once a founder voted and another did not (on a
+/// one-founder cell the cell forms over the new machine; otherwise `cell
+/// init` refuses it as `cell_exists`). Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: each
+/// ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .wiped_founder
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 

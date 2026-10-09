@@ -56,8 +56,19 @@ impl FleetOps {
     pub(super) fn connect(&self, ctx: &SimContext, servers: &[(u64, SocketAddr)]) -> ChainClient {
         self.connector
             .client(servers)
-            .with_observer(Arc::new(Announce::every(ctx)))
+            .with_observer(Arc::new(
+                Announce::every(ctx).learned_only(self.learned.clone()),
+            ))
             .rotating_over(servers.len())
+    }
+
+    /// Record `journals` as learned by this operator (#246): from `init`'s
+    /// reply or through `Inspect`, the only sources a call may name.
+    fn note_learned(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {
+        self.learned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(journals);
     }
 
     /// The cell: the one this operator knows, or — while it knows none, or
@@ -84,6 +95,7 @@ impl FleetOps {
         let Some(journals) = bootstrap::control_journals(&client).await else {
             return self.cell.clone();
         };
+        self.note_learned([Some(journals.cell), journals.fleet].into_iter().flatten());
         let Some(fleet) = journals.fleet else {
             assert_always!(
                 false,
@@ -128,6 +140,12 @@ impl FleetOps {
     /// The cell an `init` came to (#246).
     fn adopt(&mut self, ctx: &SimContext, initialized: &Initialized) {
         let journals = initialized.journals;
+        self.note_learned(
+            [Some(journals.cell), journals.fleet]
+                .into_iter()
+                .flatten()
+                .chain(initialized.users.iter().copied()),
+        );
         assert_always!(
             crate::machine::formed_cell(ctx.state()) == Some(journals),
             "init: the cell init reports is the one the machines formed",
@@ -209,6 +227,11 @@ impl FleetOps {
         } else {
             whole.await
         };
+        self.judge(ctx, run, founders)
+    }
+
+    /// What a whole `init` came to, judged; whether it ended.
+    fn judge(&mut self, ctx: &SimContext, run: InitRun, founders: usize) -> bool {
         match run {
             InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized) => {
                 initialized.steps.iter().copied().for_each(reach);
@@ -237,6 +260,20 @@ impl FleetOps {
                 // that a re-run does not find in its ask.
                 assert_reachable!("init: a seed's failed write refuses init, and it is run again");
                 false
+            }
+            InitRun::Refused(InitRefusal::Formation(label)) if label == "cell_exists" => {
+                // A founding member was wiped after a vote named the old
+                // machine (#246): the cell can never form over the listed
+                // addresses, and a re-run changes nothing.
+                assert_always!(
+                    crate::machine::founder_wiped(ctx.state()),
+                    "init: init is refused as cell_exists only after a founding member was wiped",
+                    { "founders" => founders }
+                );
+                assert_reachable!(
+                    "init: a founding member wiped during init refuses init as cell_exists"
+                );
+                true
             }
             InitRun::Refused(refusal) => {
                 assert_always!(
@@ -301,7 +338,8 @@ fn judge_second(ctx: &SimContext, second: &InitOutcome) {
         }
         InitOutcome::Refused(label) => {
             assert_always!(
-                label == "storage",
+                label == "storage"
+                    || (label == "cell_exists" && crate::machine::founder_wiped(ctx.state())),
                 "init: a second concurrent cell init is refused only for a failed write",
                 { "refusal" => label.as_str() }
             );

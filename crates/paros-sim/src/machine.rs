@@ -25,6 +25,18 @@
 //! one, §3.1), and the one cell every formation names — over the founding
 //! members `init` listed, and only on them (an idle machine no `cell init`
 //! lists stays idle).
+//!
+//! **A wiped machine** (#246): the machine group's attrition draws
+//! moonpool's own `CrashAndWipe` now and then (`crate::chaos_surfaces`), at
+//! a timed reboot or at a lifecycle `hint!`, so a founding member may lose
+//! its whole disk during `init` (or after it). The machine at that address
+//! is then a new one, with a new `node_id`, which never rejoins as the old
+//! one; the board recognizes the wipe when it boots on an empty disk where
+//! a record was. Before any vote names the old machine, `init` forms the
+//! cell over the new one; after one does, `cell init` adopts that plan and
+//! refuses it as `cell_exists`, for good, and the cell is lost
+//! ([`cell_lost`]): an operator must act outside paros, so the run's
+//! control-plane liveness is excused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -56,12 +68,20 @@ pub(crate) struct MachineBoard {
     init_sent: bool,
     /// The founding members the run's `cell init` lists (the layout's).
     founders: BTreeSet<SocketAddr>,
-    /// The cell the first durable vote named: every later one names it too.
-    cell: Option<ControlJournals>,
+    /// Every durable vote of a machine still on its disk, by minted id: all
+    /// of them name one cell. A wiped machine's vote is gone with its disk.
+    voters: BTreeMap<u64, CellPlan>,
     /// The machines that formed, by minted id.
     formed: BTreeSet<u64>,
+    /// Each machine's minted id, by address: the record on its disk now.
+    nodes: BTreeMap<SocketAddr, u64>,
+    /// The machines a wipe replaced: the address and the id it held.
+    wiped: BTreeSet<(SocketAddr, u64)>,
     /// Each machine's last recorded promise in the cell decree, by minted id.
     promises: BTreeMap<u64, Ballot>,
+    /// The first machine to record a promise: `cell init`'s receiver, which
+    /// promises to itself before its fan-out reaches the others.
+    first_promiser: Option<u64>,
     /// The ballots each plan was accepted at, by cell id.
     votes: BTreeMap<u64, BTreeSet<Ballot>>,
 }
@@ -87,9 +107,81 @@ pub(crate) fn init_sent(state: &StateHandle) -> bool {
     lock(&machine_board(state)).init_sent
 }
 
-/// The cell the machines formed, once one did.
+/// The cell the machines formed, once one did: the cell every durable vote
+/// still on a disk names.
 pub(crate) fn formed_cell(state: &StateHandle) -> Option<ControlJournals> {
-    lock(&machine_board(state)).cell
+    lock(&machine_board(state))
+        .voters
+        .values()
+        .next()
+        .map(CellPlan::control_journals)
+}
+
+/// Whether a founding member was wiped: the one cause of a `cell_exists`
+/// refusal.
+pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
+    !lock(&machine_board(state)).wiped.is_empty()
+}
+
+/// Whether the run's cell is lost (#246): a vote still on a disk names a
+/// founding member that was wiped since, so every later `cell init` adopts
+/// that plan and refuses it as `cell_exists`. An operator must act outside
+/// paros; the control plane's liveness is excused.
+pub(crate) fn cell_lost(state: &StateHandle) -> bool {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board.voters.values().any(|plan| {
+        plan.members
+            .iter()
+            .any(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
+    })
+}
+
+/// The founding member the wiped-founder scenario wipes now
+/// (`crate::world::wiped_founder`), if the run is at its moment: an operator
+/// sent `init`, and either every founder promised and none voted
+/// (`after_vote` false: a founder other than `cell init`'s receiver), or a
+/// founder voted and another did not (`after_vote` true: that one). Only a
+/// live founder whose minted id the board knows.
+pub(crate) fn wipe_target(
+    state: &StateHandle,
+    after_vote: bool,
+    dead: impl Fn(&str) -> bool,
+) -> Option<SocketAddr> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if !board.init_sent || !board.wiped.is_empty() {
+        return None;
+    }
+    let mut live = board.founders.iter().filter_map(|addr| {
+        let node = *board.nodes.get(addr)?;
+        (!dead(&addr.ip().to_string())).then_some((*addr, node))
+    });
+    if after_vote {
+        if board.voters.is_empty() {
+            return None;
+        }
+        live.find(|(_, node)| !board.voters.contains_key(node))
+            .map(|(addr, _)| addr)
+    } else {
+        if !board.voters.is_empty() {
+            return None;
+        }
+        // Once every founder promised, a founder other than the receiver:
+        // the receiver's decree goes on and forms the others, so the old
+        // machine's vote outlives it (on a one-founder cell, the founder).
+        let promised: Vec<(SocketAddr, u64)> = live
+            .filter(|(_, node)| board.promises.contains_key(node))
+            .collect();
+        if promised.len() < board.founders.len() {
+            return None;
+        }
+        promised
+            .iter()
+            .rev()
+            .find(|(_, node)| board.founders.len() == 1 || board.first_promiser != Some(*node))
+            .map(|(addr, _)| *addr)
+    }
 }
 
 /// A machine in the simulation.
@@ -168,22 +260,23 @@ async fn run_machine_role(
         failure_domain: draw.failure_domain,
     };
     let addr = machine_addr(my_ip)?;
-    let RoleRig {
-        incarnation, hooks, ..
-    } = arm_role(ctx, my_ip);
-    let tunables = incarnation.shape.tunables;
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair.
     let store_layout = paros::JournalStoreConfig {
         durability: paros::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
+    let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
+    let RoleRig {
+        incarnation, hooks, ..
+    } = arm_role(ctx, my_ip);
+    let tunables = incarnation.shape.tunables;
     let time = ctx.time().clone();
     let state = ctx.state().clone();
     let audits = move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(machine_board(&state)),
+                .on_machines(machine_board(&state), addr),
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
             }
@@ -196,7 +289,7 @@ async fn run_machine_role(
     loop {
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),
-            ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
+            disk(),
             &audits,
             &settings,
             addr,
@@ -240,16 +333,37 @@ async fn run_machine_role(
 }
 
 /// A machine read its record at boot ([`paros::Audit::machine_booted`]):
-/// the one boot fact that needs the run's layout.
+/// the boot facts that need the run's layout. An empty disk where a record
+/// was is a wipe (moonpool's `CrashAndWipe`): the machine there is a new
+/// one, and the old one's vote is gone with its disk.
 pub(crate) fn booted(
     board: &Mutex<MachineBoard>,
     addr: SocketAddr,
     record: Option<&MachineRecord>,
 ) {
+    let mut board = lock(board);
     let Some(record) = record else {
+        let Some(old) = board.nodes.remove(&addr) else {
+            return;
+        };
+        let founder = board.founders.contains(&addr);
+        let unformed = board.voters.len() < board.founders.len();
+        if board.voters.remove(&old).is_some() {
+            assert_reachable!("machine: a wipe takes a machine's vote with its disk");
+        }
+        if founder && board.init_sent && unformed {
+            assert_reachable!("machine: a founding member is wiped during init");
+        }
+        board.wiped.insert((addr, old));
+        tracing::info!(%addr, node = old, "machine_wiped");
         return;
     };
-    if record.formed().is_none() && !lock(board).founders.contains(&addr) {
+    assert_always!(
+        board.nodes.get(&addr).is_none_or(|node| *node == record.node_id.0),
+        "machine: a machine boots with the id it minted",
+        { "node" => record.node_id.0 }
+    );
+    if record.formed().is_none() && !board.founders.contains(&addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
 }
@@ -259,10 +373,12 @@ pub(crate) fn booted(
 /// ballots met at one machine (a promise raised over another machine's),
 /// and a plan was accepted at a second ballot — a later `cell init`
 /// finished what an earlier one proposed (P2c).
-pub(crate) fn recorded(board: &Mutex<MachineBoard>, record: &MachineRecord) {
+pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &MachineRecord) {
     let mut board = lock(board);
     let node = record.node_id.0;
+    board.nodes.insert(addr, node);
     if record.promised != Ballot::default() {
+        board.first_promiser.get_or_insert(node);
         let before = board.promises.insert(node, record.promised);
         if let Some(before) = before {
             assert_always!(
@@ -280,13 +396,29 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, record: &MachineRecord) {
         // machine that crashed between the two never accepted that plan, and
         // a later `cell init` may draw another (#277). Every durable vote
         // names the one plan: a formed machine never votes again, and both
-        // quorums are every member.
-        let cell = *board.cell.get_or_insert(plan.control_journals());
+        // quorums are every member. A wiped machine's vote went with its
+        // disk, so only the votes still on a disk are compared.
+        let cell = board
+            .voters
+            .values()
+            .next()
+            .map_or(plan.control_journals(), CellPlan::control_journals);
         assert_always!(
             cell == plan.control_journals(),
             "machine: every machine forms the one cell init drew",
             { "node" => node, "cell" => plan.cell_id, "first" => cell.cell_id }
         );
+        if plan.members.iter().any(|(id, addr)| {
+            board
+                .wiped
+                .iter()
+                .any(|(at, old)| at == addr && *old != id.0)
+        }) {
+            assert_reachable!(
+                "machine: a cell forms over the machine that replaced a wiped founder"
+            );
+        }
+        board.voters.insert(node, plan.clone());
         if board.formed.insert(node) && board.formed.len() > 1 {
             assert_reachable!("machine: a cell forms over several seeds");
         }
