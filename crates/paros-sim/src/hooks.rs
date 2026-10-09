@@ -26,13 +26,13 @@
 //! (a pending accept, a parked read, a requested chunk, a transferable
 //! leadership).
 //!
+//! The accept and matchmaking re-sends, the resignation and the
+//! election-timeout extremes are inline sites in `paros` now (#294), each
+//! with its fired gate inline beside it.
+//!
 //! | hook | fired gate | recovery gate |
 //! |---|---|---|
-//! | `skip_accept_resend` | audit `resend_skipped` | the slot is still applied (final convergence) |
-//! | `skip_matchmaking_resend` | audit `matchmaking_resend_skipped` | "matchmaking: a campaign closes with a matchmaker quorum" |
-//! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
 //! | `initiate_handoff` / `handoff_target` | inline, one per shape | audit handoff gates |
-//! | `shortest_election_timeout` / `longest_election_timeout` | audit `election_timeout_extreme` / inline | "a leader is elected" |
 //! | `drop_outgoing` (per kind) | audit `dropped_at_send`, one per kind family | catch-up, re-propose, dedup gates |
 //! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
 //! | `drop_client_reply` (per kind) | audit `client_reply_dropped` / `match_reply_dropped`, one per family | "…retry takes the dedup path", read retry, the duplicate matchmaking re-answer |
@@ -134,20 +134,6 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 }
 
 impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
-    fn skip_accept_resend(&self) -> bool {
-        // Consulted only with accepts pending; gated in the audit
-        // (`resend_skipped`).
-        self.active() && buggify_with_prob!(0.95)
-    }
-
-    fn skip_matchmaking_resend(&self) -> bool {
-        // Consulted only when a matchmaking re-send is due; gated in the
-        // audit (`matchmaking_resend_skipped`). Generous: a skipped beat only
-        // stretches an open campaign, and the state worth reaching is the
-        // campaign the election timeout abandons mid-matchmaking.
-        self.active() && buggify_with_prob!(0.5)
-    }
-
     fn skip_gc_resend(&self) -> bool {
         // Consulted only when a GC re-send is due; gated in the audit
         // (`gc_resend_skipped`). A skipped beat stretches the window in which
@@ -273,12 +259,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         fire_gate!(self, 0.10, "mailbox: overflow evicts across kinds")
     }
 
-    fn resign_leadership(&self) -> bool {
-        // Consulted only by a sitting leader; gated in the audit
-        // (`stepped_down`).
-        self.active() && buggify_with_prob!(0.004)
-    }
-
     #[tracing::instrument(level = "trace", skip_all)]
     fn initiate_handoff(&self, ctx: HandoffContext) -> bool {
         if !self.active() {
@@ -293,7 +273,7 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // shape and must keep working), just rarer, so it never crowds the
         // hard states out.
         //
-        // The rates sit in the same range as `resign_leadership` (0.004), not
+        // The rates sit in the same range as the driver's resignation site (0.004), not
         // an order above it, and that ceiling is load-bearing. A handoff
         // *replaces* an election rather than adding to it, so an aggressive
         // rate does not merely add coverage — it becomes the dominant way
@@ -348,21 +328,6 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
             return candidates.first().copied();
         }
         None
-    }
-
-    fn shortest_election_timeout(&self) -> bool {
-        // Gated in the audit (`election_timeout_extreme`).
-        self.active() && buggify_with_prob!(0.5)
-    }
-
-    fn longest_election_timeout(&self) -> bool {
-        // Only consulted when the shortest hook stayed quiet, so the two
-        // jitter extremes are independent locations that never both apply.
-        fire_gate!(
-            self,
-            0.5,
-            "the driver selects the longest valid election timeout"
-        )
     }
 
     #[tracing::instrument(level = "trace", skip_all)]

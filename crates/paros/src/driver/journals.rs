@@ -28,7 +28,6 @@ use moonpool_core::Providers;
 use paros_core::{ColocatedNode, JournalIdentifier, NodeId};
 
 use crate::audit::Audit;
-use crate::hooks::DriverHooks;
 use crate::storage::LogStorage;
 
 use super::boot::{check_format_marker, report_boot_state};
@@ -172,13 +171,12 @@ pub(crate) struct JournalRt<S, A> {
 ///
 /// [`RunError::Storage`] when the scan or the formatting failed,
 /// [`RunError::Refused`] when the boot claim and the marker disagree.
-pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A: Audit>(
+pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
     providers: &P,
     mut storage: S,
     boot: BootKind,
     audit: A,
     tunables: &DriverTunables,
-    hooks: &H,
 ) -> Result<JournalRt<S, A>, RunError> {
     // Stage 7: verify and classify every durable record BEFORE the core
     // reads the store, so no corrupted bytes cross into protocol logic.
@@ -196,13 +194,7 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, H: DriverHooks, A:
     );
     report_boot_state(&node, self_id, &audit);
     // The first randomized election timeout (jitter from the driver's RNG).
-    let first_timeout = draw_election_timeout(
-        providers,
-        hooks,
-        &audit,
-        self_id,
-        tunables.election_timeout_base,
-    );
+    let first_timeout = draw_election_timeout(providers, self_id, tunables.election_timeout_base);
     node.set_election_timeout(first_timeout);
     assert!(
         !node.needs_election_timeout(),

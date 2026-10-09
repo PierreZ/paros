@@ -3,9 +3,10 @@
 //! The durability moments inside one batch (staged, not synced; durable,
 //! not sent) are not hooks: the driver names each with moonpool's
 //! `hint!("label").await` inline, and the simulation decides whether to
-//! crash the process there (#294). [`DriverHooks`] exposes
-//! the driver's optional policy decisions: delaying an `Accept` re-send,
-//! resigning leadership, choosing the shortest valid election timeout, the peer mailbox's
+//! crash the process there (#294). The accept and matchmaking re-sends, the
+//! resignation and the election-timeout extremes are inline
+//! `buggify_fault_with_prob!` sites in the driver (#294). [`DriverHooks`] exposes
+//! the driver's other optional policy decisions: the peer mailbox's
 //! choices (overtake the queue, evict across kinds, and — armed at enqueue,
 //! applied at the drain — hold a batch or reverse it), and stretching a tick.
 //! Production passes [`NoHooks`], whose defaults never perturb the driver.
@@ -115,27 +116,10 @@ impl Reply {
 /// Optional driver-level fault and policy hooks.
 ///
 /// Each method corresponds to one independent `BUGGIFY` location in simulation.
-/// The default implementation is production behavior: always
-/// re-send pending accepts, retain leadership, and use normal randomized
-/// election timeouts.
+/// The default implementation is production behavior. The accept and
+/// matchmaking re-sends, the resignation and the election-timeout extremes
+/// are already inline BUGGIFY sites in the driver (#294).
 pub trait DriverHooks {
-    /// Whether to skip a re-send that has pending `Accept`s to send.
-    fn skip_accept_resend(&self) -> bool {
-        false
-    }
-
-    /// Whether to skip this beat's re-send of the open matchmaking request
-    /// (`paros_core::ColocatedNode::resend_matchmaking`). Consulted only while a
-    /// matchmaking phase is open, so a `true` always has an effect: the
-    /// campaign waits one more beat for the answers the transport may have
-    /// lost. Always safe — the re-send is a pure optimization, the matchmaker
-    /// answers a repeated request idempotently, and a campaign that never
-    /// completes its matchmaking is abandoned at the election timeout and
-    /// retried at a higher round.
-    fn skip_matchmaking_resend(&self) -> bool {
-        false
-    }
-
     /// Whether to skip re-sending the open garbage-collection request this
     /// beat ([`paros_core::ColocatedNode::resend_gc`]). Consulted only when a
     /// re-send is due; skipping always costs a beat, never safety.
@@ -192,11 +176,6 @@ pub trait DriverHooks {
         false
     }
 
-    /// Whether the current leader should voluntarily step down.
-    fn resign_leadership(&self) -> bool {
-        false
-    }
-
     /// Whether this leader should **cooperatively hand its Phase-2 authority
     /// on** right now (`paros_core::ColocatedNode::relinquish_to`), instead of
     /// keeping it until an election takes it away.
@@ -205,8 +184,8 @@ pub trait DriverHooks {
     /// handoff-eligible state and at least one successor exists, so a `true`
     /// here always has an observable effect. Answering `false` is always safe:
     /// a handoff is an *optimization* — it saves the successor a Phase 1 — and
-    /// never a requirement, exactly like
-    /// [`DriverHooks::skip_accept_resend`]'s re-send.
+    /// never a requirement, exactly like the driver's skippable accept
+    /// re-send.
     ///
     /// `ctx` describes what the transfer would carry, so a simulation can bias
     /// toward the adversarial shapes (a non-empty accepted-but-unchosen tail, a
@@ -225,19 +204,6 @@ pub trait DriverHooks {
     /// explores.
     fn handoff_target(&self, _candidates: &[NodeId]) -> Option<NodeId> {
         None
-    }
-
-    /// Whether the next election timeout should use the shortest valid value.
-    fn shortest_election_timeout(&self) -> bool {
-        false
-    }
-
-    /// Whether the next election timeout should use the **longest** valid
-    /// value — the other jitter extreme. Consulted only when
-    /// [`DriverHooks::shortest_election_timeout`] did not fire, so the two
-    /// extremes stay independent locations and never both apply to one draw.
-    fn longest_election_timeout(&self) -> bool {
-        false
     }
 
     /// Whether to drop this one outbound protocol message after it is durable

@@ -160,7 +160,6 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                 self.tunables.election_timeout_base,
                 self.tunables.election_backoff_doublings,
             ),
-            self.hooks,
             self.audit,
         );
         // The journal fold only grows inside a batch: a journal read
@@ -417,7 +416,14 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
                 }
             }
         }
-        if !handed_off && node.role() == NodeRole::Leader && hooks.resign_leadership() {
+        // A sitting leader resigns on its own, rarely: a rare-but-valid
+        // choice (`step_down` is always safe) that makes the cell elect
+        // again. Silent in the recovery tail.
+        if !handed_off
+            && node.role() == NodeRole::Leader
+            && moonpool_buggify::buggify_fault_with_prob!(0.004)
+        {
+            moonpool_assertions::reachable!("the driver voluntarily resigns leadership");
             audit.stepped_down(NodeId(self_id));
             tracing::info!(node = self_id, "leadership_resigned");
             node.step_down();
@@ -509,12 +515,13 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         );
         let lp = self.with(&*audit);
         node.tick();
-        // Consult each hook only when its decision can have an effect.
-        // Production's hooks are false; simulation gives each decision an
-        // independent BUGGIFY location.
+        // Consult each hook and each inline BUGGIFY site only when its
+        // decision can have an effect. Both are inert in production.
         if node.has_pending_accepts() {
-            if hooks.skip_accept_resend() {
-                audit.resend_skipped(NodeId(self_id));
+            // Skipping the re-send is always safe: it is a pure optimization.
+            // Silent in the recovery tail, so the tail re-sends honestly.
+            if moonpool_buggify::buggify_fault_with_prob!(0.95) {
+                moonpool_assertions::reachable!("the driver skips a pending accept re-send");
                 tracing::info!(node = self_id, "accept_resend_skipped");
             } else {
                 node.resend_pending();
@@ -536,10 +543,15 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         }
         // The open matchmaking request's re-send (#120): paced by
         // `match_resend_ticks`, and its own BUGGIFY location — consulted only
-        // when a re-send is due, so a skip always costs a beat.
+        // when a re-send is due, so a skip always costs a beat. Generous: a
+        // skipped beat only stretches an open campaign, and the state worth
+        // reaching is the campaign the election timeout abandons
+        // mid-matchmaking.
         if match_resend.tick_if(node.matchmaking_pending(), tunables.match_resend_ticks) {
-            if hooks.skip_matchmaking_resend() {
-                audit.matchmaking_resend_skipped(NodeId(self_id));
+            if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+                moonpool_assertions::reachable!(
+                    "matchmaking: the driver skips a due matchmaking re-send"
+                );
                 tracing::info!(node = self_id, "matchmaking_resend_skipped");
             } else {
                 node.resend_matchmaking();
@@ -908,16 +920,7 @@ where
     // (or down for good on a refusal); a node with none left exits.
     let mut journals: Journals<J::Store, J::Audit> = Journals::new(control);
     for &id in &ids {
-        open_journal(
-            &providers,
-            &mut stores,
-            &mut journals,
-            id,
-            0,
-            &tunables,
-            hooks,
-        )
-        .await;
+        open_journal(&providers, &mut stores, &mut journals, id, 0, &tunables).await;
     }
     for journal in journals.take_quarantined() {
         stores.quarantined(journal);
@@ -1453,7 +1456,7 @@ where
                 let journal = answer.journal();
                 let events = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                 sys.apply(f, journal, events, checkpoints).await;
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
@@ -1488,7 +1491,7 @@ where
                 // store — a restart of that journal alone.
                 let due = journals.due(ticks, tunables.quarantine_ticks);
                 for &journal in &due {
-                    open_journal(&providers, &mut stores, &mut journals, journal, ticks, &tunables, hooks).await;
+                    open_journal(&providers, &mut stores, &mut journals, journal, ticks, &tunables).await;
                 }
                 // A re-opened journal booted from `Config::pool`: it admits
                 // the registry's pool again (#189).
@@ -1512,7 +1515,7 @@ where
                 if let Some(f) = follower.as_mut() {
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, hooks, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                         sys.apply(f, journal, events, checkpoints).await;
                     }
                     f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
@@ -1529,12 +1532,11 @@ where
 
 /// What applying the system journals' folds (#189) touches: the node's
 /// journals and their opener, the lanes, and the node-level audit.
-struct SystemCtx<'a, 'l, P: Providers, J: JournalStores, H: DriverHooks> {
+struct SystemCtx<'a, 'l, P: Providers, J: JournalStores> {
     stores: &'a mut J,
     journals: &'a mut Journals<J::Store, J::Audit>,
     now: u64,
     tunables: &'a DriverTunables,
-    hooks: &'a H,
     out: &'a Outbound,
     lanes: &'a LaneOpener<'l, P, J::Audit>,
     rpc: &'a moonpool_rpc::RpcHandle<P>,
@@ -1564,7 +1566,7 @@ fn assert_event_source(
     }
 }
 
-impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Apply what `journal`'s fold moved, in position order: start a created
     /// journal naming this node, stop a tombstoned one, open a lane to an
     /// admitted node, and stop every user journal on this node's own
@@ -1619,7 +1621,6 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                         id,
                         self.now,
                         self.tunables,
-                        self.hooks,
                     )
                     .await;
                     if self.journals.live.contains_key(&id) {
@@ -1681,7 +1682,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
     }
 }
 
-impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> {
+impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Report each checkpoint `journal`'s fold met, in position order.
     fn report_checkpoints(
         &self,
@@ -1783,7 +1784,6 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                 journal,
                 self.now,
                 self.tunables,
-                self.hooks,
             )
             .await;
             if self.journals.live.contains_key(&journal) {
@@ -1850,14 +1850,13 @@ fn refuse_unknown<S, A: Audit, N: Audit, P: Providers>(
 /// Open `journal`'s store and boot it into `journals` (at boot, or when its
 /// quarantine is over at tick `now`): live on success, back in quarantine on
 /// a storage fault, down for good when the store refuses to open.
-async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
+async fn open_journal<P: Providers, J: JournalStores>(
     providers: &P,
     stores: &mut J,
     journals: &mut Journals<J::Store, J::Audit>,
     journal: JournalIdentifier,
     now: u64,
     tunables: &DriverTunables,
-    hooks: &H,
 ) {
     let audit = stores.audit(journal);
     let Some((storage, boot)) = stores.open(journal).await else {
@@ -1865,7 +1864,7 @@ async fn open_journal<P: Providers, J: JournalStores, H: DriverHooks>(
         journals.park(journal, None);
         return;
     };
-    match boot_journal(providers, storage, boot, audit, tunables, hooks).await {
+    match boot_journal(providers, storage, boot, audit, tunables).await {
         Ok(rt) => {
             journals.insert(journal, rt);
             stores.opened(journal);
