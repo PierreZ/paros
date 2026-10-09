@@ -490,18 +490,17 @@ impl AuditState {
         else {
             return;
         };
+        // The configuration bound to the highest ballot the audit knows. A
+        // leader's ballot with no configuration of its own falls back to the
+        // bootstrap one in `config_of`, which still names every member the
+        // operator removed, so the departed straggler was never recognized
+        // (0 of 1,000 seeds, against 12% that planned its loss).
         let in_force = self
-            .leader_round
-            .iter()
-            .map(|(node, round)| (*round, *node))
-            .max()
-            .and_then(|(round, node)| {
-                self.config_of(Ballot {
-                    round,
-                    node: NodeId(node),
-                })
-                .cloned()
-            });
+            .configs
+            .values()
+            .next_back()
+            .or(self.bootstrap.as_ref())
+            .cloned();
         let down = self.down_for_good();
         let Some(planned) = self.losses.planned.get(&slot) else {
             return;
