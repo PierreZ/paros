@@ -3,7 +3,7 @@
 This is the end goal. AGENTS.md describes what paros is today and the doctrine every change
 follows; this document describes what paros is becoming, so that every issue, plan and session
 aims at the same target. Where the two disagree, AGENTS.md is the present and this is the
-direction. Decided on 2026-09-30; the fleet, the control hierarchy, identifiers, checkpoints,
+direction. Decided on 2026-09-30; the universe, the control hierarchy, identifiers, checkpoints,
 recovery and the fenced `Truncate` decided on 2026-10-02; the leader-uuid API with its two
 journal modes, election over a journal, the request channel, liveness, names, trust, capacity as
 role slots, journals born with their matchmaker set, tenant modes, the data-plane limits, storage
@@ -25,33 +25,33 @@ one actor elected over an election journal and installed as its control journal'
 
 | Level | Elected actor | Its control journal holds |
 |---|---|---|
-| Fleet | the fleet coordinator (the fleet tenant's coordinator) | tenant → cell, cell entries |
+| Universe | the universe coordinator (the universe tenant's coordinator) | tenant → cell, cell entries |
 | Cell | the cell coordinator (the cell tenant's coordinator) | machine registry, capacity bookings |
 | Tenant | the tenant coordinator | its name and desired state, journal names, placement inside capacity granted by the cell |
 | Journal | the client leader (single-writer) or any writer (multi-writer) | the data |
 
-A paros deployment is always a fleet, and the fleet runs from M9. For now it has exactly one
-cell, and that cell plays both roles: it hosts the fleet tenant (the fleet level) and it is an
-ordinary cell holding tenants. Every fleet behaviour exists and is exercised from M9: `init`
-creates the fleet, tenants are created through the fleet tenant, routing resolves tenant → cell through
-the fleet directory, registrations are verified on both sides. The answer is always "this cell"
+A paros deployment is always a universe, and the universe runs from M9. For now it has exactly one
+cell, and that cell plays both roles: it hosts the universe tenant (the universe level) and it is an
+ordinary cell holding tenants. Every universe behaviour exists and is exercised from M9: `init`
+creates the universe, tenants are created through the universe tenant, routing resolves tenant → cell through
+the universe directory, registrations are verified on both sides. The answer is always "this cell"
 today, but the code path is real and runs in every simulation. A second cell, moves between
 cells and a separate resolver are M12 (section 3.7). The test for every design until then: adding
-a second cell adds an entry to the fleet directory and a routing choice, never a protocol or
-data-model change. That is why M9 already carries each cell entry's `kind` and rendezvous name
-and each tenant's `survives` (section 3.7): a fleet that mixes regional and multi-region cells
+a second cell adds an entry to the universe directory and a routing choice, never a protocol or
+data-model change. That is why M9 already carries each cell entry's `kind` and entry endpoint
+and each tenant's `survives` (section 3.7): a universe that mixes regional and multi-region cells
 adds entries, never fields.
 
 **Every tenant can be transferred** (decided on 2026-10-04): the design must be able to move any
-tenant to another cell, the fleet tenant and its fleet coordinator included, with no protocol or
+tenant to another cell, the universe tenant and its universe coordinator included, with no protocol or
 data-model change and without stopping the tenants that do not move. Nothing may assume a tenant
 stays in the cell it was born in. The reason is **rolling out a cell by evacuation**: stand up a
 new cell, move every movable tenant onto it, then retire the old cell. The one tenant that never
 leaves its cell is a cell's own cell tenant, because it *is* that cell (its registry and its
 bookings): served from another cell it would make the cell depend on a foreign control plane,
 break static stability and cross the blast-radius boundary, and after a rollout it would describe
-machines that no longer exist. It is still reconfigured within its own cell (a dead seed replaced,
-a machine drained), and it retires with its cell; the new cell has its own from its `init`. The
+machines that no longer exist. It is still reconfigured within its own cell (a dead founding member replaced,
+a machine drained), and it retires with its cell; the new cell has its own from its `cell init`. The
 moves themselves are M12; M9 carries what they need (section 3.7).
 
 Compaction and snapshots are the user's business: paros owns the log, never the state.
@@ -237,45 +237,79 @@ A cell's machines and capacity are the control journal of the **cell tenant**, s
 same `parosd`s, the same Paxos and the same stores as every tenant's journals. Its coordinator is
 the **cell coordinator**. Today's system journals are dissolved into the four levels: the machine
 registry and the capacity bookings are the cell's control journal; the directory splits into
-the fleet directory (tenant → cell, the fleet level) and each tenant's own control journal; desired
+the universe directory (tenant → cell, the universe level) and each tenant's own control journal; desired
 state moves into the tenant control journals. System journals are written with `Write` like any
 journal; there is no special path.
 
 Every tenant gets a control journal when it is created. It is **self-describing**: it holds the
 tenant's name and desired state, its journal names and its placement, so every index above it
-(the cell's list of hosted tenants, the fleet directory) can be rebuilt from it (section 3.3).
+(the cell's list of hosted tenants, the universe directory) can be rebuilt from it (section 3.3).
 
-**Bootstrap: start and wait, then one `init` that creates the fleet** (decided on 2026-10-02,
-#216). There is no provisioning step that names the seeds to each other.
+**Bootstrap: idle until an admin admits it** (decided on 2026-10-09, #216, replacing the
+2026-10-02 "start and wait with a join list, then `init` to a seed"). There are no seeds, no join
+list and no rendezvous name. The same rule holds at two levels:
 
-- The seeds start with the same rendezvous name or short join list and wait.
-- `parosctl init` is sent to one of them, which every seed's join list must name. It needs every
-  seed to answer, and it is refused if the cell is already initialized. In order:
-  1. **forms the cell**: mints `cell_id` and the cell tenant's `JournalIdentifier` (its random `TenantId` and
-     the random `JournalId` of its control journal, section 3.8), writes them into every seed's
-     durable cell plan, starts the cell's first matchmaker set on the seeds, and the first cell
-     coordinator installs itself as the cell control journal's leader with
-     `SetLeader(its fresh uuid, unset)`;
-  2. **creates the fleet tenant** inside that cell (the fleet tenant is a tenant, so the cell must exist first
-     to grant it capacity): mints `fleet_id` and the fleet tenant's `JournalIdentifier`, both random, recorded in the cell
-     plan of the cell that hosts the fleet tenant;
-  3. **registers the cell** as the first entry in the fleet directory, and writes the matching
-     registration on the cell side (section 3.7).
-- Each step is idempotent and is a step of the fleet's operation state machine (section 3.7):
-  re-running `init` after a crash resumes it.
-- The other seeds join through the rendezvous call.
-- **No implicit formation.** A node with an empty, uninitialized store waits indefinitely. It
-  never forms a cell or a fleet on its own, including when the rendezvous resolves to a wiped
-  node.
+- **An idle machine** is formatted (its `node_id` minted, its machine record written) and waits,
+  serving only `Identify`. It joins a cell only when an admin call admits it. Its configuration
+  names no cell and no peer.
+- **An idle cell** is formed and serves its own control journal, but hosts no tenant. It joins a
+  universe only when an admin call admits it.
 
-This is CockroachDB's `cockroach init`: nodes start with the same `--join` list and wait, a
-one-time init sent to any of them bootstraps the cluster, init is refused on an initialized
-cluster and must target a node every join list names. Redpanda recommends disabling
-`empty_seed_starts_cluster` in production for the same reason paros has no implicit formation.
+| Admin call | Sent to | What it does |
+|---|---|---|
+| `parosctl cell init --members a,b,c [--name]` | the listed idle machines | forms an idle cell on them |
+| `parosctl cell add-machine <addr>` | any member of the cell | the cell coordinator admits an idle machine |
+| `parosctl universe init --cell <addr> [--name]` | any member of an idle cell | creates the universe tenant there and admits that cell as the universe's first |
+| `parosctl universe add-cell <addr>` | the universe, and any member of the idle cell | admits another idle cell (M12) |
+
+`parosctl init` stays as a shortcut for `cell init` followed by `universe init` (the toy).
+
+- **`cell init`** asks every listed machine to `Identify` itself: every one must answer, be
+  `storage`, and not already belong to a cell (`cell_exists`). It then mints `cell_id` and the
+  cell tenant's `JournalIdentifier` (its random `TenantId` and the random `JournalId` of its
+  control journal, section 3.8), records them as a pending plan, and sends `FormCell(plan)` to
+  every listed machine; any idle storage machine accepts it. The listed machines are the cell's
+  **founding members**: the cell control journal is born on them with the cell's first matchmaker
+  set, and the first cell coordinator installs itself as its leader with
+  `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell plan; it is never a
+  role a machine keeps. After formation the membership changes only by reconfiguration.
+- **`add-machine`** goes to any member, which routes it to the cell coordinator as a request to a
+  leader (section 3.3). The coordinator asks the idle machine to `Identify` itself, writes its
+  `RegisterNode` into the cell control journal, then sends it `Admit` with the `cell_id`, the
+  control `JournalIdentifier`s and a registry snapshot, which the machine caches durably. An
+  interrupted admission is finished by the coordinator like any in-flight entry (section 3.7).
+- **`universe init`** creates the universe tenant inside that cell (the universe tenant is a
+  tenant, so the cell must exist first to grant it capacity), mints `universe_id` and the universe
+  tenant's `JournalIdentifier`, both random, recorded in the cell plan of the cell that hosts the
+  universe tenant, then registers the cell as the first entry in the universe directory and
+  writes the matching registration on the cell side (section 3.7).
+- Each step is idempotent and is a step of an operation state machine (section 3.7): re-running a
+  call after a crash resumes it, learning the ids back through `Inspect`.
+- **No implicit formation.** A machine with an empty, uninitialized store waits indefinitely. It
+  never forms a cell, joins one, or creates a universe on its own.
+- **Trust.** An idle machine accepts the first `FormCell` or `Admit` that reaches it; under the
+  network trust of section 3.5 that is the admin's. With Biscuit tokens (#245) both carry an admin
+  token the machine checks, since otherwise another host could impersonate the cell (kubeadm pins
+  the control plane's CA for this reason).
+
+This is the mainstream pattern, checked on 2026-10-09: Kafka KRaft passes the founding voters
+explicitly at format time (`--initial-controllers`, identical on every founder) and never
+auto-formats a blank directory, since a majority starting empty could elect a leader missing
+committed data; etcd forms from `--initial-cluster` plus a cluster token and adds later members
+with `member add`; YugabyteDB adds a master to its universe with `change_master_config ADD_SERVER`;
+kubeadm runs `init`, then `join` against any control-plane address. Redpanda recommends disabling
+`empty_seed_starts_cluster` for the same reason paros has no implicit formation. Founding on one
+machine and growing by reconfiguration (Kafka's `--standalone`) was rejected: two concurrent
+`cell init`s sent to different machines would then form two cells, where the all-must-answer
+founding list can only refuse or stall (#277).
+
+**Naming** (decided on 2026-10-09). The top level is the **universe** (formerly the fleet; the
+name Spanner and YugabyteDB use). "Seed" now only ever means a simulation seed. The code still
+says fleet and seed until the rename lands (#246's follow-up).
 
 **Every journal is born with its matchmaker set** (decided on 2026-10-04). The cell control
-journal and the fleet tenant's control journal are placed on the seeds and born with a matchmaker set that
-`init` starts there; every tenant journal is born with its tenant's set. There is no
+journal is born on the founding members with the matchmaker set `cell init` starts there, and the
+universe tenant's control journal with its tenant's set; every tenant journal is born with its tenant's set. There is no
 plain-to-matchmaker transition anywhere, so there is nothing to migrate. **Matchmakers are
 mandatory everywhere in the service**, because reconfiguration needs them and reconfiguration is
 how everything heals and moves: the cell's control
@@ -332,47 +366,51 @@ transport's failure detector and writes only the *changes* into the cell control
 heartbeat log. A machine `Down` past the re-placement bound has its roles re-placed. A machine
 never heartbeats into a journal.
 
-**Finding the cell.** There is no cluster file. A machine's and a client's only static input is
-one rendezvous name or a short join list, stored durably in the machine record and re-read on every boot
-(CockroachDB stores `--join` in the data directory but still recommends passing it on every start,
-so a node can rejoin after losing its data directory). With one cell, the fleet's rendezvous and
-the cell's are the same name.
+**Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
+A machine's configuration names no cell and no peer: it learns its cell when it is admitted
+(`FormCell` or `Admit`, section 3.1) and caches it durably. On every later start it finds the cell
+from its **cached registry fold**. If every cached member is gone, the machine cannot find its
+cell, and an admin admits it again (YugabyteDB makes the same trade: a tserver none of whose
+configured masters remain cannot rejoin).
 
-- A durable cache of the cell's seed set is tried first; the rendezvous is the fallback when no
-  cached seed answers. Kafka's KIP-899 and KIP-1102 let clients rebootstrap this way, and verify
-  the cluster id when they do.
+A client's only static input is an **entry endpoint**: a few addresses, or a DNS name the
+operator puts in front of them, never stored by paros (as Kafka's `bootstrap.servers`). From
+there it calls `Resolve` (below).
+
 - The durable cached registry fold plays the role CockroachDB gives gossip (node addresses off the
   consensus path): it lets machines find each other while the registry is unavailable. It is a
   static-stability requirement, not an optimisation.
 - **No journal is found by convention** (decided on 2026-10-04, section 3.8): there is no
-  well-known tenant or journal id. Every machine of a formed cell answers `Inspect` (and, later,
-  the rendezvous call) with its `cell_id`, the cell tenant's control `JournalIdentifier` and, on the cell that
-  hosts it, the fleet tenant's `JournalIdentifier`, all read from its durable cell plan. A client or an operator handed
+  well-known tenant or journal id. Every machine of a formed cell answers `Inspect` (and
+  `Resolve`) with its `cell_id`, the cell tenant's control `JournalIdentifier` and, on the cell that
+  hosts it, the universe tenant's `JournalIdentifier`, all read from its durable cell plan. A client or an operator handed
   only addresses learns the control `JournalIdentifier`s from any machine, then resolves everything else
-  through them: the fleet directory gives a tenant's cell and the `JournalIdentifier` of its control journal, and
-  that control journal gives the tenant's journals. A re-run of `init` learns the cell's ids the
-  same way. **An `Inspect` names its journal or asks for the node alone** (decided on 2026-10-05,
+  through them: the universe directory gives a tenant's cell and the `JournalIdentifier` of its control journal, and
+  that control journal gives the tenant's journals. A re-run of an admin call learns the cell's
+  ids the same way. **An `Inspect` names its journal or asks for the node alone** (decided on 2026-10-05,
   #243): a node-only `Inspect` answers the machine's own facts — its `node_id`, its `cell_id` and
   the control `JournalIdentifier`s — and nothing about any journal, which is how a client handed
   only addresses starts; an `Inspect` that names no journal without asking for the node alone is
   refused (`unset`), never read as "the node's first journal", and one naming a journal the
   machine does not serve is refused (`unknown_journal`). The machine's own facts ride every
   answer, refusals included.
-- `cell_id` and `fleet_id` are carried in the session `Hello`; a peer with another id is refused.
+- `cell_id` and `universe_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
-  cannot talk after a bad seed configuration.
-- **Well-known endpoints** are the bootstrap set — `Identify`, `Init`, `FormCell`, `Inspect` —
-  and the **rendezvous call**, keyed by tenant: "which references serve tenant T". Everything else
-  is a dynamic reference (amended on 2026-10-04: the bootstrap calls were well known already).
-  One call, two answerers (decided on 2026-10-07, #233): a resolver answers the cell half (the
-  tenant's cell and that cell's rendezvous references), any machine of that cell the frontend half
-  (the tenant's frontends, from its registry fold), section 3.5.
+  cannot talk after a bad configuration.
+- **Well-known endpoints** are the bootstrap set — `Identify`, `FormCell`, `Admit`, `Inspect` —
+  and **`Resolve`**, keyed by tenant: "which references serve tenant T" (named on 2026-10-09,
+  formerly `Resolve`). Everything else is a dynamic reference (amended on 2026-10-04:
+  the bootstrap calls were well known already). One call, two answerers (decided on 2026-10-07,
+  #233): a resolver answers the cell half (the tenant's cell and that cell's entry references),
+  any machine of that cell the frontend half (the tenant's frontends, from its registry fold),
+  section 3.5.
 
 The decision and its alternatives are #216. Classes are FDB's:
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
 - `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
-  and fleet coordinators run on the seeds until a `stateless` machine registers (section 3.3).
+  and universe coordinators run on the founding members until a `stateless` machine registers
+  (section 3.3).
 
 **Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots of
 its class; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
@@ -389,7 +427,7 @@ writer, and it holds no state that journal does not hold: a new one resumes from
 exist from M9.
 
 **Election over a journal** (decided on 2026-10-04, #240). Who leads is decided outside the
-journal it governs, by one library, `paros::client`'s election, used by the cell, fleet and tenant
+journal it governs, by one library, `paros::client`'s election, used by the cell, universe and tenant
 coordinators and offered to customers. An election runs over a **multi-writer** journal
 (section 2.4): candidates append campaigns, the leader renews by appending, and every watcher
 folds the same deterministic rule. The renewals are a **lease used as a liveness hint only**:
@@ -403,8 +441,8 @@ stops. Hand-off is `SetLeader(successor, me)`. An election journal is low-throug
 a redundancy mode (majority Multi-Paxos, section 3.4), never grid, and like every journal it
 has its tenant's matchmaker set (decided on 2026-10-04).
 
-**Where candidates run** (decided on 2026-10-04). The cell and fleet coordinators campaign on the
-seeds until a `stateless` machine registers, then move there; the cell coordinator places tenant
+**Where candidates run** (decided on 2026-10-04). The cell and universe coordinators campaign on the
+founding members until a `stateless` machine registers, then move there; the cell coordinator places tenant
 coordinators on `stateless` machines.
 
 **Requests to a leader** (decided on 2026-10-04). Every control journal has one writer, so
@@ -421,14 +459,14 @@ so a retry that crosses a coordinator change finds the answer there instead of a
   There is no rival write to resolve: separate journals have no order between them, and a
   single-writer journal makes the rival write impossible. Machines act on what they fold.
 - **A parent places its children's actors.** The cell coordinator places the tenant coordinators,
-  the fleet tenant's included, and re-places a dead one; tenant coordinators place their roles.
+  the universe tenant's included, and re-places a dead one; tenant coordinators place their roles.
   This is FDB's recruitment by process class, per tenant.
 - **Static stability.** A child keeps serving while its parent is down. Only new capacity, new
   tenants and moves wait for the parent. In particular, existing tenants keep serving while the
-  fleet tenant is unavailable, and the simulation shows it with one cell.
+  universe tenant is unavailable, and the simulation shows it with one cell.
 - **Rebuild from below.** Every level's journal can be reconstructed from the level beneath it. A
   tenant's name and desired state live in its own control journal; the cell's list of hosted
-  tenants and the fleet directory are rebuildable indexes. This is the pattern of DSQL's adjudicator
+  tenants and the universe directory are rebuildable indexes. This is the pattern of DSQL's adjudicator
   (section 2.3) one level up, and what makes recovery possible without Paxos surgery
   (section 3.10, deferred).
 - **Tenant birth.** When the cell applies `HostTenant`, the cell coordinator books the tenant's
@@ -452,10 +490,10 @@ five acceptors — or the opt-in throughput mode **grid** `{rows, cols}`, plus p
 meet the zone rule of section 5. It stays a mode without zone survival, for development and the
 toy, shown `Degraded` in `parosctl status` (section 3.6), and it is refused for every control
 journal and every election journal. Control and election journals are born `double` (the cell's
-own on its three seeds, one per zone) and raised to `triple` by the cell coordinator, through
+own on its three founding members, one per zone) and raised to `triple` by the cell coordinator, through
 ordinary reconfiguration, once five `storage` machines span three zones.
 
-**What a tenant survives** (decided on 2026-10-07, #252): a tenant's fleet directory entry carries
+**What a tenant survives** (decided on 2026-10-07, #252): a tenant's universe directory entry carries
 `survives: az | region`, recorded at `REGISTERING` and mirrored into the tenant's control journal
 (rebuild from below, section 3.3). It constrains the kind of cell the tenant may live in, a
 regional cell for `az` and a multi-region cell for `region` (section 3.7), never whether it may
@@ -485,7 +523,7 @@ rank `r` in the leader's region.
 
 **The leader follows its writer** (decided on 2026-10-07, #215), the main latency lever inside a
 cell: with a journal's leader in its writer's zone a write costs one cross-zone round trip,
-elsewhere two. Three pieces carry the writer's zone: the rendezvous answer tags each reference
+elsewhere two. Three pieces carry the writer's zone: the `Resolve` answer tags each reference
 with its zone (section 3.5), the client prefers a frontend in its own zone (client configuration,
 never drawn by the library), and the frontend stamps the origin zone on every write it forwards.
 The leader's driver in `paros`, never the core, counts origins per zone over a window and hands
@@ -511,12 +549,12 @@ Reconfiguration is the operational primitive for everything, so no tenant opts o
 Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
 tenant is created: one coordinator slot, its matchmaker set, one acceptor quorum of its
 redundancy mode for data and one `double` quorum for its control journal (amended on 2026-10-07,
-#215: a `single` tenant's control journal still needs `double`). The fleet tenant and the cell
+#215: a `single` tenant's control journal still needs `double`). The universe tenant and the cell
 tenant count too. A cell refuses a tenant whose footprint it cannot book.
 
 ### 3.5 The frontend and the resolver
 
-Two entry roles (decided on 2026-10-07, #233): a **resolver** per region at the fleet level, which
+Two entry roles (decided on 2026-10-07, #233): a **resolver** per region at the universe level, which
 redirects a client to its tenant's cell, and a **frontend** per tenant inside that cell, which
 forwards the client's calls.
 
@@ -525,9 +563,9 @@ frontends authenticate and route the same way). **Frontends are per tenant**
 (decided on 2026-10-04): the tenant coordinator places them in role slots like any role and the
 tenant's mode sizes the pool, so a frontend folds no other tenant's control journal and one
 tenant's load never reaches another's frontends. A client finds its tenant's frontends through the
-second hop of the **rendezvous call** (below), which any machine of the tenant's cell answers from
+second hop of **`Resolve`** (below), which any machine of the tenant's cell answers from
 the cell registry it already folds (a frontend is a booked slot keyed by tenant). Administration
-(`init`, tenant create and delete, drains) is served by the fleet tenant's own frontends. It
+(`init`, tenant create and delete, drains) is served by the universe tenant's own frontends. It
 authorizes the caller through an `Authz` trait
 whose implementation verifies a Biscuit token (below), and it routes
 each call to the machine serving the journal, so a client never knows placement. It forwards
@@ -536,20 +574,20 @@ ever reach frontends for data, which is what keeps the network the trust boundar
 (decided on 2026-10-04). Past the frontend nothing knows a tenant name, only
 `(TenantId, JournalId)`.
 
-**The resolver** (decided on 2026-10-07, #233). One pool per region, at the fleet level, stateless
-and shared by every tenant. It answers the first hop of the rendezvous call, "which references
-serve tenant T", from its cached fold of the fleet directory: the tenant's `TenantId`, its cell id
-and that cell's rendezvous references. It **redirects**: it never carries data and never forwards
-a call. It keeps resolving from its cached fold while the fleet tenant is unavailable, which is the
+**The resolver** (decided on 2026-10-07, #233). One pool per region, at the universe level, stateless
+and shared by every tenant. It answers the first hop of `Resolve`, "which references
+serve tenant T", from its cached fold of the universe directory: the tenant's `TenantId`, its cell id
+and that cell's entry references. It **redirects**: it never carries data and never forwards
+a call. It keeps resolving from its cached fold while the universe tenant is unavailable, which is the
 AWS guidance's thinnest possible router and static stability one level up (section 3.3). Before
 it answers, it verifies the token's Biscuit signature and that its scope covers the tenant asked
 for (an `admin` or `tenant-manager` token may resolve any tenant), using only the root public keys
-the fleet entry carries: it holds no private key and no state of its own, and Biscuit stays out of
-`paros` and `paros-core` as below. A resolver folds the fleet directory and nothing else, never a
+the universe entry carries: it holds no private key and no state of its own, and Biscuit stays out of
+`paros` and `paros-core` as below. A resolver folds the universe directory and nothing else, never a
 cell's registry, so it stays thin and every cell answers for itself.
 
 **Resolution is two hops: one call, two answerers.** A client asks a resolver of its region for
-tenant T and gets T's cell id and that cell's rendezvous references; it then asks any machine of
+tenant T and gets T's cell id and that cell's entry references; it then asks any machine of
 that cell the same call and gets T's frontends, each tagged with its zone, from that machine's
 registry fold, and it prefers a frontend in its own region and zone. Both answers are cached and
 refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: inside it, the cell's
@@ -557,17 +595,17 @@ machines answer and the frontend forwards, so forward-not-redirect stands and no
 authorization.
 
 ```
- client ──rendezvous(T)──► resolver (its region: fleet directory fold, Biscuit sig + scope)
-        ◄── cell X, X's rendezvous refs ──┘
- client ──rendezvous(T)──► any machine of cell X (registry fold)
+ client ──Resolve(T)──► resolver (its region: universe directory fold, Biscuit sig + scope)
+        ◄── cell X, X's entry refs ──┘
+ client ──Resolve(T)──► any machine of cell X (registry fold)
         ◄── T's frontends, zone-tagged ──┘
  client ──Write/Read/...──► frontend T (Authz, names) ──forwards──► leader / replica / batcher
 ```
 
 **Names** (decided on 2026-10-04, #239). A user addresses `paros://<tenant>/<journal>`; the URI
-names data, not a location, and the fleet endpoint (a resolver's rendezvous name, a frontend's
-address until the resolver exists) is client configuration. **Only the entry roles resolve names**:
-clients send names and never read the fleet tenant, so no tenant sees another tenant's names
+names data, not a location, and the client's entry endpoint (the resolvers' addresses, a
+frontend's address until the resolver exists) is client configuration. **Only the entry roles resolve names**:
+clients send names and never read the universe tenant, so no tenant sees another tenant's names
 (amended on 2026-10-07, #233: the resolver resolves the tenant name, only for a tenant the token's
 scope covers, and the frontend the journal name). Until the frontend exists (#192), `parosctl`
 resolves with operator rights. A name is free again once its delete completes; a recreated
@@ -576,22 +614,22 @@ tenant or journal draws a fresh id, so an old id never aliases a new name.
 **Display** (decided on 2026-10-07, #239). Human output prints an id as short hex, git-style
 (e.g. `cell=2c94f1`), widened when a prefix is ambiguous within the listing; `--json` keeps the
 full id, and a command that takes an id accepts a unique prefix. An internal tenant (section 3.7)
-shows a display label derived from its groups (`fleet`, `cell` with its cell), display only,
+shows a display label derived from its groups (`universe`, `cell` with its cell), display only,
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
-well-known rendezvous call, section 3.2), and nodes do no authorization.
+well-known `Resolve` call, section 3.2), and nodes do no authorization.
 
 **Tokens are Biscuits** (decided on 2026-10-04, #245; JWT is in section 11). paros is its own
 issuer: a root key pair, Ed25519, whose public half (with its root key id) is recorded in the
-fleet entry; rotation is adding a key then removing the old one. Tokens are short-lived and there
-is no revocation. `parosctl` works **offline**, with no running fleet: it generates root key
+universe entry; rotation is adding a key then removing the old one. Tokens are short-lived and there
+is no revocation. `parosctl` works **offline**, with no running universe: it generates root key
 pairs and mints tokens for any role.
 
-- **Roles** are facts in the authority block: `admin` administers the fleet (`init`, cells,
+- **Roles** are facts in the authority block: `admin` administers the universe (`init`, cells,
   machines, everything below), `tenant-manager` creates, deletes and lists `users` tenants
-  through the fleet tenant, and a `tenant` token is scoped to one `TenantId` for its data plane
+  through the universe tenant, and a `tenant` token is scoped to one `TenantId` for its data plane
   and journals. The frontend's policies are Datalog, one per call.
 - **Creating a tenant returns a valid tenant token**: the frontend *attenuates* the caller's
   token with a block that restricts it to the new tenant. Attenuation needs no private key, so no
@@ -619,15 +657,15 @@ simulation can replay, and features that cannot are left out:
   `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
   Biscuit implementation is its own crate, used by `parosd`, `parosctl` and `paros-sim`.
 
-**Routing goes through the fleet tenant from M9.** The tenant name → `TenantId` → cell step is
-the resolver's from M12; until then the frontend resolves it from its fold of the fleet directory,
+**Routing goes through the universe tenant from M9.** The tenant name → `TenantId` → cell step is
+the resolver's from M12; until then the frontend resolves it from its fold of the universe directory,
 and with one cell it always answers "this cell", and it runs anyway. The frontend then resolves the
 journal name → `JournalId` and its placement from its fold of the tenant's control journal.
-Resolvers and the cell's machines answer the same rendezvous call, "which references serve tenant
+Resolvers and the cell's machines answer the same `Resolve` call, "which references serve tenant
 T", so `paros://<tenant>/<journal>` never changes when a second cell appears.
 
 Tenants are created and administered through the same frontends, with an `admin` or
-`tenant-manager` token, through the fleet tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
+`tenant-manager` token, through the universe tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
 every other call.
 
 **The frontend routes to the data-plane roles** (decided on 2026-10-04).
@@ -641,20 +679,20 @@ is never called a proxy (decided on 2026-10-07, #233).
 ### 3.6 Status
 
 `parosctl status [--tenant t] [--cell c]` shows three columns, per tenant, per cell and for the
-fleet: desired (what the tenant asked for), available (machines registered, not drained, seen
+universe: desired (what the tenant asked for), available (machines registered, not drained, seen
 alive) and current (what is placed and serving, with each journal's word: Healthy, Degraded,
 Unavailable). The tenant view folds the tenant's control journal, the cell view the cell control
-journal, the fleet view the fleet directory with each cell entry's state. Status is computed live
+journal, the universe view the universe directory with each cell entry's state. Status is computed live
 from those folds and `Inspect`, never written back: there is no separate monitoring store.
 
 It starts small, like `fdbcli status`, and grows by views, each one an admin RPC scoped by the
 caller's authorization: **role slots** per machine (class, total, booked, and what holds each
 slot), per tenant (its slots and footprint), per cell (free and booked per class) and for the
-fleet (decided on 2026-10-04).
+universe (decided on 2026-10-04).
 
-### 3.7 The fleet
+### 3.7 The universe
 
-The fleet runs from M9 with one cell (decided on 2026-10-02, #226).
+The universe runs from M9 with one cell (decided on 2026-10-02, #226).
 
 **A cell** is one set of `parosd` machines. A **regional** cell lives in one region across at
 least three availability zones (decided on 2026-10-07, #215): enough failure domains for its
@@ -665,22 +703,22 @@ a failover domain; the AWS cell-based architecture guidance says the same (cells
 overload and bad deployments and are not designed for failover; multi-AZ cells avoid replicating
 between cells). Cell creation is refused if its machines span fewer than three zones.
 
-**A fleet mixes cell kinds** (decided on 2026-10-07, #253). A cell entry in the fleet directory
+**A universe mixes cell kinds** (decided on 2026-10-07, #253). A cell entry in the universe directory
 carries its `kind`, `Regional { region }` or `MultiRegion { regions, witness }`, and the cell's
-rendezvous name. A **multi-region** cell (M13, decided on 2026-10-07, #253) spans three regions, each
+entry endpoint (given at `universe init` or `add-cell`), which a resolver hands back. A **multi-region** cell (M13, decided on 2026-10-07, #253) spans three regions, each
 across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
 with full records and no other role (section 5). A tenant's `survives` (section 3.4) picks the
 kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its resolvers
 (section 3.5), and every cell answers the second hop for its own tenants.
 
-**The fleet and each cell have a name** (decided on 2026-10-07, #252): a label chosen at `init`
-(`--fleet-name`, `--cell-name`) and again with `--cell-name` when a cell is added (M12); stored
-in the fleet entry and the cell entry, unique within the fleet, refused when taken. `tenant
+**The universe and each cell have a name** (decided on 2026-10-07, #252; kept on 2026-10-09): a
+label chosen at `universe init --name` and `cell init --name`; stored
+in the universe entry and the cell entry, unique within the universe, refused when taken. `tenant
 list`, `inspect` and `status` (section 3.6) show it beside the id. Same rule as a tenant's or a
 journal's name (section 3.5): a label, never the identity; ids stay random (section 3.8).
 
 ```
- fleet F: the fleet directory (tenant → cell), held by the fleet tenant
+ universe F: the universe directory (tenant → cell), held by the universe tenant
  ┌────────────────────────────┬────────────────────────────┬────────────────────────────┐
  │ region W                   │ region C                   │ region N                   │
  │ resolvers W (thin, cached) │ resolvers C                │ resolvers N                │
@@ -690,15 +728,15 @@ journal's name (section 3.5): a label, never the identity; ids stay random (sect
  │  tenants: survives = az    │  tenants: survives = az    │  tenants: survives = az    │
  ├────────────────────────────┴────────────────────────────┴────────────────────────────┤
  │ cell MR1 multi-region over W, C, N (N = witness)                                     │
- │  cell tenant MR1 (2/2/1)   fleet tenant (2/2/1)   tenants: survives = region         │
+ │  cell tenant MR1 (2/2/1)   universe tenant (2/2/1)   tenants: survives = region         │
  └──────────────────────────────────────────────────────────────────────────────────────┘
- client: hop 1  resolver of its region → (cell id, the cell's rendezvous references)
+ client: hop 1  resolver of its region → (cell id, the cell's entry references)
          hop 2  any machine of that cell → the tenant's frontends (zone-tagged, pick local)
 ```
 
-**The fleet tenant always exists** (named *meta* until 2026-10-04). It is one tenant whose control journal also holds the directory, so it is
+**The universe tenant always exists** (named *meta* until 2026-10-04). It is one tenant whose control journal also holds the directory, so it is
 a single journal. In M9 it lives in the only cell; any cell may host it later. Once a
-multi-region cell exists, the fleet tenant is hosted there (decided on 2026-10-07, #253), moved by
+multi-region cell exists, the universe tenant is hosted there (decided on 2026-10-07, #253), moved by
 its M12 move, so a region loss never stops tenant creation and moves; resolvers in every region
 keep resolving on their folds regardless. It stays small: it
 answers only "which tenant lives in which cell" plus the cell entries. Quotas, billing and global
@@ -708,16 +746,16 @@ tenant range, the AWS guidance's range-based mapping.
 **A tenant lives in exactly one cell.** A tenant too large for a cell gets a dedicated cell; a
 tenant is never split by journal.
 
-**Every fleet operation is an idempotent state machine** (FDB's metacluster, section 10). A
+**Every universe operation is an idempotent state machine** (FDB's metacluster, section 10). A
 tenant's directory entry carries a state: `REGISTERING`, `READY`, `REMOVING`,
 `UPDATING_CONFIGURATION` or `ERROR` (`RENAMING` was dropped on 2026-10-04: no milestone renames
 a tenant, and names are the frontend's). Creating a tenant (`parosctl tenant create`)
-writes it into the fleet directory in `REGISTERING` with a cell assignment (always the one cell
+writes it into the universe directory in `REGISTERING` with a cell assignment (always the one cell
 today), creates the tenant in its cell, then marks it `READY`. If an operation fails partway,
 re-running the same operation is allowed and resumes where it stopped; on success the tenant
 returns to `READY`. **A tenant is created once** (decided on 2026-10-04): a creation is named by
 the tenant id its creator drew, so only a re-run carrying that id resumes it; any other creation
-of a name the fleet tenant holds, in any state and whatever its placement, is refused (`NameTaken`), never
+of a name the universe tenant holds, in any state and whatever its placement, is refused (`NameTaken`), never
 merged into the first. Until #225 the client drives the steps, so an interrupted creation stays
 `REGISTERING` until it is deleted; with #225 the coordinator that owns the control journal
 finishes every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is
@@ -727,59 +765,59 @@ carry a state too: `REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a
 receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `init`, and
 `RESTORING` during a recovery.
 
-**Registration is recorded on both sides and verified on every step.** The fleet directory's cell entry holds the
-cell's id; the cell's durable cell plan and its control journal hold the fleet's id; both hold a
+**Registration is recorded on both sides and verified on every step.** The universe directory's cell entry holds the
+cell's id; the cell's durable cell plan and its control journal hold the universe's id; both hold a
 metadata version number. Every
-multi-step operation checks, at each step, that it still talks to the same fleet and the same
+multi-step operation checks, at each step, that it still talks to the same universe and the same
 cell as on its previous step, and refuses otherwise (FDB's `MetaclusterOperationContext`). The
 metadata version lets a reader refuse a format it does not understand.
 
 **What M9 carries so that M12 adds no protocol or data-model change:**
 
-- The machine record carries `node_id`; the durable cell plan carries `cell_id`, `fleet_id` and
+- The machine record carries `node_id`; the durable cell plan carries `cell_id`, `universe_id` and
   the metadata version (amended on 2026-10-04: the code keeps them in the cell plan, not `Config`).
-- `Hello` carries `cell_id` and `fleet_id`.
-- The rendezvous call is keyed by tenant.
+- `Hello` carries `cell_id` and `universe_id`.
+- `Resolve` is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state).
-- The fleet directory's tenant entries carry the fleet-unique `TenantId`, the `JournalIdentifier` of the tenant's control
+- The universe directory's tenant entries carry the universe-unique `TenantId`, the `JournalIdentifier` of the tenant's control
   journal, the cell assignment, the state, a configuration sequence number, the tenant's
-  **group**; the fleet directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
-  the metadata version. No id is well known (section 3.8): a second cell learns the fleet tenant's `JournalIdentifier`
-  when it joins the fleet, from the cell that hosts the fleet tenant.
-- The fleet entry carries the fleet's name; the cell entries also carry the cell's `kind`, its
-  rendezvous name and its own name, and the tenant entries the tenant's `survives`, mirrored into
-  its control journal (decided on 2026-10-07, #252), so a fleet that mixes cell kinds is entries,
+  **group**; the universe directory's cell entries carry the cell id, the cell tenant's `JournalIdentifier`, the state and
+  the metadata version. No id is well known (section 3.8): a second cell learns the universe tenant's `JournalIdentifier`
+  when it joins the universe, from the cell that hosts the universe tenant.
+- The universe entry carries the universe's name; the cell entries also carry the cell's `kind`, its
+  entry endpoint and its own name, and the tenant entries the tenant's `survives`, mirrored into
+  its control journal (decided on 2026-10-07, #252), so a universe that mixes cell kinds is entries,
   never a new field.
 - Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)` (section 3.8).
 - The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
-- No component assumes there is only one cell: every lookup goes through the fleet directory.
+- No component assumes there is only one cell: every lookup goes through the universe directory.
 
 **Tenant groups** (decided on 2026-10-04). A tenant belongs to a **set of groups**, recorded in
-the fleet directory's tenant entry when the tenant is registered and never changed afterwards.
+the universe directory's tenant entry when the tenant is registered and never changed afterwards.
 Each group carries a rule, and a tenant obeys the rules of every group it is in. The set of
 groups is fixed by paros for now; operator-defined groups (rollout waves, co-location), as labels
 without rules, may come later (decided on 2026-10-04):
 
 | Group | Rule | Members |
 |---|---|---|
-| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; reached only for administration, through the fleet tenant's frontends | the fleet tenant, every cell tenant |
+| `internal` | created only by paros's own operations (`init`, adding a cell), never through the tenant API; reached only for administration, through the universe tenant's frontends | the universe tenant, every cell tenant |
 | `cell` | **never leaves its cell**: it *is* its cell (section 1); reconfigured only within it | each cell's cell tenant |
-| `fleet` | holds the fleet directory; moves with its coordinator | the fleet tenant |
-| `users` | created by the tenant API (`parosctl tenant create`, through the fleet tenant's frontends); served by its own frontends | every served tenant |
+| `universe` | holds the universe directory; moves with its coordinator | the universe tenant |
+| `users` | created by the tenant API (`parosctl tenant create`, through the universe tenant's frontends); served by its own frontends | every served tenant |
 
-So the fleet tenant is `{internal, fleet}`, a cell tenant `{internal, cell}` and a served tenant
+So the universe tenant is `{internal, universe}`, a cell tenant `{internal, cell}` and a served tenant
 `{users}`. **The groups alone decide whether a tenant moves**: it moves unless one of its groups
 forbids it, and today only `cell` does. There is no per-tenant movability flag (a
-`movable`/`pinned` placement was dropped the same day); the fleet tenant refuses a move of a
+`movable`/`pinned` placement was dropped the same day); the universe tenant refuses a move of a
 tenant in `cell` when it applies the move's first entry, so no step of the move runs. The tenant
-API creates tenants in `users` only, and the fleet tenant refuses any other group from it.
+API creates tenants in `users` only, and the universe tenant refuses any other group from it.
 
 **Moving a tenant (M12)**, any tenant outside the `cell` group, reconfigures its journals and matchmaker set onto the target cell, then
 transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
 changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
 guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
 never the authority: if it disagrees with the control journal's leader, the leader wins.
-The fleet tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
+The universe tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
 co-locating it with tenants.
 
 **Moving between cell kinds** (M12 and M13, decided on 2026-10-07, #253) is the same four phases.
@@ -794,7 +832,7 @@ the regional rule.
 **The cell inside the configuration** (decided on 2026-10-07, #215, #232; open until then). A
 matchmaker's registry binds an acceptor set and its quorum system to a ballot, and from M11
 `AcceptorConfig` also carries the configuration's `cell_id`, in the same single format bump as
-its failure domains (section 5). Node ids are fleet-unique, so a reconfiguration onto another cell's
+its failure domains (section 5). Node ids are universe-unique, so a reconfiguration onto another cell's
 machines already moves a journal's data; with the `cell_id` in the configuration the move is
 itself decided by Paxos: the effective configuration (the highest-ballot reconfiguration a
 matchmaker quorum holds) names the cell that owns the journal, the directory is a cache of that
@@ -803,8 +841,8 @@ it is registered. The cost is one field in `AcceptorConfig` that the core never 
 every node knowing its own cell.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
-tombstone set so it cannot silently rejoin), moving tenants between cells, moving the fleet
-tenant, the resolver (section 3.5), splitting the fleet tenant by range, placement across cells
+tombstone set so it cannot silently rejoin), moving tenants between cells, moving the universe
+tenant, the resolver (section 3.5), splitting the universe tenant by range, placement across cells
 (each cell entry with a configured capacity and an allocated count, an ordered index of cells
 with room, the fullest cell of the kind the tenant's `survives` asks for that still has room
 after a quick availability check (amended on 2026-10-07, #232), an optional preferred cell, a
@@ -819,12 +857,20 @@ on 2026-10-02, #226). **No identifier is fixed** (decided on 2026-10-04): there 
 tenant, no well-known journal and no reserved range. `0` means unset in every id space, and that
 is the only value with a meaning. **No id has a default** either: an id is drawn or read, never
 assumed, and unset is a state to refuse, not a value to fall back on. Names are labels beside
-these ids (decided on 2026-10-07, #252): the fleet's, a cell's, a tenant's and a journal's name
+these ids (decided on 2026-10-07, #252): the universe's, a cell's, a tenant's and a journal's name
 (sections 3.5, 3.7) are chosen and unique within their scope, never derived from or reused as an
 id.
 
-- `node_id`, `cell_id`, `fleet_id`: random, minted at format, `init` and `init` respectively, and
-  stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `fleet_id`). They
+**Ids on the wire, labels for people** (decided on 2026-10-09). Every RPC and every stored record
+names the universe, a cell, a tenant and a journal by its `u64` id only; a name never crosses the
+protocol below the entry roles. Each of them also has a **string label**, chosen when it is
+created (`universe init --name`, `cell init --name`, tenant and journal create) and shown by
+`parosctl` beside a short hex id. A label resolves to its id only at the edge (the resolver and
+the frontend, section 3.5, and `parosctl` for administration), and an id never becomes a label.
+
+- `node_id`, `cell_id`, `universe_id`: random, minted at format, `cell init` and `universe init`
+  respectively, and
+  stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `universe_id`). They
   are written once, unset → set, and a later mismatch is refused at boot like any `Config`
   mismatch.
 - The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the
@@ -836,24 +882,24 @@ id.
   `u64` each. They are the one part of control state bounded by history rather than by live
   entities (section 3.9), accepted as such (decided on 2026-10-04). Names are not tombstoned
   (section 3.5).
-- `TenantId(u64)`: random, drawn by the creator and recorded by the fleet tenant in the `REGISTERING` step;
-  the fleet tenant refuses a duplicate at apply and the creator redraws. It is fleet-unique, so moving a
+- `TenantId(u64)`: random, drawn by the creator and recorded by the universe tenant in the `REGISTERING` step;
+  the universe tenant refuses a duplicate at apply and the creator redraws. It is universe-unique, so moving a
   tenant between cells never needs a new id. The system tenants are no exception: each cell's
   cell tenant gets a random id at the cell's `init` (so two cells' cell tenants differ), and the
-  fleet tenant gets one when `init` creates the fleet, kept when the fleet tenant moves. The fleet tenant records both
+  universe tenant gets one when `init` creates the universe, kept when the universe tenant moves. The universe tenant records both
   (its own in its first entry, each cell tenant in that cell's entry), so its duplicate check
-  covers them too. The fleet tenant records each tenant's groups beside its id
+  covers them too. The universe tenant records each tenant's groups beside its id
   (section 3.7). FDB gave each metacluster an id prefix for the same goal; a random draw
-  checked by the fleet tenant needs no prefix.
+  checked by the universe tenant needs no prefix.
 - `JournalId(u64)`: random, unique within its tenant, recorded and checked at apply by the tenant
   coordinator, the single writer of the tenant's control journal; a duplicate is refused and the
   creator redraws. A tenant's **control journal** has a random id too, drawn with the tenant and
-  recorded where the tenant is recorded: in the fleet directory's tenant entry, and for the two system tenants
+  recorded where the tenant is recorded: in the universe directory's tenant entry, and for the two system tenants
   in the cell plan. A journal's id never changes when its tenant moves; a control journal that
   recovery rebuilds (section 3.10) gets a new one, so the old and the new can never be mistaken
   for each other.
 - **Discovery replaces convention.** The only fixed starting points are a machine's addresses:
-  the `JournalIdentifier`s of the cell's and the fleet tenant's control journals are learned from any machine of the cell
+  the `JournalIdentifier`s of the cell's and the universe tenant's control journals are learned from any machine of the cell
   (section 3.2), and everything below them through their folds.
 - **Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)`** (named `JournalKey` in the code until #244), riding the `Deliver`
   envelope where `JournalId` alone rides it today, so uniqueness is only ever needed where it can
@@ -898,15 +944,15 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
     checkpoint journals; at most two exist at a time.
 
   M9 writes `Inline` only. `Ref` removes the batch-size limit and never blocks the main journal;
-  it is needed when a journal's state outgrows one batch (the fleet tenant in a large fleet, M12). Readers
+  it is needed when a journal's state outgrows one batch (the universe tenant in a large universe, M12). Readers
   handle both forms from the start, so adopting `Ref` later changes only the writer.
 
 ### 3.10 Recovery (deferred)
 
 **Deferred out of M9** (decided on 2026-10-04, #231): nothing of it is built, and the simulation
-cannot reach a lost control quorum while it runs one seed (#213). The design below stays the
-direction and is taken up as its own later issue. Two questions it must answer then: with the fleet
-tenant's and the cell's control journals on the same seeds, recovery reads the machines' own stores
+cannot reach a lost control quorum while it runs one founding member (#213). The design below stays the
+direction and is taken up as its own later issue. Two questions it must answer then: with the universe
+tenant's and the cell's control journals on the same founding members, recovery reads the machines' own stores
 (`journals/<tenant>/<journal>/`, their `JournalIdentifier`s and assignments) to rebuild both, tombstones
 included; and a new control `JournalId` must reach machines whose cell plan is written once.
 
@@ -917,7 +963,7 @@ touched: the tenants' journals have their own quorums.
 - **Cell.** `parosctl init --recover` starts a fresh cell control journal, under a new random
   `JournalId` recorded in the cell plan, and a new recovery generation; live machines re-register; tenant coordinators re-report from their own control
   journals; any node still holding the old configuration is refused.
-- **Fleet.** The fleet directory is rebuilt from the cells' tenant lists, the way FDB's metacluster
+- **Universe.** The universe directory is rebuilt from the cells' tenant lists, the way FDB's metacluster
   could rebuild a lost management cluster from its data clusters.
 - Every recovery has a **dry-run** mode that reports what it would change without changing it,
   and takes a **recovery id** recorded in the journal so two recoveries cannot run at once. Both
@@ -938,8 +984,8 @@ scalable independently per tenant by its coordinator:
 | Unbatcher | stateless | to build; multi-writer journals only |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
 | Frontend (the entry role) | stateless | to build: one pool per tenant, per `(tenant, region)` in a multi-region cell (section 3.4); authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |
-| Resolver | stateless | to build in M12: fleet level, one pool per region shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5) |
-| Coordinator (fleet, cell, tenant) | stateless, or a seed at bootstrap | to build: the election library over a multi-writer journal (#240) |
+| Resolver | stateless | to build in M12: universe level, one pool per region shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5) |
+| Coordinator (universe, cell, tenant) | stateless, or a founding member at bootstrap | to build: the election library over a multi-writer journal (#240) |
 
 ### 4.1 How the pieces fit
 
@@ -1013,7 +1059,7 @@ identity is replaced by reconfiguration, a crashed machine restarts as an existi
 machine is reconfigured out and its journals placed elsewhere. This is what the simulation
 already exercises; what changes is who drives the healing: today the harness's client composes
 the reconfigurations, in the service the tenant's coordinator does, from desired state. Losing a
-control quorum will be recoverable at both the cell and the fleet level, without touching user
+control quorum will be recoverable at both the cell and the universe level, without touching user
 data (section 3.10, deferred). Beyond one region, a multi-region cell survives the loss of a
 region (M13, below).
 
@@ -1084,7 +1130,7 @@ the WPaxos read (section 10) established for one region with several availabilit
 `FailureDomain { region, az }` parallel to its sorted members, holding the names copied from the
 registry's `failure_domain` (`RegisterNode`, section 3.2, e.g. `("eu-west-1", "eu-west-1a")`):
 short bounded strings, compared for equality only, never parsed or ordered by the core. Names mean
-the same thing fleet-wide, so a move between cells (section 3.7) compares domains correctly; a
+the same thing universe-wide, so a move between cells (section 3.7) compares domains correctly; a
 cell-scoped pair of integers would let one cell's `az 2` equal another's and the zone rule could
 accept a placement that does not survive a zone. The cost is a few dozen bytes per member in a
 configuration of at most nine members. The vector is bound to the ballot with the
@@ -1129,7 +1175,7 @@ where the region has one.
 **A zone loss, a region loss.** A regional cell serves through the loss of one zone. The loss of
 its region takes it down by design: cells are not failover domains (section 3.7), resolvers
 elsewhere keep pointing at it, and nothing fails over. **Static stability** holds inside the
-cell: the data plane and the rendezvous answers come from folds, so only placement, new tenants,
+cell: the data plane and the `Resolve` answers come from folds, so only placement, new tenants,
 new capacity and moves wait.
 
 ```
@@ -1222,9 +1268,9 @@ Simulation is the investment. Every milestone lands with its share of:
   `TenantId`, no component reaching a journal by an id it did not learn (the simulation draws
   every `JournalIdentifier`, the system tenants' included, per seed).
 - Control-plane invariants: a child keeps serving through its parent's outage; folding from a
-  checkpoint yields the same state as folding the full history; the fleet directory equals the union
+  checkpoint yields the same state as folding the full history; the universe directory equals the union
   of the cells' tenant lists (assignments and counts), checked even with one cell (FDB's
-  metacluster consistency checker); every fleet operation resumes correctly when re-run after a
+  metacluster consistency checker); every universe operation resumes correctly when re-run after a
   crash at any step; an election never has two leaders whose writes both land, and settles on one
   leader after the chaos window (a liveness oracle in recovery mode).
 - A real linearizability checker in the workload's `check()`, over the four-call history with
@@ -1234,11 +1280,11 @@ Simulation is the investment. Every milestone lands with its share of:
   location and its reachable: a `SetLeader` drawn in the middle of a pipelined burst, a client
   timeout shorter than the ack so a retry crosses an ownership change, a `Truncate` racing a
   reader's cursor.
-- Control-plane shapes: one cell hosting the fleet tenant, now; a crash at each step of `init` and of tenant
+- Control-plane shapes: one cell hosting the universe tenant, now; a crash at each step of `init` and of tenant
   creation, each step with its own reachable; a crash between a checkpoint's write and its
-  truncate, for the registry and for the fleet tenant; a truncate refused from a stale leader; the fleet tenant
+  truncate, for the registry and for the universe tenant; a truncate refused from a stale leader; the universe tenant
   unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
-  it. In M12: a second cell, a tenant move and a move of the fleet tenant. With recovery (deferred): a lost cell
+  it. In M12: a second cell, a tenant move and a move of the universe tenant. With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
 - Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
   with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
@@ -1268,13 +1314,13 @@ Simulation is the investment. Every milestone lands with its share of:
 - Regions and the resolver (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a
-  client's two-hop resolution keeps succeeding through an outage of the fleet tenant. In M13: the
+  client's two-hop resolution keeps succeeding through an outage of the universe tenant. In M13: the
   witness region, the per-region pools and a move between cell kinds.
 - Setup under simulation (decided on 2026-10-09, #246): all of paros runs in the simulation,
   setup included. Simulated `parosd` machines run the shipped `paros::machine::run_machine`
   from an empty disk (format, a minted `node_id`, the machine record, the wait); the workload's
   `init` is `paros::client::initialize`, the code `parosctl init` prints; the machines it forms
-  host the cell control journal and the fleet tenant, and every other process learns their
+  host the cell control journal and the universe tenant, and every other process learns their
   identifiers through `Inspect`, never by injection. Forming the cell is part of every run, never
   injected state: the seed draws the layout (machine count, classes, capacities, which machine
   receives `init`), when and how often `init` and the commands after it are sent, and every
@@ -1294,7 +1340,7 @@ stay as they are.
 Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
 ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`, the retired
 read-index path and the unset `JournalIdentifier`s that meant "the first journal", #243; the
-fleet tenant, `JournalIdentifier` and proxy renames in the code, #244) are in the history and
+universe tenant, `JournalIdentifier` and proxy renames in the code, #244) are in the history and
 AGENTS.md.
 
 - The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
@@ -1308,7 +1354,7 @@ AGENTS.md.
 - `parosd` stops running the plain deployment: every journal is born with its matchmaker set, and
   journal-tagged matchmaker planes replace "only the first journal of a process" (#190); proxy leaders
   and replicas follow (#193).
-- The coordinators replace the operator's client: `parosctl` stops writing as the lowest seed's
+- The coordinators replace the operator's client: `parosctl` stops writing as the lowest founding member's
   node id (#240, #212).
 
 ## 8. Milestones
@@ -1320,15 +1366,15 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and hooks, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The fleet with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the fleet with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the fleet tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the fleet tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's rendezvous name), tenant locks, moving tenants and the fleet tenant between cells, splitting the fleet tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
-| M13 | Multi-region cells (#253) | the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the fleet tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
+| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
+| M13 | Multi-region cells (#253) | the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
-(#176, #202), three seeds (#213), the `parosd` machine lifecycle simulated as shipped (#246), the
+(#176, #202), three founding members (#213), the `parosd` machine lifecycle simulated as shipped (#246), the
 control-plane oracle debt (#247) and TigerStyle assertions (#248) rank ahead of M9's features. Recovery (#231, section 3.10) is
 deferred and carries no milestone yet. The interactive game and the lessons (`track:play`, #162,
 #163) run outside the milestones, behind the service.
@@ -1338,21 +1384,22 @@ deferred and carries no milestone yet. The interactive game and the lessons (`tr
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`stateless1`); the rendezvous list that names the first three is the `seeds` alias. Its journals run
+`stateless1`); `parosctl init --members` founds the cell on the first three, and an admin
+admits the others with `cell add-machine`. Its journals run
 `double`: four `storage` machines cannot hold `triple`'s five acceptors on distinct machines, so
 the toy cannot run `triple` (decided on 2026-10-07, #215).
 
 From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
-fleet, its one cell and the fleet tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and
+universe, its one cell and the universe tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and
 receive its token. Create a
 journal. `write`, `read` and `tail` from `parosctl`, addressing `acme/orders`. `set-leader` to a second
 client and see the first one refused, for a `write` and for a `truncate`. Create a multi-writer
 journal and append to it from two clients at once. Kill one `storage` and one `stateless`
 container and keep writing. Wipe one volume, see the amnesia refusal, and see the journal healed
-by reconfiguration onto another machine. Stop the fleet tenant's quorum and keep writing to an
+by reconfiguration onto another machine. Stop the universe tenant's quorum and keep writing to an
 existing tenant. Kill the cell coordinator's machine and see another one elected. `parosctl
 status` shows desired, available and current, and the role slots, per machine, per tenant, per
-cell and for the fleet. (Recovery of a lost cell control quorum is deferred, section 3.10.) The simulation is green in every shape and the
+cell and for the universe. (Recovery of a lost cell control quorum is deferred, section 3.10.) The simulation is green in every shape and the
 coverage-guided sweep saturates.
 
 ## 10. Sources
@@ -1379,7 +1426,7 @@ The AWS Journal, as publicly described:
   the witness region holds only a copy of the Journal; after a region loss every commit waits on
   two of two.
 - Brooker, "Control Planes vs Data Planes", <https://brooker.co.za/blog/2019/03/17/control.html>:
-  what belongs on the request path and what scales with the fleet.
+  what belongs on the request path and what scales with the universe.
 - Amazon MemoryDB, SIGMOD 2024,
   <https://cdn.amazon.science/e0/1b/ba6c28034babbc1b18f54aa8102e/amazon-memorydb-a-fast-and-durable-memory-first-cloud-database.pdf>:
   §4.1 conditional append and leadership as one more conditional append, the lease and
@@ -1497,11 +1544,11 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   procedure where an operator picks a recovery leader by host id. paros needs neither, because its
   control journals are rebuilt from below (section 3.10).
 - **One cell playing both roles.** FDB's metacluster made a cluster exactly one of standalone,
-  management or data, never two. paros co-locates the fleet tenant with tenants in one cell because the fleet tenant is a
+  management or data, never two. paros co-locates the universe tenant with tenants in one cell because the universe tenant is a
   tenant with its own coordinator and quorums, which FDB could not do (its management data lived
-  in the system keyspace). Moving the fleet tenant to a dedicated cell is the escape hatch.
+  in the system keyspace). Moving the universe tenant to a dedicated cell is the escape hatch.
 - **Multiple cells from day one.** The AWS guidance recommends multiple cells and migration from
-  day one. paros runs the fleet machinery from day one with one cell and defers the second cell
+  day one. paros runs the universe machinery from day one with one cell and defers the second cell
   to M12; the hooks of section 3.7 keep that deferral free of protocol changes.
 - **Checkpoints as local snapshot files per replica** (Kafka KIP-630, Redpanda): rejected,
   coordinators are stateless. KIP-630 rejected snapshots in the log for bandwidth, since the
@@ -1516,6 +1563,10 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   `cell` group says so (section 3.7).
 - **A provisioning step that names the seeds to each other**, a cluster file, gossip discovery and
   the frontend as the rendezvous: #216.
+- **Seeds, a join list and a rendezvous name** (2026-10-02 to 2026-10-09, #216). Every machine
+  carried the seed list and `init` had to target a seed; being a seed meant nothing after
+  formation, and "seed" collided with the simulation's seed. Replaced by founding members named
+  in `cell init` and admin-admitted machines and cells (section 3.1).
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
   fence suffices, and an owner id the caller chose, so two processes could share it and both pass
   the owner check once they read the public generation. A per-term random leader uuid is
@@ -1530,7 +1581,7 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   Biscuit gives roles as Datalog facts, attenuation without the root key (tenant creation, users
   narrowing their tokens offline) and offline minting. JWT stays the way to plug an external
   identity provider in later, as a second `Authz` implementation or a token exchange.
-- **Well-known system ids** (fleet tenant `1`, cell tenant `2`, every control journal `1`,
+- **Well-known system ids** (universe tenant `1`, cell tenant `2`, every control journal `1`,
   `0..=255` reserved; decided on 2026-10-02, reversed on 2026-10-04). They let a component find a
   control journal without asking, but every component must then agree on the convention forever,
   the cell tenant's id repeats in every cell (unique only within its cell), a rebuilt control
@@ -1538,10 +1589,10 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   to special-case. Random ids recorded where they are created, and learned from any machine of
   the cell, cost one `Inspect` at bootstrap.
 - **A single entry role** (rejected on 2026-10-07, #233): a per-tenant role cannot find the cell
-  of a tenant it does not serve, so the first hop needs a fleet-level answerer, the resolver.
+  of a tenant it does not serve, so the first hop needs a universe-level answerer, the resolver.
 - **A resolver folding every cell's registry** (rejected on 2026-10-07, #233): one hop instead of
   two, but the resolver is no longer thin, no cell stays statically stable without it, and it makes
-  every cell depend on a fleet-level role.
+  every cell depend on a universe-level role.
 - **Chain replication inside a region** (rejected on 2026-10-07, #215), the variant DSQL's journal
   runs across AZs: paros keeps quorum writes everywhere, because a slow or dead acceptor costs
   nothing until reconfiguration, where a chain stalls until its membership is changed.
