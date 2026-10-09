@@ -43,6 +43,9 @@ pub(super) struct Step<'a> {
     pub(super) config: &'a ChainConfig,
     pub(super) journal: JournalIdentifier,
     pub(super) target: usize,
+    /// The genesis pool the client's own draws rotate over: the joiners
+    /// after it are reached only through a leader a reply names.
+    pub(super) server_count: usize,
     pub(super) retarget: Retarget,
     /// The step's payload class and bytes draws.
     pub(super) draws: (u64, u64),
@@ -76,7 +79,9 @@ impl ChainWorkload {
                             self.append(step, &submission, written).await;
                         }
                     }
-                    DUAL_SUBMIT => self.dual_append(step, &submission, written).await,
+                    DUAL_SUBMIT if step.server_count > 1 => {
+                        self.dual_append(step, &submission, written).await;
+                    }
                     _ => {
                         let landed = self.append(step, &submission, written).await;
                         if !landed && buggify_with_prob!(0.5) {
@@ -169,8 +174,9 @@ impl ChainWorkload {
         submission: &Submission,
         written: &mut Vec<WrittenCommand>,
     ) {
-        let count = step.nodes.server_count();
-        let other = (step.target + 1) % count.max(1);
+        // On the genesis pool only: a joiner serves no plan journal.
+        let count = step.server_count;
+        let other = (step.target + 1) % count;
         let send = |target: usize| {
             let attempt = write_once(
                 step.nodes,
