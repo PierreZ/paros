@@ -1,4 +1,8 @@
-# Crash and restart safety
++++
+title = "Crash and restart safety"
+weight = 6
+aliases = ["/restart-safety.html"]
++++
 
 Paxos assumes that nodes crash and come back. A majority keeps serving while a
 minority is down, and a recovered node rejoins. The words "come back" hide two
@@ -10,16 +14,15 @@ it.
 
 > **Play it.** Two Act II levels, one requirement each.
 >
-> - [`act2/persist-before-send`](play/#act2/persist-before-send) — order the writes
+> - [`act2/persist-before-send`](../../play/#act2/persist-before-send) — order the writes
 >   and the messages of every `Ready` batch. Then crash the node at each seam,
 >   before the fsync and after the fsync, and read off what survived.
-> - [`act2/what-survives-a-crash`](play/#act2/what-survives-a-crash) — crash and
+> - [`act2/what-survives-a-crash`](../../play/#act2/what-survives-a-crash) — crash and
 >   restart at each step of a decision. The prompt that matters: a `Commit` says
 >   slot 5 holds `Y`, and your own durable record says `X` at a lower ballot. Keep
 >   `X` or take `Y`? The goal is a restarted node whose `HardState` never regressed
 >   and whose chosen value is intact.
 
-<!-- toc -->
 
 ## What must be durable, and when
 
@@ -71,10 +74,10 @@ value `Y` there. Its volatile chosen map holds `Y`, but its **durable** accepted
 still holds `X` — and on boot the volatile state is rebuilt from those durable records
 (`crates/paros-core/src/node/boot.rs`), so the node comes back believing slot 5 is `X`
 while every other node holds `Y`. That is exactly what
-[Why one value is safe](safety.md) promised could never happen, and nothing in the run
+[Why one value is safe](@/paxos/safety.md) promised could never happen, and nothing in the run
 was out of order: every write was flushed before its reply, which is why
 persist-before-send alone does not catch it.
-[`act2/what-survives-a-crash`](play/#act2/what-survives-a-crash) is that interleaving,
+[`act2/what-survives-a-crash`](../../play/#act2/what-survives-a-crash) is that interleaving,
 with you holding the crash.
 
 ## The fix, and why one word matters

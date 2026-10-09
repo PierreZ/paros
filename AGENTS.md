@@ -84,7 +84,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   every control-plane problem with paros's own journals, leader election and Paxos flavors;
   ask "which journal, which election, which flavor?" before building anything new.
 - **Write documents in ASD-STE100 Simplified Technical English, most of the time** (decided on
-  2026-10-09): `docs/`, the book and site, READMEs, AGENTS.md files, issues and PR descriptions.
+  2026-10-09): `docs/`, the site, READMEs, AGENTS.md files, issues and PR descriptions.
   Short sentences (at most 20 words for procedures, 25 for descriptions), one instruction per
   sentence, active voice, one meaning per word, and the same term for the same thing every time.
   Code identifiers and protocol terms stay as they are. Leave it when a sentence would lose
@@ -454,9 +454,9 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `book/` (mdbook; `book/CLAUDE.md`, the `update-the-book` skill),
+Elsewhere: `web/site/` (the website, Zola + Goyo, #254; `web/site/AGENTS.md`, the `update-the-site` skill; built by `scripts/build-site.sh`), `web/play/` (the game's app),
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-site.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

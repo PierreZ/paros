@@ -18,6 +18,24 @@
         "type": "github"
       }
     },
+    "goyo": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1784903538,
+        "narHash": "sha256-nCBQSW0uGnNywwN+crpPNtNpRFpirmse9v9WqZypIck=",
+        "ref": "refs/heads/main",
+        "rev": "25054f8f9f0b4eafa3d3380ec120b7e9cd7fd021",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/hahwul/goyo"
+      },
+      "original": {
+        "rev": "25054f8f9f0b4eafa3d3380ec120b7e9cd7fd021",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/hahwul/goyo"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1791456040,
@@ -34,10 +52,29 @@
         "type": "github"
       }
     },
+    "nixpkgs-zola": {
+      "locked": {
+        "lastModified": 1791426274,
+        "narHash": "sha256-MWhktfFtFE8Jl7bf9Pkp7TR5MSdYCjCswSo0Gkb4ywc=",
+        "ref": "nixos-26.05",
+        "rev": "7c8764b7c7b09b34f632464276218ef9090eaa11",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs"
+      },
+      "original": {
+        "ref": "nixos-26.05",
+        "shallow": true,
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
+        "goyo": "goyo",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-zola": "nixpkgs-zola",
         "rust-overlay": "rust-overlay"
       }
     },

@@ -1,4 +1,8 @@
-# Beyond Multi-Paxos
++++
+title = "Beyond Multi-Paxos"
+weight = 9
+aliases = ["/beyond-multi-paxos.html"]
++++
 
 Everything up to here is one algorithm: a majority of acceptors, one elected
 leader, a fixed membership, and disks that either work or stop. Each of those four
@@ -14,28 +18,27 @@ the plain deployment and the extended one. The safety oracles hold in both.
 
 > **Play it.** Act IV is ten levels, one for each mechanism below.
 >
-> - [`act4/flexible-quorums`](play/#act4/flexible-quorums) — choose the reach of
+> - [`act4/flexible-quorums`](../../play/#act4/flexible-quorums) — choose the reach of
 >   each phase over four acceptors, and try to dodge the overlap.
-> - [`act4/the-grid`](play/#act4/the-grid) — decide two slots on two columns, then
+> - [`act4/the-grid`](../../play/#act4/the-grid) — decide two slots on two columns, then
 >   send a stray `Accept` outside a slot's column and watch the tally ignore it.
-> - [`act4/quorum-reads`](play/#act4/quorum-reads) — serve a read at a follower
+> - [`act4/quorum-reads`](../../play/#act4/quorum-reads) — serve a read at a follower
 >   from a row's vote watermarks, and hold one read that is not covered yet.
-> - [`act4/the-handoff`](play/#act4/the-handoff) — hand the leadership on under the
+> - [`act4/the-handoff`](../../play/#act4/the-handoff) — hand the leadership on under the
 >   same ballot, then try to hand it on a second time.
-> - [`act4/matchmaking`](play/#act4/matchmaking) — register a campaign, read the
+> - [`act4/matchmaking`](../../play/#act4/matchmaking) — register a campaign, read the
 >   histories back, and close Phase 1 over every configuration in them.
-> - [`act4/reconfigure`](play/#act4/reconfigure) — grow the acceptor set onto a
+> - [`act4/reconfigure`](../../play/#act4/reconfigure) — grow the acceptor set onto a
 >   spare, and get a command chosen under the new configuration.
-> - [`act4/garbage-collection`](play/#act4/garbage-collection) — raise the
+> - [`act4/garbage-collection`](../../play/#act4/garbage-collection) — raise the
 >   watermark, then retire a removed acceptor with the evidence in hand.
-> - [`act4/matchmaker-generations`](play/#act4/matchmaker-generations) — replace
+> - [`act4/matchmaker-generations`](../../play/#act4/matchmaker-generations) — replace
 >   the matchmaker set through stop, reconstruct, bootstrap, decide and publish.
-> - [`act4/faulty-records`](play/#act4/faulty-records) — damage one accepted
+> - [`act4/faulty-records`](../../play/#act4/faulty-records) — damage one accepted
 >   record, then put each Promise that arrives into its CTRL case.
-> - [`act4/the-wiped-node`](play/#act4/the-wiped-node) — erase a disk, take the
+> - [`act4/the-wiped-node`](../../play/#act4/the-wiped-node) — erase a disk, take the
 >   library's refusal, and keep the survivors deciding.
 
-<!-- toc -->
 
 ## Flexible quorums
 
@@ -50,7 +53,7 @@ write needs two answers instead of three. The next election pays for that with
 three promises. The picture below is what no single run shows: two Phase-2 quorums
 that miss each other completely, beside a Phase-1 quorum that must meet both.
 
-```mermaid
+{% mermaid() %}
 flowchart TD
     P2A["Phase-2 quorum, q2 = 2:<br/>A0 and A1 choose SET x=1"]
     P2B["Another Phase-2 quorum:<br/>A2 and A3 — it shares<br/>no acceptor with the first"]
@@ -67,7 +70,7 @@ flowchart TD
     P1 --- A2
     P1 --- A3
     classDef shared fill:#c97a2b,stroke:#7a4718,color:#fff
-```
+{% end %}
 
 Three plus two is five and there are four acceptors, so no Phase-1 quorum can miss
 both voters. paros asks every quorum question through one boundary, so this is
@@ -80,7 +83,7 @@ tally changed when it landed.
 (`crates/paros-core/src/membership.rs`); the example
 `paros-core/examples/flexible_quorums.rs`. Paper: Howard, Malkhi and Spiegelman,
 *Flexible Paxos* (`docs/references/papers/flexible-paxos/`). Play it:
-[`act4/flexible-quorums`](play/#act4/flexible-quorums).
+[`act4/flexible-quorums`](../../play/#act4/flexible-quorums).
 
 ## The acceptor grid
 
@@ -105,12 +108,12 @@ stray copy, honestly and safely, and its vote still counts for nothing.
 `paros-core/examples/acceptor_grid.rs`. Paper: Whittaker et al.,
 *Scaling Replicated State Machines with Compartmentalization* §3.2
 (`docs/references/papers/scaling-rsm-compartmentalization/`). Play it:
-[`act4/the-grid`](play/#act4/the-grid).
+[`act4/the-grid`](../../play/#act4/the-grid).
 
 ## Quorum reads
 
 The grid takes the writes off the leader. The reads must not go back to it. The
-[quorum read](linearizable-reads.md) does not involve the leader at all, and on a
+[quorum read](@/paxos/linearizable-reads.md) does not involve the leader at all, and on a
 grid it asks less.
 
 Ask a **Phase-1 quorum** one thing each: what is the highest slot you have voted
@@ -146,7 +149,7 @@ parks until the read is confirmed and serves from the fold (`driver/log_reads.rs
 `Acceptor::vote_watermark` (`acceptor.rs`); `Message::PreRead`,
 `Message::PreReadAck` (`message.rs`); `Replica::covers`, `Ready::read_states`.
 Paper: Whittaker et al., *Compartmentalized Paxos* §3.4, *Paxos Quorum Reads*.
-Play it: [`act4/quorum-reads`](play/#act4/quorum-reads).
+Play it: [`act4/quorum-reads`](../../play/#act4/quorum-reads).
 
 ## Proxy leaders
 
@@ -253,7 +256,7 @@ index and the chosen values. Since paros runs no application at all, there is
 nothing else an acceptor could shed: every acceptor is the same learner, whether
 or not replicas run beside it.
 
-```mermaid
+{% mermaid() %}
 flowchart LR
     L[leader]
     subgraph acceptors [acceptors: vote, keep the chosen log]
@@ -272,7 +275,7 @@ flowchart LR
     L -- Commit --> R0
     L -- Commit --> R1
     R1 -- CatchUpRequest --> L
-```
+{% end %}
 
 A replica runs on a process of its own, driven by the fourth driver beside the
 node's, the matchmaker's and the proxy's. Unlike a proxy it is durable: it keeps
@@ -363,7 +366,7 @@ proxy model checker re-installed a duplicated `Relinquish` on it.
 round leaves, `record_own_round` (`node/phase2.rs`). Paper: Nawab, Agrawal and
 El Abbadi, *DPaxos*, SIGMOD 2018, the Relinquishment section; design note
 `docs/analysis/consensus/dpaxos-leader-handoff.md`. Play it:
-[`act4/the-handoff`](play/#act4/the-handoff).
+[`act4/the-handoff`](../../play/#act4/the-handoff).
 
 ## Matchmakers and reconfiguration
 
@@ -408,8 +411,8 @@ is never quietly honored.
 `ColocatedNode::on_match_reply`. Paper: Whittaker et al.,
 *Matchmaker Paxos: A Reconfigurable Consensus Protocol*
 (`docs/references/papers/matchmaker-paxos/`). Play it:
-[`act4/matchmaking`](play/#act4/matchmaking) and
-[`act4/reconfigure`](play/#act4/reconfigure).
+[`act4/matchmaking`](../../play/#act4/matchmaking) and
+[`act4/reconfigure`](../../play/#act4/reconfigure).
 
 ## The GC watermark and retirement
 
@@ -454,7 +457,7 @@ the leader reaches it.
 `ColocatedNode::may_retire` (`node/gc.rs`); `GcRequest`, `GcAck`,
 `Inspect.retirable`, `RetireRequest.gc_watermark`. Design note:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md`. Play it:
-[`act4/garbage-collection`](play/#act4/garbage-collection).
+[`act4/garbage-collection`](../../play/#act4/garbage-collection).
 
 ## Matchmaker-set generations
 
@@ -506,7 +509,7 @@ maximum over the stop quorum.
 (`matchmaker/handover_model.rs`). Design notes:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
 `docs/analysis/consensus/matchmaker-interaction-verification.md`. Play it:
-[`act4/matchmaker-generations`](play/#act4/matchmaker-generations).
+[`act4/matchmaker-generations`](../../play/#act4/matchmaker-generations).
 
 ## Faulty records
 
@@ -539,7 +542,7 @@ the slot in one of three cases:
 *Protocol-Aware Recovery for Consensus-Based Distributed Storage*
 (`docs/references/papers/protocol-aware-recovery/`); restatement
 `docs/analysis/storage/ctrl-multipaxos-restatement.md`. Play it:
-[`act4/faulty-records`](play/#act4/faulty-records).
+[`act4/faulty-records`](../../play/#act4/faulty-records).
 
 ## The wiped node
 
@@ -555,7 +558,7 @@ ballot proposes. A quorum behind the older ballot then chooses a second value fo
 a slot that already holds one.
 
 Catching up does not help either. Commit replay restores chosen values, and a
-[trim-point jump](truncation-and-snapshots.md) restores where the log starts;
+[trim-point jump](@/paxos/truncation-and-snapshots.md) restores where the log starts;
 neither restores a promise, and the peer that answers does not know what this
 node has sworn. So a node that lost its disk **does not
 rejoin**, and the **library** enforces that rather than the harness or the
@@ -603,7 +606,7 @@ resumes by reading the disk, the rule the simulation's operator follows too.
 `Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`),
 `paros::machine::run_machine` and `MachineRecord` (`crates/paros/src/machine/`)
 and `parosd`'s `Record` (`crates/parosd/src/record.rs`). Play it:
-[`act4/the-wiped-node`](play/#act4/the-wiped-node).
+[`act4/the-wiped-node`](../../play/#act4/the-wiped-node).
 
 ## Many journals on one process
 

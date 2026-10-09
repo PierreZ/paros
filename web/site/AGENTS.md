@@ -1,24 +1,38 @@
-# book
+# site
 
-The paros book: an mdbook that explains the Paxos family with diagrams, grounded in the
-papers (`docs/references/`) and mapped onto the real `paros-core` code. Source in
-`book/src/`, config in `book.toml`.
+The paros website: Zola with the Goyo theme (#254), replacing the mdbook. Two parts:
+`content/parosd/` (the system) and `content/paxos/` (the Paxos implementation, told as a
+learning path). Pages are written for people and stand on their own: they never send a
+reader to `docs/architecture.md`, which is the agents' map, not human documentation.
 
 ## Build & preview
 
-- `mdbook build` (output in `book/output/`) — the parse gate; `mdbook-mermaid` rewrites
-  every ` ```mermaid ` fence, so a build failure means a malformed block.
-- `mdbook serve` to preview live.
-- Preprocessors: `mdbook-toc` (the `<!-- toc -->` marker) and `mdbook-mermaid`. All
-  diagrams are **mermaid only** (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`); no
-  ASCII art, no SVG.
+- `scripts/build-site.sh` (inside `nix develop`) copies the pinned Goyo (`PAROS_GOYO`, a flake
+  input) into `web/site/themes/goyo` and runs `zola build`; output in `web/site/public/`. Zola checks
+  every internal link and anchor, so a broken `@/` link fails the build.
+- `scripts/build-site.sh serve` previews live.
+- The flake pins Zola 0.22 (`nixpkgs-zola`): Goyo's templates do not parse on Zola 0.23.
+- Internal links are `@/paxos/<page>.md#anchor`. Old mdbook URLs keep working through each
+  page's `aliases` (`/safety.html` redirects to `/paxos/safety/`); keep them when you move a page.
+- All diagrams are **mermaid only** (`flowchart`, `sequenceDiagram`, `stateDiagram-v2`), written
+  with the `mermaid` shortcode (`templates/shortcodes/mermaid.html` escapes the body so `<br/>`
+  reaches mermaid as text):
+
+  ```
+  {% mermaid() %}
+  flowchart TD
+    A --> B
+  {% end %}
+  ```
+
+  No ASCII art, no SVG.
 
 ## Diagram colours MUST survive both themes
 
-This is the rule that is easy to get wrong. `book.toml` sets `default-theme = "rust"`
-(a **light** theme), and `mermaid-init.js` picks mermaid's **light `default` theme** for
-light mdbook themes and the **`dark` theme** for dark ones (`coal`/`navy`/`ayu`). So any
-hardcoded colour has to read on **both** a light (~`#f9f5e9` cream) and a dark page.
+This is the rule that is easy to get wrong. `web/site/config.toml` sets the light Goyo theme as
+the default, and Goyo initializes mermaid with the light theme or the `dark` theme to match
+the reader's toggle. So any hardcoded colour has to read on **both** a light (white) and a
+dark page.
 
 - **Highlight bands** (`rect` in a `sequenceDiagram`): use a **translucent `rgba` tint**
   with low alpha, never an opaque dark `rgb` fill. An opaque dark band (e.g.
@@ -37,9 +51,8 @@ hardcoded colour has to read on **both** a light (~`#f9f5e9` cream) and a dark p
 - Leave everything else to the theme. Don't restyle actor boxes, arrows, or note
   fills — mermaid recolours those per theme automatically.
 
-To check a diagram the way readers see it (the book defaults to the light theme), render
-it with the light theme on the cream page, e.g.
-`mmdc -t default -b "#f9f5e9" -i file.md -o out.png` (on NixOS point puppeteer at the
+To check a diagram the way readers see it, render it with both themes, e.g.
+`mmdc -t default -b white -i file.md -o out.png` and `mmdc -t dark -b "#0f1729" …` (on NixOS point puppeteer at the
 system chromium: `PUPPETEER_EXECUTABLE_PATH=$(command -v chromium)` plus a puppeteer
 config with `--no-sandbox`).
 
@@ -54,16 +67,17 @@ config with `--no-sandbox`).
   intersection, a counterexample trace, a commit index advancing) — not redraw a list,
   table, or numbered steps as boxes. If it only restates the surrounding text, cut it.
 - Keep every symbol named in a diagram real: it should exist in `paros-core` / `paros-sim`
-  so the figure stays mapped to the code, like the rest of the book.
+  so the figure stays mapped to the code, like the rest of the site.
 
-## The live surface is the game, and the book is its field guide
+## The live surface is the game, and the Paxos chapters are its field guide
 
-The interactive half of the book is **paros play**, deployed beside it on the same GitHub
-Pages site at `/play/` (`crates/paros-play` + `web/play`, staged into `book/output/play/`
-by `scripts/build-play.sh` in the Pages workflow). It drives the real `paros-core` compiled
+The interactive half of the site is **paros play**, deployed on the same GitHub Pages site
+at `/play/` (`crates/paros-play` + `web/play`, staged into `web/site/public/play/` by
+`scripts/build-play.sh` in the Pages workflow). The one-widget rewrite (#308) replaces this
+section's rules when it lands. It drives the real `paros-core` compiled
 to wasm — the player is the network and the clock, and plays each role until the core judges
 the answer right — and it **never replays a trace**: there is no seed, no recorded run, and
-no simulation in the browser. `book/src/play.md` is the level map; the levels themselves are
+no simulation in the browser. `web/site/content/paxos/play.md` is the level map; the levels themselves are
 Rust, in `crates/paros-play/src/level/`.
 
 That splits the writing between the two surfaces, and the split is the rule for every future
@@ -81,30 +95,31 @@ chapter edit:
   pivot flowchart and the invariant ladder in `safety.md`, and the hole picture in
   `replicated-log.md` — static pictures of *state* or of a proof, not of an interleaving.
 - **Level ids are stable strings** (`act1/choose-a-value`, `act2/the-permanent-gap`) and a
-  chapter cites them **verbatim**. A level is linked as `play/#<level-id>` — relative, because
-  chapters are served at the site root — e.g. `[act1/adopt-the-value](play/#act1/adopt-the-value)`.
+  chapter cites them **verbatim**. A level is linked as `../../play/#<level-id>` — relative,
+  because the site is served under `/paros/` and a chapter at `/paros/paxos/<name>/` — e.g.
+  `[act1/adopt-the-value](../../play/#act1/adopt-the-value)`.
   Never link a level by index or by title.
 - **Every chapter that a level teaches carries a "Play it" callout**, a blockquote placed
-  immediately after the opening paragraph, before the `<!-- toc -->`:
+  immediately after the opening paragraph:
 
   ```markdown
   > **Play it.** One sentence of framing.
   >
-  > - [`act2/elect-a-leader`](play/#act2/elect-a-leader) — what you do by hand, in the
+  > - [`act2/elect-a-leader`](../../play/#act2/elect-a-leader) — what you do by hand, in the
   >   second person, and what the level's goal is.
   ```
 
   One bullet per level, in level order, saying what the player *does* — not what the level
-  is about. Do not list a level in a chapter it does not belong to; `book/src/play.md`'s
+  is about. Do not list a level in a chapter it does not belong to; `play.md`'s
   table is the single source of the mapping, and the two must agree.
 
 Do not add demo iframes, `runSeed` references, or wasm build steps to a chapter: the game is
 a separate page, linked, never embedded.
 
-## Book text written for the game follows ASD-STE100
+## Site text follows ASD-STE100
 
-The game's own text is Simplified Technical English, and the book pages written for it match
-it: `play.md`, the "How to play, then read" callout in `index.md`, every "Play it" callout, the
+The game's own text is Simplified Technical English, and the site pages written for it match
+it: `play.md`, the section pages (`_index.md`), every "Play it" callout, the
 one-paragraph mechanism statement that opens a chapter, and all of `beyond-multi-paxos.md`. The
 rules are one instruction per sentence, active voice, present tense, at most 20 words in a
 procedural sentence and 25 in a descriptive one, at most six sentences per paragraph, no idioms

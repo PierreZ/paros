@@ -1,0 +1,62 @@
+# The paros site (#254): Zola with the Goyo theme. Build with `scripts/build-site.sh`
+# (through Nix); it installs the pinned Goyo into `web/site/themes/goyo` first.
+base_url = "https://pierrez.github.io/paros"
+title = "paros"
+description = "Paxos in Rust, and parosd, a multi-tenant journal service built on it"
+theme = "goyo"
+default_language = "en"
+compile_sass = false
+build_search_index = true
+generate_feeds = false
+generate_sitemap = true
+
+[markdown]
+bottom_footnotes = true
+
+[markdown.highlighting]
+theme = "github-dark"
+
+[link_checker]
+internal_level = "error"
+
+[extra]
+enable_custom_css = false
+footer_html = "paros is a learning project, not for production. Built with <a href='https://www.getzola.org'>Zola</a> and <a href='https://github.com/hahwul/goyo'>Goyo</a>."
+edit_url = "https://github.com/PierreZ/paros/edit/main/site"
+issue_url = "https://github.com/PierreZ/paros/issues"
+
+nav = [
+    { name = "parosd", url = "/parosd/", type = "url", icon = "code" },
+    { name = "Paxos", url = "/paxos/", type = "url", icon = "book" },
+    { name = "Play", url = "/play/", type = "url", icon = "palette" },
+    { name = "GitHub", url = "https://github.com/PierreZ/paros", type = "url", icon = "github" },
+]
+
+[extra.logo]
+text = "paros"
+image_path = "paros-logo.svg"
+image_padding = "4px"
+
+[extra.theme]
+colorset = "light"
+brightness = "normal"
+disable_toggle = false
+default_theme_dark = "goyo-dark"
+default_theme_light = "goyo-light"
+
+[extra.sidebar]
+expand_depth = 1
+disable_root_hide = true
+enable_desktop_menu = true
+
+[extra.share]
+copy_url = false
+x = false
+
+# The site is served under /paros/ on GitHub Pages, and Goyo writes these paths as is.
+[extra.favicon]
+favicon_svg = "/paros/paros-logo.svg"
+favicon_96x96 = "/paros/paros-logo.png"
+favicon_ico = "/paros/icons/favicon.ico"
+apple_touch_icon = "/paros/paros-logo.png"
+site_webmanifest = "/paros/icons/site.webmanifest"

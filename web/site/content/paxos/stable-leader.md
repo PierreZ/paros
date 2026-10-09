@@ -1,4 +1,8 @@
-# The stable leader
++++
+title = "The stable leader"
+weight = 5
+aliases = ["/stable-leader.html"]
++++
 
 A log of independent Paxos instances is correct and wasteful. Every slot costs two
 round trips, and competing proposers collide on each one. Multi-Paxos gets its
@@ -10,19 +14,18 @@ left half-decided. It must account for the slots its promise quorum reported
 
 > **Play it.** Three Act II levels, in order.
 >
-> - [`act2/elect-a-leader`](play/#act2/elect-a-leader) — tick a follower to its
+> - [`act2/elect-a-leader`](../../play/#act2/elect-a-leader) — tick a follower to its
 >   election timeout, drive its single `Prepare(from_slot)` by hand, and read what
 >   the Promises report. Then answer the recovery prompt: re-propose that slot, or
 >   start new work?
-> - [`act2/steady-state`](play/#act2/steady-state) — deliver one Accept round per
+> - [`act2/steady-state`](../../play/#act2/steady-state) — deliver one Accept round per
 >   command, fire slot 7's Accept before slot 6 comes back, and carry the commit
 >   index on the Heartbeat. The reward is automatic heartbeat delivery.
-> - [`act2/the-permanent-gap`](play/#act2/the-permanent-gap) — drop exactly slot
+> - [`act2/the-permanent-gap`](../../play/#act2/the-permanent-gap) — drop exactly slot
 >   1's Accepts, let slot 2 be chosen, and crash the leader with its volatile
 >   proposer map. Then elect a successor and decide what to do about slot 1. The
 >   goal is `chosen_gap()` back to `None`, with every client command applied.
 
-<!-- toc -->
 
 ## Phase 1 once, Phase 2 forever
 
@@ -64,7 +67,7 @@ commander (`proposer::Rounds`) both inside the node's own `Proposer`.
 ## The new leader's two duties
 
 **Recover what the Promises reported.** The previous leader may have left slots
-half-decided, and P2c (from [Why one value is safe](safety.md)) says those must be
+half-decided, and P2c (from [Why one value is safe](@/paxos/safety.md)) says those must be
 re-proposed at the new ballot, never overwritten. The Promises piggybacked exactly the
 values needed; paros collects them in the election's `recovered` map and re-proposes
 each before opening fresh slots.
@@ -185,12 +188,12 @@ piggybacking. Here is the list, and where paros stands:
 | No-op gap fill | fill a hole with a no-op so the log can advance past a dead leader | yes: recovered slots are re-proposed, and every slot the promise quorum reported nothing for is filled with a `Control::Noop` |
 | Command batching | pack many client commands into one slot | not yet |
 | Read-index reads | linearizable reads at the leader with no log write, one heartbeat-ack round | retired (#243): every read is a quorum read |
-| Quorum reads | linearizable reads at any replica from a Phase-1 quorum's vote watermarks, no leader and no clock | yes: see [Why reads are not free](linearizable-reads.md) |
+| Quorum reads | linearizable reads at any replica from a Phase-1 quorum's vote watermarks, no leader and no clock | yes: see [Why reads are not free](@/paxos/linearizable-reads.md) |
 | Leader leases | serve linearizable reads locally for a lease period, skipping even the ack round | no: paros enforces no lease and reads no clock |
-| Truncation | discard the chosen log prefix | yes: a leader-decided `Truncate` control command (one cluster-wide floor), and a below-floor node jumps to the trim point; snapshots of the state are the application's business, not paros's — see [Truncation and the trim point](truncation-and-snapshots.md) |
+| Truncation | discard the chosen log prefix | yes: a leader-decided `Truncate` control command (one cluster-wide floor), and a below-floor node jumps to the trim point; snapshots of the state are the application's business, not paros's — see [Truncation and the trim point](@/paxos/truncation-and-snapshots.md) |
 | Cooperative handoff | move Phase-2 authority to another node under the *same* ballot, no second Phase 1 | yes, `relinquish_to`, one hop only |
 | Flexible and grid quorums | trade Phase-1 cost against Phase-2 cost (`q1 + q2 > n`) | yes, as deployment data in `QuorumSystem` |
 
 The "not yet" rows are the roadmap past this part. With a stable leader streaming a
 log, one question remains: what happens when a node crashes mid-stream and comes back?
-That is [Crash and restart safety](restart-safety.md).
+That is [Crash and restart safety](@/paxos/restart-safety.md).

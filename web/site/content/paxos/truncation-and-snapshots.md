@@ -1,4 +1,8 @@
-# Truncation and the trim point
++++
+title = "Truncation and the trim point"
+weight = 7
+aliases = ["/truncation-and-snapshots.html"]
++++
 
 A log that only grows fills the disk, so a real system must **truncate**: it
 deletes a prefix that the cluster has already chosen. Deletion makes a second
@@ -11,13 +15,12 @@ not by receiving a copy of it.
 
 > **Play it.** Two Act III levels, one half each.
 >
-> - [`act3/truncate-by-consensus`](play/#act3/truncate-by-consensus) — ask the
+> - [`act3/truncate-by-consensus`](../../play/#act3/truncate-by-consensus) — ask the
 >   leader to trim, and watch each node move its floor as its walk reaches the
 >   decided slot.
-> - [`act3/the-stranded-node`](play/#act3/the-stranded-node) — strand a node below
+> - [`act3/the-stranded-node`](../../play/#act3/the-stranded-node) — strand a node below
 >   the floor, bring it back, and state the promise it holds afterwards.
 
-<!-- toc -->
 
 ## paros owns a log, not an application
 
@@ -106,7 +109,7 @@ truncating past its position. When it comes back it sends a `CatchUpRequest`
 from where its chosen prefix stopped, and that slot is below every peer's floor.
 A peer cannot answer with a `CatchUpResponse`: the entries are gone, and a peer
 that pretended to replay a truncated range would tell the same lie the
-[floor guards](stable-leader.md) exist to prevent.
+[floor guards](@/paxos/stable-leader.md) exist to prevent.
 
 The peer answers with where its retained log starts instead:
 `Message::TrimmedTo { from, point, state }`. `point` is the peer's floor, its
@@ -115,7 +118,7 @@ There is nothing more to say. Everything below a trim point is chosen — the tr
 was itself decided, and it only ever drops chosen slots — so the laggard does
 not need the values, only the fact that they exist and are settled.
 
-```mermaid
+{% mermaid() %}
 sequenceDiagram
     autonumber
     participant L as Laggard (chosen up to 3)
@@ -128,7 +131,7 @@ sequenceDiagram
     end
     L->>P: CatchUpRequest from 10
     P->>L: CatchUpResponse 10..14
-```
+{% end %}
 
 The receiver persists `WriteOp::TrimmedTo { point, state }`
 (`LogStorage::trimmed_to`), drops whatever it still holds below `point`, sets its
@@ -157,7 +160,7 @@ it was. A trim point is a fact about the log; it says nothing about promises,
 and the peer that sent it does not know what this node has sworn. The same rule
 covers a harder case: a node that lost the promise itself (a wiped disk) cannot
 be healed by a trim jump, because a trim jump restores no promise. That node
-never rejoins; see [the wiped node](beyond-multi-paxos.md#the-wiped-node).
+never rejoins; see [the wiped node](@/paxos/beyond-multi-paxos.md#the-wiped-node).
 
 ## Where this lives in paros
 

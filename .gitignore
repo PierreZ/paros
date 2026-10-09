@@ -13,8 +13,9 @@ target
 # Nix / direnv
 .direnv/
 
-# mdBook build artifacts (`mdbook build`)
-/book/output/
+# The site's build output and the theme copied in at build time (scripts/build-site.sh)
+/web/site/public/
+/web/site/themes/
 
 # Library crate: lockfile is not committed
 /Cargo.lock
