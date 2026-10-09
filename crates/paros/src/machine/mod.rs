@@ -15,17 +15,20 @@
 //! [`Proposer`](paros_core::proposer::Proposer) and
 //! [`Acceptor`](paros_core::acceptor::Acceptor), the matchmaker handover's
 //! machinery. The machine that receives `CellInit` is the proposer; every
-//! listed machine is an acceptor, and all of them are both quorums (all must
-//! answer):
+//! listed machine is an acceptor. All of them must answer the ask, and a
+//! majority of accepts chooses the plan (#246), so a founding member wiped
+//! midway does not block it:
 //!
 //! - **`PrepareCell`** (ask, as a reservation) — a fresh random `init_id`,
 //!   the ballot. Each machine answers who it is, promises to accept no plan
 //!   under a lower ballot, and reports the plan it accepted, if any.
 //! - **Adopt or draw.** A reported plan is finished instead of a new one
 //!   (P2c): over the same addresses the two `init`s converge on one cell;
-//!   over another list the receiver refuses (`other_cell_init`); a listed
+//!   over another list the receiver refuses (`other_cell_init`). A listed
 //!   address that now hosts another machine than the plan names is a wiped
-//!   one (`cell_exists`). With nothing reported the receiver draws the plan.
+//!   one: the new machine never accepts the plan as the old one, and the
+//!   others choose it while they are a majority (else `cell_lost`). With
+//!   nothing reported the receiver draws the plan.
 //! - **`FormCell`** (accept) — each machine accepts the plan unless it
 //!   promised a higher ballot, and accepting is forming: it formats the
 //!   plan's journals and records the plan durably ([`CellLedger::form`]),

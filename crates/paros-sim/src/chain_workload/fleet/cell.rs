@@ -261,18 +261,16 @@ impl FleetOps {
                 assert_reachable!("init: a seed's failed write refuses init, and it is run again");
                 false
             }
-            InitRun::Refused(InitRefusal::Formation(label)) if label == "cell_exists" => {
-                // A founding member was wiped after a vote named the old
-                // machine (#246): the cell can never form over the listed
-                // addresses, and a re-run changes nothing.
+            InitRun::Refused(InitRefusal::Formation(label)) if label == "cell_lost" => {
+                // A majority of the plan's founding members were wiped after
+                // a vote named them (#246): no plan can be chosen over the
+                // listed addresses, and a re-run changes nothing.
                 assert_always!(
-                    crate::machine::founder_wiped(ctx.state()),
-                    "init: init is refused as cell_exists only after a founding member was wiped",
+                    crate::machine::cell_lost(ctx.state()),
+                    "init: init is refused as cell_lost only once a majority of founders was wiped",
                     { "founders" => founders }
                 );
-                assert_reachable!(
-                    "init: a founding member wiped during init refuses init as cell_exists"
-                );
+                assert_reachable!("init: a cell that lost a majority of its founders refuses init");
                 true
             }
             InitRun::Refused(refusal) => {
@@ -339,7 +337,7 @@ fn judge_second(ctx: &SimContext, second: &InitOutcome) {
         InitOutcome::Refused(label) => {
             assert_always!(
                 label == "storage"
-                    || (label == "cell_exists" && crate::machine::founder_wiped(ctx.state())),
+                    || (label == "cell_lost" && crate::machine::cell_lost(ctx.state())),
                 "init: a second concurrent cell init is refused only for a failed write",
                 { "refusal" => label.as_str() }
             );
