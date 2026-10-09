@@ -145,6 +145,62 @@ impl Lanes {
     fn lane_len(&self, journal: (u64, u64)) -> usize {
         self.by_journal.get(&journal).map_or(0, VecDeque::len)
     }
+
+    /// Shed every lane's stale head, **per lane** (#299): a lane that holds
+    /// `threshold` messages or more loses its oldest until it holds
+    /// `threshold - 1`. `held` is the lane of the message the drain already
+    /// took; that message counts in its lane as the oldest, so it goes first.
+    /// Returns the kinds shed from the lanes, and whether the held message
+    /// is stale too. A lane under the threshold loses nothing, so a sparse
+    /// journal's message survives however dense its neighbours are.
+    fn shed_stale(&mut self, threshold: usize, held: (u64, u64)) -> (Vec<&'static str>, bool) {
+        assert!(threshold > 1, "a shed lane keeps at least one message");
+        let total = self.total;
+        let mut shed = Vec::new();
+        let mut held_stale = false;
+        for (journal, lane) in &mut self.by_journal {
+            let before = lane.len();
+            let mut count = before + usize::from(*journal == held);
+            if count < threshold {
+                continue;
+            }
+            if *journal == held {
+                held_stale = true;
+                count -= 1;
+            }
+            while count >= threshold {
+                let message = lane
+                    .pop_front()
+                    .expect("a lane over the threshold is not empty");
+                shed.push(proto_message_kind(&message));
+                count -= 1;
+            }
+            // A shed lane keeps exactly its newest `threshold - 1` messages.
+            assert!(
+                lane.len() == threshold - 1,
+                "a shed lane keeps its newest messages"
+            );
+            assert!(lane.len() < before, "a shed lane loses its oldest message");
+        }
+        self.total -= shed.len();
+        assert!(
+            self.total + shed.len() == total,
+            "shedding counts every dropped message"
+        );
+        // Negative space: no lane is left at or over the threshold.
+        assert!(
+            self.by_journal.values().all(|lane| lane.len() < threshold),
+            "no lane stays at or over the shed threshold"
+        );
+        // A stale held message leaves its lane non-empty: the drain has a
+        // newer message of the same journal to send instead.
+        assert!(
+            !held_stale || self.lane_len(held) > 0,
+            "a stale held message has a newer one behind it"
+        );
+        self.assert_invariants();
+        (shed, held_stale)
+    }
 }
 
 impl PeerMailbox {
@@ -252,8 +308,14 @@ impl PeerMailbox {
         self.reverse_next.swap(false, Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.lock().total
+    }
+
+    /// See [`Lanes::shed_stale`].
+    fn shed_stale(&self, threshold: usize, held: (u64, u64)) -> (Vec<&'static str>, bool) {
+        self.lock().shed_stale(threshold, held)
     }
 
     /// Wait for the next message. A `Notify` permit is stored when nobody is
@@ -662,11 +724,11 @@ fn delivery_batch<A: Audit>(
     from: Party,
     to: Party,
 ) -> (internal::Deliver, Option<internal::ConsensusMessage>) {
-    // Do not spend the eventual-synchrony tail replaying a bounded but stale
-    // stale chaos-era traffic. Peer delivery is allowed to lose messages; the
+    // Do not spend the eventual-synchrony tail replaying a bounded but
+    // stale chaos-era backlog. Peer delivery is allowed to lose messages; the
     // protocol's current heartbeat, Accept resend, and catch-up paths repair
-    // them. Keep the newest batch so recovery signals can overtake old ballots
-    // — the drain-side half of the mailbox's keep-newest policy (see
+    // them. Keep the newest messages so recovery signals can overtake old
+    // ballots — the drain-side half of the mailbox's keep-newest policy (see
     // [`PeerMailbox`] for the enqueue-side half, which is what keeps a small
     // mailbox from starving a message class). The shed threshold stays at the
     // *default* batch depth even when the buggified `batch_limit` is smaller:
@@ -676,19 +738,34 @@ fn delivery_batch<A: Audit>(
     // that no repair path can outrun (an adversary dropping every message of
     // one kind forever defeats eventual synchrony, which the knob's extreme
     // must not do).
-    while messages.len() >= batch_limit.max(DELIVERY_BATCH) {
-        let Some(newer) = messages.try_pop() else {
-            break;
-        };
-        // The stale head of the backlog is discarded, never silently: report
-        // it at the instant of the drop, like the enqueue-side overflow.
+    //
+    // The shed is **per lane** (#299): a backlog is stale per journal. A shed
+    // judged on the total over every lane let two dense heartbeat lanes keep
+    // the total over the threshold, and the round-robin throw-away then
+    // reached a sparse lane within its first pops and dropped its one message
+    // on every drain: a follower's every `CatchUpRequest` died at the mailbox
+    // and it never caught up (witness seed 1791023425762573528 on 9371ab2:
+    // 663 sent on link 2→0, every one dropped, node 2 stuck two slots behind
+    // through a 60 s tail).
+    let threshold = batch_limit.max(DELIVERY_BATCH);
+    let held = (first.tenant, first.journal);
+    let (shed, held_stale) = messages.shed_stale(threshold, held);
+    // The stale heads are discarded, never silently: report each at the
+    // instant of the drop, oldest first, like the enqueue-side overflow.
+    if held_stale {
         audit.dropped_at_mailbox(from, to, proto_message_kind(&first));
+        first = messages
+            .try_pop()
+            .expect("a stale held message has a newer one behind it");
+    }
+    for kind in shed {
+        audit.dropped_at_mailbox(from, to, kind);
         tracing::debug!(
             from = %from,
             to = %to,
+            kind,
             "dropped stale Paxos message from delivery backlog"
         );
-        first = newer;
     }
     let mut batch = Vec::with_capacity(batch_limit);
     let mut batch_bytes = first.encoded_len();
@@ -838,5 +915,38 @@ mod tests {
             "the drain takes lanes round-robin"
         );
         assert!(mailbox.is_empty());
+    }
+
+    /// #299's per-lane shed, pinned at the mechanism: two dense lanes over
+    /// the threshold and one single-message lane. The dense lanes keep
+    /// exactly their newest messages; the single message survives.
+    #[test]
+    fn the_shed_never_drops_a_sparse_journals_message() {
+        let threshold = 4;
+        let mailbox = PeerMailbox::new(16);
+        for _ in 0..10 {
+            assert!(mailbox.push(beat(128), false, false).is_none());
+            assert!(mailbox.push(beat(130), false, false).is_none());
+        }
+        assert!(mailbox.push(beat(129), false, false).is_none());
+        // The drain holds a message of a dense lane: it is the oldest there.
+        let (shed, held_stale) = mailbox.shed_stale(threshold, (256, 128));
+        assert!(held_stale, "the held message is the oldest of a dense lane");
+        assert_eq!(shed.len(), (10 + 1 - 3) - 1 + (10 - 3));
+        assert_eq!(mailbox.lock().lane_len((256, 128)), threshold - 1);
+        assert_eq!(mailbox.lock().lane_len((256, 130)), threshold - 1);
+        assert_eq!(
+            mailbox.lock().lane_len((256, 129)),
+            1,
+            "a lane under the threshold loses nothing"
+        );
+        // A second shed finds nothing stale.
+        let (shed, held_stale) = mailbox.shed_stale(threshold, (256, 129));
+        assert!(shed.is_empty() && !held_stale);
+        let order: Vec<u64> = std::iter::from_fn(|| mailbox.try_pop())
+            .map(|m| m.journal)
+            .collect();
+        assert_eq!(order.iter().filter(|&&j| j == 129).count(), 1);
+        assert_eq!(order.len(), 2 * (threshold - 1) + 1);
     }
 }
