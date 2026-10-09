@@ -127,11 +127,20 @@ well_known_method!(
     "paros.machine.Identify"
 );
 well_known_method!(
-    /// Join a cell: record its plan and start serving its journals (#196).
+    /// Phase 2 of the cell decree: accept a plan, which forms the machine
+    /// (#196, #277).
     FormCellRpc, 0x5041_0302, machine::FormCell => machine::FormCellAck,
     "paros.machine.FormCell"
 );
+// 0x5041_0303 was `Init`, the seed-based formation, superseded by the cell
+// decree of #277. Retired, never reused.
 well_known_method!(
-    /// Form the cell over the seeds, from one of them (#196, #216).
-    InitRpc, 0x5041_0303, machine::Init => machine::InitAck, "paros.machine.Init"
+    /// `cell init`: drive the cell decree over the listed machines (#277).
+    CellInitRpc, 0x5041_0304, machine::CellInit => machine::CellInitAck,
+    "paros.machine.CellInit"
+);
+well_known_method!(
+    /// Phase 1 of the cell decree: promise, and report an accepted plan (#277).
+    PrepareCellRpc, 0x5041_0305, machine::PrepareCell => machine::PrepareCellAck,
+    "paros.machine.PrepareCell"
 );

@@ -502,7 +502,7 @@ maximum over the stop quorum.
 
 **In the code.** `MatchmakerSet { generation, members }`,
 `MatchmakerSet::has_quorum` (`membership.rs`); `MatchmakerReconfigurer`
-(`matchmaker/reconfigurer.rs`); the decree (`matchmaker/decree.rs`); the checker
+(`matchmaker/reconfigurer.rs`); the decree (`decree.rs`, generic since #277); the checker
 (`matchmaker/handover_model.rs`). Design notes:
 `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
 `docs/analysis/consensus/matchmaker-interaction-verification.md`. Play it:
@@ -585,10 +585,12 @@ restored file brings it back as the member it was.
 
 In production the claim is not a flag on the start. A machine mints its own
 identity, a random `node_id`, the first time it starts on an empty data
-directory, and then waits. `parosctl init` forms the cell: every seed formats the
-stores of the cell's journals once and records that it did in a provisioning
-record beside them, then commits the cell's plan in its machine record; every
-later start is an existing member. A start therefore never formats: lost stores
+directory, and then waits, configured with no peer. `parosctl init` forms the
+cell with `cell init`, a single-decree Paxos on the cell's plan over the founding
+members it lists, every one an acceptor. Accepting the plan is forming: each
+member formats the stores of the cell's journals once, records that it did in a
+provisioning record beside them, then commits its vote, the plan, in its machine
+record; every later start is an existing member. A start therefore never formats: lost stores
 under a kept identity are refused as amnesia. A wiped volume takes its identity
 with it and comes back as a new machine with a new `node_id`, which never rejoins
 as the old one. A formation interrupted between its formats and its commit

@@ -1,40 +1,43 @@
-//! The successor **decree**: single-decree Paxos wired out of the shared
-//! Paxos roles, over the matchmakers of `M_g` as its acceptors.
+//! A **single-decree Paxos** wired out of the shared Paxos roles: one value,
+//! chosen once, over any acceptor configuration (`docs/architecture.md` §1,
+//! "paros eats its own food": one-shot decisions use this flavor, never a
+//! hand-rolled agreement).
 //!
 //! There is no separate kernel here. A decree is exactly what
-//! [`Proposer`](crate::proposer::Proposer) already runs — a Phase 1 that
+//! [`Proposer`] already runs — a Phase 1 that
 //! adopts the highest-ballot vote reported (P2c) and a Phase 2 that chooses
 //! it — over a log of **one slot**, with no paging (a decree's whole log fits
 //! in one `Promise`), no tri-state (a lost decree vote is not repaired in
-//! place; the generation is replaced instead), no gap fill and no recovery.
-//! The matchmaker's half is the same [`Acceptor`](crate::acceptor::Acceptor)
-//! over the same one slot (`super::generation`).
+//! place), no gap fill and no recovery. Its acceptors run the same
+//! [`Acceptor`](crate::acceptor::Acceptor) over the same one slot.
 //!
-//! What stays here rather than moving into the role is the one place the two
-//! deployments genuinely differ: a `Nack`. The log side *discards* the
-//! refusing acceptor's promise and lets the leadership fall to a fresh
-//! election; a decree keeps the refusal, because its retry must open strictly
-//! above the promise that refused it and the reconfigurer owns that round
-//! floor.
+//! Two decrees run on it:
 //!
-//! **Quorum model.** Both phases take a majority of the named matchmakers,
-//! built here from the set being replaced and asked through the same
-//! membership boundary as every other tally in the core. Matchmaker Paxos
-//! generalizes matchmaker quorums to arbitrary systems; paros deliberately
-//! supports **majority matchmaker quorums only**
-//! ([`MatchmakerSet::has_quorum`] is the same rule), and the handover is safe
-//! exactly under that model.
+//! - **The matchmaker handover** (`matchmaker/reconfigurer.rs`): the
+//!   successor set, over the matchmakers of `M_g` under a majority — paros
+//!   supports **majority matchmaker quorums only**
+//!   ([`MatchmakerSet::has_quorum`](crate::MatchmakerSet::has_quorum) is the
+//!   same rule), and the handover is safe exactly under that model.
+//! - **`cell init`** (#277, `paros::machine`): the cell plan, over the
+//!   listed founding members, every one of them in both quorums.
+//!
+//! The caller names the acceptors and their quorum system; every quorum
+//! question still crosses `membership.rs`.
+//!
+//! What stays here rather than moving into the role is the one place a
+//! decree differs from a log: a `Nack`. The log side *discards* the refusing
+//! acceptor's promise and lets the leadership fall to a fresh election; a
+//! decree keeps the refusal, because its retry must open strictly above the
+//! promise that refused it and the caller owns that round floor.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{MatchmakerId, MatchmakerSet};
-use crate::membership::{AcceptorConfig, QuorumSystem};
+use crate::membership::AcceptorConfig;
 use crate::proposer::{Campaign, PromiseFold, Proposer, Round};
 use crate::types::{Ballot, Fingerprint, Slot};
 
-/// The one slot a decree runs over: a matchmaker set is a single value,
-/// chosen once per generation.
-const DECREE_SLOT: Slot = Slot(0);
+/// The one slot a decree runs over: its value is chosen once.
+pub const DECREE_SLOT: Slot = Slot(0);
 
 /// What one Phase-1b promise did to a [`Decree`]. A fold that *counted* is
 /// progress even when the quorum is still short, which is exactly what a
@@ -43,7 +46,7 @@ const DECREE_SLOT: Slot = Slot(0);
 /// driver abandon a decree that was progressing, while duplicates reported as
 /// progress kept resetting its clock).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum DecreePromise {
+pub enum DecreePromise<V> {
     /// Not folded: no matching phase, a sender already counted, or one
     /// outside the acceptor set.
     Ignored,
@@ -51,57 +54,57 @@ pub(super) enum DecreePromise {
     Counted { remaining: usize },
     /// The quorum holds: propose this value (P2c — the highest-ballot vote
     /// reported, else the proposer's own).
-    Quorum(Vec<MatchmakerId>),
+    Quorum(V),
 }
 
 /// What one Phase-2b accept did to a [`Decree`]. The twin of
 /// [`DecreePromise`], counted the same way.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum AcceptFold {
+pub enum AcceptFold<V> {
     /// Not folded: not in Phase 2, a sender already counted, or one outside
     /// the acceptor set.
     Ignored,
     /// Counted; `remaining` more accepts before the value is chosen.
     Counted { remaining: usize },
     /// The Phase-2 quorum holds: this value is chosen.
-    Chosen(Vec<MatchmakerId>),
+    Chosen(V),
 }
 
-/// One proposal of one successor set, at one ballot, over one generation's
-/// matchmakers.
+/// One proposal of one value, at one ballot, over one acceptor
+/// configuration.
 ///
-/// It appears in [`ReconfigurerPhase::Deciding`](super::ReconfigurerPhase)
-/// so a driver can see *where* the decree stands — its ballot, the value in
-/// flight, whether P2c adopted a prior vote, the promise that preempted it —
-/// and everything it *does* is the reconfigurer's to drive.
+/// The matchmaker handover shows it in
+/// [`ReconfigurerPhase::Deciding`](crate::ReconfigurerPhase) so a driver can
+/// see *where* the decree stands — its ballot, the value in flight, whether
+/// P2c adopted a prior vote, the promise that preempted it — and everything
+/// it *does* is its caller's to drive.
 #[derive(Clone, Debug)]
-pub struct Decree {
+pub struct Decree<Id, V> {
     ballot: Ballot,
-    /// The acceptors: the matchmakers of the generation being replaced, under
-    /// the majority system.
-    acceptors: AcceptorConfig<MatchmakerId>,
-    /// What this reconfigurer wants chosen, proposed only when Phase 1 finds
-    /// no earlier vote.
-    proposal: Vec<MatchmakerId>,
-    proposer: Proposer<MatchmakerId, Vec<MatchmakerId>>,
+    /// The acceptors, under the quorum system the caller chose.
+    acceptors: AcceptorConfig<Id>,
+    /// What the caller wants chosen, proposed only when Phase 1 finds no
+    /// earlier vote.
+    proposal: V,
+    proposer: Proposer<Id, V>,
     /// The promise that refused this ballot, once one has.
     preempted: Option<Ballot>,
 }
 
-impl Decree {
-    /// Open Phase 1 of `proposal` at `ballot` over the members of `old`.
+impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
+    /// Open Phase 1 of `proposal` at `ballot` over `acceptors`.
     ///
     /// # Panics
     ///
-    /// If `old` names no matchmaker (a decree with no acceptor is a
-    /// programmer error; [`MatchmakerSet::new`] never builds one).
-    pub(super) fn new(ballot: Ballot, old: &MatchmakerSet, proposal: Vec<MatchmakerId>) -> Self {
-        let acceptors = AcceptorConfig::new(old.members().to_vec(), QuorumSystem::Majority);
+    /// If `acceptors` names no member (a decree with no acceptor is a
+    /// programmer error; [`AcceptorConfig::new`] never builds one).
+    pub fn new(ballot: Ballot, acceptors: AcceptorConfig<Id>, proposal: V) -> Self {
+        assert!(!acceptors.members().is_empty(), "a decree has an acceptor");
         let mut proposer = Proposer::new();
         // A one-slot log, from slot zero, over one configuration: the decree
         // has no prior configuration to cover but the acceptors themselves,
-        // and the proposer is a *node*, never one of these matchmakers, so it
-        // holds no acceptor identity and casts no vote of its own.
+        // and the proposer casts no vote of its own here (an acceptor that is
+        // also the proposer answers like any other, through the caller).
         proposer.open_phase1(
             Campaign {
                 me: None,
@@ -117,10 +120,6 @@ impl Decree {
             proposer.election().is_some_and(|e| e.ballot() == ballot),
             "a decree opens Phase 1 at its own ballot"
         );
-        assert!(
-            acceptors.members() == old.members(),
-            "a decree's acceptors are exactly the set being replaced"
-        );
         Self {
             ballot,
             acceptors,
@@ -128,6 +127,12 @@ impl Decree {
             proposer,
             preempted: None,
         }
+    }
+
+    /// The acceptors this decree runs over.
+    #[must_use]
+    pub fn acceptors(&self) -> &AcceptorConfig<Id> {
+        &self.acceptors
     }
 
     /// The ballot this proposal runs at.
@@ -139,12 +144,12 @@ impl Decree {
     /// The value proposed once Phase 2 has opened: the reconfigurer's own
     /// proposal, or the prior vote P2c made it adopt.
     #[must_use]
-    pub fn value(&self) -> Option<&Vec<MatchmakerId>> {
+    pub fn value(&self) -> Option<&V> {
         self.proposer.rounds().get(&DECREE_SLOT).map(Round::command)
     }
 
-    /// Whether Phase 1 adopted a prior vote instead of this reconfigurer's
-    /// own proposal (the P2c rule fired) — observability for the caller's
+    /// Whether Phase 1 adopted a prior vote instead of the caller's own
+    /// proposal (the P2c rule fired) — observability for the caller's
     /// audit.
     #[must_use]
     pub fn adopted_prior_vote(&self) -> bool {
@@ -170,10 +175,16 @@ impl Decree {
         self.preempted
     }
 
-    /// The matchmakers that have not answered the phase in flight — what a
+    /// The acceptors that have not answered the phase in flight — what a
     /// re-send targets. Empty once the decree is preempted (the caller
     /// reopens it before it re-sends).
-    pub(super) fn unanswered(&self) -> Vec<MatchmakerId> {
+    ///
+    /// # Panics
+    ///
+    /// If the re-send would address a node outside the acceptors: a
+    /// programmer error, never an operating condition.
+    #[must_use]
+    pub fn unanswered(&self) -> Vec<Id> {
         if self.preempted.is_some() {
             return Vec::new();
         }
@@ -186,7 +197,7 @@ impl Decree {
     }
 
     /// [`Decree::unanswered`] for a decree no promise has preempted.
-    fn unanswered_live(&self) -> Vec<MatchmakerId> {
+    fn unanswered_live(&self) -> Vec<Id> {
         match self.proposer.rounds().get(&DECREE_SLOT) {
             None => self
                 .proposer
@@ -195,7 +206,7 @@ impl Decree {
                 .unwrap_or_default(),
             Some(round) => {
                 // A decree is never delegated: its rounds are always the
-                // reconfigurer's own.
+                // proposer's own.
                 let accepted_by = round.accepted_by().expect("a decree round is colocated");
                 self.acceptors
                     .members()
@@ -212,14 +223,10 @@ impl Decree {
     ///
     /// # Panics
     ///
-    /// If two matchmakers report different values at one ballot: one ballot
+    /// If two acceptors report different values at one ballot: one ballot
     /// has one proposer, so that is a protocol violation, never an operating
     /// condition.
-    pub(super) fn on_promise(
-        &mut self,
-        from: MatchmakerId,
-        vote: Option<(Ballot, Vec<MatchmakerId>)>,
-    ) -> DecreePromise {
+    pub fn on_promise(&mut self, from: Id, vote: Option<(Ballot, V)>) -> DecreePromise<V> {
         if !self.acceptors.contains(from) || self.preempted.is_some() {
             return DecreePromise::Ignored;
         }
@@ -255,7 +262,7 @@ impl Decree {
             .recovered
             .get(&DECREE_SLOT)
             .map_or_else(|| self.proposal.clone(), |(_, v)| v.clone());
-        // A majority names no column.
+        // A decree's one slot is addressed to every acceptor, never a column.
         self.proposer
             .open_round(DECREE_SLOT, self.ballot, value.clone(), None, None);
         assert!(
@@ -271,7 +278,13 @@ impl Decree {
 
     /// Fold one Phase-2b accept, reporting the chosen value when it completes
     /// the quorum.
-    pub(super) fn on_accepted(&mut self, from: MatchmakerId) -> AcceptFold {
+    ///
+    /// # Panics
+    ///
+    /// If the decree is chosen at another ballot or with another value than
+    /// the one it proposed: a protocol violation, never an operating
+    /// condition.
+    pub fn on_accepted(&mut self, from: Id) -> AcceptFold<V> {
         if !self.acceptors.contains(from) || self.preempted.is_some() {
             return AcceptFold::Ignored;
         }
@@ -313,8 +326,7 @@ impl Decree {
             .map_or(0, |round| round.accepted_by().map_or(0, BTreeSet::len));
         // How many more accepts the decree still waits for — the one thing
         // a quorum *predicate* cannot report, so the one place a decree
-        // quorum is spelled as a number (a majority: `Decree::new` builds
-        // its acceptors under `QuorumSystem::Majority`).
+        // quorum is spelled as a number, read off the caller's system.
         AcceptFold::Counted {
             remaining: self
                 .acceptors
@@ -324,12 +336,16 @@ impl Decree {
         }
     }
 
-    /// A refusal: some matchmaker promised `promised` above this ballot. The
+    /// A refusal: some acceptor promised `promised` above this ballot. The
     /// proposal is preempted and the caller reopens strictly above it — above
     /// the **highest** refusal seen, so a second Nack carrying a higher
     /// promise raises the floor the reopen clears without being progress of
     /// the (already dead) proposal.
-    pub(super) fn on_nack(&mut self, promised: Ballot) {
+    ///
+    /// # Panics
+    ///
+    /// If the preemption floor would fall: a programmer error.
+    pub fn on_nack(&mut self, promised: Ballot) {
         if promised <= self.ballot {
             return;
         }
@@ -346,7 +362,7 @@ impl Decree {
         );
     }
 
-    /// How many matchmakers have promised.
+    /// How many acceptors have promised.
     fn promised(&self) -> usize {
         self.proposer.election().map_or(0, |e| e.promised().len())
     }
@@ -356,7 +372,9 @@ impl Decree {
 mod tests {
     use super::{AcceptFold, Decree, DecreePromise};
     use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
-    use crate::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+    use crate::membership::{
+        AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
+    };
     use crate::types::{Ballot, NodeId, Slot};
     use crate::write::AcceptorWrite;
     use std::collections::BTreeMap;
@@ -374,6 +392,11 @@ mod tests {
 
     fn generation(members: &[u64]) -> MatchmakerSet {
         MatchmakerSet::new(MatchmakerGeneration(0), ids(members))
+    }
+
+    /// The handover's acceptors: the set being replaced, under a majority.
+    fn majority(old: &MatchmakerSet) -> AcceptorConfig<MatchmakerId> {
+        AcceptorConfig::new(old.members().to_vec(), QuorumSystem::Majority)
     }
 
     /// A matchmaker's acceptor half: the shared role over the decree's one
@@ -418,7 +441,7 @@ mod tests {
     #[test]
     fn a_lone_proposal_is_chosen_by_a_quorum() {
         let old = generation(&[0, 1, 2]);
-        let mut d = Decree::new(ballot(1, 0), &old, ids(&[3, 4, 5]));
+        let mut d = Decree::new(ballot(1, 0), majority(&old), ids(&[3, 4, 5]));
         assert_eq!(
             d.on_promise(MatchmakerId(0), None),
             DecreePromise::Counted { remaining: 1 }
@@ -470,7 +493,7 @@ mod tests {
         }
         assert_eq!(voters[0].accept(ballot(1, 1), ids(&[9])), Ok(()));
         // R2 at ballot 2 prepares 0 and 1.
-        let mut d = Decree::new(ballot(2, 2), &old, ids(&[8]));
+        let mut d = Decree::new(ballot(2, 2), majority(&old), ids(&[8]));
         let v0 = voters[0].prepare(ballot(2, 2)).expect("promise");
         let v1 = voters[1].prepare(ballot(2, 2)).expect("promise");
         assert_eq!(
@@ -494,7 +517,7 @@ mod tests {
         assert_eq!(v.prepare(ballot(3, 2)), Err(ballot(5, 1)));
         assert_eq!(v.prepare(ballot(5, 1)), Ok(None), "re-asking is idempotent");
         let old = generation(&[0]);
-        let mut d = Decree::new(ballot(3, 2), &old, ids(&[1]));
+        let mut d = Decree::new(ballot(3, 2), majority(&old), ids(&[1]));
         d.on_nack(ballot(5, 1));
         assert_eq!(d.preempted(), Some(ballot(5, 1)));
         assert_eq!(
@@ -515,7 +538,7 @@ mod tests {
     #[should_panic(expected = "two Phase-1 reports of one (slot, ballot) agree on the command")]
     fn two_votes_at_one_ballot_are_a_programmer_error() {
         let old = generation(&[0, 1, 2]);
-        let mut d = Decree::new(ballot(2, 0), &old, ids(&[8]));
+        let mut d = Decree::new(ballot(2, 0), majority(&old), ids(&[8]));
         assert_eq!(
             d.on_promise(MatchmakerId(0), Some((ballot(1, 0), ids(&[1])))),
             DecreePromise::Counted { remaining: 1 }

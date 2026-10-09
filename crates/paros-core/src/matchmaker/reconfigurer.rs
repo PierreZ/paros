@@ -51,12 +51,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::decree::{AcceptFold, Decree, DecreePromise};
+use crate::decree::{AcceptFold, DecreePromise};
+use crate::membership::{AcceptorConfig, QuorumSystem};
+
+use super::SuccessorDecree;
 use super::{
     MatchmakerId, MatchmakerSet, PendingBootstrap, ReconfigureReply, ReconfigureRequest,
     Registration, raise_effective,
 };
-use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, NodeId};
 
 /// Why [`MatchmakerReconfigurer::start`] refused a request.
@@ -111,7 +113,7 @@ pub enum ReconfigurerPhase {
         /// The single-decree proposal. Boxed: a decree carries the shared
         /// proposer role's whole tally surface, several times the size of
         /// any other phase's state.
-        decree: Box<Decree>,
+        decree: Box<SuccessorDecree>,
     },
     /// Telling the old and new generations about the chosen successor.
     Publishing {
@@ -758,7 +760,7 @@ impl MatchmakerReconfigurer {
                 if let Some(promised) = decree.preempted() {
                     // Reopen strictly above the promise that refused us.
                     self.round = self.round.max(promised.round).saturating_add(1);
-                    **decree = Decree::new(
+                    **decree = successor_decree(
                         Ballot {
                             round: self.round,
                             node: me,
@@ -997,7 +999,11 @@ impl MatchmakerReconfigurer {
                     ballot.node == self.node,
                     "a decree runs at this node's ballot"
                 );
-                let decree = Box::new(Decree::new(ballot, old, bootstrap.set.members().to_vec()));
+                let decree = Box::new(successor_decree(
+                    ballot,
+                    old,
+                    bootstrap.set.members().to_vec(),
+                ));
                 self.phase = ReconfigurerPhase::Deciding {
                     old: old.clone(),
                     bootstrap: bootstrap.clone(),
@@ -1165,6 +1171,31 @@ impl MatchmakerReconfigurer {
             "an aborted handover queues nothing"
         );
     }
+}
+
+/// The handover's decree (#125): the successor set, proposed at `ballot`
+/// over the matchmakers of `old` under a majority — the only matchmaker
+/// quorum paros supports.
+///
+/// # Panics
+///
+/// If the decree's acceptors are not exactly the set being replaced.
+fn successor_decree(
+    ballot: Ballot,
+    old: &MatchmakerSet,
+    proposal: Vec<MatchmakerId>,
+) -> SuccessorDecree {
+    let acceptors = AcceptorConfig::new(old.members().to_vec(), QuorumSystem::Majority);
+    let decree = SuccessorDecree::new(ballot, acceptors, proposal);
+    assert!(
+        decree.acceptors().members() == old.members(),
+        "a decree's acceptors are exactly the set being replaced"
+    );
+    assert!(
+        decree.acceptors().quorum_system() == QuorumSystem::Majority,
+        "a handover decree counts majorities only"
+    );
+    decree
 }
 
 #[cfg(test)]

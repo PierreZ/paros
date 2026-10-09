@@ -56,8 +56,7 @@ Three `parosd` processes on `127.0.0.1`, from the repository root. Build through
 nix develop --command cargo build --release -p parosd
 export PATH=$PWD/target/release:$PATH
 
-# The three machines, each with its own data directory.
-export PAROS_RENDEZVOUS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
+# The three machines, each with its own data directory, configured with no peer.
 export PAROS_STORE_LAYOUT=small
 mkdir -p /tmp/paros-demo
 for i in 1 2 3; do
@@ -66,9 +65,10 @@ for i in 1 2 3; do
 done
 
 # Every parosctl command talks to the three machines.
-export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
+export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 
-parosctl --servers 127.0.0.1:4501 init | tee /tmp/paros-demo/init.out
+# `cell init` over the three, every one of them needed (the servers, by default).
+parosctl init --members "$PAROSCTL_SERVERS" | tee /tmp/paros-demo/init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' /tmp/paros-demo/init.out)
 
 parosctl write "$J" hello world --leader 7
@@ -83,7 +83,7 @@ rm -rf /tmp/paros-demo
 
 ## If something goes wrong
 
-- `init` says a seed is not up yet: run it again; it resumes, and on a formed fleet it is refused
+- `init` says a member is not up yet: run it again; it resumes, and on a formed fleet it is refused
   (`already_initialized`).
 - `parosctl` exit codes: `0` success, `3` refused, `4` ambiguous (run it again), `5` no server
   answered.

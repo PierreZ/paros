@@ -10,7 +10,7 @@ use moonpool_sim::{
     SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
 };
 use paros::JournalIdentifier;
-use paros::client::bootstrap;
+use paros::client::bootstrap::{self, InitOutcome};
 use paros::client::fleet::Stage;
 use paros::client::initialize::{InitParams, InitRefusal, InitRun, Initialized};
 use paros::machine::ControlJournals;
@@ -150,44 +150,35 @@ impl FleetOps {
         });
     }
 
-    /// Every machine's address, the one at rank `target` first: the order
-    /// `init` is handed its addresses in.
-    fn addrs_from(&self, target: usize) -> Vec<SocketAddr> {
-        std::iter::once(self.machines[target])
-            .chain(
-                self.machines
-                    .iter()
-                    .enumerate()
-                    .filter(|(rank, _)| *rank != target)
-                    .map(|(_, addr)| *addr),
-            )
-            .collect()
-    }
-
-    /// `init` whole (#246), as `parosctl init` runs it: sent to the seed the
-    /// layout names — or, on its own BUGGIFY location, to a machine outside
-    /// the seeds, which must refuse it. Whether it ended.
+    /// `init` whole (#246, #277), as `parosctl init` runs it: `cell init`
+    /// over the founding members the layout draws, sent to the first one
+    /// still idle — from a drawn founder on its own BUGGIFY location, so two
+    /// operators drive two decrees at once; with a second `cell init` sent
+    /// to another founder alongside it on another; or, on a third, sent to
+    /// a machine outside the founders, which must refuse it. Whether it
+    /// ended.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn initialize(&mut self, ctx: &SimContext, draw: u64) -> bool {
-        let outside = self.layout.seeds..self.machines.len();
-        let (target, misdirected) = if !outside.is_empty() && buggify_with_prob!(0.05) {
+        let founders = self.layout.founders;
+        let mut members: Vec<SocketAddr> = self.machines[..founders].to_vec();
+        crate::machine::note_init_sent(ctx.state());
+        let outside = founders..self.machines.len();
+        if !outside.is_empty() && buggify_with_prob!(0.05) {
             assert_reachable!("init: an operator sends init to a machine outside the seeds");
             let span = (outside.end - outside.start) as u64;
-            (
-                outside.start + usize::try_from(draw % span).unwrap_or(0),
-                true,
-            )
-        } else {
-            (self.layout.target, false)
-        };
-        let addrs = self.addrs_from(target);
-        crate::machine::note_init_sent(ctx.state());
+            let target = self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)];
+            return self.misdirected(target, &members).await;
+        }
+        if founders > 1 && buggify_with_prob!(0.25) {
+            assert_reachable!("init: an operator starts cell init at another founder");
+            members.rotate_left(1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0));
+        }
         let connector = self.connector.clone();
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
-        let run = paros::client::initialize::initialize(
+        let whole = paros::client::initialize::initialize(
             connector.providers(),
             connector.rpc(),
-            &addrs,
+            &members,
             |servers| {
                 connector
                     .client(servers)
@@ -199,12 +190,27 @@ impl FleetOps {
                 fleet_id: draw | 1,
                 leader_seed: self.leader_seeds.next(),
             },
-        )
-        .await;
+        );
+        let run = if founders > 1 && buggify_with_prob!(0.25) {
+            // A second `cell init` at once, at another founder: the two
+            // decrees converge on one cell (#277).
+            assert_reachable!("init: a second cell init runs at another founder");
+            let other = members[1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0)];
+            let second = bootstrap::cell_init(
+                connector.providers(),
+                connector.rpc(),
+                other,
+                &members,
+                self.patience,
+            );
+            let (run, second) = futures::future::join(whole, second).await;
+            judge_second(ctx, &second);
+            run
+        } else {
+            whole.await
+        };
         match run {
-            InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized)
-                if !misdirected =>
-            {
+            InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized) => {
                 initialized.steps.iter().copied().for_each(reach);
                 let finished = initialized.steps.last() == Some(&Stage::CellReady);
                 if finished {
@@ -226,26 +232,9 @@ impl FleetOps {
                 self.initialized = true;
                 true
             }
-            InitRun::Initialized(_) | InitRun::AlreadyInitialized(_) => {
-                assert_always!(
-                    false,
-                    "init: a machine outside the seeds never initializes the cell",
-                    { "target" => target }
-                );
-                true
-            }
-            InitRun::Refused(InitRefusal::Formation(label)) if misdirected => {
-                assert_always!(
-                    label == "not_a_seed",
-                    "init: a machine outside the seeds refuses init as not a seed",
-                    { "refusal" => label.as_str() }
-                );
-                assert_reachable!("init: a machine outside the seeds refuses init");
-                true
-            }
             InitRun::Refused(InitRefusal::Formation(label)) if label == "storage" => {
-                // A seed's write failed under it: nothing was decided, and a
-                // re-run resumes the plan it recorded.
+                // The receiver's write failed under it: nothing was decided
+                // that a re-run does not find in its ask.
                 assert_reachable!("init: a seed's failed write refuses init, and it is run again");
                 false
             }
@@ -262,5 +251,61 @@ impl FleetOps {
                 false
             }
         }
+    }
+
+    /// A `cell init` sent to a machine outside the founders: refused as not a
+    /// member, and nothing forms. Whether it ended.
+    async fn misdirected(&self, target: SocketAddr, members: &[SocketAddr]) -> bool {
+        let outcome = bootstrap::cell_init(
+            self.connector.providers(),
+            self.connector.rpc(),
+            target,
+            members,
+            self.patience,
+        )
+        .await;
+        match outcome {
+            InitOutcome::Refused(label) => {
+                assert_always!(
+                    label == "not_a_member",
+                    "init: a machine outside the seeds refuses init as not a seed",
+                    { "refusal" => label.as_str() }
+                );
+                assert_reachable!("init: a machine outside the seeds refuses init");
+                true
+            }
+            InitOutcome::Formed(plan) => {
+                assert_always!(
+                    false,
+                    "init: a machine outside the seeds never initializes the cell",
+                    { "cell" => plan.cell_id }
+                );
+                true
+            }
+            InitOutcome::NotWaiting | InitOutcome::Malformed | InitOutcome::Unreachable => false,
+        }
+    }
+}
+
+/// The second `cell init` of a run that sent two at once: it forms the
+/// one cell the machines formed, or decides nothing — never another.
+fn judge_second(ctx: &SimContext, second: &InitOutcome) {
+    match second {
+        InitOutcome::Formed(plan) => {
+            assert_always!(
+                crate::machine::formed_cell(ctx.state()) == Some(plan.control_journals()),
+                "init: two concurrent cell inits converge on one cell",
+                { "cell" => plan.cell_id }
+            );
+            assert_reachable!("init: a second concurrent cell init finishes the one cell");
+        }
+        InitOutcome::Refused(label) => {
+            assert_always!(
+                label == "storage",
+                "init: a second concurrent cell init is refused only for a failed write",
+                { "refusal" => label.as_str() }
+            );
+        }
+        InitOutcome::NotWaiting | InitOutcome::Malformed | InitOutcome::Unreachable => {}
     }
 }

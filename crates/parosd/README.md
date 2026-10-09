@@ -32,27 +32,45 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 
 | machine | class | failure domain | role today |
 |---|---|---|---|
-| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the seeds: one network alias, `seeds`, resolves to the three |
+| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members: one network alias, `members`, resolves to the three |
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
 | `stateless1` | `stateless` | `zone-b` | waits for placement (M9) |
 
 **Start and wait.** A machine starts with its listen address, its data
-directory (a named volume), its class, capacity and failure domain, and its
-rendezvous — here `seeds:4500`, which resolves to the three seeds. On its first
-start it **mints its `node_id`** at random and records it in its data directory
-(there is no `PAROS_ID`), then waits. A machine never forms a cell on its own.
+directory (a named volume), its class, capacity and failure domain. It is
+configured with **no peer**: no seed, no join list. On its first start it
+**mints its `node_id`** at random and records it in its data directory (there
+is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
 
-**Init.** `parosctl init` goes to one seed (`node1`, which every seed's join
-list names). That seed identifies every seed, mints the cell's id, records the
-plan, forms every other seed and then itself; every seed then serves the **cell
-control journal**, **the fleet tenant's control journal** (the fleet directory: the
-fleet's one cell hosts it) and the toy's journal (the static assignment that
-stands in for placement until M9), plain Multi-Paxos over the seeds. **No
+**Init.** `parosctl --servers members:4500 init` runs `cell init` over the
+**founding members** (`--members`, by default the servers: here the three the
+`members` alias resolves to). It sends `CellInit` to the first member still
+idle, and that machine drives a single-decree Paxos on the cell plan, every
+founding member an acceptor and every one needed:
+
+1. **Prepare.** It sends `PrepareCell` with a fresh random ballot. Each member
+   says who it is, promises durably to accept no plan under a lower ballot, and
+   reports any plan it already accepted.
+2. **Adopt or draw.** A reported plan is finished instead of a new one. A plan
+   over another member list is refused (`other_cell_init`); a listed address
+   that now hosts another machine than the plan names is refused
+   (`cell_exists`: a wiped machine). Otherwise it draws the plan.
+3. **Form.** It sends `FormCell(plan, ballot)` to the other members, then forms
+   itself. A member accepts unless it promised a higher ballot
+   (`promised_higher`); accepting is forming.
+
+Two concurrent `init`s form at most one cell, and an interrupted one leaves no
+lock: the next `init`, sent to any member, hears the accepted plan and finishes
+it. A formed member keeps answering the decree from its record. Every member
+then serves the **cell control journal**, **the fleet tenant's control journal**
+(the fleet directory: the fleet's one cell hosts it) and the toy's journal (the
+static assignment that stands in for placement until M9), plain Multi-Paxos
+over the founding members. **No
 identifier is fixed**: `init` draws every one, records them in the cell plan, and
 prints them (`control=`, `fleet_control=`, `journals=`); afterwards any machine's
 node-only `Inspect` names the cell's control journal and the fleet tenant's, which is how
-`parosctl tenant` finds them. Then the first cell coordinator — the lowest seed
-id, until the coordinator election of #225 — claims the cell control journal
+`parosctl tenant` finds them. Then the first cell coordinator — the lowest
+founding member id, until the coordinator election of #225 — claims the cell control journal
 with `SetLeader(new, old = none)`, under a leader uuid `init` draws (#241). Last come the **fleet steps** (#229): the
 cell records the fleet's id (minted by `init`) on its side, and the fleet tenant records
 the fleet and adds the cell, `READY`. Every step is idempotent: re-running
@@ -71,8 +89,8 @@ creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
 finish it). A tenant's footprint and its
 own control journal are not created yet (#210, #225).
 
-**Write and read.** `parosctl` is handed addresses only: `--servers seeds:4500`
-stands for every seed, and each server's node id is learned from its own
+**Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
+stands for every founding member, and each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
 generation it read), then writes at the tail.
 
@@ -98,29 +116,30 @@ applies.
   paros_node2 && docker compose up -d node2`): the machine comes back as a **new
   machine** with a new `node_id`, and waits. It never rejoins as the old one: an
   `init` sent to it (`docker compose run --rm --entrypoint parosctl parosctl
-  --servers node2:4500 init`) is refused (`cell_exists`), since the other seeds
-  serve the cell. Healing the cell around it is reconfiguration onto another machine,
+  --servers node2:4500 init --members members:4500`) is refused
+  (`cell_exists`), since the other members hold a plan that names the old
+  machine at that address. Healing the cell around it is reconfiguration onto another machine,
   driven by the tenant coordinator in M9.
 
 **What is not proven in simulation yet.** The journals' protocol, the driver
 and the stores are the code the deterministic simulation runs. The machine
-phase — formatting an identity, waiting, `init` and `FormCell` — and the
-uniform start are not in the simulation yet (#216). This toy is a demo to run
+phase — formatting an identity, waiting, `cell init` and its decree — is the
+library's `run_machine`, the code the simulation's machines run too (#246,
+#277). This toy is a demo to run
 by hand: no test runs it, and CI only builds its image.
 
 ## Without Docker
 
-The same three seeds on one host, configured by the environment (each variable
-also has its `--flag`, see `parosd --help`):
+The same three machines on one host, configured by the environment (each
+variable also has its `--flag`, see `parosd --help`), each with no peer:
 
 ```sh
-export PAROS_RENDEZVOUS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 export PAROS_STORE_LAYOUT=small
 for i in 1 2 3; do
-  PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=seed$i parosd &
+  PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=node$i parosd &
 done
-export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
-parosctl --servers 127.0.0.1:4501 init      # prints journals=T/J
+export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
+parosctl init --members "$PAROSCTL_SERVERS"   # prints journals=T/J
 parosctl write T/J hello world --leader 7
 parosctl read T/J
 ```
@@ -137,16 +156,16 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_CLASS` | `storage` (default) or `stateless`; fixed at format |
 | `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
 | `PAROS_FAILURE_DOMAIN` | its failure domain label |
-| `PAROS_RENDEZVOUS` | the cell's seeds: one name that resolves to them, or a comma-separated join list; recorded at format, re-read on every boot |
 | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |
 | `RUST_LOG` | the log filter (default `warn,parosd=info`) |
 
 Every address is `HOST:PORT` with an explicit port; the host is an IP or a
-name — a Compose service name, say. A machine resolves its names **once, at
-startup**, asking again for up to 30 seconds while a name does not resolve
-yet, and exits 2 if one never does. A rendezvous name resolves to every
-address it stands for. `parosctl --servers` takes names too.
+name — a Compose service name, say. A machine resolves its listen address
+**once, at startup**, asking again for up to 30 seconds while the name does
+not resolve yet, and exits 2 if it never does. `parosctl --servers` and
+`init --members` take names too: a name that resolves to several machines (a
+Compose alias) stands for them all.
 
 ## Driver tunables
 
@@ -223,7 +242,7 @@ and both required: there is no default tenant and no fixed id (#235,
 
 | command | what it does |
 |---|---|
-| `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in the fleet directory (#229); resumes an interrupted init, refused on an initialized fleet |
+| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; claims the cell control journal, then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_exists`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
 | `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
@@ -255,8 +274,10 @@ truncation gap) go to stderr.
 ```
 
 The machine record is written at format (`node_id`, class, capacity, failure
-domain, rendezvous) and again when the machine forms its cell: the seed running
-`init` records the plan as *pending* first (a re-run resumes it), and every seed
-records it as *formed* only after every journal store of the plan is formatted
-and the provisioning record names them — the commit point. Every start after
+domain) and holds the machine's acceptor state in `cell init`'s decree: a
+`PrepareCell` records its promise (`promised <round>/<node>`) before the answer
+leaves, and accepting a `FormCell` records its vote (`plan <cell_id>
+<round>/<node>`, with the plan's members and journals) only after every journal
+store of the plan is formatted and the provisioning record names them — the
+commit point. Every start after
 that is an existing member's: a start never formats a journal store.

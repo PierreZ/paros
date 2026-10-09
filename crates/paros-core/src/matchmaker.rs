@@ -115,7 +115,6 @@
 //! messages; its trust boundary is the wire contract, documented on
 //! [`ReconfigureRequest::Chosen`].
 
-mod decree;
 mod generation;
 #[cfg(test)]
 mod handover_model;
@@ -127,7 +126,8 @@ mod write;
 
 use std::collections::BTreeMap;
 
-pub use self::decree::Decree;
+/// The handover's decree: the successor set, over the matchmakers of `M_g`.
+pub type SuccessorDecree = crate::decree::Decree<MatchmakerId, Vec<MatchmakerId>>;
 pub use self::message::{
     GcAck, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest,
     ReconfigureReply, ReconfigureRequest,

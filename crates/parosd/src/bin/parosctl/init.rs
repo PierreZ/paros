@@ -1,23 +1,25 @@
-//! `parosctl init` (#196, #216, #229): the fleet's bootstrap — the cell
-//! step, then the fleet steps.
+//! `parosctl init` (#196, #216, #229, #277): the fleet's bootstrap — the
+//! cell step, then the fleet steps.
 //!
-//! Sent to the first server — a waiting seed every seed's join list names —
-//! which identifies every seed, mints the cell's id and forms every seed
-//! (`paros::machine`); then `init` claims the cell control journal with
+//! The cell step is `cell init` over the founding members (`--members`, the
+//! servers by default): sent to the first listed machine still idle, which
+//! drives the cell decree — a single-decree Paxos on the cell plan, every
+//! listed machine an acceptor and all of them the quorum (`paros::machine`);
+//! then `init` claims the cell control journal with
 //! `SetLeader(new, old = none)` under a leader uuid of its own
-//! (`paros::client::bootstrap::claim_cell`). A re-run resumes: a seed that
-//! already serves the cell is asked for it, and the claim is made if it is
-//! still missing.
+//! (`paros::client::bootstrap::claim_cell`). A re-run resumes: an
+//! interrupted decree is finished by whichever listed machine is asked, and
+//! the claim is made if it is still missing.
 //!
 //! The whole operation is `paros::client::initialize` (#246), which the
 //! simulation runs too; this command prints what it came to.
 //!
 //! Then the fleet steps (#229, `paros::client::fleet`): the fleet tenant (served by the
-//! cell's seeds) records the fleet's id — drawn here, kept on a re-run — and
+//! cell's members) records the fleet's id — drawn here, kept on a re-run — and
 //! adds the cell with its cell tenant, the cell records the fleet on its
 //! side, and the fleet tenant marks the cell `READY`. No identifier is fixed (§3.8): a first
 //! run takes them from the plan it formed and prints them, a re-run learns
-//! them from the seeds' `Inspect`. Both journals are written under this
+//! them from the members' `Inspect`. Both journals are written under this
 //! run's leader uuids (#241). Every step is idempotent: `init` is refused only when it
 //! found nothing left to do.
 
@@ -38,33 +40,69 @@ use crate::output::{Printer, note};
 /// `parosctl init`.
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// How long the seed may take to form the cell, and the cell to elect
+    /// The founding members, comma-separated `HOST:PORT`s: the idle
+    /// machines the cell forms on, every one of them needed (a name that
+    /// resolves to several machines stands for them all). The servers
+    /// (`--servers`) by default.
+    #[arg(long, value_delimiter = ',')]
+    members: Vec<String>,
+    /// How long the decree may take to form the cell, and the cell to elect
     /// its first leader, in milliseconds.
     #[arg(long, default_value = "30000")]
     patience_ms: u64,
 }
 
-/// `parosctl init`: form the cell at `addrs[0]`, claim its control journal
+impl InitArgs {
+    /// The founding members, resolved, without duplicates: `--members`, or
+    /// `servers` when none is given.
+    ///
+    /// # Errors
+    ///
+    /// A member that does not resolve.
+    pub fn members(&self, servers: &[SocketAddr]) -> Result<Vec<SocketAddr>, String> {
+        if self.members.is_empty() {
+            return Ok(servers.to_vec());
+        }
+        let mut members = Vec::new();
+        for entry in self
+            .members
+            .iter()
+            .map(|m| m.trim())
+            .filter(|m| !m.is_empty())
+        {
+            for addr in crate::resolve::resolve_all(entry)
+                .map_err(|e| format!("bad member {entry:?}: {e}"))?
+            {
+                if !members.contains(&addr) {
+                    members.push(addr);
+                }
+            }
+        }
+        Ok(members)
+    }
+}
+
+/// `parosctl init`: form the cell over `members`, claim its control journal
 /// and run the fleet steps, through a client `connect` builds over its
 /// members (`paros::client::initialize`).
 pub async fn run(
     providers: &TokioProviders,
     rpc: &RpcHandle<TokioProviders>,
-    addrs: &[SocketAddr],
+    members: &[SocketAddr],
     connect: impl Fn(&[(u64, SocketAddr)]) -> Client<TokioProviders>,
     out: &Printer,
-    args: InitArgs,
+    args: &InitArgs,
 ) -> Ending {
     let params = InitParams {
         patience: Duration::from_millis(args.patience_ms),
         fleet_id: nonzero(providers),
         leader_seed: leader_seed(providers),
     };
-    match initialize::initialize(providers, rpc, addrs, connect, params).await {
+    match initialize::initialize(providers, rpc, members, connect, params).await {
         InitRun::Initialized(done) => {
             if !done.users.is_empty() {
                 note(&format!(
-                    "formed cell {} over {} seeds",
+                    "formed cell {} over {} members",
                     done.journals.cell_id,
                     done.servers.len()
                 ));
@@ -99,7 +137,7 @@ pub async fn run(
             Ending::Refused
         }
         InitRun::Unreachable(why) => {
-            note(&unreachable_text(why, addrs.first()));
+            note(&unreachable_text(why, members.first()));
             Ending::Unreachable
         }
         InitRun::Ambiguous => {
@@ -114,11 +152,12 @@ pub async fn run(
 fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
     let target = target.map_or_else(|| "?".to_string(), ToString::to_string);
     match why {
-        Unreachable::NoTarget => "no server to send init to".into(),
-        Unreachable::Malformed => "the seed answered with a plan that does not decode".into(),
-        Unreachable::Formation => {
-            format!("init at {target} decided nothing in time: a seed is not up yet; run it again")
-        }
+        Unreachable::NoTarget => "no member to form the cell on".into(),
+        Unreachable::Malformed => "a member answered with a plan that does not decode".into(),
+        Unreachable::Formation => format!(
+            "cell init over {target} and the other members decided nothing in time: a member \
+             is not up yet; run it again"
+        ),
         Unreachable::NothingAnswered => format!("nothing answered init or inspect at {target}"),
         Unreachable::NoControlJournals => "no server named its cell's control journals".into(),
         Unreachable::NoCoordinator => {

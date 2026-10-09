@@ -1,6 +1,6 @@
-//! The machine record (#196): a machine's identity and its cell, the one
-//! record a machine keeps beside its journal stores, rewritten whole by its
-//! [`MachineDisk`](super::MachineDisk).
+//! The machine record (#196, #277): a machine's identity, its standing in
+//! the cell decree and its cell, the one record a machine keeps beside its
+//! journal stores, rewritten whole by its [`MachineDisk`](super::MachineDisk).
 //!
 //! A machine is **formatted** on its first start, on an empty disk: its
 //! `node_id` is minted then, at random (#225), so a wiped disk comes back as
@@ -8,20 +8,20 @@
 //! A disk that holds stores but no record lost its identity, and is refused
 //! as amnesia ([`super::run_machine`]).
 //!
-//! The rendezvous join list is stored too and re-read on every start (the
-//! configuration's, when given, wins and is recorded). Once `init` forms the
-//! cell, the record holds its plan: first as **pending** on the seed that
-//! runs `init` (a re-run resumes it, never redraws it), then as **formed** —
-//! the commit point, written after every journal store of the plan is
-//! formatted ([`super::MachineDisk::provision`]).
+//! The record is the machine's acceptor state in the cell decree (#277): its
+//! **promise** (`promised`, absent while it promised nothing), raised by a
+//! `PrepareCell` before the answer leaves, and its **vote** — the plan it
+//! accepted and the ballot it accepted it at. Accepting is forming: the vote
+//! is written after every journal store of the plan is formatted
+//! ([`super::MachineDisk::provision`]), so the plan line is the commit point.
 //!
 //! ```text
 //! node_id 6150928431937019931
 //! class storage
 //! capacity 1
 //! failure_domain zone-a
-//! rendezvous seeds:4500
-//! plan formed 912873
+//! promised 4417/6150928431937019931
+//! plan 912873 4417/6150928431937019931
 //! member 6150928431937019931 10.0.0.2:4500
 //! control 11986532017395081213/5302873011246751929
 //! fleet 7240096361733624127/14183513009914637262
@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 
-use paros_core::{Config, JournalIdentifier, NodeId, QuorumSystem};
+use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem};
 
 use super::{CellPlan, Class};
 
@@ -43,13 +43,13 @@ fn parse_identifier(text: &str) -> Option<JournalIdentifier> {
     text.contains('/').then(|| text.parse().ok()).flatten()
 }
 
-/// Where a machine's plan stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlanState {
-    /// Recorded by the seed running `init`, before any seed formed it.
-    Pending,
-    /// Formed here: this machine serves the plan's journals.
-    Formed,
+/// Parse a ballot written `<round>/<node>`.
+fn parse_ballot(text: &str) -> Option<Ballot> {
+    let (round, node) = text.split_once('/')?;
+    Some(Ballot {
+        round: round.parse().ok()?,
+        node: NodeId(node.parse().ok()?),
+    })
 }
 
 /// What the record holds.
@@ -63,39 +63,41 @@ pub struct MachineRecord {
     pub capacity: u64,
     /// Its failure domain.
     pub failure_domain: String,
-    /// Its rendezvous join list, as configured (unresolved).
-    pub rendezvous: String,
-    /// Its cell's plan, and where it stands.
-    pub plan: Option<(PlanState, CellPlan)>,
+    /// Its promise in the cell decree: no plan under a lower ballot is
+    /// accepted. The zero ballot while it promised nothing.
+    pub promised: Ballot,
+    /// Its vote, which is its cell: the plan it accepted (and formed) and
+    /// the ballot it accepted it at.
+    pub plan: Option<(Ballot, CellPlan)>,
 }
 
 impl MachineRecord {
     /// The formed plan, if this machine has a cell.
     #[must_use]
     pub fn formed(&self) -> Option<&CellPlan> {
-        match &self.plan {
-            Some((PlanState::Formed, plan)) => Some(plan),
-            _ => None,
-        }
+        self.plan.as_ref().map(|(_, plan)| plan)
     }
 
     /// The record as text, the form a [`MachineDisk`](super::MachineDisk) keeps.
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = format!(
-            "node_id {}\nclass {}\ncapacity {}\nfailure_domain {}\nrendezvous {}\n",
+            "node_id {}\nclass {}\ncapacity {}\nfailure_domain {}\n",
             self.node_id.0,
             self.class.as_str(),
             self.capacity,
             self.failure_domain,
-            self.rendezvous
         );
-        if let Some((state, plan)) = &self.plan {
-            let state = match state {
-                PlanState::Pending => "pending",
-                PlanState::Formed => "formed",
-            };
-            let _ = writeln!(text, "plan {state} {}", plan.cell_id);
+        if self.promised != Ballot::default() {
+            let p = self.promised;
+            let _ = writeln!(text, "promised {}/{}", p.round, p.node.0);
+        }
+        if let Some((ballot, plan)) = &self.plan {
+            let _ = writeln!(
+                text,
+                "plan {} {}/{}",
+                plan.cell_id, ballot.round, ballot.node.0
+            );
             for (id, addr) in &plan.members {
                 let _ = writeln!(text, "member {} {addr}", id.0);
             }
@@ -118,7 +120,8 @@ impl MachineRecord {
     /// absence.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
-        let mut plan: Option<(PlanState, u64)> = None;
+        let mut plan: Option<(Ballot, u64)> = None;
+        let mut promised = Ballot::default();
         let mut members = Vec::new();
         let mut journals = Vec::new();
         let mut control = None;
@@ -126,20 +129,21 @@ impl MachineRecord {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
-                "node_id" | "class" | "capacity" | "failure_domain" | "rendezvous" => {
+                "node_id" | "class" | "capacity" | "failure_domain" => {
                     fields.insert(key, value);
                 }
+                "promised" => {
+                    promised =
+                        parse_ballot(value).ok_or_else(|| format!("bad promise {value:?}"))?;
+                }
                 "plan" => {
-                    let (state, cell) = value
+                    let (cell, ballot) = value
                         .split_once(' ')
                         .ok_or_else(|| format!("bad plan line {line:?}"))?;
-                    let state = match state {
-                        "pending" => PlanState::Pending,
-                        "formed" => PlanState::Formed,
-                        _ => return Err(format!("bad plan state {state:?}")),
-                    };
                     let cell = cell.parse().map_err(|e| format!("bad cell id: {e}"))?;
-                    plan = Some((state, cell));
+                    let ballot = parse_ballot(ballot)
+                        .ok_or_else(|| format!("bad plan ballot {ballot:?}"))?;
+                    plan = Some((ballot, cell));
                 }
                 "member" => {
                     let (id, addr) = value
@@ -176,7 +180,7 @@ impl MachineRecord {
                 .ok_or_else(|| format!("the machine record names no {name}"))
         };
         let plan = match plan {
-            Some((state, cell_id)) => {
+            Some((ballot, cell_id)) => {
                 let plan = CellPlan {
                     cell_id,
                     members,
@@ -185,7 +189,10 @@ impl MachineRecord {
                     journals,
                 };
                 plan.check()?;
-                Some((state, plan))
+                if ballot.round == 0 || ballot > promised {
+                    return Err("the machine record's vote is not under its promise".into());
+                }
+                Some((ballot, plan))
             }
             None => None,
         };
@@ -200,7 +207,7 @@ impl MachineRecord {
                 .parse()
                 .map_err(|e| format!("bad capacity: {e}"))?,
             failure_domain: field("failure_domain")?.to_string(),
-            rendezvous: field("rendezvous")?.to_string(),
+            promised,
             plan,
         })
     }
@@ -225,21 +232,30 @@ mod tests {
     use super::*;
     use paros_core::{JournalId, TenantId};
 
-    fn record(plan: Option<(PlanState, CellPlan)>) -> MachineRecord {
+    fn ballot(round: u64) -> Ballot {
+        Ballot {
+            round,
+            node: NodeId(5),
+        }
+    }
+
+    fn record(promised: Ballot, plan: Option<(Ballot, CellPlan)>) -> MachineRecord {
         MachineRecord {
             node_id: NodeId(u64::MAX - 3),
             class: Class::Storage,
             capacity: 4,
             failure_domain: "zone-a".into(),
-            rendezvous: "seeds:4500".into(),
+            promised,
             plan,
         }
     }
 
     #[test]
     fn a_record_round_trips_with_and_without_its_plan() {
-        let bare = record(None);
+        let bare = record(Ballot::default(), None);
         assert_eq!(MachineRecord::parse(&bare.render()), Ok(bare));
+        let promised = record(ballot(9), None);
+        assert_eq!(MachineRecord::parse(&promised.render()), Ok(promised));
         let identifier =
             |tenant, journal| JournalIdentifier::new(TenantId(tenant), JournalId(journal));
         let plan = CellPlan {
@@ -253,20 +269,23 @@ mod tests {
                 identifier(0x71, 0x72),
             ],
         };
-        let formed = record(Some((PlanState::Formed, plan.clone())));
+        let formed = record(ballot(9), Some((ballot(7), plan.clone())));
         let read = MachineRecord::parse(&formed.render()).expect("a record");
         assert_eq!(read.formed(), Some(&plan));
         assert_eq!(read, formed);
-        let pending = record(Some((PlanState::Pending, plan)));
-        let read = MachineRecord::parse(&pending.render()).expect("a record");
-        assert_eq!(read.formed(), None);
-        assert_eq!(read, pending);
+        let above = record(ballot(7), Some((ballot(9), plan)));
+        assert!(
+            MachineRecord::parse(&above.render()).is_err(),
+            "a vote never outranks the promise"
+        );
     }
 
     #[test]
     fn a_damaged_record_is_an_error() {
         assert!(MachineRecord::parse("node_id x\n").is_err());
         assert!(MachineRecord::parse("node_id 3\n").is_err());
-        assert!(MachineRecord::parse(&format!("{}bogus 1\n", record(None).render())).is_err());
+        let bare = record(Ballot::default(), None).render();
+        assert!(MachineRecord::parse(&format!("{bare}bogus 1\n")).is_err());
+        assert!(MachineRecord::parse(&format!("{bare}promised 3\n")).is_err());
     }
 }

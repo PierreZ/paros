@@ -50,7 +50,7 @@ struct Cli {
 #[derive(Args, Debug)]
 struct Global {
     /// The servers to ask, comma-separated: `HOST:PORT` — a name that
-    /// resolves to several machines (the seeds' rendezvous name) stands for
+    /// resolves to several machines (a Compose alias) stands for
     /// them all, and each server's node id is learned from its own
     /// `Inspect` — or `ID=HOST:PORT` to name the id outright. A host is an
     /// IP or a name, resolved once, at startup.
@@ -116,8 +116,8 @@ impl Global {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Form the cell over its seeds (#196, #216): sent to the first server,
-    /// a waiting seed; then `init` claims the cell control journal under a
+    /// Form the cell over its founding members with `cell init`'s decree
+    /// (#196, #216, #277); then `init` claims the cell control journal under a
     /// leader uuid of its own, and the fleet steps register the cell in the fleet directory
     /// (#229). Refused on an initialized fleet; a re-run resumes.
     Init(init::InitArgs),
@@ -253,15 +253,21 @@ async fn main() -> ExitCode {
     let command = match cli.command {
         Command::Init(args) => {
             let timeout = cli.global.timeout();
-            let addrs = cli.global.addrs();
+            let members = match args.members(&cli.global.addrs()) {
+                Ok(members) => members,
+                Err(error) => {
+                    eprintln!("parosctl: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let connect = |servers: &[(u64, SocketAddr)]| client(&runtime, servers, timeout);
             return init::run(
                 &runtime.providers,
                 &runtime.rpc,
-                &addrs,
+                &members,
                 connect,
                 &out,
-                args,
+                &args,
             )
             .await
             .into();

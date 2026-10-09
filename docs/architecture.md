@@ -290,9 +290,11 @@ list and no rendezvous name. The same rule holds at two levels:
   machine that receives it drives it, with every listed machine as both the acceptors and the
   quorum (all must answer, as before):
   1. **Ask, as a reservation.** It sends a fresh random `init_id` (its ballot) to every listed
-     machine, which answers like `Identify`: it must be `storage` and not already belong to
-     a cell (`cell_exists`). It also promises to accept no plan under a lower `init_id`, and answers
-     with any plan it has already accepted.
+     machine, which answers like `Identify`: it must be `storage`. It also promises to accept no
+     plan under a lower `init_id`, and answers with any plan it has already accepted. A formed
+     machine answers every ask with its accepted plan and never accepts another one. A listed
+     address that now hosts another machine than the accepted plan names is a wiped member,
+     and the receiver refuses (`cell_exists`).
   2. **Adopt or draw.** If an answer carries an accepted plan, the receiver must finish that plan
      instead of its own: with the same member list, the two `init`s converge on one cell; with
      another list, it refuses (`other_cell_init`). Otherwise it draws the plan: `cell_id` and the

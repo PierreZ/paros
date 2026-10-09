@@ -4,22 +4,22 @@
 //! `paros::client`.
 //!
 //! A machine starts with its listen address, its data directory, its class,
-//! capacity and failure domain, and its rendezvous join list — environment
-//! variables, validated at startup ([`settings`]). There is no role to pick
-//! and no identity to pass:
+//! capacity and failure domain — environment variables, validated at
+//! startup ([`settings`]). There is no role to pick, no identity to pass and
+//! no peer to name:
 //!
 //! 1. **Format, once.** On an empty data directory the machine mints its
 //!    `node_id` at random (#225) and records it (`MachineRecord`). A
 //!    directory that holds stores but no identity lost it, and is refused.
 //! 2. **Wait.** Until it belongs to a cell, it serves the machine contract
-//!    (`paros::machine::wait_for_cell`): `Identify`, and — on a seed of
-//!    class `storage`, one its own join list names — `Init` and
-//!    `FormCell`. It never forms a cell on its own (#216).
+//!    (`paros::machine::wait_for_cell`): `Identify`, the cell decree's two
+//!    phases as an acceptor, and `CellInit` as its proposer (#277). It never
+//!    forms a cell on its own (#216).
 //! 3. **Serve.** A formed machine runs `paros::run_journals` over its
 //!    cell's plan: the cell control journal, the fleet tenant's, and the static
 //!    assignment that stands in for placement until M9 (#212) — every identifier
-//!    drawn at `init`, none fixed — plain Multi-Paxos over the
-//!    seeds. Every start after formation is an existing member's
+//!    drawn at `cell init`, none fixed — plain Multi-Paxos over the
+//!    founding members. Every start after formation is an existing member's
 //!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
 //!
 //! The lifecycle is the library's, `paros::machine::run_machine` (#246): the
@@ -42,7 +42,6 @@ mod settings;
 mod stores;
 mod tunables;
 
-use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -106,7 +105,6 @@ async fn run(settings: Settings) -> ExitCode {
         class: settings.class,
         capacity: settings.capacity,
         failure_domain: settings.failure_domain.clone(),
-        rendezvous: settings.rendezvous.clone(),
     };
     let disk = DirDisk {
         data_dir: settings.data_dir.clone(),
@@ -117,7 +115,6 @@ async fn run(settings: Settings) -> ExitCode {
         disk,
         &machine,
         addr,
-        seeds,
         1,
         tunables,
         shutdown_on_signal(),
@@ -140,24 +137,6 @@ async fn run(settings: Settings) -> ExitCode {
         }
         Err(MachineError::Run(error)) => exit(&error),
     }
-}
-
-/// The seeds a rendezvous join list names, resolved once, here (#209),
-/// retried while a Compose peer starts: every address of every entry.
-fn seeds(rendezvous: &str) -> Result<Vec<SocketAddr>, String> {
-    let mut seeds: Vec<SocketAddr> = Vec::new();
-    for entry in rendezvous
-        .split(',')
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-    {
-        for seed in patiently(|| resolve::resolve_all(entry))? {
-            if !seeds.contains(&seed) {
-                seeds.push(seed);
-            }
-        }
-    }
-    Ok(seeds)
 }
 
 /// `resolve` until it answers or [`RESOLVE_PATIENCE`] runs out.

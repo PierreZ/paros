@@ -179,8 +179,9 @@ batch) and holds **no protocol tally of its own**:
   journal-control state machine, judged at apply
 - `quorum_read.rs` — leaderless reads · `collector.rs` — the leader-side GC tally
 - `membership.rs` — `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem`
-- `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`,
-  `decree.rs`) — the registry, its generation handover and decree
+- `matchmaking.rs` — the candidate's matchmaking phase · `matchmaker.rs` (+ `reconfigurer.rs`)
+  — the registry and its generation handover · `decree.rs` — the generic single-decree
+  Paxos (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277)
 - `proxy_leader.rs`, `replica_node.rs` — the second and third deployments
 
 The map is `crates/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because

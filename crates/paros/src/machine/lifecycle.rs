@@ -6,10 +6,13 @@
 //!    stores but no record lost its identity, and is refused (amnesia); a
 //!    record of another class is refused (a class is fixed at format).
 //! 2. **Wait.** Until it belongs to a cell, it serves the machine contract
-//!    ([`super::wait_for_cell`]). It never forms a cell on its own (#216).
+//!    ([`super::wait_for_cell`]): an acceptor of any `cell init` that lists
+//!    it, and the proposer of one sent to it (#277). It never forms a cell
+//!    on its own (#216).
 //! 3. **Serve.** A formed machine runs [`crate::run_journals`] over its
-//!    cell's plan, every journal plain Multi-Paxos over the seeds
-//!    ([`journal_config`]). Every start after formation is an existing
+//!    cell's plan, every journal plain Multi-Paxos over the founding members
+//!    ([`journal_config`]), and keeps answering the decree from its record
+//!    ([`super::FormedCell`]). Every start after formation is an existing
 //!    member's, so a lost store is refused as amnesia by the driver.
 //!
 //! The disk is the caller's ([`MachineDisk`]): `parosd` keeps the record and
@@ -23,8 +26,10 @@ use moonpool_core::{Providers, RandomProvider};
 use paros_core::{Config, JournalIdentifier, NodeId};
 use tokio_util::sync::CancellationToken;
 
-use super::record::{MachineRecord, PlanState, journal_config};
-use super::{CellLedger, CellPlan, Class, MachineFacts};
+use paros_core::Ballot;
+
+use super::record::{MachineRecord, journal_config};
+use super::{CellLedger, CellPlan, Class, FormedCell, MachineFacts};
 use crate::{DriverHooks, DriverTunables, JournalStores, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
@@ -36,9 +41,6 @@ pub struct MachineSettings {
     pub capacity: u64,
     /// Its failure domain; may change across starts.
     pub failure_domain: String,
-    /// Its rendezvous join list, unresolved: required on the first start,
-    /// and recorded (a later one, when given, replaces it).
-    pub rendezvous: Option<String>,
 }
 
 /// How a machine's run ended before or instead of a clean shutdown.
@@ -129,9 +131,7 @@ struct DiskLedger<'a, D> {
 }
 
 impl<D: MachineDisk> DiskLedger<'_, D> {
-    async fn commit(&mut self, plan: Option<(PlanState, CellPlan)>) -> Result<(), String> {
-        let mut record = self.record.clone();
-        record.plan = plan;
+    async fn commit(&mut self, record: MachineRecord) -> Result<(), String> {
         self.disk.write_record(&record.render()).await?;
         self.record = record;
         Ok(())
@@ -139,31 +139,42 @@ impl<D: MachineDisk> DiskLedger<'_, D> {
 }
 
 impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
-    fn pending(&self) -> Option<CellPlan> {
-        match &self.record.plan {
-            Some((PlanState::Pending, plan)) => Some(plan.clone()),
-            _ => None,
-        }
+    fn promised(&self) -> Ballot {
+        self.record.promised
     }
 
-    async fn record_pending(&mut self, plan: &CellPlan) -> Result<(), String> {
+    fn vote(&self) -> Option<(Ballot, CellPlan)> {
+        self.record.plan.clone()
+    }
+
+    async fn promise(&mut self, ballot: Ballot) -> Result<(), String> {
         assert!(
-            self.record.formed().is_none(),
-            "a formed machine never runs init"
+            ballot > self.record.promised,
+            "a promise is only ever raised"
         );
-        self.commit(Some((PlanState::Pending, plan.clone()))).await
+        assert!(
+            self.record.plan.is_none(),
+            "a formed machine's vote is final"
+        );
+        let mut record = self.record.clone();
+        record.promised = ballot;
+        self.commit(record).await
     }
 
-    async fn form(&mut self, plan: &CellPlan) -> Result<(), String> {
-        if self.record.formed() == Some(plan) {
-            return Ok(());
-        }
+    async fn form(&mut self, ballot: Ballot, plan: &CellPlan) -> Result<(), String> {
         assert!(
-            self.record.formed().is_none(),
+            ballot >= self.record.promised,
+            "a vote is never under the promise"
+        );
+        assert!(
+            self.record.plan.is_none(),
             "a formed machine forms no other cell"
         );
         self.disk.provision(self.record.node_id, plan).await?;
-        self.commit(Some((PlanState::Formed, plan.clone()))).await?;
+        let mut record = self.record.clone();
+        record.promised = ballot;
+        record.plan = Some((ballot, plan.clone()));
+        self.commit(record).await?;
         assert_eq!(
             self.record.formed(),
             Some(plan),
@@ -175,9 +186,8 @@ impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
 
 /// Run a machine on `disk` until `shutdown`: format it on its first start,
 /// wait for its cell while it has none, then serve the cell's journals.
-/// `resolve` turns the recorded rendezvous join list into the seeds'
-/// addresses; `addr` is the address this machine serves at. `assignment` is
-/// how many user journals a cell this machine initializes serves beside its
+/// `addr` is the address this machine serves at. `assignment` is how many
+/// user journals a cell this machine draws at `cell init` serves beside its
 /// control journals (the static assignment, until #212).
 ///
 /// # Errors
@@ -195,7 +205,6 @@ pub async fn run_machine<P, D, H>(
     mut disk: D,
     settings: &MachineSettings,
     addr: SocketAddr,
-    resolve: impl FnOnce(&str) -> Result<Vec<SocketAddr>, String>,
     assignment: usize,
     tunables: DriverTunables,
     shutdown: CancellationToken,
@@ -208,27 +217,25 @@ where
 {
     let record = identity(&providers, &mut disk, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
-    let seeds = resolve(&record.rendezvous).map_err(MachineError::Invalid)?;
-    if seeds.is_empty() {
-        return Err(MachineError::Invalid("the rendezvous names no seed".into()));
-    }
     let facts = MachineFacts {
         node_id: record.node_id,
         class: record.class,
         capacity: record.capacity,
         failure_domain: record.failure_domain.clone(),
         addr,
-        seeds,
     };
     tracing::info!(
         node = facts.node_id.0,
         %addr,
-        seeds = facts.seeds.len(),
         class = facts.class.as_str(),
         "machine_starting"
     );
-    let plan = if let Some(plan) = record.formed() {
-        plan.clone()
+    let cell = if let Some((ballot, plan)) = &record.plan {
+        FormedCell {
+            facts,
+            plan: plan.clone(),
+            ballot: *ballot,
+        }
     } else {
         let mut ledger = DiskLedger {
             disk: &mut disk,
@@ -244,13 +251,17 @@ where
         )
         .await
         .map_err(MachineError::Run)?;
-        let Some(plan) = waited else {
+        let Some(cell) = waited else {
             return Ok(());
         };
-        assert_eq!(ledger.record.formed(), Some(&plan), "a wait ends formed");
-        plan
+        assert_eq!(
+            ledger.record.formed(),
+            Some(&cell.plan),
+            "a wait ends formed"
+        );
+        cell
     };
-    serve(providers, disk, facts, plan, tunables, shutdown, hooks).await
+    serve(providers, disk, cell, tunables, shutdown, hooks).await
 }
 
 /// The machine's record: read, or minted on an empty disk; the
@@ -274,9 +285,6 @@ async fn identity<P: Providers, D: MachineDisk>(
                     .into(),
             ));
         }
-        let rendezvous = settings.rendezvous.clone().ok_or_else(|| {
-            MachineError::Invalid("a rendezvous join list is required on a first start".into())
-        })?;
         let node_id = loop {
             let id: u64 = providers.random().random();
             if id != 0 {
@@ -288,7 +296,7 @@ async fn identity<P: Providers, D: MachineDisk>(
             class: settings.class,
             capacity: settings.capacity,
             failure_domain: settings.failure_domain.clone(),
-            rendezvous,
+            promised: Ballot::default(),
             plan: None,
         };
         disk.write_record(&record.render()).await.map_err(failed)?;
@@ -304,16 +312,10 @@ async fn identity<P: Providers, D: MachineDisk>(
             settings.class.as_str()
         )));
     }
-    let mut changed =
+    let changed =
         record.capacity != settings.capacity || record.failure_domain != settings.failure_domain;
     record.capacity = settings.capacity;
     record.failure_domain.clone_from(&settings.failure_domain);
-    if let Some(rendezvous) = &settings.rendezvous
-        && *rendezvous != record.rendezvous
-    {
-        record.rendezvous.clone_from(rendezvous);
-        changed = true;
-    }
     if changed {
         disk.write_record(&record.render()).await.map_err(failed)?;
     }
@@ -324,8 +326,7 @@ async fn identity<P: Providers, D: MachineDisk>(
 async fn serve<P, D, H>(
     providers: P,
     mut disk: D,
-    facts: MachineFacts,
-    plan: CellPlan,
+    cell: FormedCell,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -335,7 +336,8 @@ where
     D: MachineDisk,
     H: DriverHooks,
 {
-    let node_id = facts.node_id;
+    let node_id = cell.facts.node_id;
+    let plan = &cell.plan;
     assert!(
         plan.members.iter().any(|(id, _)| *id == node_id),
         "a formed machine is a member of its plan"
@@ -343,7 +345,7 @@ where
     let genesis: BTreeMap<JournalIdentifier, Config> = plan
         .journals
         .iter()
-        .map(|&journal| (journal, journal_config(&plan, node_id, journal)))
+        .map(|&journal| (journal, journal_config(plan, node_id, journal)))
         .collect();
     let stores = disk
         .stores(node_id, genesis)
@@ -353,7 +355,7 @@ where
         .members
         .iter()
         .find(|(id, _)| *id == node_id)
-        .map_or(facts.addr, |(_, addr)| *addr);
+        .map_or(cell.facts.addr, |(_, addr)| *addr);
     let book: Vec<(NodeId, String)> = plan
         .members
         .iter()
@@ -370,7 +372,7 @@ where
         Vec::new(),
         Vec::new(),
         None,
-        Some(plan.control_journals()),
+        Some(cell.clone()),
         tunables,
         shutdown,
         hooks,

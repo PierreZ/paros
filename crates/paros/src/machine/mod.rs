@@ -1,40 +1,49 @@
-//! The machine (#196, #216, #246): a machine's whole lifecycle
-//! ([`run_machine`]: format, wait for a cell, serve it), and what an
-//! uninitialized `parosd` does until `parosctl init` forms the cell.
+//! The machine (#196, #216, #246, #277): a machine's whole lifecycle
+//! ([`run_machine`]: format, wait for a cell, serve it), and what an idle
+//! `parosd` does until `cell init` forms its cell.
 //!
 //! Every `parosd` starts the same way: with an identity minted at format —
 //! its random `node_id` (#225), so a wiped disk is a new machine and "a wiped
-//! identity never rejoins" holds by construction — and its rendezvous join
-//! list, resolved to the cell's **seeds**. It never forms a cell on its own
-//! (`docs/architecture.md` §3.1, `CockroachDB`'s `cockroach init`): it waits,
-//! serving the machine contract (`proto/machine.proto`), until one `Init` is
-//! sent to a seed that every seed's join list names.
+//! identity never rejoins" holds by construction. Its configuration names no
+//! cell and no peer. It never forms a cell on its own
+//! (`docs/architecture.md` §3.1): it waits, serving the machine contract
+//! (`proto/machine.proto`), until a `cell init` that lists it forms it.
 //!
-//! - **`Identify`** — who this machine is: its id, class, capacity, failure
-//!   domain, address, and whether its own address is in its join list.
-//! - **`Init`** (a seed's) — the cell step of `init`: identify every seed,
-//!   mint the cell's id, record the plan as *pending* durably, form every
-//!   other seed, then form this one last. A crash at any step is resumed by
-//!   running `init` again: the pending plan is reused, never redrawn, and a
-//!   seed already serving the cell counts as formed — but a seed with no
-//!   plan that finds another seed serving a cell is refused (`cell_exists`):
-//!   it is a new machine (a wiped volume), and never forms a second cell.
-//!   Claiming the cell
-//!   control journal with `SetLeader(expected_gen = 0)` is the caller's next
-//!   step, on the formed cell (`parosctl init`).
-//! - **`FormCell`** — join the cell a plan names: format its journals and
-//!   record the plan durably ([`CellLedger::form`]); idempotent for the same
-//!   plan. The machine then stops waiting, and its caller starts serving
-//!   the plan's journals.
+//! **`cell init` is a single-decree Paxos on the cell plan** (decided on
+//! 2026-10-09, #277): paros eats its own food, so the one-shot decision is
+//! paros-core's [`Decree`](paros_core::Decree) over the shared
+//! [`Proposer`](paros_core::proposer::Proposer) and
+//! [`Acceptor`](paros_core::acceptor::Acceptor), the matchmaker handover's
+//! machinery. The machine that receives `CellInit` is the proposer; every
+//! listed machine is an acceptor, and all of them are both quorums (all must
+//! answer):
 //!
-//! The plan is a [`CellPlan`]: the cell's id, its bootstrap members (every
-//! seed, by id and address) and the journals they serve from formation —
-//! the cell tenant's control journal ([`CellPlan::control`]), the fleet
-//! tenant's control journal ([`CellPlan::fleet`]: the fleet's one cell hosts
-//! the fleet tenant in M9, #226) and the static assignment, every identifier
-//! drawn at `init` (no identifier is fixed, `docs/architecture.md` §3.8)
-//! that stands in for placement until M9 (#212). Its first coordinator, the
-//! one that claims the cell control journal, is the lowest member id
+//! - **`PrepareCell`** (ask, as a reservation) — a fresh random `init_id`,
+//!   the ballot. Each machine answers who it is, promises to accept no plan
+//!   under a lower ballot, and reports the plan it accepted, if any.
+//! - **Adopt or draw.** A reported plan is finished instead of a new one
+//!   (P2c): over the same addresses the two `init`s converge on one cell;
+//!   over another list the receiver refuses (`other_cell_init`); a listed
+//!   address that now hosts another machine than the plan names is a wiped
+//!   one (`cell_exists`). With nothing reported the receiver draws the plan.
+//! - **`FormCell`** (accept) — each machine accepts the plan unless it
+//!   promised a higher ballot, and accepting is forming: it formats the
+//!   plan's journals and records the plan durably ([`CellLedger::form`]),
+//!   then serves them. A `FormCell` with no prior ask is both steps.
+//!
+//! A receiver that crashes midway leaves no lock: the next `cell init`, sent
+//! to any listed machine, finds the accepted plan in its ask and finishes
+//! it. A formed machine's vote is final, so it keeps answering both phases
+//! from its record while it serves its cell ([`FormedCell`]).
+//!
+//! The plan is a [`CellPlan`]: the cell's id, its founding members by id and
+//! address, and the journals they serve from formation — the cell tenant's
+//! control journal ([`CellPlan::control`]), the fleet tenant's control
+//! journal ([`CellPlan::fleet`]: the fleet's one cell hosts the fleet tenant
+//! in M9, #226) and the static assignment, every identifier drawn at
+//! `cell init` (no identifier is fixed, `docs/architecture.md` §3.8) that
+//! stands in for placement until M9 (#212). Its first coordinator, the one
+//! that claims the cell control journal, is the lowest member id
 //! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
 //!
 //! Provider-generic like every driver here: `parosd` runs it on a data
@@ -43,7 +52,9 @@
 //! the record's write protocol and the formation's stores are
 //! [`ProviderDisk`], over any storage provider, which both callers use.
 
+mod cell_init;
 mod disk;
+mod formed;
 mod lifecycle;
 mod record;
 mod wait;
@@ -51,11 +62,12 @@ mod wait;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
-use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
+use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, TenantId};
 
 pub use disk::ProviderDisk;
+pub use formed::FormedCell;
 pub use lifecycle::{MachineDisk, MachineError, MachineSettings, run_machine};
-pub use record::{MachineRecord, PlanState, journal_config};
+pub use record::{MachineRecord, journal_config};
 pub use wait::{CellLedger, wait_for_cell};
 
 use crate::rpc::machine as wire;
@@ -125,17 +137,9 @@ pub struct MachineFacts {
     pub failure_domain: String,
     /// The address it serves at, which its peers dial.
     pub addr: SocketAddr,
-    /// Its rendezvous join list, resolved: the cell's seeds.
-    pub seeds: Vec<SocketAddr>,
 }
 
 impl MachineFacts {
-    /// Whether this machine is a seed: its own address is in its join list.
-    #[must_use]
-    pub fn is_seed(&self) -> bool {
-        self.seeds.contains(&self.addr)
-    }
-
     fn identify_ack(&self) -> wire::IdentifyAck {
         wire::IdentifyAck {
             node_id: self.node_id.0,
@@ -143,17 +147,18 @@ impl MachineFacts {
             capacity: self.capacity,
             failure_domain: self.failure_domain.clone(),
             addr: self.addr.to_string(),
-            seed: self.is_seed(),
         }
     }
 }
 
-/// A cell's bootstrap: what every seed records at formation.
+/// A cell's bootstrap: the value `cell init`'s decree chooses, and what
+/// every founding member records at formation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellPlan {
-    /// The cell's id, random, minted at `init` (#226).
+    /// The cell's id, random, minted at `cell init` (#226).
     pub cell_id: u64,
-    /// The bootstrap members — every seed — by id and address, in id order.
+    /// The founding members — every machine `cell init` listed — by id and
+    /// address, in id order.
     pub members: Vec<(NodeId, SocketAddr)>,
     /// The cell tenant's control journal, its identifier drawn at `init`.
     pub control: JournalIdentifier,
@@ -259,12 +264,12 @@ impl CellPlan {
         )
     }
 
-    /// The plan an `InitAck` carries, normalized and checked.
+    /// The plan a `CellInitAck` carries, normalized and checked.
     ///
     /// # Errors
     ///
     /// See [`CellPlan::from_wire`].
-    pub fn from_init_ack(ack: &wire::InitAck) -> Result<Self, &'static str> {
+    pub fn from_cell_init_ack(ack: &wire::CellInitAck) -> Result<Self, &'static str> {
         Self::from_wire(
             ack.cell_id,
             &ack.members,
@@ -324,18 +329,25 @@ impl CellPlan {
         }
     }
 
-    fn form_request(&self) -> wire::FormCell {
+    /// The member addresses, as a set: what two `cell init`s compare.
+    #[must_use]
+    pub fn addrs(&self) -> BTreeSet<SocketAddr> {
+        self.members.iter().map(|(_, addr)| *addr).collect()
+    }
+
+    fn form_request(&self, ballot: Ballot) -> wire::FormCell {
         wire::FormCell {
             cell_id: self.cell_id,
             members: self.members_to_wire(),
             journals: self.journals_to_wire(),
             control: Some(Self::identifier_to_wire(self.control)),
             fleet: self.fleet.map(Self::identifier_to_wire),
+            init: Some(ballot_to_wire(ballot)),
         }
     }
 
-    fn init_ack(&self) -> wire::InitAck {
-        wire::InitAck {
+    fn cell_init_ack(&self) -> wire::CellInitAck {
+        wire::CellInitAck {
             initialized: true,
             refusal: String::new(),
             cell_id: self.cell_id,
@@ -346,6 +358,59 @@ impl CellPlan {
             fleet: self.fleet.map(Self::identifier_to_wire),
         }
     }
+}
+
+/// The identity a plan carries through the decree's Phase 2: an FNV-1a fold
+/// over every field, in its normalized order. A plan is small and always
+/// normalized, so its identity is its content.
+impl Fingerprint for CellPlan {
+    fn fingerprint(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let fold = |hash: u64, bytes: &[u8]| {
+            bytes
+                .iter()
+                .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
+        };
+        let identifier = |hash: u64, journal: JournalIdentifier| {
+            fold(
+                fold(hash, &journal.tenant.0.to_le_bytes()),
+                &journal.journal.0.to_le_bytes(),
+            )
+        };
+        let mut hash = fold(OFFSET, &self.cell_id.to_le_bytes());
+        for (id, addr) in &self.members {
+            hash = fold(hash, &id.0.to_le_bytes());
+            hash = fold(hash, addr.to_string().as_bytes());
+        }
+        hash = identifier(hash, self.control);
+        hash = identifier(
+            fold(hash, &[u8::from(self.fleet.is_some())]),
+            self.fleet.unwrap_or(JournalIdentifier::UNSET),
+        );
+        for journal in &self.journals {
+            hash = identifier(hash, *journal);
+        }
+        hash
+    }
+}
+
+fn ballot_to_wire(ballot: Ballot) -> crate::rpc::common::Ballot {
+    crate::rpc::common::Ballot {
+        round: ballot.round,
+        node: ballot.node.0,
+    }
+}
+
+/// A ballot from the wire; an unset one decodes as `None` (the zero ballot
+/// is no decree's: every `init_id` is non-zero).
+fn ballot_from_wire(ballot: Option<&crate::rpc::common::Ballot>) -> Option<Ballot> {
+    ballot
+        .map(|b| Ballot {
+            round: b.round,
+            node: NodeId(b.node),
+        })
+        .filter(|b| b.round != 0)
 }
 
 #[cfg(test)]
@@ -379,14 +444,28 @@ mod tests {
         let plan = plan();
         assert_eq!(plan.check(), Ok(()));
         assert_eq!(plan.coordinator(), NodeId(3));
-        let back = CellPlan::from_form(&plan.form_request()).expect("a checked plan decodes");
+        let ballot = Ballot {
+            round: 5,
+            node: NodeId(3),
+        };
+        let form = plan.form_request(ballot);
+        assert_eq!(ballot_from_wire(form.init.as_ref()), Some(ballot));
+        let back = CellPlan::from_form(&form).expect("a checked plan decodes");
         assert_eq!(
             back.members,
             vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))]
         );
         assert_eq!(back.journals, plan.journals);
         assert_eq!(back.control_journals(), plan.control_journals());
-        assert_eq!(CellPlan::from_init_ack(&plan.init_ack()), Ok(back));
+        let again = CellPlan::from_form(&back.form_request(ballot)).expect("it decodes again");
+        assert_eq!(again.fingerprint(), back.fingerprint());
+        assert_eq!(
+            CellPlan::from_cell_init_ack(&plan.cell_init_ack()),
+            Ok(back)
+        );
+        let mut other = again.clone();
+        other.cell_id = 8;
+        assert_ne!(other.fingerprint(), again.fingerprint());
     }
 
     #[test]

@@ -6,18 +6,21 @@
 //! simulation, setup included (decided on 2026-10-09): no cell is handed to
 //! a machine; the workload's operators form it with `init`
 //! (`paros::client::initialize`, the code `parosctl init` prints) against
-//! the layout the seed drew ([`crate::shape::machine_layout`]).
+//! the founding members the seed drew ([`crate::shape::machine_layout`]),
+//! with `cell init`'s decree (#277).
 //!
 //! The disk is the library's [`ProviderDisk`] over moonpool's simulated
 //! disk — the record's write protocol `parosd` ships — and the stores are
 //! `JournalStorage`, every one an existing member's once formed, as
 //! `parosd`'s are. They store ordered, outside the ledgered injector and the
-//! power cut (the acceptors' fault model): a one-seed cell has no second
+//! power cut (the acceptors' fault model): a one-member cell has no second
 //! copy to repair a torn batch from.
 //!
 //! The [`MachineBoard`] holds the run's facts about its machines that the
 //! oracles judge: whether an operator sent `init` (no cell forms without
-//! one, §3.1), and the one cell every formation names.
+//! one, §3.1), and the one cell every formation names — over the founding
+//! members `init` listed, and only on them (an idle machine no `cell init`
+//! lists stays idle).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -32,7 +35,9 @@ use paros::machine::{
     CellPlan, ControlJournals, MachineDisk, MachineError, MachineRecord, MachineSettings,
     ProviderDisk,
 };
-use paros::{BootKind, Config, JournalIdentifier, JournalStorage, JournalStores, NodeId, RunError};
+use paros::{
+    Ballot, BootKind, Config, JournalIdentifier, JournalStorage, JournalStores, NodeId, RunError,
+};
 
 use crate::audit::NodeAudit;
 use crate::audit::journals::journal_board;
@@ -47,10 +52,14 @@ const ROOT: &str = "paros/machine";
 pub(crate) struct MachineBoard {
     /// An operator sent `init` to a machine.
     init_sent: bool,
-    /// The cell the first formation named: every later one names it too.
+    /// The cell the first durable vote named: every later one names it too.
     cell: Option<ControlJournals>,
     /// The machines that formed, by minted id.
     formed: BTreeSet<u64>,
+    /// Each machine's last recorded promise in the cell decree, by minted id.
+    promises: BTreeMap<u64, Ballot>,
+    /// The ballots each plan was accepted at, by cell id.
+    votes: BTreeMap<u64, BTreeSet<Ballot>>,
 }
 
 const MACHINE_BOARD_KEY: &str = "paros-machine-board";
@@ -145,23 +154,18 @@ async fn run_machine_role(
         )));
     };
     let addrs = machine_addrs(deployment)?;
-    let rendezvous = addrs[..layout.seeds]
-        .iter()
-        .map(SocketAddr::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
+    let founders: BTreeSet<SocketAddr> = addrs[..layout.founders].iter().copied().collect();
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
         failure_domain: draw.failure_domain,
-        rendezvous: Some(rendezvous),
     };
     let addr = machine_addr(my_ip)?;
     let RoleRig {
         incarnation, hooks, ..
     } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    // Ordered: a crash never leaves a batch ambiguous, which a one-seed
+    // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair.
     let store_layout = paros::JournalStoreConfig {
         durability: paros::journal::Durability::Ordered,
@@ -170,6 +174,8 @@ async fn run_machine_role(
     loop {
         let disk = SimDisk {
             ctx,
+            addr,
+            founders: &founders,
             disk: ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
         };
         let ran = Box::pin(paros::machine::run_machine(
@@ -177,7 +183,6 @@ async fn run_machine_role(
             disk,
             &settings,
             addr,
-            resolve,
             layout.assignment,
             tunables,
             ctx.shutdown().clone(),
@@ -226,14 +231,6 @@ async fn run_machine_role(
     }
 }
 
-/// The rendezvous join list, resolved: the sim's are addresses already.
-fn resolve(text: &str) -> Result<Vec<SocketAddr>, String> {
-    text.split(',')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| entry.parse().map_err(|e| format!("{entry}: {e}")))
-        .collect()
-}
-
 /// What a boot reads, as a reachable each: an empty disk, a record still
 /// waiting for its cell, or a formed one about to serve it — judged on the
 /// lifecycle's own read, never a read of the harness's.
@@ -255,10 +252,61 @@ fn note_boot(read: &Result<Option<String>, String>) {
     }
 }
 
+/// What a durable record says of the cell decree (#277), as a reachable
+/// each: two proposers' ballots met at one machine (a promise raised over
+/// another machine's), and a plan was accepted at a second ballot — a later
+/// `cell init` finished what an earlier one proposed (P2c).
+fn note_decree(state: &StateHandle, text: &str) {
+    let Ok(record) = MachineRecord::parse(text) else {
+        assert_always!(false, "machine: a written record parses", { "bytes" => text.len() });
+        return;
+    };
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let node = record.node_id.0;
+    if record.promised != Ballot::default() {
+        let before = board.promises.insert(node, record.promised);
+        if let Some(before) = before {
+            assert_always!(
+                before <= record.promised,
+                "machine: a recorded decree promise never falls",
+                { "node" => node }
+            );
+            if before.node != record.promised.node {
+                assert_reachable!("machine: two cell init ballots meet at one machine");
+            }
+        }
+    }
+    if let Some((ballot, plan)) = &record.plan {
+        // The vote is the commit point, never the format before it: a
+        // machine that crashed between the two never accepted that plan, and
+        // a later `cell init` may draw another (#277). Every durable vote
+        // names the one plan: a formed machine never votes again, and both
+        // quorums are every member.
+        let cell = *board.cell.get_or_insert(plan.control_journals());
+        assert_always!(
+            cell == plan.control_journals(),
+            "machine: every machine forms the one cell init drew",
+            { "node" => node, "cell" => plan.cell_id, "first" => cell.cell_id }
+        );
+        if board.formed.insert(node) && board.formed.len() > 1 {
+            assert_reachable!("machine: a cell forms over several seeds");
+        }
+        let ballots = board.votes.entry(plan.cell_id).or_default();
+        if ballots.insert(*ballot) && ballots.len() > 1 {
+            assert_reachable!("machine: a later ballot finishes the plan an earlier one proposed");
+        }
+    }
+}
+
 /// A machine's [`MachineDisk`] on its simulated disk: the library's
 /// [`ProviderDisk`], and stores every one an existing member's.
 struct SimDisk<'a> {
     ctx: &'a SimContext,
+    /// The address this machine serves at.
+    addr: SocketAddr,
+    /// The founding members the run's `cell init` lists.
+    founders: &'a BTreeSet<SocketAddr>,
     disk: ProviderDisk<SimStorageProvider>,
 }
 
@@ -272,7 +320,9 @@ impl<'a> MachineDisk for SimDisk<'a> {
     }
 
     async fn write_record(&mut self, text: &str) -> Result<(), String> {
-        self.disk.write_record(text).await
+        self.disk.write_record(text).await?;
+        note_decree(self.ctx.state(), text);
+        Ok(())
     }
 
     async fn holds_stores(&mut self) -> bool {
@@ -283,21 +333,22 @@ impl<'a> MachineDisk for SimDisk<'a> {
         let state = self.ctx.state();
         {
             let board = machine_board(state);
-            let mut board = lock(&board);
+            let board = lock(&board);
             assert_always!(
                 board.init_sent,
                 "machine: no cell forms without init",
                 { "node" => node_id.0, "cell" => plan.cell_id }
             );
-            let cell = *board.cell.get_or_insert(plan.control_journals());
             assert_always!(
-                cell == plan.control_journals(),
-                "machine: every machine forms the one cell init drew",
-                { "node" => node_id.0, "cell" => plan.cell_id, "first" => cell.cell_id }
+                self.founders.contains(&self.addr),
+                "machine: only a founding member forms",
+                { "node" => node_id.0, "cell" => plan.cell_id }
             );
-            if board.formed.insert(node_id.0) && board.formed.len() > 1 {
-                assert_reachable!("machine: a cell forms over several seeds");
-            }
+            assert_always!(
+                plan.addrs() == *self.founders,
+                "machine: a cell forms over the founding members init listed",
+                { "node" => node_id.0, "members" => plan.members.len(), "founders" => self.founders.len() }
+            );
         }
         self.disk.format(node_id, plan).await?;
         assert_reachable!("machine: a seed formats its cell's journals");
