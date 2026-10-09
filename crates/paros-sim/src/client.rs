@@ -5,12 +5,15 @@
 //! The chain workload opens one per run and builds its [`ChainClient`]s —
 //! the library's `paros::client` — over it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use moonpool_sim::{SimContext, SimProviders, SimulationError, SimulationResult, TaskProvider};
 use paros::client::{ClientTunables, Server};
 use paros::{NodeClient, parse_addr};
+
+use crate::hooks::BuggifyClientHooks;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// A workload's client to one server.
@@ -85,6 +88,10 @@ impl ClientRuntime {
             .collect();
         Ok(
             paros::client::Client::new(ctx.providers(), servers, tunables)
+                .with_hooks(Arc::new(BuggifyClientHooks::new(
+                    ctx.time().clone(),
+                    crate::CHAOS_DURATION,
+                )))
                 .with_shutdown(ctx.shutdown().clone()),
         )
     }
@@ -172,6 +179,10 @@ impl Connector {
             })
             .collect();
         paros::client::Client::new(&self.providers, servers, self.tunables)
+            .with_hooks(Arc::new(BuggifyClientHooks::new(
+                moonpool_sim::Providers::time(&self.providers).clone(),
+                crate::CHAOS_DURATION,
+            )))
             .with_shutdown(self.shutdown.clone())
     }
 }

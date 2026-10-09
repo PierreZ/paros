@@ -64,6 +64,7 @@
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod fleet;
+mod hooks;
 pub mod initialize;
 mod observer;
 pub mod outcome;
@@ -82,6 +83,7 @@ use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, JournalView, LeaderUuid, QuorumSystem};
 use tokio_util::sync::CancellationToken;
 
+pub use hooks::{ClientHooks, NoClientHooks, StopPoint};
 pub use observer::{Answered, Attempted, CallObserver, NoObserver};
 pub use outcome::{
     ClaimOutcome, MatchmakersRefusal, ReadOutcome, ReconfigureMatchmakersOutcome,
@@ -298,6 +300,7 @@ pub struct Client<P: Providers> {
     rotation: usize,
     tunables: ClientTunables,
     observer: Arc<dyn CallObserver>,
+    hooks: Arc<dyn ClientHooks>,
     shutdown: CancellationToken,
     hint: Arc<Mutex<LeaderHint>>,
 }
@@ -310,6 +313,7 @@ impl<P: Providers> Clone for Client<P> {
             rotation: self.rotation,
             tunables: self.tunables,
             observer: self.observer.clone(),
+            hooks: self.hooks.clone(),
             shutdown: self.shutdown.clone(),
             hint: self.hint.clone(),
         }
@@ -333,6 +337,7 @@ impl<P: Providers> Client<P> {
             rotation,
             tunables,
             observer: Arc::new(NoObserver),
+            hooks: Arc::new(NoClientHooks),
             shutdown: CancellationToken::new(),
             hint: Arc::default(),
         }
@@ -377,6 +382,18 @@ impl<P: Providers> Client<P> {
     pub fn with_observer(mut self, observer: Arc<dyn CallObserver>) -> Self {
         self.observer = observer;
         self
+    }
+
+    /// Ask `hooks` where an operator stops (see [`ClientHooks`]).
+    #[must_use]
+    pub fn with_hooks(mut self, hooks: Arc<dyn ClientHooks>) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    /// Whether the operator stops at `point` (see [`ClientHooks::stop_at`]).
+    pub(crate) fn stops_at(&self, point: StopPoint) -> bool {
+        self.hooks.stop_at(point)
     }
 
     /// Give up every wait the moment `shutdown` is cancelled (the outcome

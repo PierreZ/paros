@@ -62,13 +62,13 @@ use std::time::Duration;
 use moonpool_core::Providers;
 use paros_core::{JournalIdentifier, TenantId};
 
-use super::Client;
 use super::checkpoint::{
     AppendOutcome, CheckpointOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome,
     OpenOutcome,
 };
 use super::outcome::ClaimOutcome;
 use super::writer::{Writer, WriterOutcome};
+use super::{Client, StopPoint};
 use crate::fleet::{
     CellState, FleetCommand, FleetDirectory, FleetEntry, METADATA_VERSION, TenantState,
 };
@@ -166,6 +166,11 @@ pub enum Interrupted {
         /// The write's verdict.
         outcome: WriterOutcome,
     },
+    /// The operator stopped at `point`, as if its process died there
+    /// ([`ClientHooks::stop_at`](super::ClientHooks::stop_at); never in
+    /// production). Every step before it landed: run the operation again, it
+    /// resumes.
+    Stopped(StopPoint),
     /// The run took its step budget without ending: other operators keep
     /// moving the journals under it.
     GoingRound {
@@ -545,7 +550,7 @@ impl FleetSession {
             if retry(client, &step, deadline).await {
                 continue;
             }
-            if let Some(end) = settle(step, &mut steps) {
+            if let Some(end) = settle(client, step, &mut steps) {
                 return end;
             }
         }
@@ -613,7 +618,7 @@ impl FleetSession {
             if retry(client, &step, deadline).await {
                 continue;
             }
-            if let Some(end) = settle(step, &mut steps) {
+            if let Some(end) = settle(client, step, &mut steps) {
                 return end;
             }
         }
@@ -638,7 +643,7 @@ impl FleetSession {
             if retry(client, &step, deadline).await {
                 continue;
             }
-            if let Some(end) = settle(step, &mut steps) {
+            if let Some(end) = settle(client, step, &mut steps) {
                 return end;
             }
         }
@@ -776,6 +781,10 @@ impl FleetSession {
             if !matches!(checkpointed, CheckpointOutcome::Checkpointed { .. }) {
                 self.directory_open = false;
             }
+            if matches!(checkpointed, CheckpointOutcome::Stopped { .. }) {
+                // The step and the checkpoint landed; the truncate did not.
+                return Err(Interrupted::Stopped(StopPoint::BeforeTruncate));
+            }
         }
         Ok(())
     }
@@ -805,17 +814,27 @@ impl FleetSession {
 /// the run's patience allows one more `retry_backoff`. The step is decided
 /// afresh from the journals, so a retry is always a resumption.
 async fn retry<P: Providers, T>(client: &Client<P>, step: &Step<T>, deadline: Duration) -> bool {
-    matches!(step, Step::Interrupted(_))
+    matches!(step, Step::Interrupted(cause) if !matches!(cause, Interrupted::Stopped(_)))
         && client.now() < deadline
         && client.pause(client.tunables().retry_backoff).await
 }
 
-/// Fold one step into a run: `None` to take the next, or the run's end.
-fn settle<T>(step: Step<T>, steps: &mut Vec<Stage>) -> Option<Run<T>> {
+/// Fold one step into a run: `None` to take the next, or the run's end. A
+/// step another one follows is a point where the operator may stop
+/// ([`StopPoint::Step`]).
+fn settle<P: Providers, T>(
+    client: &Client<P>,
+    step: Step<T>,
+    steps: &mut Vec<Stage>,
+) -> Option<Run<T>> {
     match step {
         Step::Advanced(stage) => {
             steps.push(stage);
-            None
+            let point = StopPoint::Step(stage);
+            client.stops_at(point).then(|| Run {
+                outcome: Step::Interrupted(Interrupted::Stopped(point)),
+                steps: std::mem::take(steps),
+            })
         }
         Step::Done { result, last } => {
             steps.extend(last);

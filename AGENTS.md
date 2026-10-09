@@ -323,6 +323,14 @@ Three layers, and nothing crosses them:
   recovery the oracles judge. Likewise on a seed that draws the bare-quorum scenario, an outage
   strikes inside the chaos window the moment a decided slot lacks a member's copy
   (`paros_sim::world::bare_outage`, #270).
+- **Fault injection lives in the shipped code** (decided on 2026-10-09): a fault a code path
+  can meet is a BUGGIFY point in that code path, asked through a hook that is a no-op in
+  production: a buggified `provider.sleep`, a seam crash right after a durable write, an
+  operator stopping between two steps. The simulation only answers the hook. Sim wrappers
+  (stores, processes, the workload) observe; they do not decide faults. The harness keeps
+  only what an operator does offline (a wiped disk, an edited configuration file, a reboot)
+  and the environment (moonpool's chaos). The inventory of the conversion is
+  `docs/analysis/fault-injection-in-shipped-code.md`.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
@@ -334,6 +342,11 @@ Three layers, and nothing crosses them:
   Each durability `Seam` (`BeforeSync`, `AfterSyncBeforeSend`, `MatchBeforeSync`,
   `MatchAfterSyncBeforeReply`, and `AfterPrepareSent`, a reconfiguring candidate dying with its
   campaign in flight, #260) is its own location.
+- **Client hooks, `ClientHooks`** (`paros::client`, `NoClientHooks` in production): the
+  points where an operator process can die between two durable writes (`StopPoint`: after a
+  fleet step, between a checkpoint and its truncate). The library's own loops ask them and
+  stop there; the simulation answers with one `buggify_with_prob!` location per operation
+  (`paros_sim::hooks::BuggifyClientHooks`), quiet after the chaos window.
 - **Prong 2, knobs**: anything that shapes a run is config data the harness draws per seed, one
   `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
   must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a

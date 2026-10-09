@@ -57,6 +57,8 @@ use std::time::Duration;
 
 use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
+use paros::client::fleet::Stage;
+use paros::client::{ClientHooks, StopPoint};
 use paros::{
     DriverHooks, HandoffContext, JournalIdentifier, Message, NodeId, Party, ProxyId,
     ReconfigurerPhase, Seam, Slot,
@@ -650,5 +652,48 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // the chaos window, and the read path is what needs coverage.
         // Gated in the audit (`read_expired`, the `early` leg).
         self.active() && buggify_with_prob!(0.05)
+    }
+}
+
+/// The library client's `ClientHooks` under simulation: where an operator
+/// stops, as if its process died between two durable writes. One BUGGIFY
+/// location per operation, quiet after the chaos window like the driver's.
+/// The fired gates sit in the chain workload, which sees each stop as its
+/// run's outcome (`Interrupted::Stopped`, `CheckpointOutcome::Stopped`).
+pub(crate) struct BuggifyClientHooks<T> {
+    time: T,
+    cutoff: Duration,
+}
+
+impl<T: TimeProvider> BuggifyClientHooks<T> {
+    pub(crate) fn new(time: T, cutoff: Duration) -> Self {
+        Self { time, cutoff }
+    }
+}
+
+impl<T: TimeProvider + Send + Sync + 'static> ClientHooks for BuggifyClientHooks<T> {
+    #[tracing::instrument(level = "trace", skip_all, fields(point = ?point))]
+    fn stop_at(&self, point: StopPoint) -> bool {
+        if self.time.now() >= self.cutoff {
+            return false;
+        }
+        match point {
+            StopPoint::Step(
+                Stage::FormFleet | Stage::AddCell | Stage::JoinFleet | Stage::CellReady,
+            ) => {
+                buggify_with_prob!(0.2)
+            }
+            StopPoint::Step(Stage::RegisterTenant | Stage::HostTenant | Stage::TenantReady) => {
+                buggify_with_prob!(0.2)
+            }
+            // A removal needs a `READY` tenant of that name to write its
+            // first step at all, so its stop fires often: at a shared 20%,
+            // "a tenant removal resumed after a crash" was the sweep's
+            // rarest gate, near its seed cap.
+            StopPoint::Step(Stage::TenantRemoving | Stage::DropTenant | Stage::RemoveTenant) => {
+                buggify_with_prob!(0.5)
+            }
+            StopPoint::BeforeTruncate => buggify_with_prob!(0.15),
+        }
     }
 }

@@ -19,16 +19,19 @@
 //!   or a second one at once at another founder, which must converge on the
 //!   one cell; and `cell init` sent to a machine outside the founders, which
 //!   must be refused;
-//! - **a crash at a step** (one location per operation): the operator takes
-//!   one step and stops, as if it died there; its next fleet step resumes the
-//!   same operation, which must end where an uninterrupted one would;
+//! - **a crash at a step**: the library stops the operation after a step,
+//!   as if the operator died there (`ClientHooks::stop_at`, one BUGGIFY
+//!   location per operation in `crate::hooks::BuggifyClientHooks`); its next
+//!   fleet step resumes the same operation, which must end where an
+//!   uninterrupted one would;
 //! - **a changed identity**: an `init` told another cell's id must be
 //!   refused; a tenant created under an id this client had already used must
 //!   be refused, and the creator redraws;
 //! - **a crash between the fleet directory's checkpoint and its truncate**
-//!   (#247, the registry owner's shape for the fleet tenant): the checkpoint
-//!   stays mid-log, and every later fold of the directory verifies it on the
-//!   way.
+//!   (#247, the registry owner's shape for the fleet tenant): the library
+//!   stops a session's due checkpoint before its truncate
+//!   (`StopPoint::BeforeTruncate`); the checkpoint stays mid-log, and every
+//!   later fold of the directory verifies it on the way.
 //!
 //! Every fold a session makes — the directory's and the cell's — is held to the
 //! checkpoint oracle the registry's owner is (`judge_folds`): a checkpoint
@@ -58,9 +61,10 @@ use moonpool_sim::{
     RandomProvider, SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes,
     buggify_with_prob,
 };
+use paros::client::StopPoint;
 use paros::client::Writer;
-use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
-use paros::client::fleet::{FleetRefusal, FleetSession, Run, Stage, Step};
+use paros::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome};
+use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
 use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
 use paros::machine::ControlJournals;
 use paros::system::Registry;
@@ -225,23 +229,9 @@ impl FleetOps {
             }
             return;
         }
-        if self.initialized && buggify_with_prob!(0.15) {
-            self.checkpoint_directory_and_stop(&client, cell.fleet, policy, first)
-                .await;
-            return;
-        }
         let Some(mut session) = self.session(&cell, cell.journals, policy) else {
             return;
         };
-        if buggify_with_prob!(0.2) {
-            if let Step::Advanced(stage) = session.init_step(&client, first, draw | 1).await {
-                assert_reachable!("fleet: an init stops after one step");
-                reach(stage);
-                self.pending = Some(Pending::Init);
-            }
-            judge_folds(&session);
-            return;
-        }
         let kill = self.killer(ctx, &cell, first);
         let (ended, cut_short) =
             futures::join!(self.finish_init(&client, &mut session, first, draw), kill);
@@ -295,40 +285,6 @@ impl FleetOps {
         }
     }
 
-    /// An operator that crashes between the fleet directory's checkpoint and
-    /// its truncate (#247, the registry's shape for the fleet tenant): open
-    /// the fleet tenant's control journal as its owner, write a checkpoint of
-    /// the fold, and stop. The checkpoint stays mid-log; every later fold
-    /// verifies it on the way, and the next owner's checkpoint truncates past
-    /// it.
-    async fn checkpoint_directory_and_stop(
-        &self,
-        client: &ChainClient,
-        fleet: JournalIdentifier,
-        policy: CheckpointPolicy,
-        first: usize,
-    ) {
-        let mut owner = Checkpointer::new(
-            fleet,
-            self.leader_seeds.next(),
-            FleetDirectory::default(),
-            policy,
-        );
-        let OpenOutcome::Open { diverged, .. } = owner.open(client, first).await else {
-            return;
-        };
-        assert_always!(
-            diverged.is_none(),
-            "checkpoint: an owner's load finds each checkpoint its prefix's state",
-            { "journal" => fleet.to_string(), "seq" => diverged.unwrap_or_default() }
-        );
-        if owner.write_checkpoint(client, first).await.is_ok() {
-            assert_reachable!(
-                "fleet: an operator stops between the directory's checkpoint and its truncate"
-            );
-        }
-    }
-
     /// `TENANT`: create (an even `class`) or remove a `users` tenant named
     /// from the alphabet — or resume the operation this client stopped in.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
@@ -354,17 +310,6 @@ impl FleetOps {
             return;
         };
         if class % 2 == 0 {
-            if buggify_with_prob!(0.2) {
-                let identifier = tenant_identifier(payload);
-                let step = session.create_step(&client, first, &name, identifier).await;
-                if let Step::Advanced(stage) = step {
-                    assert_reachable!("fleet: a tenant creation stops after one step");
-                    reach(stage);
-                    self.pending = Some(Pending::Create(name, vec![identifier]));
-                }
-                judge_folds(&session);
-                return;
-            }
             let draws = vec![
                 tenant_identifier(payload),
                 tenant_identifier(payload.rotate_left(23) ^ 0x7e57),
@@ -377,19 +322,6 @@ impl FleetOps {
             );
             self.stopped(ended, cut_short, pending);
         } else {
-            // The removal's crash is its own location, and fires often: a
-            // removal needs a `READY` tenant of that name to write its first
-            // step at all, so a shared 20% left "a tenant removal resumed
-            // after a crash" the sweep's rarest gate, near its seed cap.
-            if buggify_with_prob!(0.5) {
-                if let Step::Advanced(stage) = session.remove_step(&client, first, &name).await {
-                    assert_reachable!("fleet: a tenant removal stops after one step");
-                    reach(stage);
-                    self.pending = Some(Pending::Remove(name));
-                }
-                judge_folds(&session);
-                return;
-            }
             let kill = self.killer(ctx, &cell, first);
             let pending = Pending::Remove(name.clone());
             let (ended, cut_short) =
@@ -489,6 +421,12 @@ impl FleetOps {
                 true
             }
             Step::Refused(_) => true,
+            Step::Interrupted(Interrupted::Stopped(point)) => {
+                stopped(point, || {
+                    assert_reachable!("fleet: an init stops after one step");
+                });
+                false
+            }
             Step::Interrupted(_) | Step::Advanced(_) => false,
         }
     }
@@ -560,6 +498,12 @@ impl FleetOps {
                 true
             }
             Step::Refused(_) => true,
+            Step::Interrupted(Interrupted::Stopped(point)) => {
+                stopped(point, || {
+                    assert_reachable!("fleet: a tenant creation stops after one step");
+                });
+                false
+            }
             Step::Interrupted(_) | Step::Advanced(_) => false,
         }
     }
@@ -628,6 +572,12 @@ impl FleetOps {
                 true
             }
             Step::Refused(_) => true,
+            Step::Interrupted(Interrupted::Stopped(point)) => {
+                stopped(point, || {
+                    assert_reachable!("fleet: a tenant removal stops after one step");
+                });
+                false
+            }
             Step::Interrupted(_) | Step::Advanced(_) => false,
         }
     }
@@ -941,6 +891,18 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
 
 /// Each fleet [`Stage`] a step wrote, its own reachable (#247): every
 /// state machine's every step is proven written by some run.
+/// The gates of an operator the library stopped at `point` (the client's
+/// BUGGIFY stop, `paros_sim::hooks::BuggifyClientHooks`): `after_step` is the
+/// operation's own after-a-step gate.
+fn stopped(point: StopPoint, after_step: impl FnOnce()) {
+    match point {
+        StopPoint::Step(_) => after_step(),
+        StopPoint::BeforeTruncate => assert_reachable!(
+            "fleet: an operator stops between the directory's checkpoint and its truncate"
+        ),
+    }
+}
+
 fn reach(stage: Stage) {
     match stage {
         Stage::FormFleet => assert_reachable!("fleet: a step forms the fleet in the directory"),

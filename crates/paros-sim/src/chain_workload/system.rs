@@ -872,15 +872,6 @@ impl SystemOps {
         // outcomes are the truncation and the restarts it forces).
         assert_reachable!("checkpoint: an owner finds a registry checkpoint due");
         if buggify_with_prob!(0.15) {
-            // A crash between the checkpoint and its truncate.
-            if owner.write_checkpoint(&client, first).await.is_ok() {
-                assert_reachable!(
-                    "checkpoint: an owner stops between its checkpoint and its truncate"
-                );
-            }
-            return;
-        }
-        if buggify_with_prob!(0.15) {
             // A rival claims the registry between the two steps.
             let Ok(seq) = owner.write_checkpoint(&client, first).await else {
                 return;
@@ -905,10 +896,16 @@ impl SystemOps {
             }
             return;
         }
+        let outcome = owner.checkpoint(&client, first).await;
+        if let CheckpointOutcome::Stopped { .. } = outcome {
+            // The library's own stop between the two steps (the client's
+            // BUGGIFY stop, `BuggifyClientHooks`): the checkpoint stays mid-log.
+            assert_reachable!("checkpoint: an owner stops between its checkpoint and its truncate");
+        }
         if let CheckpointOutcome::Checkpointed {
             truncate: Some(TruncateOutcome::Applied { state }),
             seq,
-        } = owner.checkpoint(&client, first).await
+        } = outcome
         {
             assert_always!(
                 state.first_seq.0 >= seq,

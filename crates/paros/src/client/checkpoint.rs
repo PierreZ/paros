@@ -483,6 +483,14 @@ pub enum CheckpointOutcome {
         /// The truncation's verdict.
         truncate: Option<TruncateOutcome>,
     },
+    /// The checkpoint is written at `seq`, and the owner stopped before its
+    /// truncate ([`StopPoint::BeforeTruncate`](super::StopPoint), never in
+    /// production): the checkpoint stays mid-log, and the next one truncates
+    /// past it.
+    Stopped {
+        /// Where the checkpoint is.
+        seq: u64,
+    },
     /// The fold is not at the owner's next position (an append's verdict is
     /// still unknown, or the fold is not whole): nothing was written.
     NotFolded,
@@ -620,6 +628,9 @@ impl<S: Checkpointable> Checkpointer<S> {
         first: usize,
     ) -> CheckpointOutcome {
         match self.write_checkpoint(client, first).await {
+            Ok(seq) if client.stops_at(super::StopPoint::BeforeTruncate) => {
+                CheckpointOutcome::Stopped { seq }
+            }
             Ok(seq) => CheckpointOutcome::Checkpointed {
                 seq,
                 truncate: self.truncate_to(client, seq, first).await,
@@ -629,8 +640,8 @@ impl<S: Checkpointable> Checkpointer<S> {
     }
 
     /// The first step alone: write the fold's state as an `Inline`
-    /// checkpoint at the owner's next position. On its own (a harness's
-    /// crash between the two steps) it leaves the checkpoint mid-log.
+    /// checkpoint at the owner's next position. On its own (a rival claiming
+    /// between the two steps) it leaves the checkpoint mid-log.
     ///
     /// # Errors
     ///
