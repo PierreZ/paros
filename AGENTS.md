@@ -89,6 +89,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Simulation rules
 
+- **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
+  as possible in the simulation, setup included. Always BUGGIFY your way into the complex
+  situations rather than script them. Test several behaviours through the one workload with
+  swarm, never a new workload.
 - **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
   gate: it exits non-zero on any safety violation and must *saturate* assertion and code
   coverage; prove a red→green result there. The nextest sim tests are a fast smoke
