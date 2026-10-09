@@ -17,6 +17,7 @@ use super::formed::{FormedCell, vote_ballot};
 use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
+use crate::hooks::{DriverHooks, Seam};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, ReplySender, serve_well_known};
@@ -43,14 +44,23 @@ pub trait CellLedger {
     /// The record could not be made durable.
     fn promise(&mut self, ballot: Ballot) -> impl Future<Output = Result<(), String>>;
 
-    /// Accept `plan` at `ballot`, which forms it here: format the store of
-    /// every journal it names, then record the vote (the promise raised to
-    /// `ballot`) as this machine's cell — the commit point. Idempotent: a
-    /// format an earlier attempt finished is resumed.
+    /// Format the store of every journal `plan` names, ahead of the vote.
+    /// Idempotent: a format an earlier attempt finished is resumed. A
+    /// format with no vote recorded after it is no cell: a later plan may
+    /// format over it.
     ///
     /// # Errors
     ///
-    /// A store or the record could not be made durable.
+    /// A store could not be made durable.
+    fn format(&mut self, plan: &CellPlan) -> impl Future<Output = Result<(), String>>;
+
+    /// Accept `plan` at `ballot`, which forms it here: record the vote (the
+    /// promise raised to `ballot`) as this machine's cell — the commit
+    /// point — once [`CellLedger::format`] formatted its stores.
+    ///
+    /// # Errors
+    ///
+    /// The record could not be made durable.
     fn form(&mut self, ballot: Ballot, plan: &CellPlan)
     -> impl Future<Output = Result<(), String>>;
 }
@@ -72,19 +82,22 @@ type Proposal<'a> = (
 /// # Errors
 ///
 /// The listener could not bind, or the runtime failed, as
-/// [`RunError::Infra`].
+/// [`RunError::Infra`]; `hooks` crashed the machine at a durability seam
+/// of the decree ([`Seam::CellPromised`], [`Seam::CellFormatted`]), as
+/// [`RunError::SeamCrash`].
 ///
 /// # Panics
 ///
 /// If `ledger` already holds a vote: a formed machine does not wait.
 #[tracing::instrument(level = "debug", skip_all, fields(node = facts.node_id.0, addr = %facts.addr))]
-pub async fn wait_for_cell<P: Providers, L: CellLedger>(
+pub async fn wait_for_cell<P: Providers, L: CellLedger, H: DriverHooks>(
     providers: P,
     facts: &MachineFacts,
     assignment: usize,
     ledger: &mut L,
     tunables: &DriverTunables,
     shutdown: CancellationToken,
+    hooks: &H,
 ) -> Result<Option<FormedCell>, RunError> {
     assert!(ledger.vote().is_none(), "a formed machine does not wait");
     let addr = facts.addr.to_string();
@@ -121,10 +134,11 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                 reply.send(facts.identify_ack());
             }
             Some((request, reply)) = prepare.recv() => {
-                reply.send(answer_prepare(facts, ledger, &request).await);
+                // A seam crash drops the answer: the process dies with it.
+                reply.send(answer_prepare(facts, ledger, &request, hooks).await.map_err(RunError::SeamCrash)?);
             }
             Some((request, reply)) = form.recv() => {
-                reply.send(answer_form(facts, ledger, &request).await);
+                reply.send(answer_form(facts, ledger, &request, hooks).await.map_err(RunError::SeamCrash)?);
                 // A decree this machine drives finishes before it stops
                 // waiting: its own accept is the decree's last.
                 if proposal.is_none()
@@ -215,13 +229,16 @@ fn acceptor<L: CellLedger>(ledger: &L) -> Acceptor<CellPlan> {
 
 /// Phase 1b on an idle machine: promise (durably, before the answer
 /// leaves) and report no vote, or refuse under a higher promise. A formed
-/// machine answers from its record ([`FormedCell::prepare_ack`]).
+/// machine answers from its record ([`FormedCell::prepare_ack`]). The
+/// [`Seam::CellPromised`] crash, between the durable promise and the
+/// answer, is the `Err`.
 #[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
-async fn answer_prepare<L: CellLedger>(
+async fn answer_prepare<L: CellLedger, H: DriverHooks>(
     facts: &MachineFacts,
     ledger: &mut L,
     request: &wire::PrepareCell,
-) -> wire::PrepareCellAck {
+    hooks: &H,
+) -> Result<wire::PrepareCellAck, Seam> {
     let identity = Some(facts.identify_ack());
     let answer = |refusal: &str| wire::PrepareCellAck {
         identity: identity.clone(),
@@ -229,37 +246,43 @@ async fn answer_prepare<L: CellLedger>(
         ..wire::PrepareCellAck::default()
     };
     if facts.class != Class::Storage {
-        return answer("stateless");
+        return Ok(answer("stateless"));
     }
     let Some(ballot) = ballot_from_wire(request.init.as_ref()) else {
-        return answer("malformed");
+        return Ok(answer("malformed"));
     };
     if let Some((voted, plan)) = ledger.vote() {
-        return FormedCell {
+        return Ok(FormedCell {
             facts: facts.clone(),
             plan,
             ballot: voted,
         }
-        .prepare_ack();
+        .prepare_ack());
     }
     let mut acceptor = acceptor(ledger);
     let mut writes: Vec<AcceptorWrite<CellPlan>> = Vec::new();
     match acceptor.prepare(ballot, DECREE_SLOT, &mut writes) {
         PrepareOutcome::Promised { raised } => {
-            if raised && let Err(error) = ledger.promise(ballot).await {
-                tracing::error!(%error, "cell_promise_failed");
-                return answer("storage");
+            if raised {
+                if let Err(error) = ledger.promise(ballot).await {
+                    tracing::error!(%error, "cell_promise_failed");
+                    return Ok(answer("storage"));
+                }
+                if hooks.crash_at(Seam::CellPromised) {
+                    tracing::warn!(seam = Seam::CellPromised.label(), "seam_crash");
+                    return Err(Seam::CellPromised);
+                }
             }
             assert!(
                 ledger.promised() == ballot,
                 "a decree promise lands on the prepared ballot"
             );
             assert!(ledger.vote().is_none(), "an idle machine reports no vote");
-            wire::PrepareCellAck {
+            Ok(wire::PrepareCellAck {
                 identity,
                 promised: true,
                 ..wire::PrepareCellAck::default()
-            }
+            })
         }
         PrepareOutcome::Refused | PrepareOutcome::BelowFloor => {
             // The decree slot is the floor, so only a higher promise refuses.
@@ -267,46 +290,48 @@ async fn answer_prepare<L: CellLedger>(
                 acceptor.promised() > ballot,
                 "a decree refusal names a higher promise"
             );
-            wire::PrepareCellAck {
+            Ok(wire::PrepareCellAck {
                 identity,
                 promised: false,
                 promise: Some(ballot_to_wire(acceptor.promised())),
                 ..wire::PrepareCellAck::default()
-            }
+            })
         }
     }
 }
 
 /// Phase 2b on an idle machine: accept the plan unless a higher ballot was
 /// promised — and accepting is forming. A formed machine answers from its
-/// record ([`FormedCell::form_ack`]).
+/// record ([`FormedCell::form_ack`]). The [`Seam::CellFormatted`] crash,
+/// between the format and the vote, is the `Err`.
 #[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
-async fn answer_form<L: CellLedger>(
+async fn answer_form<L: CellLedger, H: DriverHooks>(
     facts: &MachineFacts,
     ledger: &mut L,
     request: &wire::FormCell,
-) -> wire::FormCellAck {
+    hooks: &H,
+) -> Result<wire::FormCellAck, Seam> {
     let refuse = |refusal: &str| wire::FormCellAck {
         formed: false,
         refusal: refusal.into(),
         promise: None,
     };
     if facts.class != Class::Storage {
-        return refuse("stateless");
+        return Ok(refuse("stateless"));
     }
     let (Ok(plan), Some(ballot)) = (CellPlan::from_form(request), vote_ballot(request)) else {
-        return refuse("malformed");
+        return Ok(refuse("malformed"));
     };
     if !plan.members.contains(&(facts.node_id, facts.addr)) {
-        return refuse("not_a_member");
+        return Ok(refuse("not_a_member"));
     }
     if let Some((voted, held)) = ledger.vote() {
-        return FormedCell {
+        return Ok(FormedCell {
             facts: facts.clone(),
             plan: held,
             ballot: voted,
         }
-        .form_ack(request);
+        .form_ack(request));
     }
     let mut acceptor = acceptor(ledger);
     match acceptor.admit(ballot, DECREE_SLOT) {
@@ -316,9 +341,17 @@ async fn answer_form<L: CellLedger>(
             let mut writes: Vec<AcceptorWrite<CellPlan>> = Vec::new();
             acceptor.set_promise(ballot, &mut writes);
             acceptor.record_accepted(DECREE_SLOT, ballot, plan.clone(), &mut writes);
+            if let Err(error) = ledger.format(&plan).await {
+                tracing::error!(%error, "cell_format_failed");
+                return Ok(refuse("storage"));
+            }
+            if hooks.crash_at(Seam::CellFormatted) {
+                tracing::warn!(seam = Seam::CellFormatted.label(), "seam_crash");
+                return Err(Seam::CellFormatted);
+            }
             if let Err(error) = ledger.form(ballot, &plan).await {
                 tracing::error!(%error, "cell_form_failed");
-                return refuse("storage");
+                return Ok(refuse("storage"));
             }
             assert!(
                 ledger.vote().as_ref() == acceptor.record(DECREE_SLOT),
@@ -329,22 +362,22 @@ async fn answer_form<L: CellLedger>(
                 "the ledger holds the promise the vote raised"
             );
             tracing::info!(cell = plan.cell_id, "cell_formed");
-            wire::FormCellAck {
+            Ok(wire::FormCellAck {
                 formed: true,
                 refusal: String::new(),
                 promise: None,
-            }
+            })
         }
         AcceptOutcome::Refused | AcceptOutcome::BelowFloor => {
             assert!(
                 acceptor.promised() > ballot,
                 "a decree refusal names a higher promise"
             );
-            wire::FormCellAck {
+            Ok(wire::FormCellAck {
                 formed: false,
                 refusal: "promised_higher".into(),
                 promise: Some(ballot_to_wire(acceptor.promised())),
-            }
+            })
         }
     }
 }

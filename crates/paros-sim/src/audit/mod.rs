@@ -1510,8 +1510,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 );
             }
             // The matchmaker's seams are reported through
-            // `matchmaker_crashed`, in their own namespace.
-            Seam::MatchBeforeSync | Seam::MatchAfterSyncBeforeReply => {}
+            // `matchmaker_crashed`, in their own namespace; a machine's
+            // decree seams are judged where the machine restarts
+            // (`crate::machine`): no journal driver runs yet.
+            Seam::MatchBeforeSync
+            | Seam::MatchAfterSyncBeforeReply
+            | Seam::CellPromised
+            | Seam::CellFormatted => {}
         }
     }
 

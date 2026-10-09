@@ -18,6 +18,8 @@
 //! `PeerMailbox` in `crate::driver` carries the CI failure that established
 //! this.
 
+use std::time::Duration;
+
 use paros_core::{JournalIdentifier, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
 
 /// A durability seam within one `Ready` batch where a crash can be injected.
@@ -56,6 +58,16 @@ pub enum Seam {
     /// that promised its `Prepare` served reads over a configuration the
     /// slot the dead leader had just chosen was never voted in.
     AfterPrepareSent,
+    /// Inside an idle **machine** (#246): its `cell init` promise is durable
+    /// but the `PrepareCell` answer has not left. A crash here keeps the
+    /// promise and drops the answer: the proposer times out, and the next
+    /// ballot meets a promised, unvoted machine.
+    CellPromised,
+    /// Inside an idle machine: the plan's journals are formatted but the
+    /// vote (the commit point) is not recorded. A crash here leaves formatted
+    /// stores and no cell: the machine never accepted the plan, and a later
+    /// `cell init` may form another one over those stores (#277).
+    CellFormatted,
 }
 
 impl Seam {
@@ -68,6 +80,8 @@ impl Seam {
             Seam::MatchBeforeSync => "match_before_sync",
             Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
             Seam::AfterPrepareSent => "after_prepare_sent",
+            Seam::CellPromised => "cell_promised",
+            Seam::CellFormatted => "cell_formatted",
         }
     }
 }
@@ -175,6 +189,14 @@ pub trait DriverHooks {
     /// Whether to simulate a crash at `seam` right now.
     fn crash_at(&self, _seam: Seam) -> bool {
         false
+    }
+
+    /// How long a machine waits before it reads its disk at boot (#246): a
+    /// machine that starts late, so a `cell init` meets a founding member
+    /// that is not up yet. Consulted once per boot, before anything is
+    /// read. Always safe: a late machine is a slow one.
+    fn delay_boot(&self) -> Option<Duration> {
+        None
     }
 
     /// Whether to skip a re-send that has pending `Accept`s to send.

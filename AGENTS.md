@@ -332,8 +332,9 @@ Three layers, and nothing crosses them:
   Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`
   is deliberately not `Send + 'static`); a decision a spawned task needs is carried to it.
   Each durability `Seam` (`BeforeSync`, `AfterSyncBeforeSend`, `MatchBeforeSync`,
-  `MatchAfterSyncBeforeReply`, and `AfterPrepareSent`, a reconfiguring candidate dying with its
-  campaign in flight, #260) is its own location.
+  `MatchAfterSyncBeforeReply`, `AfterPrepareSent`, a reconfiguring candidate dying with its
+  campaign in flight, #260, and an idle machine's `CellPromised` and `CellFormatted`, #246) is
+  its own location.
 - **Prong 2, knobs**: anything that shapes a run is config data the harness draws per seed, one
   `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
   must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a

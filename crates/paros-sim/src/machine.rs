@@ -30,7 +30,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, SimContext, SimStorageProvider, SimTimeProvider, SimulationError, SimulationResult,
-    StateHandle, TimeProvider, assert_always, assert_reachable, buggify_with_prob,
+    StateHandle, TimeProvider, assert_always, assert_reachable,
 };
 use paros::machine::{
     CellPlan, ControlJournals, MachineDisk, MachineError, MachineRecord, MachineSettings,
@@ -38,6 +38,7 @@ use paros::machine::{
 };
 use paros::{
     Ballot, BootKind, Config, JournalIdentifier, JournalStorage, JournalStores, NodeId, RunError,
+    Seam,
 };
 
 use crate::audit::NodeAudit;
@@ -172,11 +173,6 @@ async fn run_machine_role(
         durability: paros::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
-    start_late(
-        ctx,
-        &ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
-    )
-    .await;
     loop {
         let disk = SimDisk {
             ctx,
@@ -206,7 +202,16 @@ async fn run_machine_role(
                     "a machine whose record write failed restarts after a buggified delay"
                 );
             }
-            Err(MachineError::Run(RunError::SeamCrash(_) | RunError::Storage(_))) => {
+            Err(MachineError::Run(RunError::SeamCrash(seam))) => {
+                if seam_crash(ctx, seam).await {
+                    return Ok(());
+                }
+                crate::process::restart_delay!(
+                    ctx,
+                    "a seam-crashed machine restarts after a buggified delay"
+                );
+            }
+            Err(MachineError::Run(RunError::Storage(_))) => {
                 crate::process::restart_delay!(
                     ctx,
                     "a seam-crashed machine restarts after a buggified delay"
@@ -237,25 +242,30 @@ async fn run_machine_role(
     }
 }
 
-/// Whether the chaos window is still open: a machine's own disruptions
-/// (a late start, a crash at a `cell init` step) land only inside it, so
-/// the recovery tail is a genuine recovery.
-fn in_chaos(ctx: &SimContext) -> bool {
-    ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
-}
-
-/// A machine that starts late (#246): on a BUGGIFY coin, a machine with an
-/// empty disk boots after a delay inside the chaos window, so a `cell init`
-/// meets a founding member that is not up yet and must be run again.
-async fn start_late(ctx: &SimContext, disk: &ProviderDisk<SimStorageProvider>) {
-    if !in_chaos(ctx) || !matches!(disk.read_record().await, Ok(None)) {
-        return;
+/// The lifecycle's own seam crash (#246): a power loss through moonpool's
+/// `SelfCrash`, as every role's seam crash, so the next incarnation boots
+/// from what the step left. Whether the kill landed (else the caller
+/// restarts in place).
+async fn seam_crash(ctx: &SimContext, seam: Seam) -> bool {
+    match seam {
+        Seam::CellPromised => {
+            assert_reachable!("machine: a machine dies right after its cell init promise");
+        }
+        Seam::CellFormatted => {
+            assert_reachable!("machine: a machine dies between the format and its vote");
+        }
+        _ => {}
     }
-    if buggify_with_prob!(0.1) {
-        assert_reachable!("machine: a machine starts late");
-        let delay = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
-        let _ = ctx.time().sleep(delay).await;
+    let restart = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
+    if ctx
+        .crash_self(moonpool_sim::RebootKind::Crash, Some(restart))
+        .is_err()
+    {
+        return false;
     }
+    // The kill lands within a scheduler tick: wait for it.
+    let _ = ctx.time().sleep(Duration::from_hours(1)).await;
+    true
 }
 
 /// What a boot reads, as a reachable each: an empty disk, a record still
@@ -358,13 +368,6 @@ impl<'a> MachineDisk for SimDisk<'a> {
     async fn write_record(&mut self, text: &str) -> Result<(), String> {
         self.disk.write_record(text).await?;
         note_decree(self.ctx.state(), text);
-        // A promise with no vote is `cell init`'s phase-1 step on this
-        // machine: a crash right after it leaves a promise and no plan.
-        if MachineRecord::parse(text)
-            .is_ok_and(|record| record.promised != Ballot::default() && record.plan.is_none())
-        {
-            self.crash_at_step(InitStep::Promised).await;
-        }
         Ok(())
     }
 
@@ -398,7 +401,6 @@ impl<'a> MachineDisk for SimDisk<'a> {
         }
         self.disk.format(node_id, plan).await?;
         assert_reachable!("machine: a seed formats its cell's journals");
-        self.crash_at_step(InitStep::Formatted).await;
         Ok(())
     }
 
@@ -418,52 +420,6 @@ impl<'a> MachineDisk for SimDisk<'a> {
             node: node_id,
             genesis,
         })
-    }
-}
-
-/// A durable step of `cell init` on a machine (#246, a crash at each step).
-#[derive(Clone, Copy)]
-enum InitStep {
-    /// The phase-1 promise is recorded; no vote yet.
-    Promised,
-    /// The plan's journals are formatted; the vote is not recorded yet.
-    Formatted,
-}
-
-impl SimDisk<'_> {
-    /// A crash right after `step` (#246): on its own BUGGIFY location, the
-    /// machine loses power inside the chaos window through moonpool's
-    /// `SelfCrash`, so the next incarnation boots from what the step left
-    /// and the next `cell init` finishes or replaces the plan.
-    async fn crash_at_step(&self, step: InitStep) {
-        if !in_chaos(self.ctx) {
-            return;
-        }
-        let fire = match step {
-            InitStep::Promised => buggify_with_prob!(0.05),
-            InitStep::Formatted => buggify_with_prob!(0.1),
-        };
-        if !fire {
-            return;
-        }
-        let restart = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
-        if self
-            .ctx
-            .crash_self(moonpool_sim::RebootKind::Crash, Some(restart))
-            .is_err()
-        {
-            return;
-        }
-        match step {
-            InitStep::Promised => {
-                assert_reachable!("machine: a machine dies right after its cell init promise");
-            }
-            InitStep::Formatted => {
-                assert_reachable!("machine: a machine dies between the format and its vote");
-            }
-        }
-        // The kill lands within a scheduler tick: wait for it.
-        let _ = self.ctx.time().sleep(Duration::from_hours(1)).await;
     }
 }
 

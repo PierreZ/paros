@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use moonpool_core::{Providers, RandomProvider};
+use moonpool_core::{Providers, RandomProvider, TimeProvider};
 use paros_core::{Config, JournalIdentifier, NodeId};
 use tokio_util::sync::CancellationToken;
 
@@ -161,6 +161,14 @@ impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
         self.commit(record).await
     }
 
+    async fn format(&mut self, plan: &CellPlan) -> Result<(), String> {
+        assert!(
+            self.record.plan.is_none(),
+            "a formed machine formats no other cell"
+        );
+        self.disk.provision(self.record.node_id, plan).await
+    }
+
     async fn form(&mut self, ballot: Ballot, plan: &CellPlan) -> Result<(), String> {
         assert!(
             ballot >= self.record.promised,
@@ -170,7 +178,6 @@ impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
             self.record.plan.is_none(),
             "a formed machine forms no other cell"
         );
-        self.disk.provision(self.record.node_id, plan).await?;
         let mut record = self.record.clone();
         record.promised = ballot;
         record.plan = Some((ballot, plan.clone()));
@@ -215,6 +222,12 @@ where
     D: MachineDisk,
     H: DriverHooks,
 {
+    if let Some(delay) = hooks.delay_boot() {
+        tracing::info!(delay_ms = delay.as_millis(), "machine_boot_delayed");
+        if providers.time().sleep(delay).await.is_err() {
+            return Ok(());
+        }
+    }
     let record = identity(&providers, &mut disk, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
     let facts = MachineFacts {
@@ -248,6 +261,7 @@ where
             &mut ledger,
             &tunables,
             shutdown.clone(),
+            hooks,
         )
         .await
         .map_err(MachineError::Run)?;

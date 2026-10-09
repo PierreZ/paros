@@ -64,11 +64,13 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
 ## Seams
 
 Process-level attrition cannot crash between a write and its sync. The
-`Seam` enum in `crates/paros/src/hooks.rs` names the five points the drivers
+`Seam` enum in `crates/paros/src/hooks.rs` names the seven points the drivers
 ask `crash_at(seam)` at: the node driver's `BeforeSync` and
 `AfterSyncBeforeSend`, the matchmaker driver's `MatchBeforeSync` and
-`MatchAfterSyncBeforeReply`, and `AfterPrepareSent` (#260: a reconfiguring
-candidate dies after its `Prepare`s left, so its campaign never finishes). (The apply, boot-replay and chunk-repair seams
+`MatchAfterSyncBeforeReply`, `AfterPrepareSent` (#260: a reconfiguring
+candidate dies after its `Prepare`s left, so its campaign never finishes),
+and an idle machine's `CellPromised` and `CellFormatted` (#246: a crash
+after the `cell init` promise, and between the format and the vote). (The apply, boot-replay and chunk-repair seams
 went with the application and snapshots in #186.) A new durability boundary
 gets a new variant and its own location in `BuggifyHooks`; sharing one
 location stops the sweep from selecting the failure modes independently. If
