@@ -25,11 +25,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, SimContext, SimStorageProvider, SimTimeProvider, SimulationError, SimulationResult,
-    StateHandle, assert_always, assert_reachable,
+    StateHandle, TimeProvider, assert_always, assert_reachable, buggify_with_prob,
 };
 use paros::machine::{
     CellPlan, ControlJournals, MachineDisk, MachineError, MachineRecord, MachineSettings,
@@ -171,6 +172,11 @@ async fn run_machine_role(
         durability: paros::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
+    start_late(
+        ctx,
+        &ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
+    )
+    .await;
     loop {
         let disk = SimDisk {
             ctx,
@@ -231,24 +237,54 @@ async fn run_machine_role(
     }
 }
 
+/// Whether the chaos window is still open: a machine's own disruptions
+/// (a late start, a crash at a `cell init` step) land only inside it, so
+/// the recovery tail is a genuine recovery.
+fn in_chaos(ctx: &SimContext) -> bool {
+    ctx.time().now() < Duration::from_millis(crate::CHAOS_DURATION_MS)
+}
+
+/// A machine that starts late (#246): on a BUGGIFY coin, a machine with an
+/// empty disk boots after a delay inside the chaos window, so a `cell init`
+/// meets a founding member that is not up yet and must be run again.
+async fn start_late(ctx: &SimContext, disk: &ProviderDisk<SimStorageProvider>) {
+    if !in_chaos(ctx) || !matches!(disk.read_record().await, Ok(None)) {
+        return;
+    }
+    if buggify_with_prob!(0.1) {
+        assert_reachable!("machine: a machine starts late");
+        let delay = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
+        let _ = ctx.time().sleep(delay).await;
+    }
+}
+
 /// What a boot reads, as a reachable each: an empty disk, a record still
-/// waiting for its cell, or a formed one about to serve it — judged on the
-/// lifecycle's own read, never a read of the harness's.
-fn note_boot(read: &Result<Option<String>, String>) {
-    let formed = match read {
+/// waiting for its cell (a founding member promised in the decree but
+/// unvoted, or a machine no `cell init` lists), or a formed one about to
+/// serve it — judged on the lifecycle's own read, never a read of the
+/// harness's.
+fn note_boot(read: &Result<Option<String>, String>, founder: bool) {
+    let record = match read {
         Ok(None) => {
             assert_reachable!("machine: a machine formats an empty disk");
             return;
         }
-        Ok(Some(text)) => MachineRecord::parse(text).map(|record| record.formed().is_some()),
+        Ok(Some(text)) => MachineRecord::parse(text),
         Err(_) => return,
     };
-    match formed {
-        Ok(true) => {
-            assert_reachable!("machine: a formed machine restarts and serves its cell");
-        }
-        Ok(false) => assert_reachable!("machine: a formatted machine restarts and waits"),
-        Err(_) => {}
+    let Ok(record) = record else {
+        return;
+    };
+    if record.formed().is_some() {
+        assert_reachable!("machine: a formed machine restarts and serves its cell");
+        return;
+    }
+    assert_reachable!("machine: a formatted machine restarts and waits");
+    if record.promised != Ballot::default() {
+        assert_reachable!("machine: a machine restarts promised in cell init and unvoted");
+    }
+    if !founder {
+        assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
 }
 
@@ -315,13 +351,20 @@ impl<'a> MachineDisk for SimDisk<'a> {
 
     async fn read_record(&mut self) -> Result<Option<String>, String> {
         let read = self.disk.read_record().await;
-        note_boot(&read);
+        note_boot(&read, self.founders.contains(&self.addr));
         read
     }
 
     async fn write_record(&mut self, text: &str) -> Result<(), String> {
         self.disk.write_record(text).await?;
         note_decree(self.ctx.state(), text);
+        // A promise with no vote is `cell init`'s phase-1 step on this
+        // machine: a crash right after it leaves a promise and no plan.
+        if MachineRecord::parse(text)
+            .is_ok_and(|record| record.promised != Ballot::default() && record.plan.is_none())
+        {
+            self.crash_at_step(InitStep::Promised).await;
+        }
         Ok(())
     }
 
@@ -350,8 +393,12 @@ impl<'a> MachineDisk for SimDisk<'a> {
                 { "node" => node_id.0, "members" => plan.members.len(), "founders" => self.founders.len() }
             );
         }
+        if self.disk.holds_journals().await {
+            assert_reachable!("machine: a machine formats over journals an unvoted attempt left");
+        }
         self.disk.format(node_id, plan).await?;
         assert_reachable!("machine: a seed formats its cell's journals");
+        self.crash_at_step(InitStep::Formatted).await;
         Ok(())
     }
 
@@ -371,6 +418,52 @@ impl<'a> MachineDisk for SimDisk<'a> {
             node: node_id,
             genesis,
         })
+    }
+}
+
+/// A durable step of `cell init` on a machine (#246, a crash at each step).
+#[derive(Clone, Copy)]
+enum InitStep {
+    /// The phase-1 promise is recorded; no vote yet.
+    Promised,
+    /// The plan's journals are formatted; the vote is not recorded yet.
+    Formatted,
+}
+
+impl SimDisk<'_> {
+    /// A crash right after `step` (#246): on its own BUGGIFY location, the
+    /// machine loses power inside the chaos window through moonpool's
+    /// `SelfCrash`, so the next incarnation boots from what the step left
+    /// and the next `cell init` finishes or replaces the plan.
+    async fn crash_at_step(&self, step: InitStep) {
+        if !in_chaos(self.ctx) {
+            return;
+        }
+        let fire = match step {
+            InitStep::Promised => buggify_with_prob!(0.05),
+            InitStep::Formatted => buggify_with_prob!(0.1),
+        };
+        if !fire {
+            return;
+        }
+        let restart = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
+        if self
+            .ctx
+            .crash_self(moonpool_sim::RebootKind::Crash, Some(restart))
+            .is_err()
+        {
+            return;
+        }
+        match step {
+            InitStep::Promised => {
+                assert_reachable!("machine: a machine dies right after its cell init promise");
+            }
+            InitStep::Formatted => {
+                assert_reachable!("machine: a machine dies between the format and its vote");
+            }
+        }
+        // The kill lands within a scheduler tick: wait for it.
+        let _ = self.ctx.time().sleep(Duration::from_hours(1)).await;
     }
 }
 
