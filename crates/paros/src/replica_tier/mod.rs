@@ -42,6 +42,7 @@
 
 use std::collections::BTreeMap;
 
+use moonpool_buggify::hint::Strike;
 use moonpool_core::{Providers, SimulationResult, TimeProvider};
 use paros_core::{
     Ballot, Command, JournalId, JournalIdentifier, MustSync, NodeId, Outcome, Party, QuorumSystem,
@@ -55,11 +56,11 @@ use crate::audit::Audit;
 use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
-use crate::driver::ready::{crash_if, persist_writes, report_applied, storage_fault_crash};
+use crate::driver::ready::{persist_writes, report_applied, storage_fault_crash};
 use crate::driver::reply::answer;
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
-use crate::hooks::{DriverHooks, Reply, Seam};
+use crate::hooks::{DriverHooks, Reply};
 use crate::rpc::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, ReplySender,
     journal_state_to_proto, quorum_system_to_proto,
@@ -115,23 +116,15 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
     // A replica holds no promise; the ballot the persist report is handed
     // only ever labels an accepted record, which a replica never writes.
     let must_sync = MustSync::for_batch(&writes);
-    persist_writes(
-        storage,
-        &writes,
-        must_sync,
-        Ballot::zero(),
-        self_id,
-        hooks,
-        audit,
-    )
-    .await?;
-    crash_if(
-        !writes.is_empty() || !messages.is_empty(),
-        hooks,
-        audit,
-        NodeId(self_id),
-        Seam::AfterSyncBeforeSend,
-    )?;
+    persist_writes(storage, &writes, must_sync, Ballot::zero(), self_id, audit).await?;
+    // Hint: the replica's batch is durable, its messages have not left.
+    if !writes.is_empty() || !messages.is_empty() {
+        let hinted = moonpool_buggify::hint!("replica batch durable, not sent");
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!("a replica crashes after sync and before sending");
+        }
+        hinted.await;
+    }
     send_messages(out, hooks, audit, replica.config().journal, messages);
     for (slot, command, outcome) in &committed {
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
@@ -234,14 +227,13 @@ fn open_read<H: DriverHooks, A: Audit>(
 /// promise — there is nothing an amnesiac replica could regress.
 ///
 /// `tunables`, `hooks` and `audit` are the seams every driver in this crate
-/// takes: the tick cadence and the transport shape, the durability seams
-/// and the send seam's drop and duplicate locations, and the observation
-/// port.
+/// takes: the tick cadence and the transport shape, the send seam's drop
+/// and duplicate locations, and the observation port. The durability
+/// moments are `hint!`s inline.
 ///
 /// # Errors
 ///
-/// [`RunError::SeamCrash`] when `hooks` fires at a durability seam and
-/// [`RunError::Storage`] when a storage call failed (both recovered by
+/// [`RunError::Storage`] when a storage call failed (recovered by
 /// re-running against the surviving store), [`RunError::Refused`] when
 /// `boot` and the format marker disagree, [`RunError::Infra`] for a genuine
 /// provider failure.

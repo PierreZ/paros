@@ -54,7 +54,7 @@ Ask, in order: which role made the decision (`Acceptor`, `Proposer`,
 handed by `ColocatedNode`, and which fault or ordering meant that data was
 stale. The usual shapes:
 
-- a persist-before-send ordering broken at a `Seam` crash (`crash_at`);
+- a persist-before-send ordering broken by a crash at a driver `hint!`;
 - a value re-proposed under a wrong recovery policy after a leader change;
 - a floor (compaction, GC watermark, promise) that regressed across a reboot;
 - a configuration belief adopted from a `Prepare`/`Heartbeat` that a later

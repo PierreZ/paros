@@ -299,8 +299,8 @@ pub(super) struct AuditState {
     pub(super) leader_change_ms: Option<u64>,
     /// A write was answered written after leadership first changed hands.
     pub(super) ack_after_leader_change: bool,
-    /// A node crashed at any durability seam.
-    pub(super) crashed_any: bool,
+    /// A node booted a second time: it crashed, at a hint or by attrition.
+    pub(super) restarted_any: bool,
 
     // --- client history -----------------------------------------------------
     pub(super) lin: LinHistory,
@@ -331,10 +331,6 @@ pub(super) struct AuditState {
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.
     pub(super) waiter_superseded: bool,
-    pub(super) crashed_before_sync: bool,
-    pub(super) crashed_after_sync: bool,
-    /// A candidate crashed with its `Prepare`s in flight (#260).
-    pub(super) crashed_after_prepare: bool,
     /// A node opened no quorum read for want of a read basis (#260).
     pub(super) read_without_basis: bool,
     /// A rebooted node left a `PreRead` unanswered before it heard (#260).
@@ -839,7 +835,7 @@ impl AuditState {
             [
                 (
                     "old leader gone",
-                    self.resigned || self.crashed_any || self.handoff_relinquished
+                    self.resigned || self.restarted_any || self.handoff_relinquished
                 ),
                 ("new leader elected", self.leader_rounds.len() >= 2),
                 ("client acknowledged", self.ack_after_leader_change),

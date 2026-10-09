@@ -1,6 +1,5 @@
 //! The per-logical-node **shape**: every knob the swarm draws *for a node* —
-//! the driver's transport tunables, the write-window crash bias, the disk's
-//! write-path fault rates — fixed at that node's first boot of a seed and reused
+//! the driver's transport tunables, the disk's write-path fault rates — fixed at that node's first boot of a seed and reused
 //! by every later incarnation of the same node.
 //!
 //! Why this is its own registry and not a local in `NodeProcess::run`: a
@@ -10,16 +9,15 @@
 //! (or a different extreme). That silently breaks the FDB knob model — a knob is
 //! a *configuration* of the process for the run, not a per-boot coin — and it
 //! makes "this seed ran node 2 at the capacity extreme" false for half of node
-//! 2's lifetime. A seam crash (`RunError::SeamCrash`, the recovery loop inside
-//! `run()`) never had this problem because it never leaves the invocation; the
-//! registry gives the attrition path the same guarantee.
+//! 2's lifetime. A crash at one of the driver's `hint!`s is a restart through
+//! the same factory, so the registry covers it too.
 //!
 //! What is deliberately **not** here: durable Paxos state (that is the
 //! journal stores' concern — the shape says how a
 //! node is perturbed, never what it has promised or accepted), and the
 //! per-*event* draws that describe one crash rather than one node — a restart
-//! delay is drawn at the crash it delays, because two crashes of the same node
-//! should not be forced to look alike. Run-level shape (the application's
+//! delay is the attrition regime's, drawn at the crash it delays, because two
+//! crashes of the same node should not be forced to look alike. Run-level shape (the application's
 //! digest-lane count, fixed by whichever node boots first) also lives here so
 //! that the draw happens exactly once instead of once per boot with the extra
 //! draws discarded.
@@ -67,11 +65,6 @@ const DEFAULT_CONFIG_EDIT_PCT: u32 = 10;
 pub(crate) struct NodeShape {
     /// The driver's transport and timing tunables.
     pub(crate) tunables: DriverTunables,
-    /// Write-window crash bias (issue #19 B, the `TigerBeetle` "×10 while
-    /// writes are in flight" pressure): a multiplier on the durability-seam
-    /// crash probability. The seams are only ever consulted with a batch in
-    /// flight, so biasing them *is* biasing crashes into the write window.
-    pub(crate) seam_crash_bias: f64,
     /// Percent chance that a chaotic restart of this node comes back on an
     /// empty disk (#124, `crate::process`). Floor 5: the coin must stay rare
     /// enough that a run is a run and not an all-amnesia cluster (a node that
@@ -309,14 +302,8 @@ impl NodeShape {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.
             assert_reachable!("a node runs with an extreme decree backoff ceiling");
         }
-        // The crash bias is a plain multiplier with no floor to defend: at
-        // its extreme the seams crash on one batch in three inside the
-        // window, and the window still closes long before the tail does.
-        #[allow(clippy::cast_precision_loss)]
-        let seam_crash_bias = buggify_knob!(1_u64, 4_u64..11_u64) as f64;
         Self {
             tunables,
-            seam_crash_bias,
             wipe_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),

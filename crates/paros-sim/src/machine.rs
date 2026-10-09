@@ -29,12 +29,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, StateHandle,
-    TimeProvider, assert_always, assert_reachable,
+    assert_always, assert_reachable,
 };
 use paros::machine::{
     AuditScope, CellPlan, ControlJournals, MachineError, MachineRecord, MachineSettings,
@@ -214,25 +213,6 @@ async fn run_machine_role(
                 // storage fault: the machine stops, as `parosd` exits 75,
                 // and its supervisor starts it again.
                 assert_reachable!("machine: a failed record write stops a machine, which restarts");
-                crate::process::restart_delay!(
-                    ctx,
-                    "a machine whose record write failed restarts after a buggified delay"
-                );
-            }
-            Err(MachineError::Run(RunError::SeamCrash(_))) => {
-                // A serving node's driver seam (`BeforeSync`,
-                // `AfterSyncBeforeSend`): a power loss, until those seams
-                // are `hint!`s too (#294).
-                let restart = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
-                if ctx
-                    .crash_self(moonpool_sim::RebootKind::Crash, Some(restart))
-                    .is_err()
-                {
-                    return Ok(());
-                }
-                // The kill lands within a scheduler tick: wait for it.
-                let _ = ctx.time().sleep(Duration::from_hours(1)).await;
-                return Ok(());
             }
             Err(MachineError::Run(RunError::Infra(e))) => return Err(e),
             Err(MachineError::Run(RunError::Refused(refusal))) => {

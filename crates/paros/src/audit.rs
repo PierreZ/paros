@@ -29,7 +29,6 @@ use paros_core::{
 };
 
 use crate::driver::BootRefusal;
-use crate::hooks::Seam;
 use crate::machine::{CellPlan, MachineRecord};
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
@@ -413,9 +412,6 @@ pub trait Audit {
         accepted: &[(Slot, Ballot, u64)],
     ) {
     }
-
-    /// This node crashed at a durability `seam` inside a `Ready` batch.
-    fn crashed(&self, node: NodeId, seam: Seam) {}
 
     /// A machine at `addr` read its record at boot (#246): `None` for an
     /// empty disk, which it formats next. Reported before anything is
@@ -1069,9 +1065,6 @@ pub trait Audit {
         refusal: MatchRefusal,
     ) {
     }
-
-    /// This matchmaker crashed at a durability `seam` inside one batch.
-    fn matchmaker_crashed(&self, matchmaker: MatchmakerId, seam: Seam) {}
 
     /// The matchmaker driver refused to boot this matchmaker (#183): the
     /// operator's [`BootKind`](crate::BootKind) claim and the registry's

@@ -1,6 +1,6 @@
 ---
 name: adding-a-buggify-site
-description: Add fault injection to paros the right way - an inline buggify_with_prob!/buggify_pick! at the line of paros that makes the choice, or a hint!("moment") where a crash is interesting (never a new DriverHooks method, Seam or sim wrapper, #294), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability Seam, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
+description: Add fault injection to paros the right way - an inline buggify_with_prob!/buggify_pick! at the line of paros that makes the choice, or a hint!("moment") where a crash is interesting (never a new DriverHooks method, Seam or sim wrapper, #294), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability hint!, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
 ---
 
 # Adding a BUGGIFY site
@@ -13,8 +13,8 @@ its sites. Pick the prong first.
 **Hard rule (#294, 2026-10-09):** the site goes inline in the shipped code
 (`paros`, `parosd`) at the line that makes the choice, never in a sim wrapper.
 A choice is `buggify_with_prob!` or `buggify_pick!`; a moment where a crash is
-interesting is `hint!("label").await`. Add no new `DriverHooks` method or
-`Seam`: prong 1 below describes the code being migrated
+interesting is `hint!("label").await`. Add no new `DriverHooks` method (the
+`Seam`s are gone): prong 1 below describes the code being migrated
 (`docs/analysis/simulation/production-fault-hints.md`).
 
 ## Prong 1: a driver decision → `DriverHooks`
@@ -71,14 +71,25 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
 ## Seams
 
 Process-level attrition cannot crash between a write and its sync. The
-`Seam` enum in `crates/paros/src/hooks.rs` names the five points the drivers
-ask `crash_at(seam)` at: the node driver's `BeforeSync` and
-`AfterSyncBeforeSend`, the matchmaker driver's `MatchBeforeSync` and
-`MatchAfterSyncBeforeReply`, and `AfterPrepareSent` (#260: a reconfiguring
-candidate dies after its `Prepare`s left, so its campaign never finishes). (The apply, boot-replay and chunk-repair seams
-went with the application and snapshots in #186.) A new durability boundary
-gets a new variant and its own location in `BuggifyHooks`; sharing one
-location stops the sweep from selecting the failure modes independently. If
+drivers name those moments inline with moonpool's `hint!("label").await`
+(#294): the node driver's "batch staged, not synced" and "batch durable, not
+sent" (`driver/ready.rs`), the replica's "replica batch durable, not sent",
+the matchmaker's "registration staged, not synced" and "registration
+durable, reply not sent", and "reconfiguring prepare sent" (#260: a
+reconfiguring candidate dies after its `Prepare`s left, so its campaign never
+finishes). The seed's attrition regime decides whether the process dies
+there. A new durability boundary is a new `hint!` at its own line (one
+location each; sharing one stops the sweep from selecting the failure modes
+independently), with a rate literal when the 5% default does not fit, and a
+`moonpool_assertions::reachable!` on `Strike::Killed` as its fired gate:
+
+```rust
+let hinted = moonpool_buggify::hint!("batch durable, not sent");
+if hinted.strike() == Strike::Killed {
+    moonpool_assertions::reachable!("the driver crashes after sync and before sending a batch");
+}
+hinted.await;
+``` If
 the swarm cannot build the seam's precondition, make the precondition a
 per-seed BUGGIFY draw (a `shape.rs` function, like `withhold_gc`) so the
 campaign builds it; there is no scripted corpus to fall back on (#263).

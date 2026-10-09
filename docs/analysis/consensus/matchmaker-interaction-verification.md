@@ -295,8 +295,8 @@ at `handover_model.rs:848` on the default seeds and in the two-finisher case.
 ## 8. The new failure seams
 
 **The concern.** #134 and #133 added durability seams on the matchmaker plane
-(`Seam::MatchBeforeSync`, `Seam::MatchAfterSyncBeforeReply`,
-`crates/paros/src/hooks.rs:67–75`, consulted at `crates/paros/src/matchmaker/mod.rs:159`)
+(`Seam::MatchBeforeSync`, `Seam::MatchAfterSyncBeforeReply` at the time; since #294 the
+two `hint!`s in `crates/paros/src/matchmaker/mod.rs`'s `drain`)
 and a torn-batch crash. Every reply a matchmaker sends is a promise about its disk: the
 freeze, the pending bootstrap, the decree promise and vote, the activation, the
 registration. Is each one durable at the seam the reply leaves through?
