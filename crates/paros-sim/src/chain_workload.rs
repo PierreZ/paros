@@ -1730,7 +1730,9 @@ impl Workload for ChainWorkload {
                             // answer from the log. `resolve` reads back
                             // first, so without this the retry that meets a
                             // committed write is all but never sent.
-                            let resent = if buggify_with_prob!(0.5) {
+                            let resent = if crate::shape::lost_verdict(ctx.state())
+                                || buggify_with_prob!(0.5)
+                            {
                                 assert_reachable!(
                                     "client: an ambiguous write is re-sent before any read-back"
                                 );

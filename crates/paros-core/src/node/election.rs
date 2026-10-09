@@ -41,7 +41,9 @@ impl ColocatedNode {
     /// record naming retired identities that every later `H_b` had to
     /// cover. The probe registers nothing
     /// ([`crate::matchmaking::MembershipProbe`]); a node whose probe finds
-    /// it inside campaigns from there.
+    /// it inside campaigns from there. A node whose heard belief leaves it
+    /// outside keeps probing on the same clock, so a configuration that
+    /// names it is heard even when no campaign ever registers it (#270).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
@@ -56,6 +58,12 @@ impl ColocatedNode {
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
             self.counters.non_member_campaigns_skipped =
                 self.counters.non_member_campaigns_skipped.saturating_add(1);
+            // A heard belief that leaves this node outside is re-asked on
+            // the same clock (#270): a probe may have adopted a
+            // reconfiguration only one matchmaker held, which no quorum ever
+            // completes. Its members never hear of it and stay out on the
+            // bootstrap; without the re-probe, nobody campaigned again.
+            self.probe_membership();
             return;
         }
         self.campaign(RegistrationKind::Belief, self.acceptors.clone());

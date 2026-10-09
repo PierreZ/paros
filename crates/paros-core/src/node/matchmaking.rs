@@ -190,8 +190,9 @@ pub enum MatchStep {
     /// or the bootstrap confirmed when they named none — and a node the
     /// belief names opened a campaign in the same call.
     ProbeClosed {
-        /// The ballot of the effective configuration adopted, `None` when
-        /// the quorum named no reconfiguration.
+        /// The ballot the node's belief is bound to once the probe closed:
+        /// the effective configuration adopted, or the newer one it already
+        /// held (#270); `None` while the belief is the bootstrap.
         effective: Option<Ballot>,
         /// Whether the belief now names this node (and a campaign opened).
         member: bool,
@@ -333,23 +334,26 @@ impl ColocatedNode {
     }
 
     /// Open a membership probe (#173), or re-ask an open one: the election
-    /// clock of a node whose belief is only the bootstrap default (see
-    /// `on_check_leader`). The probe's tag is a round this node never
+    /// clock of a node whose belief is only the bootstrap default, or a
+    /// heard belief that leaves it outside (#270; see `on_check_leader`). The probe's tag is a round this node never
     /// campaigns at: it sits at the next campaign round and raises the round
     /// floor over it, so a late answer can never be mistaken for a later
     /// campaign's. Nothing is promised and nothing registered.
     pub(super) fn probe_membership(&mut self) {
         let me = self.config.id;
         // Preconditions: a follower on a matchmaker deployment, on a
-        // belief it never heard, with no campaign open.
+        // belief it never heard or one that leaves it outside, with no
+        // campaign open.
         assert!(
             self.config.has_matchmakers(),
             "only a matchmaker deployment probes its membership"
         );
-        assert!(
-            self.belief_source == BeliefSource::Bootstrap,
-            "a node probes only on the bootstrap default it never heard confirmed"
-        );
+        if self.belief_source == BeliefSource::Heard {
+            assert!(
+                !self.acceptors.contains(me),
+                "a node re-probes a heard belief only from outside it"
+            );
+        }
         assert!(
             self.role != NodeRole::Leader,
             "a probe never overlaps a leadership"
@@ -666,9 +670,9 @@ impl ColocatedNode {
 
     /// The probe half of [`ColocatedNode::on_match_reply`] (#173): fold one
     /// matchmaker's effective configuration, and once a quorum answered,
-    /// close the probe — adopt what they named (or keep the bootstrap, now
-    /// confirmed) as a belief this node **heard**, and campaign at once if
-    /// that belief names it.
+    /// close the probe — adopt what they named when it is newer than the
+    /// belief (or keep the belief, now confirmed) as a belief this node
+    /// **heard**, and campaign at once if that belief names it.
     ///
     /// # Panics
     ///
@@ -703,23 +707,36 @@ impl ColocatedNode {
             return MatchStep::UnknownMember;
         }
         // A belief heard since the probe opened would have closed it
-        // (`adopt_configuration`): what closes here is still the default.
-        assert!(
-            self.belief_source == BeliefSource::Bootstrap,
-            "a probe closes on the bootstrap default it opened on"
-        );
-        assert!(
-            self.acceptors_since == Ballot::zero(),
-            "a probe closes on a belief bound to no ballot"
-        );
-        let adopted = effective.map(|(ballot, config)| {
+        // (`adopt_configuration`): what closes here is the belief it opened
+        // on, the bootstrap default or a heard one leaving this node outside.
+        if self.belief_source == BeliefSource::Heard {
+            assert!(
+                !self.acceptors.contains(me),
+                "a probe closes on a heard belief only from outside it"
+            );
+        } else {
+            assert!(
+                self.acceptors_since == Ballot::zero(),
+                "a probe closes on a bootstrap belief bound to no ballot"
+            );
+        }
+        let since = self.acceptors_since;
+        // Only a strictly newer configuration moves the belief (#270): a
+        // re-probe's quorum may miss the one matchmaker that held the
+        // reconfiguration this node already heard, and a belief never moves
+        // backwards.
+        if let Some((ballot, config)) = effective.filter(|(ballot, _)| *ballot > since) {
             self.adopt_configuration(config, ballot);
-            ballot
-        });
+        }
         // No reconfiguration at a quorum: the bootstrap is the configuration
         // in force as far as any campaign could learn, and this node heard
         // so.
         self.belief_source = BeliefSource::Heard;
+        assert!(
+            self.acceptors_since >= since,
+            "a probe never moves a belief backwards"
+        );
+        let adopted = (self.acceptors_since != Ballot::zero()).then_some(self.acceptors_since);
         let member = self.acceptors.contains(me);
         if member {
             self.campaign(RegistrationKind::Belief, self.acceptors.clone());

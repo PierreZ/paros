@@ -98,6 +98,10 @@ pub(crate) struct LossShape {
     /// CTRL Case 3 across a reconfiguration. Only then does it spend the
     /// loss budget; with no removed holder it leaves the budget alone.
     pub(crate) prefer_removed: bool,
+    /// Aim at a slot a member of its deciding configuration never held,
+    /// every holder's copy settled: the bare quorum, whose Phase-1 tally
+    /// can then read `faulty, faulty, none` once every copy is lost.
+    pub(crate) short: bool,
 }
 
 impl LossShape {
@@ -107,6 +111,7 @@ impl LossShape {
         recent: true,
         keep: Some(0),
         prefer_removed: false,
+        short: true,
     };
 
     /// The departed-straggler scenario's loss
@@ -116,6 +121,7 @@ impl LossShape {
         recent: true,
         keep: None,
         prefer_removed: true,
+        short: false,
     };
 
     /// How many slots of one journal may lose their clean quorum: zero
@@ -161,6 +167,8 @@ impl FaultInjector for OutageLosses {
                             "storage: an outage lands on a seed drawing the departed-straggler scenario"
                         );
                         LossShape::DEPARTED_STRAGGLER
+                    } else if crate::shape::bare_quorum(ctx.state()) {
+                        LossShape::BARE_QUORUM
                     } else {
                         draw_loss()
                     };
@@ -190,6 +198,7 @@ fn draw_loss() -> LossShape {
         recent: buggify_with_prob!(0.5),
         keep: lossy.then(|| usize::from(moonpool_sim::sim_random_bool(0.5))),
         prefer_removed: buggify_with_prob!(1.0),
+        short: false,
     }
 }
 

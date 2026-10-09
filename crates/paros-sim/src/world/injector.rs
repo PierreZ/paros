@@ -387,6 +387,24 @@ impl StorageWorld {
         })
     }
 
+    /// Whether the custody ledger holds a decided slot a loss could leave
+    /// bare: a member of its deciding configuration never held it and every
+    /// copy is settled (see [`Self::short_of_a_member`]). The bare-quorum
+    /// scenario strikes on it (`super::bare_outage`).
+    pub(crate) fn holds_short_slot(&self, decided: &BTreeMap<u64, Vec<u64>>) -> bool {
+        let live: Vec<(&String, &Custody)> = self
+            .custody
+            .iter()
+            .filter(|(key, _)| !self.replicas.contains(*key) && !self.parked.contains_key(*key))
+            .collect();
+        let Some(floor) = live.iter().map(|(_, c)| c.first).max() else {
+            return false;
+        };
+        decided
+            .range(floor..)
+            .any(|(slot, _)| Self::short_of_a_member(&live, *slot, decided))
+    }
+
     /// The slot an outage's loss aims at (see [`Self::plan_outage_loss`]):
     /// a decided slot above every holder's floor, the most recent or a
     /// uniform one.
@@ -444,6 +462,21 @@ impl StorageWorld {
                 candidates = never_held;
             }
         }
+        // The bare quorum aims where its shape can exist: a slot decided on
+        // a quorum short of a member, every copy settled so each can be
+        // lost. The most recent slot alone is usually held by every member
+        // (the gate fired on 0 of 1,024 CI seeds, #270).
+        if loss.short {
+            let short: BTreeSet<u64> = candidates
+                .iter()
+                .copied()
+                .filter(|slot| Self::short_of_a_member(live, *slot, decided))
+                .collect();
+            if !short.is_empty() {
+                assert_reachable!("storage: an outage aims at a slot a deciding member never held");
+                candidates = short;
+            }
+        }
         if loss.recent {
             assert_reachable!("storage: an outage aims at the most recent slot it holds");
             candidates.last().copied()
@@ -473,6 +506,29 @@ impl StorageWorld {
             })
             .count();
         never > installed.len() / 2
+    }
+
+    /// Whether some member of the configuration that decided `slot` never
+    /// held it (every custody of theirs settled without it), while every
+    /// custody holding it is settled, so a loss can take each copy.
+    fn short_of_a_member(
+        live: &[(&String, &Custody)],
+        slot: u64,
+        decided: &BTreeMap<u64, Vec<u64>>,
+    ) -> bool {
+        let Some(members) = decided.get(&slot) else {
+            return false;
+        };
+        let holders_settled = live
+            .iter()
+            .filter(|(_, c)| c.records.contains_key(&slot))
+            .all(|(_, c)| c.settled);
+        let never_held = members.iter().any(|member| {
+            let mut custodies = live.iter().filter(|(_, c)| c.node == *member).peekable();
+            custodies.peek().is_some()
+                && custodies.all(|(_, c)| c.settled && !c.records.contains_key(&slot))
+        });
+        holders_settled && never_held
     }
 
     /// Whether `slot` may lose its clean quorum: it already did, or the loss

@@ -84,7 +84,7 @@ impl FaultInjector for LateOutage {
 /// clean copy the loss left (`kept`, node ids, which are ranks in the
 /// acceptor group), so the cluster must recover through the prior
 /// configuration while it is still down (#267), else a random acceptor.
-fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
+pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
     let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
     let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);
     let clean = match kept {

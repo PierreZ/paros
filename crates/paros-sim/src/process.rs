@@ -561,7 +561,8 @@ async fn run_acceptor(
     } = arm_role(ctx, my_ip);
     let hooks = hooks
         .holding_journal(plan.held)
-        .withholding_gc(crate::shape::withhold_gc(ctx.state()));
+        .withholding_gc(crate::shape::withhold_gc(ctx.state()))
+        .losing_verdicts(crate::shape::lost_verdict(ctx.state()));
     let shape = incarnation.shape;
     // The copy budget is sized by the run's configuration floor
     // (`crate::shape::config_floor`): the whole pool on a plain seed, the

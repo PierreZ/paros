@@ -212,6 +212,9 @@ pub(super) struct MatchmakerAudit {
     /// effective configuration a quorum of the probed generation already
     /// held durably when it opened — what its answers cannot miss.
     probes: BTreeMap<(u64, Ballot), Option<(Ballot, AcceptorConfig)>>,
+    /// Nodes whose last membership probe closed on a heard reconfiguration
+    /// that leaves them outside: their election clock re-probes (#270).
+    probed_outside: BTreeSet<u64>,
     /// Per matchmaker generation, the configuration each **completed**
     /// campaign registered, by ballot — the reconstruction-completeness check
     /// reads exactly this, and reading it here keeps that check proportional
@@ -295,6 +298,7 @@ pub(super) struct MatchmakerAudit {
     clock_reasked: bool,
     campaign_stale: bool,
     probe_rejoined: bool,
+    reprobe_rejoined: bool,
     ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from
@@ -1648,6 +1652,15 @@ impl MatchmakerAudit {
                 self.probe_rejoined,
                 "matchmaking: a membership probe finds its node inside a reconfiguration and it campaigns"
             );
+        }
+        if member && self.probed_outside.remove(&node.0) {
+            reach_once!(
+                self.reprobe_rejoined,
+                "matchmaking: a node outside its heard belief re-probes, is named and campaigns"
+            );
+        }
+        if !member && effective.is_some() {
+            self.probed_outside.insert(node.0);
         }
     }
 

@@ -289,7 +289,9 @@ Three layers, and nothing crosses them:
   the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
   scenario, its outage may strike early in the tail, once the owner's removal took effect and
   at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
-  recovery the oracles judge.
+  recovery the oracles judge. Likewise on a seed that draws the bare-quorum scenario, an outage
+  strikes inside the chaos window the moment a decided slot lacks a member's copy
+  (`paros_sim::world::bare_outage`, #270).
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.

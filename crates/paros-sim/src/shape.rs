@@ -496,6 +496,12 @@ struct Registry {
     /// Run-level: whether the run draws the departed-straggler scenario
     /// (see [`departed_straggler`]), fixed by the first caller.
     departed_straggler: Option<bool>,
+    /// Run-level: whether the run draws the bare-quorum scenario (see
+    /// [`bare_quorum`]), fixed by the first caller.
+    bare_quorum: Option<bool>,
+    /// Run-level: whether the run draws the lost-verdict scenario (see
+    /// [`lost_verdict`]), fixed by the first caller.
+    lost_verdict: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -672,6 +678,46 @@ pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .departed_straggler
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **bare-quorum scenario** (#270): drawn once
+/// per seed, its own BUGGIFY location, never on a departed-straggler seed.
+/// The bare quorum needs a slot decided on a quorum short of a member, an
+/// outage landing while that member still lacks it, and every copy lost:
+/// three coins whose product fired the gate on 3 of 2,094 checks (1,000
+/// hunt seeds; 0 on `main`); with the scenario, 42 of 2,898 (1,400). On
+/// a scenario seed, `crate::world::bare_outage` strikes the moment the
+/// custody ledger holds such a slot and plans the bare loss on it, so the
+/// Phase-1 tally reads `faulty, faulty, none` and the no-op fill must be
+/// refused. Each ingredient keeps its own coin on the other seeds.
+/// Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
+    let straggler = departed_straggler(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .bare_quorum
+        .get_or_insert_with(|| !straggler && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **lost-verdict scenario** (#270): drawn once
+/// per seed, its own BUGGIFY location. A write's verdict is lost and its
+/// retry answered from the log (`Duplicate`, #204) only when a write reply
+/// is dropped at the reply seam *and* the owner re-sends the identical
+/// write before any read-back, two locations whose product fired the gate
+/// on 9 of 2,929 checks (1,400 hunt seeds on `main`). On a scenario seed
+/// every node drops write replies at the location's rate
+/// (`BuggifyHooks::losing_verdicts`) and every ambiguous write is re-sent
+/// at once (`ChainWorkload`). Each ingredient keeps its own coin on the
+/// other seeds. Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .lost_verdict
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
