@@ -136,6 +136,15 @@ if self.reboot_after.is_some_and(|at| self.applied >= at) {
 }
 ```
 
+**The network, the same three shapes.** A window attracts every fault moonpool owns, not only
+reboots: partition and clog draws weight their victim by open windows as attrition does. Points:
+`hint::isolate(dur)` cuts the calling process off from every peer, and `hint::clog(peer, dur)`
+holds one link (FDB's `clogInterface` and `clogPair`). Example: Accepts sent, quorum not in yet.
+The drop and duplicate hooks become inline `buggify!` at paros's send line, as moonpool-rpc already
+does in its own transport. A hint steers moonpool's network chaos and never replaces it: the swarm
+mask still decides whether the fault family is on for the seed. Network points land in moonpool
+PR B, with the windows.
+
 **How the sim consumes a window.** `moonpool-sim` keeps a per-process window table in the
 world (`ip -> Vec<(label, weight)>`), written only at `open`/`close`, with no draw.
 
