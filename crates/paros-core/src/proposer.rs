@@ -356,6 +356,15 @@ fn merge_report<V: PartialEq>(
     ballot: Ballot,
     command: V,
 ) {
+    // Either arrival order counts: a lower report after a higher one is
+    // dropped by the first arm, a higher one after a lower replaces it.
+    probe!(
+        sometimes,
+        tally
+            .get(&slot)
+            .is_some_and(|(held_ballot, held)| *held_ballot != ballot && *held != command),
+        "phase1: a promise quorum reports two different values for one slot and P2c keeps the higher ballot"
+    );
     match tally.get(&slot) {
         Some((held, _)) if ballot < *held => return,
         Some((held, recorded)) if ballot == *held => {
@@ -367,11 +376,6 @@ fn merge_report<V: PartialEq>(
         }
         _ => {}
     }
-    probe!(
-        sometimes,
-        tally.get(&slot).is_some_and(|(_, held)| *held != command),
-        "phase1: a promise quorum reports two different values for one slot and P2c keeps the higher ballot"
-    );
     tally.insert(slot, (ballot, command));
     assert!(
         tally.get(&slot).is_some_and(|(held, _)| *held == ballot),
