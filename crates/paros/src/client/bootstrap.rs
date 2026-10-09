@@ -26,10 +26,11 @@ use crate::rpc::{InspectReply, InspectRequest, well_known};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InitOutcome {
     /// The machine drove the decree to a chosen plan: the cell is formed
-    /// over every listed machine (or an interrupted formation finished).
+    /// over the listed machines (or an interrupted formation finished); a
+    /// member wiped during `init` is a dead member of it (#246).
     Formed(CellPlan),
     /// The machine answered, and refused: its label (`not_a_member`,
-    /// `stateless_member`, `other_cell_init`, `cell_exists`, `malformed`,
+    /// `stateless_member`, `other_cell_init`, `cell_lost`, `malformed`,
     /// `storage`).
     Refused(String),
     /// The machine answered with a plan that does not decode.

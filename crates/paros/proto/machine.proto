@@ -107,8 +107,8 @@ message CellInit {
 message CellInitAck {
   bool initialized = 1;
   // Why not, when not: "not_a_member", "malformed", "stateless_member",
-  // "member_unreachable", "contended", "other_cell_init", "cell_exists",
-  // "storage".
+  // "member_unreachable", "contended", "other_cell_init", "cell_lost" (a
+  // majority of the accepted plan's members were wiped), "storage".
   string refusal = 2;
   uint64 cell_id = 3;
   repeated Member members = 4;

@@ -52,12 +52,16 @@ founding member an acceptor and every one needed:
    says who it is, promises durably to accept no plan under a lower ballot, and
    reports any plan it already accepted.
 2. **Adopt or draw.** A reported plan is finished instead of a new one. A plan
-   over another member list is refused (`other_cell_init`); a listed address
-   that now hosts another machine than the plan names is refused
-   (`cell_exists`: a wiped machine). Otherwise it draws the plan.
+   over another member list is refused (`other_cell_init`). A listed address
+   that now hosts another machine than the plan names is a wiped member: the
+   plan stays, with the old machine as a dead member. When a majority of the
+   plan's members are wiped, no plan can be chosen (`cell_lost`). Otherwise it
+   draws the plan.
 3. **Form.** It sends `FormCell(plan, ballot)` to the other members, then forms
    itself. A member accepts unless it promised a higher ballot
-   (`promised_higher`); accepting is forming.
+   (`promised_higher`); accepting is forming. Every member must answer step 1,
+   and a majority of accepts chooses the plan, so one wiped member does not
+   block it.
 
 Two concurrent `init`s form at most one cell, and an interrupted one leaves no
 lock: the next `init`, sent to any member, hears the accepted plan and finishes
@@ -116,9 +120,10 @@ applies.
   paros_node2 && docker compose up -d node2`): the machine comes back as a **new
   machine** with a new `node_id`, and waits. It never rejoins as the old one: an
   `init` sent to it (`docker compose run --rm --entrypoint parosctl parosctl
-  --servers node2:4500 init --members members:4500`) is refused
-  (`cell_exists`), since the other members hold a plan that names the old
-  machine at that address. Healing the cell around it is reconfiguration onto another machine,
+  --servers node2:4500 init --members members:4500`) finishes the plan the other
+  members hold, which names the old machine at that address: the cell keeps
+  serving on the two members that kept their disks, and the new machine stays
+  idle. Healing the cell around it is reconfiguration onto another machine,
   driven by the tenant coordinator in M9.
 
 **What is not proven in simulation yet.** The journals' protocol, the driver
@@ -244,7 +249,7 @@ and both required: there is no default tenant and no fixed id (#235,
 
 | command | what it does |
 |---|---|
-| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; claims the cell control journal, then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_exists`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
+| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; claims the cell control journal, then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
 | `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |

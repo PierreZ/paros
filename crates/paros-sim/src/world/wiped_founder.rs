@@ -10,12 +10,16 @@
 //! - **before any vote**: every founder promised and none voted; the
 //!   injector wipes a founder other than `cell init`'s receiver. The
 //!   receiver's decree goes on and forms the other founders over the old
-//!   machine, which the new one refuses: `cell init` answers
-//!   `cell_exists`, and the cell is lost (`crate::machine::cell_lost`). On
-//!   a one-founder cell the founder is the receiver: no vote names the old
+//!   machine, which the new one refuses. With three founders the two others
+//!   are a majority and choose the plan: the cell forms with the old id as a
+//!   dead member. With two, the receiver does not vote for a plan it cannot
+//!   choose, and the next ballot draws one over the new machine. On a
+//!   one-founder cell the founder is the receiver: no vote names the old
 //!   machine, and `init` forms the cell over the new one;
 //! - **after a vote**: a founder voted and another did not, which is
-//!   wiped: the vote names the old machine, and the cell is lost too.
+//!   wiped: the vote names the old machine. With three founders the two
+//!   that kept their disks choose it; with two, the plan lost a majority
+//!   and `cell init` refuses `cell_lost` (`crate::machine::cell_lost`).
 //!
 //! The machine group's attrition draws the same wipe at any reboot
 //! (`crate::MACHINE_WIPE_WEIGHT`); this injector only aims it.

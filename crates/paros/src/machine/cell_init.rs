@@ -1,8 +1,23 @@
 //! `cell init`'s proposer (#277): the machine a `CellInit` reaches drives
 //! the single-decree Paxos on the cell plan over the listed machines — every
-//! one an acceptor, all of them both quorums — through paros-core's
-//! [`Decree`], over the network, its own acceptor included (served by the
-//! waiting loop, [`super::wait_for_cell`]).
+//! one an acceptor — through paros-core's [`Decree`], over the network, its
+//! own acceptor included (served by the waiting loop,
+//! [`super::wait_for_cell`]).
+//!
+//! **Quorums: every member in Phase 1, a majority in Phase 2** (#246). Every
+//! listed machine must answer the ask, so every vote still on a disk is heard
+//! and adopted (P2c). A majority of accepts chooses the plan, so a founding
+//! member that can never accept does not block it. That member is a wiped
+//! one: its disk is gone, and the machine at its address is a new one with a
+//! new `node_id`. The new machine refuses a plan that names the old one
+//! (`not_a_member`), so it never votes as the old one, and the old id stays
+//! a dead member of the cell until a reconfiguration replaces it. The wiped
+//! machine lost its promises (amnesia), but it answers Phase 1 only as a new
+//! acceptor with no vote. Every Phase-1 quorum (all members) meets every
+//! Phase-2 quorum (a majority) in a member that kept its disk while fewer
+//! than a majority of the members are wiped. When a majority of the plan's
+//! members are wiped, no plan can be chosen any more: the receiver refuses
+//! `cell_lost`, the Paxos limit and not a gap.
 //!
 //! Every ballot this machine opens lies strictly above its own durable
 //! promise and above any promise that refused an earlier one: a ballot that
@@ -67,6 +82,10 @@ enum Attempt {
     Chosen(CellPlan),
     /// A member promised above this ballot: reopen above it.
     Preempted(Ballot),
+    /// Fewer accepts than a quorum, with no higher promise: a member was
+    /// wiped between the two phases. Reopen above this ballot, whose ask
+    /// meets the new machine.
+    Short,
     /// Refused, with the label the caller sees.
     Failed(&'static str),
 }
@@ -127,6 +146,13 @@ pub(super) async fn propose<P: Providers>(
             Attempt::Preempted(promise) => {
                 assert!(promise > ballot, "only a higher promise preempts");
                 floor = Some(floor.map_or(promise, |held| held.max(promise)));
+            }
+            Attempt::Short => {
+                assert!(
+                    floor.is_none_or(|held| held < ballot),
+                    "a short ballot lies above the floor it opened over"
+                );
+                floor = Some(ballot);
             }
             Attempt::Failed(label) => return Err(label),
         }
@@ -200,10 +226,16 @@ async fn attempt<P: Providers>(
         return Attempt::Failed("malformed");
     };
     let n = members.len();
-    // Every listed machine is an acceptor, and all of them are both quorums.
+    let q2 = n / 2 + 1;
+    // Every listed machine is an acceptor: all of them answer Phase 1, a
+    // majority chooses (see the module doc).
     let acceptors = AcceptorConfig::new(
         ids.into_iter().collect(),
-        QuorumSystem::Flexible { q1: n, q2: n },
+        QuorumSystem::Flexible { q1: n, q2 },
+    );
+    assert!(
+        acceptors.quorum_system().phase2_quorum_size(n) == q2,
+        "a majority of the listed machines chooses the plan"
     );
     // Votes are wire input: two that disagree at one ballot would break the
     // decree's own agreement rule, so they are refused here as malformed.
@@ -259,35 +291,57 @@ async fn attempt<P: Providers>(
     if decree.adopted_prior_vote() {
         tracing::info!(cell = plan.cell_id, "cell_init_adopts_a_plan");
     }
-    // Adopt or refuse (#277): another list's plan is another cell's, and a
-    // listed address that now hosts another machine than the plan names is a
-    // wiped member, a new machine that never rejoins as the old one.
+    // Adopt or refuse (#277): another list's plan is another cell's.
     if !plan.addrs().into_iter().eq(members.iter().copied()) {
         return Attempt::Failed("other_cell_init");
     }
-    if plan
+    // A listed address that now hosts another machine than the plan names
+    // is a wiped member (#246): a new machine, which never accepts the plan
+    // as the old one. The others choose it while they are a quorum.
+    let intact: BTreeSet<SocketAddr> = plan
         .members
         .iter()
-        .any(|(id, addr)| identities.get(addr) != Some(id))
-    {
-        return Attempt::Failed("cell_exists");
+        .filter(|(id, addr)| identities.get(addr) == Some(id))
+        .map(|(_, addr)| *addr)
+        .collect();
+    if intact.len() < q2 {
+        return Attempt::Failed("cell_lost");
+    }
+    if intact.len() < n {
+        tracing::info!(
+            cell = plan.cell_id,
+            wiped = n - intact.len(),
+            "cell_init_around_wiped"
+        );
     }
     // Every other member first, this one last: a receiver formed is a
-    // receiver that stopped driving, so it accepts once the others did.
+    // receiver that stopped driving, so it accepts once the others did. A
+    // receiver the plan does not name (it replaced a wiped member) never
+    // accepts it.
     let form = plan.form_request(ballot);
     let others: Vec<SocketAddr> = members
         .iter()
         .copied()
-        .filter(|addr| *addr != facts.addr)
+        .filter(|addr| *addr != facts.addr && intact.contains(addr))
         .collect();
+    let mut accepted = 0_usize;
     let mut chosen = None;
     for batch in [others, vec![facts.addr]] {
+        if batch == [facts.addr] {
+            // This receiver votes only for a plan the others can still
+            // choose with it: a vote is final, and a lone vote for a plan
+            // that names a wiped member would keep it for good.
+            if !intact.contains(&facts.addr) || accepted + 1 < q2 {
+                break;
+            }
+        }
         let answers = fan_out::<P, FormCellRpc>(providers, rpc, &batch, &form, patience).await;
         for (addr, answer) in answers {
             let Some(ack) = answer else {
                 return Attempt::Failed("member_unreachable");
             };
             if ack.formed {
+                accepted += 1;
                 if let AcceptFold::Chosen(value) = decree.on_accepted(identities[&addr]) {
                     chosen = Some(value);
                 }
@@ -300,8 +354,9 @@ async fn attempt<P: Providers>(
                 },
                 "other_cell" => return Attempt::Failed("other_cell_init"),
                 // The machine there is not the one the plan names: a member
-                // wiped between the two phases, a new machine.
-                "not_a_member" => return Attempt::Failed("cell_exists"),
+                // wiped between the two phases, a new machine. It counts as
+                // no accept.
+                "not_a_member" => {}
                 "storage" => return Attempt::Failed("member_unreachable"),
                 _ => return Attempt::Failed("malformed"),
             }
@@ -310,12 +365,13 @@ async fn attempt<P: Providers>(
             return Attempt::Preempted(promise);
         }
     }
-    match chosen {
-        Some(value) => {
-            assert!(value == plan, "the decree chooses the plan it proposed");
-            Attempt::Chosen(value)
-        }
-        None => Attempt::Failed("malformed"),
+    if let Some(value) = chosen {
+        assert!(value == plan, "the decree chooses the plan it proposed");
+        assert!(accepted >= q2, "a chosen plan has a quorum of accepts");
+        Attempt::Chosen(value)
+    } else {
+        assert!(accepted < q2, "a quorum of accepts chooses the plan");
+        Attempt::Short
     }
 }
 

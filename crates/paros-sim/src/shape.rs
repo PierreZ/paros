@@ -740,15 +740,15 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// `init` needs `init` inside the chaos window, the machines' attrition
 /// on, its wipe weight on, and a reboot that lands on a founder between
 /// two steps of the cell decree. `init` mostly starts in the recovery tail,
-/// so the product almost never lines up: 2 wipes during `init` and no
-/// `cell_exists` in 500 hunt seeds without the scenario; 37 and 9 with it.
+/// so the product almost never lines up: 2 wipes during `init` in 500 hunt
+/// seeds without the scenario; 37 with it.
 /// On a scenario
 /// seed, client 0 runs `init` first (`crate::chain_workload`), and
 /// `crate::world::wiped_founder` wipes a founder through moonpool's
 /// `CrashAndWipe` at one of two moments: once every founder promised and
-/// none voted, or once a founder voted and another did not (on a
-/// one-founder cell the cell forms over the new machine; otherwise `cell
-/// init` refuses it as `cell_exists`). Each
+/// none voted, or once a founder voted and another did not. The founders
+/// that kept their disks choose the plan while they are a majority; else
+/// `cell init` refuses `cell_lost`. Each
 /// ingredient keeps its own coin on the other seeds. Rare-but-valid: each
 /// ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]

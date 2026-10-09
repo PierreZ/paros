@@ -33,10 +33,12 @@
 //! is then a new one, with a new `node_id`, which never rejoins as the old
 //! one; the board recognizes the wipe when it boots on an empty disk where
 //! a record was. Before any vote names the old machine, `init` forms the
-//! cell over the new one; after one does, `cell init` adopts that plan and
-//! refuses it as `cell_exists`, for good, and the cell is lost
-//! ([`cell_lost`]): an operator must act outside paros, so the run's
-//! control-plane liveness is excused.
+//! cell over the new one. After one does, `cell init` adopts that plan and
+//! the members that kept their disks choose it, a majority of them being
+//! enough: the cell forms with the old id as a dead member. Only when a
+//! majority of the plan's members are wiped can no plan be chosen: `cell
+//! init` refuses `cell_lost`, the Paxos limit, and the run's control-plane
+//! liveness is excused ([`cell_lost`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -117,23 +119,26 @@ pub(crate) fn formed_cell(state: &StateHandle) -> Option<ControlJournals> {
         .map(CellPlan::control_journals)
 }
 
-/// Whether a founding member was wiped: the one cause of a `cell_exists`
-/// refusal.
-pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
-    !lock(&machine_board(state)).wiped.is_empty()
+/// How many of `plan`'s members the board saw wiped.
+fn wiped_members(board: &MachineBoard, plan: &CellPlan) -> usize {
+    plan.members
+        .iter()
+        .filter(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
+        .count()
 }
 
 /// Whether the run's cell is lost (#246): a vote still on a disk names a
-/// founding member that was wiped since, so every later `cell init` adopts
-/// that plan and refuses it as `cell_exists`. An operator must act outside
-/// paros; the control plane's liveness is excused.
+/// plan that lost a majority of its members to wipes, so no `cell init` can
+/// choose it and every later one refuses `cell_lost`, and the cell's
+/// majority journals cannot serve. The Paxos limit: the control plane's
+/// liveness is excused. A plan that kept a majority heals: its members
+/// choose it around the wiped ones.
 pub(crate) fn cell_lost(state: &StateHandle) -> bool {
     let board = machine_board(state);
     let board = lock(&board);
     board.voters.values().any(|plan| {
-        plan.members
-            .iter()
-            .any(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
+        let n = plan.members.len();
+        n - wiped_members(&board, plan) < n / 2 + 1
     })
 }
 
@@ -395,9 +400,10 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
         // The vote is the commit point, never the format before it: a
         // machine that crashed between the two never accepted that plan, and
         // a later `cell init` may draw another (#277). Every durable vote
-        // names the one plan: a formed machine never votes again, and both
-        // quorums are every member. A wiped machine's vote went with its
-        // disk, so only the votes still on a disk are compared.
+        // names the one plan: a formed machine never votes again, and every
+        // member answers Phase 1, so every later ballot adopts it. A wiped
+        // machine's vote went with its disk, so only the votes still on a
+        // disk are compared.
         let cell = board
             .voters
             .values()
@@ -417,6 +423,9 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
             assert_reachable!(
                 "machine: a cell forms over the machine that replaced a wiped founder"
             );
+        }
+        if wiped_members(&board, plan) > 0 {
+            assert_reachable!("machine: a cell forms around a wiped founder's old id");
         }
         board.voters.insert(node, plan.clone());
         if board.formed.insert(node) && board.formed.len() > 1 {

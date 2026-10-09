@@ -788,9 +788,9 @@ impl FleetOps {
             return;
         }
         if crate::machine::cell_lost(ctx.state()) {
-            // A founding member wiped during `init` after a vote named it
-            // (#246): no `init` forms the cell, and its control plane owes
-            // nothing.
+            // A majority of the founding members wiped after a vote named
+            // them (#246): no `init` forms the cell, and its control plane
+            // owes nothing.
             assert_reachable!(
                 "machine: a run whose founding member was wiped during init ends without its cell"
             );

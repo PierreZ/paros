@@ -289,9 +289,10 @@ fn chaos_surfaces() -> [Chaos; 9] {
 /// attrition, against a crash's 1.0 (#246): about one machine reboot in
 /// eleven, timed or at a lifecycle `hint!`, replaces the machine's disk. A
 /// wiped machine is a new one that never rejoins as the old one
-/// (`crate::machine`): a founding member wiped during `init` is the
-/// `cell_exists` refusal once a vote names it, and a wiped member of a
-/// formed cell is a member lost for good. Only the machines draw it: an
+/// (`crate::machine`): a founding member wiped during `init` is a dead
+/// member of the cell once a vote names it, and a wiped member of a formed
+/// cell is a member lost for good; a cell that lost a majority is lost
+/// (`cell_lost`). Only the machines draw it: an
 /// acceptor's wipe is the storage ledger's coin (see [`chaos_surfaces`]).
 const MACHINE_WIPE_WEIGHT: f64 = 0.1;
 
