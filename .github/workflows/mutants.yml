@@ -1,0 +1,94 @@
+# Mutation testing of paros-core with the simulation as the test (#269).
+#
+# cargo-mutants edits paros-core one mutant at a time (the modules
+# `.cargo/mutants.toml` scopes) and runs a fixed-seed hunt of the main campaign
+# for each; a mutant the hunt does not catch is a survivor: a missing oracle, an
+# unreachable state, or an equivalent mutant to exclude with a reason. Weekly
+# and on demand, never a PR gate (decided on 2026-10-09). The survivors land in
+# one rolling issue, labelled `mutation-survivors`, rewritten by every run.
+name: Mutants
+
+on:
+  schedule:
+    # Saturdays, 02:00 UTC.
+    - cron: "0 2 * * 6"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Hunt seeds per mutant"
+        default: "300"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Shards across the matrix below; each runs two mutants at a time (a hunt
+  # uses one core, the build the rest).
+  SHARDS: 16
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run shard ${{ matrix.shard }}
+        env:
+          SEEDS: ${{ inputs.seeds || '300' }}
+        run: |
+          # cargo-mutants exits 2 when a mutant survived and 3 on a timeout:
+          # both are results for the report, not a broken job.
+          code=0
+          nix develop --command cargo xtask mutants --seeds "$SEEDS" \
+            --shard "${{ matrix.shard }}/$SHARDS" --jobs 2 || code=$?
+          echo "cargo-mutants exited $code"
+          case "$code" in 0|2|3) ;; *) exit "$code" ;; esac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: warn
+
+  report:
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Rewrite the rolling survivors issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SEEDS: ${{ inputs.seeds || '300' }}
+        run: |
+          scripts/mutants-report.sh shards > report.md
+          cat report.md
+          gh label create mutation-survivors --force \
+            --color B60205 --description "cargo-mutants survivors (#269)"
+          number=$(gh issue list --label mutation-survivors --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file report.md
+          else
+            gh issue create --title "mutants: paros-core survivors (rolling)" \
+              --label mutation-survivors --body-file report.md
+          fi

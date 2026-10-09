@@ -162,6 +162,10 @@ pub const SMOKE_ITERATIONS: usize = 50;
 pub const COVERAGE_ITERATIONS: usize = 1024;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
+/// Seeds the mutation hunt runs per mutant (#269), when `cargo xtask mutants`
+/// is given no `--seeds`: about 1.5 minutes in release on a 4-core machine.
+/// A schedule parameter like the `*_ITERATIONS` caps, never buggified.
+pub const MUTANT_SEEDS: u64 = 300;
 
 /// Simulated window (ms) over which chaos fires — network faults, attrition
 /// reboots, and the paros-side driver/storage perturbations. It ends well
@@ -426,6 +430,27 @@ pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
 pub fn chain_smoke(iterations: usize) -> SimulationReport {
     chain_builder(None)
         .set_iterations(iterations)
+        .run_configured()
+}
+
+/// The mutation hunt (#269): seeds `1..=seeds` of the main campaign, the
+/// same ones for every mutant, so survivors compare between runs. These are
+/// not witnesses (AGENTS.md, *No pinned seeds*): the range is a fixed sample,
+/// and a draw added to the harness simply shifts which states it covers.
+/// `paros-sim-runner`'s `mutants` test target runs it under `cargo mutants`;
+/// a mutant is caught when the report is not clean.
+///
+/// # Panics
+///
+/// Panics if `seeds` is zero or does not fit a `usize`.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn chain_mutants(seeds: u64) -> SimulationReport {
+    assert!(seeds > 0, "the mutation hunt runs at least one seed");
+    let iterations = usize::try_from(seeds).expect("the seed count fits a usize");
+    chain_builder(None)
+        .set_iterations(iterations)
+        .set_debug_seeds((1..=seeds).collect())
         .run_configured()
 }
 

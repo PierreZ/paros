@@ -30,3 +30,7 @@ target
 /web/play/node_modules/
 /web/play/dist/
 /web/play/src/wasm/
+
+# cargo-mutants output (`cargo xtask mutants`, #269)
+mutants.out/
+mutants.out.old/

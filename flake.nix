@@ -43,6 +43,9 @@
             # Development tools
             cargo-nextest
             cargo-edit
+            # Mutation testing of paros-core with the simulation as the test
+            # (`cargo xtask mutants`, the weekly `mutants` workflow, #269).
+            cargo-mutants
             protobuf
 
             # mdBook: the GitHub Pages book.

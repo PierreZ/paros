@@ -17,6 +17,18 @@ path = "src/main.rs"
 name = "sim-paros-hunt"
 path = "src/hunt.rs"
 
+# The mutation hunt (#269): `cargo xtask mutants` runs this target as
+# cargo-mutants' test (`.cargo/mutants.toml`). Behind a feature so the plain
+# `cargo nextest run` never builds or runs a 300-seed hunt.
+[[test]]
+name = "mutants"
+path = "tests/mutants.rs"
+harness = false
+required-features = ["mutants"]
+
+[features]
+mutants = []
+
 [dependencies]
 paros-sim = { path = "../paros-sim", version = "0.2.0" }
 
