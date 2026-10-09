@@ -58,9 +58,9 @@ use moonpool_sim::{
     RandomProvider, SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes,
     buggify_with_prob,
 };
-use paros::client::Writer;
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
-use paros::client::fleet::{FleetRefusal, FleetSession, Run, Stage, Step};
+use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
+use paros::client::{ClaimOutcome, Writer};
 use paros::fleet::{CellState, FleetDirectory, Groups, TenantState};
 use paros::machine::ControlJournals;
 use paros::system::Registry;
@@ -493,7 +493,11 @@ impl FleetOps {
                 true
             }
             Step::Refused(_) => true,
-            Step::Interrupted(_) | Step::Advanced(_) => false,
+            Step::Interrupted(interrupted) => {
+                self.forget_unknown(&interrupted);
+                false
+            }
+            Step::Advanced(_) => false,
         }
     }
 
@@ -564,7 +568,11 @@ impl FleetOps {
                 true
             }
             Step::Refused(_) => true,
-            Step::Interrupted(_) | Step::Advanced(_) => false,
+            Step::Interrupted(interrupted) => {
+                self.forget_unknown(&interrupted);
+                false
+            }
+            Step::Advanced(_) => false,
         }
     }
 
@@ -632,7 +640,26 @@ impl FleetOps {
                 true
             }
             Step::Refused(_) => true,
-            Step::Interrupted(_) | Step::Advanced(_) => false,
+            Step::Interrupted(interrupted) => {
+                self.forget_unknown(&interrupted);
+                false
+            }
+            Step::Advanced(_) => false,
+        }
+    }
+
+    /// Forget the cached cell when the machines no longer know its journals
+    /// (#304): a one-founder cell was wiped and a new cell formed at the
+    /// same address, so the next `learn()` asks the machines through
+    /// `Inspect` again. The machine is right: it never held the old cell.
+    fn forget_unknown(&mut self, interrupted: &Interrupted) {
+        if let Interrupted::NotClaimed {
+            outcome: ClaimOutcome::UnknownJournal,
+            ..
+        } = interrupted
+        {
+            assert_reachable!("fleet: an operator forgets a cell its machines do not know");
+            self.cell = None;
         }
     }
 
@@ -771,9 +798,11 @@ impl FleetOps {
         nodes: &ChainClient,
         expected: &[u64],
     ) {
-        let deadline = ctx.time().now() + FLEET_SETTLE;
-        self.final_fleet(ctx, deadline).await;
-        self.final_registry(ctx, nodes, expected, deadline).await;
+        self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
+        // Its own deadline (#304): a fleet half that took all of its time
+        // must not leave the registry half none.
+        self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)
+            .await;
     }
 
     /// [`FleetOps::final_check`]'s fleet half, over the cell the machines
@@ -796,26 +825,21 @@ impl FleetOps {
             );
             return;
         }
+        // The cell is learned again when its machines do not know the cached
+        // one's journals (#304): a one-founder cell wiped and formed anew.
         let mut learned = None;
-        while learned.is_none() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            learned = self.learn(ctx).await;
-            if learned.is_none() && ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
-                break;
-            }
-        }
-        if ctx.shutdown().is_cancelled() {
-            return;
-        }
-        assert_always!(
-            learned.is_some(),
-            "fleet: a formed cell's control journals are learned through Inspect after chaos"
-        );
-        let Some(known) = learned else {
-            return;
-        };
         let mut folds = None;
         let mut attempt = 0_u64;
         while folds.is_none() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            if learned.is_none() {
+                learned = self.learn(ctx).await;
+            }
+            let Some(known) = &learned else {
+                if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                    break;
+                }
+                continue;
+            };
             let first = known.first(attempt);
             attempt += 1;
             let directory =
@@ -829,15 +853,33 @@ impl FleetOps {
                 0,
             )
             .await;
-            if let (Ok(directory), LoadOutcome::Loaded { .. }) = (directory, loaded) {
-                folds = Some((directory, cell));
-            } else if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
-                break;
+            match (directory, loaded) {
+                (Ok(directory), LoadOutcome::Loaded { .. }) => folds = Some((directory, cell)),
+                (_, LoadOutcome::UnknownJournal) => {
+                    assert_reachable!("fleet: an operator forgets a cell its machines do not know");
+                    self.cell = None;
+                    learned = None;
+                    if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {
+                    if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
         if ctx.shutdown().is_cancelled() {
             return;
         }
+        assert_always!(
+            learned.is_some(),
+            "fleet: a formed cell's control journals are learned through Inspect after chaos"
+        );
+        let Some(known) = learned else {
+            return;
+        };
         assert_always!(
             folds.is_some(),
             "fleet: the directory and the cell's journal are read to their tails after chaos"
