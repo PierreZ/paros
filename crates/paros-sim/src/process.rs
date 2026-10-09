@@ -1318,9 +1318,9 @@ async fn run_matchmaker_role(
     // write-window crash bias, drawn once per seed like a node's.
     let RoleRig {
         incarnation,
-        hooks,
         checker,
         audit,
+        ..
     } = arm_role(ctx, my_ip);
     let shape = incarnation.shape;
     // The store (#176): the library's `JournalMatchmakerStorage` on the
@@ -1412,7 +1412,6 @@ async fn run_matchmaker_role(
             config.clone(),
             shape.tunables,
             ctx.shutdown().clone(),
-            &hooks,
             &audit,
         )
         .await

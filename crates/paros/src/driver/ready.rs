@@ -57,7 +57,7 @@ pub(crate) fn fold_head(node: &ColocatedNode) -> Option<Slot> {
 /// there. A slot this batch walked is judged from the batch (`walked`):
 /// a `Truncate` folded later in the same walk may already have compacted
 /// it. The reply may be deliberately dropped at the reply seam
-/// ([`DriverHooks::drop_client_reply`]): the journal moved either way, and
+/// (`reply::answer`, #318): the journal moved either way, and
 /// the client's retry is answered from the log.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 fn answer_applied_calls<H, A>(

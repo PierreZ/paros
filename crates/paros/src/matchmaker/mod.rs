@@ -34,7 +34,7 @@ use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
-use crate::hooks::{DriverHooks, Reply};
+use crate::hooks::Reply;
 use crate::storage::StorageError;
 
 pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite};
@@ -365,9 +365,9 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 /// deployment's bootstrap set), serves the matchmaker RPC contract on
 /// `local_addr`, and answers each request only once its write is
 /// fsync-durable. `tunables` supplies the RPC liveness and inbox shape (the
-/// matchmaker has no tick and no peers); `hooks` and `audit` are the same
-/// provider-generic seams the node driver takes, with the matchmaker's own
-/// reply-drop locations
+/// matchmaker has no tick and no peers); `audit` is the same
+/// provider-generic seam the node driver takes. Each reply kind is its own
+/// inline reply-drop location
 /// ([`Reply::Match`], [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]).
 ///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #183), the
@@ -394,7 +394,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 // The parameters are the matchmaker's complete wiring; a bundle would only
 // rename them. The loop is one select over the contract's three inboxes.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn run_matchmaker<P, S, H, A>(
+pub async fn run_matchmaker<P, S, A>(
     providers: P,
     mut storage: S,
     boot: BootKind,
@@ -402,13 +402,11 @@ pub async fn run_matchmaker<P, S, H, A>(
     config: MatchmakerConfig,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
     audit: &A,
 ) -> Result<(), RunError>
 where
     P: Providers,
     S: MatchmakerStorage,
-    H: DriverHooks,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let id = config.id;
@@ -463,7 +461,7 @@ where
                     // A lost reply is a legal outcome: the registration stands
                     // and the requester's retry is the same request again,
                     // answered from the retained history.
-                    match_answer(hooks, audit, id, Reply::Match, reply, answer);
+                    match_answer(id, Reply::Match, reply, answer);
                 }
             }
             Some((request, reply)) = inbox.collects.recv() => {
@@ -494,7 +492,7 @@ where
                     watermark: matchmaker.hard_state().gc_watermark,
                 };
                 audit.matchmaker_gc_replied(id, &ack);
-                match_answer(hooks, audit, id, Reply::GcAck, reply, ack);
+                match_answer(id, Reply::GcAck, reply, ack);
             }
             Some((request, reply)) = inbox.reconfigures.recv() => {
                 // One step of a matchmaker-set handover (#125): the core
@@ -524,7 +522,7 @@ where
                         phase = ?matchmaker.phase(),
                         "reconfigure_replied"
                     );
-                    match_answer(hooks, audit, id, Reply::MatchmakerReconfigure, reply, answer);
+                    match_answer(id, Reply::MatchmakerReconfigure, reply, answer);
                 }
             }
             () = shutdown.cancelled() => return Ok(()),

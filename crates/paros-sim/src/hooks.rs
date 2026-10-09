@@ -28,15 +28,15 @@
 //!
 //! The accept and matchmaking re-sends, the resignation and the
 //! election-timeout extremes are inline sites in `paros` now (#294), each
-//! with its fired gate inline beside it.
+//! with its fired gate inline beside it. So are the send seam's drops and
+//! duplicates (fired gates in the audit's `dropped_at_send` and
+//! `duplicated_at_send`) and the reply seam's per-kind drops and
+//! matchmaker-plane duplicates (#318).
 //!
 //! | hook | fired gate | recovery gate |
 //! |---|---|---|
 //! | `initiate_handoff` / `handoff_target` | inline, one per shape | audit handoff gates |
-//! | `drop_outgoing` (per kind) | audit `dropped_at_send`, one per kind family | catch-up, re-propose, dedup gates |
-//! | `duplicate_outgoing` (per kind) | audit `duplicated_at_send` | idempotency `always` checks |
-//! | `drop_client_reply` (per kind) | audit `client_reply_dropped` / `match_reply_dropped`, one per family | "…retry takes the dedup path", read retry, the duplicate matchmaking re-answer |
-//! | `duplicate_client_reply` (matchmaker plane) | audit `client_reply_duplicated`, one per kind | the idempotency of every answer the node loop folds |
+//! | `drop_client_reply` (the lost-verdict latch only) | inline ("client: a write's verdict is lost on a lost-verdict seed") | "…retry takes the dedup path" |
 //! | `expire_parked_read_early` | audit `read_expired` | "a read is retried across nodes before committing" |
 //! | `phase2_column` | inline | "grid: a slot is decided on a column other than its own" |
 //! | `read_row` | inline | "grid: a quorum read is served by a row of a grid" |
@@ -330,168 +330,19 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         None
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn drop_outgoing(&self, _to: Party, msg: &Message) -> bool {
-        if !self.active() {
-            return false;
-        }
-        // Three locations, selected independently per seed: an isolated
-        // `Accept` loss is the interleaving behind a stranded chosen-gap wedge
-        // (#80) — one earlier slot's Accept vanishes while later slots land —
-        // while losing a `Promise`/`Prepare` stretches elections open, and a
-        // lost `Nack` keeps a below-floor candidate's campaign alive long
-        // enough for the answering trim point to land mid-election (the
-        // truncated-quorum Nack otherwise steps the candidate down before the
-        // `CatchUpRequest`'s `TrimmedTo` arrives — the #88 window).
-        match msg {
-            Message::Accept { .. } => buggify_with_prob!(0.05),
-            Message::Prepare { .. } | Message::Promise { .. } => buggify_with_prob!(0.10),
-            Message::Nack { .. } => buggify_with_prob!(0.25),
-            // A dropped `Commit` delays a follower's floor-raise (truncation
-            // applies lazily at its Truncate slot), widening the mixed-floor
-            // window the #88 mid-election trim jump needs — and leaves the
-            // follower hole commit-replay catch-up must heal (#80's terrain).
-            Message::Commit { .. } => buggify_with_prob!(0.05),
-            // The lost *ack*: a slot durably accepted by a quorum whose
-            // proposer never learns it — the pure quorum-intersection edge
-            // that forces a re-propose under a new ballot (P2c for real).
-            Message::Accepted { .. } => buggify_with_prob!(0.05),
-            // Starve the `CheckQuorum` window / the catch-up push direction. Kept low:
-            // these fire per tick per peer, and a high rate is just a
-            // partition, which is moonpool's job.
-            Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => buggify_with_prob!(0.02),
-            // Repair traffic for a node that is already behind: a lost
-            // response costs one beat of latency and re-derives on the next.
-            Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
-                buggify_with_prob!(0.10)
-            }
-            // The pull direction of catch-up: a lost request starves the
-            // lagging node one beat; the next tick re-asks.
-            Message::CatchUpRequest { .. } => buggify_with_prob!(0.10),
-            // The whole handoff, lost in one message. The correctness claim is
-            // that this costs *availability only*: the outgoing leader has
-            // already stepped down, so the cluster simply has no leader until
-            // an ordinary Phase 1 elects one. Aggressive, because that fallback
-            // is the path that must always work.
-            Message::Relinquish { .. } => buggify_with_prob!(0.25),
-            _ => false,
-        }
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn duplicate_outgoing(&self, _to: Party, msg: &Message) -> bool {
-        if !self.active() {
-            return false;
-        }
-        // Moonpool has no message-duplication fault, so this seam is the only
-        // duplicate generator. The quorum-counting kinds are the point of the
-        // location: every quorum in the core is set-based today, and this
-        // keeps a future "optimization" into counters from fabricating a
-        // quorum out of a duplicated ack.
-        match msg {
-            Message::Promise { .. } | Message::Accepted { .. } | Message::HeartbeatAck { .. } => {
-                buggify_with_prob!(0.05)
-            }
-            Message::Commit { .. } => buggify_with_prob!(0.05),
-            // A duplicated trim point must be a no-op the second time (the
-            // jump refuses a point at or below its floor).
-            Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
-                buggify_with_prob!(0.10)
-            }
-            // A duplicated catch-up request must only cost a redundant reply.
-            Message::CatchUpRequest { .. } => buggify_with_prob!(0.10),
-            // A re-delivered handoff must be a no-op at its addressee (never an
-            // allocator rewind) and refused everywhere else — the structural
-            // half of authority uniqueness, kept honest by firing it often.
-            Message::Relinquish { .. } => buggify_with_prob!(0.25),
-            _ => false,
-        }
-    }
-
     fn drop_client_reply(&self, reply: paros::Reply) -> bool {
-        if !self.active() {
+        // The reply seam's per-kind drops are inline in `paros` (#318). What
+        // is left is the lost-verdict scenario's latch: on such a seed every
+        // node drops a write's verdict at the same rate, so a retry meets a
+        // committed write wherever it lands (#318 E moves it).
+        if !self.active() || !self.lose_verdicts || reply != paros::Reply::Write {
             return false;
         }
-        // Dropped *after* the journal judged the call: the client's retry
-        // must be answered from the log (#204: a retried write is a
-        // `Duplicate`), the edge a lost verdict lives on. One location per
-        // reply kind.
-        match reply {
-            // On a lost-verdict seed every node drops at the same rate,
-            // so a retry meets a committed write wherever it lands.
-            paros::Reply::Write if self.lose_verdicts => {
-                let lost = moonpool_sim::sim_random_bool(0.10);
-                if lost {
-                    assert_reachable!("client: a write's verdict is lost on a lost-verdict seed");
-                }
-                lost
-            }
-            paros::Reply::Write => buggify_with_prob!(0.10),
-            // A lost claim: the owner does not know it won, and its next
-            // write names its old generation — refused, naming itself as
-            // the writer, which it adopts.
-            paros::Reply::SetLeader => buggify_with_prob!(0.10),
-            // A lost journal read: the client re-asks, and a read waiting at
-            // the tail costs it its deadline first.
-            paros::Reply::LogRead => buggify_with_prob!(0.10),
-            // A lost redirect costs the client its whole request deadline
-            // before it retries blind, so the retarget policies meet a stale
-            // hint under time pressure instead of a fresh one.
-            paros::Reply::Redirect => buggify_with_prob!(0.10),
-            paros::Reply::ReadUnserved => buggify_with_prob!(0.10),
-            // A lost truncation ack is the one ambiguity the truncation
-            // client's re-ask loop must absorb.
-            paros::Reply::Truncate => buggify_with_prob!(0.10),
-            // A lost matchmaker reply after the registration is durable: the
-            // requester's retry is the same request again, the idempotent
-            // re-answer path. Gated in the audit (`match_reply_dropped`).
-            paros::Reply::Match => buggify_with_prob!(0.20),
-            // A lost reconfiguration ack: the client re-asks and meets the
-            // change already under way (refused `not_leader`, then
-            // `unchanged`).
-            paros::Reply::Reconfigure => buggify_with_prob!(0.10),
-            // A lost GC ack after the floor is durable: the leader re-asks a
-            // floor already in force (the idempotent `Unchanged` answer).
-            paros::Reply::GcAck => buggify_with_prob!(0.20),
-            // A lost handover reply after its write is durable: the
-            // reconfigurer's re-send meets the idempotent stop, the keyed
-            // bootstrap, the durable vote.
-            paros::Reply::MatchmakerReconfigure => buggify_with_prob!(0.20),
-            // A lost matchmaker-reconfiguration ack: the client re-asks and
-            // meets `busy`, or a later generation.
-            paros::Reply::ReconfigureMatchmakers => buggify_with_prob!(0.10),
-            // A lost retirement ack: the operator re-asks a node already
-            // gone; the world already knows it is retired.
-            paros::Reply::Retire => buggify_with_prob!(0.10),
+        let lost = moonpool_sim::sim_random_bool(0.10);
+        if lost {
+            assert_reachable!("client: a write's verdict is lost on a lost-verdict seed");
         }
-    }
-
-    fn duplicate_client_reply(&self, reply: paros::Reply) -> bool {
-        if !self.active() {
-            return false;
-        }
-        // The mirror of `drop_client_reply`, at the matchmaker-plane replies
-        // the node loop folds: the answer is delivered a second time, which
-        // is exactly what a sender's own re-send produces once its first
-        // answer was merely slow. One location per reply kind, at the drop
-        // twins' rates. Every claim these paths make is an idempotency claim,
-        // and until now none of them met a duplicate on purpose.
-        match reply {
-            // Folded twice into the open matchmaking phase: a matchmaker
-            // already counted must not re-open the registration quorum, and a
-            // refusal must not be applied twice to the round floor.
-            paros::Reply::Match => buggify_with_prob!(0.20),
-            // Folded twice into the collector: an ack already counted must
-            // not re-close the floor, nor re-name the retirable acceptors.
-            paros::Reply::GcAck => buggify_with_prob!(0.20),
-            // Folded twice into the reconfigurer: a repeated `StopAck`,
-            // bootstrap ack, decree promise or vote must move no tally, and a
-            // repeated `Learned` must not re-publish.
-            paros::Reply::MatchmakerReconfigure => buggify_with_prob!(0.20),
-            // The client-facing seams cannot duplicate a unary response; see
-            // the trait doc.
-            _ => false,
-        }
+        lost
     }
 
     fn phase2_column(&self, slot: Slot, cols: usize) -> Option<usize> {

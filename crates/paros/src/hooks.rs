@@ -5,7 +5,9 @@
 //! `hint!("label").await` inline, and the simulation decides whether to
 //! crash the process there (#294). The accept and matchmaking re-sends, the
 //! resignation and the election-timeout extremes are inline
-//! `buggify_fault_with_prob!` sites in the driver (#294). [`DriverHooks`] exposes
+//! `buggify_fault_with_prob!` sites in the driver (#294), and so are the
+//! per-message drops and duplicates at the send seam and the reply seam's
+//! drops and matchmaker-plane duplicates (#318). [`DriverHooks`] exposes
 //! the driver's other optional policy decisions: the peer mailbox's
 //! choices (overtake the queue, evict across kinds, and — armed at enqueue,
 //! applied at the drain — hold a batch or reverse it), and stretching a tick.
@@ -206,27 +208,6 @@ pub trait DriverHooks {
         None
     }
 
-    /// Whether to drop this one outbound protocol message after it is durable
-    /// but before it reaches the transport. Always safe: the network could lose
-    /// the same message, and every protocol path already tolerates that loss
-    /// (`resend_pending` re-derives what still matters). Unlike moonpool's
-    /// connection-level faults, this reaches *per-message* loss — e.g. one
-    /// isolated `Accept` for an earlier slot vanishing while later slots land,
-    /// the interleaving behind a stranded chosen-gap wedge.
-    fn drop_outgoing(&self, _to: Party, _msg: &Message) -> bool {
-        false
-    }
-
-    /// Whether to send this one outbound protocol message **twice**. Always
-    /// safe: retransmission is legal transport behavior on any reconnecting
-    /// link, and every quorum in the core is set-based, so a duplicate must be
-    /// harmless — this location exists to keep it that way (a quorum counter
-    /// "optimized" into an integer would let a duplicated `Accepted` fabricate
-    /// a quorum from a sub-quorum). Moonpool has no message-duplication fault.
-    fn duplicate_outgoing(&self, _to: Party, _msg: &Message) -> bool {
-        false
-    }
-
     /// Whether this outbound message should **overtake** everything already
     /// queued in its peer mailbox — enqueued at the front instead of the back.
     /// Always safe: the peer transport never promised ordering (a reconnect,
@@ -297,30 +278,13 @@ pub trait DriverHooks {
         false
     }
 
-    /// Whether to drop this one client-facing reply after the server state has
-    /// advanced. Always safe: the client-facing RPC response can be lost in
-    /// production at any time, and the whole ack contract is built for it —
-    /// "committed" is re-derivable by a retry through the `(client, seq)`
-    /// dedup path. Deterministically produces "committed, applied, and the
-    /// client does not know", the precondition of the dedup-window edges.
+    /// Whether to drop this one client-facing reply on top of the reply
+    /// seam's own per-kind locations (`crate::driver::reply`, #294). It is
+    /// left only for the lost-verdict scenario, a per-seed latch that drops
+    /// a write's verdict on every node at one rate; it goes with the other
+    /// latches (#318 E). Always safe: the client-facing RPC response can be
+    /// lost in production at any time.
     fn drop_client_reply(&self, _reply: Reply) -> bool {
-        false
-    }
-
-    /// Whether to deliver this one reply **twice**, the mirror of
-    /// [`DriverHooks::drop_client_reply`]. Always safe: a duplicate is what
-    /// the sender's own re-send produces once its first answer was merely
-    /// slow, so every reply the driver folds must already be idempotent —
-    /// this makes the second copy arrive on purpose instead of by luck.
-    ///
-    /// Consulted only where a duplicate is *expressible*: the matchmaker
-    /// plane's replies, which reach the node loop through a channel and are
-    /// folded into `ColocatedNode` / the reconfigurer ([`Reply::Match`],
-    /// [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]). The client-facing
-    /// seams take no duplicate by construction — a unary RPC reply is
-    /// delivered exactly once, and the *client's* retry is the duplicate that
-    /// path has to survive, which `drop_client_reply` already produces.
-    fn duplicate_client_reply(&self, _reply: Reply) -> bool {
         false
     }
 

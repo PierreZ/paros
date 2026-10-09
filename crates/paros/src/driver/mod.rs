@@ -1293,10 +1293,10 @@ where
                 let Some((&journal, rt)) = journals.first() else { continue };
                 let (matchmaker, ballot) = (reply.matchmaker, reply.ballot);
                 // The duplicate seam (the mirror of the matchmaker driver's
-                // `drop_client_reply`): what it tests is the idempotency the
+                // reply drop): what it tests is the idempotency the
                 // registration path claims — a matchmaker already counted
                 // never re-opens the quorum.
-                maybe_duplicate(hooks, &rt.audit, NodeId(self_id), Reply::Match, &links.replies, &reply);
+                maybe_duplicate(NodeId(self_id), Reply::Match, &links.replies, &reply);
                 tracing::info!(
                     node = self_id,
                     matchmaker = matchmaker.0,
@@ -1316,7 +1316,7 @@ where
                 // fold it; a quorum makes the floor effective and names the
                 // retirable acceptors (reported in the step).
                 let Some((&journal, rt)) = journals.first() else { continue };
-                maybe_duplicate(hooks, &rt.audit, NodeId(self_id), Reply::GcAck, &links.gc_acks, &ack);
+                maybe_duplicate(NodeId(self_id), Reply::GcAck, &links.gc_acks, &ack);
                 let step = rt.node.on_gc_ack(&ack);
                 rt.audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
                 tracing::info!(
@@ -1336,8 +1336,6 @@ where
                 let Some((&journal, rt)) = journals.first() else { continue };
                 let matchmaker = reply.matchmaker();
                 maybe_duplicate(
-                    hooks,
-                    &rt.audit,
                     NodeId(self_id),
                     Reply::MatchmakerReconfigure,
                     &links.reconfigure_replies,

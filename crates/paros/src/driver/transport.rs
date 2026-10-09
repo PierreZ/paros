@@ -823,7 +823,89 @@ fn delivery_batch<A: Audit>(
     (internal::Deliver { messages: batch }, carried)
 }
 
-/// Surface a hook-decided send drop (the `msg_dropped_at_send` trace and
+/// Whether to drop this one outbound protocol message after it is durable
+/// but before it reaches the transport. One location per kind family, one
+/// macro line per arm, silent in the recovery tail.
+///
+/// Always safe: the network could lose the same message, and every protocol
+/// path tolerates that loss (`resend_pending` re-derives what still
+/// matters). Unlike moonpool's connection-level faults, this reaches
+/// per-message loss: for example, one isolated `Accept` for an earlier slot
+/// vanishes while later slots land, the interleaving behind a stranded
+/// chosen-gap wedge.
+fn drop_at_send(msg: &Message) -> bool {
+    match msg {
+        // An isolated `Accept` loss is the interleaving behind a stranded
+        // chosen-gap wedge (#80): one earlier slot's Accept vanishes while
+        // later slots land.
+        Message::Accept { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // A lost `Promise`/`Prepare` stretches an election open.
+        Message::Prepare { .. } | Message::Promise { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.10)
+        }
+        // A lost `Nack` keeps a below-floor candidate's campaign alive long
+        // enough for the answering trim point to land mid-election (the #88
+        // window).
+        Message::Nack { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
+        // A dropped `Commit` delays a follower's floor raise, widening the
+        // mixed-floor window the #88 mid-election trim jump needs, and
+        // leaves the hole commit-replay catch-up must heal (#80).
+        Message::Commit { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // The lost ack: a slot durably accepted by a quorum whose proposer
+        // never learns it, which forces a re-propose under a new ballot.
+        Message::Accepted { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // Starve the `CheckQuorum` window and the catch-up push direction.
+        // Kept low: these fire per tick per peer, and a high rate is a
+        // partition, which is moonpool's job.
+        Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.02)
+        }
+        // Repair traffic for a node that is already behind: a lost response
+        // costs one beat and re-derives on the next.
+        Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.10)
+        }
+        // The pull direction of catch-up: the next tick re-asks.
+        Message::CatchUpRequest { .. } => moonpool_buggify::buggify_fault_with_prob!(0.10),
+        // The whole handoff, lost in one message. It must cost availability
+        // only: the outgoing leader already stepped down, so an ordinary
+        // Phase 1 elects the next one. Aggressive, because that fallback must
+        // always work.
+        Message::Relinquish { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
+        _ => false,
+    }
+}
+
+/// Whether to send this one outbound protocol message twice. One location
+/// per kind family, one macro line per arm, silent in the recovery tail.
+///
+/// Always safe: retransmission is legal transport behavior on any
+/// reconnecting link, and every quorum in the core is set-based, so a
+/// duplicate must be harmless. These locations keep it that way: a quorum
+/// counter "optimized" into an integer would let a duplicated `Accepted`
+/// fabricate a quorum. Moonpool has no message-duplication fault.
+fn duplicate_at_send(msg: &Message) -> bool {
+    match msg {
+        // The quorum-counting kinds are the point of the location.
+        Message::Promise { .. } | Message::Accepted { .. } | Message::HeartbeatAck { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.05)
+        }
+        Message::Commit { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // A duplicated trim point must be a no-op the second time (the jump
+        // refuses a point at or below its floor).
+        Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.10)
+        }
+        // A duplicated catch-up request must only cost a redundant reply.
+        Message::CatchUpRequest { .. } => moonpool_buggify::buggify_fault_with_prob!(0.10),
+        // A re-delivered handoff must be a no-op at its addressee (never an
+        // allocator rewind) and refused everywhere else.
+        Message::Relinquish { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
+        _ => false,
+    }
+}
+
+/// Surface a send drop (the `msg_dropped_at_send` trace and
 /// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
 /// exactly which round the loss isolated.
 fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
@@ -844,10 +926,12 @@ fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
 
 /// Send one batch's addressed messages (fire-and-forget). The core addresses
 /// each one; the driver maps a [`Party`] → address. Each message may be dropped
-/// at this seam — per-message loss the network layer cannot produce on its own
-/// (a TCP stream loses intervals, never one isolated message), with
-/// `resend_pending` re-deriving what matters — or sent twice (retransmission
-/// is legal transport behavior; set-based quorum counting must tolerate it).
+/// at this seam ([`drop_at_send`]) — per-message loss the network layer cannot
+/// produce on its own (a TCP stream loses intervals, never one isolated
+/// message), with `resend_pending` re-deriving what matters — or sent twice
+/// ([`duplicate_at_send`]: retransmission is legal transport behavior;
+/// set-based quorum counting must tolerate it). Both are drawn here, on the
+/// node loop.
 #[tracing::instrument(level = "trace", skip_all, fields(from = %out.sender, messages = messages.len()))]
 pub(crate) fn send_messages<H, A>(
     out: &Outbound,
@@ -861,12 +945,12 @@ pub(crate) fn send_messages<H, A>(
 {
     let from = out.sender;
     for (to, msg) in messages {
-        if hooks.drop_outgoing(to, &msg) {
+        if drop_at_send(&msg) {
             trace_send_drop(audit, from, to, &msg);
             continue;
         }
         out.transmit(hooks, audit, journal, to, &msg);
-        if hooks.duplicate_outgoing(to, &msg) {
+        if duplicate_at_send(&msg) {
             audit.duplicated_at_send(from, to, &msg);
             tracing::info!(
                 from = %from,

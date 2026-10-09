@@ -287,7 +287,6 @@ pub(super) struct MatchmakerAudit {
     duplicate_answered: bool,
     watermark_raised: bool,
     recovered_after_restart: bool,
-    reply_dropped: bool,
     // --- the leader-side phase (#120) ---
     campaign_opened: bool,
     campaign_completed: bool,
@@ -320,7 +319,6 @@ pub(super) struct MatchmakerAudit {
     gc_retired_any: bool,
     gc_refused: bool,
     gc_resend_skipped: bool,
-    gc_ack_dropped: bool,
     retire_accepted: bool,
     retire_refused: bool,
     node_retired: bool,
@@ -343,7 +341,6 @@ pub(super) struct MatchmakerAudit {
     in_flight: BTreeMap<u64, Vec<RegistryOp>>,
     reconfigurer_superseded: bool,
     reconfigurer_resend_skipped: bool,
-    reconfigure_reply_dropped: bool,
     matchmaker_frozen: bool,
     matchmaker_bootstrapped_flag: bool,
     matchmaker_activated_flag: bool,
@@ -1192,24 +1189,6 @@ impl MatchmakerAudit {
                     "generation: an inactive matchmaker refuses a proposer"
                 );
             }
-        }
-    }
-
-    /// A reply was deliberately dropped after its write was durable.
-    pub(super) fn reply_dropped(&mut self, reply: paros::Reply) {
-        match reply {
-            paros::Reply::GcAck => reach_once!(
-                self.gc_ack_dropped,
-                "gc: a garbage-collection ack is dropped at the reply seam"
-            ),
-            paros::Reply::MatchmakerReconfigure => reach_once!(
-                self.reconfigure_reply_dropped,
-                "generation: a handover reply is dropped at the reply seam"
-            ),
-            _ => reach_once!(
-                self.reply_dropped,
-                "matchmaker: a reply is dropped at the reply seam"
-            ),
         }
     }
 
