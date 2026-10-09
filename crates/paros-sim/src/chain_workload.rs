@@ -348,6 +348,12 @@ struct ChainConfig {
     /// reboot that comes straight back, its connections and unsynced writes
     /// still lost; ceiling 2 s, far inside the recovery budget.
     fleet_kill_down_ms: u64,
+    /// How long one `init` may take (#246, `InitParams::patience`): the
+    /// seed forming the cell, its first leader, a fleet step taken again.
+    /// Floor 500 ms: a few round trips, so an `init` under chaos often
+    /// decides nothing and is run again; ceiling 10 s, inside the chaos
+    /// window's reach of the recovery tail.
+    init_patience_ms: u64,
     /// How long client 0 holds the control journals' seed down for the
     /// static-stability shape (#247). Floor 200 ms: a blip a tenant journal
     /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
@@ -427,6 +433,7 @@ impl ChainConfig {
             checkpoint_interval_ms: buggify_knob!(60_000_u64, 0_u64..5_001_u64),
             fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
+            init_patience_ms: buggify_knob!(3_000_u64, 500_u64..10_001_u64),
             parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
             claim_patience_ms: buggify_knob!(3_000_u64, 0_u64..6_001_u64),
             reconfigure_after_claim: buggify_with_prob!(1.0),
@@ -1313,12 +1320,13 @@ impl Workload for ChainWorkload {
         // the system journals at all (a seed that does not must refuse them).
         // The fleet operations (#229): the fleet tenant and the cell's tenant list.
         let mut fleet_ops = fleet::FleetOps::new(
+            ctx,
             &deployment,
-            crate::shape::identifiers(ctx.state()),
-            crate::shape::system_journals(ctx.state()),
+            runtime.connector(ctx, config.tunables()),
+            Duration::from_millis(config.init_patience_ms),
             client_id,
             (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
-        );
+        )?;
         let mut system_ops = system::SystemOps::new(
             &deployment,
             crate::shape::identifiers(ctx.state()),
@@ -2984,19 +2992,13 @@ impl Workload for ChainWorkload {
                 BOOK_CAPACITY => system_ops.book(ctx, &nodes, raw_payload).await,
                 FLEET_INIT => {
                     fleet_ops
-                        .init(
-                            ctx,
-                            &nodes,
-                            config.tunables().checkpoint_policy(),
-                            raw_payload,
-                        )
+                        .init(ctx, config.tunables().checkpoint_policy(), raw_payload)
                         .await;
                 }
                 TENANT => {
                     fleet_ops
                         .tenant(
                             ctx,
-                            &nodes,
                             config.tunables().checkpoint_policy(),
                             (raw_class, raw_payload),
                         )
@@ -3120,7 +3122,6 @@ impl Workload for ChainWorkload {
         fleet_ops
             .settle(
                 ctx,
-                &nodes,
                 config.tunables().checkpoint_policy(),
                 Duration::from_millis(config.retry_backoff_ms.max(10)),
             )
@@ -3678,15 +3679,21 @@ impl Workload for ChainWorkload {
             }
         }
         // The control journals' histories (#247): every client's library
-        // calls at the fleet tenant, the registry and the directory, searched once (by
+        // calls at the registry and the directory, and at the control
+        // journals of the cell the machines formed (#246), searched once (by
         // client 0, after every run) against the journal model.
-        if self.client_id == 0 && crate::shape::system_journals(ctx.state()) {
+        if self.client_id == 0 {
             let identifiers = crate::shape::identifiers(ctx.state());
-            for journal in [
-                identifiers.fleet,
-                identifiers.registry,
-                identifiers.directory,
-            ] {
+            let system = crate::shape::system_journals(ctx.state())
+                .then_some([identifiers.registry, identifiers.directory])
+                .into_iter()
+                .flatten();
+            let cell = crate::machine::formed_cell(ctx.state())
+                .map(|cell| [Some(cell.cell), cell.fleet])
+                .into_iter()
+                .flatten()
+                .flatten();
+            for journal in system.chain(cell) {
                 let attempts = std::mem::take(
                     &mut *rpc::control_attempts(ctx.state(), journal)
                         .lock()

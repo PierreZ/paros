@@ -46,6 +46,11 @@ pub(crate) const REPLICA_GROUP: &str = "paros-replica";
 /// The process group of the joiners (`JoinerProcess::name`, #189): nodes
 /// outside the genesis pool that join it at runtime through the registry.
 pub(crate) const JOINER_GROUP: &str = "paros-joiner";
+/// The process group of the machines (`MachineProcess::name`, #246): a
+/// `parosd` each, running the shipped lifecycle from an empty disk, formed
+/// into the cell by the workload's `init`. A machine mints its own
+/// `node_id`, so the map ranks it and names no identity.
+pub(crate) const MACHINE_GROUP: &str = "paros-machine";
 
 /// Where the joiners' `NodeId`s start: above any genesis pool the campaign
 /// draws and below the replicas', so a joiner's identity collides with
@@ -84,6 +89,9 @@ pub(crate) enum Role {
     /// A joiner (#189), speaking as [`joiner_node_id`] of its rank: outside
     /// the genesis pool until the registry admits it.
     Joiner(NodeId),
+    /// A machine (#246), ranked among the machines: its identity is the one
+    /// it mints at format.
+    Machine(usize),
 }
 
 /// The seed's deployment: sorted acceptor IPs (`NodeId(i)` ↔ `acceptors[i]`),
@@ -97,6 +105,7 @@ pub(crate) struct Deployment {
     proxies: Vec<String>,
     replicas: Vec<String>,
     joiners: Vec<String>,
+    machines: Vec<String>,
 }
 
 impl Deployment {
@@ -117,6 +126,7 @@ impl Deployment {
             proxies,
             replicas,
             joiners: Vec::new(),
+            machines: Vec::new(),
         }
     }
 
@@ -124,6 +134,13 @@ impl Deployment {
     fn with_joiners(mut self, mut joiners: Vec<String>) -> Self {
         sort_ips(&mut joiners);
         self.joiners = joiners;
+        self
+    }
+
+    /// The same map with `machines` (#246), sorted.
+    fn with_machines(mut self, mut machines: Vec<String>) -> Self {
+        sort_ips(&mut machines);
+        self.machines = machines;
         self
     }
 
@@ -141,10 +158,18 @@ impl Deployment {
         if let Some(rank) = self.replicas.iter().position(|r| r == ip) {
             return Some(Role::Replica(ReplicaId(rank as u64)));
         }
-        self.joiners
+        if let Some(rank) = self.joiners.iter().position(|j| j == ip) {
+            return Some(Role::Joiner(joiner_node_id(rank)));
+        }
+        self.machines
             .iter()
-            .position(|j| j == ip)
-            .map(|rank| Role::Joiner(joiner_node_id(rank)))
+            .position(|m| m == ip)
+            .map(Role::Machine)
+    }
+
+    /// The machines (#246), in rank order.
+    pub(crate) fn machines(&self) -> &[String] {
+        &self.machines
     }
 
     /// The joiners (#189), in rank order: each joins as
@@ -199,8 +224,10 @@ pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {
     let proxies = topology.ips_in_group(PROXY_GROUP);
     let replicas = topology.ips_in_group(REPLICA_GROUP);
     let joiners = topology.ips_in_group(JOINER_GROUP);
-    let map =
-        Deployment::from_groups(acceptors, matchmakers, proxies, replicas).with_joiners(joiners);
+    let machines = topology.ips_in_group(MACHINE_GROUP);
+    let map = Deployment::from_groups(acceptors, matchmakers, proxies, replicas)
+        .with_joiners(joiners)
+        .with_machines(machines);
     assert_always!(
         !map.acceptors.is_empty(),
         "a deployment names at least one acceptor",

@@ -30,7 +30,7 @@
 //! | exit | outcome | what the operator does |
 //! |---|---|---|
 //! | 0 | shut down on `SIGTERM` / `SIGINT` | nothing |
-//! | 75 (`EX_TEMPFAIL`) | [`RunError::Storage`]: the fail-stop crash on a storage fault | restart: the next boot recovers from what the disk holds |
+//! | 75 (`EX_TEMPFAIL`) | [`RunError::Storage`] or [`MachineError::Storage`]: the fail-stop crash on a storage fault | restart: the next boot recovers from what the disk holds |
 //! | 78 (`EX_CONFIG`) | [`RunError::Refused`]: the store or the identity disagrees with the configuration | do **not** restart: resolve it (amnesia, an edited configuration, a class change) |
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
 //! | 2 | an invalid configuration | fix the variables |
@@ -133,6 +133,10 @@ async fn run(settings: Settings) -> ExitCode {
         Err(MachineError::Refused(error)) => {
             eprintln!("parosd: {}: {error}", settings.data_dir.display());
             ExitCode::from(EXIT_REFUSED)
+        }
+        Err(MachineError::Storage(error)) => {
+            tracing::error!(%error, "parosd_storage_failed");
+            ExitCode::from(EXIT_RESTART)
         }
         Err(MachineError::Run(error)) => exit(&error),
     }

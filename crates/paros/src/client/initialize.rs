@@ -56,7 +56,10 @@ pub struct Initialized {
     pub fleet_id: u64,
     /// The cell coordinator, which wrote both control journals.
     pub coordinator: NodeId,
-    /// The cell's servers: `(node id, address)`.
+    /// The cell's members by id, in id order: the cell control journal's
+    /// genesis pool, whether or not each answered this run.
+    pub members: Vec<u64>,
+    /// The cell's servers this run reached: `(node id, address)`.
     pub servers: Vec<(u64, SocketAddr)>,
     /// The control journals, learned from the plan or `Inspect`.
     pub journals: ControlJournals,
@@ -112,6 +115,48 @@ pub struct InitParams {
     pub fleet_id: u64,
 }
 
+/// What a found cell is: its servers, its members, its coordinator, its
+/// control journals and its user journals (none: only the run that formed
+/// the cell knows them).
+type Found = (
+    Vec<(u64, SocketAddr)>,
+    Vec<u64>,
+    NodeId,
+    ControlJournals,
+    Vec<JournalIdentifier>,
+);
+
+/// A cell an earlier run formed, learned from its servers: their ids and
+/// its control journals from a node-only `Inspect` (no identifier is fixed,
+/// §3.8), its members from the cell control journal's.
+async fn found<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    addrs: &[SocketAddr],
+    connect: &impl Fn(&[(u64, SocketAddr)]) -> Client<P>,
+    patience: Duration,
+) -> Result<Found, Unreachable> {
+    let servers = bootstrap::discover(providers, rpc, addrs, patience).await;
+    if servers.is_empty() {
+        return Err(Unreachable::NothingAnswered);
+    }
+    let client = connect(&servers);
+    let journals = bootstrap::control_journals(&client)
+        .await
+        .ok_or(Unreachable::NoControlJournals)?;
+    // The genesis pool is the cell's members, never only the servers that
+    // answered: one of them may be down.
+    let mut members = client
+        .inspect(0, journals.cell)
+        .await
+        .map(|view| view.members)
+        .unwrap_or_default();
+    members.sort_unstable();
+    members.dedup();
+    let coordinator = *members.first().ok_or(Unreachable::NoCoordinator)?;
+    Ok((servers, members, NodeId(coordinator), journals, Vec::new()))
+}
+
 /// Run `init` whole: form the cell at `addrs[0]` (or learn it, when that
 /// seed already serves one), claim its control journal, then run the fleet
 /// steps, through a client `connect` builds over the cell's servers.
@@ -133,7 +178,7 @@ pub async fn initialize<P: Providers>(
         return InitRun::Unreachable(Unreachable::NoTarget);
     };
     let patience = params.patience;
-    let (servers, coordinator, journals, users) =
+    let (servers, members, coordinator, journals, users) =
         match bootstrap::init(providers, rpc, target, patience).await {
             InitOutcome::Formed(plan) => {
                 let servers: Vec<(u64, SocketAddr)> = plan
@@ -141,6 +186,7 @@ pub async fn initialize<P: Providers>(
                     .iter()
                     .map(|(id, addr)| (id.0, *addr))
                     .collect();
+                let members = servers.iter().map(|(id, _)| *id).collect();
                 let Some(fleet_control) = plan.fleet else {
                     return InitRun::Refused(InitRefusal::NoFleet);
                 };
@@ -150,7 +196,13 @@ pub async fn initialize<P: Providers>(
                     .copied()
                     .filter(|j| *j != plan.control && *j != fleet_control)
                     .collect();
-                (servers, plan.coordinator(), plan.control_journals(), users)
+                (
+                    servers,
+                    members,
+                    plan.coordinator(),
+                    plan.control_journals(),
+                    users,
+                )
             }
             InitOutcome::Refused(refusal) => {
                 return InitRun::Refused(InitRefusal::Formation(refusal));
@@ -159,27 +211,17 @@ pub async fn initialize<P: Providers>(
             InitOutcome::Unreachable => return InitRun::Unreachable(Unreachable::Formation),
             // No machine endpoint: the target serves a cell already (a re-run
             // after its formation), or nothing listens there.
-            InitOutcome::NotWaiting => {
-                let servers = bootstrap::discover(providers, rpc, addrs, patience).await;
-                if servers.is_empty() {
-                    return InitRun::Unreachable(Unreachable::NothingAnswered);
-                }
-                let client = connect(&servers);
-                // No identifier is fixed (§3.8): the cell's are learned from it.
-                let Some(journals) = bootstrap::control_journals(&client).await else {
-                    return InitRun::Unreachable(Unreachable::NoControlJournals);
-                };
-                let Some(coordinator) = client
-                    .inspect(0, journals.cell)
-                    .await
-                    .and_then(|view| view.members.iter().copied().min())
-                else {
-                    return InitRun::Unreachable(Unreachable::NoCoordinator);
-                };
-                (servers, NodeId(coordinator), journals, Vec::new())
-            }
+            InitOutcome::NotWaiting => match found(providers, rpc, addrs, &connect, patience).await
+            {
+                Ok(cell) => cell,
+                Err(unreachable) => return InitRun::Unreachable(unreachable),
+            },
         };
     assert!(!servers.is_empty(), "a formed or found cell has servers");
+    assert!(
+        members.contains(&coordinator.0),
+        "the coordinator is a member of its cell"
+    );
     let client = connect(&servers);
     let claimed = match bootstrap::claim_cell(&client, journals.cell, coordinator, patience).await {
         ClaimCellOutcome::Claimed { generation } => Some(generation),
@@ -189,12 +231,11 @@ pub async fn initialize<P: Providers>(
         ClaimCellOutcome::Unavailable => return InitRun::Unreachable(Unreachable::Claim),
         ClaimCellOutcome::Ambiguous => return InitRun::Ambiguous,
     };
-    let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
     let Some(mut fleet) = FleetSession::new(
         journals,
         coordinator.0,
         coordinator,
-        Registry::new(ids.iter().copied().map(NodeId)),
+        Registry::new(members.iter().copied().map(NodeId)),
         client.tunables().checkpoint_policy(),
     ) else {
         return InitRun::Refused(InitRefusal::NoFleet);
@@ -207,6 +248,7 @@ pub async fn initialize<P: Providers>(
             let initialized = Initialized {
                 fleet_id,
                 coordinator,
+                members,
                 servers,
                 journals,
                 users,

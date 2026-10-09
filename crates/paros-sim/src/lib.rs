@@ -25,6 +25,7 @@ mod chain_workload;
 mod client;
 mod hooks;
 mod lifecycle;
+mod machine;
 mod process;
 mod roles;
 mod shape;
@@ -43,8 +44,9 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
+use crate::machine::MachineProcess;
 use crate::process::{JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess};
-use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
+use crate::roles::{ACCEPTOR_GROUP, MACHINE_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
 
 /// An optional slot or watermark as a signed trace/detail value: `None`
 /// (the empty prefix, nothing seen yet) is `-1`, and a value too large for
@@ -140,6 +142,14 @@ pub(crate) const REPLICA_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// journals idles. Two let one joiner race another's registration and a
 /// created journal name both.
 pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
+/// Per-seed **machine pool** draw (inclusive, #246): the machine process
+/// group (`crate::roles::MACHINE_GROUP`), each a `parosd` running the shipped
+/// lifecycle from an empty disk until the workload's `init` forms the cell
+/// over the seeds the layout draws (`crate::shape::machine_layout`). One is
+/// the one-seed cell (#213's three seeds are not yet the rule); two is a
+/// cell whose majority is both seeds, or a seed and a waiting machine; three
+/// a cell that keeps a quorum through one seed's loss.
+pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=3;
 /// Per-seed concurrent-client draw (half-open: 1–3 clients). Multi-client runs
 /// are what give the linearizability checker conflicting concurrent histories
 /// to reject; single-client runs keep the cheap sequential fast path. Each
@@ -198,12 +208,14 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// Moonpool re-samples each attrition base per seed under `ChaosMode::Swarm`
 /// (about half the seeds run a regime with no attrition, and the restart
 /// window is rescaled to 50–200% of the range below), so the values here are
-/// a base, not a fixed shape. The four regimes are independent: the acceptor
+/// a base, not a fixed shape. The five regimes are independent: the acceptor
 /// pool's `max_dead` budget is spent only by dead acceptors, the
-/// matchmakers' only by dead matchmakers, the proxies' only by dead proxies
-/// and the replicas' only by dead replicas, so a killed matchmaker, proxy or
-/// replica never keeps the cluster's own quorum whole by proxy, and every
-/// role can be down at once. A killed replica (#144) comes back to a log the
+/// matchmakers' only by dead matchmakers, the proxies' only by dead proxies,
+/// the replicas' only by dead replicas and the machines' only by dead
+/// machines (#246), so a killed matchmaker, proxy or replica never keeps the
+/// cluster's own quorum whole by proxy, and every role can be down at once.
+/// A killed machine reboots from its record: before `init` it waits again,
+/// in the middle of one it resumes, after one it serves its cell. A killed replica (#144) comes back to a log the
 /// acceptors kept deciding and truncating without it — the catch-up and the
 /// below-floor snapshot install a replica exists to survive. A killed proxy
 /// leader (#142) is the fault the leader's take-back exists for: every slot
@@ -226,7 +238,7 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// transfers; lost unsynced directory entries), swarm-masked per seed by
 /// moonpool. A world-store seed has no files and is untouched. See
 /// [`storage_fault_mask`] for what is masked.
-fn chaos_surfaces() -> [Chaos; 8] {
+fn chaos_surfaces() -> [Chaos; 9] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -253,6 +265,10 @@ fn chaos_surfaces() -> [Chaos; 8] {
         },
         Chaos::Attrition {
             config: regime(AttritionVictims::group(REPLICA_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::Attrition {
+            config: regime(AttritionVictims::group(MACHINE_GROUP)),
             mode: ChaosMode::Swarm,
         },
         crate::world::outage::regime(),
@@ -300,6 +316,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .processes(PROXY_POOL_RANGE, || Box::new(ProxyProcess::chaotic()))
         .processes(REPLICA_POOL_RANGE, || Box::new(ReplicaProcess::chaotic()))
         .processes(JOINER_POOL_RANGE, || Box::new(JoinerProcess::chaotic()))
+        .processes(MACHINE_POOL_RANGE, || Box::new(MachineProcess::chaotic()))
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))
