@@ -76,6 +76,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   (`moonpool-consultant` agent).
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
+  When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
+  moonpool PR, merge it once its CI is green, then advance paros's pin (all eight lines).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
