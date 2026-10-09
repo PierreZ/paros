@@ -137,7 +137,7 @@ replica's fold position (`folded`) moves **only** with the contiguous walk.
 
 The same definition answers a retry. Since the journal API (#204) there is no
 dedup table at all: the log is the at-most-once table. A retry is the identical
-write — generation, owner, position and bytes — and the journal state machine
+write — leader uuid, position and bytes — and the journal state machine
 judges it at apply like any other slot (`JournalState::apply`): it is a
 `Duplicate` exactly when the log already holds that write at that position.
 The judgement at apply is the safety rule (a leader may refuse early from its

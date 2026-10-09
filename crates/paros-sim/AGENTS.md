@@ -38,7 +38,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
 - `audit/losses.rs` → `Losses` → an outage's losses as the journal reports them (#263): the shape recognized (no, one, fewer than a quorum of clean copies; `faulty, faulty, none`; the only clean copy on a removed node), the CTRL rule re-derived to name a slot unrecoverable, "an unrecoverable slot is never accepted again", the four outcome gates, and the convergence excuse.
 - `audit/client.rs` → `ClientHistory`, `check_control_history` (the registry, the directory, and the control journals of the cell the machines formed, #247, #246) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
-- `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, generation chain, monotone `first_seq`).
+- `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, the leader chain — every verdict names the leader in force, a write accepted only under a uuid won in the log — monotone `first_seq`; a reinstated uuid is reachable, never a violation, #241).
 - `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
 
 ## Harness shape
@@ -87,7 +87,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
 
 `WRITE=0` (owner writes at its believed next position; a superseded writer's stale write must be
-refused) · `WRITE_TO_NON_LEADER=1` · `TRUNCATE=2` (an owner's, under its own fence and clamped by the trim fence; a superseded owner's stale truncate, `stale_truncate_pct`, must be refused, #228) · `READ_STATE=3`
+refused, unless a reinstatement made its uuid lead again) · `WRITE_TO_NON_LEADER=1` · `TRUNCATE=2` (an owner's, under its own fence and clamped by the trim fence; a superseded owner's stale truncate, `stale_truncate_pct`, must be refused, #228) · `READ_STATE=3`
 (fold to tail) · `PAUSE=4` · `DUP_WRITE=5` (must fold `Duplicate`) · `DUAL_SUBMIT=6` (one
 position per verdict) · `TRUNCATE_STORM=7` · `READ_INDEX=8` retired · `MATCHMAKE=9`,
 `MATCH_GC=10` retired · `RECONFIGURE=11` (compose from the live pool; refused on a plain seed)
@@ -96,7 +96,7 @@ it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=1
 `REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to the directory or the registry; a create draws its id and redraws on `IdTaken`; refused
 `unknown_journal` without system journals; a register carries the joiner's drawn class and
 capacity, and a registered joiner registering again is a reboot, #211) · `SET_LEADER=22` (CAS on
-the generation) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
+the leader uuid; a superseded writer reinstates the uuid it last led with, `reinstate_pct`, the misbehaviour the journal does not refuse, #241) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
 `BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
 #211) · `FLEET_INIT=25` (`init` whole through `paros::client::initialize` while the cell is unknown or on a coin, else `init`'s fleet half through `paros::client::fleet`, #229, #246) · `TENANT=26`
@@ -104,7 +104,8 @@ claim, fold to the tail, checkpoint and truncate when the policy finds it due, #
 crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired ids are no-ops that keep their slot in the alphabet.
 
 - Each client is an **owner** or a **reader** for the run (knob; each journal's first client
-  owns). Owners claim before writing — the opening claim re-asked within `claim_patience_ms`
+  owns). Every library writer, session and checkpointer a client starts draws a fresh leader seed
+  (`LeaderSeeds`, #241), so a well-behaved client never reinstates a uuid. Owners claim before writing — the opening claim re-asked within `claim_patience_ms`
   while the cluster leaves it unresolved — and re-claim when superseded.
 - Every client folds its journal into `ChainState` and reports each step
   (`AuditWorld::fold_applied`); truncations are clamped below the lowest folding cursor.

@@ -59,19 +59,19 @@ slot. So paros makes the floor a **decided value**.
 
 A decided slot holds a `Command` (`crates/paros-core/src/types.rs`), which is
 either a `Write(Entry)` with a writer's batch of opaque records or one of
-paros's own `Control` commands: `Truncate { generation, owner, up_to }`, `SetLeader` and the
+paros's own `Control` commands: `Truncate { leader, up_to }`, `SetLeader { new, old }` and the
 `Noop` gap filler. The acceptors and the replication path do not tell the
 variants apart, exactly as Compartmentalized Paxos treats a `Noop`. Only the
 **learner's walk** interprets a slot: it judges each one, in slot order, with
 the journal state machine (`JournalState::apply`, `journal_state.rs`). A client
 asks the leader to truncate with the `Truncate` RPC, naming `up_to`, the first
-position it still needs, and its writer fence `(generation, owner)`; the leader
+position it still needs, and its writer fence, its leader uuid (#241); the leader
 proposes `Control::Truncate` into the next slot, and a non-leader redirects the
 client, as it does for a `Write`.
 
 A truncation is **fenced like a write**. The fold accepts it only if its
-`(generation, owner)` is the journal's current writer, and otherwise refuses it
-in place (`Outcome::TruncateRefused`), naming the writer in force; nothing
+leader uuid is the journal's current one, and otherwise refuses it in place
+(`Outcome::TruncateRefused`), naming the leader in force; nothing
 moves, but the slot is spent, like a refused `Write`. Without the fence, anyone
 holding the tenant could truncate any of its journals, and a stale or buggy
 caller could truncate to a position that is not the owner's checkpoint and break
@@ -91,7 +91,7 @@ on the same floor.
 
 Two things survive the drop. The node's **promise** is a scalar beside the log,
 never inside it. And the **journal state** the dropped slots folded to — the
-owner, the generation, `next_seq` and `first_seq` — is **sealed** durably in the
+leader uuid, the term, `next_seq` and `first_seq` — is **sealed** durably in the
 same write (`WriteOp::Truncate`'s `sealed`, read back through
 `Storage::sealed_state`), so a restarted node folds the retained log from the
 same state as a node that never restarted. There is no separate at-most-once

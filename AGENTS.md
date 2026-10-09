@@ -374,10 +374,15 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 ## Protocol invariants to remember
 
 - **Truncation is a Paxos-decided control command** (`Truncate`, proposed by the leader), **fenced
-  by `(generation, owner)` like a `Write`** (#228): judged at apply, a stale or foreign caller is
+  by the leader uuid like a `Write`** (#228, #241): judged at apply, a stale or foreign caller is
   refused in place; an accepted one raises `first_seq` and every node compacts lazily when its
   walk reaches the slot. paros runs no application and takes no snapshot; record bytes are
   opaque.
+- **The leader uuid is the writer fence** (#241): `SetLeader(new, old)` is a compare-and-set,
+  `Write` and `Truncate` carry the uuid, and the core's term counter never reaches a client (a
+  client sees `JournalView`). The journal trusts its clients to draw fresh uuids (decided on
+  2026-10-09): a reinstated uuid wins, and the simulation's `reinstate_pct` knob proves the
+  guarantees hold through it (`docs/architecture.md` §2.3).
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
 - **Cooperative handoff** (`DPaxos`, `relinquish_to`): abdication is synchronous with the

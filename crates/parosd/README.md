@@ -23,7 +23,7 @@ the one build outside Nix):
 ```sh
 docker compose up -d --build        # five machines; each formats and waits
 docker compose run --rm init        # forms the cell; prints journals=T/J
-docker compose run --rm parosctl write T/J hello world --owner 7
+docker compose run --rm parosctl write T/J hello world --leader 7
 docker compose run --rm parosctl read T/J
 ```
 
@@ -82,9 +82,9 @@ keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
-**Supersede a writer.** `parosctl set-leader T/J --owner 8` takes the journal;
-the first owner's writes and truncations are refused from then on
-(`superseded`, exit 3), and the new owner's `truncate --up-to N --owner 8`
+**Supersede a writer.** `parosctl set-leader T/J --new 8` takes the journal;
+the first leader's writes and truncations are refused from then on
+(`superseded`, exit 3), and the new leader's `truncate --up-to N --leader 8`
 applies.
 
 **Lose a disk.** Two ways, both refused:
@@ -121,7 +121,7 @@ for i in 1 2 3; do
 done
 export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
 parosctl --servers 127.0.0.1:4501 init      # prints journals=T/J
-parosctl write T/J hello world --owner 7
+parosctl write T/J hello world --leader 7
 parosctl read T/J
 ```
 
@@ -225,11 +225,11 @@ and both required: there is no default tenant and no fixed id (#235,
 |---|---|
 | `parosctl init [--patience-ms N]` | forms the cell at the first server, a waiting seed, claims the cell control journal, then registers the cell in the fleet directory (#229); resumes an interrupted init, refused on an initialized fleet |
 | `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
-| `parosctl write <journal> <record>…` | claims the journal if this owner does not hold it (a read finding it the owner already is adopted, never re-claimed), then writes at the tail; `--owner` (or `PAROSCTL_OWNER`, default 1), `--generation` and `--seq` override |
+| `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |
-| `parosctl truncate <journal> --up-to N [--owner N] [--generation G]` | drops every record below `N`, as the journal's owner (claimed like `write`); a superseded owner is refused |
-| `parosctl set-leader <journal> --owner X [--expected G]` | compare-and-swaps the writer (against the generation read when `--expected` is absent) |
+| `parosctl truncate <journal> --up-to N [--leader U] [--no-claim]` | drops every record below `N`, as the journal's leader (claimed like `write`); a superseded leader is refused |
+| `parosctl set-leader <journal> [--new U] [--old U\|none]` | compare-and-sets the leader uuid to `--new` (drawn at random when absent), against `--old` or the leader a read finds; the journal does not refuse a uuid that led before, so never reinstate one |
 | `parosctl inspect [--journal J]` | every server's view of journal `J`: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers; without `--journal`, every server's own facts (node id, cell, control journals): no journal is inspected by default (#243) |
 | `parosctl reconfigure --members 0,1,2 [--quorum majority\|flexible:Q1:Q2\|grid:RxC]` | asks the leader for a new acceptor set |
 | `parosctl retire --node N [--gc-watermark ROUND.NODE \| --journal J]` | retires a node, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent) |
