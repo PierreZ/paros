@@ -29,7 +29,10 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `proxy/mod.rs` → `run_proxy`, `ProxyConfig` → Phase-2 subset, nothing durable (#142).
 - `replica_tier/mod.rs` → `run_replica` → learner subset over a `LogStorage`; serves `Read` (#144).
 - `rpc/methods.rs` → one `RpcMethod` per call, `WellKnownMethod` ids (public `0x5041_00xx`, internal `0x5041_01xx`, matchmaker `0x5041_02xx`, machine `0x5041_03xx`; retired ids never reused).
-- `machine.rs` → `wait_for_cell`, `MachineFacts`, `CellPlan`, `CellLedger`, `Class`, `ControlJournals` (the cell's, the fleet's, one type for driver and client, #243) → the machine before its cell (every identifier drawn at `init`): `Identify`, `Init` (a seed forms the cell over the seeds, resumable), `FormCell` (#196, #216); not in the simulation yet.
+- `machine/mod.rs` → `MachineFacts`, `CellPlan`, `Class`, `ControlJournals` (the cell's, the fleet's, one type for driver and client, #243) → a machine's facts and its cell's plan (every identifier drawn at `init`).
+- `machine/lifecycle.rs` → `run_machine`, `MachineDisk`, `MachineSettings`, `MachineError` → the whole machine lifecycle `parosd` runs (#246): format (mint `node_id`), the amnesia and class checks, wait, serve the plan; the disk is the caller's.
+- `machine/wait.rs` → `wait_for_cell`, `CellLedger` → the machine before its cell: `Identify`, `Init` (a seed forms the cell over the seeds, resumable), `FormCell` (#196, #216).
+- `machine/record.rs` → `MachineRecord`, `PlanState`, `journal_config` → the machine record's text (identity, class, capacity, failure domain, rendezvous, the plan pending then formed) and a plan journal's `Config`; not in the simulation yet (#246).
 - `rpc/inspect.rs` → `InspectTarget`, `InspectRefusal` → what an `Inspect` asks for: a named journal or the node alone; an unset identifier is refused (#243).
 - `rpc/inbound.rs` → `Inbound`, `ReplySender`, `serve_deliveries`, `rpc_config`, `MAX_FRAME_BYTES`.
 - `rpc/client.rs` → `NodeClient` (one at-most-once attempt per call), `MatchmakerClient`.

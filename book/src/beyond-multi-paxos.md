@@ -599,9 +599,8 @@ resumes by reading the disk, the rule the simulation's operator follows too.
 `BootKind::ExistingMember`, `BootRefusal::Amnesia`,
 `BootRefusal::ConfigMismatch` (`crates/paros/src/driver/config.rs`);
 `Audit::boot_refused`; `provision_store` (`crates/paros/src/provision.rs`),
-`paros::machine::wait_for_cell` (`crates/paros/src/machine.rs`) and `parosd`'s
-`MachineRecord` and `Record` (`crates/parosd/src/machine_record.rs`,
-`crates/parosd/src/record.rs`). Play it:
+`paros::machine::run_machine` and `MachineRecord` (`crates/paros/src/machine/`)
+and `parosd`'s `Record` (`crates/parosd/src/record.rs`). Play it:
 [`act4/the-wiped-node`](play/#act4/the-wiped-node).
 
 ## Many journals on one process

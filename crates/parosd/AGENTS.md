@@ -8,14 +8,14 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Map
 
-- `src/main.rs` → format (mint `node_id`), wait (`paros::machine::wait_for_cell`), serve
-  (`paros::run_journals` over the cell's plan) → tracing subscriber, runtime, `SIGTERM`/`SIGINT`
-  → shutdown token, exit codes.
+- `src/main.rs` → `paros::machine::run_machine` (the lifecycle is the library's, #246: format,
+  amnesia, wait, serve) → tracing subscriber, runtime, name resolution, `SIGTERM`/`SIGINT`
+  → shutdown token, `MachineError` → exit codes.
 - `src/settings.rs` → `Settings`, `Layout`, `check_unknown` → `PAROS_*` variables (each also a
   `--flag`); an unknown `PAROS_*` variable is an error.
-- `src/machine_record.rs` → `MachineRecord`, `DirLedger` (`CellLedger`), `journal_config` →
-  `<data-dir>/machine`: identity, class, capacity, failure domain, rendezvous, the cell's plan
-  (pending, then formed: the commit point after every store is formatted).
+- `src/disk.rs` → `DirDisk` (`paros::machine::MachineDisk`) → the data directory: the machine
+  record's file (`<data-dir>/machine`, its text the library's `MachineRecord`), the formation's
+  stores and provisioning record, the amnesia probe.
 - `src/stores.rs` → `DirStores` (`JournalStores`) → `<data-dir>/journals/<tenant>/<journal>/`
   (#235); a created journal is a first boot until `opened`, resolved from the disk at `load`.
 - `src/record.rs` → `Record`, `parse_identifier`, `write_atomically` → `<data-dir>/provisioned`: the
