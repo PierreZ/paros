@@ -82,8 +82,12 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 
 ## Deps & constants
 
-- Features (`Cargo.toml:18-30`): `default = ["tracing"]`; deps `serde` (`Cargo.toml:33`) and
-  `tracing` (`Cargo.toml:34`), both optional. Zero deps with `--no-default-features`.
+- Features (`Cargo.toml`): `default = ["tracing", "assertions"]`; deps `serde`, `tracing` and
+  `moonpool-assertions` (git rev pinned with the other moonpool lines, plus a crates.io
+  `version` for publishing), all optional. Zero deps with `--no-default-features`.
+- `probe.rs` → `probe!(reachable, "..")` / `probe!(sometimes, cond, "..")` → coverage probes
+  (#317) behind `assertions`; observe only, compile to nothing with the feature off. Never
+  reword a probe's message (the slot is its hash).
 - Exported constants (`lib.rs`): `HANDOFF_BATCH`, `HANDOFF_FENCE_ELECTIONS`, `HEARTBEAT_TICKS`,
   `LEADER_RECOVERY_BATCH`, `PROMISE_BATCH`, `REPAIR_TIMEOUT_ELECTIONS`, `REGISTRY_PAGE`.
 - `CHANGELOG.md` is release-plz's (`version_group = "paros"`); never edit it by hand.

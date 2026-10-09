@@ -1,6 +1,6 @@
 ---
 name: upstream-to-moonpool
-description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on all eight moonpool lines across crates/paros/Cargo.toml, crates/paros-sim/Cargo.toml and crates/parosd/Cargo.toml) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
+description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on all eleven moonpool lines across crates/paros-core/Cargo.toml, crates/paros/Cargo.toml, crates/paros-sim/Cargo.toml and crates/parosd/Cargo.toml) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
 ---
 
 # Upstreaming to moonpool
@@ -10,7 +10,7 @@ paros depends on moonpool through a **git pin** (`rev = ...` on
 dev-dependency in `crates/paros/Cargo.toml`, on `moonpool-sim` and
 `moonpool-rpc` in `crates/paros-sim/Cargo.toml`, and on `moonpool-core`
 (with `tokio-providers`) and `moonpool-rpc` in `crates/parosd/Cargo.toml`; one
-rev, eight lines, three manifests). When paros work hits a wall in the simulator, the
+rev, eleven lines, four manifests). When paros work hits a wall in the simulator, the
 question is whose wall it is.
 
 ## First, a moonpool question
@@ -48,7 +48,7 @@ never a silent local reimplementation of simulator infrastructure.
 
 ## Advancing the pin
 
-1. Set the new rev on all eight dependency lines (`grep -n 'rev =' crates/*/Cargo.toml`
+1. Set the new rev on all eleven dependency lines (`grep -n 'rev =' crates/*/Cargo.toml`
    lists them across the three manifests) and let cargo refetch (`Cargo.lock` is not committed; this is a
    library workspace).
 2. Read moonpool's changes between the two revs for anything that moves the

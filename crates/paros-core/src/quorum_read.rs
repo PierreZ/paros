@@ -473,6 +473,11 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             };
             // The basis's fence stands for every earlier configuration the
             // row cannot speak for (#260): the read waits on both.
+            probe!(
+                sometimes,
+                read.fence > index,
+                "quorum read: a read waits on its basis fence above the row's watermark"
+            );
             let index = index.max(read.fence);
             assert!(
                 index >= read.fence,

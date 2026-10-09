@@ -234,8 +234,8 @@ fn a_same_ballot_continuation_closes_a_stale_campaign() {
     );
 }
 
-/// An `Accepted` is credited only when its fingerprint names the admitted
-/// command, identity included.
+/// An `Accepted` is credited when its fingerprint names the admitted command,
+/// identity included. (A same-ballot mismatch panics: `decide_apply`.)
 #[test]
 fn accepted_fingerprints_include_identity() {
     let (mut proposer, proposal_ballot) = candidate(0);
@@ -262,16 +262,6 @@ fn accepted_fingerprints_include_identity() {
         command_fingerprint(&command(0)),
         admitted_hash,
         "command fingerprints include identity"
-    );
-    proposer.step(Message::Accepted {
-        from: NodeId(1),
-        ballot: proposal_ballot,
-        slot,
-        vhash: admitted_hash ^ 1,
-    });
-    assert!(
-        proposer.hard_state().chosen_index.is_none(),
-        "a mismatched Accepted fingerprint is not credited"
     );
     proposer.step(Message::Accepted {
         from: NodeId(1),

@@ -77,7 +77,11 @@ fn chosen_index_advances_only_over_contiguous_prefix() {
     );
 }
 
+/// One command per (slot, ballot) (P2b, #317): an `Accepted` at the open
+/// round's own ballot that names another command is a broken invariant, not a
+/// vote to ignore.
 #[test]
+#[should_panic(expected = "an Accepted at an open round's ballot names the round's command")]
 fn accepted_fingerprint_must_match_the_inflight_command() {
     let mut n = node(0, &[0, 1, 2]);
     campaign(&mut n);
@@ -96,15 +100,6 @@ fn accepted_fingerprint_must_match_the_inflight_command() {
         slot,
         vhash: expected ^ 1,
     });
-    assert_eq!(n.hard_state().chosen_index, None);
-
-    n.step(Message::Accepted {
-        from: NodeId(1),
-        ballot: camp,
-        slot,
-        vhash: expected,
-    });
-    assert_eq!(n.hard_state().chosen_index, Some(slot));
 }
 
 #[test]

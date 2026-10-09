@@ -367,6 +367,11 @@ fn merge_report<V: PartialEq>(
         }
         _ => {}
     }
+    probe!(
+        sometimes,
+        tally.get(&slot).is_some_and(|(_, held)| *held != command),
+        "phase1: a promise quorum reports two different values for one slot and P2c keeps the higher ballot"
+    );
     tally.insert(slot, (ballot, command));
     assert!(
         tally.get(&slot).is_some_and(|(held, _)| *held == ballot),
@@ -797,7 +802,6 @@ mod tests {
         let c = config(&[0, 1, 2]);
         p.open_round(Slot(5), ballot(1, 0), cmd(1), Some(NodeId(0)), None);
         assert!(p.decided(Slot(5), &c).is_none());
-        assert!(!p.fold_accepted(NodeId(1), ballot(1, 0), Slot(5), 0));
         assert!(p.fold_accepted(
             NodeId(1),
             ballot(1, 0),

@@ -323,6 +323,10 @@ impl ColocatedNode {
             PromiseFold::Continue(next) => {
                 // A continuation only ever moves forward through the suffix.
                 assert!(next > from_slot, "a promise page's cursor advances");
+                probe!(
+                    reachable,
+                    "phase1: a candidate pages a Promise suffix longer than one page"
+                );
                 // A valid page is leader contact for election-timeout purposes;
                 // a long suffix must not make the same campaign expire mid-page.
                 self.election_elapsed = 0;
@@ -453,7 +457,22 @@ impl ColocatedNode {
         // The win gate (#121): every prior configuration covered — one
         // predicate, in one place (`Election::covered`) — at a ballot the
         // node's own promise has not moved past.
-        if self.role != NodeRole::Candidate || !self.proposer.phase1_won(self.acceptor.promised()) {
+        if self.role != NodeRole::Candidate {
+            return;
+        }
+        if !self.proposer.phase1_won(self.acceptor.promised()) {
+            // The #67/#88 refusal: every prior configuration is covered, but
+            // the node's own promise moved past the campaign's ballot.
+            if let Some(election) = self.proposer.election().filter(|e| e.covered()) {
+                assert!(
+                    election.ballot() < self.acceptor.promised(),
+                    "a covered campaign is refused only below its own promise"
+                );
+                probe!(
+                    reachable,
+                    "phase1: a covered campaign is refused because its own promise moved past it"
+                );
+            }
             return;
         }
         let me = self.config.id;
@@ -565,6 +584,10 @@ impl ColocatedNode {
             .map(|(slot, (ballot, command))| (*slot, *ballot, command.clone()))
             .collect();
         for (slot, ballot, command) in prefix_heals {
+            probe!(
+                reachable,
+                "phase1: a fresh leader heals a faulty chosen slot from its promise quorum"
+            );
             self.mark_chosen(slot, &command, ballot);
         }
 

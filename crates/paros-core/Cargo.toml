@@ -11,12 +11,12 @@ categories.workspace = true
 
 # paros-core is std-only and portable to wasm32-unknown-unknown; every
 # dependency is optional and observation-only, so `default-features = false`
-# gives a dependency-free build (the wasm CI gate checks both). Neither feature
-# touches behavior: `serde` adds derives, `tracing` adds spans. See the
-# turbulence doctrine in AGENTS.md — the core is never buggified, and neither
-# feature is a perturbation.
+# gives a dependency-free build (the wasm CI gate checks both). No feature
+# touches behavior: `serde` adds derives, `tracing` adds spans, `assertions`
+# adds coverage probes. See the turbulence doctrine in AGENTS.md — the core is
+# never buggified, and no feature is a perturbation.
 [features]
-default = ["tracing"]
+default = ["tracing", "assertions"]
 # Derive Serialize/Deserialize on the public protocol types so a driver can put
 # the *same* `Message` on the wire (no duplicate DTO). Off by default; serde is
 # itself wasm-safe, so the portability guarantee holds.
@@ -28,10 +28,23 @@ serde = ["dep:serde"]
 # Spans only observe: with the feature off the generated code is the bare
 # function body, so the feature can never change a decision the core takes.
 tracing = ["dep:tracing"]
+# Coverage probes (#317): the crate's `probe!` shim marks rare protocol
+# branches with moonpool's `reachable`/`sometimes` accounting, so the
+# simulation sweep must reach them. Probes only observe: outside a simulation
+# no assertion table is installed and a probe is one pointer read; with the
+# feature off a probe compiles to nothing and its condition is never
+# evaluated. A probe and a simulation `assert_reachable!` with the same
+# message share one slot, so never reword a probe's message.
+assertions = ["dep:moonpool-assertions"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
 tracing = { version = "0.1", optional = true }
+# Pure std, zero dependencies, wasm-safe. Pinned to the same moonpool rev as
+# every other moonpool line (advanced together): the probes must land in the
+# simulation's own assertion table, so the workspace must resolve one copy.
+# `version` is what a crates.io publish of paros-core resolves instead.
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "31c206ef0982765410cfe527bcdfbd70c1364217", version = "0.8", optional = true }
 
 [lints]
 workspace = true

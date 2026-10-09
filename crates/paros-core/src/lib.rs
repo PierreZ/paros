@@ -62,6 +62,10 @@
 //! reads without voting, beside acceptors that vote — none of them runs an
 //! application: a journal's client folds what it reads (#186).
 
+// First: `probe!` is a textual-scope macro every module below uses.
+#[macro_use]
+mod probe;
+
 pub mod acceptor;
 mod collector;
 pub mod decree;
