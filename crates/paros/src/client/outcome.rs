@@ -50,6 +50,15 @@ pub enum WriteOutcome {
     },
     /// The node does not serve the journal.
     UnknownJournal,
+    /// Refused at the edge, before consensus (#241): the batch is over the
+    /// answering node's limits. This attempt wrote nothing; the batch must
+    /// be split.
+    TooLarge {
+        /// The most records the node accepts in one write.
+        max_records: u64,
+        /// The most record bytes the node accepts in one write.
+        max_bytes: u64,
+    },
     /// The reply named a journal state that does not decode: no verdict.
     Malformed,
     /// No answer: the write may or may not be in the journal.
@@ -79,6 +88,10 @@ impl WriteOutcome {
             WireWriteOutcome::Truncated => {
                 state().map_or(Self::Malformed, |state| Self::Truncated { state })
             }
+            WireWriteOutcome::TooLarge => Self::TooLarge {
+                max_records: ack.max_records,
+                max_bytes: ack.max_bytes,
+            },
             WireWriteOutcome::None => Self::Redirect { leader: ack.leader },
         }
     }

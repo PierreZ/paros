@@ -213,6 +213,17 @@ pub struct DriverTunables {
     /// eviction reclaims only rounds the leader is done with. Meaningless
     /// on a proxy-less deployment, and read only by `run_proxy`.
     pub proxy_round_resends: u64,
+    /// The most records one `Write` may carry (#241, `docs/architecture.md`
+    /// §2.7). A larger batch is refused at the edge (`TooLarge`) before it
+    /// reaches consensus. Floor 1: a one-record batch always fits, so a
+    /// writer that splits its batches always makes progress.
+    pub max_batch_records: u64,
+    /// The most record bytes one `Write` may carry (#241, §2.7), summed over
+    /// its records; refused at the edge like `max_batch_records`. Floor 1;
+    /// a record larger than this can never be written, which is the
+    /// contract, never a wrong answer. The default leaves room under the RPC
+    /// frame (`MAX_FRAME_BYTES`) for the request's other fields.
+    pub max_batch_bytes: u64,
 }
 
 impl Default for DriverTunables {
@@ -239,6 +250,8 @@ impl Default for DriverTunables {
             reconfigure_backoff_max_ticks: ELECTION_TIMEOUT_BASE * 2,
             proxy_take_back_resends: PROXY_TAKE_BACK_RESENDS,
             proxy_round_resends: PROXY_ROUND_RESENDS,
+            max_batch_records: MAX_BATCH_RECORDS,
+            max_batch_bytes: MAX_BATCH_BYTES,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -252,6 +265,19 @@ impl Default for DriverTunables {
         tunables
     }
 }
+
+/// The most records one `Write` may carry: well above any batch the
+/// simulation's writers build, and a 1 KiB record each fits the byte limit.
+const MAX_BATCH_RECORDS: u64 = 1024;
+
+/// The most record bytes one `Write` may carry: 1 MiB, a quarter of the RPC
+/// frame.
+const MAX_BATCH_BYTES: u64 = 1 << 20;
+
+// The byte limit leaves the frame room for the request's other fields and
+// the records' framing (#241).
+const _: () = assert!(MAX_BATCH_BYTES <= (crate::rpc::MAX_FRAME_BYTES as u64) / 2);
+const _: () = assert!(MAX_BATCH_RECORDS >= 1);
 
 /// Ticks a parked read reply may wait for its quorum read to be served before
 /// the driver answers a retry redirect (500 ms — well inside the sim client's

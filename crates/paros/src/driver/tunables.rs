@@ -140,7 +140,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 21] = [
+        let fields: [(&'static str, u64, u64); 23] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -188,6 +188,8 @@ impl DriverTunables {
             ),
             ("proxy_take_back_resends", self.proxy_take_back_resends, 1),
             ("proxy_round_resends", self.proxy_round_resends, 1),
+            ("max_batch_records", self.max_batch_records, 1),
+            ("max_batch_bytes", self.max_batch_bytes, 1),
         ];
         assert!(
             fields.iter().all(|(field, _, _)| !field.is_empty()),

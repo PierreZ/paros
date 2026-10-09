@@ -244,6 +244,12 @@ long-poll of a few hundred milliseconds, a batch well under the 4 MiB RPC frame)
 checkpoint (section 3.9) must fit one batch. Every id, `seq` and the term counter are `u64`; the
 leader uuid is 128 bits.
 
+The batch limits are `DriverTunables::max_batch_records` (1,024 by default) and
+`max_batch_bytes` (1 MiB by default, the sum of the record bytes). The node that receives a
+`Write` checks them before it proposes anything. A batch over either limit gets the answer
+`TooLarge`, which names the two limits. That write is in no slot. Different nodes can have
+different limits, so a retry to another node can get a different answer (#241).
+
 ### 2.8 Underneath
 
 Paxos is unchanged: replication, holes, gap fills, the contiguous chosen prefix, CTRL, the trim

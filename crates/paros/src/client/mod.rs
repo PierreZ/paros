@@ -784,7 +784,10 @@ impl<P: Providers> Client<P> {
                     Resolution::NotWritten { state }
                 }
                 WriteOutcome::Refused { .. } => Resolution::Unresolved,
+                // A node whose limits refuse the re-send proposed nothing:
+                // it says nothing about the first attempt, so ask another.
                 WriteOutcome::Redirect { .. }
+                | WriteOutcome::TooLarge { .. }
                 | WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {

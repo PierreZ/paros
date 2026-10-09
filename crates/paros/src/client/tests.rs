@@ -108,6 +108,25 @@ fn a_write_reply_is_judged_by_its_outcome() {
 }
 
 #[test]
+fn an_edge_refusal_names_the_limits_and_is_no_journal_verdict() {
+    let ack = WriteAck {
+        max_records: 8,
+        max_bytes: 4096,
+        ..write_ack(Wire::TooLarge, None)
+    };
+    let outcome = WriteOutcome::judge(&Ok(ack));
+    assert_eq!(
+        outcome,
+        WriteOutcome::TooLarge {
+            max_records: 8,
+            max_bytes: 4096
+        }
+    );
+    // Nothing reached the journal: no leader is learned from it.
+    assert!(!outcome.is_verdict());
+}
+
+#[test]
 fn a_set_leader_reply_wins_loses_or_redirects() {
     let s = state(Some(LeaderUuid(1)), 0, 0);
     let ack = |decided, won| SetLeaderAck {
