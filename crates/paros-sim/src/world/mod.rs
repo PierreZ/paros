@@ -10,6 +10,7 @@
 //! injector's ([`injector`]) and the power cuts' ([`power`]).
 
 pub(crate) mod injector;
+pub(crate) mod late_outage;
 pub(crate) mod node_store;
 pub(crate) mod outage;
 pub(crate) mod power;

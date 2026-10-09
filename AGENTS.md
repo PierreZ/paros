@@ -286,7 +286,10 @@ Three layers, and nothing crosses them:
   close, attrition, scheduling), swarm-masked per seed, on **one combined campaign axis**
   (`chaos_surfaces()`); after `CHAOS_DURATION_MS` moonpool enters recovery mode, so the tail is
   a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
-  the axis.
+  the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
+  scenario, its outage may strike early in the tail, once the owner's removal took effect and
+  at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
+  recovery the oracles judge.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.

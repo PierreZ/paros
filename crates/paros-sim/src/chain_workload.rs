@@ -1519,7 +1519,15 @@ impl Workload for ChainWorkload {
             // The owner's removal stays its next operation until a request
             // leaves (an inspect the chaos swallows, a shape nothing admits),
             // and for the chaos window only: the tail runs the drawn mix.
-            if time.now() >= Duration::from_millis(CHAOS_DURATION_MS) {
+            // On a departed-straggler seed it stays armed into the late
+            // outage's window (`crate::world::late_outage`): the owner's
+            // claim usually lands after the chaos window.
+            let deadline = if crate::shape::departed_straggler(ctx.state()) {
+                crate::world::late_outage::late_deadline()
+            } else {
+                Duration::from_millis(CHAOS_DURATION_MS)
+            };
+            if time.now() >= deadline {
                 remove_next = false;
             }
             let after_claim = remove_next;

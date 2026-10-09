@@ -53,15 +53,16 @@ const START: std::ops::Range<Duration> =
 
 /// How long each victim stays down. Floor 20 ms: a reboot, and longer than
 /// [`POLL`], so the losses are planned while every victim is still down.
-const DOWN: std::ops::Range<Duration> = Duration::from_millis(20)..Duration::from_millis(600);
+pub(super) const DOWN: std::ops::Range<Duration> =
+    Duration::from_millis(20)..Duration::from_millis(600);
 
 /// How long the straggler stays down: back last, early in the recovery
 /// tail, which then still has its whole settle budget to converge in.
-const STRAGGLER: std::ops::Range<Duration> =
+pub(super) const STRAGGLER: std::ops::Range<Duration> =
     Duration::from_millis(600)..Duration::from_millis(2_500);
 
 /// How often [`OutageLosses`] looks for the outage's landing.
-const POLL: Duration = Duration::from_millis(5);
+pub(super) const POLL: Duration = Duration::from_millis(5);
 
 const _: () = assert!(POLL.as_millis() < DOWN.start.as_millis());
 
@@ -100,6 +101,14 @@ pub(crate) struct LossShape {
 }
 
 impl LossShape {
+    /// The bare-quorum scenario's loss (see [`draw_loss`]): the most recent
+    /// slot, no clean copy left.
+    pub(crate) const BARE_QUORUM: Self = Self {
+        recent: true,
+        keep: Some(0),
+        prefer_removed: false,
+    };
+
     /// The departed-straggler scenario's loss
     /// (`crate::shape::departed_straggler`): the most recent slot, down to
     /// one clean copy on a member a reconfiguration removed.
@@ -168,6 +177,14 @@ impl FaultInjector for OutageLosses {
 
 /// The outage's loss shape, drawn when it lands (see the module doc).
 fn draw_loss() -> LossShape {
+    // The bare-quorum scenario, its own BUGGIFY location: the most recent
+    // slot, decided on a quorum short of every member, left no clean copy,
+    // so its tally is `faulty, faulty, none` and the no-op fill must be
+    // refused. Drawn whole, not as the product of the coins below.
+    if buggify_with_prob!(0.25) {
+        assert_reachable!("storage: an outage draws the bare-quorum loss");
+        return LossShape::BARE_QUORUM;
+    }
     let lossy = buggify_with_prob!(0.4);
     LossShape {
         recent: buggify_with_prob!(0.5),
@@ -177,7 +194,7 @@ fn draw_loss() -> LossShape {
 }
 
 /// Plan the outage's losses in every genesis journal (see the module doc).
-fn plan_losses(state: &StateHandle, loss: LossShape) {
+pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) {
     let plan = crate::shape::journals(state);
     for journal in plan.ids {
         let audit = crate::audit::audit_world_for(state, journal);

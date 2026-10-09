@@ -391,6 +391,21 @@ impl AuditWorld {
         self.lock().note_faulty_copies(node, faulty);
     }
 
+    /// Whether a configuration bound to some ballot removed a member of the
+    /// bootstrap one (#263): the departed straggler's first half, what the
+    /// late outage waits for (`crate::world::late_outage`).
+    pub(crate) fn has_departure(&self) -> bool {
+        let st = self.lock();
+        st.bootstrap.as_ref().is_some_and(|bootstrap| {
+            st.configs.values().any(|config| {
+                bootstrap
+                    .members()
+                    .iter()
+                    .any(|member| !config.members().contains(member))
+            })
+        })
+    }
+
     /// The slots a durable accept quorum decided (#263: what an outage
     /// aims at), above the pruned prefix, each with the members of the
     /// configuration its deciding ballot was bound to (the departed
