@@ -27,8 +27,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209).
 - `src/bin/parosctl/main.rs` → `parosctl` → global options, server ids discovered from
   `Inspect`, `init` vs the cell commands, exit codes.
-- `src/bin/parosctl/init.rs` → `parosctl init` over `paros::client::bootstrap`, then its fleet
-  steps over `paros::client::fleet` (#229).
+- `src/bin/parosctl/init.rs` → `parosctl init`: prints what `paros::client::initialize` came to
+  (the cell step, the claim, the fleet steps; #229, #246).
 - `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete|list` over
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
