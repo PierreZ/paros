@@ -88,6 +88,10 @@ impl ColocatedNode {
         // retry sweep answers it unserved — the client asks again, here or
         // elsewhere, once a won leadership's beat has been heard.
         let Some(basis) = self.read_basis() else {
+            probe!(
+                reachable,
+                "quorum read: a node without a read basis opens no read"
+            );
             self.counters.quorum_reads_without_basis += 1;
             assert!(
                 self.config.has_matchmakers(),
@@ -151,6 +155,10 @@ impl ColocatedNode {
         // until its membership probe (or a leader) has told it what is in
         // force, or a read could complete over a promise it forgot.
         if self.config.has_matchmakers() && self.belief_source == BeliefSource::Bootstrap {
+            probe!(
+                reachable,
+                "quorum read: a rebooted node answers no pre-read before it heard"
+            );
             self.counters.pre_reads_refused_unheard += 1;
             // Negative space: an unheard belief is bound to no ballot, the
             // very thing an answer would have misreported.

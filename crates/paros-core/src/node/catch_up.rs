@@ -86,6 +86,10 @@ impl ColocatedNode {
             // trim point) serves past the hole; faulty means silence, not
             // garbage.
             if *slot != expected {
+                probe!(
+                    reachable,
+                    "catch-up: a replay stops at the server's own faulty chosen record"
+                );
                 break;
             }
             expected = Slot(slot.0 + 1);

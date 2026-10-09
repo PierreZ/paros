@@ -300,6 +300,10 @@ impl ProxyLeader {
             // A round this proxy already decided at this ballot: the
             // leader's `Commit` is on its way or was lost, and liveness is
             // the leader's take-back, never a second `Commit` from here.
+            probe!(
+                reachable,
+                "proxy: a re-delegation of a slot it already decided is ignored"
+            );
             self.counters.ignored += 1;
             return;
         }

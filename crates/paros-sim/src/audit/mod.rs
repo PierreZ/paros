@@ -2212,38 +2212,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .campaign_refused(node, ballot, &refusal);
     }
 
-    fn campaign_skipped_non_member(&self, _node: NodeId, _count: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.non_member_campaign_skipped,
-            "reconfiguration: a node outside the acceptor set declines to campaign"
-        );
-    }
-
-    fn read_without_basis(&self, _node: NodeId, _count: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.read_without_basis,
-            "quorum read: a node without a read basis opens no read"
-        );
-    }
-
-    fn pre_read_refused_unheard(&self, _node: NodeId, _count: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.pre_read_refused_unheard,
-            "quorum read: a rebooted node answers no pre-read before it heard"
-        );
-    }
-
-    fn non_member_leader_resigned(&self, _node: NodeId, _count: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.non_member_leader_resigned,
-            "reconfiguration: a leader its own reconfiguration removed resigns"
-        );
-    }
-
     fn reconfigure_acked(&self, node: NodeId, _members: &[NodeId], result: ReconfigureResult) {
         let mut st = self.state();
         match result {
