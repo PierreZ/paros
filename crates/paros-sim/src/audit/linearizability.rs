@@ -601,7 +601,10 @@ pub(crate) fn check(attempts: &[Attempt], mode: WriterMode, budget: u64) -> Verd
         } else if let Some(undo) = model.step(i) {
             let forced = attempts[i].seen.is_some() && model.unchanged(undo);
             pending.remove(attempts, i);
-            if pending.lowest().is_some_and(|lowest| lowest < model.scalars.next_seq) {
+            if pending
+                .lowest()
+                .is_some_and(|lowest| lowest < model.scalars.next_seq)
+            {
                 // `next_seq` only grows: an answered attempt still to place
                 // saw it lower, so no order from here places it.
                 pending.add(attempts, i);
