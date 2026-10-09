@@ -261,3 +261,133 @@ fn a_member_of_its_default_probes_and_registers_only_what_it_heard() {
         "the only registration is the set the probe heard"
     );
 }
+
+/// The #278 wedge, shape A: a rotation that reached one matchmaker of three,
+/// whose answer arrives after the other two closed the probe. The late
+/// answer is folded as the probe would have folded it, and the node it
+/// names campaigns.
+#[test]
+fn a_late_probe_answer_moves_an_outside_node() {
+    let mut mms = registries(3);
+    matchmake(
+        &mut mms,
+        vec![(
+            MatchmakerId(2),
+            MatchRequest::reconfigure(NodeId(2), ballot(2, 2), cfg(&[3, 4, 5]), G0),
+        )],
+    );
+    let mut n = rebooted_member();
+    fire_election(&mut n);
+    let (late, early): (Vec<_>, Vec<_>) = drain_match_requests(&mut n)
+        .into_iter()
+        .partition(|(id, _)| *id == MatchmakerId(2));
+    let steps: Vec<MatchStep> = matchmake(&mut mms, early)
+        .into_iter()
+        .map(|r| n.on_match_reply(r))
+        .collect();
+    assert!(steps.contains(&MatchStep::ProbeClosed {
+        effective: None,
+        member: false,
+    }));
+    assert_eq!(n.role(), NodeRole::Follower);
+    let steps: Vec<MatchStep> = matchmake(&mut mms, late)
+        .into_iter()
+        .map(|r| n.on_match_reply(r))
+        .collect();
+    assert_eq!(
+        steps,
+        [MatchStep::ProbeLate {
+            effective: Some(ballot(2, 2)),
+            member: true,
+        }]
+    );
+    assert_eq!(*n.acceptors(), cfg(&[3, 4, 5]));
+    assert_eq!(n.role(), NodeRole::Candidate);
+}
+
+/// A late answer that names no newer fact, or lands after a campaign
+/// opened, moves nothing.
+#[test]
+fn a_late_probe_answer_after_a_campaign_is_ignored() {
+    let mut mms = rotated_registries();
+    let mut n = rebooted_member();
+    fire_election(&mut n);
+    let (late, early): (Vec<_>, Vec<_>) = drain_match_requests(&mut n)
+        .into_iter()
+        .partition(|(id, _)| *id == MatchmakerId(2));
+    for reply in matchmake(&mut mms, early) {
+        n.on_match_reply(reply);
+    }
+    assert_eq!(n.role(), NodeRole::Candidate, "the quorum named it");
+    let steps: Vec<MatchStep> = matchmake(&mut mms, late)
+        .into_iter()
+        .map(|r| n.on_match_reply(r))
+        .collect();
+    assert_eq!(steps, [MatchStep::Ignored]);
+    assert_eq!(n.role(), NodeRole::Candidate);
+}
+
+/// The #278 wedge, shape B: a node that promised an ordinary campaign at
+/// round 4 learned its `C_b`, which leaves it outside. The reconfiguration
+/// at round 2 that names it is an older ballot but a fact, and the campaign
+/// was only promised, never known to win: the probe adopts the fact, and
+/// keeps the belief bound at round 4 so no `Prepare` at or below it flips
+/// it back.
+#[test]
+fn a_probe_prefers_a_fact_to_a_campaign_heard_belief() {
+    let mut mms = rotated_registries();
+    let mut n = rebooted_member();
+    n.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot: ballot(4, 1),
+        from_slot: Slot(0),
+        config: Some(cfg(&[0, 1, 2])),
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.belief_source(), BeliefSource::Heard);
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    fire_election(&mut n);
+    let steps: Vec<MatchStep> = matchmake(&mut mms, drain_match_requests(&mut n))
+        .into_iter()
+        .map(|r| n.on_match_reply(r))
+        .collect();
+    assert!(steps.contains(&MatchStep::ProbeClosed {
+        effective: Some(ballot(4, 1)),
+        member: true,
+    }));
+    assert_eq!(*n.acceptors(), cfg(&[3, 4, 5]));
+    assert_eq!(n.acceptors_since(), ballot(4, 1));
+    assert_eq!(n.role(), NodeRole::Candidate);
+}
+
+/// A leadership this node knows won outranks an older reconfiguration a
+/// matchmaker still holds (#278): the rotation at round 2 was never in
+/// effect if a leader won round 4 under `{0, 1, 2}`, and a spare that
+/// adopted it would finish a rotation nobody was told of.
+#[test]
+fn a_won_leadership_outranks_an_older_reconfiguration() {
+    let mut mms = rotated_registries();
+    let mut n = rebooted_member();
+    n.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: ballot(4, 1),
+        commit: None,
+        config: Some(cfg(&[0, 1, 2])),
+        fence: None,
+    });
+    fire_election(&mut n);
+    let steps: Vec<MatchStep> = matchmake(&mut mms, drain_match_requests(&mut n))
+        .into_iter()
+        .map(|r| n.on_match_reply(r))
+        .collect();
+    assert!(steps.contains(&MatchStep::ProbeClosed {
+        effective: Some(ballot(4, 1)),
+        member: false,
+    }));
+    assert_eq!(
+        *n.acceptors(),
+        cfg(&[0, 1, 2]),
+        "the won configuration stands"
+    );
+    assert_eq!(n.role(), NodeRole::Follower);
+}

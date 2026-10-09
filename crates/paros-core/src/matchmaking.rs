@@ -623,6 +623,20 @@ impl Matchmaking {
 ///   adopts only a strictly newer configuration: a quorum that misses the
 ///   one holder never moves a belief backwards. The sweep went red on
 ///   "cluster converged after chaos" without the re-probe and green with it.
+/// - **Still outside after the re-probe** (#278), two ways. A node that
+///   promised an ordinary campaign learned its `C_b` bound to the
+///   campaign's ballot, and "strictly newer" compared the reconfiguration
+///   fact naming it against that ballot, so an older fact never won; and
+///   with fixed per-pair latencies the one holder of a minority-registered
+///   rotation answered after the quorum on every re-probe, and the answer
+///   was dropped. So a probe compares a reconfiguration against what this
+///   node knows to be in force, never a campaign it only promised: the fact
+///   its belief matches (kept while the wire confirms the same
+///   configuration) or a leadership it knows won, whichever is higher; and
+///   a probe that closed with its node outside still folds its late
+///   answers. Two hunt seeds went red on "every node
+///   converges to the cluster's chosen prefix" without both and green with
+///   them.
 ///
 /// Why a quorum of effective configurations suffices: a reconfiguration is
 /// honored once its registration landed at a matchmaker quorum, which raised

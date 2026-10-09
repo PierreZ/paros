@@ -391,19 +391,15 @@ impl AuditWorld {
         self.lock().note_faulty_copies(node, faulty);
     }
 
-    /// Whether a configuration bound to some ballot removed a member of the
-    /// bootstrap one (#263): the departed straggler's first half, what the
-    /// late outage waits for (`crate::world::late_outage`).
+    /// Whether a leadership won under a configuration that removed a member
+    /// of the bootstrap one (#263, #278): the removal took effect, the
+    /// departed straggler's first half, what the late outage waits for
+    /// (`crate::world::late_outage`). A configuration merely registered at
+    /// one matchmaker does not count: the outage once struck 3 ms after a
+    /// lone registration, mid-reconfiguration, outside the scenario the
+    /// budget describes.
     pub(crate) fn has_departure(&self) -> bool {
-        let st = self.lock();
-        st.bootstrap.as_ref().is_some_and(|bootstrap| {
-            st.configs.values().any(|config| {
-                bootstrap
-                    .members()
-                    .iter()
-                    .any(|member| !config.members().contains(member))
-            })
-        })
+        self.lock().departure_effective
     }
 
     /// The slots a durable accept quorum decided (#263: what an outage

@@ -208,6 +208,7 @@ impl ColocatedNode {
                 "a configuration bound to a ballot is a heard belief"
             );
         }
+        self.assert_fact_invariants();
         if self.probe.is_some() && self.belief_source == BeliefSource::Heard {
             assert!(
                 !self.acceptors.contains(self.config.id),
@@ -228,6 +229,43 @@ impl ColocatedNode {
                     .as_ref()
                     .is_some_and(|p| p.ballot().round <= self.round_floor),
                 "every later campaign opens above an open probe's tag"
+            );
+        }
+    }
+
+    /// The matched reconfiguration fact and a closed probe's tag (#278).
+    fn assert_fact_invariants(&self) {
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.closed_probe.is_none(),
+                "a plain deployment never keeps a closed probe's tag"
+            );
+            assert!(
+                self.belief_fact == Ballot::zero(),
+                "a plain deployment matches no reconfiguration fact"
+            );
+        }
+        // The matched reconfiguration fact (#278) is a heard one, never
+        // above the ballot the belief is bound to; a closed probe's tag is
+        // kept only while no probe is open.
+        assert!(
+            self.belief_fact <= self.acceptors_since,
+            "a belief is bound at or above the fact it matches"
+        );
+        if self.belief_fact != Ballot::zero() {
+            assert!(
+                self.belief_source == BeliefSource::Heard,
+                "a matched reconfiguration fact is a heard belief"
+            );
+        }
+        if self.closed_probe.is_some() {
+            assert!(
+                self.probe.is_none(),
+                "a closed probe's tag never coexists with an open probe"
+            );
+            assert!(
+                self.matchmaking.is_none(),
+                "a closed probe's tag never coexists with a campaign"
             );
         }
     }

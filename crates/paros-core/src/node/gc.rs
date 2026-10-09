@@ -275,7 +275,11 @@ impl ColocatedNode {
     ///    rather than an operator's belief; and
     /// 5. the configuration this node believes in force is bound to exactly
     ///    `watermark` (`acceptors_since == watermark`): the belief condition 2
-    ///    reads is `C_w`, the configuration the floor was computed over.
+    ///    reads is `C_w`, the configuration the floor was computed over. A
+    ///    probe may bind a reconfiguration it adopted at a higher campaign
+    ///    ballot it heard (#278); it does so only from outside the belief it
+    ///    replaces, so the node is outside `C_w` then too, which is what
+    ///    legs 2 and 5 together need.
     ///
     /// Condition 5 closes the retirement window (#165). Conditions 2 and 4
     /// are both read off what this node *heard*, and a node can be a member
