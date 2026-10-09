@@ -1151,7 +1151,12 @@ async fn claim(
     );
     assert_always!(
         outcome != ClaimOutcome::UnknownJournal,
-        "chain: a node serves the journal the client names"
+        "chain: a node serves the journal the client names",
+        {
+            "node" => nodes.id_of(target),
+            "tenant" => journal.tenant.0,
+            "journal" => journal.journal.0
+        }
     );
     outcome
 }
@@ -1750,7 +1755,12 @@ impl Workload for ChainWorkload {
                                 },
                             )
                             .await;
-                        let result = judged_write(report.outcome, false);
+                        let result = judged_write(
+                            report.outcome,
+                            false,
+                            nodes.id_of(report.server),
+                            writer.journal(),
+                        );
                         if report.redirects > 0 && matches!(result, WriteOutcome::Written { .. }) {
                             redirected_written = true;
                         }
@@ -1783,7 +1793,12 @@ impl Workload for ChainWorkload {
                                 let again = nodes
                                     .write_attempt(retry_target, request.clone(), None)
                                     .await;
-                                match judged_write(again, false) {
+                                match judged_write(
+                                    again,
+                                    false,
+                                    nodes.id_of(retry_target),
+                                    writer.journal(),
+                                ) {
                                     WriteOutcome::Written { seq, count, .. } => {
                                         Some(Resolution::Written { seq, count })
                                     }
@@ -2334,7 +2349,12 @@ impl Workload for ChainWorkload {
                         answer if answered => {
                             assert_always!(
                                 answer != ReadOutcome::UnknownJournal,
-                                "chain: a node serves the journal the client names"
+                                "chain: a node serves the journal the client names",
+                                {
+                                    "node" => readers.id_of(drawn),
+                                    "tenant" => named.tenant.0,
+                                    "journal" => named.journal.0
+                                }
                             );
                             judge_read(&audit, from, &answer, &written);
                             let tail = answer
@@ -3389,7 +3409,16 @@ impl Workload for ChainWorkload {
                     }
                     WriterOutcome::UnknownJournal => {
                         self.history.record_write_failed(submission.op);
-                        assert_always!(false, "chain: a node serves the journal the client names");
+                        let journal = writer.journal();
+                        assert_always!(
+                            false,
+                            "chain: a node serves the journal the client names",
+                            {
+                                "node" => nodes.id_of(target),
+                                "tenant" => journal.tenant.0,
+                                "journal" => journal.journal.0
+                            }
+                        );
                     }
                     WriterOutcome::Ambiguous => {
                         self.history.record_write_failed(submission.op);

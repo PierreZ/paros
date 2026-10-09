@@ -228,8 +228,15 @@ fn seen(answer: Answered<'_>) -> Option<Seen> {
 /// Judge a `Write` outcome against the oracles every answer passes: a node
 /// serves the journal the client names, and names a well-formed state. On
 /// a journal `created` at runtime (#189) an unknown answer is no verdict:
-/// a member that has not folded the create yet does not serve it.
-pub(super) fn judged_write(outcome: WriteOutcome, created: bool) -> WriteOutcome {
+/// a member that has not folded the create yet does not serve it. `node`
+/// is the node that answered and `journal` the one the client named, for
+/// the violation's detail (#265).
+pub(super) fn judged_write(
+    outcome: WriteOutcome,
+    created: bool,
+    node: u64,
+    journal: JournalIdentifier,
+) -> WriteOutcome {
     assert_always!(
         outcome != WriteOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
@@ -240,7 +247,8 @@ pub(super) fn judged_write(outcome: WriteOutcome, created: bool) -> WriteOutcome
     }
     assert_always!(
         outcome != WriteOutcome::UnknownJournal,
-        "chain: a node serves the journal the client names"
+        "chain: a node serves the journal the client names",
+        { "node" => node, "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
     );
     match outcome {
         WriteOutcome::UnknownJournal => WriteOutcome::Redirect { leader: None },
@@ -250,7 +258,12 @@ pub(super) fn judged_write(outcome: WriteOutcome, created: bool) -> WriteOutcome
 }
 
 /// [`judged_write`] for a `SetLeader` outcome.
-pub(super) fn judged_set_leader(outcome: SetLeaderOutcome, created: bool) -> SetLeaderOutcome {
+pub(super) fn judged_set_leader(
+    outcome: SetLeaderOutcome,
+    created: bool,
+    node: u64,
+    journal: JournalIdentifier,
+) -> SetLeaderOutcome {
     assert_always!(
         outcome != SetLeaderOutcome::Malformed,
         "chain: a node answers a well-formed journal state"
@@ -261,7 +274,8 @@ pub(super) fn judged_set_leader(outcome: SetLeaderOutcome, created: bool) -> Set
     }
     assert_always!(
         outcome != SetLeaderOutcome::UnknownJournal,
-        "chain: a node serves the journal the client names"
+        "chain: a node serves the journal the client names",
+        { "node" => node, "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
     );
     match outcome {
         SetLeaderOutcome::UnknownJournal => SetLeaderOutcome::Redirect { leader: None },
@@ -311,7 +325,8 @@ pub(super) fn write_once(
 ) -> impl Future<Output = WriteOutcome> + use<> {
     let listen = abandon.then_some(Duration::from_millis(10));
     let attempt = nodes.write_attempt(target, write_request(journal, entry), listen);
-    async move { judged_write(attempt.await, created) }
+    let node = nodes.id_of(target);
+    async move { judged_write(attempt.await, created, node, journal) }
 }
 
 /// One `SetLeader(new, old)` asked of server `target`; `created` as for
@@ -324,7 +339,8 @@ pub(super) fn set_leader_once(
     created: bool,
 ) -> impl Future<Output = SetLeaderOutcome> + use<> {
     let attempt = nodes.set_leader_attempt(target, journal, new, old);
-    async move { judged_set_leader(attempt.await, created) }
+    let node = nodes.id_of(target);
+    async move { judged_set_leader(attempt.await, created, node, journal) }
 }
 
 /// One journal `Read` of `journal` from `from`, asked of server `target`.
