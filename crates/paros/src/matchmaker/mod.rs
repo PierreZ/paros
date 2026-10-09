@@ -33,7 +33,8 @@ use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
-use crate::hooks::{DriverHooks, Reply, Seam};
+use crate::hooks::{DriverHooks, Reply};
+use crate::moment::crash_moment;
 use crate::storage::StorageError;
 
 pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite};
@@ -45,31 +46,6 @@ fn storage_fault_crash<A: Audit>(audit: &A, id: MatchmakerId, e: StorageError) -
     audit.matchmaker_storage_fault(id, &e, StorageFaultDecision::Crash);
     tracing::warn!(matchmaker = id.0, error = %e, decision = "crash", "matchmaker_storage_fault");
     RunError::Storage(e)
-}
-
-/// The matchmaker driver's twin of the node driver's `crash_if`, reported
-/// through [`Audit::matchmaker_crashed`].
-///
-/// # Errors
-///
-/// [`RunError::SeamCrash`] when the hook fires.
-fn match_crash_if<H: DriverHooks, A: Audit>(
-    armed: bool,
-    hooks: &H,
-    audit: &A,
-    matchmaker: MatchmakerId,
-    seam: Seam,
-) -> Result<(), RunError> {
-    if armed && hooks.crash_at(seam) {
-        audit.matchmaker_crashed(matchmaker, seam);
-        tracing::info!(
-            matchmaker = matchmaker.0,
-            seam = seam.label(),
-            "matchmaker_crashed"
-        );
-        return Err(RunError::SeamCrash(seam));
-    }
-    Ok(())
 }
 
 /// #183: judge the operator's claim against the registry's format marker,
@@ -202,24 +178,30 @@ where
         staged.map_err(|e| storage_fault_crash(audit, id, e))?;
     }
     if !writes.is_empty() {
-        // Crash seam: staged but not flushed — the batch dies whole, and no
-        // reply has been handed out yet.
-        match_crash_if(true, hooks, audit, id, Seam::MatchBeforeSync)?;
+        // A crash-worthy moment: staged but not flushed — the batch dies
+        // whole, and no reply has been handed out yet. A matchmaker drains a
+        // batch only on a round change, a handful per run, so the rate is an
+        // order above the node's write moments.
+        crash_moment!(
+            true,
+            "registration staged, not synced",
+            0.15,
+            "matchmaker: the driver crashes before syncing a registration"
+        );
         storage
             .sync()
             .await
             .map_err(|e| storage_fault_crash(audit, id, e))?;
         surface_registry_writes(&writes, id, audit);
     }
-    // 2. Crash seam: durable, but the reply never leaves. Only meaningful when
-    //    there is a reply to lose.
-    match_crash_if(
+    // 2. A crash-worthy moment: durable, but the reply never leaves. Only
+    //    meaningful when there is a reply to lose.
+    crash_moment!(
         !replies.is_empty() || !reconfigure_replies.is_empty(),
-        hooks,
-        audit,
-        id,
-        Seam::MatchAfterSyncBeforeReply,
-    )?;
+        "registration durable, reply not sent",
+        0.15,
+        "matchmaker: the driver crashes after syncing and before replying"
+    );
     Ok(Drained {
         replies,
         reconfigure_replies,

@@ -11,7 +11,8 @@ use paros_core::{
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
-use crate::hooks::{DriverHooks, Seam};
+use crate::hooks::DriverHooks;
+use crate::moment::crash_moment;
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
@@ -222,24 +223,19 @@ where
         report_recovery_batch(audit, self_id, batch);
     }
 
-    // Crash seam: after the batch is durable but before its messages leave. The
-    // durable writes survive; the batch's messages are dropped (never sent), so a
-    // recovered node must re-derive them. Only meaningful when there is durable
-    // work or a message to lose.
-    if (!writes.is_empty()
-        || !messages.is_empty()
-        || !match_requests.is_empty()
-        || !gc_requests.is_empty())
-        && hooks.crash_at(Seam::AfterSyncBeforeSend)
-    {
-        audit.crashed(NodeId(self_id), Seam::AfterSyncBeforeSend);
-        tracing::info!(
-            node = self_id,
-            seam = Seam::AfterSyncBeforeSend.label(),
-            "crashed"
-        );
-        return Err(RunError::SeamCrash(Seam::AfterSyncBeforeSend));
-    }
+    // A crash-worthy moment: the batch is durable but its messages have not
+    // left. The durable writes survive; the messages are lost, so a recovered
+    // node must re-derive them. Only meaningful when there is durable work or
+    // a message to lose.
+    crash_moment!(
+        !writes.is_empty()
+            || !messages.is_empty()
+            || !match_requests.is_empty()
+            || !gc_requests.is_empty(),
+        "batch durable, not sent",
+        0.05,
+        "the driver crashes after sync and before sending a batch"
+    );
 
     // 2. Send messages — only after (1) is durable.
     // A reconfiguring campaign's `Prepare` carries a configuration other
@@ -275,16 +271,16 @@ where
         audit,
     );
 
-    // Crash seam (#260): a reconfiguring candidate dies with its `Prepare`s
-    // in flight — after the batch is durable, sent, applied and its reads
-    // answered, so all it loses is the campaign itself.
-    crash_if(
+    // A crash-worthy moment (#260): a reconfiguring candidate dies with its
+    // `Prepare`s in flight — after the batch is durable, sent, applied and
+    // its reads answered, so all it loses is the campaign itself. A few per
+    // run, so the rate is far above the write moments'.
+    crash_moment!(
         sent_prepare,
-        hooks,
-        audit,
-        NodeId(self_id),
-        Seam::AfterPrepareSent,
-    )?;
+        "campaign Prepares in flight",
+        0.5,
+        "the driver crashes with a campaign's Prepares in flight"
+    );
 
     // The previous recovery page is now fully durable, sent, and applied. Only
     // at this boundary may the core materialize the next bounded Ready page;
@@ -433,17 +429,15 @@ pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
 
-    // Crash seam: the batch is staged but not yet flushed. A crash here loses the
-    // whole un-synced batch (and no message has been sent), so surface nothing but
-    // the crash marker itself. Only meaningful when the batch actually staged
-    // something.
-    crash_if(
+    // A crash-worthy moment: the batch is staged but not yet flushed. A crash
+    // here loses the whole un-synced batch (and no message has been sent).
+    // Only meaningful when the batch actually staged something.
+    crash_moment!(
         !writes.is_empty(),
-        hooks,
-        audit,
-        NodeId(self_id),
-        Seam::BeforeSync,
-    )?;
+        "batch staged, not synced",
+        0.05,
+        "the driver crashes before syncing a staged batch"
+    );
 
     if !writes.is_empty() {
         storage
@@ -532,29 +526,6 @@ fn surface_persisted<A: Audit>(
             WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) | WriteOp::Learned { .. } => {}
         }
     }
-}
-
-/// The crash seam: when `armed` (the seam has something to lose — an
-/// unarmed site never consults the hook, so it spends no draw) and the hook
-/// fires, report the crash where it happens and unwind the incarnation with
-/// [`RunError::SeamCrash`].
-///
-/// # Errors
-///
-/// [`RunError::SeamCrash`] when the hook fires.
-pub(crate) fn crash_if<H: DriverHooks, A: Audit>(
-    armed: bool,
-    hooks: &H,
-    audit: &A,
-    node: NodeId,
-    seam: Seam,
-) -> Result<(), RunError> {
-    if armed && hooks.crash_at(seam) {
-        audit.crashed(node, seam);
-        tracing::info!(node = node.0, seam = seam.label(), "crashed");
-        return Err(RunError::SeamCrash(seam));
-    }
-    Ok(())
 }
 
 /// Map a [`StorageError`] into the driver's **deliberate crash decision**: a

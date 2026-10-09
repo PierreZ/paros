@@ -36,6 +36,7 @@ mod hooks;
 pub mod journal;
 pub mod machine;
 mod matchmaker;
+mod moment;
 mod provision;
 mod proxy;
 mod replica_tier;
@@ -68,7 +69,7 @@ pub mod wire {
         checkpoint, common, fleet, internal, machine, matchmaker, public, system,
     };
 }
-pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply, Seam};
+pub use hooks::{DriverHooks, HandoffContext, NoHooks, Reply};
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};
 pub use matchmaker::{
     MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite, run_matchmaker,

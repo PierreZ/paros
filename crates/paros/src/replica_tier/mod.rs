@@ -55,7 +55,8 @@ use crate::audit::Audit;
 use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
-use crate::driver::ready::{crash_if, persist_writes, report_applied, storage_fault_crash};
+use crate::driver::ready::{persist_writes, report_applied, storage_fault_crash};
+use crate::moment::crash_moment;
 use crate::driver::reply::answer;
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
@@ -125,13 +126,12 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
         audit,
     )
     .await?;
-    crash_if(
+    crash_moment!(
         !writes.is_empty() || !messages.is_empty(),
-        hooks,
-        audit,
-        NodeId(self_id),
-        Seam::AfterSyncBeforeSend,
-    )?;
+        "replica batch durable, not sent",
+        0.05,
+        "the driver crashes after sync and before sending a batch"
+    );
     send_messages(out, hooks, audit, replica.config().journal, messages);
     for (slot, command, outcome) in &committed {
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
