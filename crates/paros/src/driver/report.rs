@@ -9,26 +9,37 @@ use paros_core::{
 };
 
 use crate::audit::Audit;
-use crate::hooks::HandoffContext;
 
 use super::ready::ClientWaiters;
 
+/// What a cooperative leader handoff would transfer right now, read from
+/// the core's public accessors. Pure observation: nothing here changes with
+/// the decision it feeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandoffContext {
+    /// Slots between this leader's contiguous chosen prefix and its
+    /// allocator frontier: the unfinished business a transfer carries.
+    pub(crate) tail: usize,
+    /// Whether the transfer is clean: nothing unfinished below the frontier.
+    pub(crate) settled: bool,
+    /// Whether this leader holds a chosen slot above its applied prefix: a
+    /// hole ordinary replication is still healing.
+    pub(crate) healing: bool,
+}
+
 /// What a handoff would transfer right now, from the core's public read views:
 /// the span between this leader's contiguous chosen prefix and its allocator
-/// frontier, plus whether it is itself still healing a hole.
-///
-/// Pure observation — it exists only so [`DriverHooks::initiate_handoff`] can be
-/// biased toward the interesting shapes instead of firing uniformly.
-pub(crate) fn handoff_context(node: &ColocatedNode, candidates: usize) -> HandoffContext {
+/// frontier, plus whether it is itself still healing a hole. It lets the
+/// handoff sites bias toward the interesting shapes instead of firing
+/// uniformly, and it shapes the handoff trace.
+pub(crate) fn handoff_context(node: &ColocatedNode) -> HandoffContext {
     let first_unchosen = node.hard_state().chosen_index.map_or(0, |ci| ci.0 + 1);
     let tail = usize::try_from(node.proposer().next_slot().0.saturating_sub(first_unchosen))
         .unwrap_or(usize::MAX);
     HandoffContext {
         tail,
-        next_slot: node.proposer().next_slot(),
         settled: tail == 0,
         healing: node.replica().chosen_gap().is_some(),
-        candidates,
     }
 }
 
@@ -126,7 +137,7 @@ fn report_handoff<A: Audit>(
     if installed_now && let LeadershipOrigin::Handoff { from } = node.leadership_origin() {
         let ballot = node.ballot();
         let next_slot = node.proposer().next_slot();
-        let tail = u64::try_from(handoff_context(node, 0).tail).unwrap_or(u64::MAX);
+        let tail = u64::try_from(handoff_context(node).tail).unwrap_or(u64::MAX);
         audit.authority_installed(NodeId(self_id), from, ballot, next_slot, tail);
         tracing::info!(
             node = self_id,

@@ -249,7 +249,7 @@ where
     let sent_prepare = messages.iter().any(|(_, msg)| {
         matches!(msg, Message::Prepare { config: Some(config), .. } if config != node.acceptors())
     });
-    send_messages(out, hooks, audit, journal, messages);
+    send_messages(out, audit, journal, messages);
 
     // 3. Learn the entries the chosen prefix walked over (already durable, in
     //    contiguous order) — surface them and the journal state machine's
@@ -272,7 +272,6 @@ where
         fold_head(node),
         leader,
         NodeId(self_id),
-        hooks,
         audit,
     );
 

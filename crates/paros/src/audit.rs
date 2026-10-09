@@ -537,9 +537,9 @@ pub trait Audit {
     }
 
     /// This node answered a journal `Read` `served: false` because its
-    /// quorum read did not confirm: `early` when the
-    /// `expire_parked_read_early` hook fired before the read's confirmation
-    /// deadline, otherwise the deadline itself ran out.
+    /// quorum read did not confirm: `early` when the driver's inline
+    /// early-expiry location fired before the read's confirmation deadline,
+    /// otherwise the deadline itself ran out.
     fn read_expired(&self, node: NodeId, early: bool) {}
 
     /// `from` (a node, or a proxy leader) dropped one outbound message at a
@@ -633,10 +633,6 @@ pub trait Audit {
     /// `ballot` to `leader`, the node that delegated the round, and closed
     /// the round.
     fn proxy_nack_relayed(&self, proxy: ProxyId, leader: NodeId, slot: Slot, ballot: Ballot) {}
-
-    /// The proxy leader `proxy` deliberately skipped this beat's re-fan-out
-    /// of its open rounds ([`DriverHooks::skip_proxy_resend`](crate::DriverHooks)).
-    fn proxy_resend_skipped(&self, proxy: ProxyId) {}
 
     /// This node lost its leadership with `calls` journal calls still
     /// parked, whose slots may yet decide under the successor: their clients
@@ -841,10 +837,6 @@ pub trait Audit {
     ) {
     }
 
-    /// This leader deliberately skipped re-sending its open GC request this
-    /// beat ([`DriverHooks::skip_gc_resend`](crate::DriverHooks)).
-    fn gc_resend_skipped(&self, node: NodeId) {}
-
     /// This leader folded `matchmaker`'s GC ack: what it did to the campaign
     /// — one more ack, or the quorum that makes the floor effective and
     /// names the retirable acceptors.
@@ -875,10 +867,6 @@ pub trait Audit {
         request: &ReconfigureRequest,
     ) {
     }
-
-    /// This node deliberately skipped re-sending its running handover's
-    /// requests this beat ([`DriverHooks::skip_reconfigurer_resend`](crate::DriverHooks)).
-    fn reconfigurer_resend_skipped(&self, node: NodeId) {}
 
     /// This node abandoned a handover whose running phase made no progress
     /// for `reconfigure_timeout_elections` election timeouts (a member that

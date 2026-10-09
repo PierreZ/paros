@@ -9,7 +9,7 @@ use paros_core::{MatchmakerId, NodeId};
 use tokio::sync::mpsc;
 
 use crate::audit::Audit;
-use crate::hooks::{DriverHooks, Reply};
+use crate::hooks::{DriverHooks, NoHooks, Reply};
 use crate::rpc::ReplySender;
 
 /// Whether to drop this one reply of `kind` after the server state advanced.
@@ -82,6 +82,22 @@ pub(crate) fn answer<T, H: DriverHooks, A: Audit>(
     } else {
         let _ = waiter.send(ack);
     }
+}
+
+/// [`answer`] for a read's reply, which the lost-verdict latch never
+/// touches: only the reply seam's own location for its kind applies.
+pub(crate) fn answer_read<T, A: Audit>(
+    audit: &A,
+    node: NodeId,
+    kind: Reply,
+    waiter: ReplySender<T>,
+    ack: T,
+) {
+    assert!(
+        matches!(kind, Reply::LogRead | Reply::ReadUnserved),
+        "only a read's reply skips the lost-verdict latch"
+    );
+    answer(&NoHooks, audit, node, kind, waiter, ack);
 }
 
 /// The matchmaker driver's twin of [`answer`]: the same locations, with the

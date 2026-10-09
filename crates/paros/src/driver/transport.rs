@@ -17,7 +17,6 @@ use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::hooks::DriverHooks;
 use crate::rpc::methods::DeliverRpc;
 use crate::rpc::{internal, message_to_proto, well_known};
 
@@ -65,18 +64,18 @@ use super::events::{command_hash, message_kind, message_route, proto_message_kin
 /// message per non-empty lane in journal order. The per-kind eviction rule
 /// holds inside a lane; a journal is never crowded out by another.
 ///
-/// The mailbox also carries the two **drain-side** hook decisions
-/// ([`DriverHooks::hold_peer_delivery`], [`DriverHooks::reverse_delivery_batch`]).
+/// The mailbox also carries the two **drain-side** BUGGIFY decisions (hold
+/// the next batch a tick, reverse it), drawn in [`Outbound::transmit`].
 /// They are taken here, at enqueue time on the node loop, and merely *read* by
 /// the delivery task, because a decision is a randomness draw and the delivery
 /// task is `spawn_task(..).detach()`ed: a detached task's poll schedule is not
 /// part of the simulation's deterministic step order the way the node loop is,
 /// so drawing inside one lets a task that outlives its simulation shift the
-/// *next* run's draw sequence. That is not a theoretical hazard — consulting
-/// these two hooks from inside the delivery task broke
+/// *next* run's draw sequence. That is not a theoretical hazard — drawing
+/// these two decisions inside the delivery task broke
 /// `same_seed_replays_identically` on CI (seed 42's first in-process replay
 /// diverged from its second, on a run that was clean locally). Deciding on the
-/// node loop restores the invariant every other hook already had: **simulation
+/// node loop restores the invariant every other site already has: **simulation
 /// randomness is drawn only where the simulation is stepping deterministically.**
 #[derive(Clone)]
 pub(crate) struct PeerMailbox {
@@ -240,9 +239,9 @@ impl PeerMailbox {
     /// the mailbox is full: the oldest of the *same kind* as `message` if one
     /// is queued, else the oldest overall — unless `evict_across_kinds`, which
     /// takes the oldest overall outright. `overtake` enqueues at the front
-    /// instead of the back. Both are the driver-hook perturbations
-    /// ([`DriverHooks::overtake_in_mailbox`], [`DriverHooks::evict_across_kinds`]);
-    /// production passes `false` for both. Never blocks.
+    /// instead of the back. Both are BUGGIFY perturbations drawn in
+    /// [`Outbound::transmit`]; production passes `false` for both. Never
+    /// blocks.
     #[tracing::instrument(level = "trace", skip_all, fields(overtake, evict_across_kinds))]
     fn push(
         &self,
@@ -472,9 +471,8 @@ impl Outbound {
     /// proposer attempted, independently of delivery. The `msg_sent` trace
     /// event is the human-readable mirror; nothing reads it back.
     #[tracing::instrument(level = "trace", skip_all, fields(from = %self.sender, to = %to, kind = message_kind(msg)))]
-    pub(crate) fn transmit<H: DriverHooks, A: Audit>(
+    pub(crate) fn transmit<A: Audit>(
         &self,
-        hooks: &H,
         audit: &A,
         journal: JournalIdentifier,
         to: Party,
@@ -542,14 +540,25 @@ impl Outbound {
             // receiver demuxes on the pair.
             message.tenant = journal.tenant.0;
             message.journal = journal.journal.0;
-            // The mailbox's four decisions, all taken here on the node loop,
-            // each consulted only where it can have an observable effect.
+            // The mailbox's four decisions, each its own BUGGIFY location,
+            // all drawn here on the node loop, each only where it can have an
+            // observable effect, and silent in the recovery tail.
             //
-            // Two act on this enqueue: overtake needs something already queued
-            // to jump, evicting across kinds needs a full queue to evict from.
-            let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
+            // Two act on this enqueue. Overtake needs something already
+            // queued to jump: a per-peer stream is otherwise delivered in
+            // enqueue order, so this is the only in-stream reorder. Evicting
+            // across kinds needs a full queue to evict from; kept occasional,
+            // because a systematic cross-kind eviction is the starvation the
+            // per-kind default exists to prevent.
+            let overtake = !queue.is_empty() && moonpool_buggify::buggify_fault_with_prob!(0.02);
+            if overtake {
+                moonpool_assertions::reachable!("mailbox: a message overtakes its peer queue");
+            }
             let evict_across_kinds = queue.is_full((journal.tenant.0, journal.journal.0))
-                && hooks.evict_across_kinds(to, msg);
+                && moonpool_buggify::buggify_fault_with_prob!(0.10);
+            if evict_across_kinds {
+                moonpool_assertions::reachable!("mailbox: overflow evicts across kinds");
+            }
             // Two arm the *drain*: this message's arrival is what makes the
             // next batch worth holding or reversing. Holding needs a queue that
             // is already non-empty (parking a drain of nothing changes
@@ -557,10 +566,21 @@ impl Outbound {
             // plus a queued one is the smallest reorderable batch. Decided
             // here, applied there — see [`PeerMailbox`] for why the delivery
             // task must not draw.
-            if !queue.is_empty() && hooks.hold_peer_delivery(to) {
+            //
+            // Both arms are latches, so a node that enqueues a dozen messages
+            // in one tick draws a dozen times and the arms collapse into one:
+            // the per-drain rate is far above the per-call one. Holding most
+            // drains would halve per-peer throughput (a partition, moonpool's
+            // job), and reversing most batches would make the stream
+            // systematically backwards. One tick per hold bounds the backlog
+            // one hold builds to one tick's traffic: enough to cross the shed
+            // threshold, never enough to wedge a link.
+            if !queue.is_empty() && moonpool_buggify::buggify_fault_with_prob!(0.01) {
+                moonpool_assertions::reachable!("mailbox: a peer drain is held for a tick");
                 queue.hold_next.store(true, Ordering::Relaxed);
             }
-            if !queue.is_empty() && hooks.reverse_delivery_batch(to) {
+            if !queue.is_empty() && moonpool_buggify::buggify_fault_with_prob!(0.01) {
+                moonpool_assertions::reachable!("mailbox: a delivery batch is reversed");
                 queue.reverse_next.store(true, Ordering::Relaxed);
             }
             if let Some(evicted) = queue.push(message, overtake, evict_across_kinds) {
@@ -933,23 +953,19 @@ fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
 /// set-based quorum counting must tolerate it). Both are drawn here, on the
 /// node loop.
 #[tracing::instrument(level = "trace", skip_all, fields(from = %out.sender, messages = messages.len()))]
-pub(crate) fn send_messages<H, A>(
+pub(crate) fn send_messages<A: Audit>(
     out: &Outbound,
-    hooks: &H,
     audit: &A,
     journal: JournalIdentifier,
     messages: Vec<(Party, Message)>,
-) where
-    H: DriverHooks,
-    A: Audit,
-{
+) {
     let from = out.sender;
     for (to, msg) in messages {
         if drop_at_send(&msg) {
             trace_send_drop(audit, from, to, &msg);
             continue;
         }
-        out.transmit(hooks, audit, journal, to, &msg);
+        out.transmit(audit, journal, to, &msg);
         if duplicate_at_send(&msg) {
             audit.duplicated_at_send(from, to, &msg);
             tracing::info!(
@@ -958,7 +974,7 @@ pub(crate) fn send_messages<H, A>(
                 kind = message_kind(&msg),
                 "msg_duplicated_at_send"
             );
-            out.transmit(hooks, audit, journal, to, &msg);
+            out.transmit(audit, journal, to, &msg);
         }
     }
 }

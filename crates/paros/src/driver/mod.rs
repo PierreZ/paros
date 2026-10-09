@@ -72,7 +72,7 @@ use paros_core::{
     ColocatedNode, Control, Delegation, Entry, GcAck, JournalId, JournalIdentifier, MatchRefusal,
     MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet, Message, NodeId,
     NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigurerStep, Seq, TenantId, Value,
+    ReconfigurerPhase, ReconfigurerStep, Seq, TenantId, Value,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -99,7 +99,7 @@ use matchmaking::{
 };
 use ready::{ClientWaiters, drain_ready, fold_head};
 use reply::maybe_duplicate;
-use report::{Deltas, handoff_context, maintain};
+use report::{Deltas, HandoffContext, handoff_context, maintain};
 use system::{Followed, SystemFollower, follow_local};
 use transport::{LaneOpener, Outbound, peer_address};
 
@@ -167,7 +167,6 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         waiters.reads.wake(
             |from, limit, bytes| node.read_log(from, limit, bytes),
             NodeId(self.self_id),
-            self.hooks,
             self.audit,
         );
         // The settle tail persists and applies; it never lowers what it made
@@ -316,7 +315,7 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             node.config().has_matchmakers(),
             "a handover is paced only on a matchmaker deployment"
         );
-        let (hooks, audit, self_id) = (self.hooks, self.audit, self.self_id);
+        let (audit, self_id) = (self.audit, self.self_id);
         handover.tick();
         let stall_budget = node
             .election_timeout()
@@ -329,6 +328,9 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             // A phase that no member answers any more (a lost registry, a
             // machine gone) is abandoned: the frozen generation is finished
             // by the next node to meet it, with the members that do answer.
+            // Its own gate: the early abandon below reports through the same
+            // audit port, so without it this path could be dead unseen.
+            moonpool_assertions::reachable!("generation: the stall budget abandons a handover");
             audit.reconfigurer_aborted(NodeId(self_id));
             tracing::info!(node = self_id, "reconfigurer_aborted");
         }
@@ -337,10 +339,9 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
         // and the freeze, the bootstrap and the votes are all idempotent or
         // durable elsewhere), and it is what puts a *second* reconfigurer on
         // a half-replaced generation.
-        if handover.is_busy() && hooks.abandon_reconfigurer(handover.phase()) && handover.abandon()
-        {
+        if handover.is_busy() && abandon_early(handover.phase()) && handover.abandon() {
             audit.reconfigurer_aborted(NodeId(self_id));
-            tracing::info!(node = self_id, hooked = true, "reconfigurer_aborted");
+            tracing::info!(node = self_id, early = true, "reconfigurer_aborted");
         }
         if !handover.resend_due(self.tunables.reconfigurer_resend_ticks) {
             return;
@@ -368,8 +369,11 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
             );
             self.send_reconfigure(handover.take_requests());
         }
-        if hooks.skip_reconfigurer_resend() {
-            audit.reconfigurer_resend_skipped(NodeId(self_id));
+        // Skipping a due re-send is always safe: it stretches the
+        // stop-the-world window and delays a preempted decree's reopening.
+        // Silent in the recovery tail.
+        if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+            moonpool_assertions::reachable!("generation: the driver skips a due handover re-send");
             tracing::info!(node = self_id, "reconfigurer_resend_skipped");
         } else {
             handover.resend();
@@ -387,32 +391,38 @@ impl<P: Providers, H: DriverHooks, A: Audit> NodeLoop<'_, P, H, A> {
     /// hook: both give up the leadership, and the cooperative one is strictly
     /// the more interesting outcome.
     fn offer_handoff(&self, node: &mut ColocatedNode) {
-        let (hooks, audit, self_id) = (self.hooks, self.audit, self.self_id);
+        let (audit, self_id) = (self.audit, self.self_id);
         let mut handed_off = false;
         if node.can_relinquish() {
             let candidates = node.handoff_candidates();
-            if !candidates.is_empty() {
-                let ctx = handoff_context(node, candidates.len());
-                if hooks.initiate_handoff(ctx) {
-                    let fallback = self.providers.random().random_range(0..candidates.len());
-                    let target = hooks
-                        .handoff_target(&candidates)
-                        .filter(|t| candidates.contains(t))
-                        .unwrap_or(candidates[fallback]);
-                    if let Some(handoff) = node.relinquish_to(target) {
-                        handed_off = true;
-                        audit.authority_relinquished(NodeId(self_id), handoff);
-                        tracing::info!(
-                            node = self_id,
-                            to = handoff.to.0,
-                            round = handoff.ballot.round,
-                            bnode = handoff.ballot.node.0,
-                            next_slot = handoff.next_slot.0,
-                            decided = handoff.decided,
-                            pending = handoff.pending,
-                            "authority_relinquished"
-                        );
-                    }
+            if !candidates.is_empty() && initiate_handoff(&handoff_context(node)) {
+                let fallback = self.providers.random().random_range(0..candidates.len());
+                // Target selection is its own location: it pins the
+                // lowest-id candidate instead of the uniform pick, so a
+                // seed can concentrate repeated handoffs on one successor
+                // (A -> B -> A -> B). Every candidate is valid: the
+                // successor checks the transfer itself.
+                let target = if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+                    moonpool_assertions::reachable!(
+                        "a handoff target is chosen by the pinning selector"
+                    );
+                    candidates[0]
+                } else {
+                    candidates[fallback]
+                };
+                if let Some(handoff) = node.relinquish_to(target) {
+                    handed_off = true;
+                    audit.authority_relinquished(NodeId(self_id), handoff);
+                    tracing::info!(
+                        node = self_id,
+                        to = handoff.to.0,
+                        round = handoff.ballot.round,
+                        bnode = handoff.ballot.node.0,
+                        next_slot = handoff.next_slot.0,
+                        decided = handoff.decided,
+                        pending = handoff.pending,
+                        "authority_relinquished"
+                    );
                 }
             }
         }
@@ -562,8 +572,13 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         if gc_resend.tick_if(node.gc_pending(), tunables.gc_resend_ticks) {
             if hooks.withhold_gc_requests() {
                 tracing::info!(node = self_id, "gc_requests_withheld");
-            } else if hooks.skip_gc_resend() {
-                audit.gc_resend_skipped(NodeId(self_id));
+            } else if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+                // Skipping a due re-send is always safe: a skipped beat
+                // stretches the window in which a leader deposed before its
+                // quorum acks leaves the floor un-raised.
+                moonpool_assertions::reachable!(
+                    "gc: the driver skips a due garbage-collection re-send"
+                );
                 tracing::info!(node = self_id, "gc_resend_skipped");
             } else {
                 node.resend_gc();
@@ -577,17 +592,20 @@ impl<P: Providers, H: DriverHooks> Shared<'_, P, H> {
         lp.offer_handoff(node);
         // Expire the reads whose quorum read is overdue (a row that never
         // answered whole, a fold that has not reached the watermark) and
-        // answer the long-polls whose wait ran out. The early-expiry hook,
-        // consulted only while a read waits on its confirmation, takes the
-        // first exit before the deadline.
-        let expire_all = waiters.reads.has_confirming() && hooks.expire_parked_read_early();
+        // answer the long-polls whose wait ran out. The early expiry, drawn
+        // only while a read waits on its confirmation, takes the first exit
+        // before the deadline. Kept shy: expiring most parked reads early
+        // would stop confirmed reads from ever completing during the chaos
+        // window. Silent in the recovery tail; its gate is the audit's
+        // `read_expired` (the `early` leg).
+        let expire_all =
+            waiters.reads.has_confirming() && moonpool_buggify::buggify_fault_with_prob!(0.05);
         waiters.reads.expire(
             |from, limit, bytes| node.read_log(from, limit, bytes),
             ticks,
             tunables.read_retry_ticks,
             expire_all,
             NodeId(self_id),
-            hooks,
             &*audit,
         );
         lp.settle(node, storage, waiters, last).await?;
@@ -633,24 +651,113 @@ fn trace_received(self_id: u64, msg: &Message) {
     }
 }
 
+/// Whether to give up the running handover early, on the node loop. One
+/// location per phase, one macro line per arm: a seed that abandons freezes
+/// readily must be able to leave decrees alone. `Publishing` is absent: the
+/// successor is already chosen there, so giving up loses nothing a
+/// straggler's republication does not already cover.
+///
+/// Always safe: the reconfigurer holds no durable state, and the freeze, the
+/// bootstrap and the votes are idempotent or durable elsewhere. It puts a
+/// second reconfigurer on a half-replaced generation. Silent in the recovery
+/// tail.
+fn abandon_early(phase: &ReconfigurerPhase) -> bool {
+    let fired = match phase {
+        ReconfigurerPhase::Stopping { .. } => moonpool_buggify::buggify_fault_with_prob!(0.02),
+        ReconfigurerPhase::Bootstrapping { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.02)
+        }
+        ReconfigurerPhase::Deciding { .. } => moonpool_buggify::buggify_fault_with_prob!(0.02),
+        ReconfigurerPhase::Idle | ReconfigurerPhase::Publishing { .. } => false,
+    };
+    if fired {
+        // BUGGIFY pairing, one gate per location.
+        match phase {
+            ReconfigurerPhase::Stopping { .. } => moonpool_assertions::reachable!(
+                "generation: a handover is abandoned while freezing"
+            ),
+            ReconfigurerPhase::Bootstrapping { .. } => moonpool_assertions::reachable!(
+                "generation: a handover is abandoned while bootstrapping"
+            ),
+            ReconfigurerPhase::Deciding { .. } => {
+                moonpool_assertions::reachable!("generation: a handover is abandoned mid-decree");
+            }
+            ReconfigurerPhase::Idle | ReconfigurerPhase::Publishing { .. } => {}
+        }
+    }
+    fired
+}
+
+/// Whether a transferable leadership hands itself off on this tick. One
+/// location per shape of transfer, biased toward the hard states: a handoff
+/// that carries unfinished business (an accepted-but-unchosen tail, or a
+/// leader still healing a hole) fires an order of magnitude more often than
+/// the clean one, which stays armed because it is the common production
+/// shape.
+///
+/// The rates stay near the resignation site's (0.004), and that ceiling
+/// matters. A handoff replaces an election, so a high rate makes it the
+/// main way leadership moves and starves every campaign that needs a
+/// settled cell. `healing` is true for any leader that holds a pipelined
+/// slot decided out of order, an ordinary streaming state: at 0.30 it moved
+/// leadership every few ticks. Always safe: a failed handoff costs
+/// availability, never safety. Silent in the recovery tail.
+fn initiate_handoff(ctx: &HandoffContext) -> bool {
+    let fired = if ctx.healing {
+        moonpool_buggify::buggify_fault_with_prob!(0.03)
+    } else if !ctx.settled {
+        moonpool_buggify::buggify_fault_with_prob!(0.02)
+    } else {
+        moonpool_buggify::buggify_fault_with_prob!(0.002)
+    };
+    if fired {
+        // BUGGIFY pairing: each shape fires on some seed, split so that
+        // saturation cannot hide one shape behind another's samples.
+        if ctx.healing {
+            moonpool_assertions::reachable!(
+                "a handoff leaves a leader that is still healing a hole"
+            );
+        } else if ctx.settled {
+            moonpool_assertions::reachable!("a handoff leaves a fully settled leader");
+        } else {
+            moonpool_assertions::reachable!("a handoff carries an accepted-but-unchosen tail");
+        }
+    }
+    fired
+}
+
 /// The driver's delegation choice for the proposal about to open (#142):
-/// consulted only where it can have an effect — this node leads a
-/// deployment with proxies — and from the node loop, never a task. First
-/// "run it colocated?" ([`DriverHooks::skip_delegation`]), then "which
-/// proxy?" ([`DriverHooks::proxy_for`], a proxy the deployment does not have
-/// is ignored); [`Delegation::Auto`] otherwise, which is the core's own rule
-/// and the whole answer under `NoHooks`.
-fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegation {
+/// drawn only where it can have an effect (this node leads a deployment
+/// with proxies), on the node loop. First "run it colocated?", then "which
+/// proxy?", each its own location; [`Delegation::Auto`] otherwise, which is
+/// the core's own rule.
+fn delegation_choice(node: &ColocatedNode) -> Delegation {
     let count = node.config().proxy_count;
     if count == 0 || !node.is_leader() {
         return Delegation::Auto;
     }
-    if hooks.skip_delegation() {
+    // The round runs colocated instead, so a proxied deployment's log mixes
+    // proxied and colocated slots and the two Phase-2 paths interleave in
+    // one leadership. Shy, so most slots still go through a proxy.
+    if moonpool_buggify::buggify_fault_with_prob!(0.10) {
+        moonpool_assertions::reachable!(
+            "proxy: the driver runs a round colocated on a proxied deployment"
+        );
         return Delegation::Colocated;
     }
-    let choice = match hooks.proxy_for(node.proposer().next_slot(), count) {
-        Some(proxy) if proxy.is_in(count) => Delegation::To(proxy),
-        _ => Delegation::Auto,
+    // The next proxy the modulus would not pick, `(slot + 1) % count`: so
+    // consecutive slots land on one proxy, and a handoff successor's
+    // re-delegation (which derives `slot % count` afresh) lands on another
+    // proxy. Two proxies then fan out the same round: the P2b idempotency
+    // the delegation rests on.
+    let choice = if count >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) {
+        moonpool_assertions::reachable!("proxy: the driver overrides a round's proxy");
+        let modulus = u64::try_from(count).unwrap_or(u64::MAX);
+        Delegation::To(ProxyId(
+            node.proposer().next_slot().0.wrapping_add(1) % modulus,
+        ))
+    } else {
+        Delegation::Auto
     };
     // A named proxy is one the deployment has, chosen by its leader.
     if let Delegation::To(proxy) = choice {
@@ -658,6 +765,38 @@ fn delegation_choice<H: DriverHooks>(node: &ColocatedNode, hooks: &H) -> Delegat
         assert!(node.is_leader(), "only a leader delegates");
     }
     choice
+}
+
+/// The column of a grid this proposal's Phase 2 goes to instead of the
+/// core's `slot % cols` (#141): `(slot + 1) % cols`, the next slot's column,
+/// so consecutive slots land on one column and a handoff successor's
+/// re-proposal lands on another. Every column is a Phase-2 quorum, so the
+/// choice is always valid. Its own location; silent in the recovery tail.
+fn phase2_column(slot: paros_core::Slot, cols: usize) -> Option<usize> {
+    if cols < 2 || !moonpool_buggify::buggify_fault_with_prob!(0.10) {
+        return None;
+    }
+    // BUGGIFY pairing: the override genuinely fires.
+    moonpool_assertions::reachable!("grid: the driver overrides a round's column");
+    let modulus = u64::try_from(cols).unwrap_or(u64::MAX);
+    let column = usize::try_from(slot.0.wrapping_add(1) % modulus).unwrap_or(0);
+    assert!(column < cols, "an overridden column is one the grid has");
+    Some(column)
+}
+
+/// Whether the next tick waits twice the normal interval. Always safe: every
+/// timeout the core owns counts ticks, so a node that ticks slower is a slow
+/// node, which the cell must tolerate. Deliberately shy: a node that
+/// stretches most ticks runs its protocol clock at half speed, a stalled
+/// node rather than a slow one. At this rate a node loses a handful of
+/// ticks per chaos window, enough to desynchronize the protocol clocks.
+/// Silent in the recovery tail.
+fn stretch_tick() -> bool {
+    let stretched = moonpool_buggify::buggify_fault_with_prob!(0.05);
+    if stretched {
+        moonpool_assertions::reachable!("a node stretches its tick interval");
+    }
+    stretched
 }
 
 /// Park `call` on the slot its proposal took (`result`), to be answered
@@ -712,7 +851,7 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
 /// `proxies` is the deployment map's proxy leaders (`ProxyId` → address,
 /// #142), empty on a deployment without proxies; its length must agree with
 /// the `Config`'s `proxy_count`. A leader delegates a settled round's Phase 2
-/// to the proxy the core names (or the one [`DriverHooks::proxy_for`] names),
+/// to the proxy the core names (or the one the driver's proxy override names),
 /// and takes it back after `tunables.proxy_take_back_resends` re-delegations
 /// without a `Commit`.
 ///
@@ -732,9 +871,9 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
 /// production passes [`DriverTunables::default()`] (the historical constants);
 /// the sim harness buggifies it per seed, FDB knob style.
 ///
-/// `hooks` controls the driver-level crash seams and rare-but-valid policy
-/// alternatives. Production passes [`NoHooks`](crate::NoHooks), whose default
-/// methods are inert.
+/// `hooks` carries the per-seed latches left in [`DriverHooks`] (#318 E).
+/// Production passes [`NoHooks`](crate::NoHooks), whose default methods are
+/// inert. Every other rare-but-valid choice is an inline BUGGIFY site.
 ///
 /// `audit` is the pure-observation mirror of `hooks`: the driver reports every
 /// externally meaningful transition to it, and nothing it does can change the
@@ -1114,22 +1253,22 @@ where
                     seq: Seq(req.seq),
                     records: req.records.into_iter().map(Value).collect(),
                 };
-                // The column override (#141): consulted only where it can
-                // have an effect — this node leads and its configuration is
-                // a grid — and from the loop, never a task. The core's
-                // `slot % cols` stands under `NoHooks`.
+                // The column override (#141): drawn only where it can have
+                // an effect (this node leads and its configuration is a
+                // grid), on the loop. Otherwise the core's `slot % cols`
+                // stands.
                 let column = match rt.node.acceptors().quorum_system() {
-                    QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => hooks
-                        .phase2_column(rt.node.proposer().next_slot(), cols)
-                        .filter(|c| *c < cols),
+                    QuorumSystem::Grid { cols, .. } if rt.node.is_leader() => {
+                        phase2_column(rt.node.proposer().next_slot(), cols)
+                    }
                     _ => None,
                 };
                 // The delegation override (#142), under the same gate: only
                 // a leader of a deployment with proxies is asked, first
                 // whether to run this round colocated, then which proxy to
-                // hand it to; `Delegation::Auto` — the core's `slot %
-                // proxy_count` — stands under `NoHooks`.
-                let delegation = delegation_choice(&rt.node, hooks);
+                // hand it to; otherwise `Delegation::Auto`, the core's
+                // `slot % proxy_count`, stands.
+                let delegation = delegation_choice(&rt.node);
                 let result = rt.node.propose_in(entry.clone(), column, delegation);
                 park_call(rt, result, Call::Write { entry, reply }, &shared);
                 let outcome = shared.settle(rt).await;
@@ -1151,7 +1290,7 @@ where
                 };
                 let new = leader_uuid_from_proto(req.new);
                 let old = leader_from_proto(req.old);
-                let delegation = delegation_choice(&rt.node, hooks);
+                let delegation = delegation_choice(&rt.node);
                 let result = rt
                     .node
                     .propose_control_in(Control::SetLeader { new, old }, delegation);
@@ -1181,7 +1320,7 @@ where
                 };
                 let up_to = Seq(req.up_to);
                 let leader = leader_uuid_from_proto(req.leader);
-                let delegation = delegation_choice(&rt.node, hooks);
+                let delegation = delegation_choice(&rt.node);
                 let result = rt.node.propose_control_in(
                     Control::Truncate { leader, up_to },
                     delegation,
@@ -1216,10 +1355,16 @@ where
                 // neither the row hook nor the audit hears of it.
                 let basis = rt.node.read_basis();
                 // The row override (the Phase-1 twin of `phase2_column`) is
-                // asked only where it can have an effect: under a grid. The
-                // core's `ctx % rows` stands under `NoHooks`.
+                // drawn only where it can have an effect: under a grid. Its
+                // own location; the replica tier has the other. Otherwise the
+                // core's `ctx % rows` stands.
                 let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-                    QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
+                    QuorumSystem::Grid { rows, .. }
+                        if rows >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+                    {
+                        moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
+                        Some(log_reads::next_row(ctx, rows))
+                    }
                     _ => None,
                 });
                 // The row the core will ask, resolved exactly as it resolves
@@ -1464,8 +1609,7 @@ where
                 // cluster's protocol clocks — a shape moonpool's clock skew
                 // reaches only for the wall clock, never for the tick counter
                 // the election and read-round timers actually run on.
-                next_tick = time.now()
-                    + if hooks.stretch_tick_interval() { tunables.tick_interval * 2 } else { tunables.tick_interval };
+                next_tick = time.now() + if stretch_tick() { tunables.tick_interval * 2 } else { tunables.tick_interval };
                 if let Some(journal) = retiring.take() {
                     // The operator's decommissioning takes effect: this
                     // identity leaves the journal and never comes back to it;

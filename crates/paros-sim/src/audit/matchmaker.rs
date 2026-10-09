@@ -318,7 +318,6 @@ pub(super) struct MatchmakerAudit {
     gc_effective: bool,
     gc_retired_any: bool,
     gc_refused: bool,
-    gc_resend_skipped: bool,
     retire_accepted: bool,
     retire_refused: bool,
     node_retired: bool,
@@ -340,7 +339,6 @@ pub(super) struct MatchmakerAudit {
     /// flight, until the driver reports them or the next boot judges them.
     in_flight: BTreeMap<u64, Vec<RegistryOp>>,
     reconfigurer_superseded: bool,
-    reconfigurer_resend_skipped: bool,
     matchmaker_frozen: bool,
     matchmaker_bootstrapped_flag: bool,
     matchmaker_activated_flag: bool,
@@ -1755,14 +1753,6 @@ impl MatchmakerAudit {
         );
     }
 
-    /// The leader skipped a due GC re-send.
-    pub(super) fn gc_resend_skipped(&mut self) {
-        reach_once!(
-            self.gc_resend_skipped,
-            "gc: the driver skips a due garbage-collection re-send"
-        );
-    }
-
     /// A matchmaker answered a GC request.
     pub(super) fn gc_replied(&mut self, matchmaker: MatchmakerId, ack: &GcAck) {
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -1958,14 +1948,6 @@ impl MatchmakerAudit {
         reach_once!(
             self.reconfigurer_started_flag,
             "generation: a matchmaker-set handover starts"
-        );
-    }
-
-    /// The reconfigurer skipped a due re-send.
-    pub(super) fn reconfigurer_resend_skipped(&mut self) {
-        reach_once!(
-            self.reconfigurer_resend_skipped,
-            "generation: the driver skips a due handover re-send"
         );
     }
 

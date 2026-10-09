@@ -35,7 +35,7 @@ pub(super) struct DeposedStreak {
     /// Consecutive ticks with no beat observed at this ballot. A leader beats
     /// every [`paros::HEARTBEAT_TICKS`] ticks, so more than one whole beat
     /// period of silence means it stepped down — but *one* period of silence
-    /// does not: the send seam's `drop_outgoing` skips `Audit::sent`, so a
+    /// does not: the send seam's drop (`drop_at_send`) skips `Audit::sent`, so a
     /// fully dropped beat is invisible here, and a single beatless tick used
     /// to close the streak and hand a zombie leader a fresh budget.
     pub(super) beatless_ticks: u64,
@@ -534,7 +534,6 @@ pub(super) struct AuditState {
     /// The causes, recorded when they fire: a proxied round outliving a
     /// handoff, a skipped re-fan-out beat, an unanswered round evicted.
     pub(super) proxied_round_survived_handoff: bool,
-    pub(super) proxy_resend_skipped: bool,
     pub(super) proxy_round_expired: bool,
 
     // --- the replica tier (#144) --------------------------------------------

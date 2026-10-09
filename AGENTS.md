@@ -338,10 +338,11 @@ Three layers, and nothing crosses them:
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
-- **Prong 1, `DriverHooks`** (retiring, #294: each method becomes an inline site per the hard
-  rule above): the driver's rare-but-valid choices, one `buggify_with_prob!`
-  location each in `paros-sim` (`NoHooks` in production). Consult a hook only where its answer
-  has an observable effect, trace what happened, quiet disruptive hooks after the chaos window.
+- **Prong 1, the driver's choices are inline sites** (#294, #318): every per-call rare-but-valid
+  choice is a `buggify_fault_with_prob!` at the line that makes it (silent in the recovery tail),
+  with a `reachable!` beside it or a fired gate in the audit. Three per-seed latches are left in
+  `DriverHooks` (`NoHooks` in production) until moonpool can force a location's activation per
+  seed (#318 E). Draw a site only where its answer has an observable effect.
   Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`
   is deliberately not `Send + 'static`); a decision a spawned task needs is carried to it.
 - **Durability moments are hints** (#294): the drivers name each with moonpool's

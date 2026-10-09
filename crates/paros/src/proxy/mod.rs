@@ -43,7 +43,6 @@ use crate::driver::edge::{RpcEdge, edge_reporter};
 use crate::driver::events::{command_hash, message_kind, message_route};
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{DriverTunables, RunError};
-use crate::hooks::DriverHooks;
 use crate::rpc::serve_deliveries;
 
 /// A proxy leader's deployment data: its identity in the proxy namespace and
@@ -154,12 +153,11 @@ fn report_delegation<A: Audit>(
 /// a `Commit` to the learners reaches the deployment's replicas too),
 /// and send. Nothing to persist: the batch is messages alone.
 #[tracing::instrument(level = "trace", skip_all, fields(proxy = proxy.id().0))]
-fn drain<H: DriverHooks, A: Audit>(
+fn drain<A: Audit>(
     proxy: &mut ProxyLeader,
     journal: JournalIdentifier,
     pool: &[NodeId],
     out: &Outbound,
-    hooks: &H,
     audit: &A,
 ) {
     let id = proxy.id();
@@ -240,7 +238,7 @@ fn drain<H: DriverHooks, A: Audit>(
         );
     }
     ready.advance();
-    send_messages(out, hooks, audit, journal, messages);
+    send_messages(out, audit, journal, messages);
 }
 
 /// Drive a paros proxy leader to completion over the given providers.
@@ -254,10 +252,9 @@ fn drain<H: DriverHooks, A: Audit>(
 /// deployment's replica tier (#144, `NodeId` → address, outside the pool;
 /// empty without one): a `Commit` reaches them beside the pool. `tunables` supplies the
 /// tick cadence, the retention budget (`proxy_round_resends`), the RPC
-/// keep-alive and the mailbox shape; `hooks` and
-/// `audit` are the provider-generic seams every driver in this crate takes,
-/// with the proxy's own beat location ([`DriverHooks::skip_proxy_resend`])
-/// and the send seam's per-message drop and duplicate locations.
+/// keep-alive and the mailbox shape; `audit` is the observation port. The
+/// proxy's beat skip and the send seam's per-message drops and duplicates
+/// are inline BUGGIFY locations.
 ///
 /// # Errors
 ///
@@ -268,7 +265,7 @@ fn drain<H: DriverHooks, A: Audit>(
 // The parameters are the proxy's complete wiring; a bundle would only rename
 // them. The loop is one select over the contract's one inbox and the beat.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn run_proxy<P, H, A>(
+pub async fn run_proxy<P, A>(
     providers: P,
     local_addr: String,
     config: ProxyConfig,
@@ -276,14 +273,12 @@ pub async fn run_proxy<P, H, A>(
     replicas: Vec<(NodeId, String)>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
     audit: &A,
 ) -> Result<(), RunError>
 where
     P: Providers,
     // Not `Send + 'static`, as on `run_node`: a hook is consulted from this
     // loop and never from a spawned task.
-    H: DriverHooks,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let id = config.id;
@@ -369,7 +364,7 @@ where
                 let before = proxy.counters();
                 proxy.step(msg);
                 report_delegation(audit, id, before, proxy.counters(), accept);
-                drain(&mut proxy, config.journal, &pool, &out, hooks, audit);
+                drain(&mut proxy, config.journal, &pool, &out, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
@@ -387,12 +382,15 @@ where
                 // with rounds open, so a skip always costs a beat; skipping
                 // is always safe (the leader's take-back is the liveness).
                 if proxy.has_pending_accepts() {
-                    if hooks.skip_proxy_resend() {
-                        audit.proxy_resend_skipped(id);
+                    // Generous: the state worth reaching is the leader
+                    // taking the round back while the proxy still holds it.
+                    // Silent in the recovery tail.
+                    if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+                        moonpool_assertions::reachable!("proxy: a proxy skips a re-fan-out beat");
                         tracing::info!(proxy = id.0, "proxy_resend_skipped");
                     } else {
                         proxy.resend_pending();
-                        drain(&mut proxy, config.journal, &pool, &out, hooks, audit);
+                        drain(&mut proxy, config.journal, &pool, &out, audit);
                     }
                 }
                 tracing::info!(proxy = id.0, "proxy_tick");
