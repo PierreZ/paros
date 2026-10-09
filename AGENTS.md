@@ -80,6 +80,15 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   moonpool PR, merge it once its CI is green, then advance paros's pin (all eight lines).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
+- **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture.md` §1): solve
+  every control-plane problem with paros's own journals, leader election and Paxos flavors;
+  ask "which journal, which election, which flavor?" before building anything new.
+- **Write documents in ASD-STE100 Simplified Technical English, most of the time** (decided on
+  2026-10-09): `docs/`, the book and site, READMEs, AGENTS.md files, issues and PR descriptions.
+  Short sentences (at most 20 words for procedures, 25 for descriptions), one instruction per
+  sentence, active voice, one meaning per word, and the same term for the same thing every time.
+  Code identifiers and protocol terms stay as they are. Leave it when a sentence would lose
+  precision.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
