@@ -150,6 +150,20 @@ impl FleetOps {
         });
     }
 
+    /// Every machine's address, the one at rank `target` first: the order
+    /// `init` is handed its addresses in.
+    fn addrs_from(&self, target: usize) -> Vec<SocketAddr> {
+        std::iter::once(self.machines[target])
+            .chain(
+                self.machines
+                    .iter()
+                    .enumerate()
+                    .filter(|(rank, _)| *rank != target)
+                    .map(|(_, addr)| *addr),
+            )
+            .collect()
+    }
+
     /// `init` whole (#246), as `parosctl init` runs it: sent to the seed the
     /// layout names — or, on its own BUGGIFY location, to a machine outside
     /// the seeds, which must refuse it. Whether it ended.
@@ -166,15 +180,7 @@ impl FleetOps {
         } else {
             (self.layout.target, false)
         };
-        let addrs: Vec<SocketAddr> = std::iter::once(self.machines[target])
-            .chain(
-                self.machines
-                    .iter()
-                    .enumerate()
-                    .filter(|(rank, _)| *rank != target)
-                    .map(|(_, addr)| *addr),
-            )
-            .collect();
+        let addrs = self.addrs_from(target);
         crate::machine::note_init_sent(ctx.state());
         let connector = self.connector.clone();
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
@@ -191,6 +197,7 @@ impl FleetOps {
             InitParams {
                 patience: self.patience,
                 fleet_id: draw | 1,
+                leader_seed: self.leader_seeds.next(),
             },
         )
         .await;
