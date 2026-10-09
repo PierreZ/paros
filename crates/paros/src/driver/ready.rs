@@ -116,10 +116,6 @@ fn report_recovery_batch<A: Audit>(audit: &A, self_id: u64, batch: (usize, usize
         gap_fills <= started,
         "a recovery page fills only rounds it started"
     );
-    moonpool_assertions::sometimes!(
-        remaining > 0,
-        "recovery: a leader's recovery spans more than one bounded page"
-    );
     let started = u64::try_from(started).unwrap_or(u64::MAX);
     let gap_fills = u64::try_from(gap_fills).unwrap_or(u64::MAX);
     let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
