@@ -17,6 +17,7 @@ pub(crate) mod node_store;
 pub(crate) mod outage;
 pub(crate) mod registry_store;
 pub(crate) mod wipe;
+pub(crate) mod wiped_founder;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};

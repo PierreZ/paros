@@ -1425,7 +1425,14 @@ Simulation is the investment. Every milestone lands with its share of:
   outside paros (generating the Biscuit root key pair, #245). Until #190 and #210 make the main journal
   and the directory plan data, the acceptors that serve them keep the per-seed harness draw
   (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
-  too.
+  too. A machine's disk can be wiped: the machines' attrition draws moonpool's `CrashAndWipe`,
+  and a per-seed scenario aims it at a founding member in the middle of `init`. The machine at
+  that address is a new machine with a new `node_id`, and it never rejoins as the old one.
+  When no vote names the old machine, `init` forms the cell over the new one. When a vote names
+  it, `cell init` refuses with `cell_exists`, and the cell is lost until an operator acts
+  outside paros; the control-plane liveness oracles do not apply to a lost cell. The "no
+  unlearned id" oracle holds on every run: an operator's call to the cell names only a
+  `JournalIdentifier` that it learned from `init`'s reply or through `Inspect`.
 - Faults in the shipped code (decided on 2026-10-09, #294): the simulation runs the same machine
   and disk as `parosd`, with no sim substitute. A choice the code makes is an inline buggify. A
   moment where an environmental fault is interesting is a hint: the code names the moment

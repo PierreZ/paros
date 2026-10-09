@@ -121,6 +121,9 @@ pub(super) struct FleetOps {
     kill_ms: (u64, u64),
     /// The pending operation was cut short by its target's kill.
     killed: bool,
+    /// The journals this operator learned (#246): every call it makes at
+    /// the cell names one of them.
+    learned: super::system::Learned,
 }
 
 impl FleetOps {
@@ -156,6 +159,7 @@ impl FleetOps {
             pending: None,
             kill_ms,
             killed: false,
+            learned: super::system::Learned::default(),
         })
     }
 
@@ -733,8 +737,12 @@ impl FleetOps {
             draw = draw.wrapping_add(1);
             attempt = attempt.saturating_add(1);
         }
+        // A lost cell (#246) ends no operation: an operator must act
+        // outside paros first.
         assert_always!(
-            self.pending.is_none() || ctx.shutdown().is_cancelled(),
+            self.pending.is_none()
+                || ctx.shutdown().is_cancelled()
+                || crate::machine::cell_lost(ctx.state()),
             "fleet: an operation an operator stopped in ends in the recovery tail",
             { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
         );
@@ -777,6 +785,15 @@ impl FleetOps {
                     "machine: a run that never sends init ends with its machines waiting"
                 );
             }
+            return;
+        }
+        if crate::machine::cell_lost(ctx.state()) {
+            // A founding member wiped during `init` after a vote named it
+            // (#246): no `init` forms the cell, and its control plane owes
+            // nothing.
+            assert_reachable!(
+                "machine: a run whose founding member was wiped during init ends without its cell"
+            );
             return;
         }
         let mut learned = None;

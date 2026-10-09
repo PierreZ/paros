@@ -225,7 +225,8 @@ pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION
 /// leader (#142) is the fault the leader's take-back exists for: every slot
 /// delegated to it stalls until the leader runs it colocated, and a proxy
 /// killed at the chaos cutoff stays down for the whole recovery tail.
-/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe` now reaches
+/// `prob_wipe = 0` **stays** zero but on the machines
+/// ([`MACHINE_WIPE_WEIGHT`]): moonpool's `CrashAndWipe` now reaches
 /// the disk paros stores on, but it wipes a whole machine without asking the
 /// copy budget, so it could lose a quorum's copies at once. The amnesia fault
 /// is the storage ledger's own coin instead, drawn at a restart in
@@ -272,7 +273,10 @@ fn chaos_surfaces() -> [Chaos; 9] {
             mode: ChaosMode::Swarm,
         },
         Chaos::Attrition {
-            config: regime(AttritionVictims::group(MACHINE_GROUP)),
+            config: Attrition {
+                prob_wipe: MACHINE_WIPE_WEIGHT,
+                ..regime(AttritionVictims::group(MACHINE_GROUP))
+            },
             mode: ChaosMode::Swarm,
         },
         crate::world::outage::regime(),
@@ -280,6 +284,16 @@ fn chaos_surfaces() -> [Chaos; 9] {
         Chaos::Storage(ChaosMode::Swarm),
     ]
 }
+
+/// The weight of moonpool's `CrashAndWipe` in the machine group's
+/// attrition, against a crash's 1.0 (#246): about one machine reboot in
+/// eleven, timed or at a lifecycle `hint!`, replaces the machine's disk. A
+/// wiped machine is a new one that never rejoins as the old one
+/// (`crate::machine`): a founding member wiped during `init` is the
+/// `cell_exists` refusal once a vote names it, and a wiped member of a
+/// formed cell is a member lost for good. Only the machines draw it: an
+/// acceptor's wipe is the storage ledger's coin (see [`chaos_surfaces`]).
+const MACHINE_WIPE_WEIGHT: f64 = 0.1;
 
 /// The storage families the campaign leaves out (architecture §5, #176).
 /// Rot (corruption, EIO, misdirection) damages a record on whichever disks
@@ -330,6 +344,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
         .fault_factory(|| Box::new(crate::world::late_outage::LateOutage))
         .fault_factory(|| Box::new(crate::world::bare_outage::BareOutage))
+        .fault_factory(|| Box::new(crate::world::wiped_founder::WipedFounder))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }

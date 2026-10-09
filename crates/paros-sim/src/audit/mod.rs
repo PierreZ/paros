@@ -90,7 +90,10 @@ pub(crate) struct NodeAudit<T> {
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
     /// The run's machine board (#246), on a machine's own port.
-    machines: Option<Arc<Mutex<crate::machine::MachineBoard>>>,
+    machines: Option<(
+        Arc<Mutex<crate::machine::MachineBoard>>,
+        std::net::SocketAddr,
+    )>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -139,8 +142,12 @@ impl<T: TimeProvider> NodeAudit<T> {
     }
 
     /// This port also reports a machine's lifecycle to `board` (#246).
-    pub(crate) fn on_machines(mut self, board: Arc<Mutex<crate::machine::MachineBoard>>) -> Self {
-        self.machines = Some(board);
+    pub(crate) fn on_machines(
+        mut self,
+        board: Arc<Mutex<crate::machine::MachineBoard>>,
+        addr: std::net::SocketAddr,
+    ) -> Self {
+        self.machines = Some((board, addr));
         self
     }
 
@@ -1500,14 +1507,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         addr: std::net::SocketAddr,
         record: Option<&paros::machine::MachineRecord>,
     ) {
-        if let Some(board) = &self.machines {
+        if let Some((board, _)) = &self.machines {
             crate::machine::booted(board, addr, record);
         }
     }
 
     fn machine_recorded(&self, record: &paros::machine::MachineRecord) {
-        if let Some(board) = &self.machines {
-            crate::machine::recorded(board, record);
+        if let Some((board, addr)) = &self.machines {
+            crate::machine::recorded(board, *addr, record);
         }
     }
 
@@ -1518,7 +1525,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         plan: &paros::machine::CellPlan,
         _leftovers: bool,
     ) {
-        if let Some(board) = &self.machines {
+        if let Some((board, _)) = &self.machines {
             crate::machine::formatting(board, addr, node, plan);
         }
     }
