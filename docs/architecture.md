@@ -357,8 +357,8 @@ list and no rendezvous name. The same rule holds at two levels:
   reconfiguration.
 - **`add-machine`** goes to any member, which routes it to the cell coordinator as a request to a
   leader (section 3.3). The coordinator reaches the idle machine at the address the operator
-  gives and asks it to `Identify` itself. It writes its `RegisterNode`, with that address, into
-  the cell control journal, then sends it `Admit` with the `cell_id`, the
+  gives and asks it to `Identify` itself. It writes its `RegisterNode` into the cell control
+  journal, with the machine's advertised address (section 3.2, #257), then sends it `Admit` with the `cell_id`, the
   control `JournalIdentifier`s and a registry snapshot, which the machine caches durably. An
   interrupted admission is finished by the coordinator like any in-flight entry (section 3.7).
 - **`universe init`** creates the universe tenant inside that cell (the universe tenant is a
@@ -795,12 +795,10 @@ a failover domain; the AWS cell-based architecture guidance says the same (cells
 overload and bad deployments and are not designed for failover; multi-AZ cells avoid replicating
 between cells). Cell creation is refused if its machines span fewer than three zones.
 
-**A universe mixes cell kinds** (decided on 2026-10-07, #253; amended on 2026-10-09). A cell entry
-in the universe directory carries its `kind` and the cell's entry endpoint (given at
-`universe init` or `add-cell`), which a resolver hands back. The `kind` names the regions the
-cell's zones are placed in, and the witness region when there are several. There is no
-`MultiRegion` kind: a **multi-region** cell (M12, decided on 2026-10-07, #253) is a cell whose
-zones are placed in different regions. It spans three regions, each across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
+**A universe mixes cell kinds** (decided on 2026-10-07, #253). A cell entry in the universe directory
+carries its `kind`, `Regional { region }` or `MultiRegion { regions, witness }`, and the cell's
+entry endpoint (given at `universe init` or `add-cell`), which a resolver hands back. A **multi-region** cell (M12, decided on 2026-10-07, #253) spans three regions, each
+across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
 with full records and no other role (section 5). A tenant's `survives` (section 3.4) picks the
 kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its resolvers
 (section 3.5), and every cell answers the second hop for its own tenants.
@@ -1520,7 +1518,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M9 | The universe with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5); last, multi-region cells: cells whose zones are placed in several regions, with a witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
+| M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
