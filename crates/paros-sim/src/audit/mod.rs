@@ -771,6 +771,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if st.bootstrap.as_ref().is_some_and(|b| b != config) {
             st.reconfiguration_completed = true;
         }
+        if st.bootstrap.as_ref().is_some_and(|b| {
+            b.members()
+                .iter()
+                .any(|member| !config.members().contains(member))
+        }) {
+            st.departure_effective = true;
+        }
         // The #140 outcome: a leadership genuinely ran under a flexible
         // split (the draw is a `reachable` in `shape::quorum_policy`).
         if matches!(config.quorum_system(), QuorumSystem::Flexible { .. }) {
@@ -2148,6 +2155,16 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         self.state()
             .matchmaker
             .probe_closed(node, ballot, effective, member);
+    }
+
+    fn membership_probe_late(
+        &self,
+        node: NodeId,
+        _ballot: Ballot,
+        _effective: Option<Ballot>,
+        member: bool,
+    ) {
+        self.state().matchmaker.probe_late(node, member);
     }
 
     fn match_request_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {

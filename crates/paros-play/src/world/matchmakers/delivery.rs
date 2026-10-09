@@ -398,6 +398,19 @@ impl World {
                     "It is not a member, so it does not campaign."
                 }
             ),
+            MatchStep::ProbeLate { effective, member } => format!(
+                "{} hears one more answer to a question it had already closed{}. {}",
+                who(id),
+                effective.map_or_else(String::new, |at| format!(
+                    ": the change at ballot {}",
+                    show_ballot(at)
+                )),
+                if *member {
+                    "It is a member after all, so it starts a campaign."
+                } else {
+                    "It is still not a member."
+                }
+            ),
             MatchStep::StaleConfiguration { newest } => format!(
                 "{} abandons its campaign and adopts the configuration registered at {}. Its own \
                  belief was out of date, because an operator changed the acceptor set while this \

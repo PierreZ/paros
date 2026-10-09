@@ -139,6 +139,7 @@ impl ColocatedNode {
         // A campaign and a membership probe never coexist (#173): the
         // campaign registers what this node now believes.
         self.probe = None;
+        self.closed_probe = None;
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };

@@ -423,6 +423,32 @@ fn report_probe_closed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: 
     );
 }
 
+/// Report a closed probe's late answer that moved this node's belief (#278).
+fn report_probe_late<A: Audit>(
+    audit: &A,
+    self_id: u64,
+    matchmaker: MatchmakerId,
+    ballot: Ballot,
+    step: &MatchStep,
+) {
+    assert!(
+        matches!(step, MatchStep::ProbeLate { .. }),
+        "only a late probe answer is reported late"
+    );
+    let MatchStep::ProbeLate { effective, member } = *step else {
+        return;
+    };
+    audit.membership_probe_late(NodeId(self_id), ballot, effective, member);
+    tracing::info!(
+        node = self_id,
+        matchmaker = matchmaker.0,
+        round = ballot.round,
+        effective_round = effective.map_or(0, |b| b.round),
+        member,
+        "membership_probe_late"
+    );
+}
+
 /// Pair of [`folded_answer`]: a step that moved a registration came from a
 /// registration's answer, and a probe's step from a probe's answer.
 fn assert_step_source(folded: bool, step: &MatchStep) {
@@ -434,7 +460,7 @@ fn assert_step_source(folded: bool, step: &MatchStep) {
     }
     if matches!(
         step,
-        MatchStep::ProbeAnswered | MatchStep::ProbeClosed { .. }
+        MatchStep::ProbeAnswered | MatchStep::ProbeClosed { .. } | MatchStep::ProbeLate { .. }
     ) {
         assert!(!folded, "a probe step folded no registration");
     }
@@ -545,6 +571,7 @@ pub(crate) fn report_match_step<A: Audit>(
             );
         }
         MatchStep::ProbeClosed { .. } => report_probe_closed(audit, self_id, ballot, step),
+        MatchStep::ProbeLate { .. } => report_probe_late(audit, self_id, matchmaker, ballot, step),
         MatchStep::Refused(refusal) => {
             audit.matchmaking_refused(NodeId(self_id), matchmaker, ballot, refusal.clone());
             tracing::info!(

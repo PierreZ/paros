@@ -197,6 +197,16 @@ pub enum MatchStep {
         /// Whether the belief now names this node (and a campaign opened).
         member: bool,
     },
+    /// A matchmaker answered a probe that had already closed with this node
+    /// outside, naming a reconfiguration newer than the one the belief
+    /// matches (#278): the node adopted it, and a node it names opened a
+    /// campaign in the same call.
+    ProbeLate {
+        /// The ballot the node's belief is bound to after the answer.
+        effective: Option<Ballot>,
+        /// Whether the belief now names this node (and a campaign opened).
+        member: bool,
+    },
 }
 
 /// What one reply answers: a registration's page, a probe's effective
@@ -372,6 +382,8 @@ impl ColocatedNode {
             return;
         };
         self.round_floor = self.round_floor.max(round);
+        // A fresh probe supersedes the closed one's late answers (#278).
+        self.closed_probe = None;
         self.probe = Some(Box::new(MembershipProbe::new(
             Ballot { round, node: me },
             self.acceptors.clone(),
@@ -461,6 +473,10 @@ impl ColocatedNode {
     ///   adopted through [`ColocatedNode::learn_matchmakers`] and reported as
     ///   `Superseded`; the next campaign asks the new set. A refused
     ///   registration never becomes a leadership (invariant 4).
+    /// - A membership probe's answer (#173) is folded into the open probe
+    ///   (`ProbeAnswered`, `ProbeClosed`); one that arrives after the probe
+    ///   closed with this node outside is folded on its own (`ProbeLate`,
+    ///   #278).
     ///
     /// # Panics
     ///
@@ -478,6 +494,16 @@ impl ColocatedNode {
         }
         if generation != matchmakers.generation {
             return MatchStep::Ignored;
+        }
+        if self.probe.is_none() && self.closed_probe == Some(ballot) {
+            // A closed probe's late answer (#278); anything else at its tag
+            // answers nothing this node still asks.
+            let step = match answer {
+                Answer::Probed(effective) => self.fold_late_probe_answer(effective),
+                Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
+            };
+            self.assert_invariants();
+            return step;
         }
         if self.probe.as_ref().is_some_and(|p| p.ballot() == ballot) {
             let step = match answer {
@@ -547,6 +573,9 @@ impl ColocatedNode {
             | MatchStep::Ignored
             | MatchStep::ProbeAnswered
             | MatchStep::ProbeClosed { .. } => {}
+            MatchStep::ProbeLate { .. } => {
+                unreachable!("a late probe answer is folded before any campaign");
+            }
         }
         self.assert_invariants();
         step
@@ -632,6 +661,7 @@ impl ColocatedNode {
             // here, unlike `learn_config`, and the membership fence keeps
             // the higher ballot it already recorded.
             self.adopt_configuration(config, newest);
+            self.bind_fact(newest);
             self.become_follower(None);
             MatchStep::StaleConfiguration { newest }
         } else {
@@ -695,6 +725,7 @@ impl ColocatedNode {
             return MatchStep::ProbeAnswered;
         }
         let effective = probe.effective().cloned();
+        let tag = probe.ballot();
         self.probe = None;
         // The probe's twin of the campaign's guard (#189): an effective
         // configuration naming a node outside the pool is not adopted; the
@@ -720,44 +751,158 @@ impl ColocatedNode {
                 "a probe closes on a bootstrap belief bound to no ballot"
             );
         }
-        let since = self.acceptors_since;
-        // Only a strictly newer configuration moves the belief (#270): a
-        // re-probe's quorum may miss the one matchmaker that held the
-        // reconfiguration this node already heard, and a belief never moves
-        // backwards.
-        if let Some((ballot, config)) = effective.filter(|(ballot, _)| *ballot > since) {
-            self.adopt_configuration(config, ballot);
+        let (adopted, member) = self.adopt_probed(effective);
+        // Postconditions: the probe is spent, the belief is heard, and a
+        // campaign opened exactly when the belief names this node; one that
+        // closed outside keeps its tag for the late answers (#278).
+        assert!(self.probe.is_none(), "a closed probe leaves nothing open");
+        assert!(
+            self.belief_source == BeliefSource::Heard,
+            "a closed probe's belief is heard"
+        );
+        if !member {
+            self.closed_probe = Some(tag);
         }
-        // No reconfiguration at a quorum: the bootstrap is the configuration
-        // in force as far as any campaign could learn, and this node heard
-        // so.
+        assert!(
+            self.closed_probe.is_some() != member,
+            "a probe keeps its tag exactly when it closed outside"
+        );
+        MatchStep::ProbeClosed {
+            effective: adopted,
+            member,
+        }
+    }
+
+    /// A matchmaker's answer to a probe that already **closed with this node
+    /// outside** (#278): fold it as the probe would have, had it arrived
+    /// before the quorum. A quorum is a minimum, not a maximum, and with
+    /// fixed per-pair latencies the one matchmaker that holds a
+    /// reconfiguration registered at a minority may answer last on every
+    /// re-probe: a leader that died with its rotation at one matchmaker
+    /// left the old members adopting it and the new members' quorums
+    /// missing it, everyone outside, and nobody campaigned again. The hunt
+    /// went red on "every node converges to the cluster's chosen prefix" and
+    /// "cluster converged after chaos" without this fold.
+    ///
+    /// # Panics
+    ///
+    /// If the fold moves the belief backwards or leaves a member without a
+    /// campaign (a programmer error, never an operating condition).
+    fn fold_late_probe_answer(&mut self, effective: Option<(Ballot, AcceptorConfig)>) -> MatchStep {
+        let me = self.config.id;
+        // Wire input: an answer that cannot move the belief, or one that
+        // lands after the node moved on, is ignored whole.
+        let outside = self.belief_source == BeliefSource::Heard && !self.acceptors.contains(me);
+        let idle =
+            self.role == NodeRole::Follower && self.matchmaking.is_none() && self.probe.is_none();
+        let floor = self.probe_floor();
+        let newer = effective
+            .as_ref()
+            .is_some_and(|(ballot, _)| *ballot > floor);
+        // The closing probe's #189 guard: a configuration naming a node this
+        // pool has not admitted yet is not adopted.
+        let drawn = effective
+            .as_ref()
+            .is_some_and(|(_, config)| config.is_drawn_from(&self.pool));
+        if !outside || !idle || !newer || !drawn {
+            return MatchStep::Ignored;
+        }
+        let since = self.acceptors_since;
+        let (adopted, member) = self.adopt_probed(effective);
+        assert!(
+            self.acceptors_since >= since,
+            "a late probe answer never moves a belief backwards"
+        );
+        if !member {
+            assert!(
+                self.role == NodeRole::Follower,
+                "a late probe answer that leaves its node outside opens nothing"
+            );
+        }
+        MatchStep::ProbeLate {
+            effective: adopted,
+            member,
+        }
+    }
+
+    /// Adopt what a probe heard (#173, #278) and campaign when it names this
+    /// node: the shared tail of a closing probe and a late answer. Only a
+    /// reconfiguration above the [probe floor](ColocatedNode::probe_floor)
+    /// moves the belief — never a comparison against `acceptors_since`,
+    /// which may be the ballot of a campaign that never won and left this
+    /// node outside (#278) — and the belief stays bound at least as high as
+    /// it was, so no `Prepare` at or below the campaign it heard can flip it
+    /// back. A re-probe whose quorum misses the one holder of the fact this
+    /// node already matches moves nothing (#270). Returns the ballot the
+    /// belief is bound to (`None`: the bootstrap) and whether it names this
+    /// node.
+    ///
+    /// The belief is then `C_fact` bound to `max(fact, since)`, a pair no
+    /// campaign ever registered when `since` was higher. What depends on the
+    /// binding still holds: a probe runs only from outside the belief it
+    /// replaces, so this node was outside `C_since` too (`may_retire`'s
+    /// legs 2 and 5), the membership fence only rises, and the read basis is
+    /// judged against `since`, which never falls.
+    fn adopt_probed(
+        &mut self,
+        effective: Option<(Ballot, AcceptorConfig)>,
+    ) -> (Option<Ballot>, bool) {
+        let me = self.config.id;
+        let since = self.acceptors_since;
+        let fact = self.belief_fact;
+        let floor = self.probe_floor();
+        assert!(floor >= fact, "the probe floor covers the matched fact");
+        if let Some((ballot, config)) = effective.filter(|(ballot, _)| *ballot > floor) {
+            assert!(
+                config.is_drawn_from(&self.pool),
+                "a probe adopts only a configuration drawn from the pool"
+            );
+            self.adopt_configuration(config, ballot.max(since));
+            self.bind_fact(ballot);
+        }
+        // No newer fact: the belief stands — the bootstrap is the
+        // configuration in force as far as any campaign could learn — and
+        // this node heard so.
         self.belief_source = BeliefSource::Heard;
         assert!(
             self.acceptors_since >= since,
             "a probe never moves a belief backwards"
+        );
+        assert!(
+            self.belief_fact >= fact,
+            "a probe never moves the matched fact backwards"
         );
         let adopted = (self.acceptors_since != Ballot::zero()).then_some(self.acceptors_since);
         let member = self.acceptors.contains(me);
         if member {
             self.campaign(RegistrationKind::Belief, self.acceptors.clone());
         }
-        // Postconditions: the probe is spent, the belief is heard, and a
-        // campaign opened exactly when the belief names this node.
-        assert!(self.probe.is_none(), "a closed probe leaves nothing open");
         if self.next_campaign_round().is_some() {
             assert!(
                 member == (self.role != NodeRole::Follower),
                 "a probe that finds its node inside campaigns, and only then"
             );
         }
+        (adopted, member)
+    }
+
+    /// The ballot a probe's reconfiguration must exceed to move this node's
+    /// belief (#278): the fact the belief already matches, or the ballot of
+    /// a leadership this node knows **won** (its read basis), whichever is
+    /// higher. A won leadership's configuration is in force at its ballot,
+    /// so a reconfiguration below it is either honored by it or one its
+    /// matchmaking quorum missed, never in effect, and reviving it would
+    /// finish a rotation nobody was told of. A campaign this node only
+    /// promised counts for nothing here: it may never have won.
+    pub(super) fn probe_floor(&self) -> Ballot {
+        let won = self.read_basis.as_ref().map_or(Ballot::zero(), |b| b.since);
+        let floor = self.belief_fact.max(won);
         assert!(
-            self.belief_source == BeliefSource::Heard,
-            "a closed probe's belief is heard"
+            floor >= self.belief_fact,
+            "the probe floor covers the matched fact"
         );
-        MatchStep::ProbeClosed {
-            effective: adopted,
-            member,
-        }
+        assert!(floor >= won, "the probe floor covers a won leadership");
+        floor
     }
 
     /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor

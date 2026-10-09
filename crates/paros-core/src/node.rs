@@ -217,6 +217,28 @@ pub struct ColocatedNode {
     /// node whose belief is only the default probes the matchmakers before
     /// its first campaign or skip (#173); see [`BeliefSource`].
     belief_source: BeliefSource,
+    /// The ballot of the **reconfiguration fact** the belief is known to
+    /// match (#278): the effective configuration a membership probe or a
+    /// `StaleConfiguration` adopted, kept while the wire confirms the same
+    /// configuration, and `Ballot::zero()` for the bootstrap or a
+    /// *different* configuration learned off the wire, which carries no
+    /// fact. A probe compares against this and the read basis
+    /// (`probe_floor`), never `acceptors_since`, which may be a *campaign*
+    /// ballot (`learn_config` binds a `Prepare`'s `C_b` to its ballot): a
+    /// campaign that never won and left this node outside must not outrank
+    /// the older reconfiguration that names it. At most `acceptors_since`;
+    /// volatile.
+    belief_fact: Ballot,
+    /// The tag of the last membership probe that **closed with this node
+    /// outside** its belief (#278), until a campaign, a probe or a new belief
+    /// replaces it: a matchmaker's answer at that tag arriving after the
+    /// quorum is still folded ([`ColocatedNode::on_match_reply`]), because a
+    /// quorum is a minimum, and the one answer a fixed latency always orders
+    /// last may be the only one that names this node. The first late answer
+    /// that moves the belief retires the tag, as any new belief does: a
+    /// later one waits for the next re-probe, a liveness cost only.
+    /// Volatile.
+    closed_probe: Option<Ballot>,
     /// The highest ballot at which a configuration this node **belonged to**
     /// was in force here: `acceptors_since` restricted to the assignments
     /// that left this node inside `acceptors` (boot, `learn_config`,

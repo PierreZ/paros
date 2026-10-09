@@ -203,17 +203,26 @@ impl ColocatedNode {
     /// Whatever moved it, the belief is now one this incarnation **heard**
     /// ([`BeliefSource::Heard`]), and a membership probe still open is
     /// answered by it: a probe only ever asks about the bootstrap default
-    /// (#173).
+    /// (#173). A closed probe's late answers stop counting (#278), and a
+    /// *different* configuration (or a binding below the fact) drops the
+    /// reconfiguration fact the old one matched: the caller that adopted a fact names it afterwards
+    /// ([`ColocatedNode::bind_fact`]).
     pub(super) fn adopt_configuration(&mut self, config: AcceptorConfig, since: Ballot) {
         // Plain Multi-Paxos never moves its static membership.
         assert!(
             self.config.has_matchmakers(),
             "only a matchmaker deployment adopts a configuration"
         );
+        // A binding below the fact cannot carry it either: the fact is
+        // always at most the ballot the belief is bound to.
+        if config != self.acceptors || since < self.belief_fact {
+            self.belief_fact = Ballot::zero();
+        }
         self.acceptors = config;
         self.acceptors_since = since;
         self.belief_source = BeliefSource::Heard;
         self.probe = None;
+        self.closed_probe = None;
         self.record_membership();
         assert!(
             self.acceptors_since == since,
@@ -222,6 +231,30 @@ impl ColocatedNode {
         assert!(
             self.probe.is_none(),
             "an adopted belief answers any open probe"
+        );
+        assert!(
+            self.closed_probe.is_none(),
+            "an adopted belief retires a closed probe's late answers"
+        );
+    }
+
+    /// Name the reconfiguration fact the belief now matches (#278): the
+    /// effective configuration a probe or a `StaleConfiguration` just
+    /// adopted, registered under `fact`. Called right after
+    /// [`ColocatedNode::adopt_configuration`] bound that configuration.
+    pub(super) fn bind_fact(&mut self, fact: Ballot) {
+        assert!(
+            fact != Ballot::zero(),
+            "a reconfiguration fact is registered under a ballot"
+        );
+        assert!(
+            fact <= self.acceptors_since,
+            "a belief is bound at or above the fact it matches"
+        );
+        self.belief_fact = fact;
+        assert!(
+            self.belief_fact == fact,
+            "the belief names the fact it matches"
         );
     }
 

@@ -299,6 +299,7 @@ pub(super) struct MatchmakerAudit {
     campaign_stale: bool,
     probe_rejoined: bool,
     reprobe_rejoined: bool,
+    late_answer_moved: bool,
     ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from
@@ -1664,6 +1665,17 @@ impl MatchmakerAudit {
         }
         if !member && effective.is_some() {
             self.probed_outside.insert(node.0);
+        }
+    }
+
+    /// A closed probe's late answer moved an outside node's belief (#278).
+    pub(super) fn probe_late(&mut self, node: NodeId, member: bool) {
+        reach_once!(
+            self.late_answer_moved,
+            "membership: a late probe answer moves an outside node's belief"
+        );
+        if member {
+            self.probed_outside.remove(&node.0);
         }
     }
 

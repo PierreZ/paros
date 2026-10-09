@@ -24,7 +24,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.
 - `quorum_read.rs` → `QuorumRead`, `QuorumReads`, `PreReadFold`, `ReadBasis` → the leaderless read tally (#143) and the won leadership's configuration and fence it is judged over (#260).
 - `membership.rs` → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing.
-- `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the boot probe (#173).
+- `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the membership probe (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).
 - `matchmaker/{generation,reconfigurer,decree}.rs` → the generation machine, `MatchmakerReconfigurer`, the successor decree over the shared roles at slot zero.
 - `matchmaker/{message,state,storage,write}.rs` → wire contract, durable state, `RegistryStorage` + `MemRegistry` (the reference registry), `MatchmakerWriteOp` + `MatchmakerReady`.

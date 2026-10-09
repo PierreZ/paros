@@ -701,6 +701,20 @@ pub trait Audit {
     ) {
     }
 
+    /// A matchmaker answered this node's membership probe for `ballot` after
+    /// it had closed with the node outside, naming a newer reconfiguration
+    /// (#278): `effective` is the ballot the belief is now bound to, and
+    /// `member` whether it names the node — a campaign opened in the same
+    /// step.
+    fn membership_probe_late(
+        &self,
+        node: NodeId,
+        ballot: Ballot,
+        effective: Option<Ballot>,
+        member: bool,
+    ) {
+    }
+
     /// This candidate deliberately skipped re-sending its open matchmaking
     /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).
     fn matchmaking_resend_skipped(&self, node: NodeId) {}
