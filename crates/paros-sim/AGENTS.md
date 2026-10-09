@@ -76,12 +76,12 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   and every journal on `JournalStorage`, matchmakers on `JournalMatchmakerStorage`; its
   `Durability` a knob (two syncs by default, one at the extreme) and its segment geometry a knob
   per region (`journal_geometry`: floors `PERSIST_BLOCKS_FLOOR` = 2 blocks,
-  `ENTRY_BLOCKS_FLOOR` = 17, the workload's largest write). A seam crash is a power loss
-  (`SelfCrash`, `world/power.rs`), a wipe deletes the journal's files, the ledgered injector
+  `ENTRY_BLOCKS_FLOOR` = 17, the workload's largest write). A crash at a driver `hint!` is a
+  power loss the attrition regime takes, a cut mid-commit is `world/power.rs` (`SelfCrash`), a wipe deletes the journal's files, the ledgered injector
   damages a boot, and moonpool's storage chaos runs under it. A quiet seat (a replica, a held
   journal) stores ordered with the power cut and the injector dark. `withhold_gc` → a seed
   whose nodes withhold GC requests for the chaos window (#263). `system_journals` → the directory and the registry on half the seeds (kept at 50% from the sweep's coverage, #247; the fleet operations run on every seed, against the machines, #246), on
-  `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
+  `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
 

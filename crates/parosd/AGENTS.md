@@ -52,7 +52,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 - `parosd` (`src/main.rs`): `0` clean shutdown · `75` `RunError::Storage` or `MachineError::Storage` (restart) · `78` a
   refusal (do not restart: amnesia, a lost identity, a class change, an edited `Config`) · `1`
-  `RunError::Infra` / `SeamCrash` · `2` an invalid configuration.
+  `RunError::Infra` · `2` an invalid configuration.
 - `parosctl` (`src/bin/parosctl/main.rs`, `Ending`): `0` success · `3` refused/not served · `4`
   ambiguous · `5` no server answered · `2` bad arguments · `1` no servers configured.
 

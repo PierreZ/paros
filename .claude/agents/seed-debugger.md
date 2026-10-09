@@ -31,7 +31,7 @@ Work in this order and report where you stopped if you cannot finish:
    `crates/paros/src/audit.rs`, then the driver site that reports it.
 3. Walk back through the roles in `paros-core`: which of `Acceptor`,
    `Proposer`, `Replica`, `Matchmaking`, `Matchmaker` decided, what
-   `ColocatedNode` handed it, and which fault (a `Seam` crash, a dropped or
+   `ColocatedNode` handed it, and which fault (a crash at a driver `hint!`, a dropped or
    overtaken message, a wiped disk, a superseded configuration) made that data
    stale. Name the invariant in protocol terms.
 4. Decide who is wrong: the protocol, the harness (a fault beyond the budget,

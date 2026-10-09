@@ -126,15 +126,16 @@ a node **between** batches, never at the seam *within* one. Yet the seam is wher
 durability is subtle: what happens if a node dies after it fsyncs an accept but before
 the `Accepted` leaves the wire? Or before the fsync, with the batch half-written?
 
-To reach those points the harness uses `buggify!()` — deterministic fault injection
-activated per seed and then fired probabilistically, so only some seeds exercise a seam
-crash, always reproducibly. Each seam is a `Seam` variant on the driver's `DriverHooks`
-port with its own BUGGIFY location. Crashing *before* the fsync loses the whole
+To reach those points the driver names each one with moonpool's `hint!("label").await`
+— a deterministic fault location activated per seed and then fired probabilistically, so
+only some seeds exercise a seam crash, always reproducibly. The same code ships in
+`parosd`, where a hint does nothing. Crashing *before* the fsync loses the whole
 un-synced batch, and since no message was sent, recovery is a clean "it never happened";
 crashing *after* the fsync but before the send leaves the writes durable and the
 messages gone, so peers are re-driven by the next beat's resend. The simulation makes
-this a *real* crash: it unwinds the node loop, drops the volatile state, and re-runs the
-node from the durable storage world exactly as a fresh process would. The audit then
+this a *real* crash: the seed's attrition regime kills the process at the hint, every
+unsynced write resolves by the simulated disk's crash physics, and the node boots again
+from its durable store exactly as a fresh process would. The audit then
 checks the two things a restart must never do: **"a node's promised ballot never
 decreases"** and **"a chosen index never regresses within a boot"**.
 

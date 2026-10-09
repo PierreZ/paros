@@ -11,7 +11,9 @@ use paros_core::{
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
-use crate::hooks::{DriverHooks, Seam};
+use moonpool_buggify::hint::Strike;
+
+use crate::hooks::DriverHooks;
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
@@ -214,31 +216,30 @@ where
 
     // 1. Persist durable writes FIRST, each op in order, flush per MustSync, and
     //    surface the persisted state for the safety + recovery oracles. The
-    //    `BeforeSync` crash seam lives inside `persist_writes`.
+    //    staged-not-synced hint lives inside `persist_writes`.
     let promised = node.hard_state().max_promised_ballot;
-    persist_writes(storage, &writes, must_sync, promised, self_id, hooks, audit).await?;
+    persist_writes(storage, &writes, must_sync, promised, self_id, audit).await?;
 
     if let Some(batch) = recovery_batch {
         report_recovery_batch(audit, self_id, batch);
     }
 
-    // Crash seam: after the batch is durable but before its messages leave. The
-    // durable writes survive; the batch's messages are dropped (never sent), so a
-    // recovered node must re-derive them. Only meaningful when there is durable
-    // work or a message to lose.
-    if (!writes.is_empty()
+    // Hint: the batch is durable, its messages have not left. A crash here
+    // keeps the durable writes and drops the batch's messages, so a
+    // restarted node must re-derive them. Only meaningful when there is
+    // durable work or a message to lose.
+    if !writes.is_empty()
         || !messages.is_empty()
         || !match_requests.is_empty()
-        || !gc_requests.is_empty())
-        && hooks.crash_at(Seam::AfterSyncBeforeSend)
+        || !gc_requests.is_empty()
     {
-        audit.crashed(NodeId(self_id), Seam::AfterSyncBeforeSend);
-        tracing::info!(
-            node = self_id,
-            seam = Seam::AfterSyncBeforeSend.label(),
-            "crashed"
-        );
-        return Err(RunError::SeamCrash(Seam::AfterSyncBeforeSend));
+        let hinted = moonpool_buggify::hint!("batch durable, not sent");
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!(
+                "the driver crashes after sync and before sending a batch"
+            );
+        }
+        hinted.await;
     }
 
     // 2. Send messages — only after (1) is durable.
@@ -275,16 +276,24 @@ where
         audit,
     );
 
-    // Crash seam (#260): a reconfiguring candidate dies with its `Prepare`s
-    // in flight — after the batch is durable, sent, applied and its reads
-    // answered, so all it loses is the campaign itself.
-    crash_if(
-        sent_prepare,
-        hooks,
-        audit,
-        NodeId(self_id),
-        Seam::AfterPrepareSent,
-    )?;
+    // Hint (#260): a reconfiguring candidate dies with its `Prepare`s in
+    // flight, after the batch is durable, sent, applied and its reads
+    // answered, so all it loses is the campaign itself. Armed only by a
+    // reconfiguring campaign's `Prepare`, a few per run, so the rate is far
+    // above the write hints': the state worth reaching is the campaign that
+    // never finishes. The witness of #260 was a reconfiguring leader dying
+    // here: an acceptor that promised its `Prepare` served reads over a
+    // configuration the slot the dead leader had just chosen was never
+    // voted in.
+    if sent_prepare {
+        let hinted = moonpool_buggify::hint!("reconfiguring prepare sent", 0.5);
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!(
+                "the driver crashes with a campaign's Prepares in flight"
+            );
+        }
+        hinted.await;
+    }
 
     // The previous recovery page is now fully durable, sent, and applied. Only
     // at this boundary may the core materialize the next bounded Ready page;
@@ -351,17 +360,16 @@ pub(crate) fn report_applied<A: Audit>(
 /// promise (`>=` any accept ballot in the batch).
 ///
 /// The observability events are emitted only **after** the fsync, so they never
-/// claim a write the `BeforeSync` crash seam then discards: a crash before the
+/// claim a write the staged-not-synced hint then discards: a crash before the
 /// fsync loses the whole un-synced batch and emits nothing, exactly as a real
 /// crash-before-flush would.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id, writes = writes.len(), must_sync = ?must_sync))]
-pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
+pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     storage: &mut S,
     writes: &[WriteOp],
     must_sync: paros_core::MustSync,
     promised: Ballot,
     self_id: u64,
-    hooks: &H,
     audit: &A,
 ) -> Result<(), RunError> {
     // The write half of the pairs the boot scan re-asserts
@@ -433,17 +441,16 @@ pub(crate) async fn persist_writes<S: LogStorage, H: DriverHooks, A: Audit>(
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
 
-    // Crash seam: the batch is staged but not yet flushed. A crash here loses the
-    // whole un-synced batch (and no message has been sent), so surface nothing but
-    // the crash marker itself. Only meaningful when the batch actually staged
-    // something.
-    crash_if(
-        !writes.is_empty(),
-        hooks,
-        audit,
-        NodeId(self_id),
-        Seam::BeforeSync,
-    )?;
+    // Hint: the batch is staged, not yet flushed. A crash here loses the
+    // whole un-synced batch, and no message was sent. Only meaningful when
+    // the batch staged something.
+    if !writes.is_empty() {
+        let hinted = moonpool_buggify::hint!("batch staged, not synced");
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!("the driver crashes before syncing a staged batch");
+        }
+        hinted.await;
+    }
 
     if !writes.is_empty() {
         storage
@@ -532,29 +539,6 @@ fn surface_persisted<A: Audit>(
             WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) | WriteOp::Learned { .. } => {}
         }
     }
-}
-
-/// The crash seam: when `armed` (the seam has something to lose — an
-/// unarmed site never consults the hook, so it spends no draw) and the hook
-/// fires, report the crash where it happens and unwind the incarnation with
-/// [`RunError::SeamCrash`].
-///
-/// # Errors
-///
-/// [`RunError::SeamCrash`] when the hook fires.
-pub(crate) fn crash_if<H: DriverHooks, A: Audit>(
-    armed: bool,
-    hooks: &H,
-    audit: &A,
-    node: NodeId,
-    seam: Seam,
-) -> Result<(), RunError> {
-    if armed && hooks.crash_at(seam) {
-        audit.crashed(node, seam);
-        tracing::info!(node = node.0, seam = seam.label(), "crashed");
-        return Err(RunError::SeamCrash(seam));
-    }
-    Ok(())
 }
 
 /// Map a [`StorageError`] into the driver's **deliberate crash decision**: a

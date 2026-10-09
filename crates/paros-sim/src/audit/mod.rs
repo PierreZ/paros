@@ -66,7 +66,7 @@ use paros::{
     LogReadReport, MatchRefusal, MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet,
     Message, NodeId, PROMISE_BATCH, Party, PendingBootstrap, ProxyId, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, ReconfigureResult, ReconfigurerStep, Registration,
-    RegistrationKind, Seam, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
+    RegistrationKind, Slot, StorageError, StorageFaultDecision, StorageRecord, command_hash,
     message_kind,
 };
 
@@ -1267,7 +1267,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             journals::lock(board).reopened(node.0, *journal);
         }
         let mut st = self.state();
-        st.booted.insert(node.0);
+        st.restarted_any |= !st.booted.insert(node.0); // a second boot: it crashed
         // One shared deployment per run: every node's durable configuration
         // names the same bootstrap membership, pool and matchmaker set.
         let bootstrap = st
@@ -1492,35 +1492,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                     "storage: the library refuses a restart under an edited configuration"
                 );
             }
-        }
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
-    fn crashed(&self, _node: NodeId, seam: Seam) {
-        let mut st = self.state();
-        st.crashed_any = true;
-        match seam {
-            Seam::BeforeSync => {
-                reach_once!(
-                    st.crashed_before_sync,
-                    "the driver crashes before syncing a staged batch"
-                );
-            }
-            Seam::AfterSyncBeforeSend => {
-                reach_once!(
-                    st.crashed_after_sync,
-                    "the driver crashes after sync and before sending a batch"
-                );
-            }
-            Seam::AfterPrepareSent => {
-                reach_once!(
-                    st.crashed_after_prepare,
-                    "the driver crashes with a campaign's Prepares in flight"
-                );
-            }
-            // The matchmaker's seams are reported through
-            // `matchmaker_crashed`, in their own namespace.
-            Seam::MatchBeforeSync | Seam::MatchAfterSyncBeforeReply => {}
         }
     }
 
@@ -2346,10 +2317,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         refusal: MatchRefusal,
     ) {
         self.state().matchmaker.refused(matchmaker, ballot, refusal);
-    }
-
-    fn matchmaker_crashed(&self, _matchmaker: MatchmakerId, seam: Seam) {
-        self.state().matchmaker.crashed(seam);
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0, refusal = ?refusal))]

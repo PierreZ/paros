@@ -91,8 +91,7 @@ use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
 use paros::{
     AcceptorConfig, Ballot, GcAck, GcStep, HistoryPage, MatchRefusal, MatchmakerHardState,
     MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, Seam, Slot,
-    StorageFaultDecision,
+    ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, Slot, StorageFaultDecision,
 };
 
 /// One write a journal registry's commit carries (#176), reported before
@@ -288,8 +287,6 @@ pub(super) struct MatchmakerAudit {
     duplicate_answered: bool,
     watermark_raised: bool,
     recovered_after_restart: bool,
-    crashed_before_sync: bool,
-    crashed_after_sync: bool,
     reply_dropped: bool,
     // --- the leader-side phase (#120) ---
     campaign_opened: bool,
@@ -1196,21 +1193,6 @@ impl MatchmakerAudit {
                     "generation: an inactive matchmaker refuses a proposer"
                 );
             }
-        }
-    }
-
-    /// A matchmaker crashed at one of its seams.
-    pub(super) fn crashed(&mut self, seam: Seam) {
-        match seam {
-            Seam::MatchBeforeSync => reach_once!(
-                self.crashed_before_sync,
-                "matchmaker: the driver crashes before syncing a registration"
-            ),
-            Seam::MatchAfterSyncBeforeReply => reach_once!(
-                self.crashed_after_sync,
-                "matchmaker: the driver crashes after syncing and before replying"
-            ),
-            _ => {}
         }
     }
 

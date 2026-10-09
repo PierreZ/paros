@@ -165,7 +165,7 @@ fn exit(error: &RunError) -> ExitCode {
             eprintln!("parosd: {}", remedy(*refusal));
             ExitCode::from(EXIT_REFUSED)
         }
-        RunError::Infra(_) | RunError::SeamCrash(_) => ExitCode::FAILURE,
+        RunError::Infra(_) => ExitCode::FAILURE,
     }
 }
 

@@ -21,6 +21,7 @@
 
 mod storage;
 
+use moonpool_buggify::hint::Strike;
 use moonpool_core::Providers;
 use paros_core::{
     GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, Matchmaker, MatchmakerConfig,
@@ -33,7 +34,7 @@ use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
-use crate::hooks::{DriverHooks, Reply, Seam};
+use crate::hooks::{DriverHooks, Reply};
 use crate::storage::StorageError;
 
 pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite};
@@ -45,31 +46,6 @@ fn storage_fault_crash<A: Audit>(audit: &A, id: MatchmakerId, e: StorageError) -
     audit.matchmaker_storage_fault(id, &e, StorageFaultDecision::Crash);
     tracing::warn!(matchmaker = id.0, error = %e, decision = "crash", "matchmaker_storage_fault");
     RunError::Storage(e)
-}
-
-/// The matchmaker driver's twin of the node driver's `crash_if`, reported
-/// through [`Audit::matchmaker_crashed`].
-///
-/// # Errors
-///
-/// [`RunError::SeamCrash`] when the hook fires.
-fn match_crash_if<H: DriverHooks, A: Audit>(
-    armed: bool,
-    hooks: &H,
-    audit: &A,
-    matchmaker: MatchmakerId,
-    seam: Seam,
-) -> Result<(), RunError> {
-    if armed && hooks.crash_at(seam) {
-        audit.matchmaker_crashed(matchmaker, seam);
-        tracing::info!(
-            matchmaker = matchmaker.0,
-            seam = seam.label(),
-            "matchmaker_crashed"
-        );
-        return Err(RunError::SeamCrash(seam));
-    }
-    Ok(())
 }
 
 /// #183: judge the operator's claim against the registry's format marker,
@@ -147,7 +123,7 @@ struct Drained {
 
 /// Run the [`MatchmakerReady`](paros_core::MatchmakerReady) handshake once:
 /// persist the batch's writes, fsync them, report them, and hand back the
-/// replies the caller may now send. The two crash seams sit exactly where a
+/// replies the caller may now send. The two hints sit exactly where a
 /// real crash would matter: before the fsync (the batch is lost whole, no
 /// reply was sent) and after it (the batch is durable, the reply never
 /// leaves).
@@ -159,21 +135,19 @@ struct Drained {
 /// a later leader's history would then silently omit it. The audit judges the
 /// rule at the reply (`match_replied` must find the registration already
 /// folded durable) and again at every restart (`matchmaker_recovered` must
-/// read back every durable registration), and the two crash seams below are
-/// the BUGGIFY locations that make both crash windows likely. The same
+/// read back every durable registration), and the two hints below are the
+/// moments the simulation strikes to make both crash windows likely. The same
 /// ordering covers the generation writes of #125: a `StopAck` leaves only
 /// once the freeze is durable, a bootstrap ack only once the pending record
 /// is, a decree promise or vote only once the decree record is.
 #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.id().0))]
-async fn drain<S, H, A>(
+async fn drain<S, A>(
     matchmaker: &mut Matchmaker,
     storage: &mut S,
-    hooks: &H,
     audit: &A,
 ) -> Result<Drained, RunError>
 where
     S: MatchmakerStorage,
-    H: DriverHooks,
     A: Audit,
 {
     let id = matchmaker.id();
@@ -202,24 +176,37 @@ where
         staged.map_err(|e| storage_fault_crash(audit, id, e))?;
     }
     if !writes.is_empty() {
-        // Crash seam: staged but not flushed — the batch dies whole, and no
-        // reply has been handed out yet.
-        match_crash_if(true, hooks, audit, id, Seam::MatchBeforeSync)?;
+        // Hint: staged but not flushed. The batch dies whole, and no reply
+        // was handed out yet. A matchmaker drains a batch only on a round
+        // change, a handful per run, so the rate is an order above the node
+        // hints' and still crashes only a few registrations per seed.
+        let hinted = moonpool_buggify::hint!("registration staged, not synced", 0.15);
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!(
+                "matchmaker: the driver crashes before syncing a registration"
+            );
+        }
+        hinted.await;
         storage
             .sync()
             .await
             .map_err(|e| storage_fault_crash(audit, id, e))?;
         surface_registry_writes(&writes, id, audit);
     }
-    // 2. Crash seam: durable, but the reply never leaves. Only meaningful when
-    //    there is a reply to lose.
-    match_crash_if(
-        !replies.is_empty() || !reconfigure_replies.is_empty(),
-        hooks,
-        audit,
-        id,
-        Seam::MatchAfterSyncBeforeReply,
-    )?;
+    // 2. Hint: durable, but the reply has not left. Only meaningful when
+    //    there is a reply to lose. This is the persist-before-reply moment:
+    //    with the order swapped (reply, then fsync) a crash here lets a
+    //    `Registered` reply escape for a ballot the restarted matchmaker no
+    //    longer holds, the registry's un-promise.
+    if !replies.is_empty() || !reconfigure_replies.is_empty() {
+        let hinted = moonpool_buggify::hint!("registration durable, reply not sent", 0.15);
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!(
+                "matchmaker: the driver crashes after syncing and before replying"
+            );
+        }
+        hinted.await;
+    }
     Ok(Drained {
         replies,
         reconfigure_replies,
@@ -231,7 +218,7 @@ where
 /// driver splits `persist_writes` / `surface_persisted`: the staging half and
 /// the reporting half each stay readable, both walk `writes` in order, and
 /// the reports come strictly after the fsync so they never claim a write the
-/// `MatchBeforeSync` seam then discards.
+/// staged-not-synced hint then discards.
 #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = id.0))]
 fn surface_registry_writes<A: Audit>(writes: &[MatchmakerWriteOp], id: MatchmakerId, audit: &A) {
     for op in writes {
@@ -380,8 +367,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 /// fsync-durable. `tunables` supplies the RPC liveness and inbox shape (the
 /// matchmaker has no tick and no peers); `hooks` and `audit` are the same
 /// provider-generic seams the node driver takes, with the matchmaker's own
-/// crash locations ([`Seam::MatchBeforeSync`],
-/// [`Seam::MatchAfterSyncBeforeReply`]) and reply-drop locations
+/// reply-drop locations
 /// ([`Reply::Match`], [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]).
 ///
 /// `boot` is the operator's claim about `storage` ([`BootKind`], #183), the
@@ -395,8 +381,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
 /// # Errors
 ///
 /// The exit is typed exactly like [`run_node`](crate::run_node)'s:
-/// [`RunError::SeamCrash`] for a hook-injected crash at a durability seam (the
-/// caller re-runs against the surviving storage), [`RunError::Storage`] for a
+/// [`RunError::Storage`] for a
 /// fail-stop storage fault, [`RunError::Refused`] when the boot claim and
 /// the registry's format marker disagree, [`RunError::Infra`] for a genuine
 /// provider/infrastructure failure.
@@ -467,7 +452,7 @@ where
                 // request it is stepped, and the drain hands the reply out
                 // only once the batch is durable.
                 matchmaker.step(request);
-                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit).await?;
+                let mut drained = drain(&mut matchmaker, &mut storage, audit).await?;
                 let answer = drained.replies.pop();
                 assert!(
                     answer.is_some() && drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
@@ -497,7 +482,7 @@ where
                     outcome = ?outcome,
                     "garbage_collect_requested"
                 );
-                let drained = drain(&mut matchmaker, &mut storage, hooks, audit).await?;
+                let drained = drain(&mut matchmaker, &mut storage, audit).await?;
                 assert!(
                     drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
                     "a garbage-collect request yields no match reply"
@@ -523,7 +508,7 @@ where
                     "reconfigure_requested"
                 );
                 matchmaker.step_reconfigure(request.clone());
-                let mut drained = drain(&mut matchmaker, &mut storage, hooks, audit).await?;
+                let mut drained = drain(&mut matchmaker, &mut storage, audit).await?;
                 let answer = drained.reconfigure_replies.pop();
                 assert!(
                     answer.is_some() && drained.reconfigure_replies.is_empty() && drained.replies.is_empty(),

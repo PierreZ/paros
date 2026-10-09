@@ -12,11 +12,13 @@
 //! nothing durable, so a kill simply reboots it empty; a [`ReplicaProcess`]
 //! runs `run_replica` (#144) over its own journal store with the power cut
 //! and the injector dark, outside the copy budget — a replica is not an acceptor. Every role with a
-//! disk sits inside a recovery loop that turns a `buggify`-injected seam crash into a real
-//! crash+restart: the driver unwinds, the volatile core is dropped, and the
-//! next iteration rebuilds it from its journal store on the simulated disk. A
-//! process kill — moonpool attrition, or the chain client's scripted reboot —
-//! aborts the task outright; the next incarnation restores the same way.
+//! disk sits inside a recovery loop that restarts it after a fail-stop
+//! storage fault, as `parosd`'s supervisor would: the driver unwinds, the
+//! volatile core is dropped, and the next iteration rebuilds it from its
+//! journal store on the simulated disk. A process kill — moonpool attrition,
+//! a driver `hint!` the attrition regime strikes (#294), or the chain
+//! client's scripted reboot — aborts the task outright; the next incarnation
+//! restores the same way.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -100,11 +102,7 @@ pub(crate) struct RoleRig {
 /// driver; that is the hooks' job.
 pub(crate) fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
     let incarnation = crate::shape::boot(ctx.state(), my_ip);
-    let hooks = BuggifyHooks::new(
-        ctx.time().clone(),
-        crate::CHAOS_DURATION,
-        incarnation.shape.seam_crash_bias,
-    );
+    let hooks = BuggifyHooks::new(ctx.time().clone(), crate::CHAOS_DURATION);
     let checker = audit_world(ctx.state());
     let audit = NodeAudit::new(ctx.time().clone(), checker.clone());
     RoleRig {
@@ -146,38 +144,6 @@ fn stay_down(checker: &AuditWorld, down: Down) {
         }
     }
 }
-
-/// One restart-delay BUGGIFY site: the delay a crashed role waits before its
-/// next incarnation boots, workload-buggified config (prong 2) that
-/// stretches the durability-seam crash window process-level attrition
-/// cannot reach — a node held down while the cluster keeps committing and
-/// truncating returns below the compaction floor and independently
-/// exercises the trim-point jump. Drawn per *crash*, deliberately not per node
-/// (it is not part of the node's shape): the delay describes one event, and
-/// two crashes of the same node should be free to look different. The floor
-/// is structural: a held-down node is a recovery the tail must absorb, never
-/// a cluster that stalls.
-///
-/// A macro, never a fn: moonpool keys a BUGGIFY location by the `file:line` of
-/// the outermost macro invocation, so every invocation below stays its own
-/// independently selectable location with its own fired gate (`$fired`,
-/// the reachable that proves the knob fired there).
-macro_rules! restart_delay {
-    ($ctx:expr, $fired:literal) => {{
-        let delay_ms = moonpool_sim::buggify_knob!(0_u64, 250_u64..3_001_u64);
-        if delay_ms > 0 {
-            // BUGGIFY pairing: this site's restart-delay knob fired.
-            moonpool_sim::assert_reachable!($fired);
-            moonpool_sim::TimeProvider::sleep(
-                $ctx.time(),
-                std::time::Duration::from_millis(delay_ms),
-            )
-            .await
-            .ok();
-        }
-    }};
-}
-pub(crate) use restart_delay;
 
 /// A paros node (an acceptor) in the simulation.
 pub(crate) struct NodeProcess;
@@ -260,9 +226,10 @@ impl Process for JoinerProcess {
 }
 
 /// A joiner (#189): `run_journals` with no journal of its own and the
-/// system plan, in the same seam-crash recovery loop as a node. Its disk is
+/// system plan, in the same recovery loop as a node. Its disk is
 /// fault-free (every seat it gets is a created journal's), and it is not an
-/// attrition victim: a joiner's lifecycle is the registry's.
+/// attrition victim (so no driver `hint!` kills it either): a joiner's
+/// lifecycle is the registry's.
 #[tracing::instrument(level = "debug", skip_all, fields(node = id.0))]
 async fn run_joiner(
     ctx: &SimContext,
@@ -315,12 +282,9 @@ async fn run_joiner(
         ))
         .await
         {
-            Err(RunError::SeamCrash(_) | RunError::Storage(_)) => {
-                restart_delay!(
-                    ctx,
-                    "a seam-crashed joiner restarts after a buggified delay"
-                );
-            }
+            // A failed storage call is a fail-stop exit (`parosd` exits
+            // 75): the supervisor starts it again at once.
+            Err(RunError::Storage(_)) => {}
             Err(RunError::Refused(refusal)) => {
                 assert_always!(
                     false,
@@ -710,11 +674,11 @@ async fn run_acceptor(
             && moonpool_sim::buggify_with_prob!(f64::from(shape.config_edit_pct) / 100.0),
     );
 
-    // Recovery loop: a `buggify`-injected seam crash unwinds the driver, we
-    // drop the volatile nodes, rebuild storage from the (surviving) worlds,
-    // and re-run — a faithful clean crash + recovery. Attrition (process
-    // kill) is handled by the harness; this covers the seams *inside* a
-    // Ready batch that attrition cannot reach. A journal that is down for
+    // Recovery loop: a fail-stop storage fault unwinds the driver, we drop
+    // the volatile nodes, rebuild storage from the (surviving) worlds, and
+    // re-run, as `parosd`'s supervisor restarts it. A process kill
+    // (attrition, or a driver `hint!` the regime strikes) is handled by the
+    // harness: a fresh factory instance boots. A journal that is down for
     // good on this node — retired by the operator (#123), or terminally
     // parked by a detected persistent corruption — is one the opener
     // declines (`SimStores::open`), and a node with every journal down
@@ -761,31 +725,6 @@ async fn run_acceptor(
         ))
         .await
         {
-            // Simulated crash at a durability seam: fall through to recover
-            // and re-run (rebuilding volatile state from the durable world),
-            // after this crash's own restart delay (`restart_delay!`).
-            Err(RunError::SeamCrash(_)) => {
-                // On a real disk a seam crash is the process dying: a power
-                // loss, through moonpool's `SelfCrash`, so every write not
-                // yet synced (a store that acknowledged one early included)
-                // resolves by the disk's crash physics, and the process
-                // restarts as attrition's would.
-                if ctx
-                    .crash_self(
-                        moonpool_sim::RebootKind::Crash,
-                        Some(Duration::from_millis(moonpool_sim::sim_random_range(
-                            250..3_001,
-                        ))),
-                    )
-                    .is_ok()
-                {
-                    assert_reachable!("journal store: a seam crash is a power loss");
-                    // The kill lands within a scheduler tick: wait for it.
-                    let _ = ctx.time().sleep(Duration::from_hours(1)).await;
-                    return Ok(());
-                }
-                restart_delay!(ctx, "a seam-crashed node restarts after a buggified delay");
-            }
             // An injected storage fault surfaced as the driver's typed
             // crash decision (issue #19 A) and took the node's last live
             // journal (#188: a fault quarantines its journal; a node left
@@ -824,10 +763,6 @@ async fn run_acceptor(
                     return Ok(());
                 }
                 assert_reachable!("a storage-fault crash recovers through the restart path");
-                restart_delay!(
-                    ctx,
-                    "a storage-fault crash restarts after a buggified delay"
-                );
             }
             // The library refused the store (#147). Amnesia is the wipe
             // coin's outcome and the one the rule exists for: the identity
@@ -870,10 +805,6 @@ async fn run_acceptor(
                     )));
                 }
                 tracing::info!(node = self_rank.0, "config_restored");
-                restart_delay!(
-                    ctx,
-                    "a node refused under an edited configuration restarts under the restored one"
-                );
             }
             // A first boot on a formatted store is a harness bug: the
             // provisioning ledger and the disks disagree.
@@ -1356,9 +1287,9 @@ fn spare_template(ctx: &SimContext, deployment: &Deployment) -> Option<Config> {
 }
 
 /// A matchmaker: the provider-generic registry driver inside the same
-/// crash/recovery loop as the node — a seam crash unwinds `run_matchmaker`,
-/// the volatile `Matchmaker` is dropped, and the next incarnation restores
-/// its registry from the durable world.
+/// recovery loop as the node — a fail-stop storage fault unwinds
+/// `run_matchmaker`, the volatile `Matchmaker` is dropped, and the next
+/// incarnation restores its registry from the durable world.
 // One recovery loop with per-exit-kind handling, like `run_acceptor`'s.
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(matchmaker = id.0))]
@@ -1490,28 +1421,22 @@ async fn run_matchmaker_role(
         )
         .await
         {
-            // A seam crash, or the registry's own failed sync: both mean
-            // this incarnation's un-synced batch is gone, so both rebuild
-            // from the disk, after the matchmaker's own restart-delay knob. A restart may then draw the wipe coin and
-            // hand the replacement to a matchmaker-set reconfiguration.
-            // Its floor is structural: a matchmaker held down is a
-            // matchmaking phase that waits, never a cluster that stalls.
-            Err(failure @ (RunError::SeamCrash(_) | RunError::Storage(_))) => {
-                // A seam crash is the process dying, a power loss through moonpool's `SelfCrash`, like an
-                // acceptor's: every write not yet synced resolves by the
-                // disk's crash physics. A failed sync is a fail-stop the
-                // process restarts from. A journal registry the budgeted cut
-                // left with an ambiguous live registration refuses to open
-                // for good (a crash verdict): the matchmaker is the run's one
-                // matchmaker loss, down for the run and replaced by a
-                // handover, like a wiped one.
-                if matches!(
-                    failure,
-                    RunError::Storage(paros::StorageError::Corruption { .. })
-                ) && world
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_cut_matchmaker(my_ip)
+            // The registry's own failed sync: this incarnation's un-synced
+            // batch is gone, so it rebuilds from the disk. A restart may then
+            // draw the wipe coin and hand the replacement to a
+            // matchmaker-set reconfiguration.
+            Err(RunError::Storage(failure)) => {
+                // A failed sync is a fail-stop the process restarts from. A
+                // journal registry the budgeted cut left with an ambiguous
+                // live registration refuses to open for good (a crash
+                // verdict): the matchmaker is the run's one matchmaker loss,
+                // down for the run and replaced by a handover, like a wiped
+                // one.
+                if matches!(failure, paros::StorageError::Corruption { .. })
+                    && world
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_cut_matchmaker(my_ip)
                 {
                     assert_reachable!(
                         "journal store: a cut matchmaker's registry is lost for good"
@@ -1519,25 +1444,6 @@ async fn run_matchmaker_role(
                     stay_down(&checker, Down::MatchmakerLost(id.0));
                     return Ok(());
                 }
-                if matches!(failure, RunError::SeamCrash(_))
-                    && ctx
-                        .crash_self(
-                            moonpool_sim::RebootKind::Crash,
-                            Some(Duration::from_millis(moonpool_sim::sim_random_range(
-                                250..3_001,
-                            ))),
-                        )
-                        .is_ok()
-                {
-                    assert_reachable!("journal store: a matchmaker crash is a power loss");
-                    // The kill lands within a scheduler tick: wait for it.
-                    let _ = ctx.time().sleep(Duration::from_hours(1)).await;
-                    return Ok(());
-                }
-                restart_delay!(
-                    ctx,
-                    "a seam-crashed matchmaker restarts after a buggified delay"
-                );
             }
             // The library refused the registry (#183). Amnesia is the wipe
             // coin's outcome and the one the rule exists for: the matchmaker
@@ -1574,10 +1480,6 @@ async fn run_matchmaker_role(
                     )));
                 }
                 tracing::info!(matchmaker = id.0, "matchmaker_config_restored");
-                restart_delay!(
-                    ctx,
-                    "a matchmaker refused under an edited configuration restarts under the restored one"
-                );
             }
             // A first boot on a formatted registry is a harness bug: the
             // provisioning ledger and the disks disagree.
@@ -1683,8 +1585,8 @@ fn replica_config(
 }
 
 /// A replica (#144): the provider-generic replica driver inside the same
-/// crash/recovery loop as a node — a seam crash unwinds `run_replica`, the
-/// volatile `ReplicaNode` is dropped, and the next incarnation rebuilds it
+/// recovery loop as a node — a fail-stop storage fault unwinds
+/// `run_replica`, the volatile `ReplicaNode` is dropped, and the next incarnation rebuilds it
 /// from the durable world. Its disk is its own slice of the world under its
 /// IP, registered outside the copy budget and fault-free: the budget defends
 /// the acceptors' copies, and a replica's records are never one. A replica
@@ -1766,19 +1668,11 @@ async fn run_replica_role(
         )
         .await
         {
-            Err(RunError::SeamCrash(_)) => {
-                restart_delay!(
-                    ctx,
-                    "a seam-crashed replica restarts after a buggified delay"
-                );
-            }
             // The simulated disk's own chaos (a failed sync, a short
             // transfer) reaches a replica's journal too: a fail-stop the
             // process restarts from, never a lost copy (nothing is injected
             // into it).
-            Err(RunError::Storage(_)) => {
-                restart_delay!(ctx, "a replica restarts after a storage fault on its disk");
-            }
+            Err(RunError::Storage(_)) => {}
             // The world never wipes a replica and the provisioning ledger
             // records its format, so its claim always matches its disk.
             Err(RunError::Refused(refusal)) => {

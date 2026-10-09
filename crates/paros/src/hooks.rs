@@ -1,10 +1,9 @@
 //! Driver fault-injection hooks.
 //!
-//! `drain_ready` awaits the storage seam, and process-granularity chaos
-//! (moonpool's attrition) lands wherever a task happens to yield, which a
-//! sweep cannot aim: the persist/send boundaries inside one batch are narrow
-//! windows it rarely hits. [`Seam`] names those points, so each becomes its
-//! own reachable crash. [`DriverHooks`] also exposes
+//! The durability moments inside one batch (staged, not synced; durable,
+//! not sent) are not hooks: the driver names each with moonpool's
+//! `hint!("label").await` inline, and the simulation decides whether to
+//! crash the process there (#294). [`DriverHooks`] exposes
 //! the driver's optional policy decisions: delaying an `Accept` re-send,
 //! resigning leadership, choosing the shortest valid election timeout, the peer mailbox's
 //! choices (overtake the queue, evict across kinds, and — armed at enqueue,
@@ -19,58 +18,6 @@
 //! this.
 
 use paros_core::{JournalIdentifier, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
-
-/// A durability seam within one `Ready` batch where a crash can be injected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Seam {
-    /// After the batch's durable writes are staged but **before** the fsync. A
-    /// crash here loses the whole un-synced batch — and no message was sent yet
-    /// (sends come after the fsync), so it is a clean "the step never happened".
-    BeforeSync,
-    /// After the batch is fsync-durable but **before** its messages are sent
-    /// (this subsumes the after-accept-before-`Accepted`-reply seam). A crash
-    /// here keeps the durable writes but drops the batch's outbound messages;
-    /// the peers must recover from the restarted node re-deriving them.
-    AfterSyncBeforeSend,
-    /// Inside the **matchmaker** driver: a registration (or a watermark raise)
-    /// is staged but **before** its fsync. A crash here loses the staged
-    /// write, and no reply was sent (replies come after the fsync), so it is a
-    /// clean "the request never happened" — the requester times out and asks
-    /// again.
-    MatchBeforeSync,
-    /// Inside the matchmaker driver: the registration is fsync-durable but
-    /// **before** its reply leaves. A crash here keeps the registration and
-    /// drops the reply; the restarted matchmaker answers the requester's
-    /// retried request idempotently, from the history it retains.
-    /// This is the persist-before-reply seam: with the order swapped (reply,
-    /// then fsync) a crash here lets a `Registered` reply escape for a ballot
-    /// the restarted matchmaker no longer holds — the registry's un-promise.
-    MatchAfterSyncBeforeReply,
-    /// After a batch that carried a **reconfiguring** campaign's `Prepare`
-    /// (a configuration other than the node's belief) was persisted **and
-    /// sent**: a candidate dies with its campaign in flight (#260). Nothing durable
-    /// is lost; what dies is the campaign, whose `Prepare` some acceptors
-    /// already promised — and a node that promised it believes the
-    /// campaign's configuration until a leader is elected again. The
-    /// witness of #260 was a reconfiguring leader dying here: an acceptor
-    /// that promised its `Prepare` served reads over a configuration the
-    /// slot the dead leader had just chosen was never voted in.
-    AfterPrepareSent,
-}
-
-impl Seam {
-    /// The stable `seam` field a crash at this seam is traced with.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Seam::BeforeSync => "before_sync",
-            Seam::AfterSyncBeforeSend => "after_sync_before_send",
-            Seam::MatchBeforeSync => "match_before_sync",
-            Seam::MatchAfterSyncBeforeReply => "match_after_sync_before_reply",
-            Seam::AfterPrepareSent => "after_prepare_sent",
-        }
-    }
-}
 
 /// What a cooperative leader handoff would transfer right now, handed to
 /// [`DriverHooks::initiate_handoff`] so a simulation can bias the decision
@@ -168,15 +115,10 @@ impl Reply {
 /// Optional driver-level fault and policy hooks.
 ///
 /// Each method corresponds to one independent `BUGGIFY` location in simulation.
-/// The default implementation is production behavior: never crash, always
+/// The default implementation is production behavior: always
 /// re-send pending accepts, retain leadership, and use normal randomized
 /// election timeouts.
 pub trait DriverHooks {
-    /// Whether to simulate a crash at `seam` right now.
-    fn crash_at(&self, _seam: Seam) -> bool {
-        false
-    }
-
     /// Whether to skip a re-send that has pending `Accept`s to send.
     fn skip_accept_resend(&self) -> bool {
         false

@@ -21,7 +21,11 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
 - `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
+<<<<<<< HEAD
 - `hooks.rs` → `DriverHooks`, `NoHooks`, `Seam`, `HandoffContext`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294): add nothing to it.
+=======
+- `hooks.rs` → `DriverHooks`, `NoHooks`, `HandoffContext`, `Reply` → BUGGIFY prong-1 surface. The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs` and `replica_tier/mod.rs` (#294).
+>>>>>>> 166ece1 (sim: the driver seams are hint!s; RunError::SeamCrash and restart_delay! go (#294))
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.
@@ -79,7 +83,12 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
   implementation would be a sim wrapper. A path the code walks gets a `reachable!` probe, with
   the message the sim's gate already uses, never reworded.
 - A new tunable is a `DriverTunables` field with a default (`driver/config.rs`) and a
+<<<<<<< HEAD
   `buggify_knob!` in `paros-sim`'s `NodeShape`; a new durability boundary is a `hint!`.
+=======
+  `buggify_knob!` in `paros-sim`'s `NodeShape`; a new durability boundary is an inline
+  `hint!("label").await` with a `reachable!` on `Strike::Killed`.
+>>>>>>> 166ece1 (sim: the driver seams are hint!s; RunError::SeamCrash and restart_delay! go (#294))
 - Every call is one at-most-once attempt (`try_get_reply`), never `get_reply`.
 - `paros::client` draws no randomness: every choice is the caller's.
 - Storage implementations pass both contract suites.

@@ -28,7 +28,6 @@
 //!
 //! | hook | fired gate | recovery gate |
 //! |---|---|---|
-//! | `crash_at` (per seam) | audit `crashed` / `matchmaker_crashed`, one per seam | boot re-report checks in audit `recovered` / `matchmaker_recovered` |
 //! | `skip_accept_resend` | audit `resend_skipped` | the slot is still applied (final convergence) |
 //! | `skip_matchmaking_resend` | audit `matchmaking_resend_skipped` | "matchmaking: a campaign closes with a matchmaker quorum" |
 //! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
@@ -59,7 +58,7 @@ use moonpool_sim::{TimeProvider, assert_reachable, buggify_with_prob};
 
 use paros::{
     DriverHooks, HandoffContext, JournalIdentifier, Message, NodeId, Party, ProxyId,
-    ReconfigurerPhase, Seam, Slot,
+    ReconfigurerPhase, Slot,
 };
 
 /// The shape every inline-gated hook shares: one `buggify_with_prob!` draw
@@ -84,13 +83,6 @@ macro_rules! fire_gate {
 pub(crate) struct BuggifyHooks<T> {
     time: T,
     cutoff: Duration,
-    /// Write-window crash bias (issue #19 B, the `TigerBeetle` "×10 while writes
-    /// are in flight" pressure): a workload-buggified multiplier on the
-    /// durability-seam crash probability. The seams are only ever consulted
-    /// with a batch in flight, so biasing them *is* biasing crashes into the
-    /// write window. Part of the node's per-seed shape (`crate::shape`), so a
-    /// restarted node keeps the bias its first boot drew.
-    seam_crash_bias: f64,
     /// Whether this run's nodes withhold their GC requests for the chaos
     /// window (`crate::shape::withhold_gc`, drawn once per seed).
     withhold_gc: bool,
@@ -105,11 +97,10 @@ pub(crate) struct BuggifyHooks<T> {
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
-    pub(crate) fn new(time: T, cutoff: Duration, seam_crash_bias: f64) -> Self {
+    pub(crate) fn new(time: T, cutoff: Duration) -> Self {
         Self {
             time,
             cutoff,
-            seam_crash_bias,
             withhold_gc: false,
             held_journal: None,
             lose_verdicts: false,
@@ -143,38 +134,6 @@ impl<T: TimeProvider> BuggifyHooks<T> {
 }
 
 impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
-    #[tracing::instrument(level = "trace", skip_all, fields(seam = ?seam))]
-    fn crash_at(&self, seam: Seam) -> bool {
-        let prob = 0.03 * self.seam_crash_bias;
-        let fired = self.active()
-            && match seam {
-                Seam::BeforeSync => buggify_with_prob!(prob),
-                Seam::AfterSyncBeforeSend => buggify_with_prob!(prob),
-                // The matchmaker's two durability points, each its own
-                // location. A matchmaker drains a batch only on a round
-                // change — a handful per run — so the per-batch rate is an
-                // order above the node seams' and still crashes only a few
-                // registrations per seed. The bias applies: both are write
-                // windows.
-                Seam::MatchBeforeSync => buggify_with_prob!((0.15 * self.seam_crash_bias).min(0.9)),
-                Seam::MatchAfterSyncBeforeReply => {
-                    buggify_with_prob!((0.15 * self.seam_crash_bias).min(0.9))
-                }
-                // Armed only by a reconfiguring campaign's `Prepare`, a few
-                // per run, so the rate is far above the write seams' (#260):
-                // the state worth reaching is the campaign that never
-                // finishes. Kept off the write-window bias: a campaign is not
-                // a write window.
-                Seam::AfterPrepareSent => buggify_with_prob!(0.5),
-            };
-        if fired && self.seam_crash_bias > 1.0 && seam != Seam::AfterPrepareSent {
-            // BUGGIFY pairing: the biased write-window crash pressure genuinely
-            // fires on some seed (no slot is created when it never does).
-            assert_reachable!("a write-window-biased seam crash fires");
-        }
-        fired
-    }
-
     fn skip_accept_resend(&self) -> bool {
         // Consulted only with accepts pending; gated in the audit
         // (`resend_skipped`).

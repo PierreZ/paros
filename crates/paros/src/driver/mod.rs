@@ -730,12 +730,10 @@ fn park_call<S, A: Audit, P: Providers, H: DriverHooks>(
 ///
 /// # Errors
 ///
-/// The exit is typed ([`RunError`]): [`RunError::SeamCrash`] when `hooks` fires
-/// at a durability seam (the caller recovers by re-running `run_node` against
-/// the surviving durable storage, which rebuilds the volatile state); [`RunError::Storage`] when a [`LogStorage`] call failed and
+/// The exit is typed ([`RunError`]): [`RunError::Storage`] when a [`LogStorage`] call failed and
 /// the driver took its fail-stop crash decision — production treats it as a
-/// process exit (crash-only), the sim node loop recovers through the same
-/// restart path as a seam crash; [`RunError::Refused`] when `boot` and the
+/// process exit (crash-only), the sim node loop recovers by re-running
+/// `run_node` against the surviving durable storage; [`RunError::Refused`] when `boot` and the
 /// store's format marker disagree (nothing was written, nothing sent: the
 /// identity stays down); [`RunError::Infra`] for genuine
 /// provider/infrastructure failures (bind, listen), the only exit that is not

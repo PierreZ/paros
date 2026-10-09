@@ -283,7 +283,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   the sim draws every identifier per seed (`paros_sim::shape::Identifiers`). Stores live at
   `journals/<tenant>/<journal>/`.
 - **A storage fault quarantines its journal, not the process**; it re-opens after
-  `DriverTunables::quarantine_ticks`. A seam crash is the process dying, for every journal.
+  `DriverTunables::quarantine_ticks`. A crash at a driver `hint!` is the process dying, for every journal.
 - **System journals** (the directory = a user tenant's control journal, the node registry = the
   cell tenant's control journal, both identifiers in the `SystemPlan`) are opt-in through a
   `SystemPlan` (`None` is the static deployment), folded by `paros::system::{Directory,
@@ -344,9 +344,12 @@ Three layers, and nothing crosses them:
   has an observable effect, trace what happened, quiet disruptive hooks after the chaos window.
   Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`
   is deliberately not `Send + 'static`); a decision a spawned task needs is carried to it.
-  Each durability `Seam` (`BeforeSync`, `AfterSyncBeforeSend`, `MatchBeforeSync`,
-  `MatchAfterSyncBeforeReply`, and `AfterPrepareSent`, a reconfiguring candidate dying with its
-  campaign in flight, #260) is its own location.
+- **Durability moments are hints** (#294): the drivers name each with moonpool's
+  `hint!("label").await` inline, at its own rate (staged, not synced; durable, not sent; a
+  matchmaker's registration on both sides of its sync; a reconfiguring `Prepare` sent, #260).
+  The seed's attrition regime decides whether the process dies there; a killed process never
+  returns, so there is no `RunError` for it and no sim-side restart delay. The kill gate is an
+  inline `reachable!` on `Strike::Killed`.
 - **Prong 2, knobs**: anything that shapes a run is config data the harness draws per seed, one
   `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
   must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a

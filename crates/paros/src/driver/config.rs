@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use moonpool_core::{SimulationError, SimulationResult};
 
-use crate::hooks::Seam;
 use crate::storage::StorageError;
 
 /// How often a node advances its logical clock.
@@ -435,16 +434,11 @@ impl BootRefusal {
 /// a protocol-layer decision.
 #[derive(Debug)]
 pub enum RunError {
-    /// A hook-injected crash at a durability [`Seam`] inside a `Ready` batch
-    /// (simulation only: production's `NoHooks` never fires). The caller
-    /// recovers by re-running the driver loop, which rebuilds volatile state
-    /// from durable storage.
-    SeamCrash(Seam),
     /// A [`crate::LogStorage`] (or [`crate::MatchmakerStorage`]) call failed
     /// and the driver took its fail-stop crash
     /// decision — never an incidental error propagation. In **production**
     /// this is a crash-only process exit; recovery is the next boot. In
-    /// simulation the loop recovers exactly like a seam crash: re-run the
+    /// simulation the loop recovers the same way: re-run the
     /// driver against whatever the disk *actually* holds (the recovery
     /// path must be correct for both outcomes of an ambiguous write; see
     /// [`crate::WriteOutcome`]).
@@ -464,7 +458,6 @@ pub enum RunError {
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunError::SeamCrash(seam) => write!(f, "injected crash at durability seam {seam:?}"),
             RunError::Storage(e) => write!(f, "storage fault, crashing: {e}"),
             RunError::Refused(BootRefusal::Amnesia) => write!(
                 f,
@@ -491,7 +484,7 @@ impl std::error::Error for RunError {
         match self {
             RunError::Storage(e) => Some(e),
             RunError::Infra(e) => Some(e),
-            RunError::SeamCrash(_) | RunError::Refused(_) => None,
+            RunError::Refused(_) => None,
         }
     }
 }
