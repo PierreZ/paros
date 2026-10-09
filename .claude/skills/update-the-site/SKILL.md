@@ -1,6 +1,6 @@
 ---
 name: update-the-site
-description: Keep the paros site (Zola + Goyo under web/site/, the Paxos chapters in web/site/content/paxos and the parosd pages in web/site/content/parosd, mermaid-only diagrams, the both-theme colour rules in web/site/AGENTS.md) in step with the code - map a protocol or harness change to the page that explains it, keep every named symbol real, and verify with scripts/build-site.sh. Use after changing a protocol rule, a message, a recovery or read path, the journal API, truncation or trim-point behaviour, a game level, or when asked to explain part of paros for readers.
+description: Keep the paros site (Zola + Goyo under web/site/, the Paxos chapters in web/site/content/paxos and the parosd pages in web/site/content/parosd, mermaid-only diagrams, the both-theme colour rules in web/site/AGENTS.md) in step with the code - map a protocol or harness change to the page that explains it, keep every named symbol real, and verify with web/site/build.sh. Use after changing a protocol rule, a message, a recovery or read path, the journal API, truncation or trim-point behaviour, a game level, or when asked to explain part of paros for readers.
 ---
 
 # Update the site
@@ -52,8 +52,8 @@ chapter never re-explains an interleaving a level plays. `paxos/play.md`, every
 ## Verify
 
 ```bash
-scripts/build-site.sh        # inside nix develop; output in web/site/public/; fails on a broken internal link or anchor
-scripts/build-site.sh serve  # live preview
+web/site/build.sh        # inside nix develop; output in web/site/public/; fails on a broken internal link or anchor
+web/site/build.sh serve  # live preview
 ```
 
 Run through the Nix prefix that applies (`/validate`). The site is built by

@@ -12,7 +12,7 @@
     # template engine and refuses them. nixos-26.05 ships 0.22.1; unstable has 0.23.
     # Fetched over git so the session proxy (which refuses GitHub tarballs) can lock it.
     nixpkgs-zola.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-26.05&shallow=1";
-    # The Goyo theme (v0.7.1), pinned by rev, not a flake. scripts/build-site.sh copies
+    # The Goyo theme (v0.7.1), pinned by rev, not a flake. web/site/build.sh copies
     # it into web/site/themes/goyo (decided on 2026-10-07: no git submodule).
     goyo = {
       url = "git+https://github.com/hahwul/goyo?rev=25054f8f9f0b4eafa3d3380ec120b7e9cd7fd021&shallow=1";
@@ -59,7 +59,7 @@
             cargo-mutants
             protobuf
 
-            # The site (web/site/, Zola + Goyo, #254): scripts/build-site.sh.
+            # The site (web/site/, Zola + Goyo, #254): web/site/build.sh.
             zola
 
             # paros play: the interactive game (crates/paros-play + web/play).
@@ -78,7 +78,7 @@
 
             # Set environment variables
             export RUST_BACKTRACE=1
-            # The pinned Goyo theme; scripts/build-site.sh copies it into web/site/themes/goyo.
+            # The pinned Goyo theme; web/site/build.sh copies it into web/site/themes/goyo.
             export PAROS_GOYO="${goyo}"
             export RUST_LOG=debug
             # RUSTC_WRAPPER for selective LLVM SanitizerCoverage instrumentation,
@@ -95,7 +95,7 @@
             echo "  • Use 'cargo nextest run' for better test output with timeouts"
             echo "  • Use 'cargo fmt' to format code"
             echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-play.sh builds the game"
-            echo "  • zola $(zola --version | cut -d' ' -f2): scripts/build-site.sh builds the site"
+            echo "  • zola $(zola --version | cut -d' ' -f2): web/site/build.sh builds the site"
           '';
 
           # Environment variables

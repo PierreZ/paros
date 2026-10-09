@@ -25,7 +25,7 @@ nix develop --command bash -c 'cd web/play && npm ci && npm run check && npm tes
 ```
 
 The full deploy build — wasm, bundle, and the copy into `web/site/public/play/` —
-is `nix develop --command scripts/build-play.sh`, after `scripts/build-site.sh`.
+is `nix develop --command scripts/build-play.sh`, after `web/site/build.sh`.
 
 ## Layout
 

@@ -8,7 +8,7 @@ on:
     paths:
       - "web/**"
       - "crates/paros-play/**"
-      - "scripts/build-site.sh"
+      - "web/site/build.sh"
       - "scripts/build-play.sh"
       - "flake.nix"
       - "flake.lock"
@@ -32,7 +32,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Build the site
-        run: nix develop --command scripts/build-site.sh
+        run: nix develop --command web/site/build.sh
       - name: Build and stage the game at /play/
         run: nix develop --command scripts/build-play.sh
       - uses: actions/upload-pages-artifact@v5

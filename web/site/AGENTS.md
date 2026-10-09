@@ -7,10 +7,10 @@ reader to `docs/architecture.md`, which is the agents' map, not human documentat
 
 ## Build & preview
 
-- `scripts/build-site.sh` (inside `nix develop`) copies the pinned Goyo (`PAROS_GOYO`, a flake
+- `web/site/build.sh` (inside `nix develop`) copies the pinned Goyo (`PAROS_GOYO`, a flake
   input) into `web/site/themes/goyo` and runs `zola build`; output in `web/site/public/`. Zola checks
   every internal link and anchor, so a broken `@/` link fails the build.
-- `scripts/build-site.sh serve` previews live.
+- `web/site/build.sh serve` previews live.
 - The flake pins Zola 0.22 (`nixpkgs-zola`): Goyo's templates do not parse on Zola 0.23.
 - Internal links are `@/paxos/<page>.md#anchor`. Old mdbook URLs keep working through each
   page's `aliases` (`/safety.html` redirects to `/paxos/safety/`); keep them when you move a page.

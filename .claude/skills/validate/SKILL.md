@@ -82,4 +82,4 @@ coverage gate that never fired, or convergence timeout. A docs-only change can s
   not noise; do not delete the gate (`/adding-an-audit-check`).
 
 The site is built by `pages.yml`, not by `rust.yml`; if you touched
-`web/site/`, also run `RUN scripts/build-site.sh` (`/update-the-site`).
+`web/site/`, also run `RUN web/site/build.sh` (`/update-the-site`).

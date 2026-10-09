@@ -1,4 +1,4 @@
-# The paros site (#254): Zola with the Goyo theme. Build with `scripts/build-site.sh`
+# The paros site (#254): Zola with the Goyo theme. Build with `web/site/build.sh`
 # (through Nix); it installs the pinned Goyo into `web/site/themes/goyo` first.
 base_url = "https://pierrez.github.io/paros"
 title = "paros"

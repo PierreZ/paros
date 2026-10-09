@@ -454,9 +454,9 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `web/site/` (the website, Zola + Goyo, #254; `web/site/AGENTS.md`, the `update-the-site` skill; built by `scripts/build-site.sh`), `web/play/` (the game's app),
+Elsewhere: `web/site/` (the website, Zola + Goyo, #254; `web/site/AGENTS.md`, the `update-the-site` skill; built by `web/site/build.sh`), `web/play/` (the game's app),
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-site.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

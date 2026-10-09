@@ -7,7 +7,7 @@
 # Run inside `nix develop` (wasm-bindgen-cli, wasm-opt, node and npm come from the
 # flake). The wasm-bindgen CLI version must equal the `wasm-bindgen` crate pin in
 # crates/paros-play/Cargo.toml; the flake and the pin are bumped together.
-# `scripts/build-site.sh` must have run first when staging (web/site/public/ is its output).
+# `web/site/build.sh` must have run first when staging (web/site/public/ is its output).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,7 +35,7 @@ echo "building the web app…"
 
 echo "staging into web/site/public/play/…"
 if [ ! -d web/site/public ]; then
-  echo "web/site/public/ is missing: run \`scripts/build-site.sh\` first" >&2
+  echo "web/site/public/ is missing: run \`web/site/build.sh\` first" >&2
   exit 1
 fi
 rm -rf web/site/public/play

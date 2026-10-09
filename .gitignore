@@ -13,7 +13,7 @@ target
 # Nix / direnv
 .direnv/
 
-# The site's build output and the theme copied in at build time (scripts/build-site.sh)
+# The site's build output and the theme copied in at build time (web/site/build.sh)
 /web/site/public/
 /web/site/themes/
 

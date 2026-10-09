@@ -80,7 +80,7 @@ Prefix each with `nix develop --command` (on the web, see root *Environment & Ni
 - `cargo check --target wasm32-unknown-unknown -p paros-play`
 - `scripts/build-play.sh --wasm-only` (wasm-bindgen output into `web/play/src/wasm/`, gitignored)
 - `bash -c 'cd web/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
-- Full deploy build: `scripts/build-play.sh` after `scripts/build-site.sh` (stages into `web/site/public/play/`).
+- Full deploy build: `scripts/build-play.sh` after `web/site/build.sh` (stages into `web/site/public/play/`).
 
 ## Deps & pins (`Cargo.toml`)
 
