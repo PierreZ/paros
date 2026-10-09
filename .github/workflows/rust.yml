@@ -1,10 +1,13 @@
 name: Tests
 
+# A change that touches only Markdown or docs/ runs no Rust job.
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
