@@ -1,18 +1,19 @@
-//! The machine record (#196): `<data-dir>/machine`, a machine's identity and
-//! its cell, kept beside the stores and rewritten whole and atomically.
+//! The machine record (#196): a machine's identity and its cell, the one
+//! record a machine keeps beside its journal stores, rewritten whole by its
+//! [`MachineDisk`](super::MachineDisk).
 //!
-//! A machine is **formatted** on its first start, on an empty data
-//! directory: its `node_id` is minted then, at random (#225), so a wiped
-//! volume comes back as a new machine and "a wiped identity never rejoins"
-//! holds by construction. A data directory that holds stores but no record
-//! lost its identity, and is refused as amnesia.
+//! A machine is **formatted** on its first start, on an empty disk: its
+//! `node_id` is minted then, at random (#225), so a wiped disk comes back as
+//! a new machine and "a wiped identity never rejoins" holds by construction.
+//! A disk that holds stores but no record lost its identity, and is refused
+//! as amnesia ([`super::run_machine`]).
 //!
-//! The rendezvous join list is stored too and re-read on every boot (the
-//! environment's, when given, wins and is recorded). Once `init` forms the
+//! The rendezvous join list is stored too and re-read on every start (the
+//! configuration's, when given, wins and is recorded). Once `init` forms the
 //! cell, the record holds its plan: first as **pending** on the seed that
-//! runs `init` (a re-run resumes it, never redraws it), then as **formed**
-//! — the commit point, written after every journal store of the plan is
-//! formatted and the provisioning record names them ([`DirLedger::form`]).
+//! runs `init` (a re-run resumes it, never redraws it), then as **formed** —
+//! the commit point, written after every journal store of the plan is
+//! formatted ([`super::MachineDisk::provision`]).
 //!
 //! ```text
 //! node_id 6150928431937019931
@@ -29,24 +30,18 @@
 //! journal 2965734451981346203/9861377130450924019
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs;
-use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 
-use paros::machine::{CellLedger, CellPlan, Class};
-use paros::{Config, JournalIdentifier, JournalStorage, JournalStoreConfig, NodeId, QuorumSystem};
+use paros_core::{Config, JournalIdentifier, NodeId, QuorumSystem};
 
-use crate::record::{Record, parse_identifier, write_atomically};
-use crate::stores::{journal_dir, path_str};
+use super::{CellPlan, Class};
 
-/// The record's file name under the data directory.
-const FILE: &str = "machine";
-
-/// The role the provisioning record names for a machine's stores.
-pub const ROLE: &str = "machine";
+/// Parse a journal identifier written `<tenant>/<journal>` (#235).
+fn parse_identifier(text: &str) -> Option<JournalIdentifier> {
+    text.contains('/').then(|| text.parse().ok()).flatten()
+}
 
 /// Where a machine's plan stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,31 +70,6 @@ pub struct MachineRecord {
 }
 
 impl MachineRecord {
-    /// Read the record under `data_dir`; `None` when there is none.
-    ///
-    /// # Errors
-    ///
-    /// The file exists but cannot be read, or is not a record.
-    pub fn read(data_dir: &Path) -> io::Result<Option<Self>> {
-        let text = match fs::read_to_string(data_dir.join(FILE)) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        Self::parse(&text)
-            .map(Some)
-            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))
-    }
-
-    /// Write the record under `data_dir`, durably.
-    ///
-    /// # Errors
-    ///
-    /// Any filesystem failure.
-    pub fn write(&self, data_dir: &Path) -> io::Result<()> {
-        write_atomically(data_dir, FILE, &self.render())
-    }
-
     /// The formed plan, if this machine has a cell.
     #[must_use]
     pub fn formed(&self) -> Option<&CellPlan> {
@@ -109,7 +79,9 @@ impl MachineRecord {
         }
     }
 
-    fn render(&self) -> String {
+    /// The record as text, the form a [`MachineDisk`](super::MachineDisk) keeps.
+    #[must_use]
+    pub fn render(&self) -> String {
         let mut text = format!(
             "node_id {}\nclass {}\ncapacity {}\nfailure_domain {}\nrendezvous {}\n",
             self.node_id.0,
@@ -138,7 +110,13 @@ impl MachineRecord {
         text
     }
 
-    fn parse(text: &str) -> Result<Self, String> {
+    /// The record [`MachineRecord::render`] wrote.
+    ///
+    /// # Errors
+    ///
+    /// The text is not a record: a damaged record is an error, never an
+    /// absence.
+    pub fn parse(text: &str) -> Result<Self, String> {
         let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
         let mut plan: Option<(PlanState, u64)> = None;
         let mut members = Vec::new();
@@ -242,72 +220,10 @@ pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifi
     }
 }
 
-/// The [`CellLedger`] of a machine's data directory.
-pub struct DirLedger {
-    /// The data directory.
-    pub data_dir: PathBuf,
-    /// The store layout.
-    pub layout: JournalStoreConfig,
-    /// The machine's record, as last written.
-    pub record: MachineRecord,
-}
-
-impl DirLedger {
-    fn commit(&mut self, plan: Option<(PlanState, CellPlan)>) -> Result<(), String> {
-        let mut record = self.record.clone();
-        record.plan = plan;
-        record
-            .write(&self.data_dir)
-            .map_err(|e| format!("machine record: {e}"))?;
-        self.record = record;
-        Ok(())
-    }
-}
-
-impl CellLedger for DirLedger {
-    fn pending(&self) -> Option<CellPlan> {
-        match &self.record.plan {
-            Some((PlanState::Pending, plan)) => Some(plan.clone()),
-            _ => None,
-        }
-    }
-
-    fn record_pending(&mut self, plan: &CellPlan) -> Result<(), String> {
-        self.commit(Some((PlanState::Pending, plan.clone())))
-    }
-
-    async fn form(&mut self, plan: &CellPlan) -> Result<(), String> {
-        if self.record.formed() == Some(plan) {
-            return Ok(());
-        }
-        let provider = moonpool_core::TokioStorageProvider::new();
-        let node_id = self.record.node_id;
-        for &journal in &plan.journals {
-            let mut store = JournalStorage::new(
-                provider.clone(),
-                path_str(&journal_dir(&self.data_dir, journal)),
-                journal_config(plan, node_id, journal),
-                self.layout,
-            );
-            paros::provision_store(&mut store)
-                .await
-                .map_err(|e| format!("journal {journal}: {e}"))?;
-        }
-        Record {
-            role: ROLE.into(),
-            id: node_id.0,
-            journals: plan.journals.iter().copied().collect::<BTreeSet<_>>(),
-        }
-        .write(&self.data_dir)
-        .map_err(|e| format!("provisioning record: {e}"))?;
-        self.commit(Some((PlanState::Formed, plan.clone())))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros::{JournalId, TenantId};
+    use paros_core::{JournalId, TenantId};
 
     fn record(plan: Option<(PlanState, CellPlan)>) -> MachineRecord {
         MachineRecord {
@@ -322,14 +238,8 @@ mod tests {
 
     #[test]
     fn a_record_round_trips_with_and_without_its_plan() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        assert_eq!(MachineRecord::read(dir.path()).expect("readable"), None);
         let bare = record(None);
-        bare.write(dir.path()).expect("written");
-        assert_eq!(
-            MachineRecord::read(dir.path()).expect("readable"),
-            Some(bare)
-        );
+        assert_eq!(MachineRecord::parse(&bare.render()), Ok(bare));
         let identifier =
             |tenant, journal| JournalIdentifier::new(TenantId(tenant), JournalId(journal));
         let plan = CellPlan {
@@ -344,17 +254,19 @@ mod tests {
             ],
         };
         let formed = record(Some((PlanState::Formed, plan.clone())));
-        formed.write(dir.path()).expect("written");
-        let read = MachineRecord::read(dir.path())
-            .expect("readable")
-            .expect("present");
+        let read = MachineRecord::parse(&formed.render()).expect("a record");
         assert_eq!(read.formed(), Some(&plan));
+        assert_eq!(read, formed);
+        let pending = record(Some((PlanState::Pending, plan)));
+        let read = MachineRecord::parse(&pending.render()).expect("a record");
+        assert_eq!(read.formed(), None);
+        assert_eq!(read, pending);
     }
 
     #[test]
-    fn a_damaged_record_is_an_error_not_an_absence() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        fs::write(dir.path().join(FILE), "node_id x\n").expect("written");
-        assert!(MachineRecord::read(dir.path()).is_err());
+    fn a_damaged_record_is_an_error() {
+        assert!(MachineRecord::parse("node_id x\n").is_err());
+        assert!(MachineRecord::parse("node_id 3\n").is_err());
+        assert!(MachineRecord::parse(&format!("{}bogus 1\n", record(None).render())).is_err());
     }
 }

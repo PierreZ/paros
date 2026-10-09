@@ -86,7 +86,7 @@ impl DirStores {
         let mut stores = Self {
             provider: TokioStorageProvider::new(),
             record: read.unwrap_or_else(|| Record {
-                role: crate::machine_record::ROLE.into(),
+                role: crate::disk::ROLE.into(),
                 id,
                 journals: BTreeSet::new(),
             }),
@@ -95,7 +95,7 @@ impl DirStores {
             genesis,
             created: BTreeMap::new(),
         };
-        stores.record.check(crate::machine_record::ROLE, id)?;
+        stores.record.check(crate::disk::ROLE, id)?;
         stores.resolve_created().await?;
         Ok(stores)
     }

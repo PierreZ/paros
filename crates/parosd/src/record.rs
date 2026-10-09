@@ -7,7 +7,7 @@
 //! completed one leave the same marker. The record is written only once
 //! every store it names is formatted durably, so:
 //!
-//! - a cell's formation (#196, [`crate::machine_record`]) formats every
+//! - a cell's formation (#196, [`crate::disk`]) formats every
 //!   journal of the plan, then writes this record, then commits the plan;
 //!   an interrupted formation resumes from the disk (a store already
 //!   formatted under the same configuration is left as it is);
