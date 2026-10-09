@@ -186,6 +186,15 @@ impl LogStorage for LedgeredJournal {
             Some(injection) => super::injector::apply(&self.provider, injection).await,
             None => false,
         };
+        // An open writes too (moonpool-journal's `begin_generation` rewrites
+        // both metainfo copies; a header or record repair rewrites its
+        // region), so a kill inside it may tear a copy the last sync left
+        // whole: until `note_opened`, the ledger cannot vouch for the layout
+        // and aims no family at it (#270: a bare-quorum seed's two outages
+        // killed a reboot mid-open, then a metainfo rot flipped the one
+        // valid copy).
+        let ip = self.ip.clone();
+        self.with_world(|w| w.note_sync_started(&ip));
         let mut scanned = self.inner.boot_scan().await;
         // A transient fault in the open's own repair (a failed sync of
         // the rewritten copy) says nothing about the damage: a boot

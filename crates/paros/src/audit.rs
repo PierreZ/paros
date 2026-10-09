@@ -687,9 +687,10 @@ pub trait Audit {
     fn membership_probe_sent(&self, node: NodeId, matchmaker: MatchmakerId, ballot: Ballot) {}
 
     /// A matchmaker quorum answered this node's membership probe for
-    /// `ballot` and it closed: `effective` is the ballot of the effective
-    /// configuration the node adopted (`None`: the quorum named none and the
-    /// bootstrap stands, now heard), and `member` whether the belief names
+    /// `ballot` and it closed: `effective` is the ballot the node's belief is
+    /// bound to (the effective configuration it adopted, or a newer one it
+    /// already held; `None`: the bootstrap stands, now heard), and `member`
+    /// whether the belief names
     /// the node — in which case a campaign opened in the same step.
     fn membership_probe_closed(
         &self,

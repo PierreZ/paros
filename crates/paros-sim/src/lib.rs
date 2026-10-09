@@ -308,6 +308,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(ScriptedLifecycle))
         .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
         .fault_factory(|| Box::new(crate::world::late_outage::LateOutage))
+        .fault_factory(|| Box::new(crate::world::bare_outage::BareOutage))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }

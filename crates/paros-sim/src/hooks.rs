@@ -97,6 +97,11 @@ pub(crate) struct BuggifyHooks<T> {
     /// The journal held on every node for the chaos window (#188), drawn
     /// once per seed (`crate::shape::journals`); `None` on most seeds.
     held_journal: Option<JournalIdentifier>,
+    /// Whether this run draws the lost-verdict scenario
+    /// (`crate::shape::lost_verdict`, drawn once per seed): a write's reply
+    /// is dropped at its own rate on every node, not only where the
+    /// location fires.
+    lose_verdicts: bool,
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
@@ -107,6 +112,7 @@ impl<T: TimeProvider> BuggifyHooks<T> {
             seam_crash_bias,
             withhold_gc: false,
             held_journal: None,
+            lose_verdicts: false,
         }
     }
 
@@ -121,6 +127,13 @@ impl<T: TimeProvider> BuggifyHooks<T> {
     /// window when `withhold` (see `DriverHooks::withhold_gc_requests`).
     pub(crate) fn withholding_gc(mut self, withhold: bool) -> Self {
         self.withhold_gc = withhold;
+        self
+    }
+
+    /// Drop write replies at the lost-verdict scenario's rate
+    /// (`crate::shape::lost_verdict`).
+    pub(crate) fn losing_verdicts(mut self, lose: bool) -> Self {
+        self.lose_verdicts = lose;
         self
     }
 
@@ -480,6 +493,15 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
         // `Duplicate`), the edge a lost verdict lives on. One location per
         // reply kind.
         match reply {
+            // On a lost-verdict seed every node drops at the same rate,
+            // so a retry meets a committed write wherever it lands.
+            paros::Reply::Write if self.lose_verdicts => {
+                let lost = moonpool_sim::sim_random_bool(0.10);
+                if lost {
+                    assert_reachable!("client: a write's verdict is lost on a lost-verdict seed");
+                }
+                lost
+            }
             paros::Reply::Write => buggify_with_prob!(0.10),
             // A lost claim: the owner does not know it won, and its next
             // write names its old generation — refused, naming itself as

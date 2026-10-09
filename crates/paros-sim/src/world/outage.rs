@@ -40,6 +40,7 @@ use async_trait::async_trait;
 use moonpool_sim::{
     Chaos, ChaosMode, FaultContext, FaultInjector, OUTAGE_STATE_KEY, Outage, OutageLanded,
     SimulationResult, StateHandle, TimeProvider, assert_reachable, buggify_with_prob,
+    sim_random_range,
 };
 
 /// When an outage may strike, from the opening of the chaos window: late,
@@ -98,6 +99,10 @@ pub(crate) struct LossShape {
     /// CTRL Case 3 across a reconfiguration. Only then does it spend the
     /// loss budget; with no removed holder it leaves the budget alone.
     pub(crate) prefer_removed: bool,
+    /// Aim at a slot a member of its deciding configuration never held,
+    /// every holder's copy settled: the bare quorum, whose Phase-1 tally
+    /// can then read `faulty, faulty, none` once every copy is lost.
+    pub(crate) short: bool,
 }
 
 impl LossShape {
@@ -107,6 +112,7 @@ impl LossShape {
         recent: true,
         keep: Some(0),
         prefer_removed: false,
+        short: true,
     };
 
     /// The departed-straggler scenario's loss
@@ -116,6 +122,7 @@ impl LossShape {
         recent: true,
         keep: None,
         prefer_removed: true,
+        short: false,
     };
 
     /// How many slots of one journal may lose their clean quorum: zero
@@ -161,10 +168,15 @@ impl FaultInjector for OutageLosses {
                             "storage: an outage lands on a seed drawing the departed-straggler scenario"
                         );
                         LossShape::DEPARTED_STRAGGLER
+                    } else if crate::shape::bare_quorum(ctx.state()) {
+                        assert_reachable!(
+                            "storage: an outage lands on a seed drawing the bare-quorum scenario"
+                        );
+                        LossShape::BARE_QUORUM
                     } else {
                         draw_loss()
                     };
-                    plan_losses(ctx.state(), loss);
+                    let _ = plan_losses(ctx.state(), loss);
                 }
                 return Ok(());
             }
@@ -190,12 +202,16 @@ fn draw_loss() -> LossShape {
         recent: buggify_with_prob!(0.5),
         keep: lossy.then(|| usize::from(moonpool_sim::sim_random_bool(0.5))),
         prefer_removed: buggify_with_prob!(1.0),
+        short: false,
     }
 }
 
 /// Plan the outage's losses in every genesis journal (see the module doc).
-pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) {
+/// Returns the holders the main journal's plan left clean: the copies the
+/// cluster must wait for.
+pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) -> Vec<u64> {
     let plan = crate::shape::journals(state);
+    let mut kept = Vec::new();
     for journal in plan.ids {
         let audit = crate::audit::audit_world_for(state, journal);
         let decided = audit.decided_slots();
@@ -206,8 +222,17 @@ pub(super) fn plan_losses(state: &StateHandle, loss: LossShape) {
             .plan_outage_loss(loss, &decided);
         if let Some(planned) = planned {
             audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
+            if journal == plan.main {
+                kept = planned
+                    .holders
+                    .iter()
+                    .copied()
+                    .filter(|node| !planned.damaged.contains(node))
+                    .collect();
+            }
         }
     }
+    kept
 }
 
 /// What [`super::StorageWorld::plan_outage_loss`] planned for one journal.
@@ -219,4 +244,44 @@ pub(crate) struct PlannedLoss {
     pub(crate) holders: Vec<u64>,
     /// The holders whose copy is damaged at their next boot.
     pub(crate) damaged: Vec<u64>,
+}
+
+/// Take every acceptor and proxy leader down now, each back after its own
+/// delay in [`DOWN`], one acceptor straggling in [`STRAGGLER`]: the one
+/// clean copy the loss left (`kept`, node ids, which are ranks in the
+/// acceptor group), so the cluster must recover through the prior
+/// configuration while it is still down (#267), else a random acceptor.
+pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
+    let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
+    let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);
+    let clean = match kept {
+        [node] => usize::try_from(*node)
+            .ok()
+            .filter(|rank| *rank < acceptors.len()),
+        _ => None,
+    };
+    if clean.is_some() {
+        assert_reachable!("outage: the departed straggler's clean holder is back last");
+    }
+    let straggler = clean.unwrap_or_else(|| {
+        usize::try_from(sim_random_range(0..acceptors.len().max(1) as u64)).unwrap_or(0)
+    });
+    let millis = |range: &std::ops::Range<Duration>| {
+        Duration::from_millis(sim_random_range(
+            u64::try_from(range.start.as_millis()).unwrap_or(0)
+                ..u64::try_from(range.end.as_millis()).unwrap_or(1),
+        ))
+    };
+    for (rank, ip) in acceptors.iter().enumerate() {
+        let down = if rank == straggler {
+            millis(&STRAGGLER)
+        } else {
+            millis(&DOWN)
+        };
+        ctx.crash_for(ip, down)?;
+    }
+    for ip in &proxies {
+        ctx.crash_for(ip, millis(&DOWN))?;
+    }
+    Ok(())
 }

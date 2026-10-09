@@ -127,7 +127,9 @@ fn a_probe_that_finds_its_node_inside_opens_a_campaign() {
 
 /// A spare on a cluster that never reconfigured: the quorum names no
 /// reconfiguration, the bootstrap stands as a heard belief, and the node
-/// skips its campaigns from then on without probing again.
+/// skips its campaigns from then on, re-probing on each election timeout so
+/// a reconfiguration naming it is heard even if no campaign registers it
+/// (#270).
 #[test]
 fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
     let mut mms = registries(3);
@@ -147,10 +149,37 @@ fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
         1,
         "the settled spare skips"
     );
+    assert_eq!(n.role(), NodeRole::Follower, "and never campaigns");
     assert!(
-        drain_match_requests(&mut n).is_empty(),
-        "and probes no more"
+        n.membership_probe().is_some(),
+        "but re-probes from outside its belief"
     );
+    assert!(!drain_match_requests(&mut n).is_empty());
+}
+
+/// A node outside a heard reconfiguration re-probes, and a quorum that
+/// misses the one matchmaker holding it never moves its belief backwards
+/// (#270).
+#[test]
+fn a_re_probe_never_moves_a_belief_backwards() {
+    let mut n = rebooted_member();
+    n.step(Message::Heartbeat {
+        from: NodeId(4),
+        ballot: ballot(3, 4),
+        commit: None,
+        config: Some(cfg(&[0, 1, 4])),
+        fence: None,
+    });
+    assert_eq!(n.belief_source(), BeliefSource::Heard);
+    let mut mms = registries(3);
+    fire_election(&mut n);
+    let replies = matchmake(&mut mms, drain_match_requests(&mut n));
+    let steps: Vec<MatchStep> = replies.into_iter().map(|r| n.on_match_reply(r)).collect();
+    assert!(steps.contains(&MatchStep::ProbeClosed {
+        effective: Some(ballot(3, 4)),
+        member: false,
+    }));
+    assert_eq!(n.acceptors(), &cfg(&[0, 1, 4]), "the newer belief stands");
 }
 
 /// A belief heard on the wire answers the probe itself: the node adopts it

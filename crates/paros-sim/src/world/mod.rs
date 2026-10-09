@@ -9,6 +9,7 @@
 //! (owned by the `StateHandle`); the damage it permits is the ledgered
 //! injector's ([`injector`]) and the power cuts' ([`power`]).
 
+pub(crate) mod bare_outage;
 pub(crate) mod injector;
 pub(crate) mod late_outage;
 pub(crate) mod node_store;

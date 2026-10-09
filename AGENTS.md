@@ -76,6 +76,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   (`moonpool-consultant` agent).
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
+  When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
+  moonpool PR, merge it once its CI is green, then advance paros's pin (all eight lines).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
@@ -201,7 +203,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   (`MatchStep::StaleConfiguration`); beliefs never trigger that.
 - **Membership probe** (`MembershipProbe`): every incarnation boots believing the bootstrap
   configuration and asks a matchmaker quorum for the effective one, registering nothing, before
-  its first campaign or skip. A node only registers a belief it heard.
+  its first campaign or skip. A node only registers a belief it heard. A node whose heard belief
+  leaves it outside re-probes on every election timeout, and a probe adopts only a strictly
+  newer configuration (#270).
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are
@@ -289,7 +293,9 @@ Three layers, and nothing crosses them:
   the axis. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
   scenario, its outage may strike early in the tail, once the owner's removal took effect and
   at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
-  recovery the oracles judge.
+  recovery the oracles judge. Likewise on a seed that draws the bare-quorum scenario, an outage
+  strikes inside the chaos window the moment a decided slot lacks a member's copy
+  (`paros_sim::world::bare_outage`, #270).
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.

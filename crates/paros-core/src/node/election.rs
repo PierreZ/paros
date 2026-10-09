@@ -41,7 +41,9 @@ impl ColocatedNode {
     /// record naming retired identities that every later `H_b` had to
     /// cover. The probe registers nothing
     /// ([`crate::matchmaking::MembershipProbe`]); a node whose probe finds
-    /// it inside campaigns from there.
+    /// it inside campaigns from there. A node whose heard belief leaves it
+    /// outside keeps probing on the same clock, so a configuration that
+    /// names it is heard even when no campaign ever registers it (#270).
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
     pub(super) fn on_check_leader(&mut self) {
         if self.role == NodeRole::Leader {
@@ -56,6 +58,14 @@ impl ColocatedNode {
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
             self.counters.non_member_campaigns_skipped =
                 self.counters.non_member_campaigns_skipped.saturating_add(1);
+            // A heard belief that leaves this node outside is re-asked on
+            // the same clock (#270): a probe may have adopted a
+            // reconfiguration only one matchmaker held, which no quorum ever
+            // completes. Its members never hear of it and stay out on the
+            // bootstrap; without the re-probe, nobody campaigned again (the
+            // sweep went red on "cluster converged after chaos", and green
+            // with it).
+            self.probe_membership();
             return;
         }
         self.campaign(RegistrationKind::Belief, self.acceptors.clone());
@@ -201,13 +211,27 @@ impl ColocatedNode {
         // chosen record leaves a hole this node may be the only one able to
         // ask about — the Promise response IS the recovery query, so the
         // node's own Phase 1 covers the hole and the quorum's reports heal it
-        // (see the prefix-heal step in `try_become_leader`).
-        let from_slot = self
-            .acceptor
-            .first_faulty()
-            .map_or(self.first_unchosen(), |first_faulty| {
-                first_faulty.min(self.first_unchosen())
-            });
+        // (see the prefix-heal step in `try_become_leader`). It starts at
+        // the fold's hole too: an accept that rewrote the rotted record
+        // cleared its faulty mark but not the hole, which no catch-up heals
+        // once no node holds the slot chosen (witness 11946559099387280463:
+        // a leader's own re-proposal repaired its record of slot 0, its
+        // next election opened at slot 1, and every node's prefix froze
+        // below slot 0 for good).
+        let from_slot = [self.acceptor.first_faulty(), self.replica.fold_hole()]
+            .into_iter()
+            .flatten()
+            .fold(self.first_unchosen(), Slot::min);
+        assert!(
+            from_slot <= self.first_unchosen(),
+            "a campaign's recovery range starts at or below the chosen prefix"
+        );
+        assert!(
+            self.replica
+                .fold_hole()
+                .is_none_or(|hole| from_slot <= hole),
+            "a campaign's recovery range covers the fold's hole"
+        );
         let wire_config = self.wire_config_of(&config);
         // The candidate is its own first acceptor: its records seed the P2c
         // tally, its faulty entries the tri-state tally, and its promise

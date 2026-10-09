@@ -296,6 +296,12 @@ fn member_union<'a, Id: Copy + Ord + 'a>(
 /// `none` per configuration). Anything less is Case 3: wait. With no prior
 /// configuration at all nothing could have been chosen below this ballot, so
 /// the slot is decidable outright.
+///
+/// Proved in simulation (#267): asking the newest prior configuration alone
+/// lets a successor whose own members never held the slot fill it with
+/// `Noop` while the departed member holding its only clean copy is down,
+/// and the sweep goes red on two values decided for one slot (witness
+/// 9147512841470386050).
 fn slot_decidable<Id: Copy + Ord>(
     prior: &[AcceptorConfig<Id>],
     answered: &BTreeSet<Id>,

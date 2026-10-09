@@ -496,6 +496,12 @@ struct Registry {
     /// Run-level: whether the run draws the departed-straggler scenario
     /// (see [`departed_straggler`]), fixed by the first caller.
     departed_straggler: Option<bool>,
+    /// Run-level: whether the run draws the bare-quorum scenario (see
+    /// [`bare_quorum`]), fixed by the first caller.
+    bare_quorum: Option<bool>,
+    /// Run-level: whether the run draws the lost-verdict scenario (see
+    /// [`lost_verdict`]), fixed by the first caller.
+    lost_verdict: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -654,13 +660,16 @@ pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
 /// once per seed, its own BUGGIFY location, it turns on together every
 /// ingredient of the rarest storage shape, so the sweep reaches it by
 /// design instead of by the product of independent coins. The nodes
-/// withhold GC ([`withhold_gc`]), the acceptors bootstrap on all but one
-/// of the pool on a matchmaker seed, leaving the spare a removal needs
-/// ([`bootstrap_ranks`]), the main journal's owner removes a member right
-/// after its claim (`ChainConfig::reconfigure_after_claim`),
-/// and a correlated outage that lands loses the most recent slot down to
-/// one clean copy on a member the removal superseded
-/// (`crate::world::outage`). Each ingredient keeps its own coin on the
+/// withhold GC ([`withhold_gc`]), the acceptors bootstrap at the floor on
+/// a matchmaker seed, leaving every other node a spare
+/// ([`bootstrap_ranks`]), the main journal's owner rotates the set onto
+/// them right after its claim (`ChainConfig::reconfigure_after_claim`),
+/// and a correlated outage that lands loses the most recent slot most of
+/// the successor never held down to one clean copy on a member the
+/// rotation superseded, that member back last (`crate::world::outage`,
+/// `crate::world::late_outage`): the newest configuration alone would
+/// then decide the slot with a no-op, so only the cross-configuration
+/// Phase 1 keeps it (#267). Each ingredient keeps its own coin on the
 /// other seeds. Its fired gate sits where the outage's loss takes the
 /// shape. Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -669,6 +678,46 @@ pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .departed_straggler
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **bare-quorum scenario** (#270): drawn once
+/// per seed, its own BUGGIFY location, never on a departed-straggler seed.
+/// The bare quorum needs a slot decided on a quorum short of a member, an
+/// outage landing while that member still lacks it, and every copy lost:
+/// three coins whose product fired the gate on 3 of 2,094 checks (1,000
+/// hunt seeds; 0 on `main`); with the scenario, 42 of 2,898 (1,400). On
+/// a scenario seed, `crate::world::bare_outage` strikes the moment the
+/// custody ledger holds such a slot and plans the bare loss on it, so the
+/// Phase-1 tally reads `faulty, faulty, none` and the no-op fill must be
+/// refused. Each ingredient keeps its own coin on the other seeds.
+/// Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
+    let straggler = departed_straggler(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .bare_quorum
+        .get_or_insert_with(|| !straggler && moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **lost-verdict scenario** (#270): drawn once
+/// per seed, its own BUGGIFY location. A write's verdict is lost and its
+/// retry answered from the log (`Duplicate`, #204) only when a write reply
+/// is dropped at the reply seam *and* the owner re-sends the identical
+/// write before any read-back, two locations whose product fired the gate
+/// on 9 of 2,929 checks (1,400 hunt seeds on `main`). On a scenario seed
+/// every node drops write replies at the location's rate
+/// (`BuggifyHooks::losing_verdicts`) and every ambiguous write is re-sent
+/// at once (`ChainWorkload`). Each ingredient keeps its own coin on the
+/// other seeds. Rare-but-valid: each ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .lost_verdict
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
@@ -1016,11 +1065,13 @@ pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers:
             if !(has_matchmakers && pool > MIN_BOOTSTRAP) {
                 return all;
             }
-            // The departed-straggler scenario leaves a spare: a member
-            // removed right after the claim needs one to be replaced by
-            // when the set already sits at its floor.
+            // The departed-straggler scenario bootstraps at the floor,
+            // leaving every other node a spare: the owner's removal right
+            // after its claim is a rotation onto them, as whole as they
+            // allow, so the successor is mostly members that never held
+            // a departed member's slot (#267).
             let size = if scenario {
-                pool - 1
+                MIN_BOOTSTRAP
             } else {
                 buggify_knob!(pool, MIN_BOOTSTRAP..pool)
             };
