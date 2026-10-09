@@ -2,8 +2,8 @@
 //! creating and removing tenants, run through the library's
 //! `paros::client::initialize` and `paros::client::fleet` — the code
 //! `parosctl` ships — against the machines (`crate::machine`). No cell is
-//! handed to an operator: the first `init` forms it over the seeds the layout
-//! drew, and every operator learns its control journals from the `init` it
+//! handed to an operator: the first `init` forms it over the founding members
+//! the layout drew (`cell init`'s decree, #277), and every operator learns its control journals from the `init` it
 //! ran or through `Inspect` at the machines, never from the harness (§3.8:
 //! no identifier is fixed).
 //!
@@ -15,8 +15,10 @@
 //!
 //! - **`init` whole, again** (#246): an operator that already saw the cell
 //!   runs `init` once more, which must find nothing left to do or finish
-//!   what an interrupted run left; and `init` sent to a machine outside the
-//!   seeds, which must be refused;
+//!   what an interrupted run left; `cell init` started at another founder,
+//!   or a second one at once at another founder, which must converge on the
+//!   one cell; and `cell init` sent to a machine outside the founders, which
+//!   must be refused;
 //! - **a crash at a step** (one location per operation): the operator takes
 //!   one step and stops, as if it died there; its next fleet step resumes the
 //!   same operation, which must end where an uninterrupted one would;
@@ -96,7 +98,7 @@ pub(super) struct FleetOps {
     connector: Connector,
     /// Every machine's address, in rank order.
     machines: Vec<SocketAddr>,
-    /// The machines' layout: the seeds, and the seed `init` goes to.
+    /// The machines' layout: the founding members `cell init` lists.
     layout: MachineLayout,
     /// The cell, once this operator learned it.
     cell: Option<Cell>,

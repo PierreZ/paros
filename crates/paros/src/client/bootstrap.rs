@@ -1,12 +1,12 @@
-//! Bootstrap calls (#196, #216): forming a cell with `init`, and learning a
+//! Bootstrap calls (#196, #216, #277): forming a cell with `cell init`, and learning a
 //! deployment's node ids and its control journals' identifiers from its
 //! addresses (no identifier is fixed, `docs/architecture.md` §3.8).
 //!
 //! A machine's id is random, minted at format (#225), so an operator knows
-//! addresses — a rendezvous name, a join list — never ids. These calls
-//! bridge the two, with the discipline of the rest of the client: one
-//! bounded attempt per call, every outcome typed, no randomness (the seed
-//! that runs `init` mints the cell's id).
+//! addresses — the founding members' — never ids. These calls bridge the
+//! two, with the discipline of the rest of the client: one bounded attempt
+//! per call, every outcome typed, no randomness (the machine that drives
+//! `cell init` draws the cell's ballot and its plan).
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -19,65 +19,69 @@ use super::Client;
 use super::outcome::SetLeaderOutcome;
 use crate::machine::{CellPlan, ControlJournals};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{InitRpc, InspectRpc};
+use crate::rpc::methods::{CellInitRpc, InspectRpc};
 use crate::rpc::{InspectReply, InspectRequest, well_known};
 
-/// What one `Init` sent to a seed came back with.
+/// What one `CellInit` sent to a listed machine came back with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InitOutcome {
-    /// The seed formed the cell (or resumed a formation) over every seed.
+    /// The machine drove the decree to a chosen plan: the cell is formed
+    /// over every listed machine (or an interrupted formation finished).
     Formed(CellPlan),
-    /// The seed answered, and refused: its label (`not_a_seed`,
-    /// `seed_unreachable`, `other_cell`, `cell_exists`, `stateless_seed`,
+    /// The machine answered, and refused: its label (`not_a_member`,
+    /// `stateless_member`, `other_cell_init`, `cell_exists`, `malformed`,
     /// `storage`).
     Refused(String),
-    /// The seed answered with a plan that does not decode.
+    /// The machine answered with a plan that does not decode.
     Malformed,
-    /// A machine answered there without the machine endpoint: it serves a
-    /// cell already.
+    /// A machine answered there without the `CellInit` endpoint: it is
+    /// formed already, and serves its cell.
     NotWaiting,
-    /// Nothing decided within the patience: the machine, or another seed,
-    /// is not up yet, or the answer was lost (`Init` is resumable: send it
-    /// again).
+    /// Nothing decided within the patience: the machine, or another listed
+    /// one, is not up yet, a concurrent `cell init` outbid this one, or the
+    /// answer was lost (the decree resumes: send it again).
     Unreachable,
 }
 
-/// How long one `Init` attempt waits before it is sent again.
+/// How long one `CellInit` attempt waits before it is sent again.
 const INIT_ATTEMPT: Duration = Duration::from_secs(10);
-/// The pause between two `Init` attempts.
+/// The pause between two `CellInit` attempts.
 const INIT_RETRY: Duration = Duration::from_millis(500);
 
-/// Send `Init` to the waiting seed at `seed`, again while nothing answers
-/// or the seed finds another seed not up yet (`seed_unreachable`: a machine
-/// still starting), for up to `patience`; then [`InitOutcome::Unreachable`]. Each attempt waits up
-/// to [`INIT_ATTEMPT`]: the seed calls every other seed before it answers.
-/// Re-sending is safe: a seed resumes the plan it recorded, never redraws.
-pub async fn init<P: Providers>(
+/// Send `CellInit` over `members` to the listed machine `target`, again
+/// while nothing answers, another listed machine is not up yet
+/// (`member_unreachable`: a machine still starting) or a concurrent
+/// `cell init` outbid it (`contended`), for up to `patience`; then
+/// [`InitOutcome::Unreachable`]. Each attempt waits up to [`INIT_ATTEMPT`]:
+/// the machine runs both phases of the decree before it answers. Re-sending
+/// is safe: a plan any listed machine accepted is finished, never redrawn.
+pub async fn cell_init<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    seed: SocketAddr,
+    target: SocketAddr,
+    members: &[SocketAddr],
     patience: Duration,
 ) -> InitOutcome {
     let time = providers.time();
     let deadline = time.now() + patience;
-    let client = well_known::<P, InitRpc>(rpc, seed);
+    let client = well_known::<P, CellInitRpc>(rpc, target);
+    let request = wire::CellInit {
+        members: members.iter().map(SocketAddr::to_string).collect(),
+    };
     loop {
         let remaining = deadline.saturating_sub(time.now());
         let reply = time
-            .timeout(
-                remaining.min(INIT_ATTEMPT),
-                client.try_get_reply(&wire::Init {}),
-            )
+            .timeout(remaining.min(INIT_ATTEMPT), client.try_get_reply(&request))
             .await;
         match reply {
             Ok(Ok(ack)) if ack.initialized => {
-                return CellPlan::from_init_ack(&ack)
+                return CellPlan::from_cell_init_ack(&ack)
                     .map_or(InitOutcome::Malformed, InitOutcome::Formed);
             }
-            // Another seed is not up yet: nothing was decided, and `init`
-            // resumes, so ask again — the seeds of a fresh deployment start
-            // in any order.
-            Ok(Ok(ack)) if ack.refusal == "seed_unreachable" => {}
+            // Nothing was decided, and the decree resumes, so ask again: the
+            // machines of a fresh deployment start in any order, and two
+            // `cell init`s may outbid each other a while.
+            Ok(Ok(ack)) if ack.refusal == "member_unreachable" || ack.refusal == "contended" => {}
             Ok(Ok(ack)) => return InitOutcome::Refused(ack.refusal),
             Ok(Err(error)) if *error.reason() == ErrorReason::EndpointNotFound => {
                 return InitOutcome::NotWaiting;

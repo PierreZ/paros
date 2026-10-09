@@ -9,7 +9,6 @@
 //! | `PAROS_CLASS` | `storage` or `stateless` (fixed at format) |
 //! | `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
 //! | `PAROS_FAILURE_DOMAIN` | its failure domain label (default empty) |
-//! | `PAROS_RENDEZVOUS` | the cell's seeds: one `HOST:PORT` name or a comma-separated join list; recorded at format, re-read on every boot |
 //! | `PAROS_STORE_LAYOUT` | `default` (64 MiB segments) or `small` (laptops, tests) |
 //! | `PAROS_<FIELD>[_MS]` | one override per `DriverTunables` field ([`crate::tunables`]) |
 //!
@@ -23,13 +22,12 @@ use paros::JournalStoreConfig;
 use paros::machine::Class;
 
 /// The variables this module reads.
-const VARIABLES: [&str; 7] = [
+const VARIABLES: [&str; 6] = [
     "PAROS_LISTEN",
     "PAROS_DATA_DIR",
     "PAROS_CLASS",
     "PAROS_CAPACITY",
     "PAROS_FAILURE_DOMAIN",
-    "PAROS_RENDEZVOUS",
     "PAROS_STORE_LAYOUT",
 ];
 
@@ -72,11 +70,6 @@ pub struct Settings {
     /// Its failure domain label.
     #[arg(long, env = "PAROS_FAILURE_DOMAIN", default_value = "")]
     pub failure_domain: String,
-    /// The cell's seeds: one name that resolves to them, or a short
-    /// comma-separated join list; recorded at format and re-read on every
-    /// boot (the recorded one is used when this is absent).
-    #[arg(long, env = "PAROS_RENDEZVOUS")]
-    pub rendezvous: Option<String>,
     /// The store layout.
     #[arg(
         long,

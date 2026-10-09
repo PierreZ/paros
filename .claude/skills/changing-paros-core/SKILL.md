@@ -27,7 +27,8 @@ because the perturbation is a caller that stops calling.
 | the leaderless read tally (#143): a row's vote watermarks, the maximum, bound to one configuration, TTL-bounded; the acceptor answers `vote_watermark`, the replica answers `covers` | `quorum_read.rs` (`QuorumRead`, `QuorumReads`) |
 | the candidate's matchmaking phase (registration tally, `H_b`, effective configuration, stale belief) | `matchmaking.rs` |
 | the leader-side GC tally (#123): which configured acceptors report a chosen index past the election fence, which matchmakers acked the watermark, the effective floor and the acceptors it retires; knows nothing of leadership or re-sends (that wiring is `node/gc.rs`) | `collector.rs` |
-| the registry and generations, the handover, the single decree over the shared roles at slot zero, the model checker | `matchmaker.rs`, `matchmaker/{reconfigurer,decree,generation,handover_model,storage,message,state,write}.rs` |
+| the registry and generations, the handover, the model checker | `matchmaker.rs`, `matchmaker/{reconfigurer,generation,handover_model,storage,message,state,write}.rs` |
+| the single decree over the shared roles at slot zero (`Decree<Id, V>`): the handover's successor and `cell init`'s plan (#277) | `decree.rs` |
 | wiring only: role transitions, timers, message construction, the persist-before-send batch, **no protocol tally**; `phase2` opens, fans out or delegates, folds, decides and takes back; `learn` is the learner half | `node.rs`, `node/{election,replication,authority,phase2,learn,handoff,gc,matchmaking,reconfigure,reads,quorum_reads,catch_up,boot,acceptor,helpers,invariants}.rs`; `catch_up` serves commit replay and answers a below-floor request with `TrimmedTo` (`serve_catchup`, `on_trimmed_to`) |
 
 A component must not learn something merely because the deployment colocates

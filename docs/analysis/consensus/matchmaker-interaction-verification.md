@@ -198,7 +198,7 @@ decree builds a `QuorumSystem::Majority` over the set it replaces.
 | ~~`driver/mod.rs:970`, `snap_repair.rs:323` (snapshot custody)~~ — deleted with the snapshots (#186) | Phase 2 | a decided point is held by a set every later Phase 1 intersects | yes |
 | `collector.rs:220`, `matchmaking.rs:347` (GC acks, the matchmaking tally) | matchmaker majority | a matchmaker quorum durably holds it | yes |
 | `reconfigurer.rs:438`, `:475`, `:893` (freeze, close, publication) | matchmaker majority of `M_g` (`:893`: of the successor) | frozen / reconstructed / activated at a quorum | yes |
-| `matchmaker/decree.rs` | the shared `Proposer` over `Majority(M_g)` | the ordinary Paxos claims at slot zero | yes |
+| `decree.rs` | the shared `Proposer` over `Majority(M_g)` | the ordinary Paxos claims at slot zero | yes |
 
 No site compares a count against a threshold (`quorum_size` survives only in the
 "how many acks are still missing" reports), and no site asks the untagged predicate, which

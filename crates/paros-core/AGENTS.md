@@ -26,7 +26,8 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `membership.rs` → `AcceptorConfig`, `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing.
 - `matchmaking.rs` → `Matchmaking`, `MembershipProbe` → the candidate's matchmaking phase and the membership probe (#173: at boot; #270: re-probed from outside a heard belief; #278: against a matched fact or a won leadership, late answers folded).
 - `matchmaker.rs` → `Matchmaker` → the registry and its generations (re-exports the submodules below).
-- `matchmaker/{generation,reconfigurer,decree}.rs` → the generation machine, `MatchmakerReconfigurer`, the successor decree over the shared roles at slot zero.
+- `decree.rs` → `Decree<Id, V>`, `DecreePromise`, `AcceptFold`, `DECREE_SLOT` → single-decree Paxos over the shared `Proposer` and `Acceptor` at slot zero: the matchmaker handover's successor decree (`SuccessorDecree`) and `cell init`'s plan (#277).
+- `matchmaker/{generation,reconfigurer}.rs` → the generation machine, `MatchmakerReconfigurer`.
 - `matchmaker/{message,state,storage,write}.rs` → wire contract, durable state, `RegistryStorage` + `MemRegistry` (the reference registry), `MatchmakerWriteOp` + `MatchmakerReady`.
 - `matchmaker/handover_model.rs` → the handover model checker (test-only).
 - `proxy_model.rs` → the proxy-leader model checker (test-only); `model_support.rs` → seeded RNG + lossy mailbox both share.

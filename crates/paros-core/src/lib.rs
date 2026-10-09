@@ -64,6 +64,7 @@
 
 pub mod acceptor;
 mod collector;
+pub mod decree;
 pub mod journal_state;
 mod matchmaker;
 pub mod matchmaking;
@@ -86,14 +87,15 @@ mod storage;
 mod types;
 mod write;
 
+pub use decree::Decree;
 pub use journal_state::{JournalState, JournalView, Outcome};
 pub use matchmaker::{
-    Decree, DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal,
+    DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal,
     MatchReply, MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,
     MatchmakerReady, MatchmakerReconfigurer, MatchmakerWriteOp, MemRegistry, PendingBootstrap,
     REGISTRY_PAGE, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerReady,
     ReconfigurerStep, Reconstruction, Registration, RegistrationKind, RegistryStorage,
-    StartRefusal,
+    StartRefusal, SuccessorDecree,
 };
 pub use membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem,

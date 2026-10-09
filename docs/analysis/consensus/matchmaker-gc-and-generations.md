@@ -10,7 +10,7 @@ what the paper says, what paros actually has, and the rule that survives the tra
 Code: `crates/paros-core/src/node/gc.rs` (the leader's GC decision),
 `crates/paros-core/src/matchmaker.rs` (generations, fencing, the durable decree
 acceptor), `crates/paros-core/src/matchmaker/reconfigurer.rs` (the handover state
-machine), `crates/paros-core/src/matchmaker/decree.rs` (the decree it decides with), and the
+machine), `crates/paros-core/src/decree.rs` (the decree it decides with, generic since #277), and the
 harness's wipe / retire model in `crates/paros-sim/src/world/mod.rs`.
 
 ## 1. Garbage collection: when may a configuration be forgotten?
@@ -227,7 +227,7 @@ That reason stopped holding once the core was decomposed into roles (`acceptor.r
 `proposer.rs`, `replica.rs`, with `membership.rs` as the quorum boundary; AGENTS.md, *The core
 is composable*), leaving `ColocatedNode` as the wiring that colocates them. A single decree is
 then **the same `Proposer` + `Acceptor` over a one-slot log**, and that is what it now is:
-`matchmaker/decree.rs` opens Phase 1 at slot zero over `M_g` as an `AcceptorConfig<MatchmakerId>`,
+`decree.rs` opens Phase 1 at slot zero over `M_g` as an `AcceptorConfig<MatchmakerId>`,
 closes it into the P2c-selected value, and runs one Phase-2 round; each matchmaker answers
 through the same `Acceptor<Vec<MatchmakerId>>`, reconstructed over the two durable scalars of
 its `DecreeRecord`. There is no second value-selection rule to keep in agreement, and the

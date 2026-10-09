@@ -869,27 +869,25 @@ pub(crate) struct MachineDraw {
 /// run's own business (decided on 2026-10-09): nothing here is a cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MachineLayout {
-    /// How many machines, the lowest ranks, are seeds: every machine's
-    /// rendezvous names them, and `init` forms the cell over them.
-    pub(crate) seeds: usize,
+    /// How many machines, the lowest ranks, are the founding members:
+    /// `cell init` lists them, and forms the cell over them (#277).
+    pub(crate) founders: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
-    /// The seed every operator sends `init` to (every seed's join list
-    /// names it, §3.1).
-    pub(crate) target: usize,
     /// How many user journals a formed cell serves beside its control
     /// journals (the static assignment, until #212).
     pub(crate) assignment: usize,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
-/// first, for `count` machines in rank order. The seed count is uniform over
-/// `1..=count`; every seed is a `storage` machine (`init` refuses a
-/// `stateless` seed) and every other machine is `storage` or `stateless` on
-/// a coin, waiting for a placement that is #212's. The capacity is one
-/// `buggify_knob!` for the run (default 2, extreme 1..=4; floor 1, as a
-/// joiner's); the assignment one more (default 1, `parosd`'s; extreme 0..=2:
-/// a cell of control journals alone, or two user journals beside them).
+/// first, for `count` machines in rank order. The founder count is uniform
+/// over `1..=count`; every founder is a `storage` machine (`cell init`
+/// refuses a `stateless` member) and every other machine is `storage` or
+/// `stateless` on a coin, idle, waiting for a placement that is #212's. The
+/// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
+/// floor 1, as a joiner's); the assignment one more (default 1, `parosd`'s;
+/// extreme 0..=2: a cell of control journals alone, or two user journals
+/// beside them).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     let registry = registry(state);
@@ -897,21 +895,16 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     guard
         .machine_layout
         .get_or_insert_with(|| {
-            let seeds = if count == 0 {
+            let founders = if count == 0 {
                 0
             } else {
                 moonpool_sim::sim_random_range(1..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
             let assignment = buggify_knob!(1_usize, 0_usize..3_usize);
-            let target = if seeds == 0 {
-                0
-            } else {
-                moonpool_sim::sim_random_range(0..seeds)
-            };
             let machines = (0..count)
                 .map(|rank| {
-                    let class = if rank >= seeds && moonpool_sim::sim_random_bool(0.5) {
+                    let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {
                         assert_reachable!("machine: a machine outside the seeds is stateless");
                         paros::machine::Class::Stateless
                     } else {
@@ -928,14 +921,13 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 })
                 .collect();
             assert_always!(
-                count == 0 || (seeds >= 1 && seeds <= count && target < seeds),
-                "machine: a layout's seeds and init target are machines of it",
-                { "count" => count, "seeds" => seeds, "target" => target }
+                count == 0 || (founders >= 1 && founders <= count),
+                "machine: a layout's founding members are machines of it",
+                { "count" => count, "founders" => founders }
             );
             MachineLayout {
-                seeds,
+                founders,
                 machines,
-                target,
                 assignment,
             }
         })

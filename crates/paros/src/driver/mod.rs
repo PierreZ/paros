@@ -79,7 +79,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
 use crate::hooks::{DriverHooks, Reply};
-use crate::machine::ControlJournals;
+use crate::machine::{ControlJournals, FormedCell};
 use crate::rpc::{
     InspectRefusal, InspectTarget, MatchmakerClient, MatchmakersRefusal, ReadAck,
     ReconfigureMatchmakersAck, ReplySender, SetLeaderAck, TruncateAck, WriteAck, leader_from_proto,
@@ -833,6 +833,10 @@ where
 /// at all (a joiner boots with none) and exits only on a fault. `None` is
 /// the static deployment: a fixed list over a fixed pool.
 ///
+/// `formed` is a machine's cell (#246, #277), `None` off a machine: its
+/// control journals, which `Inspect` reports, and its vote in the cell
+/// decree, which the node keeps answering ([`FormedCell`]).
+///
 /// # Errors
 ///
 /// As [`run_node`]; [`RunError::Infra`] when several journals are asked of a
@@ -852,7 +856,7 @@ pub async fn run_journals<P, J, H>(
     proxies: Vec<(ProxyId, String)>,
     replicas: Vec<(NodeId, String)>,
     system: Option<SystemPlan>,
-    cell: Option<ControlJournals>,
+    formed: Option<FormedCell>,
     tunables: DriverTunables,
     shutdown: CancellationToken,
     hooks: &H,
@@ -873,6 +877,7 @@ where
             "the system plan names another node".into(),
         )));
     }
+    let cell: Option<ControlJournals> = formed.as_ref().map(FormedCell::control_journals);
     // No identifier is fixed (§3.8): the deployment names its control journals —
     // the cell's and the fleet tenant's from the cell plan, the system journals a
     // `SystemPlan` follows — and every other journal is a user's.
@@ -991,6 +996,11 @@ where
         (None, inbox, Some(open))
     };
     let rpc_handle = edge.handle().clone();
+    // A machine's vote is final: it answers the cell decree from its record
+    // while it serves its cell (#277).
+    if let Some(formed) = formed {
+        formed.serve(&providers, &rpc_handle, incarnation_shutdown.clone())?;
+    }
 
     // The replicas (#144) get a node's lane, as any peer. One lane per peer,
     // carrying every journal (#188: one `Deliver` per peer, a fair lane per

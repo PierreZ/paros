@@ -57,16 +57,20 @@ pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
 }
 
 /// Resolve `addr` (`HOST:PORT`) to **every** socket address it names, in
-/// resolution order without duplicates: a rendezvous name that stands for
-/// several machines (a Compose network alias shared by the seeds, #216)
-/// yields them all. One family only — the IPv4 addresses when there is any,
-/// else the IPv6 ones — the family [`resolve`] picks for a listen address:
-/// a name like `localhost` that resolves to `127.0.0.1` and `::1` is one
-/// machine listening on one of them, never two seeds.
+/// resolution order without duplicates: a name that stands for several
+/// machines (a Compose network alias, #216) yields them all. One family
+/// only — the IPv4 addresses when there is any, else the IPv6 ones — the
+/// family [`resolve`] picks for a listen address: a name like `localhost`
+/// that resolves to `127.0.0.1` and `::1` is one machine listening on one
+/// of them, never two members.
 ///
 /// # Errors
 ///
 /// `addr` is malformed, or the name does not resolve (yet).
+#[allow(
+    dead_code,
+    reason = "parosctl's (its servers and founding members); parosd resolves one listen address"
+)]
 pub fn resolve_all(addr: &str) -> Result<Vec<SocketAddr>, String> {
     check_shape(addr)?;
     if let Ok(literal) = addr.parse::<SocketAddr>() {

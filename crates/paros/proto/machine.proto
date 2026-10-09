@@ -2,22 +2,32 @@ syntax = "proto3";
 
 package paros.machine.v1;
 
-// The machine contract (#196, #216): what an uninitialized `parosd` serves
-// while it waits for `parosctl init`. A machine starts with an identity
-// minted at format (`node_id`, #225) and its rendezvous join list, and never
-// forms a cell on its own: one `Init`, sent to a seed every seed's join list
-// names, forms the cell. The `service` block documents the method set; each
-// method's id lives in `src/rpc/methods.rs`.
+import "common.proto";
+
+// The machine contract (#196, #216, #277): what an idle `parosd` serves while
+// it waits for `cell init`, and what a formed one keeps answering. A machine
+// starts with an identity minted at format (`node_id`, #225) and never forms
+// a cell on its own: one `CellInit`, sent to any listed machine, forms the
+// cell over the listed machines with a single-decree Paxos on the cell plan,
+// every listed machine an acceptor and all of them the quorum. The `service`
+// block documents the method set; each method's id lives in
+// `src/rpc/methods.rs`.
 service Machine {
-  // Who this machine is: its identity and whether it is a seed.
+  // Who this machine is: its identity.
   rpc Identify(.paros.machine.v1.Identify) returns (.paros.machine.v1.IdentifyAck);
-  // Join the cell `plan` names: record it durably, format its journals, and
-  // start serving them. Idempotent for the same plan.
+  // Phase 1 of the cell decree: promise to accept no plan under a lower
+  // `init`, and report the plan this machine accepted, if any. Answered by
+  // a formed machine too, from its record.
+  rpc PrepareCell(.paros.machine.v1.PrepareCell) returns (.paros.machine.v1.PrepareCellAck);
+  // Phase 2 of the cell decree: accept `plan` at `init` unless a higher
+  // `init` was promised. Accepting is forming: record the plan durably,
+  // format its journals, and start serving them. Idempotent for the same
+  // plan, at any `init`, on a formed machine.
   rpc FormCell(.paros.machine.v1.FormCell) returns (.paros.machine.v1.FormCellAck);
-  // Form the cell over the seeds: identify every seed, mint the cell's id,
-  // and form every seed (this one last). Resumable: a plan this seed
-  // recorded before a crash is resumed, never redrawn.
-  rpc Init(.paros.machine.v1.Init) returns (.paros.machine.v1.InitAck);
+  // `cell init`: the receiver drives the decree over the listed machines.
+  // Resumable: a plan any listed machine accepted is finished, never
+  // redrawn.
+  rpc CellInit(.paros.machine.v1.CellInit) returns (.paros.machine.v1.CellInitAck);
 }
 
 message Identify {}
@@ -30,8 +40,8 @@ message IdentifyAck {
   string failure_domain = 4;
   // The address this machine serves at.
   string addr = 5;
-  // Whether its own address is in its rendezvous join list.
-  bool seed = 6;
+  // 6 was `seed` (the rendezvous join list, retired by #277).
+  reserved 6;
 }
 
 // One member of a cell's bootstrap: its identity and address.
@@ -46,33 +56,59 @@ message JournalIdentifier {
   uint64 journal = 2;
 }
 
+message PrepareCell {
+  // The decree's ballot: a fresh random `init_id` and the receiver's node.
+  .paros.common.v1.Ballot init = 1;
+}
+
+message PrepareCellAck {
+  // Who answered.
+  IdentifyAck identity = 1;
+  // Whether it promised `init`.
+  bool promised = 2;
+  // The promise that refused `init`, when it did not promise.
+  .paros.common.v1.Ballot promise = 3;
+  // The plan it accepted, at the ballot it accepted it (its `init`), if any.
+  FormCell vote = 4;
+  // Why it could not answer, when it could not: "storage".
+  string refusal = 5;
+}
+
 message FormCell {
   uint64 cell_id = 1;
   repeated Member members = 2;
   // The journals every member serves from its formation: the cell control
   // journal, the fleet tenant's when this cell hosts it, and the static assignment that
   // stands in for placement until M9 (#212). No identifier is fixed: every one is
-  // drawn at `init` (`docs/architecture.md` §3.8).
+  // drawn at `cell init` (`docs/architecture.md` §3.8).
   repeated JournalIdentifier journals = 3;
   // The cell tenant's control journal.
   JournalIdentifier control = 4;
   // The fleet tenant's control journal, when this cell hosts the fleet tenant (unset otherwise).
   JournalIdentifier fleet = 5;
+  // The decree's ballot this plan is proposed (or was accepted) at.
+  .paros.common.v1.Ballot init = 6;
 }
 
 message FormCellAck {
   bool formed = 1;
   // Why not, when not: "not_a_member", "other_cell", "malformed",
-  // "stateless", "storage".
+  // "stateless", "storage", "promised_higher".
   string refusal = 2;
+  // The promise that refused it, on "promised_higher".
+  .paros.common.v1.Ballot promise = 3;
 }
 
-message Init {}
+message CellInit {
+  // The founding members, by address: every one an acceptor of the decree.
+  repeated string members = 1;
+}
 
-message InitAck {
+message CellInitAck {
   bool initialized = 1;
-  // Why not, when not: "not_a_seed", "seed_unreachable", "other_cell",
-  // "cell_exists", "storage", "stateless_seed".
+  // Why not, when not: "not_a_member", "malformed", "stateless_member",
+  // "member_unreachable", "contended", "other_cell_init", "cell_exists",
+  // "storage".
   string refusal = 2;
   uint64 cell_id = 3;
   repeated Member members = 4;

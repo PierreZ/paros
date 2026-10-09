@@ -1,75 +1,82 @@
-//! Waiting for a cell (#196, #216): the machine contract a machine with no
-//! plan serves — `Identify`, `Init` (a seed's: the cell step of `init`) and
-//! `FormCell` — until one forms it (see the parent module).
+//! Waiting for a cell (#196, #216, #277): the machine contract an idle
+//! machine serves — `Identify`, the cell decree's two phases (`PrepareCell`,
+//! `FormCell`) as an acceptor, and `CellInit` as the decree's proposer —
+//! until it forms (see the parent module).
 
-use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::time::Duration;
 
-use moonpool_core::{Providers, RandomProvider, TimeProvider};
-use moonpool_rpc::RpcHandle;
-use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
+use moonpool_core::{Providers, TimeProvider};
+use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_core::decree::DECREE_SLOT;
+use paros_core::{AcceptorWrite, Ballot};
 use tokio_util::sync::CancellationToken;
 
-use super::{CellPlan, Class, MachineFacts};
+use super::formed::{FormedCell, vote_ballot};
+use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{FormCellRpc, IdentifyRpc, InitRpc, InspectRpc};
-use crate::rpc::{Inbound, InspectRequest, serve_well_known, well_known};
-
-/// A random identifier: a random tenant and a random journal, both set (no id
-/// is fixed, `docs/architecture.md` §3.8).
-fn draw_identifier<P: Providers>(providers: &P) -> JournalIdentifier {
-    let draw = || loop {
-        let id: u64 = providers.random().random();
-        if id != 0 {
-            break id;
-        }
-    };
-    JournalIdentifier::new(TenantId(draw()), JournalId(draw()))
-}
+use crate::rpc::methods::{CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
+use crate::rpc::{Inbound, ReplySender, serve_well_known};
 
 /// How long a waiting machine keeps its listener up after the answer that
 /// ends its wait, so the answer leaves before the listener closes.
 const FLUSH: Duration = Duration::from_millis(250);
 
-/// Where a waiting machine keeps its cell's plan durably: the caller's
-/// (`parosd` records it in its data directory). Every method returns only
-/// once what it recorded survives a crash.
+/// Where an idle machine keeps its acceptor state in the cell decree
+/// durably: the caller's (`parosd` records it in its data directory). Every
+/// method returns only once what it recorded survives a crash.
 pub trait CellLedger {
-    /// The plan this machine recorded as pending while it ran `Init`, if
-    /// any: a re-run resumes it, never redraws it.
-    fn pending(&self) -> Option<CellPlan>;
+    /// The promise held: no plan under a lower ballot is accepted.
+    fn promised(&self) -> Ballot;
 
-    /// Record `plan` as pending, before any seed is asked to form it.
+    /// The vote: the plan this machine accepted, and the ballot it accepted
+    /// it at. A machine with a vote is formed.
+    fn vote(&self) -> Option<(Ballot, CellPlan)>;
+
+    /// Raise the promise to `ballot`, durably, before the answer leaves.
     ///
     /// # Errors
     ///
     /// The record could not be made durable.
-    fn record_pending(&mut self, plan: &CellPlan) -> impl Future<Output = Result<(), String>>;
+    fn promise(&mut self, ballot: Ballot) -> impl Future<Output = Result<(), String>>;
 
-    /// Form `plan` on this machine: format the store of every journal it
-    /// names, then record the plan as this machine's cell — the commit
-    /// point. Idempotent: a format an earlier attempt finished is resumed.
+    /// Accept `plan` at `ballot`, which forms it here: format the store of
+    /// every journal it names, then record the vote (the promise raised to
+    /// `ballot`) as this machine's cell — the commit point. Idempotent: a
+    /// format an earlier attempt finished is resumed.
     ///
     /// # Errors
     ///
     /// A store or the record could not be made durable.
-    fn form(&mut self, plan: &CellPlan) -> impl Future<Output = Result<(), String>>;
+    fn form(&mut self, ballot: Ballot, plan: &CellPlan)
+    -> impl Future<Output = Result<(), String>>;
 }
 
-/// Wait for a cell: serve the machine contract at `facts.addr` until a
-/// `FormCell` (from a seed running `Init`) or an `Init` (from `parosctl`)
-/// forms this machine, and return the plan it formed — or `None` on
-/// `shutdown`. `assignment` is how many user journals a cell this machine
-/// initializes serves beside its control journals — the static assignment,
-/// until #212 — each under an identifier `init` draws.
+/// The decree a `CellInit` drives, in flight on the waiting loop, with the
+/// answer it owes.
+type Proposal<'a> = (
+    Pin<Box<dyn Future<Output = Result<CellPlan, &'static str>> + Send + 'a>>,
+    ReplySender<wire::CellInitAck>,
+);
+
+/// Wait for a cell: serve the machine contract at `facts.addr` until this
+/// machine forms — it accepted a `FormCell` and no `CellInit` it drives is
+/// still in flight — and return its cell, or `None` on `shutdown`.
+/// `assignment` is how many user journals a cell this machine draws serves
+/// beside its control journals — the static assignment, until #212 — each
+/// under an identifier `cell init` draws.
 ///
 /// # Errors
 ///
 /// The listener could not bind, or the runtime failed, as
 /// [`RunError::Infra`].
+///
+/// # Panics
+///
+/// If `ledger` already holds a vote: a formed machine does not wait.
 #[tracing::instrument(level = "debug", skip_all, fields(node = facts.node_id.0, addr = %facts.addr))]
 pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     providers: P,
@@ -78,7 +85,8 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     ledger: &mut L,
     tunables: &DriverTunables,
     shutdown: CancellationToken,
-) -> Result<Option<CellPlan>, RunError> {
+) -> Result<Option<FormedCell>, RunError> {
+    assert!(ledger.vote().is_none(), "a formed machine does not wait");
     let addr = facts.addr.to_string();
     let mut edge = RpcEdge::listen(&providers, &addr, "machine", tunables)
         .await
@@ -86,15 +94,25 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     let rpc = edge.handle().clone();
     let mut identify =
         Inbound::plain(serve_well_known::<P, IdentifyRpc>(&rpc).map_err(RunError::Infra)?);
+    let mut prepare =
+        Inbound::plain(serve_well_known::<P, PrepareCellRpc>(&rpc).map_err(RunError::Infra)?);
     let mut form =
         Inbound::plain(serve_well_known::<P, FormCellRpc>(&rpc).map_err(RunError::Infra)?);
-    let mut init = Inbound::plain(serve_well_known::<P, InitRpc>(&rpc).map_err(RunError::Infra)?);
+    let mut init =
+        Inbound::plain(serve_well_known::<P, CellInitRpc>(&rpc).map_err(RunError::Infra)?);
     tracing::info!(
         node = facts.node_id.0,
-        seed = facts.is_seed(),
         class = facts.class.as_str(),
         "machine_waiting"
     );
+    let mut proposal: Option<Proposal<'_>> = None;
+    let formed = |ledger: &L| {
+        ledger.vote().map(|(ballot, plan)| FormedCell {
+            facts: facts.clone(),
+            plan,
+            ballot,
+        })
+    };
     loop {
         moonpool_core::select! {
             () = shutdown.cancelled() => return Ok(None),
@@ -102,38 +120,66 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
             Some((_, reply)) = identify.recv() => {
                 reply.send(facts.identify_ack());
             }
+            Some((request, reply)) = prepare.recv() => {
+                reply.send(answer_prepare(facts, ledger, &request).await);
+            }
             Some((request, reply)) = form.recv() => {
-                let (ack, formed) = form_cell(facts, ledger, &request).await;
-                reply.send(ack);
-                if let Some(plan) = formed {
+                reply.send(answer_form(facts, ledger, &request).await);
+                // A decree this machine drives finishes before it stops
+                // waiting: its own accept is the decree's last.
+                if proposal.is_none()
+                    && let Some(cell) = formed(ledger)
+                {
                     flush(&providers, &mut edge).await;
-                    return Ok(Some(plan));
+                    return Ok(Some(cell));
                 }
             }
-            Some((_, reply)) = init.recv() => {
-                // The cell step calls the other seeds: the runtime must keep
-                // running while it does.
-                let outcome = moonpool_core::select! {
-                    error = edge.run() => return Err(RunError::Infra(error)),
-                    outcome = run_init(&providers, &rpc, facts, assignment, ledger, tunables) => outcome,
-                };
+            Some((request, reply)) = init.recv() => {
+                if proposal.is_some() {
+                    // One decree at a time per receiver: the caller asks
+                    // again, and finds what this one decided.
+                    reply.send(refused("contended"));
+                } else {
+                    let run = super::cell_init::propose(
+                        &providers,
+                        &rpc,
+                        facts,
+                        ledger.promised(),
+                        assignment,
+                        request,
+                        tunables,
+                    );
+                    proposal = Some((Box::pin(run), reply));
+                }
+            }
+            outcome = async { proposal.as_mut().expect("guarded").0.as_mut().await },
+                if proposal.is_some() =>
+            {
+                let (_, reply) = proposal.take().expect("guarded");
                 match outcome {
                     Ok(plan) => {
                         tracing::info!(cell = plan.cell_id, members = plan.members.len(), "cell_initialized");
-                        reply.send(plan.init_ack());
-                        flush(&providers, &mut edge).await;
-                        return Ok(Some(plan));
+                        reply.send(plan.cell_init_ack());
                     }
                     Err(refusal) => {
-                        tracing::warn!(refusal, "init_refused");
-                        reply.send(wire::InitAck {
-                            refusal: refusal.into(),
-                            ..wire::InitAck::default()
-                        });
+                        tracing::warn!(refusal, "cell_init_refused");
+                        reply.send(refused(refusal));
                     }
+                }
+                if let Some(cell) = formed(ledger) {
+                    flush(&providers, &mut edge).await;
+                    return Ok(Some(cell));
                 }
             }
         }
+    }
+}
+
+/// A `CellInitAck` that refuses, with its label.
+fn refused(refusal: &str) -> wire::CellInitAck {
+    wire::CellInitAck {
+        refusal: refusal.into(),
+        ..wire::CellInitAck::default()
     }
 }
 
@@ -147,171 +193,158 @@ async fn flush<P: Providers>(providers: &P, edge: &mut RpcEdge<P>) {
     }
 }
 
-/// Answer one `FormCell`: the ack, and the plan when this machine formed it.
-async fn form_cell<L: CellLedger>(
+/// This machine's acceptor half of the decree, over the ledger: the shared
+/// [`Acceptor`] role over a one-value log — slot zero, floor at zero, no
+/// tri-state, exactly as a matchmaker runs the handover's decree.
+fn acceptor<L: CellLedger>(ledger: &L) -> Acceptor<CellPlan> {
+    let records = ledger
+        .vote()
+        .map(|vote| BTreeMap::from([(DECREE_SLOT, vote)]))
+        .unwrap_or_default();
+    let acceptor = Acceptor::new(ledger.promised(), records, DECREE_SLOT, BTreeMap::new());
+    assert!(
+        acceptor.promised() == ledger.promised(),
+        "the decree acceptor holds the durable promise"
+    );
+    assert!(
+        acceptor.record(DECREE_SLOT).cloned() == ledger.vote(),
+        "the decree acceptor holds the durable vote"
+    );
+    acceptor
+}
+
+/// Phase 1b on an idle machine: promise (durably, before the answer
+/// leaves) and report no vote, or refuse under a higher promise. A formed
+/// machine answers from its record ([`FormedCell::prepare_ack`]).
+#[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
+async fn answer_prepare<L: CellLedger>(
+    facts: &MachineFacts,
+    ledger: &mut L,
+    request: &wire::PrepareCell,
+) -> wire::PrepareCellAck {
+    let identity = Some(facts.identify_ack());
+    let answer = |refusal: &str| wire::PrepareCellAck {
+        identity: identity.clone(),
+        refusal: refusal.into(),
+        ..wire::PrepareCellAck::default()
+    };
+    if facts.class != Class::Storage {
+        return answer("stateless");
+    }
+    let Some(ballot) = ballot_from_wire(request.init.as_ref()) else {
+        return answer("malformed");
+    };
+    if let Some((voted, plan)) = ledger.vote() {
+        return FormedCell {
+            facts: facts.clone(),
+            plan,
+            ballot: voted,
+        }
+        .prepare_ack();
+    }
+    let mut acceptor = acceptor(ledger);
+    let mut writes: Vec<AcceptorWrite<CellPlan>> = Vec::new();
+    match acceptor.prepare(ballot, DECREE_SLOT, &mut writes) {
+        PrepareOutcome::Promised { raised } => {
+            if raised && let Err(error) = ledger.promise(ballot).await {
+                tracing::error!(%error, "cell_promise_failed");
+                return answer("storage");
+            }
+            assert!(
+                ledger.promised() == ballot,
+                "a decree promise lands on the prepared ballot"
+            );
+            assert!(ledger.vote().is_none(), "an idle machine reports no vote");
+            wire::PrepareCellAck {
+                identity,
+                promised: true,
+                ..wire::PrepareCellAck::default()
+            }
+        }
+        PrepareOutcome::Refused | PrepareOutcome::BelowFloor => {
+            // The decree slot is the floor, so only a higher promise refuses.
+            assert!(
+                acceptor.promised() > ballot,
+                "a decree refusal names a higher promise"
+            );
+            wire::PrepareCellAck {
+                identity,
+                promised: false,
+                promise: Some(ballot_to_wire(acceptor.promised())),
+                ..wire::PrepareCellAck::default()
+            }
+        }
+    }
+}
+
+/// Phase 2b on an idle machine: accept the plan unless a higher ballot was
+/// promised — and accepting is forming. A formed machine answers from its
+/// record ([`FormedCell::form_ack`]).
+#[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
+async fn answer_form<L: CellLedger>(
     facts: &MachineFacts,
     ledger: &mut L,
     request: &wire::FormCell,
-) -> (wire::FormCellAck, Option<CellPlan>) {
-    let refuse = |refusal: &str| {
-        (
-            wire::FormCellAck {
-                formed: false,
-                refusal: refusal.into(),
-            },
-            None,
-        )
+) -> wire::FormCellAck {
+    let refuse = |refusal: &str| wire::FormCellAck {
+        formed: false,
+        refusal: refusal.into(),
+        promise: None,
     };
     if facts.class != Class::Storage {
         return refuse("stateless");
     }
-    let Ok(plan) = CellPlan::from_form(request) else {
+    let (Ok(plan), Some(ballot)) = (CellPlan::from_form(request), vote_ballot(request)) else {
         return refuse("malformed");
     };
     if !plan.members.contains(&(facts.node_id, facts.addr)) {
         return refuse("not_a_member");
     }
-    if ledger
-        .pending()
-        .is_some_and(|pending| pending.cell_id != plan.cell_id)
-    {
-        return refuse("other_cell");
+    if let Some((voted, held)) = ledger.vote() {
+        return FormedCell {
+            facts: facts.clone(),
+            plan: held,
+            ballot: voted,
+        }
+        .form_ack(request);
     }
-    if let Err(error) = ledger.form(&plan).await {
-        tracing::error!(%error, "cell_form_failed");
-        return refuse("storage");
-    }
-    tracing::info!(cell = plan.cell_id, "cell_formed");
-    (
-        wire::FormCellAck {
-            formed: true,
-            refusal: String::new(),
-        },
-        Some(plan),
-    )
-}
-
-/// The cell step of `init`, run by the seed it was sent to: the formed plan,
-/// or the refusal's label.
-async fn run_init<P: Providers, L: CellLedger>(
-    providers: &P,
-    rpc: &RpcHandle<P>,
-    facts: &MachineFacts,
-    assignment: usize,
-    ledger: &mut L,
-    tunables: &DriverTunables,
-) -> Result<CellPlan, &'static str> {
-    if !facts.is_seed() {
-        return Err("not_a_seed");
-    }
-    if facts.class != Class::Storage {
-        return Err("stateless_seed");
-    }
-    let time = providers.time().clone();
-    let patience = tunables.connection_timeout;
-    let plan = if let Some(plan) = ledger.pending() {
-        plan
-    } else {
-        let mut members = Vec::with_capacity(facts.seeds.len());
-        for &seed in &facts.seeds {
-            if seed == facts.addr {
-                members.push((facts.node_id, seed));
-                continue;
+    let mut acceptor = acceptor(ledger);
+    match acceptor.admit(ballot, DECREE_SLOT) {
+        AcceptOutcome::Admitted => {
+            // A vote is a promise too: the acceptor raises the promise
+            // before it records, exactly as the log wiring does.
+            let mut writes: Vec<AcceptorWrite<CellPlan>> = Vec::new();
+            acceptor.set_promise(ballot, &mut writes);
+            acceptor.record_accepted(DECREE_SLOT, ballot, plan.clone(), &mut writes);
+            if let Err(error) = ledger.form(ballot, &plan).await {
+                tracing::error!(%error, "cell_form_failed");
+                return refuse("storage");
             }
-            let client = well_known::<P, IdentifyRpc>(rpc, seed);
-            match time
-                .timeout(patience, client.try_get_reply(&wire::Identify {}))
-                .await
-            {
-                Ok(Ok(ack)) if ack.class == Class::Storage.as_str() => {
-                    members.push((NodeId(ack.node_id), seed));
-                }
-                Ok(Ok(_)) => return Err("stateless_seed"),
-                // A seed that serves a cell already, while this one waits
-                // with no plan: this machine is new (a wiped volume mints a
-                // new identity) and never forms a second cell beside it.
-                _ if serves_cell(&time, rpc, seed, patience).await => {
-                    return Err("cell_exists");
-                }
-                _ => return Err("seed_unreachable"),
+            assert!(
+                ledger.vote().as_ref() == acceptor.record(DECREE_SLOT),
+                "the ledger holds the vote the acceptor recorded"
+            );
+            assert!(
+                ledger.promised() == acceptor.promised(),
+                "the ledger holds the promise the vote raised"
+            );
+            tracing::info!(cell = plan.cell_id, "cell_formed");
+            wire::FormCellAck {
+                formed: true,
+                refusal: String::new(),
+                promise: None,
             }
         }
-        members.sort_unstable();
-        let cell_id = loop {
-            let id: u64 = providers.random().random();
-            if id != 0 {
-                break id;
-            }
-        };
-        // Every identifier is drawn (§3.8): the cell tenant's control journal,
-        // the fleet tenant's (this cell hosts it: the fleet's first), and the static
-        // user journals under one drawn user tenant.
-        let control = draw_identifier(providers);
-        let fleet = draw_identifier(providers);
-        let users = draw_identifier(providers).tenant;
-        let mut journals: BTreeSet<JournalIdentifier> = [control, fleet].into_iter().collect();
-        while journals.len() < 2 + assignment {
-            journals.insert(JournalIdentifier::new(
-                users,
-                draw_identifier(providers).journal,
-            ));
-        }
-        let plan = CellPlan {
-            cell_id,
-            members,
-            control,
-            fleet: Some(fleet),
-            journals: journals.into_iter().collect(),
-        };
-        plan.check().map_err(|_| "malformed")?;
-        ledger.record_pending(&plan).await.map_err(|error| {
-            tracing::error!(%error, "cell_pending_record_failed");
-            "storage"
-        })?;
-        plan
-    };
-    // Every other seed first, this one last: a seed that formed is serving
-    // the cell, so a re-run that finds this one still waiting resumes.
-    let request = plan.form_request();
-    for &(id, seed) in &plan.members {
-        if id == facts.node_id {
-            continue;
-        }
-        let client = well_known::<P, FormCellRpc>(rpc, seed);
-        match time.timeout(patience, client.try_get_reply(&request)).await {
-            Ok(Ok(ack)) if ack.formed => {}
-            Ok(Ok(ack)) if ack.refusal == "other_cell" => return Err("other_cell"),
-            Ok(Ok(_)) => return Err("seed_unreachable"),
-            // No machine endpoint there: a seed an earlier run formed serves
-            // the cell control journal instead.
-            _ => {
-                if !serves_cell(&time, rpc, seed, patience).await {
-                    return Err("seed_unreachable");
-                }
+        AcceptOutcome::Refused | AcceptOutcome::BelowFloor => {
+            assert!(
+                acceptor.promised() > ballot,
+                "a decree refusal names a higher promise"
+            );
+            wire::FormCellAck {
+                formed: false,
+                refusal: "promised_higher".into(),
+                promise: Some(ballot_to_wire(acceptor.promised())),
             }
         }
     }
-    ledger.form(&plan).await.map_err(|error| {
-        tracing::error!(%error, "cell_form_failed");
-        "storage"
-    })?;
-    Ok(plan)
-}
-
-/// Whether the machine at `seed` serves a cell: it answers a node-only
-/// `Inspect` (a waiting machine serves no `Inspect` at all) naming a cell. A
-/// machine that has no plan cannot know any identifier to ask for: no
-/// identifier is fixed (§3.8).
-async fn serves_cell<P: Providers>(
-    time: &P::Time,
-    rpc: &RpcHandle<P>,
-    seed: SocketAddr,
-    patience: Duration,
-) -> bool {
-    let client = well_known::<P, InspectRpc>(rpc, seed);
-    let request = InspectRequest::node_only();
-    matches!(
-        time.timeout(patience, client.try_get_reply(&request)).await,
-        Ok(Ok(reply)) if reply.cell_id != 0
-    )
 }

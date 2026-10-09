@@ -1,22 +1,23 @@
-//! `init` whole (#196, #229, #246): the cell step, then the fleet steps, as
-//! one resumable operation. `parosctl init` prints what it comes to, and the
-//! simulation's workload runs the very same code.
+//! `init` whole (#196, #229, #246, #277): the cell step, then the fleet
+//! steps, as one resumable operation. `parosctl init` prints what it comes
+//! to, and the simulation's workload runs the very same code.
 //!
-//! Sent to the first address — a waiting seed every seed's join list names
-//! — which identifies every seed, mints the cell's id and forms every seed
-//! ([`crate::machine`]); then `init` claims the cell control journal with
+//! The cell step is `cell init` over the founding members: sent to the
+//! first listed machine still idle, which drives the cell decree over every
+//! listed machine ([`crate::machine`]); a formed one has no `CellInit` and
+//! the next is asked. Then `init` claims the cell control journal with
 //! `SetLeader(new, old = none)`, under a leader uuid drawn from the caller's
-//! seed
-//! ([`super::bootstrap::claim_cell`]). A re-run resumes: a seed that already
-//! serves the cell is asked for it, and the claim is made if it is still
-//! missing.
+//! seed ([`super::bootstrap::claim_cell`]). A re-run resumes: an interrupted
+//! decree is finished by whichever listed machine is asked, a cell every
+//! member formed is learned from the members, and the claim is made if it
+//! is still missing.
 //!
 //! Then the fleet steps ([`super::fleet`]): the fleet tenant (served by the
-//! cell's seeds) records the fleet's id — drawn by the caller, kept on a
+//! cell's members) records the fleet's id — drawn by the caller, kept on a
 //! re-run — and adds the cell with its cell tenant, the cell records the
 //! fleet on its side, and the fleet tenant marks the cell `READY`. No
 //! identifier is fixed (§3.8): a first run takes them from the plan it
-//! formed, a re-run learns them from the seeds' `Inspect`. Both journals are
+//! formed, a re-run learns them from the members' `Inspect`. Both journals are
 //! written under the run's leader uuids: a re-run, with a seed of its own,
 //! takes them over (#241). Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
@@ -78,7 +79,7 @@ pub struct Initialized {
 /// Why `init` cannot go on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InitRefusal {
-    /// The seed refused the formation: its label (see [`InitOutcome::Refused`]).
+    /// The cell decree refused: its label (see [`InitOutcome::Refused`]).
     Formation(String),
     /// The formed cell hosts no fleet tenant.
     NoFleet,
@@ -89,13 +90,13 @@ pub enum InitRefusal {
 /// What `init` waited on in vain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unreachable {
-    /// No address was given.
+    /// No member was listed.
     NoTarget,
-    /// The seed answered with a plan that does not decode.
+    /// A member answered with a plan that does not decode.
     Malformed,
-    /// The formation decided nothing in time: a seed is not up yet.
+    /// The formation decided nothing in time: a member is not up yet.
     Formation,
-    /// Nothing answered `Init` or `Inspect`.
+    /// Nothing answered `CellInit` or `Inspect`.
     NothingAnswered,
     /// No server named its cell's control journals.
     NoControlJournals,
@@ -110,7 +111,7 @@ pub enum Unreachable {
 /// the caller: `paros::client` draws no randomness).
 #[derive(Clone, Copy, Debug)]
 pub struct InitParams {
-    /// How long the seed may take to form the cell, the cell to elect its
+    /// How long the decree may take to form the cell, the cell to elect its
     /// first leader, and an interrupted fleet step to be taken again.
     pub patience: Duration,
     /// The fleet id a first run records; a re-run keeps the recorded one.
@@ -166,66 +167,76 @@ async fn found<P: Providers>(
     Ok((servers, members, NodeId(coordinator), journals, Vec::new()))
 }
 
-/// Run `init` whole: form the cell at `addrs[0]` (or learn it, when that
-/// seed already serves one), claim its control journal, then run the fleet
-/// steps, through a client `connect` builds over the cell's servers.
+/// Run `init` whole: form the cell over the founding `members` (or learn it,
+/// when every member already serves it), claim its control journal, then
+/// run the fleet steps, through a client `connect` builds over the cell's
+/// servers.
 ///
 /// # Panics
 ///
 /// If the fleet half ends advanced (a broken [`FleetSession::init`]
 /// contract), or `params` carries an unset fleet id.
-#[tracing::instrument(level = "debug", skip_all, fields(addrs = addrs.len()))]
+#[tracing::instrument(level = "debug", skip_all, fields(members = members.len()))]
 pub async fn initialize<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    addrs: &[SocketAddr],
+    members: &[SocketAddr],
     connect: impl Fn(&[(u64, SocketAddr)]) -> Client<P>,
     params: InitParams,
 ) -> InitRun {
     assert_ne!(params.fleet_id, 0, "a fleet id is never unset");
-    let Some(&target) = addrs.first() else {
+    if members.is_empty() {
         return InitRun::Unreachable(Unreachable::NoTarget);
-    };
+    }
     let patience = params.patience;
-    let (servers, members, coordinator, journals, users) =
-        match bootstrap::init(providers, rpc, target, patience).await {
+    let mut formation = None;
+    for &target in members {
+        match bootstrap::cell_init(providers, rpc, target, members, patience).await {
             InitOutcome::Formed(plan) => {
-                let servers: Vec<(u64, SocketAddr)> = plan
-                    .members
-                    .iter()
-                    .map(|(id, addr)| (id.0, *addr))
-                    .collect();
-                let members = servers.iter().map(|(id, _)| *id).collect();
-                let Some(fleet_control) = plan.fleet else {
-                    return InitRun::Refused(InitRefusal::NoFleet);
-                };
-                let users: Vec<JournalIdentifier> = plan
-                    .journals
-                    .iter()
-                    .copied()
-                    .filter(|j| *j != plan.control && *j != fleet_control)
-                    .collect();
-                (
-                    servers,
-                    members,
-                    plan.coordinator(),
-                    plan.control_journals(),
-                    users,
-                )
+                formation = Some(plan);
+                break;
             }
             InitOutcome::Refused(refusal) => {
                 return InitRun::Refused(InitRefusal::Formation(refusal));
             }
             InitOutcome::Malformed => return InitRun::Unreachable(Unreachable::Malformed),
             InitOutcome::Unreachable => return InitRun::Unreachable(Unreachable::Formation),
-            // No machine endpoint: the target serves a cell already (a re-run
-            // after its formation), or nothing listens there.
-            InitOutcome::NotWaiting => match found(providers, rpc, addrs, &connect, patience).await
-            {
-                Ok(cell) => cell,
-                Err(unreachable) => return InitRun::Unreachable(unreachable),
-            },
-        };
+            // Formed already: the next listed machine may still be idle.
+            InitOutcome::NotWaiting => {}
+        }
+    }
+    let (servers, members, coordinator, journals, users) = match formation {
+        Some(plan) => {
+            let servers: Vec<(u64, SocketAddr)> = plan
+                .members
+                .iter()
+                .map(|(id, addr)| (id.0, *addr))
+                .collect();
+            let ids = servers.iter().map(|(id, _)| *id).collect();
+            let Some(fleet_control) = plan.fleet else {
+                return InitRun::Refused(InitRefusal::NoFleet);
+            };
+            let users: Vec<JournalIdentifier> = plan
+                .journals
+                .iter()
+                .copied()
+                .filter(|j| *j != plan.control && *j != fleet_control)
+                .collect();
+            (
+                servers,
+                ids,
+                plan.coordinator(),
+                plan.control_journals(),
+                users,
+            )
+        }
+        // Every listed machine is formed (a re-run after its formation):
+        // learn the cell from them.
+        None => match found(providers, rpc, members, &connect, patience).await {
+            Ok(cell) => cell,
+            Err(unreachable) => return InitRun::Unreachable(unreachable),
+        },
+    };
     assert!(!servers.is_empty(), "a formed or found cell has servers");
     assert!(
         members.contains(&coordinator.0),
