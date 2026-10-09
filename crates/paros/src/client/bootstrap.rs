@@ -206,7 +206,10 @@ async fn claim_cell_once<P: Providers>(
     control: JournalIdentifier,
     leader: LeaderUuid,
 ) -> ClaimCellOutcome {
-    let Some(state) = client.journal_state(control, 0).await else {
+    let report = client
+        .read_any(&super::state_read(control), client.leader().unwrap_or(0))
+        .await;
+    let Some(state) = report.outcome.state() else {
         return ClaimCellOutcome::Unavailable;
     };
     if state.leader.is_some() {
@@ -214,7 +217,11 @@ async fn claim_cell_once<P: Providers>(
             leader: state.leader,
         };
     }
-    let first = client.leader().unwrap_or(0);
+    // Asked of the leader the read named, else of the server that served
+    // the read, the one just proven reachable: a member wiped during `init`
+    // is a dead member of the cell (#246), and a `SetLeader` sent down its
+    // dead link comes back ambiguous every time.
+    let first = client.leader().unwrap_or(report.server);
     match client.set_leader(control, leader, None, first).await {
         SetLeaderOutcome::Won { .. } => ClaimCellOutcome::Claimed { leader },
         SetLeaderOutcome::Lost { state } => ClaimCellOutcome::AlreadyInitialized {

@@ -1140,7 +1140,7 @@ impl<P: Providers> Client<P> {
 
 /// The read that asks where `journal` stands: one record from position 0,
 /// no wait — answered with the journal state whatever the log holds.
-fn state_read(journal: JournalIdentifier) -> Read {
+pub(super) fn state_read(journal: JournalIdentifier) -> Read {
     Read {
         journal: journal.journal.0,
         tenant: journal.tenant.0,
