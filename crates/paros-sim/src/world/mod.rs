@@ -123,7 +123,7 @@ pub(crate) struct StorageWorld {
     /// first reason wins — a corruption park on an identity already wiped
     /// or retired changes nothing.
     parked: BTreeMap<String, ParkReason>,
-    /// Injections a boot applied, by identity, whose journal gave no
+    /// Double faults a boot applied, by identity, whose journal gave no
     /// verdict yet: the process died between the damage and the scan's
     /// answer. The next boot judges the same injection, never a second one,
     /// and until then a corruption park is not honored: the park is
@@ -217,10 +217,14 @@ impl StorageWorld {
         self.unjudged.get(ip).cloned()
     }
 
-    /// `ip`'s boot applied `injection`: it stays to judge until
-    /// [`StorageWorld::judged`].
+    /// `ip`'s boot applied `injection`: when its plan parked `ip` for
+    /// corruption (a double fault, which no open repairs), it stays to
+    /// judge until [`StorageWorld::judged`]. Any other family may be
+    /// repaired by the killed open itself, so it is never carried.
     pub(crate) fn note_applied(&mut self, ip: &str, injection: injector::Injection) {
-        self.unjudged.insert(ip.to_owned(), injection);
+        if self.parked.get(ip) == Some(&ParkReason::Corruption) {
+            self.unjudged.insert(ip.to_owned(), injection);
+        }
     }
 
     /// `ip`'s journal gave its verdict on the applied injection.
