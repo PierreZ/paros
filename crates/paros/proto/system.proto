@@ -45,6 +45,8 @@ message CreateJournal {
   bytes name = 1;
   paros.common.v1.AcceptorConfig config = 2;
   uint64 id = 3;
+  // Who may write the journal (#241), fixed for its life.
+  paros.common.v1.WriterMode mode = 4;
 }
 
 // Delete journal `id`: a tombstone, never a reuse.

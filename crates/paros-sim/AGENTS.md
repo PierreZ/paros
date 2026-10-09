@@ -21,6 +21,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `chain_workload.rs` → `ChainWorkload`, `ChainConfig` → the op alphabet, weights, reconfiguration shape rings.
 - `chain_workload/rpc.rs` → `CallLog` → the library's `CallObserver` (the history), per-answer oracles, one-attempt calls, the retry-identity oracle (`open_write` / `close_write`).
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
+- `chain_workload/multi.rs` → the ops on a multi-writer journal (#241): unfenced appends through `paros::client::multi`, re-sent at-least-once, open truncations, and the wrong-mode calls (a claim, a fenced write) that must be refused; a single-writer journal's unfenced write is refused too.
 - `chain_workload/foreign.rs` → the cross-tenant attack (#247): a `Write`, `Truncate` or `SetLeader` under another tenant's journal or an identifier nobody serves, refused and never applied (`AuditWorld::note_foreign`).
 - `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals and the logger of every attempt at them into the control journals' shared history (#247, `rpc::control_attempts`).
 - `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229, #246): `init` whole through `paros::client::initialize` against the machines (`cell init` over the layout's founding members — started at a drawn founder, or with a second concurrent `cell init` at another founder that must converge on the one cell, on their own BUGGIFY locations — again once known, or misdirected to a non-founder that must refuse it as `not_a_member`), the cell learned from that run or through `Inspect` (never injected), `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step, target-kill (#247), changed-identity and fleet-tenant checkpoint-crash shapes, a reachable per `Stage`, and the check that the fleet directory equals the cell's tenant list — mid-run when both folds are one instant's, and on every run over the final folds, with the recovery tail's control-plane liveness (`settle`, `final_check`).
@@ -68,7 +69,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
 - `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
-  window (`hold_journal`). The first is the run's main identifier (`Identifiers::main`; `identifiers` draws it, the
+  window (`hold_journal`). Each journal but the first is multi-writer on a coin (`JournalPlan::multi`, #241); a directory create draws its mode too, and `writer_mode` answers the mode of either. The first is the run's main identifier (`Identifiers::main`; `identifiers` draws it, the
   directory's and the registry's once per seed: no identifier is fixed; the cell's and the fleet tenant's are `init`'s, on a machine); the
   others' identifiers are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal

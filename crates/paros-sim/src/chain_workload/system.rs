@@ -350,7 +350,13 @@ impl SystemOps {
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
-        let mut claim: Option<(LeaderUuid, u64)> = None;
+        // A multi-writer journal (#241) takes unfenced writes and no claim:
+        // its seq is assigned at apply.
+        let unfenced = (audit.mode() == paros::WriterMode::Multi).then_some((LeaderUuid::UNSET, 0));
+        if unfenced.is_some() {
+            assert_reachable!("system: a client appends unfenced to a multi-writer journal");
+        }
+        let mut claim: Option<(LeaderUuid, u64)> = unfenced;
         for _ in 0..APPEND_ATTEMPTS {
             let node = targets[target % targets.len()] % nodes.server_count();
             let Some((leader, position)) = claim else {
@@ -388,6 +394,7 @@ impl SystemOps {
                     SetLeaderOutcome::Won { state } => {
                         claim = Some((uuid, state.next_seq.0));
                     }
+                    SetLeaderOutcome::WrongMode { .. } => system_never_of_wrong_mode(),
                     SetLeaderOutcome::Lost { .. }
                     | SetLeaderOutcome::UnknownJournal
                     | SetLeaderOutcome::Malformed
@@ -410,7 +417,11 @@ impl SystemOps {
             match within(ctx, self.timeout, WriteOutcome::Ambiguous, write).await {
                 WriteOutcome::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
-                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = None,
+                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = unfenced,
+                WriteOutcome::WrongMode { .. } => {
+                    system_never_of_wrong_mode();
+                    claim = unfenced;
+                }
                 WriteOutcome::Redirect { leader } => {
                     target = leader
                         .and_then(|l| targets.iter().position(|t| *t as u64 == l))
@@ -573,12 +584,9 @@ impl SystemOps {
         } else {
             drawn_id(payload ^ class)
         };
+        let mode = drawn_mode();
         for attempt in 0..2_u64 {
-            let command = SystemCommand::CreateJournal {
-                id,
-                name: name.clone(),
-                config: config.clone(),
-            };
+            let command = self.create_command(ctx, id, &name, &config, mode);
             let Appended::At(position) = self
                 .append(ctx, nodes, self.directory, &command, payload)
                 .await
@@ -626,6 +634,26 @@ impl SystemOps {
                 }
                 _ => return,
             }
+        }
+    }
+
+    /// The create of journal `id`, its mode first recorded for the audit
+    /// (#241).
+    fn create_command(
+        &self,
+        ctx: &SimContext,
+        id: JournalId,
+        name: &[u8],
+        config: &AcceptorConfig,
+        mode: paros::WriterMode,
+    ) -> SystemCommand {
+        let journal = JournalIdentifier::new(self.directory.tenant, id);
+        crate::audit::note_created_mode(ctx.state(), journal, mode);
+        SystemCommand::CreateJournal {
+            id,
+            name: name.to_vec(),
+            config: config.clone(),
+            mode,
         }
     }
 
@@ -978,4 +1006,23 @@ impl SystemOps {
             self.booked.push(booking);
         }
     }
+}
+
+/// The writer mode a create draws (#241): fixed for the journal's life.
+fn drawn_mode() -> paros::WriterMode {
+    if buggify_with_prob!(0.5) {
+        assert_reachable!("system: a client creates a multi-writer journal");
+        paros::WriterMode::Multi
+    } else {
+        paros::WriterMode::Single
+    }
+}
+
+/// A system journal is single-writer, and its writers fence every call: a
+/// wrong-mode refusal (#241) there is a bug.
+fn system_never_of_wrong_mode() {
+    assert_always!(
+        false,
+        "system: a system journal call is never refused as of the wrong mode"
+    );
 }

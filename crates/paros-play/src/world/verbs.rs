@@ -676,7 +676,11 @@ impl World {
                     .find(|(_, command)| command.write() == Some(&entry))
                     .map_or(Slot(0), |(slot, _)| *slot)
             });
-            let outcome = state.apply(&Command::Write(entry.clone()), |at| replica.accepted_at(at));
+            let outcome = state.apply(
+                paros_core::WriterMode::Single,
+                &Command::Write(entry.clone()),
+                |at| replica.accepted_at(at),
+            );
             (outcome, original, replica.journal().next_seq)
         });
         let mark = self.narration.len();

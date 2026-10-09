@@ -36,6 +36,7 @@ use moonpool_sim::{StateHandle, assert_always, assert_reachable, buggify_knob};
 
 use paros::{
     DriverTunables, JournalId, JournalIdentifier, JournalStoreConfig, QuorumSystem, TenantId,
+    WriterMode,
 };
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
@@ -544,6 +545,10 @@ pub(crate) struct JoinerMachine {
 pub(crate) struct JournalPlan {
     pub(crate) ids: Vec<JournalIdentifier>,
     pub(crate) held: Option<JournalIdentifier>,
+    /// The journals that run the multi-writer mode (#241): never the main
+    /// one, whose owners claim, reconfigure and drive the scenarios; each
+    /// other journal on a coin of its own.
+    pub(crate) multi: Vec<JournalIdentifier>,
     /// The deployment's journal ([`Identifiers::main`]): the one with the seed's
     /// matchmakers, proxies, replicas and bootstrap.
     pub(crate) main: JournalIdentifier,
@@ -616,6 +621,15 @@ impl JournalPlan {
     /// Whether the run serves more than one journal.
     pub(crate) fn is_multi(&self) -> bool {
         self.ids.len() > 1
+    }
+
+    /// The writer mode `journal` was created with (#241).
+    pub(crate) fn mode(&self, journal: JournalIdentifier) -> WriterMode {
+        if self.multi.contains(&journal) {
+            WriterMode::Multi
+        } else {
+            WriterMode::Single
+        }
     }
 }
 
@@ -998,6 +1012,7 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
                 return JournalPlan {
                     ids,
                     held: None,
+                    multi: Vec::new(),
                     main,
                 };
             }
@@ -1011,7 +1026,23 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
                 );
                 ids[usize::try_from(count - 1).unwrap_or(0)]
             });
-            JournalPlan { ids, held, main }
+            // The writer mode is fixed when a journal is created (#241): each
+            // journal beside the main one draws it once per seed.
+            let multi: Vec<JournalIdentifier> = ids
+                .iter()
+                .copied()
+                .filter(|id| *id != main && moonpool_sim::buggify_with_prob!(0.5))
+                .collect();
+            if !multi.is_empty() {
+                // BUGGIFY pairing: a multi-writer journal runs on some seed.
+                assert_reachable!("journal: a seed runs a multi-writer journal");
+            }
+            JournalPlan {
+                ids,
+                held,
+                multi,
+                main,
+            }
         })
         .clone()
 }

@@ -1590,7 +1590,9 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
             self.audit.system_folded(me, journal, seq, &event);
             tracing::info!(node = me.0, journal = %journal, seq, event = ?event, "system_folded");
             match event {
-                SystemEvent::Directory(DirectoryEvent::Created { id, config, .. }) => {
+                SystemEvent::Directory(DirectoryEvent::Created {
+                    id, config, mode, ..
+                }) => {
                     // A created journal lives in the directory's tenant
                     // (#235): the directory is that tenant's control journal.
                     let id = JournalIdentifier::new(journal.tenant, id);
@@ -1606,6 +1608,7 @@ impl<P: Providers, J: JournalStores, H: DriverHooks> SystemCtx<'_, '_, P, J, H> 
                     let journal_config = paros_core::Config {
                         peers: config.members().to_vec(),
                         quorum_system: config.quorum_system(),
+                        writer_mode: mode,
                         ..paros_core::Config::new(me, id)
                     };
                     if !self.stores.create(id, journal_config) {

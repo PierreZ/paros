@@ -220,8 +220,10 @@ async fn claim_cell_once<P: Providers>(
             leader: state.leader,
         },
         SetLeaderOutcome::Ambiguous | SetLeaderOutcome::Malformed => ClaimCellOutcome::Ambiguous,
-        SetLeaderOutcome::Redirect { .. } | SetLeaderOutcome::UnknownJournal => {
-            ClaimCellOutcome::Unavailable
-        }
+        // A cell control journal is single-writer: a wrong-mode refusal is
+        // a journal this call cannot claim.
+        SetLeaderOutcome::Redirect { .. }
+        | SetLeaderOutcome::UnknownJournal
+        | SetLeaderOutcome::WrongMode { .. } => ClaimCellOutcome::Unavailable,
     }
 }

@@ -60,7 +60,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, NodeId, TenantId};
+use paros_core::{AcceptorConfig, JournalId, JournalIdentifier, NodeId, TenantId, WriterMode};
 use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
@@ -85,6 +85,8 @@ pub enum SystemCommand {
         name: Vec<u8>,
         /// The journal's static acceptor configuration.
         config: AcceptorConfig,
+        /// Who may write it (#241), fixed for its life.
+        mode: WriterMode,
     },
     /// Delete journal `id` (a tombstone, never a reuse).
     DeleteJournal {
@@ -165,13 +167,17 @@ impl SystemCommand {
     pub fn encode(&self) -> Vec<u8> {
         use wire::system_entry::Kind;
         let kind = match self {
-            SystemCommand::CreateJournal { id, name, config } => {
-                Kind::CreateJournal(wire::CreateJournal {
-                    name: name.clone(),
-                    config: Some(config_to_proto(config)),
-                    id: id.0,
-                })
-            }
+            SystemCommand::CreateJournal {
+                id,
+                name,
+                config,
+                mode,
+            } => Kind::CreateJournal(wire::CreateJournal {
+                name: name.clone(),
+                config: Some(config_to_proto(config)),
+                id: id.0,
+                mode: crate::rpc::writer_mode_to_proto(*mode).into(),
+            }),
             SystemCommand::DeleteJournal { id } => {
                 Kind::DeleteJournal(wire::DeleteJournal { id: id.0 })
             }
@@ -241,6 +247,7 @@ impl SystemCommand {
                 name: create.name,
                 config: config_from_proto(create.config)?
                     .ok_or("a created journal names no configuration")?,
+                mode: crate::rpc::writer_mode_from_proto(create.mode)?,
             },
             Kind::DeleteJournal(delete) => SystemCommand::DeleteJournal {
                 id: JournalId(delete.id),
@@ -291,6 +298,8 @@ pub struct CreatedJournal {
     pub name: Vec<u8>,
     /// Its static acceptor configuration.
     pub config: AcceptorConfig,
+    /// Who may write it (#241).
+    pub mode: WriterMode,
     /// The position of the `DeleteJournal` that tombstoned it, if any.
     pub deleted_at: Option<u64>,
 }
@@ -306,6 +315,8 @@ pub enum DirectoryEvent {
         name: Vec<u8>,
         /// Its configuration.
         config: AcceptorConfig,
+        /// Who may write it (#241).
+        mode: WriterMode,
     },
     /// A journal was tombstoned.
     Deleted {
@@ -381,7 +392,12 @@ impl Directory {
         );
         self.next_seq = seq + 1;
         match SystemCommand::decode(record).ok() {
-            Some(SystemCommand::CreateJournal { id, name, config }) => {
+            Some(SystemCommand::CreateJournal {
+                id,
+                name,
+                config,
+                mode,
+            }) => {
                 if !id.is_set() {
                     return DirectoryEvent::Refused(DirectoryRefusal::Malformed);
                 }
@@ -397,10 +413,16 @@ impl Directory {
                     CreatedJournal {
                         name: name.clone(),
                         config: config.clone(),
+                        mode,
                         deleted_at: None,
                     },
                 );
-                DirectoryEvent::Created { id, name, config }
+                DirectoryEvent::Created {
+                    id,
+                    name,
+                    config,
+                    mode,
+                }
             }
             Some(SystemCommand::DeleteJournal { id }) => {
                 let Some(created) = self
@@ -1138,6 +1160,7 @@ mod tests {
             id: JournalId(id),
             name: name.to_vec(),
             config: config(members),
+            mode: WriterMode::Single,
         }
         .encode()
     }
@@ -1153,6 +1176,7 @@ mod tests {
                 id: JournalId(0x9e37_79b9),
                 name: b"orders".to_vec(),
                 config: config(&[0, 1, 2]),
+                mode: WriterMode::Multi,
             },
             SystemCommand::DeleteJournal { id: JournalId(131) },
             SystemCommand::RegisterNode {
@@ -1291,6 +1315,7 @@ mod tests {
                         cols: 2,
                         ..Default::default()
                     }),
+                    ..Default::default()
                 },
             )),
         }

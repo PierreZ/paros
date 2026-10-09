@@ -42,6 +42,7 @@ impl ColocatedNode {
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
         let replica = Replica::from_boot(
+            config.writer_mode,
             hard_state.chosen_index,
             first_slot,
             storage.sealed_state(),

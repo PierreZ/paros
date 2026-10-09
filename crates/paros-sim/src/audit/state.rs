@@ -1557,7 +1557,7 @@ impl AuditState {
     pub(super) fn check_client_history(&mut self, clients: usize) {
         if self.lin.merged >= clients && !self.lin.searched {
             self.lin.searched = true;
-            check_linearizable(&self.lin);
+            check_linearizable(&self.lin, self.journal.mode());
         }
         let h = &self.lin;
         // A terminal event is only ever recorded for an op that was issued.

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::{
     AcceptorConfig, Ballot, Command, Control, Entry, JournalState, JournalView, LeaderUuid, NodeId,
-    Party, ProxyId, QuorumSystem, Seq, Value,
+    Party, ProxyId, QuorumSystem, Seq, Value, WriterMode,
 };
 
 use super::{InspectReply, Reconfigure, common, internal};
@@ -313,6 +313,29 @@ pub fn journal_state_from_proto(
         return Err("ill-formed journal state");
     }
     Ok(decoded)
+}
+
+/// A journal's writer mode on the wire (#241).
+#[must_use]
+pub fn writer_mode_to_proto(mode: WriterMode) -> common::WriterMode {
+    match mode {
+        WriterMode::Single => common::WriterMode::Single,
+        WriterMode::Multi => common::WriterMode::Multi,
+    }
+}
+
+/// A journal's writer mode off the wire (#241). An unknown value is
+/// refused, never read as single-writer.
+///
+/// # Errors
+///
+/// The value names no writer mode.
+pub fn writer_mode_from_proto(mode: i32) -> Result<WriterMode, &'static str> {
+    match common::WriterMode::try_from(mode) {
+        Ok(common::WriterMode::Single) => Ok(WriterMode::Single),
+        Ok(common::WriterMode::Multi) => Ok(WriterMode::Multi),
+        Err(_) => Err("an unknown writer mode"),
+    }
 }
 
 /// The wire form of what a client learns of a journal (#241): every verdict

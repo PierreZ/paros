@@ -23,7 +23,11 @@
 //! - **truncation monotone**: `first_seq` never moves backwards along the
 //!   log, and never past `next_seq`;
 //! - **truncation fenced** (#228): a `Truncate` is accepted only from the
-//!   current leader, and refused only from a caller that is not it.
+//!   current leader, and refused only from a caller that is not it;
+//! - **the writer mode** (#241): a multi-writer journal never names a leader,
+//!   accepts every write that carries records at the next position, lets
+//!   anyone truncate, and refuses a fenced call or a `SetLeader` as of the
+//!   wrong mode; a single-writer journal refuses an unfenced call so.
 //!
 //! The per-slot facts arrive in whatever order the nodes walk; the checks
 //! that need slot order (density, the leader chain, truncation) run
@@ -33,7 +37,7 @@
 use std::collections::BTreeMap;
 
 use moonpool_sim::{assert_always, assert_sometimes};
-use paros::{Command, Control, JournalView, LeaderUuid, Outcome};
+use paros::{Command, Control, JournalView, LeaderUuid, Outcome, WriterMode};
 
 /// The write a slot decided, as the model keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +62,8 @@ struct SlotFact {
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct JournalModel {
+    /// The journal's writer mode (#241), fixed at creation.
+    mode: WriterMode,
     /// Per slot: the verdict every node must reach there (a `Noop` is kept
     /// out: it judges nothing).
     slots: BTreeMap<u64, SlotFact>,
@@ -79,6 +85,10 @@ pub(super) struct JournalModel {
     trimmed_any: bool,
     superseded_write_answered: bool,
     reinstated_any: bool,
+    wrong_mode_any: bool,
+    /// Per record-batch hash, how many slots accepted it: a multi-writer
+    /// write retried may land twice (#241, at-least-once).
+    accepted_bytes: BTreeMap<u64, u64>,
 }
 
 /// The hash a record is kept under (`user_command_hash` of its bytes).
@@ -87,6 +97,19 @@ pub(crate) fn record_hash(record: &[u8]) -> u64 {
 }
 
 impl JournalModel {
+    /// The model of a journal of `mode`.
+    pub(super) fn new(mode: WriterMode) -> Self {
+        Self {
+            mode,
+            ..Self::default()
+        }
+    }
+
+    /// The journal's writer mode.
+    pub(super) fn mode(&self) -> WriterMode {
+        self.mode
+    }
+
     /// Fold one node's verdict at `slot`: `command` (hashed to `vhash`)
     /// judged `outcome` (`None` for a `Noop`).
     pub(super) fn applied(
@@ -134,30 +157,7 @@ impl JournalModel {
         }
         match (&fact.outcome, fact.write) {
             (Outcome::Accepted { seq, count }, Some(write)) => {
-                self.accepted_any = true;
-                assert_always!(
-                    write.seq == seq.0 && write.count == *count && *count > 0,
-                    "journal: an accepted write takes the positions it asked for",
-                    { "slot" => slot, "seq" => seq.0, "asked" => write.seq }
-                );
-                // No position is accepted twice: the batch below this one
-                // ends at or before it, the one above starts at or after its
-                // end.
-                let below = self.batches.range(..=seq.0).next_back();
-                let above = self.batches.range(seq.0..).next();
-                assert_always!(
-                    below.is_none_or(|(start, (_, w))| start + w.count <= seq.0)
-                        && above.is_none_or(|(start, _)| *start >= seq.0 + count),
-                    "journal: a position is accepted once",
-                    { "slot" => slot, "seq" => seq.0, "count" => *count }
-                );
-                self.batches.insert(seq.0, (slot, write));
-                self.next_seq = self.next_seq.max(seq.0 + count);
-                if let Command::Write(entry) = command {
-                    for (position, record) in (seq.0..).zip(&entry.records) {
-                        self.records.insert(position, record_hash(&record.0));
-                    }
-                }
+                self.accepted(slot, (seq.0, *count), write, command);
             }
             (Outcome::Duplicate { seq, .. }, Some(write)) => {
                 self.duplicate_any = true;
@@ -170,7 +170,13 @@ impl JournalModel {
                 }
             }
             (Outcome::Refused(state), Some(write)) => {
-                if state.leader != Some(write.leader) {
+                if self.mode == WriterMode::Multi {
+                    assert_always!(
+                        write.count == 0,
+                        "journal: a multi-writer journal refuses only an empty write",
+                        { "slot" => slot, "count" => write.count }
+                    );
+                } else if state.leader != Some(write.leader) {
                     self.fenced_any = true;
                 } else if write.seq != state.next_seq.0 {
                     self.gap_refused_any = true;
@@ -215,6 +221,14 @@ impl JournalModel {
             (Outcome::Trimmed(state) | Outcome::TruncateRefused(state), None) => {
                 self.truncate_verdict(slot, fact, state);
             }
+            (Outcome::WrongMode(_), _) => {
+                self.wrong_mode_any = true;
+                assert_always!(
+                    self.of_wrong_mode(command),
+                    "journal: a call is refused as of the wrong mode only when it is",
+                    { "slot" => slot, "multi" => self.mode == WriterMode::Multi }
+                );
+            }
             (outcome, write) => {
                 assert_always!(
                     false,
@@ -225,10 +239,83 @@ impl JournalModel {
         }
     }
 
+    /// An accepted write's first verdict: the positions it takes, taken
+    /// once, and the records there.
+    fn accepted(
+        &mut self,
+        slot: u64,
+        (seq, count): (u64, u64),
+        write: WriteFact,
+        command: &Command,
+    ) {
+        self.accepted_any = true;
+        *self.accepted_bytes.entry(write.vhash).or_insert(0) += 1;
+        if self.mode == WriterMode::Multi {
+            assert_always!(
+                !write.leader.is_set() && write.count == count && count > 0,
+                "journal: a multi-writer write is accepted unfenced, records whole",
+                { "slot" => slot, "seq" => seq }
+            );
+        } else {
+            assert_always!(
+                write.seq == seq && write.count == count && count > 0,
+                "journal: an accepted write takes the positions it asked for",
+                { "slot" => slot, "seq" => seq, "asked" => write.seq }
+            );
+        }
+        // No position is accepted twice: the batch below this one
+        // ends at or before it, the one above starts at or after its
+        // end.
+        let below = self.batches.range(..=seq).next_back();
+        let above = self.batches.range(seq..).next();
+        assert_always!(
+            below.is_none_or(|(start, (_, w))| start + w.count <= seq)
+                && above.is_none_or(|(start, _)| *start >= seq + count),
+            "journal: a position is accepted once",
+            { "slot" => slot, "seq" => seq, "count" => count }
+        );
+        self.batches.insert(seq, (slot, write));
+        self.next_seq = self.next_seq.max(seq + count);
+        if let Command::Write(entry) = command {
+            for (position, record) in (seq..).zip(&entry.records) {
+                self.records.insert(position, record_hash(&record.0));
+            }
+        }
+    }
+
+    /// Whether `command` is shaped for the other writer mode (#241): a
+    /// leader uuid or a `SetLeader` on a multi-writer journal, the unset
+    /// uuid on a single-writer one.
+    fn of_wrong_mode(&self, command: &Command) -> bool {
+        let fence = match command {
+            Command::Write(entry) => entry.leader,
+            Command::Control(Control::Truncate { leader, .. }) => *leader,
+            Command::Control(Control::SetLeader { .. }) => {
+                return self.mode == WriterMode::Multi;
+            }
+            Command::Control(Control::Noop) => return false,
+        };
+        match self.mode {
+            WriterMode::Single => !fence.is_set(),
+            WriterMode::Multi => fence.is_set(),
+        }
+    }
+
     /// A `Truncate`'s verdict against its fence (#228): accepted only from
     /// the leader the state after it names, refused only from a caller that
-    /// is not the leader it was judged against.
+    /// is not the leader it was judged against. On a multi-writer journal
+    /// (#241) anyone truncates, under the unset uuid, and nobody is refused.
     fn truncate_verdict(&mut self, slot: u64, fact: &SlotFact, state: &JournalView) {
+        if self.mode == WriterMode::Multi {
+            self.trimmed_any = true;
+            assert_always!(
+                matches!(fact.outcome, Outcome::Trimmed(_))
+                    && fact.truncate.is_some_and(|fence| !fence.is_set()),
+                "journal: a multi-writer truncation applies from anyone",
+                { "slot" => slot }
+            );
+            return;
+        }
         let leads = fact.truncate.is_some() && state.leader == fact.truncate;
         if matches!(fact.outcome, Outcome::Trimmed(_)) {
             self.trimmed_any = true;
@@ -296,6 +383,13 @@ impl JournalModel {
                 );
             }
             next = after.or(next);
+            if let (Some(state), WriterMode::Multi) = (revealed(&fact.outcome), self.mode) {
+                assert_always!(
+                    state.leader.is_none(),
+                    "journal: a multi-writer journal never names a leader",
+                    { "slot" => slot }
+                );
+            }
             if let Some(state) = revealed(&fact.outcome) {
                 assert_always!(
                     state.first_seq.0 >= first && state.first_seq <= state.next_seq,
@@ -334,7 +428,9 @@ impl JournalModel {
                     { "slot" => slot }
                 );
             }
-            if let (Outcome::Accepted { .. }, Some(write)) = (&fact.outcome, fact.write) {
+            if let (Outcome::Accepted { .. }, Some(write), WriterMode::Single) =
+                (&fact.outcome, fact.write, self.mode)
+            {
                 // The uuid a write was accepted under won in the log, at a
                 // lower slot.
                 assert_always!(
@@ -356,6 +452,25 @@ impl JournalModel {
 
     /// The journal's coverage gates, once the slot-ordered checks ran.
     fn gates(&self, stale_truncate_refused: bool) {
+        if self.mode == WriterMode::Multi {
+            assert_sometimes!(
+                self.accepted_any,
+                "journal: a multi-writer journal accepts a write"
+            );
+            assert_sometimes!(
+                self.trimmed_any,
+                "journal: a multi-writer truncation applies"
+            );
+            assert_sometimes!(
+                self.wrong_mode_any,
+                "journal: a multi-writer journal refuses a fenced call"
+            );
+            assert_sometimes!(
+                self.accepted_bytes.values().any(|&n| n > 1),
+                "journal: a multi-writer write lands twice"
+            );
+            return;
+        }
         assert_sometimes!(self.won_any, "journal: a SetLeader wins a generation");
         assert_sometimes!(self.accepted_any, "journal: a write is accepted");
         assert_sometimes!(
@@ -404,7 +519,8 @@ fn revealed(outcome: &Outcome) -> Option<JournalView> {
         | Outcome::Leader(state)
         | Outcome::LeaderRefused(state)
         | Outcome::Trimmed(state)
-        | Outcome::TruncateRefused(state) => Some(*state),
+        | Outcome::TruncateRefused(state)
+        | Outcome::WrongMode(state) => Some(*state),
         Outcome::Accepted { .. } | Outcome::Duplicate { .. } | Outcome::Noop => None,
     }
 }

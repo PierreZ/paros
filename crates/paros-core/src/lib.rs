@@ -88,7 +88,7 @@ mod types;
 mod write;
 
 pub use decree::Decree;
-pub use journal_state::{JournalState, JournalView, Outcome};
+pub use journal_state::{JournalState, JournalView, Outcome, WriterMode};
 pub use matchmaker::{
     DecreeRecord, GcAck, GcOutcome, GcRequest, MatchOutcome, MatchPurpose, MatchRefusal,
     MatchReply, MatchRequest, Matchmaker, MatchmakerConfig, MatchmakerHardState, MatchmakerPhase,

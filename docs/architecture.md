@@ -173,6 +173,18 @@ monotone. A multi-writer journal is what many independent producers append to, a
 election runs over (section 3.3). Batchers (section 4) merge multi-writer writes into fewer
 slots; the unbatcher hands each write its own `seq` range.
 
+How it is built (#241, part 3). The mode is a field of the journal's `Config`, so the format
+marker records it and a restart cannot change it. `CreateJournal` carries it, and a journal
+without one is single-writer. On the wire a multi-writer call uses the same messages: a
+`Write` or `Truncate` carries the unset leader uuid (`0`) and `expected_seq` 0, and the core
+ignores that `seq`. The mode is judged at apply, like every other rule. A call shaped for the
+other mode is refused in place with `WRONG_MODE` and the journal's view: an unfenced call on
+a single-writer journal, and a fenced call or a `SetLeader` on a multi-writer one.
+`paros::client::multi` builds the unfenced requests, and `parosctl write --multi` and
+`parosctl truncate --multi` send them. The simulation draws the mode per journal, judges every
+attempt against the same model in that mode, and a client sends the wrong-mode calls on
+purpose.
+
 ### 2.5 Reads
 
 `Read` is served by whatever holds the journal's replica state — the colocated node by default,

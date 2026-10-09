@@ -9,7 +9,7 @@ use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::client::bootstrap::control_journals_of;
 use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
-    Writer, WriterOutcome,
+    WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
 use paros::wire::common::Ballot;
 use paros::{
@@ -73,6 +73,11 @@ pub struct WriteArgs {
     /// Override: write at this position instead of the tail.
     #[arg(long)]
     seq: Option<u64>,
+    /// Write to a multi-writer journal (#241): no leader uuid, no claim,
+    /// no position. A write whose answer never came is not sent again: it
+    /// may land, and a second send may land twice.
+    #[arg(long, conflicts_with_all = ["leader", "no_claim", "seq"])]
+    multi: bool,
 }
 
 /// Where `journal` stands, read from any server.
@@ -125,6 +130,9 @@ async fn become_writer(
         }
         ClaimOutcome::Owned { .. } => {}
         ClaimOutcome::Lost { state } => return Err(refused(out, "claim lost", &state)),
+        ClaimOutcome::WrongMode { state } => {
+            return Err(refused(out, "multi-writer journal", &state));
+        }
         ClaimOutcome::UnknownJournal => return Err(unknown_journal(journal)),
         ClaimOutcome::Unread => {
             note("no server served the journal's state");
@@ -156,6 +164,9 @@ pub async fn write(
     args: WriteArgs,
 ) -> Ending {
     let journal = args.journal;
+    if args.multi {
+        return append(client, out, journal, &args.records).await;
+    }
     let identity = Identity {
         journal: args.journal,
         leader: leader_or_drawn(providers, args.leader),
@@ -213,6 +224,9 @@ pub async fn write(
             WriterOutcome::Refused { state } => return refused(out, "refused", &state),
             WriterOutcome::Superseded { state } => return refused(out, "superseded", &state),
             WriterOutcome::Truncated { state } => return refused(out, "truncated", &state),
+            WriterOutcome::WrongMode { state } => {
+                return refused(out, "multi-writer journal", &state);
+            }
             WriterOutcome::NotWritten { state } => return refused(out, "not written", &state),
             WriterOutcome::NotOwner => {
                 note("this writer leads no term of the journal");
@@ -246,6 +260,59 @@ pub async fn write(
                 note("the write's answer never came and could not be settled: it may land");
                 return Ending::Ambiguous;
             }
+        }
+    }
+}
+
+/// `parosctl write --multi`: one multi-writer write (#241), redirects
+/// followed, never re-sent after an answer that never came.
+async fn append(
+    client: &ParosClient,
+    out: &Printer,
+    journal: JournalIdentifier,
+    records: &[String],
+) -> Ending {
+    let records = records.iter().map(|r| r.as_bytes().to_vec()).collect();
+    let request = paros::client::multi::append_request(journal, records);
+    let report = client
+        .write(&request, start(client), WriteOptions::default())
+        .await;
+    match report.outcome {
+        WriteOutcome::Written { seq, count, .. } => {
+            out.emit(
+                || format!("written seq={seq} count={count}"),
+                || json!({ "outcome": "written", "seq": seq, "count": count }),
+            );
+            Ending::Success
+        }
+        WriteOutcome::WrongMode { state } => refused(out, "single-writer journal", &state),
+        WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
+            refused(out, "refused", &state)
+        }
+        WriteOutcome::TooLarge {
+            max_records,
+            max_bytes,
+        } => {
+            out.emit(
+                || format!("too large max_records={max_records} max_bytes={max_bytes}"),
+                || {
+                    json!({
+                        "outcome": "too large",
+                        "max_records": max_records,
+                        "max_bytes": max_bytes,
+                    })
+                },
+            );
+            Ending::Refused
+        }
+        WriteOutcome::UnknownJournal => unknown_journal(journal),
+        WriteOutcome::Redirect { .. } => {
+            note("no leader took the write");
+            Ending::Unreachable
+        }
+        WriteOutcome::Malformed | WriteOutcome::Ambiguous => {
+            note("the write's answer never came: it may land");
+            Ending::Ambiguous
         }
     }
 }
@@ -422,6 +489,10 @@ pub struct TruncateArgs {
     /// Override: truncate under `--leader` without claiming.
     #[arg(long, requires = "leader")]
     no_claim: bool,
+    /// Truncate a multi-writer journal (#241): anyone may, with no leader
+    /// uuid and no claim.
+    #[arg(long, conflicts_with_all = ["leader", "no_claim"])]
+    multi: bool,
 }
 
 /// `parosctl truncate`: become the writer exactly as `parosctl write` does
@@ -434,19 +505,25 @@ pub async fn truncate(
     args: TruncateArgs,
 ) -> Ending {
     let journal = args.journal;
-    let identity = Identity {
-        journal: args.journal,
-        leader: leader_or_drawn(providers, args.leader),
-        claim: !args.no_claim,
-        seq: None,
-    };
-    let mut writer = match become_writer(client, out, &identity).await {
-        Ok(writer) => writer,
-        Err(ending) => return ending,
-    };
-    let Some(outcome) = writer.truncate(client, args.up_to, start(client)).await else {
-        note("this writer leads no term of the journal");
-        return Ending::Refused;
+    let (outcome, superseded) = if args.multi {
+        let request = paros::client::multi::open_truncate_request(journal, args.up_to);
+        (client.truncate(&request, start(client)).await, false)
+    } else {
+        let identity = Identity {
+            journal: args.journal,
+            leader: leader_or_drawn(providers, args.leader),
+            claim: !args.no_claim,
+            seq: None,
+        };
+        let mut writer = match become_writer(client, out, &identity).await {
+            Ok(writer) => writer,
+            Err(ending) => return ending,
+        };
+        let Some(outcome) = writer.truncate(client, args.up_to, start(client)).await else {
+            note("this writer leads no term of the journal");
+            return Ending::Refused;
+        };
+        (outcome, writer.owned().is_none())
     };
     match outcome {
         TruncateOutcome::Applied { state } => {
@@ -457,10 +534,9 @@ pub async fn truncate(
             Ending::Success
         }
         // The refusal named another writer: this one was superseded.
-        TruncateOutcome::Refused { state } if writer.owned().is_none() => {
-            refused(out, "superseded", &state)
-        }
+        TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", &state),
         TruncateOutcome::Refused { state } => refused(out, "refused", &state),
+        TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", &state),
         TruncateOutcome::UnknownJournal => unknown_journal(journal),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");
@@ -532,6 +608,7 @@ pub async fn set_leader(
             Ending::Success
         }
         ClaimOutcome::Lost { state } => refused(out, "lost", &state),
+        ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", &state),
         ClaimOutcome::UnknownJournal => unknown_journal(journal),
         ClaimOutcome::Unread | ClaimOutcome::Redirect { .. } => {
             note("no leader decided the swap");

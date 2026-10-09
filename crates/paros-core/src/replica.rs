@@ -46,7 +46,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::journal_state::{JournalState, JournalView, Outcome};
+use crate::journal_state::{JournalState, JournalView, Outcome, WriterMode};
 use crate::types::{Command, Entry, Seq, Slot, Value};
 use crate::write::WriteOp;
 
@@ -150,13 +150,17 @@ pub struct Replica {
     /// `Truncate` folded later in the same walk may compact the slot — and
     /// its [`Replica::outcome_at`] — before the caller reports it.
     committed: Vec<(Slot, Command, Outcome)>,
+    /// The journal's writer mode (#241): configuration, fixed at creation,
+    /// handed to every [`JournalState::apply`].
+    mode: WriterMode,
 }
 
 impl Replica {
     /// Rebuild the replica from what a boot scan read back: the durable
     /// chosen index, the retention floor and the journal state sealed at it,
     /// and the retained accepted log (every record at or below the chosen
-    /// index carries the chosen value — the P2c chain).
+    /// index carries the chosen value — the P2c chain), under the journal's
+    /// writer `mode`.
     ///
     /// The fold starts from the sealed state at the floor and replays the
     /// retained chosen records in slot order, stopping at the first one the
@@ -171,6 +175,7 @@ impl Replica {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn from_boot(
+        mode: WriterMode,
         chosen_index: Option<Slot>,
         floor: Slot,
         sealed: JournalState,
@@ -194,6 +199,7 @@ impl Replica {
             positions: BTreeMap::new(),
             truncate_due: false,
             committed: Vec::new(),
+            mode,
         };
         replica.refold();
         replica.truncate_due = false;
@@ -595,9 +601,10 @@ impl Replica {
             .get(&seq)
             .and_then(|slot| self.chosen.get(slot))
             .and_then(Command::write);
-        // Read-back of the index `fold_one` writes: the write indexed at a
-        // position starts there.
-        if let Some(entry) = entry {
+        // Read-back of the index `fold_one` writes: a single-writer write
+        // indexed at a position names it (a multi-writer write names none,
+        // the journal assigns it).
+        if let (Some(entry), WriterMode::Single) = (entry, self.mode) {
             assert!(entry.seq == seq, "an indexed write starts at its position");
         }
         entry
@@ -651,6 +658,11 @@ impl Replica {
                 .chosen
                 .range(first..self.folded)
                 .filter_map(|(slot, command)| {
+                    // Only a single-writer retry reads a retained record: a
+                    // multi-writer write is never compared with one.
+                    if self.mode == WriterMode::Multi {
+                        return None;
+                    }
                     let entry = command.write()?;
                     let at = self.state_at(*slot);
                     (entry.seq >= at.first_seq && entry.seq < at.next_seq)
@@ -852,7 +864,7 @@ impl Replica {
         );
         let before = self.state;
         let mut state = self.state;
-        let outcome = state.apply(command, |seq| self.accepted_at(seq));
+        let outcome = state.apply(self.mode, command, |seq| self.accepted_at(seq));
         self.state = state;
         if let (Outcome::Accepted { seq, .. }, Command::Write(_)) = (&outcome, command) {
             self.positions.insert(*seq, slot);
@@ -1088,7 +1100,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{LogRead, Replica};
-    use crate::journal_state::{JournalState, Outcome};
+    use crate::journal_state::{JournalState, Outcome, WriterMode};
     use crate::types::{Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
 
     fn write(seq: u64, records: &[&[u8]]) -> Command {
@@ -1121,7 +1133,13 @@ mod tests {
     /// A replica whose chosen prefix is `commands` from slot 0.
     fn replica(commands: &[Command]) -> Replica {
         let ci = commands.len().checked_sub(1).map(|i| Slot(i as u64));
-        Replica::from_boot(ci, Slot(0), JournalState::default(), &records(commands))
+        Replica::from_boot(
+            WriterMode::Single,
+            ci,
+            Slot(0),
+            JournalState::default(),
+            &records(commands),
+        )
     }
 
     fn page(read: LogRead) -> super::LogPage {
@@ -1199,7 +1217,7 @@ mod tests {
         let sealed = r.truncate(first);
         let mut recs = records(&commands);
         recs.retain(|slot, _| *slot >= first);
-        let rebooted = Replica::from_boot(Some(Slot(4)), first, sealed, &recs);
+        let rebooted = Replica::from_boot(WriterMode::Single, Some(Slot(4)), first, sealed, &recs);
         assert!(matches!(
             rebooted.outcome_at(Slot(3)),
             Some(Outcome::Duplicate { .. })
@@ -1229,7 +1247,7 @@ mod tests {
         ];
         let mut recs = records(&commands);
         recs.retain(|slot, _| *slot >= Slot(2));
-        let r = Replica::from_boot(Some(Slot(3)), Slot(2), base, &recs);
+        let r = Replica::from_boot(WriterMode::Single, Some(Slot(3)), Slot(2), base, &recs);
         assert_eq!(r.journal().first_seq, Seq(1));
         assert_eq!(r.compaction_target(), Some(Slot(1)), "the floor stays");
     }
@@ -1317,7 +1335,7 @@ mod tests {
                 ),
             );
         }
-        let rebooted = Replica::from_boot(Some(Slot(3)), Slot(2), base, &recs);
+        let rebooted = Replica::from_boot(WriterMode::Single, Some(Slot(3)), Slot(2), base, &recs);
         assert_eq!(rebooted.journal(), r.journal());
     }
 
@@ -1325,7 +1343,13 @@ mod tests {
     fn a_hole_below_the_prefix_stops_the_fold_until_it_heals() {
         let mut recs = records(&[claim(), write(0, &[b"a"]), write(1, &[b"b"])]);
         let lost = recs.remove(&Slot(1)).expect("slot 1").1;
-        let mut r = Replica::from_boot(Some(Slot(2)), Slot(0), JournalState::default(), &recs);
+        let mut r = Replica::from_boot(
+            WriterMode::Single,
+            Some(Slot(2)),
+            Slot(0),
+            JournalState::default(),
+            &recs,
+        );
         assert_eq!(r.fold_hole(), Some(Slot(1)));
         assert!(!r.covers(Some(Slot(1))));
         r.learn(Slot(1), &lost);

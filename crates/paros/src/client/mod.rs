@@ -65,6 +65,7 @@ pub mod bootstrap;
 pub mod checkpoint;
 pub mod fleet;
 pub mod initialize;
+pub mod multi;
 mod observer;
 pub mod outcome;
 mod reader;
@@ -774,6 +775,9 @@ impl<P: Providers> Client<P> {
             let resolution = match report.outcome {
                 WriteOutcome::Written { seq, count, .. } => Resolution::Written { seq, count },
                 WriteOutcome::Truncated { state } => Resolution::Truncated { state },
+                // Of the wrong mode (#241): a journal's mode never changes,
+                // so the write is not in it and never will be.
+                WriteOutcome::WrongMode { state } => Resolution::NotWritten { state },
                 // Refused: the log does not hold this write at its
                 // position. For good when another leader fenced it or
                 // another write took the position; a write ahead of the

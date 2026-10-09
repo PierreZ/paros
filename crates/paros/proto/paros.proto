@@ -51,9 +51,11 @@ message Write {
   uint64 journal = 1;
   // 2 and 3 were the M7 writer `(generation, owner)` (#241).
   reserved 2, 3;
-  // The fence: the caller's leader uuid.
+  // The fence: the caller's leader uuid. Absent on a multi-writer journal,
+  // which has no leader (#241).
   .paros.common.v1.LeaderUuid leader = 7;
-  // The position the batch's first record asks for.
+  // The position the batch's first record asks for. A multi-writer journal
+  // assigns the position at apply and ignores this.
   uint64 seq = 4;
   // The records, in order: accepted or refused whole, in one slot.
   repeated bytes records = 5;
@@ -74,6 +76,10 @@ enum WriteOutcome {
   // Refused at the edge, before consensus: the batch is over the answering
   // node's limits (`max_records`, `max_bytes`, #241). Nothing was proposed.
   WRITE_OUTCOME_TOO_LARGE = 5;
+  // Judged and refused (#241): the write is shaped for the other writer
+  // mode (a leader uuid on a multi-writer journal, none on a single-writer
+  // one). Nothing moved; `state` is the view it was judged against.
+  WRITE_OUTCOME_WRONG_MODE = 6;
 }
 
 message WriteAck {
@@ -125,7 +131,8 @@ message Truncate {
   reserved 3, 4;
   uint64 tenant = 5;
   // The fence (#228, #241): the caller's leader uuid, judged against the
-  // journal's current leader at apply.
+  // journal's current leader at apply. Absent on a multi-writer journal,
+  // where anyone may truncate.
   .paros.common.v1.LeaderUuid leader = 6;
 }
 
@@ -140,6 +147,10 @@ message TruncateAck {
   // Judged and refused (#228): the leader uuid is not the current one.
   // Nothing moved.
   bool refused = 5;
+  // Judged and refused (#241): the truncation is shaped for the other
+  // writer mode (a leader uuid on a multi-writer journal, none on a
+  // single-writer one). Nothing moved.
+  bool wrong_mode = 6;
 }
 
 message SetLeader {
@@ -162,6 +173,9 @@ message SetLeaderAck {
   optional uint64 leader = 3;
   bool unknown_journal = 4;
   .paros.common.v1.JournalView state = 5;
+  // Judged and refused (#241): the journal is multi-writer and has no
+  // leader. Nothing moved.
+  bool wrong_mode = 6;
 }
 
 message Reconfigure {

@@ -108,6 +108,10 @@ impl ChainWorkload {
                     assert_reachable!("chain: a batch over a node's limits is refused at the edge");
                     self.history.record_write_failed(submission.op);
                 }
+                WriteOutcome::WrongMode { .. } => {
+                    super::owner_never_of_wrong_mode();
+                    self.history.record_write_failed(submission.op);
+                }
                 WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {
@@ -182,6 +186,10 @@ impl ChainWorkload {
             ClaimOutcome::Lost { state } => {
                 writer.learn(&state);
                 true
+            }
+            ClaimOutcome::WrongMode { .. } => {
+                super::owner_never_of_wrong_mode();
+                false
             }
             ClaimOutcome::Redirect { .. }
             | ClaimOutcome::UnknownJournal

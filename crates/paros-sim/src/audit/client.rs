@@ -208,10 +208,13 @@ pub(crate) fn check_control_history(attempts: Vec<Attempt>) {
         return;
     }
     assert_reachable!("journal: a control journal's history is searched for a linearization");
-    check_linearizable(&LinHistory {
-        attempts,
-        ..LinHistory::default()
-    });
+    check_linearizable(
+        &LinHistory {
+            attempts,
+            ..LinHistory::default()
+        },
+        paros::WriterMode::Single,
+    );
 }
 
 /// The search's step budget. The histories a campaign produces take tens of
@@ -227,8 +230,8 @@ const LIN_SEARCH_BUDGET: u64 = 5_000_000;
 /// last client of the journal merged: a sub-history of some clients is not a
 /// history (a read shows records another client wrote).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(super) fn check_linearizable(h: &LinHistory) {
-    let verdict = super::linearizability::check(&h.attempts, LIN_SEARCH_BUDGET);
+pub(super) fn check_linearizable(h: &LinHistory, mode: paros::WriterMode) {
+    let verdict = super::linearizability::check(&h.attempts, mode, LIN_SEARCH_BUDGET);
     assert_always!(
         !verdict.exhausted,
         "the linearizability history stays within the checker's cap",
