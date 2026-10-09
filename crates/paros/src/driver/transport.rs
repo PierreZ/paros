@@ -180,7 +180,13 @@ impl Lanes {
                 lane.len() == threshold - 1,
                 "a shed lane keeps its newest messages"
             );
-            assert!(lane.len() < before, "a shed lane loses its oldest message");
+            // A shed lane loses its oldest message: the held one, or its
+            // own front (the held one alone when the lane held exactly
+            // `threshold - 1` behind it).
+            assert!(
+                lane.len() < before || *journal == held,
+                "a shed lane loses its oldest message"
+            );
         }
         self.total -= shed.len();
         assert!(
@@ -943,6 +949,11 @@ mod tests {
         // A second shed finds nothing stale.
         let (shed, held_stale) = mailbox.shed_stale(threshold, (256, 129));
         assert!(shed.is_empty() && !held_stale);
+        // A lane one short of the threshold plus the held message: only the
+        // held message is stale, and the lane keeps every message.
+        let (shed, held_stale) = mailbox.shed_stale(threshold, (256, 130));
+        assert!(shed.is_empty() && held_stale);
+        assert_eq!(mailbox.lock().lane_len((256, 130)), threshold - 1);
         let order: Vec<u64> = std::iter::from_fn(|| mailbox.try_pop())
             .map(|m| m.journal)
             .collect();
