@@ -77,7 +77,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (all eight lines).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (all ten lines).
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
 - **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture.md` §1): solve
@@ -441,5 +441,5 @@ references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-t
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
 `CHANGELOG.md`; binaries and xtask are `publish = false`. `paros`, `paros-sim` and `parosd` pin
-moonpool by **git** rev (eight lines across their `Cargo.toml`s, advanced together), so only
+moonpool by **git** rev (ten lines across their `Cargo.toml`s, advanced together), so only
 `paros-core` is truly publishable.

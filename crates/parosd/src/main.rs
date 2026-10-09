@@ -25,7 +25,9 @@
 //! The lifecycle is the library's, `paros::machine::run_machine` (#246): the
 //! same code the deterministic simulation runs. This binary holds only its
 //! Tokio wiring, the `PAROS_*` configuration, name resolution and the exit
-//! codes; its disk is a data directory ([`disk`]).
+//! codes. Its disk is the library's `ProviderDisk` over Tokio's filesystem,
+//! rooted at the data directory: the record (`<data-dir>/machine`) and the
+//! stores (`<data-dir>/journals/<tenant>/<journal>/`).
 //!
 //! | exit | outcome | what the operator does |
 //! |---|---|---|
@@ -35,24 +37,20 @@
 //! | 1 | [`RunError::Infra`]: bind, listen, address | fix the environment |
 //! | 2 | an invalid configuration | fix the variables |
 
-mod disk;
-mod record;
 mod resolve;
 mod settings;
-mod stores;
 mod tunables;
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use moonpool_core::TokioProviders;
-use paros::machine::{MachineError, MachineSettings};
-use paros::{BootRefusal, NoHooks, RunError};
+use moonpool_core::{TokioProviders, TokioStorageProvider};
+use paros::machine::{MachineError, MachineSettings, ProviderDisk};
+use paros::{BootRefusal, NoAudit, NoHooks, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use crate::disk::DirDisk;
 use crate::settings::Settings;
 
 /// `EX_TEMPFAIL`: a storage fault crashed the process; restart it.
@@ -106,13 +104,15 @@ async fn run(settings: Settings) -> ExitCode {
         capacity: settings.capacity,
         failure_domain: settings.failure_domain.clone(),
     };
-    let disk = DirDisk {
-        data_dir: settings.data_dir.clone(),
-        layout: settings.layout.config(),
-    };
+    let disk = ProviderDisk::new(
+        TokioStorageProvider::new(),
+        settings.data_dir.to_string_lossy(),
+        settings.layout.config(),
+    );
     let ran = paros::machine::run_machine(
         TokioProviders::new(),
         disk,
+        |_| NoAudit,
         &machine,
         addr,
         1,

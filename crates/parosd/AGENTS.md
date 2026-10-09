@@ -13,13 +13,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   → shutdown token, `MachineError` → exit codes.
 - `src/settings.rs` → `Settings`, `Layout`, `check_unknown` → `PAROS_*` variables (each also a
   `--flag`); an unknown `PAROS_*` variable is an error.
-- `src/disk.rs` → `DirDisk` (`paros::machine::MachineDisk`) → the data directory: the machine
-  record's file (`<data-dir>/machine`, its text the library's `MachineRecord`), the formation's
-  stores and provisioning record, the amnesia probe.
-- `src/stores.rs` → `DirStores` (`JournalStores`) → `<data-dir>/journals/<tenant>/<journal>/`
-  (#235); a created journal is a first boot until `opened`, resolved from the disk at `load`.
-- `src/record.rs` → `Record`, `parse_identifier`, `write_atomically` → `<data-dir>/provisioned`: the
-  journal stores formatted (#208); every record here is rewritten atomically.
+- The disk is the library's `paros::machine::ProviderDisk` over `TokioStorageProvider`, rooted
+  at the data directory: the record `<data-dir>/machine` and the stores
+  `<data-dir>/journals/<tenant>/<journal>/` (#235). No disk or store type lives here (#294).
 - `src/resolve.rs` → `check_shape`, `resolve`, `resolve_all` → `HOST:PORT` (port required),
   names resolved once at startup (`parosd` its listen address; `parosctl` its servers and
   `init`'s members, where a name such as a Compose alias yields every address); shared with
@@ -38,7 +34,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/bin/parosctl/output.rs` → `Printer` → text or one JSON document per answer (`--json`);
   diagnostics to stderr.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
-  reopens with every acked write.
+  reopens with every acked write; the machine record on a real disk.
 
 ## Entry points
 

@@ -30,11 +30,12 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `replica_tier/mod.rs` → `run_replica` → learner subset over a `LogStorage`; serves `Read` (#144).
 - `rpc/methods.rs` → one `RpcMethod` per call, `WellKnownMethod` ids (public `0x5041_00xx`, internal `0x5041_01xx`, matchmaker `0x5041_02xx`, machine `0x5041_03xx`: `Identify`, `FormCell`, `CellInit` `0x5041_0304`, `PrepareCell` `0x5041_0305`; `0x5041_0303`, the old `Init`, is retired; retired ids never reused).
 - `machine/mod.rs` → `MachineFacts`, `CellPlan`, `Class`, `ControlJournals` (the cell's, the fleet's, one type for driver and client, #243) → a machine's facts (no peer: a machine is configured with none, #277) and its cell's plan, the value of `cell init`'s decree (every identifier drawn by the machine that drives it).
-- `machine/lifecycle.rs` → `run_machine`, `MachineDisk`, `MachineSettings`, `MachineError` → the whole machine lifecycle `parosd` and the simulation run (#246): format (mint `node_id`), the amnesia and class checks, wait (an acceptor of any `cell init` that lists it), serve the plan and keep answering the decree; names are the caller's, there is no `resolve` parameter; the disk is the caller's; a failed record read or write is `MachineError::Storage`, a restart, never a refusal.
-- `machine/wait.rs` → `wait_for_cell`, `CellLedger` → the idle machine (#196, #216, #277): `Identify`; `PrepareCell` and `FormCell` as an acceptor of the cell decree (accepting is forming); `CellInit` as its proposer over the founding members, every one an acceptor and in both quorums (adopt a reported plan, else draw one; form the others, then itself).
+- `machine/lifecycle.rs` → `run_machine`, `MachineSettings`, `MachineError` → the whole machine lifecycle `parosd` and the simulation run (#246): format (mint `node_id`), the amnesia and class checks, wait (an acceptor of any `cell init` that lists it), serve the plan and keep answering the decree; names are the caller's, there is no `resolve` parameter; the disk is a bare `ProviderDisk` over the caller's provider and the audit port is the caller's (`AuditScope`, #294); a late boot is an inline `buggify_range!`; a failed record read or write is `MachineError::Storage`, a restart, never a refusal.
+- `machine/wait.rs` → `wait_for_cell`, `CellLedger` → the idle machine (#196, #216, #277): `Identify`; `PrepareCell` and `FormCell` as an acceptor of the cell decree (accepting is forming: `format`, then the vote; a `hint!` after the durable promise and one between the format and the vote, #246, #294); `CellInit` as its proposer over the founding members, every one an acceptor and in both quorums (adopt a reported plan, else draw one; form the others, then itself).
 - `machine/formed.rs` → `FormedCell` → a formed machine answers the decree (`PrepareCell`, `FormCell`, `Identify`) from its record while it serves its cell (#277).
 - `machine/record.rs` → `MachineRecord`, `journal_config` → the machine record's text (identity, class, capacity, failure domain; the decree's acceptor state: `promised <round>/<node>` and the vote `plan <cell_id> <round>/<node>`, written after the stores, the commit point) and a plan journal's `Config`.
-- `machine/disk.rs` → `ProviderDisk` → the record's atomic rewrite (staged, synced, renamed, every directory on the way synced), the amnesia probe and the formation's stores over any `StorageProvider`: `parosd`'s `DirDisk` and the simulation's machines both use it (#246).
+- `machine/disk.rs` → `ProviderDisk` → the record's atomic rewrite (staged, synced, renamed, every directory on the way synced), the amnesia probe and the formation's stores over any `StorageProvider`: `parosd` and the simulation both hand it to `run_machine` bare (#246, #294).
+- `machine/stores.rs` → `AuditScope`, `MachineStores` → a formed machine's `JournalStorage` per plan journal, every one an existing member's; no created journal (no `SystemPlan` on a machine yet).
 - `rpc/inspect.rs` → `InspectTarget`, `InspectRefusal` → what an `Inspect` asks for: a named journal or the node alone; an unset identifier is refused (#243).
 - `rpc/inbound.rs` → `Inbound`, `ReplySender`, `serve_deliveries`, `rpc_config`, `MAX_FRAME_BYTES`.
 - `rpc/client.rs` → `NodeClient` (one at-most-once attempt per call), `MatchmakerClient`.
@@ -91,8 +92,8 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine}`; the 
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `0a68199` (moonpool#312 merged: #309, #310, #311): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
-  `moonpool-journal` (`:32`), dev `moonpool-sim` (`:56`).
+- moonpool, rev `a187053` (moonpool#316 merged: `hint!`, `reachable!`, `buggify_range!`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+  `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
-- The pin is **eight lines**: four here, `crates/paros-sim/Cargo.toml:20,29`,
+- The pin is **ten lines**: six here, `crates/paros-sim/Cargo.toml:20,29`,
   `crates/parosd/Cargo.toml:22,24` — advance every line together.

@@ -43,14 +43,23 @@ pub trait CellLedger {
     /// The record could not be made durable.
     fn promise(&mut self, ballot: Ballot) -> impl Future<Output = Result<(), String>>;
 
-    /// Accept `plan` at `ballot`, which forms it here: format the store of
-    /// every journal it names, then record the vote (the promise raised to
-    /// `ballot`) as this machine's cell — the commit point. Idempotent: a
-    /// format an earlier attempt finished is resumed.
+    /// Format the store of every journal `plan` names, ahead of the vote.
+    /// Idempotent: a format an earlier attempt finished is resumed. A
+    /// format with no vote recorded after it is no cell: a later plan may
+    /// format over it.
     ///
     /// # Errors
     ///
-    /// A store or the record could not be made durable.
+    /// A store could not be made durable.
+    fn format(&mut self, plan: &CellPlan) -> impl Future<Output = Result<(), String>>;
+
+    /// Accept `plan` at `ballot`, which forms it here: record the vote (the
+    /// promise raised to `ballot`) as this machine's cell — the commit
+    /// point — once [`CellLedger::format`] formatted its stores.
+    ///
+    /// # Errors
+    ///
+    /// The record could not be made durable.
     fn form(&mut self, ballot: Ballot, plan: &CellPlan)
     -> impl Future<Output = Result<(), String>>;
 }
@@ -215,7 +224,10 @@ fn acceptor<L: CellLedger>(ledger: &L) -> Acceptor<CellPlan> {
 
 /// Phase 1b on an idle machine: promise (durably, before the answer
 /// leaves) and report no vote, or refuse under a higher promise. A formed
-/// machine answers from its record ([`FormedCell::prepare_ack`]).
+/// machine answers from its record ([`FormedCell::prepare_ack`]). Between
+/// the durable promise and the answer is a moment worth a crash (#246): the
+/// promise stays, the answer is lost, and the next ballot meets a promised,
+/// unvoted machine.
 #[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
 async fn answer_prepare<L: CellLedger>(
     facts: &MachineFacts,
@@ -246,9 +258,12 @@ async fn answer_prepare<L: CellLedger>(
     let mut writes: Vec<AcceptorWrite<CellPlan>> = Vec::new();
     match acceptor.prepare(ballot, DECREE_SLOT, &mut writes) {
         PrepareOutcome::Promised { raised } => {
-            if raised && let Err(error) = ledger.promise(ballot).await {
-                tracing::error!(%error, "cell_promise_failed");
-                return answer("storage");
+            if raised {
+                if let Err(error) = ledger.promise(ballot).await {
+                    tracing::error!(%error, "cell_promise_failed");
+                    return answer("storage");
+                }
+                moonpool_buggify::hint!("cell init promise durable, answer not sent").await;
             }
             assert!(
                 ledger.promised() == ballot,
@@ -279,7 +294,10 @@ async fn answer_prepare<L: CellLedger>(
 
 /// Phase 2b on an idle machine: accept the plan unless a higher ballot was
 /// promised — and accepting is forming. A formed machine answers from its
-/// record ([`FormedCell::form_ack`]).
+/// record ([`FormedCell::form_ack`]). Between the format and the vote is a
+/// moment worth a crash (#246): formatted stores and no cell, so the
+/// machine never accepted the plan and a later `cell init` may form
+/// another one over those stores (#277).
 #[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
 async fn answer_form<L: CellLedger>(
     facts: &MachineFacts,
@@ -316,6 +334,11 @@ async fn answer_form<L: CellLedger>(
             let mut writes: Vec<AcceptorWrite<CellPlan>> = Vec::new();
             acceptor.set_promise(ballot, &mut writes);
             acceptor.record_accepted(DECREE_SLOT, ballot, plan.clone(), &mut writes);
+            if let Err(error) = ledger.format(&plan).await {
+                tracing::error!(%error, "cell_format_failed");
+                return refuse("storage");
+            }
+            moonpool_buggify::hint!("cell stores formatted, vote not recorded", 0.1).await;
             if let Err(error) = ledger.form(ballot, &plan).await {
                 tracing::error!(%error, "cell_form_failed");
                 return refuse("storage");

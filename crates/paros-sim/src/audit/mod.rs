@@ -89,6 +89,8 @@ pub(crate) struct NodeAudit<T> {
     /// The run's system-journal board (#189), on a node that follows the
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
+    /// The run's machine board (#246), on a machine's own port.
+    machines: Option<Arc<Mutex<crate::machine::MachineBoard>>>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -132,7 +134,14 @@ impl<T: TimeProvider> NodeAudit<T> {
             world,
             journal: None,
             system: None,
+            machines: None,
         }
+    }
+
+    /// This port also reports a machine's lifecycle to `board` (#246).
+    pub(crate) fn on_machines(mut self, board: Arc<Mutex<crate::machine::MachineBoard>>) -> Self {
+        self.machines = Some(board);
+        self
     }
 
     /// This port also reports the system journals' folds and their effects
@@ -1512,6 +1521,34 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // The matchmaker's seams are reported through
             // `matchmaker_crashed`, in their own namespace.
             Seam::MatchBeforeSync | Seam::MatchAfterSyncBeforeReply => {}
+        }
+    }
+
+    fn machine_booted(
+        &self,
+        addr: std::net::SocketAddr,
+        record: Option<&paros::machine::MachineRecord>,
+    ) {
+        if let Some(board) = &self.machines {
+            crate::machine::booted(board, addr, record);
+        }
+    }
+
+    fn machine_recorded(&self, record: &paros::machine::MachineRecord) {
+        if let Some(board) = &self.machines {
+            crate::machine::recorded(board, record);
+        }
+    }
+
+    fn cell_formatting(
+        &self,
+        addr: std::net::SocketAddr,
+        node: NodeId,
+        plan: &paros::machine::CellPlan,
+        _leftovers: bool,
+    ) {
+        if let Some(board) = &self.machines {
+            crate::machine::formatting(board, addr, node, plan);
         }
     }
 

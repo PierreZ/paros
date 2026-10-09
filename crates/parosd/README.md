@@ -271,7 +271,6 @@ truncation gap) go to stderr.
 
 ```text
 <data-dir>/machine                     the machine's identity and its cell's plan
-<data-dir>/provisioned                 the journal stores it formatted
 <data-dir>/journals/<tenant>/<journal>/  one moonpool-journal per journal it serves (#235)
 ```
 
@@ -280,6 +279,5 @@ domain) and holds the machine's acceptor state in `cell init`'s decree: a
 `PrepareCell` records its promise (`promised <round>/<node>`) before the answer
 leaves, and accepting a `FormCell` records its vote (`plan <cell_id>
 <round>/<node>`, with the plan's members and journals) only after every journal
-store of the plan is formatted and the provisioning record names them — the
-commit point. Every start after
+store of the plan is formatted — the commit point. Every start after
 that is an existing member's: a start never formats a journal store.
