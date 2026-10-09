@@ -264,15 +264,36 @@ list and no rendezvous name. The same rule holds at two levels:
 
 `parosctl init` stays as a shortcut for `cell init` followed by `universe init` (the toy).
 
-- **`cell init`** asks every listed machine to `Identify` itself: every one must answer, be
-  `storage`, and not already belong to a cell (`cell_exists`). It then mints `cell_id` and the
-  cell tenant's `JournalIdentifier` (its random `TenantId` and the random `JournalId` of its
-  control journal, section 3.8), records them as a pending plan, and sends `FormCell(plan)` to
-  every listed machine; any idle storage machine accepts it. The listed machines are the cell's
-  **founding members**: the cell control journal is born on them with the cell's first matchmaker
-  set, and the first cell coordinator installs itself as its leader with
-  `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell plan; it is never a
-  role a machine keeps. After formation the membership changes only by reconfiguration.
+- **`cell init` is a single-decree Paxos on the cell plan** (decided on 2026-10-09, #277). The
+  machine that receives it drives it, with every listed machine as both the acceptors and the
+  quorum (all must answer, as before):
+  1. **Ask, as a reservation.** It sends a fresh random `init_id` (its ballot) to every listed
+     machine, which answers like `Identify`: it must be `storage` and not already belong to
+     a cell (`cell_exists`). It also promises to accept no plan under a lower `init_id`, and answers
+     with any plan it has already accepted.
+  2. **Adopt or draw.** If an answer carries an accepted plan, the receiver must finish that plan
+     instead of its own: with the same member list, the two `init`s converge on one cell; with
+     another list, it refuses (`other_cell_init`). Otherwise it draws the plan: `cell_id` and the
+     cell tenant's `JournalIdentifier` (its random `TenantId` and the random `JournalId` of its
+     control journal, section 3.8).
+  3. **Form.** It sends `FormCell(plan, init_id)`; each machine accepts it unless it has promised
+     a higher `init_id`, and is then formed. A machine that receives a `FormCell` without being
+     asked first treats it as both steps.
+
+  A receiver that crashes midway leaves no lock: the next `cell init`, sent to any listed machine,
+  finds the accepted plan in its ask and finishes it. A plain question ("is anything ongoing?")
+  would not do, because two receivers could both hear "no" and both go ahead. The decree is
+  paros-core's single-decree `Proposer` and `Acceptor`, as the matchmaker handover already uses
+  them at slot zero. FDB reaches the same end differently: its cluster file names coordinators
+  that elect a controller before any database exists, the controller's provisional proxy takes
+  the first `configure new` transaction, and each client reads `\xff/init_id` back to learn
+  whether it won. paros has nothing elected before `cell init`, so the decree is that election.
+
+  The listed machines are the cell's **founding members**: the cell control journal is born on
+  them with the cell's first matchmaker set, and the first cell coordinator installs itself as
+  its leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
+  plan; it is never a role a machine keeps. After formation the membership changes only by
+  reconfiguration.
 - **`add-machine`** goes to any member, which routes it to the cell coordinator as a request to a
   leader (section 3.3). The coordinator asks the idle machine to `Identify` itself, writes its
   `RegisterNode` into the cell control journal, then sends it `Admit` with the `cell_id`, the
@@ -300,8 +321,8 @@ with `member add`; YugabyteDB adds a master to its universe with `change_master_
 kubeadm runs `init`, then `join` against any control-plane address. Redpanda recommends disabling
 `empty_seed_starts_cluster` for the same reason paros has no implicit formation. Founding on one
 machine and growing by reconfiguration (Kafka's `--standalone`) was rejected: two concurrent
-`cell init`s sent to different machines would then form two cells, where the all-must-answer
-founding list can only refuse or stall (#277).
+`cell init`s sent to different machines would then form two cells, where the decree over the
+whole founding list forms at most one.
 
 **Naming** (decided on 2026-10-09). The top level is the **universe** (formerly the fleet; the
 name Spanner and YugabyteDB use). "Seed" now only ever means a simulation seed. The code still
