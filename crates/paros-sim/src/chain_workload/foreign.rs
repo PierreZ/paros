@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable};
 use paros::client::{SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer, write_request};
-use paros::{Command, JournalIdentifier, TenantId, Truncate, Value};
+use paros::{Command, JournalIdentifier, TenantId, Truncate, Value, leader_uuid_to_proto};
 
 use super::rpc::within;
 use crate::client::ChainClient;
@@ -62,7 +62,7 @@ pub(super) async fn attack(
         .nth(usize::try_from(draw % journals.len().max(1) as u64).unwrap_or(0))
         .or_else(|| journals.iter().copied().find(|j| j.tenant != own.tenant));
     // The other tenant's journal, for a write or a truncation this client
-    // can fence (it owns its own journal's generation).
+    // can fence (it leads its own journal).
     if let (Some(other), true) = (other, op != super::SET_LEADER && writer.owned().is_some()) {
         served(ctx, nodes, (op, writer), other, target, timeout).await;
         return;
@@ -93,8 +93,7 @@ async fn served(
             journal: other.journal.0,
             tenant: other.tenant.0,
             up_to: entry.seq.0,
-            generation: entry.generation.0,
-            owner: entry.owner.0,
+            leader: Some(leader_uuid_to_proto(entry.leader)),
         };
         let mut at = target;
         for _ in 0..REDIRECTS {
@@ -164,8 +163,7 @@ async fn unserved(
     assert_reachable!("chain: a client calls under an identifier nobody serves");
     let answered_from_a_journal = match op {
         super::SET_LEADER => {
-            let ask =
-                nodes.set_leader_attempt(target, identifier, writer.generation(), writer.owner());
+            let ask = nodes.set_leader_attempt(target, identifier, writer.uuid(), writer.owned());
             matches!(
                 within(ctx, timeout, SetLeaderOutcome::Ambiguous, ask).await,
                 SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. }
@@ -176,8 +174,7 @@ async fn unserved(
                 journal: identifier.journal.0,
                 tenant: identifier.tenant.0,
                 up_to: writer.next_seq(),
-                generation: writer.generation(),
-                owner: writer.owner(),
+                leader: Some(leader_uuid_to_proto(writer.fence())),
             };
             let ask = nodes.truncate_attempt(target, request);
             matches!(

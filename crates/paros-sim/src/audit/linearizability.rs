@@ -1,14 +1,14 @@
 //! The journal linearizability checker (#205): every attempt a client made at
 //! the four calls of its journal — `Write`, `Read`, `SetLeader`, `Truncate`,
 //! answered or never answered — checked against the **sequential model of a
-//! journal** (an owner, a generation, a dense log, a floor) by a Wing & Gong
+//! journal** (a leader uuid, a dense log, a floor) by a Wing & Gong
 //! search with Lowe's memoization (the Porcupine algorithm).
 //!
 //! The model is this file's own: it restates the rules of
 //! `docs/architecture.md` §2 and never calls `paros_core`'s
-//! `JournalState::apply`, so a rule the core loses is a history the model
+//! `JournalView::apply`, so a rule the core loses is a history the model
 //! refuses. Removing the fencing check from the core (a write accepted from
-//! any `(generation, owner)`) is red here on the first seed whose superseded
+//! any leader uuid) is red here on the first seed whose superseded
 //! writer is acked written — the PR that landed this file records the
 //! witness.
 //!
@@ -39,7 +39,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use paros::JournalState;
+use paros::{JournalView, LeaderUuid};
 
 use crate::chain::splitmix;
 
@@ -51,24 +51,21 @@ const PAGE_RECORDS: u64 = 256;
 /// One call a client made of its journal: what it asked.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Call {
-    /// `Write(generation, owner, seq, batch)`; the batch as one hash per
-    /// record.
+    /// `Write(leader, seq, batch)`; the batch as one hash per record.
     Write {
-        generation: u64,
-        owner: u64,
+        leader: LeaderUuid,
         seq: u64,
         records: Vec<u64>,
     },
     /// `Read(from_seq, limit)`.
     Read { from: u64, limit: u64 },
-    /// `SetLeader(expected_gen, new_owner)`.
-    SetLeader { expected: u64, owner: u64 },
-    /// `Truncate(generation, owner, up_to_seq)` (#228).
-    Truncate {
-        generation: u64,
-        owner: u64,
-        up_to: u64,
+    /// `SetLeader(new, old)` (#241).
+    SetLeader {
+        new: LeaderUuid,
+        old: Option<LeaderUuid>,
     },
+    /// `Truncate(leader, up_to_seq)` (#228).
+    Truncate { leader: LeaderUuid, up_to: u64 },
 }
 
 /// What the client was told: a verdict, never a redirect or a timeout (those
@@ -83,26 +80,26 @@ pub(crate) enum Seen {
         duplicate: bool,
     },
     /// The write was refused against `state`.
-    Refused(JournalState),
+    Refused(JournalView),
     /// The write's position is below `state.first_seq`.
-    WriteTruncated(JournalState),
+    WriteTruncated(JournalView),
     /// A read page: the records from the read's `from`, one hash each, served
     /// at `state`.
     Page {
         records: Vec<u64>,
-        state: JournalState,
+        state: JournalView,
     },
     /// The read started below `state.first_seq`.
-    ReadTruncated(JournalState),
+    ReadTruncated(JournalView),
     /// The claim won: `state` is the one after it.
-    Won(JournalState),
+    Won(JournalView),
     /// The claim lost against `state`.
-    Lost(JournalState),
+    Lost(JournalView),
     /// The truncation applied: `state` is the one after it.
-    Trimmed(JournalState),
+    Trimmed(JournalView),
     /// The truncation was refused against `state` (#228): its fence is not
     /// the writer in force.
-    TruncateRefused(JournalState),
+    TruncateRefused(JournalView),
 }
 
 /// One attempt: who made it, when, what it asked and — when it was
@@ -119,17 +116,15 @@ pub(crate) struct Attempt {
 /// stand. Plain scalars, compared field by field with what a node answered.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Scalars {
-    owner: Option<u64>,
-    generation: u64,
+    leader: Option<LeaderUuid>,
     next_seq: u64,
     first_seq: u64,
 }
 
 impl Scalars {
     /// Whether a node's answered state is exactly this one.
-    fn is(self, state: &JournalState) -> bool {
-        self.owner == state.owner.map(|owner| owner.0)
-            && self.generation == state.generation.0
+    fn is(self, state: &JournalView) -> bool {
+        self.leader == state.leader
             && self.next_seq == state.next_seq.0
             && self.first_seq == state.first_seq.0
     }
@@ -184,12 +179,8 @@ impl<'a> Model<'a> {
     fn hash(&self) -> u128 {
         let s = self.scalars;
         let mut h = *self.chain.last().unwrap_or(&0);
-        for word in [
-            s.owner.map_or(0, |o| o.wrapping_add(1)),
-            s.generation,
-            s.next_seq,
-            s.first_seq,
-        ] {
+        h = mix128(h ^ s.leader.map_or(0, |leader| leader.0));
+        for word in [s.next_seq, s.first_seq] {
             h = mix128(h ^ u128::from(word));
         }
         h
@@ -222,8 +213,7 @@ impl<'a> Model<'a> {
         let s = self.scalars;
         let ok = match &attempt.call {
             Call::Write {
-                generation,
-                owner,
+                leader,
                 seq,
                 records,
             } => {
@@ -243,11 +233,7 @@ impl<'a> Model<'a> {
                         Some(Seen::Refused(state)) => !duplicate && s.is(state),
                         _ => false,
                     }
-                } else if s.owner == Some(*owner)
-                    && s.generation == *generation
-                    && *seq == s.next_seq
-                    && count > 0
-                {
+                } else if s.leader == Some(*leader) && *seq == s.next_seq && count > 0 {
                     let answered = match seen {
                         None => true,
                         Some(Seen::Written {
@@ -269,11 +255,14 @@ impl<'a> Model<'a> {
                     matches!(seen, Some(Seen::Refused(state)) if s.is(state))
                 }
             }
-            Call::SetLeader { expected, owner } => {
-                if *expected == s.generation {
+            // The compare-and-set (§2.3): it wins against the leader it
+            // names, installing a set uuid that is not the current one. A
+            // uuid that led before may be reinstated: the journal trusts its
+            // clients to draw fresh ones.
+            Call::SetLeader { new, old } => {
+                if *old == s.leader && new.is_set() && s.leader != Some(*new) {
                     let after = Scalars {
-                        owner: Some(*owner),
-                        generation: s.generation + 1,
+                        leader: Some(*new),
                         ..s
                     };
                     let answered = match seen {
@@ -289,14 +278,10 @@ impl<'a> Model<'a> {
                     matches!(seen, Some(Seen::Lost(state)) if s.is(state))
                 }
             }
-            Call::Truncate {
-                generation,
-                owner,
-                up_to,
-            } => {
-                let (generation, owner, up_to) = (*generation, *owner, *up_to);
+            Call::Truncate { leader, up_to } => {
+                let (leader, up_to) = (*leader, *up_to);
                 let seen = seen.cloned();
-                self.step_truncate(generation, owner, up_to, seen.as_ref())
+                self.step_truncate(leader, up_to, seen.as_ref())
             }
             Call::Read { from, limit } => match seen {
                 Some(Seen::ReadTruncated(state)) => s.is(state) && *from < s.first_seq,
@@ -311,15 +296,9 @@ impl<'a> Model<'a> {
 
     /// Linearize a `Truncate`: fenced like a write (#228) — only the writer
     /// in force truncates, anyone else is refused against the state.
-    fn step_truncate(
-        &mut self,
-        generation: u64,
-        owner: u64,
-        up_to: u64,
-        seen: Option<&Seen>,
-    ) -> bool {
+    fn step_truncate(&mut self, leader: LeaderUuid, up_to: u64, seen: Option<&Seen>) -> bool {
         let s = self.scalars;
-        if s.owner != Some(owner) || s.generation != generation {
+        if s.leader != Some(leader) {
             return matches!(seen, Some(Seen::TruncateRefused(state)) if s.is(state));
         }
         let after = Scalars {
@@ -570,7 +549,7 @@ pub(crate) fn check(attempts: &[Attempt], budget: u64) -> Verdict {
 /// - **Identical calls.** Two unknown attempts asking the same thing are the
 ///   same step.
 /// - **Unobserved bytes.** Two unknown writes with the same
-///   `(generation, owner, seq, count)` change the scalars identically, and
+///   `(leader, seq, count)` change the scalars identically, and
 ///   differ only in bytes. When no answered attempt can tell those bytes
 ///   apart — no page shows one of their records, and no answered write is
 ///   the same call (whose verdict, duplicate or refused, would depend on
@@ -611,7 +590,7 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..attempts.len()).collect();
     order.sort_by_key(|&i| (attempts[i].inv, i));
     let mut unknown: BTreeSet<&Call> = BTreeSet::new();
-    let mut unobserved: BTreeSet<(u64, u64, u64, usize)> = BTreeSet::new();
+    let mut unobserved: BTreeSet<(LeaderUuid, u64, usize)> = BTreeSet::new();
     let mut keep: Vec<usize> = order
         .into_iter()
         .filter(|&i| {
@@ -622,8 +601,7 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
             match &attempt.call {
                 Call::Read { .. } => false,
                 call @ Call::Write {
-                    generation,
-                    owner,
+                    leader,
                     seq,
                     records,
                 } => {
@@ -637,8 +615,7 @@ fn judged(attempts: &[Attempt]) -> Vec<usize> {
                     let observed = answered_writes.contains(call)
                         || records.iter().any(|r| seen_records.contains(r));
                     unknown.insert(call)
-                        && (observed
-                            || unobserved.insert((*generation, *owner, *seq, records.len())))
+                        && (observed || unobserved.insert((*leader, *seq, records.len())))
                 }
                 call => unknown.insert(call),
             }
@@ -667,14 +644,25 @@ fn mix128(x: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{Attempt, Call, Seen, check, judged};
-    use paros::{ClientId, Generation, JournalState, Seq};
+    use paros::{JournalView, LeaderUuid, Seq};
 
-    fn state(owner: Option<u64>, generation: u64, next: u64, first: u64) -> JournalState {
-        JournalState {
-            owner: owner.map(ClientId),
-            generation: Generation(generation),
+    /// Client `k`'s leader uuid (the unset uuid is never one).
+    fn u(k: u64) -> LeaderUuid {
+        LeaderUuid(u128::from(k) + 1)
+    }
+
+    fn state(leader: Option<u64>, next: u64, first: u64) -> JournalView {
+        JournalView {
+            leader: leader.map(u),
             next_seq: Seq(next),
             first_seq: Seq(first),
+        }
+    }
+
+    fn claim(new: u64, old: Option<u64>) -> Call {
+        Call::SetLeader {
+            new: u(new),
+            old: old.map(u),
         }
     }
 
@@ -687,10 +675,9 @@ mod tests {
         }
     }
 
-    fn write(generation: u64, owner: u64, seq: u64, records: &[u64]) -> Call {
+    fn write(leader: u64, seq: u64, records: &[u64]) -> Call {
         Call::Write {
-            generation,
-            owner,
+            leader: u(leader),
             seq,
             records: records.to_vec(),
         }
@@ -717,18 +704,10 @@ mod tests {
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
             ),
-            at(
-                0,
-                2,
-                write(1, 0, 0, &[7, 8]),
-                Some((3, written(0, 2, false))),
-            ),
+            at(0, 2, write(0, 0, &[7, 8]), Some((3, written(0, 2, false)))),
             at(
                 0,
                 4,
@@ -737,7 +716,7 @@ mod tests {
                     5,
                     Seen::Page {
                         records: vec![7, 8],
-                        state: state(Some(0), 1, 2, 0),
+                        state: state(Some(0), 2, 0),
                     },
                 )),
             ),
@@ -745,17 +724,16 @@ mod tests {
                 0,
                 6,
                 Call::Truncate {
-                    generation: 1,
-                    owner: 0,
+                    leader: u(0),
                     up_to: 9,
                 },
-                Some((7, Seen::Trimmed(state(Some(0), 1, 2, 2)))),
+                Some((7, Seen::Trimmed(state(Some(0), 2, 2)))),
             ),
             at(
                 0,
                 8,
                 Call::Read { from: 1, limit: 0 },
-                Some((9, Seen::ReadTruncated(state(Some(0), 1, 2, 2)))),
+                Some((9, Seen::ReadTruncated(state(Some(0), 2, 2)))),
             ),
         ];
         assert!(linearizable(&history));
@@ -769,28 +747,22 @@ mod tests {
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
             ),
             at(
                 1,
                 2,
-                Call::SetLeader {
-                    expected: 1,
-                    owner: 1,
-                },
-                Some((3, Seen::Won(state(Some(1), 2, 0, 0)))),
+                claim(1, Some(0)),
+                Some((3, Seen::Won(state(Some(1), 0, 0)))),
             ),
-            at(0, 4, write(1, 0, 0, &[7]), Some((5, written(0, 1, false)))),
+            at(0, 4, write(0, 0, &[7]), Some((5, written(0, 1, false)))),
         ];
         assert!(!linearizable(&history));
         // Concurrent with the claim, it is fine — when the claim's answer
         // shows the write landed before it.
         history[2].inv = 2;
-        history[1].seen = Some((3, Seen::Won(state(Some(1), 2, 1, 0))));
+        history[1].seen = Some((3, Seen::Won(state(Some(1), 1, 0))));
         assert!(linearizable(&history));
     }
 
@@ -803,35 +775,28 @@ mod tests {
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
             ),
-            at(0, 2, write(1, 0, 0, &[7]), Some((3, written(0, 1, false)))),
+            at(0, 2, write(0, 0, &[7]), Some((3, written(0, 1, false)))),
             at(
                 1,
                 4,
-                Call::SetLeader {
-                    expected: 1,
-                    owner: 1,
-                },
-                Some((5, Seen::Won(state(Some(1), 2, 1, 0)))),
+                claim(1, Some(0)),
+                Some((5, Seen::Won(state(Some(1), 1, 0)))),
             ),
             at(
                 0,
                 6,
                 Call::Truncate {
-                    generation: 1,
-                    owner: 0,
+                    leader: u(0),
                     up_to: 1,
                 },
-                Some((7, Seen::TruncateRefused(state(Some(1), 2, 1, 0)))),
+                Some((7, Seen::TruncateRefused(state(Some(1), 1, 0)))),
             ),
         ];
         assert!(linearizable(&history));
-        history[3].seen = Some((7, Seen::Trimmed(state(Some(1), 2, 1, 1))));
+        history[3].seen = Some((7, Seen::Trimmed(state(Some(1), 1, 1))));
         assert!(!linearizable(&history));
     }
 
@@ -843,14 +808,11 @@ mod tests {
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
             ),
-            at(0, 2, write(1, 0, 0, &[7]), None),
-            at(0, 4, write(1, 0, 0, &[7]), Some((5, written(0, 1, true)))),
+            at(0, 2, write(0, 0, &[7]), None),
+            at(0, 4, write(0, 0, &[7]), Some((5, written(0, 1, true)))),
             at(
                 1,
                 6,
@@ -859,7 +821,7 @@ mod tests {
                     7,
                     Seen::Page {
                         records: vec![7],
-                        state: state(Some(0), 1, 1, 0),
+                        state: state(Some(0), 1, 0),
                     },
                 )),
             ),
@@ -875,27 +837,21 @@ mod tests {
         assert!(!linearizable(&without));
     }
 
-    /// A compare-and-swap wins at most once per generation.
+    /// A compare-and-set wins at most once against one leader.
     #[test]
-    fn two_claims_cannot_both_win_one_generation() {
+    fn two_claims_cannot_both_win_against_one_leader() {
         let history = [
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((5, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((5, Seen::Won(state(Some(0), 0, 0)))),
             ),
             at(
                 1,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 1,
-                },
-                Some((5, Seen::Won(state(Some(1), 1, 0, 0)))),
+                claim(1, None),
+                Some((5, Seen::Won(state(Some(1), 0, 0)))),
             ),
         ];
         assert!(!linearizable(&history));
@@ -908,13 +864,10 @@ mod tests {
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
             ),
-            at(0, 2, write(1, 0, 0, &[7]), Some((3, written(0, 1, false)))),
+            at(0, 2, write(0, 0, &[7]), Some((3, written(0, 1, false)))),
             at(
                 1,
                 4,
@@ -923,7 +876,7 @@ mod tests {
                     5,
                     Seen::Page {
                         records: vec![],
-                        state: state(Some(0), 1, 0, 0),
+                        state: state(Some(0), 0, 0),
                     },
                 )),
             ),
@@ -938,14 +891,11 @@ mod tests {
         let mut history = vec![at(
             0,
             0,
-            Call::SetLeader {
-                expected: 0,
-                owner: 0,
-            },
-            Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
         )];
         for k in 0..50 {
-            history.push(at(0, 2 + k, write(1, 0, 0, &[100 + k]), None));
+            history.push(at(0, 2 + k, write(0, 0, &[100 + k]), None));
         }
         history.push(at(
             1,
@@ -955,7 +905,7 @@ mod tests {
                 91,
                 Seen::Page {
                     records: vec![130],
-                    state: state(Some(0), 1, 1, 0),
+                    state: state(Some(0), 1, 0),
                 },
             )),
         ));
@@ -974,20 +924,17 @@ mod tests {
         let mut history = vec![at(
             0,
             0,
-            Call::SetLeader {
-                expected: 0,
-                owner: 0,
-            },
-            Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+            claim(0, None),
+            Some((1, Seen::Won(state(Some(0), 0, 0)))),
         )];
         for k in 0..16 {
-            history.push(at(0, 2 + k, write(1, 0, k, &[100 + k]), None));
+            history.push(at(0, 2 + k, write(0, k, &[100 + k]), None));
         }
         for k in 0..16 {
             history.push(at(
                 0,
                 40 + k,
-                write(1, 0, k, &[200 + k]),
+                write(0, k, &[200 + k]),
                 Some((900, written(k, 1, false))),
             ));
         }
@@ -1006,18 +953,10 @@ mod tests {
             at(
                 0,
                 0,
-                Call::SetLeader {
-                    expected: 0,
-                    owner: 0,
-                },
-                Some((1, Seen::Won(state(Some(0), 1, 0, 0)))),
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
             ),
-            at(
-                0,
-                2,
-                write(1, 0, 0, &[7]),
-                Some((1_000, written(0, 1, false))),
-            ),
+            at(0, 2, write(0, 0, &[7]), Some((1_000, written(0, 1, false)))),
         ];
         for k in 0..40 {
             let page = if k % 2 == 0 { vec![] } else { vec![7] };
@@ -1030,7 +969,7 @@ mod tests {
                     900 + k,
                     Seen::Page {
                         records: page,
-                        state: state(Some(0), 1, next, 0),
+                        state: state(Some(0), next, 0),
                     },
                 )),
             ));
@@ -1038,5 +977,34 @@ mod tests {
         let verdict = check(&history, 1_000_000);
         assert!(verdict.linearizable);
         assert!(verdict.steps < 20_000, "steps: {}", verdict.steps);
+    }
+
+    /// The journal trusts its clients to draw fresh uuids (§2.3, decided on
+    /// 2026-10-09): a misbehaving client that reinstates a former leader's
+    /// uuid wins, and that uuid's writes are accepted again.
+    #[test]
+    fn a_reinstated_uuid_leads_again() {
+        let history = [
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(
+                1,
+                2,
+                claim(1, Some(0)),
+                Some((3, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+            at(
+                1,
+                4,
+                claim(0, Some(1)),
+                Some((5, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 6, write(0, 0, &[7]), Some((7, written(0, 1, false)))),
+        ];
+        assert!(linearizable(&history));
     }
 }

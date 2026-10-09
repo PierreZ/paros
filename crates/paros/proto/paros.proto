@@ -11,24 +11,24 @@ import "common.proto";
 // and schema version live in `src/rpc/methods.rs`; only the messages are
 // generated from this file.
 service Paros {
-  // Append a batch to a journal at `seq` (#204): fenced by `(generation,
-  // owner)`, contiguous by `seq`, idempotent on retry, pipelineable. Every
+  // Append a batch to a journal at `seq` (#204): fenced by the leader uuid
+  // (#241), contiguous by `seq`, idempotent on retry, pipelineable. Every
   // rule is judged at apply, in slot order, by the journal state machine;
   // the reply is held until the deciding slot applies, or redirected to
   // the leader.
   rpc Write(.paros.v1.Write) returns (.paros.v1.WriteAck);
   // The committed records from `from_seq` (#204), plus `first_seq`,
-  // `next_seq` and the current writer, or `truncated` below `first_seq`.
+  // `next_seq` and the current leader uuid, or `truncated` below `first_seq`.
   // Served by any node or replica through the leaderless read (#143): a
   // Phase-1 quorum's vote watermarks, then this server's fold once it
   // covers them. Long-polls at the tail for `wait_ms`.
   rpc Read(.paros.v1.Read) returns (.paros.v1.ReadAck);
-  // Drop every record below `up_to` (#204). Fenced by `(generation, owner)`
-  // like a `Write` (#228), monotone, decided by consensus and judged at
+  // Drop every record below `up_to` (#204). Fenced by the leader uuid like
+  // a `Write` (#228, #241), monotone, decided by consensus and judged at
   // apply in slot order; a stale or foreign caller is refused in place.
   rpc Truncate(.paros.v1.Truncate) returns (.paros.v1.TruncateAck);
-  // Compare-and-swap the journal's writer (#204): wins iff `expected` is the
-  // current generation, which then becomes `expected + 1`.
+  // Compare-and-set the journal's leader (#241): `new` wins iff `old` is the
+  // current leader uuid (absent on a journal that never had one).
   rpc SetLeader(.paros.v1.SetLeader) returns (.paros.v1.SetLeaderAck);
   // Change the acceptor set (Matchmaker Paxos reconfiguration, #122). Only the
   // leader admits it, and only on a deployment that names matchmakers; every
@@ -49,8 +49,10 @@ service Paros {
 
 message Write {
   uint64 journal = 1;
-  uint64 generation = 2;
-  uint64 owner = 3;
+  // 2 and 3 were the M7 writer `(generation, owner)` (#241).
+  reserved 2, 3;
+  // The fence: the caller's leader uuid.
+  .paros.common.v1.LeaderUuid leader = 7;
   // The position the batch's first record asks for.
   uint64 seq = 4;
   // The records, in order: accepted or refused whole, in one slot.
@@ -65,7 +67,7 @@ enum WriteOutcome {
   WRITE_OUTCOME_ACCEPTED = 1;
   // A retry of the write accepted at `seq`: acked, nothing moved.
   WRITE_OUTCOME_DUPLICATE = 2;
-  // Refused in place: `state` names the current writer and `next_seq`.
+  // Refused in place: `state` names the current leader and `next_seq`.
   WRITE_OUTCOME_REFUSED = 3;
   // `seq` is below `first_seq`: ambiguous, read the tail.
   WRITE_OUTCOME_TRUNCATED = 4;
@@ -79,8 +81,8 @@ message WriteAck {
   // Accepted or duplicate: where the batch sits.
   uint64 seq = 4;
   uint64 count = 5;
-  // Refused or truncated: the journal state the write was judged against.
-  .paros.common.v1.JournalState state = 6;
+  // Refused or truncated: the journal view the write was judged against.
+  .paros.common.v1.JournalView state = 6;
 }
 
 message Read {
@@ -104,20 +106,21 @@ message ReadAck {
   // The first record's position and the records, dense from it.
   uint64 from_seq = 4;
   repeated bytes records = 5;
-  // The state the page was served from: `first_seq`, `next_seq` (the
-  // committed end) and the current writer.
-  .paros.common.v1.JournalState state = 6;
+  // The view the page was served from: `first_seq`, `next_seq` (the
+  // committed end) and the current leader uuid.
+  .paros.common.v1.JournalView state = 6;
 }
 
 message Truncate {
   uint64 journal = 1;
   // The first position the client still needs.
   uint64 up_to = 2;
-  // The writer fence (#228): the caller's generation and owner id, judged
-  // against the journal's current writer at apply.
-  uint64 generation = 3;
-  uint64 owner = 4;
+  // 3 and 4 were the M7 writer `(generation, owner)` (#241).
+  reserved 3, 4;
   uint64 tenant = 5;
+  // The fence (#228, #241): the caller's leader uuid, judged against the
+  // journal's current leader at apply.
+  .paros.common.v1.LeaderUuid leader = 6;
 }
 
 message TruncateAck {
@@ -125,32 +128,34 @@ message TruncateAck {
   bool decided = 1;
   optional uint64 leader = 2;
   bool unknown_journal = 3;
-  // Applied: the state after it. Refused: the state it was judged against,
-  // naming the current writer.
-  .paros.common.v1.JournalState state = 4;
-  // Judged and refused (#228): `(generation, owner)` is not the current
-  // writer. Nothing moved.
+  // Applied: the view after it. Refused: the view it was judged against,
+  // naming the current leader.
+  .paros.common.v1.JournalView state = 4;
+  // Judged and refused (#228): the leader uuid is not the current one.
+  // Nothing moved.
   bool refused = 5;
 }
 
 message SetLeader {
   uint64 journal = 1;
-  // The generation the caller believes current.
-  uint64 expected = 2;
-  // The client that should own the journal.
-  uint64 owner = 3;
+  // 2 and 3 were the M7 `(expected, owner)` (#241).
+  reserved 2, 3;
   uint64 tenant = 4;
+  // The leader uuid that should lead, drawn fresh for this term.
+  .paros.common.v1.LeaderUuid new = 5;
+  // The leader uuid the caller believes current; absent for none.
+  .paros.common.v1.LeaderUuid old = 6;
 }
 
 message SetLeaderAck {
   // Whether the compare-and-swap was judged (won or lost).
   bool decided = 1;
-  // Whether it won: `state` is then the new generation, the new owner and
-  // the position it continues from; lost, `state` names the current writer.
+  // Whether it won: `state` then names the new leader and the position it
+  // continues from; lost, `state` names the current leader.
   bool won = 2;
   optional uint64 leader = 3;
   bool unknown_journal = 4;
-  .paros.common.v1.JournalState state = 5;
+  .paros.common.v1.JournalView state = 5;
 }
 
 message Reconfigure {

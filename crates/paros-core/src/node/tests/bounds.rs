@@ -7,17 +7,16 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Ballot, ClientId, ColocatedNode, Command, Control, Entry, Generation, LEADER_RECOVERY_BATCH,
-    Message, NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, TestStorage,
-    Value, campaign, command_fingerprint, drain_with, terminal_promise,
+    Ballot, ColocatedNode, Command, Control, Entry, LEADER_RECOVERY_BATCH, LeaderUuid, Message,
+    NodeId, NodeRole, PROMISE_BATCH, Party, ProposeResult, Ready, Seq, Slot, TestStorage, Value,
+    campaign, command_fingerprint, drain_with, terminal_promise,
 };
 
 const SUFFIX_LEN: u64 = 2 * PROMISE_BATCH as u64 + 2;
 
 fn command(slot: u64) -> Command {
     Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(7),
+        leader: LeaderUuid(7),
         seq: Seq(slot),
         records: vec![Value(slot.to_le_bytes().to_vec())],
     })
@@ -247,16 +246,14 @@ fn accepted_fingerprints_include_identity() {
     ));
     let _ = take_ready(&mut proposer);
     let ProposeResult::Accepted(slot) = proposer.propose(Entry {
-        generation: Generation(0),
-        owner: ClientId(9),
+        leader: LeaderUuid(9),
         seq: Seq(1),
         records: vec![Value(vec![1, 2, 3])],
     }) else {
         panic!("leader rejected the proposal");
     };
     let admitted = Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(9),
+        leader: LeaderUuid(9),
         seq: Seq(1),
         records: vec![Value(vec![1, 2, 3])],
     });

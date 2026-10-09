@@ -6,7 +6,7 @@
 //! silently would hand its caller a fold with a hole it cannot see.
 
 use moonpool_core::Providers;
-use paros_core::{JournalIdentifier, JournalState};
+use paros_core::{JournalIdentifier, JournalView};
 
 use super::Client;
 use super::outcome::ReadOutcome;
@@ -23,7 +23,7 @@ pub enum ReaderOutcome {
         /// The records, in position order.
         records: Vec<Vec<u8>>,
         /// The journal state the page was served from.
-        state: JournalState,
+        state: JournalView,
     },
     /// The cursor was below the journal's floor: the positions
     /// `[from, resumed_at)` are gone, and the cursor resumed at
@@ -34,7 +34,7 @@ pub enum ReaderOutcome {
         /// The floor the answer named, where the cursor is now.
         resumed_at: u64,
         /// The journal state that named it.
-        state: JournalState,
+        state: JournalView,
     },
     /// No server served the page.
     Unavailable,
@@ -70,7 +70,7 @@ impl Reader {
 
     /// Whether the cursor is at (or past) the tail `state` names.
     #[must_use]
-    pub fn at_tail(&self, state: &JournalState) -> bool {
+    pub fn at_tail(&self, state: &JournalView) -> bool {
         self.cursor >= state.next_seq.0
     }
 

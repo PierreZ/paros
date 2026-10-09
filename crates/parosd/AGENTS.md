@@ -44,7 +44,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `PAROS_FAILURE_DOMAIN`, `PAROS_RENDEZVOUS`, `PAROS_STORE_LAYOUT` and the tunable overrides
   (`settings.rs`). No role, no id, no seed list: `PAROS_ID` and `PAROS_SEEDS` are gone.
 - `parosctl [--servers HOST:PORT|ID=HOST:PORT,…] [--json] [--timeout-ms N] <command>`; servers
-  also from `PAROSCTL_SERVERS`, the writer's owner id from `PAROSCTL_OWNER` (default 1).
+  also from `PAROSCTL_SERVERS`, the writer's leader uuid from `PAROSCTL_LEADER` / `--leader` (hex;
+  drawn at random when absent, so a run that names none claims a term of its own, #241).
   `parosctl init` goes to the first server, a waiting seed.
 - `RUST_LOG` filters both (`parosd` default `warn,parosd=info`, `parosctl` default `error`).
 

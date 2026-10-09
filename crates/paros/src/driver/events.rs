@@ -87,9 +87,11 @@ pub(crate) fn value_hash(bytes: &[u8]) -> u64 {
 pub fn command_hash(command: &Command) -> u64 {
     match command {
         Command::Write(entry) => {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&entry.generation.0.to_le_bytes());
-            bytes.extend_from_slice(&entry.owner.0.to_le_bytes());
+            // A write's own tag: a control command's encoding starts `0xfd`,
+            // `0xfe` or `0xff`, so no write encodes to one whatever its length
+            // (a one-record write can be as long as a `SetLeader`, #241).
+            let mut bytes = vec![0x00_u8];
+            bytes.extend_from_slice(&entry.leader.0.to_le_bytes());
             bytes.extend_from_slice(&entry.seq.0.to_le_bytes());
             for record in &entry.records {
                 bytes.extend_from_slice(&(record.0.len() as u64).to_le_bytes());
@@ -97,14 +99,9 @@ pub fn command_hash(command: &Command) -> u64 {
             }
             value_hash(&bytes)
         }
-        Command::Control(Control::Truncate {
-            generation,
-            owner,
-            up_to,
-        }) => {
+        Command::Control(Control::Truncate { leader, up_to }) => {
             let mut bytes = vec![0xff_u8];
-            bytes.extend_from_slice(&generation.0.to_le_bytes());
-            bytes.extend_from_slice(&owner.0.to_le_bytes());
+            bytes.extend_from_slice(&leader.0.to_le_bytes());
             bytes.extend_from_slice(&up_to.0.to_le_bytes());
             // The no-collision argument below rests on this exact shape.
             assert!(bytes.len() == 25, "a truncate encodes to twenty-five bytes");
@@ -115,11 +112,15 @@ pub fn command_hash(command: &Command) -> u64 {
         // are twenty-five bytes and start `0xff`), and every node hashes the same no-op to
         // the same digest, so per-slot prefix agreement stays checkable.
         Command::Control(Control::Noop) => value_hash(&[0xfe_u8]),
-        Command::Control(Control::SetLeader { expected, owner }) => {
+        Command::Control(Control::SetLeader { new, old }) => {
             let mut bytes = vec![0xfd_u8];
-            bytes.extend_from_slice(&expected.0.to_le_bytes());
-            bytes.extend_from_slice(&owner.0.to_le_bytes());
-            assert!(bytes.len() == 17, "a set-leader encodes to seventeen bytes");
+            bytes.extend_from_slice(&new.0.to_le_bytes());
+            // `None` encodes as the unset uuid, which no `new` can be.
+            bytes.extend_from_slice(&old.map_or(0, |old| old.0).to_le_bytes());
+            assert!(
+                bytes.len() == 33,
+                "a set-leader encodes to thirty-three bytes"
+            );
             assert!(
                 bytes[0] == 0xfd,
                 "a set-leader encoding starts with its tag"

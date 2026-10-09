@@ -49,8 +49,8 @@
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
 use paros_core::{
-    Audience, Ballot, ClientId, ColocatedNode, Command, Config, Control, Entry, Generation,
-    HardState, LogRead, Message, NodeId, ReplicaId, ReplicaNode, Seq, Slot, Storage, Value,
+    Audience, Ballot, ColocatedNode, Command, Config, Control, Entry, HardState, LeaderUuid,
+    LogRead, Message, NodeId, ReplicaId, ReplicaNode, Seq, Slot, Storage, Value,
 };
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
@@ -240,13 +240,12 @@ fn main() {
         // the next five are its writes, at positions 0..=4.
         let _ = if seq == 1 {
             d.acceptors[0].propose_control(Control::SetLeader {
-                expected: Generation(0),
-                owner: ClientId(7),
+                new: LeaderUuid(7),
+                old: None,
             })
         } else {
             d.acceptors[0].propose(Entry {
-                generation: Generation(1),
-                owner: ClientId(7),
+                leader: LeaderUuid(7),
                 seq: Seq(seq - 2),
                 records: vec![Value(format!("cmd-{seq}").into_bytes())],
             })
@@ -300,10 +299,10 @@ fn main() {
         panic!("nothing is trimmed");
     };
     println!(
-        "   a journal read on replica 11: {} records, next position {}, generation {}",
+        "   a journal read on replica 11: {} records, next position {}, leader {:?}",
         page.records.len(),
         page.next().0,
-        page.state.generation.0
+        page.state.leader
     );
     assert_eq!(page.records.len(), 5);
     assert_eq!(page.next(), Seq(5));

@@ -43,11 +43,10 @@
 //! first, and the cell refuses to host a tombstoned tenant at apply, so the
 //! stale `HostTenant` changes nothing ([`FleetRefusal::Removed`]).
 //!
-//! **Who writes.** The fleet tenant is written by its coordinator — whoever claims it with
-//! `SetLeader` (the session's `operator`) — and the cell's control journal by
-//! the cell coordinator (`coordinator`, the cell's first coordinator in M9:
-//! the cell coordinator of #225 is not built). Each journal has one writer
-//! per generation, so two operators running at once fence each other: the
+//! **Who writes.** Both journals are written by the session that last claimed
+//! them with `SetLeader`, under a leader uuid drawn from the session's seed
+//! (#241; the cell coordinator of #225 is not built). Each journal has one
+//! leader per term, so two operators running at once fence each other: the
 //! loser's write is refused, its run is [`Step::Interrupted`], and running it
 //! again resumes from what the winner wrote. The fleet tenant is checkpointed as its
 //! owner writes it ([`crate::client::checkpoint`], #227); the cell's journal
@@ -61,7 +60,7 @@
 use std::time::Duration;
 
 use moonpool_core::Providers;
-use paros_core::{JournalIdentifier, NodeId, TenantId};
+use paros_core::{JournalIdentifier, TenantId};
 
 use super::Client;
 use super::checkpoint::{
@@ -227,9 +226,9 @@ pub struct FleetSession {
 }
 
 impl FleetSession {
-    /// A session over `journals`, writing the fleet tenant as client `operator`
-    /// (checkpointing it under `policy`) and the cell's control journal as
-    /// the cell coordinator `coordinator`, folding the cell's journal into
+    /// A session over `journals`, writing the fleet tenant (checkpointing it
+    /// under `policy`) and the cell's control journal under leader uuids
+    /// drawn from `seed` ([`Writer::new`]), folding the cell's journal into
     /// `cell` — the empty registry over the deployment's genesis pool.
     /// `None` when `journals` names no fleet journal: a cell that does not
     /// host the fleet tenant runs no fleet operation (no identifier has a
@@ -237,8 +236,7 @@ impl FleetSession {
     #[must_use]
     pub fn new(
         journals: ControlJournals,
-        operator: u64,
-        coordinator: NodeId,
+        seed: u128,
         cell: Registry,
         policy: CheckpointPolicy,
     ) -> Option<Self> {
@@ -246,8 +244,8 @@ impl FleetSession {
         Some(Self {
             journals,
             fleet,
-            directory: Checkpointer::new(fleet, operator, FleetDirectory::default(), policy),
-            cell: Checkpointer::new(journals.cell, coordinator.0, cell, policy),
+            directory: Checkpointer::new(fleet, seed, FleetDirectory::default(), policy),
+            cell: Checkpointer::new(journals.cell, seed, cell, policy),
             directory_open: false,
             cell_open: false,
             diverged: None,
@@ -277,7 +275,7 @@ impl FleetSession {
     }
 
     /// The writers of the fleet tenant's and of the cell's control journal: the
-    /// generation each owns and the position it writes next.
+    /// uuid each leads under and the position it writes next.
     #[must_use]
     pub fn writers(&self) -> (&Writer, &Writer) {
         (self.directory.writer(), self.cell.writer())

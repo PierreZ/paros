@@ -10,9 +10,7 @@ use crate::message::{Audience, Message};
 use crate::node::ColocatedNode;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
-use crate::types::{
-    Ballot, ClientId, Command, Control, Entry, Generation, NodeId, Seq, Slot, Value,
-};
+use crate::types::{Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value};
 use crate::write::{AcceptorWrite, WriteOp};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
@@ -103,8 +101,7 @@ fn config(id: u64) -> Config {
 
 fn cmd(seq: u64) -> Command {
     Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         seq: Seq(seq),
         records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
     })
@@ -230,11 +227,11 @@ impl Tier {
         self.write(0, seq, keep);
     }
 
-    /// A `Write` of one record at `seq` under `generation`, by client 1.
-    fn write(&mut self, generation: u64, seq: u64, keep: impl Fn(NodeId, &Message) -> bool) {
+    /// A `Write` of one record at `seq` under leader uuid `leader` (`0`,
+    /// the unset uuid, is refused at apply).
+    fn write(&mut self, leader: u128, seq: u64, keep: impl Fn(NodeId, &Message) -> bool) {
         let _ = self.nodes[0].propose(Entry {
-            generation: Generation(generation),
-            owner: ClientId(1),
+            leader: LeaderUuid(leader),
             seq: Seq(seq),
             records: vec![Value(vec![u8::try_from(seq).expect("small seq")])],
         });
@@ -245,8 +242,8 @@ impl Tier {
     /// Client 1 claims the journal (generation 1) at the next slot.
     fn claim(&mut self, keep: impl Fn(NodeId, &Message) -> bool) {
         let _ = self.nodes[0].propose_control(Control::SetLeader {
-            expected: Generation(0),
-            owner: ClientId(1),
+            new: LeaderUuid(1),
+            old: None,
         });
         let q = self.drain_node(0);
         self.deliver(q, keep);
@@ -418,8 +415,7 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
         tier.write(1, seq, |_, _| true);
     }
     let _ = tier.nodes[0].propose_control(Control::Truncate {
-        generation: Generation(1),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         up_to: Seq(2),
     });
     let q = tier.drain_node(0);
@@ -433,7 +429,7 @@ fn a_replica_executes_a_decided_truncate_and_seals_its_journal_state() {
             Seq(2),
             "the dropped slots' journal state is sealed durably"
         );
-        assert_eq!(tier.disks[r].sealed.owner, Some(ClientId(1)));
+        assert_eq!(tier.disks[r].sealed.leader, Some(LeaderUuid(1)));
         assert_eq!(tier.applied_slots(r), vec![0, 1, 2, 3, 4]);
     }
 }
@@ -449,8 +445,7 @@ fn a_replica_below_the_floor_jumps_to_the_trim_point() {
         tier.write(1, seq, away);
     }
     let _ = tier.nodes[0].propose_control(Control::Truncate {
-        generation: Generation(1),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         up_to: Seq(2),
     });
     let q = tier.drain_node(0);

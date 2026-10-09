@@ -18,7 +18,7 @@ buggified: perturbed only through its public API. Doctrine lives in the root `AG
 - `proposer/authority.rs` → `proposer::Authority` → the leadership fence and the `CheckQuorum` window.
 - `collector.rs` → `Collector`, `GcStep` → the leader-side GC tally (#123): chosen-index reports, matchmaker acks, the effective floor.
 - `replica.rs` → `Replica`, `LogRead`, `LogPage` → chosen prefix, apply walk, journal fold (`journal`, `outcome_at`, `accepted_at`, `fold_hole`, `chosen_gap`, `covers`).
-- `journal_state.rs` → `JournalState`, `Outcome` → the journal-control state machine; pure `apply` judges `Write`/`SetLeader`/`Truncate` (#204); `Write` and `Truncate` share the writer fence `is_current` (#228).
+- `journal_state.rs` → `JournalState` (leader uuid, hidden term, positions), `JournalView` (what a client sees: no term), `Outcome` → the journal-control state machine; pure `apply` judges `Write`/`SetLeader`/`Truncate` (#204, #241); `Write` and `Truncate` share the writer fence `is_current` (#228).
 - `proxy_leader.rs` → `ProxyLeader`, `ProxyReady` → the second deployment (#142): fan-out, fold, `Commit`, `Nack` relay, `expire_stale`.
 - `replica_node.rs` → `ReplicaNode`, `ReplicaReady`, `ReplicaCounters` → the third deployment (#144); module doc holds the coupling analysis.
 - `replica_node/tests.rs` → three `ColocatedNode`s and two replicas over a hand-driven network.

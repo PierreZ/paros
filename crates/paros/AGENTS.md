@@ -42,7 +42,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `rpc/tests.rs` → round-trip tests; malformed input refused.
 - `client/mod.rs` → `Client`, `ClientTunables`, `Retarget`, `LeaderHint` → policy loops: `write`, `resolve`, `read_any`, `journal_state`, `claim`, `set_leader`, `truncate`, `reconfigure*`, `inspect`, `retire`; `*_attempt` one-shot calls.
 - `client/outcome.rs` → `WriteOutcome`, `ReadOutcome`, … → every reply judged once.
-- `client/writer.rs` → `Writer` (`truncate` carries the owner's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
+- `client/writer.rs` → `Writer`, `leader_uuid` (a uuid per term derived from the caller's random seed, #241; `with_uuid` for an operator-named one; `truncate` carries the leader's fence, #228; `stale_entry` and `stale_truncate_request` are the explicit misbehaviours) · `client/reader.rs` → `Reader`, `ReaderOutcome::Gap`.
 - `client/observer.rs` → `CallObserver`, `NoObserver` · `client/tests.rs` → the pure parts pinned.
 - `client/checkpoint.rs` → `Checkpointable`, `Folder`, `Checkpointer`, `CheckpointRecord` (`MAGIC`, `Inline` / `Ref`), `load` → checkpoint and truncate for any journal owner (#230); `Folder` is also the registry follower's fold.
 - `client/bootstrap.rs` → `init`, `discover`, `claim_cell`, `control_journals`, `control_journals_of` → `parosctl init`'s calls; server ids and the control journals learned from a node-only `Inspect` (#196, §3.8, #243).

@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, Command, Control, Entry, Generation, JournalState, Message, NodeId, Party,
-    ProxyId, Seq, Slot, Value,
+    Ballot, Command, Control, Entry, JournalState, LeaderUuid, Message, NodeId, Party, ProxyId,
+    Seq, Slot, Value,
 };
 use prost::Message as ProstMessage;
 
@@ -58,8 +58,7 @@ fn every_variant() -> Vec<Message> {
         node: NodeId(3),
     };
     let entry = Entry {
-        generation: Generation(4),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         seq: Seq(2),
         records: vec![Value(vec![1, 2, 3]), Value(Vec::new())],
     };
@@ -67,13 +66,12 @@ fn every_variant() -> Vec<Message> {
     // Control commands in the accepted suffix exercise every protobuf
     // control variant alongside the client-write case.
     let control = Command::Control(Control::Truncate {
-        generation: Generation(2),
-        owner: ClientId(9),
+        leader: LeaderUuid(9),
         up_to: Seq(3),
     });
     let claim = Command::Control(Control::SetLeader {
-        expected: Generation(3),
-        owner: ClientId(9),
+        new: LeaderUuid(9),
+        old: Some(LeaderUuid(3)),
     });
     let mut accepted = BTreeMap::new();
     accepted.insert(Slot(5), (ballot, command.clone()));
@@ -178,8 +176,8 @@ fn every_variant() -> Vec<Message> {
             // The journal state rides with the trim point (#204) and must
             // survive the wire round trip scalar for scalar.
             state: JournalState {
-                owner: Some(ClientId(4)),
-                generation: Generation(2),
+                leader: Some(LeaderUuid(4)),
+                term: 2,
                 next_seq: Seq(7),
                 first_seq: Seq(3),
             },
@@ -235,8 +233,7 @@ fn every_variant() -> Vec<Message> {
                         node: NodeId(2),
                     },
                     Command::Control(Control::Truncate {
-                        generation: Generation(2),
-                        owner: ClientId(9),
+                        leader: LeaderUuid(9),
                         up_to: Seq(2),
                     }),
                 ),
@@ -245,8 +242,7 @@ fn every_variant() -> Vec<Message> {
                 (
                     Slot(5),
                     Command::Write(Entry {
-                        generation: Generation(1),
-                        owner: ClientId(8),
+                        leader: LeaderUuid(8),
                         seq: Seq(3),
                         records: vec![Value(vec![4, 5])],
                     }),

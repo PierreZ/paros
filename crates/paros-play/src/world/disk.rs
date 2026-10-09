@@ -44,8 +44,7 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    AcceptorWrite, Ballot, ClientId, Command, Config, Generation, HardState, JournalState, Slot,
-    Storage, WriteOp,
+    AcceptorWrite, Ballot, Command, Config, HardState, JournalState, Slot, Storage, WriteOp,
 };
 
 /// One node's disk.
@@ -256,16 +255,16 @@ impl Disk {
         }
     }
 
-    /// Provision the journal to `owner` at generation 1, as if a
-    /// `SetLeader` had been decided and trimmed before the level starts.
+    /// Provision the journal to `owner`'s uuid, as if a `SetLeader` had
+    /// been decided and trimmed before the level starts.
     /// The game teaches Paxos, not the claim (#204): a level's client is the
     /// journal's writer from its first move. Only a disk that has sealed
     /// nothing yet is provisioned.
-    pub fn provision_owner(&mut self, owner: ClientId) {
+    pub fn provision_owner(&mut self, owner: crate::world::ClientId) {
         if self.sealed == JournalState::default() && self.first_slot == Slot(0) {
             self.sealed = JournalState {
-                owner: Some(owner),
-                generation: Generation(1),
+                leader: Some(owner.uuid()),
+                term: 1,
                 ..JournalState::default()
             };
         }

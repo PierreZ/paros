@@ -736,7 +736,7 @@ mod tests {
     use super::*;
     use crate::membership::QuorumSystem;
     use crate::proposer::Round;
-    use crate::types::{ClientId, Entry, Generation, Seq, Value};
+    use crate::types::{Entry, LeaderUuid, Seq, Value};
 
     fn ballot(round: u64, node: u64) -> Ballot {
         Ballot {
@@ -747,8 +747,7 @@ mod tests {
 
     fn cmd(seq: u64) -> Command {
         Command::Write(Entry {
-            generation: Generation(0),
-            owner: ClientId(1),
+            leader: LeaderUuid(1),
             seq: Seq(seq),
             records: vec![Value(seq.to_le_bytes().to_vec())],
         })

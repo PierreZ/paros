@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use moonpool_core::TokioProviders;
+use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::client::bootstrap::control_journals_of;
 use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
@@ -13,9 +13,8 @@ use paros::client::{
 };
 use paros::wire::common::Ballot;
 use paros::{
-    ClientId, Generation, InspectReply, JournalIdentifier, JournalState, QuorumSystem,
-    RetireRequest, Seq, Value, WireQuorumSystem, journal_state_from_proto,
-    quorum_system_from_proto,
+    InspectReply, JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, RetireRequest, Seq,
+    Value, WireQuorumSystem, journal_state_from_proto, quorum_system_from_proto,
 };
 use serde_json::{Value as Json, json};
 
@@ -29,6 +28,33 @@ fn start(client: &ParosClient) -> usize {
     client.leader().unwrap_or(0)
 }
 
+/// A leader uuid as given on the command line: 1 to 32 hex digits, never
+/// the unset uuid.
+fn parse_uuid(text: &str) -> Result<LeaderUuid, String> {
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    if digits.is_empty() || digits.len() > 32 {
+        return Err("a leader uuid is 1 to 32 hex digits".into());
+    }
+    let uuid = u128::from_str_radix(digits, 16).map_err(|e| e.to_string())?;
+    if uuid == 0 {
+        return Err("the unset uuid (0) never leads".into());
+    }
+    Ok(LeaderUuid(uuid))
+}
+
+/// `--leader`, or a random uuid when absent: a run that names none leads a
+/// term of its own (#241).
+fn leader_or_drawn(providers: &TokioProviders, given: Option<LeaderUuid>) -> LeaderUuid {
+    given.unwrap_or_else(|| {
+        loop {
+            let uuid: u128 = providers.random().random();
+            if uuid != 0 {
+                break LeaderUuid(uuid);
+            }
+        }
+    })
+}
+
 /// `parosctl write`.
 #[derive(Args, Debug)]
 pub struct WriteArgs {
@@ -37,48 +63,48 @@ pub struct WriteArgs {
     /// The records, in order, each one argument.
     #[arg(required = true)]
     records: Vec<String>,
-    /// The client writing (its identity as the journal's owner).
-    #[arg(long, env = "PAROSCTL_OWNER", default_value = "1")]
-    owner: u64,
-    /// Override: write under this generation instead of claiming.
-    #[arg(long)]
-    generation: Option<u64>,
+    /// The leader uuid to write under (hex); drawn at random when absent,
+    /// so a run that names none claims a term of its own.
+    #[arg(long, env = "PAROSCTL_LEADER", value_parser = parse_uuid)]
+    leader: Option<LeaderUuid>,
+    /// Override: write under `--leader` without claiming.
+    #[arg(long, requires = "leader")]
+    no_claim: bool,
     /// Override: write at this position instead of the tail.
     #[arg(long)]
     seq: Option<u64>,
 }
 
 /// Where `journal` stands, read from any server.
-async fn journal_state(client: &ParosClient, journal: JournalIdentifier) -> Option<JournalState> {
+async fn journal_state(client: &ParosClient, journal: JournalIdentifier) -> Option<JournalView> {
     client.journal_state(journal, start(client)).await
 }
 
-/// Who a writing command acts as: the journal, the owner id, and the
+/// Who a writing command acts as: the journal, the leader uuid, and the
 /// overrides of `parosctl write` (a truncation names no position).
 struct Identity {
     journal: JournalIdentifier,
-    owner: u64,
-    generation: Option<u64>,
+    leader: LeaderUuid,
+    claim: bool,
     seq: Option<u64>,
 }
 
-/// Become the journal's writer: under `--generation` (at `--seq`, or the
-/// tail a read finds) as given, or by a claim — a read naming this owner
-/// already is adopted, never re-claimed.
+/// Become the journal's writer: under `--leader` without a claim (at
+/// `--seq`, or the tail a read finds) when `--no-claim` says so, or by a
+/// claim — a read naming this uuid already is adopted, never re-claimed.
 async fn become_writer(
     client: &ParosClient,
     out: &Printer,
     args: &Identity,
 ) -> Result<Writer, Ending> {
     let journal = args.journal;
-    let mut writer = Writer::new(journal, args.owner);
-    let at = |generation: u64, next: u64| JournalState {
-        owner: Some(ClientId(args.owner)),
-        generation: Generation(generation),
+    let mut writer = Writer::with_uuid(journal, args.leader);
+    let at = |next: u64| JournalView {
+        leader: Some(args.leader),
         next_seq: Seq(next),
         first_seq: Seq(0),
     };
-    if let Some(generation) = args.generation {
+    if !args.claim {
         let next = if let Some(seq) = args.seq {
             seq
         } else if let Some(state) = journal_state(client, journal).await {
@@ -87,7 +113,7 @@ async fn become_writer(
             note("no server served the journal's state");
             return Err(Ending::Unreachable);
         };
-        writer.won(&at(generation, next));
+        writer.won(&at(next));
         return Ok(writer);
     }
     match writer.claim(client, start(client), false).await {
@@ -113,8 +139,8 @@ async fn become_writer(
             return Err(Ending::Ambiguous);
         }
     }
-    if let (Some(seq), Some(generation)) = (args.seq, writer.owned()) {
-        writer.won(&at(generation, seq));
+    if let (Some(seq), Some(_)) = (args.seq, writer.owned()) {
+        writer.won(&at(seq));
     }
     Ok(writer)
 }
@@ -123,12 +149,17 @@ async fn become_writer(
 /// library's writer session — redirects followed, an ambiguous answer
 /// settled, a refusal for a stale position corrected and retried, a
 /// superseded writer stopped.
-pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Ending {
+pub async fn write(
+    providers: &TokioProviders,
+    client: &ParosClient,
+    out: &Printer,
+    args: WriteArgs,
+) -> Ending {
     let journal = args.journal;
     let identity = Identity {
         journal: args.journal,
-        owner: args.owner,
-        generation: args.generation,
+        leader: leader_or_drawn(providers, args.leader),
+        claim: !args.no_claim,
         seq: args.seq,
     };
     let mut writer = match become_writer(client, out, &identity).await {
@@ -154,9 +185,8 @@ pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Endi
                 out.emit(
                     || {
                         format!(
-                            "written seq={seq} count={count} generation={} owner={}{}",
-                            writer.generation(),
-                            args.owner,
+                            "written seq={seq} count={count} leader={}{}",
+                            writer.fence(),
                             if resolved { " (resolved)" } else { "" }
                         )
                     },
@@ -167,8 +197,7 @@ pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Endi
                             "count": count,
                             "duplicate": duplicate,
                             "resolved": resolved,
-                            "generation": writer.generation(),
-                            "owner": args.owner,
+                            "leader": writer.fence().to_string(),
                         })
                     },
                 );
@@ -186,7 +215,7 @@ pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Endi
             WriterOutcome::Truncated { state } => return refused(out, "truncated", &state),
             WriterOutcome::NotWritten { state } => return refused(out, "not written", &state),
             WriterOutcome::NotOwner => {
-                note("this writer owns no generation of the journal");
+                note("this writer leads no term of the journal");
                 return Ending::Refused;
             }
             WriterOutcome::UnknownJournal => return unknown_journal(journal),
@@ -205,7 +234,7 @@ pub async fn write(client: &ParosClient, out: &Printer, args: WriteArgs) -> Endi
     }
 }
 
-fn refused(out: &Printer, what: &str, state: &JournalState) -> Ending {
+fn refused(out: &Printer, what: &str, state: &JournalView) -> Ending {
     out.emit(
         || format!("{what} {}", state_text(state)),
         || json!({ "outcome": what, "state": state_json(state) }),
@@ -370,23 +399,29 @@ pub struct TruncateArgs {
     /// Drop every record below this position.
     #[arg(long)]
     up_to: u64,
-    /// The client truncating (its identity as the journal's owner).
-    #[arg(long, env = "PAROSCTL_OWNER", default_value = "1")]
-    owner: u64,
-    /// Override: truncate under this generation instead of claiming.
-    #[arg(long)]
-    generation: Option<u64>,
+    /// The leader uuid to truncate under (hex); drawn at random when
+    /// absent, so a run that names none claims a term of its own.
+    #[arg(long, env = "PAROSCTL_LEADER", value_parser = parse_uuid)]
+    leader: Option<LeaderUuid>,
+    /// Override: truncate under `--leader` without claiming.
+    #[arg(long, requires = "leader")]
+    no_claim: bool,
 }
 
 /// `parosctl truncate`: become the writer exactly as `parosctl write` does
-/// (a claim, or `--generation`), then ask the leader to raise the journal's
-/// floor under that fence (#228). A stale owner is refused and says so.
-pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -> Ending {
+/// (a claim, or `--no-claim`), then ask the leader to raise the journal's
+/// floor under that fence (#228). A superseded leader is refused and says so.
+pub async fn truncate(
+    providers: &TokioProviders,
+    client: &ParosClient,
+    out: &Printer,
+    args: TruncateArgs,
+) -> Ending {
     let journal = args.journal;
     let identity = Identity {
         journal: args.journal,
-        owner: args.owner,
-        generation: args.generation,
+        leader: leader_or_drawn(providers, args.leader),
+        claim: !args.no_claim,
         seq: None,
     };
     let mut writer = match become_writer(client, out, &identity).await {
@@ -394,7 +429,7 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
         Err(ending) => return ending,
     };
     let Some(outcome) = writer.truncate(client, args.up_to, start(client)).await else {
-        note("this writer owns no generation of the journal");
+        note("this writer leads no term of the journal");
         return Ending::Refused;
     };
     match outcome {
@@ -427,25 +462,43 @@ pub async fn truncate(client: &ParosClient, out: &Printer, args: TruncateArgs) -
 pub struct SetLeaderArgs {
     /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
     journal: JournalIdentifier,
-    /// The client that should own the journal.
-    #[arg(long)]
-    owner: u64,
-    /// The generation the caller believes current; read from the journal
-    /// when absent.
-    #[arg(long)]
-    expected: Option<u64>,
+    /// The leader uuid to install (hex); drawn at random when absent.
+    #[arg(long, value_parser = parse_uuid)]
+    new: Option<LeaderUuid>,
+    /// The leader uuid the caller believes current (hex, or `none` for a
+    /// journal no one leads yet); read from the journal when absent.
+    #[arg(long, value_parser = parse_old)]
+    old: Option<Old>,
 }
 
-/// `parosctl set-leader`: compare-and-swap the journal's writer — against
-/// `--expected`, or against the generation a read finds.
-pub async fn set_leader(client: &ParosClient, out: &Printer, args: SetLeaderArgs) -> Ending {
+/// `--old`: a uuid, or `none`.
+#[derive(Clone, Copy, Debug)]
+struct Old(Option<LeaderUuid>);
+
+fn parse_old(text: &str) -> Result<Old, String> {
+    if text == "none" {
+        Ok(Old(None))
+    } else {
+        parse_uuid(text).map(|uuid| Old(Some(uuid)))
+    }
+}
+
+/// `parosctl set-leader`: compare-and-set the journal's leader uuid —
+/// against `--old`, or against the leader a read finds (#241).
+pub async fn set_leader(
+    providers: &TokioProviders,
+    client: &ParosClient,
+    out: &Printer,
+    args: SetLeaderArgs,
+) -> Ending {
     let journal = args.journal;
-    let outcome = match args.expected {
-        Some(expected) => client
-            .set_leader(journal, expected, args.owner, start(client))
+    let new = leader_or_drawn(providers, args.new);
+    let outcome = match args.old {
+        Some(Old(old)) => client
+            .set_leader(journal, new, old, start(client))
             .await
             .into(),
-        None => client.claim(journal, args.owner, start(client), true).await,
+        None => client.claim(journal, new, start(client)).await,
     };
     match outcome {
         ClaimOutcome::Won { state } => {
@@ -526,7 +579,9 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
             continue;
         };
         answered = true;
-        let state = journal_state_from_proto(reply.journal).ok();
+        let state = journal_state_from_proto(reply.journal)
+            .ok()
+            .map(|s| s.view());
         out.emit(
             || {
                 format!(

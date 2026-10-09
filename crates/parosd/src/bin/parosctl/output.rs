@@ -3,7 +3,7 @@
 //! Diagnostics — a claim made on the way, a truncation gap a reader
 //! jumped — go to stderr in both modes.
 
-use paros::JournalState;
+use paros::JournalView;
 use serde_json::{Value, json};
 
 /// The output mode.
@@ -31,24 +31,22 @@ pub fn note(message: &str) {
     eprintln!("parosctl: {message}");
 }
 
-/// A journal state as `key=value` pairs.
-pub fn state_text(state: &JournalState) -> String {
+/// A journal view as `key=value` pairs.
+pub fn state_text(state: &JournalView) -> String {
     format!(
-        "owner={} generation={} next_seq={} first_seq={}",
+        "leader={} next_seq={} first_seq={}",
         state
-            .owner
-            .map_or_else(|| "none".to_string(), |owner| owner.0.to_string()),
-        state.generation.0,
+            .leader
+            .map_or_else(|| "none".to_string(), |leader| leader.to_string()),
         state.next_seq.0,
         state.first_seq.0
     )
 }
 
-/// A journal state as JSON.
-pub fn state_json(state: &JournalState) -> Value {
+/// A journal view as JSON.
+pub fn state_json(state: &JournalView) -> Value {
     json!({
-        "owner": state.owner.map(|owner| owner.0),
-        "generation": state.generation.0,
+        "leader": state.leader.map(|leader| leader.to_string()),
         "next_seq": state.next_seq.0,
         "first_seq": state.first_seq.0,
     })

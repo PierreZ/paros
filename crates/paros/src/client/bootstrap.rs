@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::{ErrorReason, RpcHandle};
-use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
+use paros_core::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
 
 use super::Client;
 use super::outcome::SetLeaderOutcome;
@@ -118,18 +118,16 @@ pub async fn discover<P: Providers>(
 /// What claiming a formed cell's control journal came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClaimCellOutcome {
-    /// The coordinator now owns the cell control journal: `init` is done.
+    /// The claim won: `init` is done.
     Claimed {
-        /// The generation it owns.
-        generation: u64,
+        /// The uuid that now leads the cell control journal.
+        leader: LeaderUuid,
     },
-    /// The cell control journal already has an owner: the cell was
+    /// The cell control journal already has a leader: the cell was
     /// initialized before.
     AlreadyInitialized {
-        /// Its owner.
-        owner: Option<u64>,
-        /// Its generation.
-        generation: u64,
+        /// Its leader.
+        leader: Option<LeaderUuid>,
     },
     /// No server confirmed the journal's state or decided the claim.
     Unavailable,
@@ -173,22 +171,22 @@ pub async fn control_journals<P: Providers>(client: &Client<P>) -> Option<Contro
     None
 }
 
-/// The cell step's last move (`docs/architecture.md` §3.1): the first cell
-/// coordinator `coordinator` claims the cell control journal `control` with
-/// `SetLeader(expected_gen = 0)`, through `client` (the cell's members). A
-/// journal that already has an owner was initialized before. A freshly
+/// The cell step's last move (`docs/architecture.md` §3.1): `init` claims
+/// the cell control journal `control` for `leader` with
+/// `SetLeader(new = leader, old = none)`, through `client` (the cell's
+/// members). A journal that already has a leader was initialized before. A freshly
 /// formed cell is still electing its first leader, so an attempt that finds
 /// no server to confirm the state is retried, `retry_backoff` apart, for up
 /// to `patience`.
 pub async fn claim_cell<P: Providers>(
     client: &Client<P>,
     control: JournalIdentifier,
-    coordinator: NodeId,
+    leader: LeaderUuid,
     patience: Duration,
 ) -> ClaimCellOutcome {
     let deadline = client.time.now() + patience;
     loop {
-        let outcome = claim_cell_once(client, control, coordinator).await;
+        let outcome = claim_cell_once(client, control, leader).await;
         if outcome != ClaimCellOutcome::Unavailable
             || client.time.now() >= deadline
             || !client.pause(client.tunables.retry_backoff).await
@@ -201,25 +199,21 @@ pub async fn claim_cell<P: Providers>(
 async fn claim_cell_once<P: Providers>(
     client: &Client<P>,
     control: JournalIdentifier,
-    coordinator: NodeId,
+    leader: LeaderUuid,
 ) -> ClaimCellOutcome {
     let Some(state) = client.journal_state(control, 0).await else {
         return ClaimCellOutcome::Unavailable;
     };
-    if state.generation.0 > 0 {
+    if state.leader.is_some() {
         return ClaimCellOutcome::AlreadyInitialized {
-            owner: state.owner.map(|o| o.0),
-            generation: state.generation.0,
+            leader: state.leader,
         };
     }
     let first = client.leader().unwrap_or(0);
-    match client.set_leader(control, 0, coordinator.0, first).await {
-        SetLeaderOutcome::Won { state } => ClaimCellOutcome::Claimed {
-            generation: state.generation.0,
-        },
+    match client.set_leader(control, leader, None, first).await {
+        SetLeaderOutcome::Won { .. } => ClaimCellOutcome::Claimed { leader },
         SetLeaderOutcome::Lost { state } => ClaimCellOutcome::AlreadyInitialized {
-            owner: state.owner.map(|o| o.0),
-            generation: state.generation.0,
+            leader: state.leader,
         },
         SetLeaderOutcome::Ambiguous | SetLeaderOutcome::Malformed => ClaimCellOutcome::Ambiguous,
         SetLeaderOutcome::Redirect { .. } | SetLeaderOutcome::UnknownJournal => {

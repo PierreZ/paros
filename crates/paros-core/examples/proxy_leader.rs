@@ -58,8 +58,8 @@
 use std::collections::BTreeMap;
 
 use paros_core::{
-    Ballot, ClientId, ColocatedNode, Command, Config, Delegation, Entry, Generation, HardState,
-    Message, NodeId, Party, ProxyId, ProxyLeader, QuorumSystem, Seq, Slot, Storage, Value,
+    Ballot, ColocatedNode, Command, Config, Delegation, Entry, HardState, LeaderUuid, Message,
+    NodeId, Party, ProxyId, ProxyLeader, QuorumSystem, Seq, Slot, Storage, Value,
 };
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
@@ -275,8 +275,7 @@ impl Cluster {
         let leader = self.leader;
         let result = self.node(leader).propose_in(
             Entry {
-                generation: Generation(0),
-                owner: ClientId(7),
+                leader: LeaderUuid(7),
                 seq: Seq(seq),
                 records: vec![Value(text.as_bytes().to_vec())],
             },
@@ -394,8 +393,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
     let leader = cluster.leader;
     let result = cluster.node(leader).propose_in(
         Entry {
-            generation: Generation(0),
-            owner: ClientId(7),
+            leader: LeaderUuid(7),
             seq: Seq(7),
             records: vec![Value(b"golf".to_vec())],
         },
@@ -447,8 +445,7 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
     let leader = cluster.leader;
     let result = cluster.node(leader).propose_in(
         Entry {
-            generation: Generation(0),
-            owner: ClientId(7),
+            leader: LeaderUuid(7),
             seq: Seq(8),
             records: vec![Value(b"hotel".to_vec())],
         },

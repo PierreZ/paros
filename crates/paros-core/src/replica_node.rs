@@ -845,7 +845,7 @@ impl ReplicaNode {
         let read = self.replica.read(from, limit, max_bytes);
         if let crate::LogRead::Page(page) = &read {
             assert!(
-                page.state == self.replica.journal(),
+                page.state == self.replica.journal().view(),
                 "a page names the fold's head"
             );
             assert!(page.from == from, "a page starts where the read asked");

@@ -189,7 +189,7 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 }
 
 /// Bumped when an encoding changes; bytes of another version do not decode.
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION: u8 = 3;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {

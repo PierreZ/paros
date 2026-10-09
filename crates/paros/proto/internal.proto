@@ -84,26 +84,29 @@ message ConsensusMessage {
 // journal state machine — the safety rule; any propose-time check is only
 // an optimisation (`docs/architecture.md` §2.2).
 message WriteEntry {
-  uint64 generation = 1;
-  uint64 owner = 2;
+  // 1 and 2 were the M7 writer `(generation, owner)` (#241).
+  reserved 1, 2;
   uint64 seq = 3;
   repeated bytes records = 4;
+  .paros.common.v1.LeaderUuid leader = 5;
 }
 
 // Drop every record below `up_to` (a position, #204), fenced by the
-// writer `(generation, owner)` like a `Write` (#228).
+// leader uuid like a `Write` (#228, #241).
 message Truncate {
   uint64 up_to = 1;
-  uint64 generation = 2;
-  uint64 owner = 3;
+  reserved 2, 3;
+  .paros.common.v1.LeaderUuid leader = 4;
 }
 
 message Noop {}
 
-// Compare-and-swap the journal's writer (#204).
+// Compare-and-set the journal's leader (#241): `new` leads iff `old` is
+// the current leader (absent: none).
 message SetLeader {
-  uint64 expected = 1;
-  uint64 owner = 2;
+  reserved 1, 2;
+  .paros.common.v1.LeaderUuid new = 3;
+  .paros.common.v1.LeaderUuid old = 4;
 }
 
 message ControlCommand {

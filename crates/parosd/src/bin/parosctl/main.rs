@@ -117,8 +117,8 @@ impl Global {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Form the cell over its seeds (#196, #216): sent to the first server,
-    /// a waiting seed; then the first cell coordinator claims the cell
-    /// control journal, and the fleet steps register the cell in the fleet directory
+    /// a waiting seed; then `init` claims the cell control journal under a
+    /// leader uuid of its own, and the fleet steps register the cell in the fleet directory
     /// (#229). Refused on an initialized fleet; a re-run resumes.
     Init(init::InitArgs),
     /// A call to a formed cell.
@@ -275,11 +275,15 @@ async fn main() -> ExitCode {
     }
     let client = client(&runtime, &servers, cli.global.timeout());
     let ending = match command {
-        CellCommand::Write(args) => commands::write(&client, &out, args).await,
+        CellCommand::Write(args) => commands::write(&runtime.providers, &client, &out, args).await,
         CellCommand::Read(args) => commands::read(&client, &out, args).await,
         CellCommand::Tail(args) => commands::tail(&client, &out, args).await,
-        CellCommand::Truncate(args) => commands::truncate(&client, &out, args).await,
-        CellCommand::SetLeader(args) => commands::set_leader(&client, &out, args).await,
+        CellCommand::Truncate(args) => {
+            commands::truncate(&runtime.providers, &client, &out, args).await
+        }
+        CellCommand::SetLeader(args) => {
+            commands::set_leader(&runtime.providers, &client, &out, args).await
+        }
         CellCommand::Inspect(args) => commands::inspect(&client, &out, args).await,
         CellCommand::Reconfigure(args) => commands::reconfigure(&client, &out, args).await,
         CellCommand::Retire(args) => commands::retire(&client, &out, args).await,

@@ -21,7 +21,7 @@ docker compose run --rm init | tee init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
 
 # Write and read the cell's user journal.
-docker compose run --rm parosctl write "$J" hello world --owner 7
+docker compose run --rm parosctl write "$J" hello world --leader 7
 docker compose run --rm parosctl read "$J"
 
 # Tenants: created once (a second create of a name is refused).
@@ -36,7 +36,7 @@ docker compose run --rm parosctl inspect --journal "$J"
 
 # Kill a machine and keep writing (a majority is left), then bring it back.
 docker compose kill node2
-docker compose run --rm parosctl write "$J" still here --owner 7
+docker compose run --rm parosctl write "$J" still here --leader 7
 docker compose start node2
 
 # Logs, and tear everything down (volumes included).
@@ -71,7 +71,7 @@ export PAROSCTL_SERVERS=$PAROS_RENDEZVOUS
 parosctl --servers 127.0.0.1:4501 init | tee /tmp/paros-demo/init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' /tmp/paros-demo/init.out)
 
-parosctl write "$J" hello world --owner 7
+parosctl write "$J" hello world --leader 7
 parosctl read "$J"
 parosctl tenant create acme
 parosctl tenant list

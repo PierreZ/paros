@@ -3,7 +3,7 @@
 #
 #   docker compose up -d --build
 #   docker compose run --rm init          # prints journals=T/J
-#   docker compose run --rm parosctl write T/J hello world --owner 7
+#   docker compose run --rm parosctl write T/J hello world --leader 7
 #   docker compose run --rm parosctl read T/J
 #
 # The copy-paste demo is DEMO.md; the walkthrough is crates/parosd/README.md.

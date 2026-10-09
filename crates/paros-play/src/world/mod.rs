@@ -25,6 +25,29 @@
 //! is the player not delivering. Likewise there is no clock — [`World::tick`]
 //! advances one node, [`World::tick_all`] the whole pool.
 
+/// A level's client, by its id. Client `k` leads its journal under the
+/// leader uuid `k + 1` (#241): the game draws no randomness, and the unset
+/// uuid never leads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClientId(pub u64);
+
+impl ClientId {
+    /// The uuid this client leads under.
+    #[must_use]
+    pub fn uuid(self) -> paros_core::LeaderUuid {
+        paros_core::LeaderUuid(u128::from(self.0) + 1)
+    }
+
+    /// The client that leads under `uuid`, if it is one of a level's.
+    #[must_use]
+    pub fn of(uuid: paros_core::LeaderUuid) -> Option<Self> {
+        uuid.0
+            .checked_sub(1)
+            .and_then(|id| u64::try_from(id).ok())
+            .map(Self)
+    }
+}
+
 pub mod decree;
 pub mod disk;
 mod drain;
@@ -40,7 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::proposer::RecoveryStep;
 use paros_core::{
-    AcceptorConfig, Ballot, ClientId, ColocatedNode, Command, Config, GcAck, GcRequest, MatchReply,
+    AcceptorConfig, Ballot, ColocatedNode, Command, Config, GcAck, GcRequest, MatchReply,
     MatchRequest, MatchmakerId, MatchmakerReconfigurer, Message, NodeId, QuorumSystem,
     ReconfigureReply, ReconfigureRequest, Slot,
 };

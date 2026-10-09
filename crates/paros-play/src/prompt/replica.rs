@@ -175,19 +175,13 @@ impl Prompt {
             question: format!(
                 "Client {} asks again for its write #{seq}, at position {position}. What does \
                  the journal answer, as far as this node has folded it?",
-                entry.owner.0
+                crate::world::ClientId::of(entry.leader).map_or(0, |client| client.0)
             ),
             state_summary: vec![
                 format!("the applied prefix ends at: {applied}"),
                 format!("the journal's next position: {next}"),
                 format!("the journal's first position: {}", folded.first_seq.0),
-                format!(
-                    "the journal's writer: {}",
-                    folded.owner.map_or_else(
-                        || "nobody".to_string(),
-                        |owner| format!("client {} (generation {})", owner.0, folded.generation.0)
-                    )
-                ),
+                format!("the journal's writer: {}", writer_text(&folded)),
             ],
             choices,
             expected: expected.to_string(),
@@ -198,3 +192,15 @@ impl Prompt {
 }
 
 impl Prompt {}
+
+/// The journal's writer as a prompt names it: the level's client that leads
+/// it, or nobody.
+fn writer_text(folded: &paros_core::JournalState) -> String {
+    folded
+        .leader
+        .and_then(crate::world::ClientId::of)
+        .map_or_else(
+            || "nobody".to_string(),
+            |client| format!("client {}", client.0),
+        )
+}

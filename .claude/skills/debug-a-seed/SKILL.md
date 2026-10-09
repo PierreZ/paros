@@ -59,7 +59,7 @@ stale. The usual shapes:
 - a floor (compaction, GC watermark, promise) that regressed across a reboot;
 - a configuration belief adopted from a `Prepare`/`Heartbeat` that a later
   reconfiguration superseded;
-- a client retry that changed the write — generation, owner, position or
+- a client retry that changed the write — leader uuid, position or
   bytes — and was treated as new (`CallLog`'s retry-identity check in
   `chain_workload/rpc.rs` names it).
 

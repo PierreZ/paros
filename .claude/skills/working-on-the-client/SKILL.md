@@ -19,7 +19,7 @@ linearizability checker judge is the client an operator runs. The module doc
 |---|---|
 | which server to ask, the leader hint, redirects, `Retarget` (`FollowHint`, `SameNode`, `NextNode`), `WriteOptions`, the journal calls (`write`, `resolve`, `read_any`, `journal_state`, `claim`, `set_leader`, `truncate`) and the operator calls (`reconfigure`, `reconfigure_matchmakers`, `inspect`, `retire`), the one-attempt calls (`write_attempt`, `set_leader_attempt`, `read_attempt`, `truncate_attempt`) | `mod.rs` (`Client`, `ClientTunables`, `Server`, `LeaderHint`, `WriteReport`, `Resolution`, `ResolveReport`, `ReadReport`) |
 | the typed outcomes, each with a `judge` from the wire reply | `outcome.rs` (`WriteOutcome`, `SetLeaderOutcome`, `ClaimOutcome`, `ReadOutcome`, `TruncateOutcome`, `ReconfigureOutcome`, `ReconfigureMatchmakersOutcome`, `RetireOutcome`, and the refusal enums) |
-| the writer session: claim with `SetLeader` against the generation read, track generation and next position, stop when superseded | `writer.rs` (`Writer`, `WriterOutcome`, `Learned`, `write_request`) |
+| the writer session: claim with `SetLeader` against the leader read, under a uuid per term derived from the caller's seed (`leader_uuid`), track the uuid and next position, stop when superseded | `writer.rs` (`Writer`, `WriterOutcome`, `Learned`, `write_request`) |
 | the reader: a cursor, paged `Read`s with a long-poll, a `truncated` answer resumed at the floor and reported as `ReaderOutcome::Gap` | `reader.rs` (`Reader`, `ReaderOutcome`) |
 | observation of every attempt and answer at the four journal calls | `observer.rs` (`CallObserver`, `NoObserver`, `Attempted`, `Answered`) |
 | checkpoint and truncate (#230): the record format (`MAGIC`, `Inline` / `Ref`), the pure `Folder` every reader runs (the registry's node follower too), the owner's `Checkpointer` (`open`, `append`, `due`, `checkpoint` = `write_checkpoint` + `truncate_to`) | `checkpoint.rs` (`Checkpointable`, `Folder`, `Folded`, `Checkpointer`, `CheckpointPolicy` from `checkpoint_factor` / `checkpoint_interval`) |
@@ -39,7 +39,7 @@ linearizability checker judge is the client an operator runs. The module doc
   field gets a variant and its `judge`, and a refusal label the node sends gets
   a typed refusal (`every_refusal_label_the_node_sends_is_typed` in
   `tests.rs`).
-- **A retry is the identical write**: same generation, owner, position and
+- **A retry is the identical write**: same leader uuid, position and
   bytes, so the log answers it as a `Duplicate`. There is no "retry with a
   fresh position" anywhere; the simulation's `CallLog` (`open_write` /
   `close_write`, `crates/paros-sim/src/chain_workload/rpc.rs`) asserts it on
@@ -49,7 +49,7 @@ linearizability checker judge is the client an operator runs. The module doc
   read the position back, then re-send the identical write, within
   `retry_budget`; what it cannot settle stays `Resolution::Unresolved`.
 - **Misbehaviours are explicit calls, never defaults.** A harness needs a
-  stale-generation write (`Writer::stale_entry`), an attempt it stops
+  stale-uuid write (`Writer::stale_entry`), an attempt it stops
   listening to (`Client::write_attempt` with a `listen` bound, or
   `WriteOptions::abandon_first_after`), one write to two servers (two
   `write_attempt`s: the workload's `DUAL_SUBMIT`), a re-sent write it saw

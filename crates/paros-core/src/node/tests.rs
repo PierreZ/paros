@@ -18,8 +18,7 @@ use crate::ready::Ready;
 use crate::state::{Config, HardState};
 use crate::storage::Storage;
 use crate::types::{
-    Ballot, ClientId, Command, Control, Entry, Generation, NodeId, Seq, Slot, Value,
-    command_fingerprint,
+    Ballot, Command, Control, Entry, LeaderUuid, NodeId, Seq, Slot, Value, command_fingerprint,
 };
 
 /// In-memory [`Storage`] seeded with an explicit initial state (for restart
@@ -210,8 +209,7 @@ fn val(b: u8) -> Value {
 /// is all a test of the consensus layer needs.
 fn entry(client: u64, seq: u64, b: u8) -> Entry {
     Entry {
-        generation: Generation(0),
-        owner: ClientId(client),
+        leader: LeaderUuid(u128::from(client)),
         seq: Seq(seq),
         records: vec![val(b)],
     }

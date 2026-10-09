@@ -95,8 +95,9 @@ pub use public::{
 pub use refusal::{MatchmakersRefusal, RetireRefusal};
 
 pub use codec::{
-    WireQuorumSystem, journal_state_from_proto, journal_state_to_proto, quorum_system_from_proto,
-    quorum_system_to_proto,
+    WireQuorumSystem, journal_state_from_proto, journal_state_to_proto, journal_view_from_proto,
+    journal_view_to_proto, leader_from_proto, leader_uuid_from_proto, leader_uuid_to_proto,
+    quorum_system_from_proto, quorum_system_to_proto,
 };
 pub(crate) use codec::{config_from_proto, config_to_proto};
 pub(crate) use consensus::{message_from_proto, message_to_proto};

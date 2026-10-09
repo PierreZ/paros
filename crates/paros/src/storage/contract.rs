@@ -38,22 +38,21 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
     Fresh: Future<Output = S>,
     Reopened: Future<Output = S>,
 {
-    use paros_core::{ClientId, Entry, Generation, JournalState, Seq, Value};
+    use paros_core::{Entry, JournalState, LeaderUuid, Seq, Value};
     let ballot = |round: u64| Ballot {
         round,
         node: paros_core::NodeId(0),
     };
     let user = |seq: u64, byte: u8| {
         Command::Write(Entry {
-            generation: Generation(1),
-            owner: ClientId(7),
+            leader: LeaderUuid(7),
             seq: Seq(seq),
             records: vec![Value(vec![byte])],
         })
     };
     let state = |next: u64, first: u64| JournalState {
-        owner: Some(ClientId(7)),
-        generation: Generation(1),
+        leader: Some(LeaderUuid(7)),
+        term: 1,
         next_seq: Seq(next),
         first_seq: Seq(first),
     };

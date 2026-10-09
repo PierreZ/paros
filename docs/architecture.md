@@ -93,7 +93,7 @@ walk.
 | `Write` | `Write(leader_uuid, expected_seq, batch) -> seq`: fenced by the leader uuid, contiguous by `expected_seq`, idempotent on retry, pipelineable. | `Write(batch) -> seq`: unfenced; the journal orders writes and assigns `seq` at apply. At-least-once on an ambiguous retry. |
 | `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. Long-polls at the tail for `wait_ms`. | The same. |
 | `Truncate` | `Truncate(leader_uuid, up_to_seq)`: fenced like `Write`. | `Truncate(up_to_seq)`: anyone may truncate. |
-| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns `{ old_uuid, next_seq, first_seq }`. | Refused: a multi-writer journal has no leader. |
+| `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns the journal's view after it: the leader uuid, `next_seq`, `first_seq`. | Refused: a multi-writer journal has no leader. |
 
 The API is Brooker's fourth MemoryDB journal API (section 10): `set_leader_uuid(new, old)`,
 `write(payload, leader_uuid)`, `read()`, plus the expected-sequence precondition of DSQL's
@@ -128,7 +128,8 @@ pipelined burst does not burn slots. That is an optimisation; the apply-time che
 
 Leadership is a pure compare-and-set, no lease and no clock. `SetLeader(new_uuid, old_uuid)`
 succeeds iff `old_uuid` is the current leader (unset on a fresh journal); the journal records the
-change as an ordinary log entry and answers `{ old_uuid, next_seq, first_seq }` so the new leader
+change as an ordinary log entry and answers the view after it (the leader uuid, `next_seq`,
+`first_seq`) so the new leader
 can continue the sequence. Every tailer learns the leader changed in-band, without a side channel.
 
 **The leader uuid is the fence.** It is a 128-bit random value the leader draws for one
@@ -136,8 +137,19 @@ leadership term, never per process: a process that wins again draws a new uuid, 
 own older in-flight writes. It is not a secret and not an authentication token; the frontend
 decides who may touch a tenant at all (section 3.5), the leader uuid decides which of the
 tenant's clients holds the pen. The core keeps a hidden term counter beside it, raised by every
-`SetLeader`, so a uuid that ever led can never lead again (no ABA through
-`SetLeader(old, current)`); the counter never leaves `paros-core`.
+`SetLeader`, that never reaches a data-plane reply (only an operator's `Inspect` shows it).
+
+**The journal trusts its clients to draw fresh uuids** (decided on 2026-10-09, #241). A
+`SetLeader` is refused only when `old_uuid` is not the current leader, when `new_uuid` is the
+current one, or when it is the unset uuid; a uuid that led before and is named again wins. The
+journal keeps no history of past uuids: the term counter alone cannot tell a reinstated uuid from a
+fresh one, and remembering every uuid that ever led would grow the state each trim point carries.
+Since every call names both `old_uuid` and `new_uuid`, a client that reinstates a former leader's
+uuid (an `A → B → A` sequence) does so deliberately, and only its own in-flight writes under that
+uuid are at stake: `paros::client::Writer` derives a new uuid for every term from a random seed and
+never reinstates one. The simulation checks the journal's guarantees under clients that do: a
+swarm knob (`reinstate_pct`) makes a superseded writer reinstate the uuid it last led with, and
+every invariant of section 6 holds through it.
 
 A superseded leader's writes and truncations are refused at apply, which is the whole safety
 argument. What keeps a superseded leader from *serving* stale data is a rule on the leader, not
@@ -1319,11 +1331,12 @@ contribution from above, while Lemma 1's proof uses exact counts, which is the f
 
 Simulation is the investment. Every milestone lands with its share of:
 
-- Invariants in the audit, where the fact arrives: a leader uuid leads at most one term and is
-  never reinstated, every leadership change present in the log, `seq` dense per journal, a
+- Invariants in the audit, where the fact arrives: a leader uuid leads only from a `SetLeader`
+  won in the log, every verdict naming the leader in force (through a misbehaving client's
+  reinstatement too, section 2.3), every leadership change present in the log, `seq` dense per journal, a
   single-writer `Write` never re-accepted with other bytes, `Truncate` monotone and `first_seq`
   never above a served cursor, a single-writer `Truncate` accepted only from the current leader, a
-  `SetLeader` winning at most once per `old_uuid`, a multi-writer journal never refusing an
+  `SetLeader` winning at most once per `old_uuid` in a linearization, a multi-writer journal never refusing an
   in-limits write, a capacity slot booked at most once (a booking id never booked twice, across
   checkpoints), a tenant never reaching a journal outside its own
   `TenantId`, no component reaching a journal by an id it did not learn (the simulation draws
@@ -1409,7 +1422,8 @@ AGENTS.md.
   `SetLeader(new, old)`, with a hidden term counter in the core; `Write` takes an explicit
   `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
-  linearizability model and the audit follow.
+  linearizability model and the audit follow. The single-writer half landed first; the writer
+  mode and the limits follow.
 - The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
   levels: tenant names and desired state move into each tenant's control journal, capacity is
   owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).
@@ -1633,7 +1647,12 @@ Compartmentalized Paxos and Matchmaker Paxos are in `docs/references/papers/`.
   fence suffices, and an owner id the caller chose, so two processes could share it and both pass
   the owner check once they read the public generation. A per-term random leader uuid is
   Brooker's final MemoryDB API and cannot be shared by accident; the term counter stays, hidden
-  in the core, to rule out a reinstated uuid.
+  in the core.
+- **Refusing a reinstated leader uuid** (2026-10-09, #241). Remembering every uuid that ever led
+  (a `term → uuid` map carried with the trim point) would make `A → B → A` impossible even for a
+  misbehaving client. Rejected: `SetLeader` names both uuids, so the client that reinstates one
+  does it on purpose, the state each trim point carries would grow with every term, and the
+  simulation shows the journal's guarantees hold through it (section 2.3).
 - **A lease in the journal** (MemoryDB's lease-fenced writes). Rejected: a lease fence depends
   on clocks and pauses; the leader uuid fences without either, and the election library keeps a
   lease only as a liveness hint (section 3.3).

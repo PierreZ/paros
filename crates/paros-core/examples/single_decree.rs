@@ -173,8 +173,8 @@ use std::collections::BTreeMap;
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::{
-    AcceptorConfig, AcceptorWrite, Ballot, ClientId, Command, Entry, Fingerprint, Generation,
-    NodeId, QuorumSystem, Seq, Slot, Value,
+    AcceptorConfig, AcceptorWrite, Ballot, Command, Entry, Fingerprint, LeaderUuid, NodeId,
+    QuorumSystem, Seq, Slot, Value,
 };
 
 /// The one decision. Paros's roles are written over a *log* of numbered
@@ -203,8 +203,7 @@ fn ballot(round: u64, proposer: u64) -> Ballot {
 /// value; a proposer only ever compares values by their [`Fingerprint`].
 fn value(text: &str) -> Command {
     Command::Write(Entry {
-        generation: Generation(0),
-        owner: ClientId(1),
+        leader: LeaderUuid(1),
         seq: Seq(0),
         records: vec![Value(text.as_bytes().to_vec())],
     })
