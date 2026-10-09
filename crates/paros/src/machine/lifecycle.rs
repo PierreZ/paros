@@ -49,6 +49,12 @@ pub enum MachineError {
     /// The disk disagrees with the configuration: an operator must act, a
     /// restart cannot help (`parosd` exits 78).
     Refused(String),
+    /// The disk failed under the machine record (a read or a write did not
+    /// complete): nothing is refused, and a restart recovers from what the
+    /// disk holds (`parosd` exits 75). Found in simulation (#246): a failed
+    /// sync of the record's first write ended a machine as refused, for
+    /// good, and the cell never formed.
+    Storage(String),
     /// The drivers ended in error ([`RunError`]).
     Run(RunError),
 }
@@ -56,7 +62,9 @@ pub enum MachineError {
 impl core::fmt::Display for MachineError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            MachineError::Invalid(error) | MachineError::Refused(error) => f.write_str(error),
+            MachineError::Invalid(error)
+            | MachineError::Refused(error)
+            | MachineError::Storage(error) => f.write_str(error),
             MachineError::Run(error) => write!(f, "{error}"),
         }
     }
@@ -253,7 +261,8 @@ async fn identity<P: Providers, D: MachineDisk>(
     settings: &MachineSettings,
 ) -> Result<MachineRecord, MachineError> {
     let refused = |error: String| MachineError::Refused(format!("machine record: {error}"));
-    let read = disk.read_record().await.map_err(refused)?;
+    let failed = |error: String| MachineError::Storage(format!("machine record: {error}"));
+    let read = disk.read_record().await.map_err(failed)?;
     let Some(text) = read else {
         // A disk with stores and no identity lost it: never a new machine
         // on top of an old one's stores.
@@ -282,7 +291,7 @@ async fn identity<P: Providers, D: MachineDisk>(
             rendezvous,
             plan: None,
         };
-        disk.write_record(&record.render()).await.map_err(refused)?;
+        disk.write_record(&record.render()).await.map_err(failed)?;
         tracing::info!(node = node_id.0, "machine_formatted");
         return Ok(record);
     };
@@ -306,7 +315,7 @@ async fn identity<P: Providers, D: MachineDisk>(
         changed = true;
     }
     if changed {
-        disk.write_record(&record.render()).await.map_err(refused)?;
+        disk.write_record(&record.render()).await.map_err(failed)?;
     }
     Ok(record)
 }

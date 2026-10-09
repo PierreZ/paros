@@ -25,7 +25,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, TimeProvider,
-    assert_always, assert_reachable, buggify_knob,
+    assert_always, assert_reachable,
 };
 
 use crate::audit::journals::{journal_board, lock as board_lock};
@@ -84,11 +84,11 @@ fn bootstrap_config(ctx: &SimContext, pool: usize, has_matchmakers: bool) -> Acc
 /// and the per-iteration audit — the shared checker every role folds into,
 /// and this incarnation's port. The disk's fault layer is not here: a proxy
 /// has no disk.
-struct RoleRig {
-    incarnation: crate::shape::Incarnation,
-    hooks: BuggifyHooks<SimTimeProvider>,
-    checker: Arc<AuditWorld>,
-    audit: NodeAudit<SimTimeProvider>,
+pub(crate) struct RoleRig {
+    pub(crate) incarnation: crate::shape::Incarnation,
+    pub(crate) hooks: BuggifyHooks<SimTimeProvider>,
+    pub(crate) checker: Arc<AuditWorld>,
+    pub(crate) audit: NodeAudit<SimTimeProvider>,
 }
 
 /// Arm `my_ip`'s rig for this incarnation. The shape is what makes a
@@ -98,7 +98,7 @@ struct RoleRig {
 /// observation, published beside the storage world so every node folds its
 /// transitions into one incremental checker — it never influences the
 /// driver; that is the hooks' job.
-fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
+pub(crate) fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
     let incarnation = crate::shape::boot(ctx.state(), my_ip);
     let hooks = BuggifyHooks::new(
         ctx.time().clone(),
@@ -164,17 +164,20 @@ fn stay_down(checker: &AuditWorld, down: Down) {
 /// the reachable that proves the knob fired there).
 macro_rules! restart_delay {
     ($ctx:expr, $fired:literal) => {{
-        let delay_ms = buggify_knob!(0_u64, 250_u64..3_001_u64);
+        let delay_ms = moonpool_sim::buggify_knob!(0_u64, 250_u64..3_001_u64);
         if delay_ms > 0 {
             // BUGGIFY pairing: this site's restart-delay knob fired.
-            assert_reachable!($fired);
-            $ctx.time()
-                .sleep(Duration::from_millis(delay_ms))
-                .await
-                .ok();
+            moonpool_sim::assert_reachable!($fired);
+            moonpool_sim::TimeProvider::sleep(
+                $ctx.time(),
+                std::time::Duration::from_millis(delay_ms),
+            )
+            .await
+            .ok();
         }
     }};
 }
+pub(crate) use restart_delay;
 
 /// A paros node (an acceptor) in the simulation.
 pub(crate) struct NodeProcess;
@@ -305,7 +308,7 @@ async fn run_joiner(
             Vec::new(),
             Vec::new(),
             Some(system_plan.clone()),
-            Some(control_journals(ctx)),
+            None,
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -358,7 +361,7 @@ impl Process for IdleProcess {
 /// (its identity), and `run` runs it. A process whose IP the map puts in
 /// another group is a harness bug: recorded under `unmapped` (the group's
 /// always-assertion) and refused as not `what` of the deployment.
-async fn dispatch<I, Fut>(
+pub(crate) async fn dispatch<I, Fut>(
     ctx: &SimContext,
     unmapped: &'static str,
     what: &'static str,
@@ -751,7 +754,7 @@ async fn run_acceptor(
             proxies.clone(),
             replicas.clone(),
             system.as_ref().map(|(plan, _)| plan.clone()),
-            system.as_ref().map(|_| control_journals(ctx)),
+            None,
             tunables,
             ctx.shutdown().clone(),
             &hooks,
@@ -1227,22 +1230,10 @@ impl JournalStores for SimStores<'_> {
     }
 }
 
-/// The control journals as the driver learns them (§3.2, §3.8): the run's
-/// drawn cell id, the registry as the cell tenant's control journal, and
-/// the fleet tenant's as the fleet's — so the driver knows its control journals and
-/// `Inspect` names them.
-fn control_journals(ctx: &SimContext) -> paros::machine::ControlJournals {
-    let identifiers = crate::shape::identifiers(ctx.state());
-    paros::machine::ControlJournals {
-        cell_id: identifiers.cell_id,
-        cell: identifiers.registry,
-        fleet: Some(identifiers.fleet),
-    }
-}
-
 /// Arm the system journals on a genesis node (#189): the board, the seats of
-/// the system journals (and the fleet tenant's, #229) on a seed, every seat's port reporting to the board, and
-/// the plan the driver follows them by.
+/// the system journals on a seed, every seat's port reporting to the board,
+/// and the plan the driver follows them by. The fleet tenant and the cell
+/// control journal are the machines' (#246, `crate::machine`).
 fn system_rig(
     ctx: &SimContext,
     deployment: &Deployment,
@@ -1257,13 +1248,8 @@ fn system_rig(
         seat.audit = seat.audit.clone().with_system(board.clone());
     }
     if seeds.contains(&self_rank) {
-        // The fleet tenant (#229) lives beside them: the fleet's one cell hosts it.
         let identifiers = crate::shape::identifiers(ctx.state());
-        for journal in [
-            identifiers.directory,
-            identifiers.registry,
-            identifiers.fleet,
-        ] {
+        for journal in [identifiers.directory, identifiers.registry] {
             let config = Config {
                 peers: seeds.clone(),
                 quorum_system: paros::QuorumSystem::Majority,

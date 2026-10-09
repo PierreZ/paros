@@ -31,7 +31,7 @@
 //! No function here draws randomness: every choice is read off the caller's
 //! step draws.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
@@ -127,7 +127,16 @@ pub(super) struct SystemOps {
 /// `check()` searches for a linearization against the journal model, as a
 /// tenant journal's history is.
 pub(super) struct Announce {
-    journals: Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>, CallLog)>,
+    /// The journals announced; `None` announces every journal the client
+    /// calls — a client over the machines (#246), whose control journals
+    /// are learned at runtime.
+    only: Option<Vec<JournalIdentifier>>,
+    state: moonpool_sim::StateHandle,
+    time: moonpool_sim::SimTimeProvider,
+    client: u64,
+    /// Each announced journal's audit world and shared log, in first-call
+    /// order: an attempt token names its index.
+    journals: Mutex<Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>, CallLog)>>,
 }
 
 /// An attempt token names its journal in the high bits: a token is one
@@ -137,34 +146,62 @@ const TOKEN_JOURNAL_SHIFT: u32 = 48;
 impl Announce {
     /// An observer announcing the writes to each of `journals`.
     pub(super) fn new(ctx: &SimContext, journals: &[JournalIdentifier]) -> Self {
-        let client = u64::try_from(ctx.client_id()).unwrap_or(0);
         Self {
-            journals: journals
-                .iter()
-                .map(|journal| {
-                    (
-                        *journal,
-                        audit_world_for(ctx.state(), *journal),
-                        CallLog::shared(
-                            *journal,
-                            client,
-                            ctx.time().clone(),
-                            super::rpc::control_attempts(ctx.state(), *journal),
-                        ),
-                    )
-                })
-                .collect(),
+            only: Some(journals.to_vec()),
+            ..Self::every(ctx)
         }
+    }
+
+    /// An observer announcing the writes to every journal its client calls
+    /// (#246): a client over the machines, which serve only the cell's
+    /// journals.
+    pub(super) fn every(ctx: &SimContext) -> Self {
+        Self {
+            only: None,
+            state: ctx.state().clone(),
+            time: ctx.time().clone(),
+            client: u64::try_from(ctx.client_id()).unwrap_or(0),
+            journals: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `journal`'s index, its entry made on the first call; `None` for a
+    /// journal this observer does not announce.
+    fn entry(
+        &self,
+        journal: JournalIdentifier,
+    ) -> Option<(usize, Arc<crate::audit::AuditWorld>, CallLog)> {
+        if self
+            .only
+            .as_ref()
+            .is_some_and(|only| !only.contains(&journal))
+        {
+            return None;
+        }
+        let mut journals = self.journals.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = if let Some(index) = journals.iter().position(|(j, _, _)| *j == journal) {
+            index
+        } else {
+            journals.push((
+                journal,
+                audit_world_for(&self.state, journal),
+                CallLog::shared(
+                    journal,
+                    self.client,
+                    self.time.clone(),
+                    super::rpc::control_attempts(&self.state, journal),
+                ),
+            ));
+            journals.len() - 1
+        };
+        let (_, audit, log) = &journals[index];
+        Some((index, audit.clone(), log.clone()))
     }
 }
 
 impl CallObserver for Announce {
     fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
-        let (index, (_, audit, log)) = self
-            .journals
-            .iter()
-            .enumerate()
-            .find(|(_, (j, _, _))| *j == attempt.journal())?;
+        let (index, audit, log) = self.entry(attempt.journal())?;
         if let Attempted::Write(write) = attempt {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
@@ -183,7 +220,13 @@ impl CallObserver for Announce {
 
     fn answered(&self, token: u64, answer: Answered<'_>) {
         let index = usize::try_from(token >> TOKEN_JOURNAL_SHIFT).unwrap_or(usize::MAX);
-        if let Some((_, _, log)) = self.journals.get(index) {
+        let log = self
+            .journals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .map(|(_, _, log)| log.clone());
+        if let Some(log) = log {
             log.answered(token & ((1 << TOKEN_JOURNAL_SHIFT) - 1), answer);
         }
     }

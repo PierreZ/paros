@@ -11,18 +11,14 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
 use std::path::PathBuf;
 
-use paros::machine::{CellPlan, MachineDisk, journal_config};
-use paros::{Config, JournalIdentifier, JournalStorage, JournalStoreConfig, NodeId};
+use moonpool_core::TokioStorageProvider;
+use paros::machine::{CellPlan, MachineDisk, ProviderDisk};
+use paros::{Config, JournalIdentifier, JournalStoreConfig, NodeId};
 
-use crate::record::{Record, write_atomically};
-use crate::stores::{DirStores, journal_dir, path_str};
-
-/// The machine record's file name under the data directory.
-const FILE: &str = "machine";
+use crate::record::Record;
+use crate::stores::{DirStores, path_str};
 
 /// The role the provisioning record names for a machine's stores.
 pub const ROLE: &str = "machine";
@@ -35,39 +31,35 @@ pub struct DirDisk {
     pub layout: JournalStoreConfig,
 }
 
+impl DirDisk {
+    /// The record and the formation's stores, on Tokio's filesystem: the
+    /// library's code, the one the simulation runs.
+    fn disk(&self) -> ProviderDisk<TokioStorageProvider> {
+        ProviderDisk::new(
+            TokioStorageProvider::new(),
+            path_str(&self.data_dir),
+            self.layout,
+        )
+    }
+}
+
 impl MachineDisk for DirDisk {
     type Stores = DirStores;
 
     async fn read_record(&mut self) -> Result<Option<String>, String> {
-        match fs::read_to_string(self.data_dir.join(FILE)) {
-            Ok(text) => Ok(Some(text)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.to_string()),
-        }
+        self.disk().read_record().await
     }
 
     async fn write_record(&mut self, text: &str) -> Result<(), String> {
-        write_atomically(&self.data_dir, FILE, text).map_err(|e| e.to_string())
+        self.disk().write_record(text).await
     }
 
     async fn holds_stores(&mut self) -> bool {
-        self.data_dir.join("journals").exists()
-            || Record::read(&self.data_dir).ok().flatten().is_some()
+        self.disk().holds_journals().await || Record::read(&self.data_dir).ok().flatten().is_some()
     }
 
     async fn provision(&mut self, node_id: NodeId, plan: &CellPlan) -> Result<(), String> {
-        let provider = moonpool_core::TokioStorageProvider::new();
-        for &journal in &plan.journals {
-            let mut store = JournalStorage::new(
-                provider.clone(),
-                path_str(&journal_dir(&self.data_dir, journal)),
-                journal_config(plan, node_id, journal),
-                self.layout,
-            );
-            paros::provision_store(&mut store)
-                .await
-                .map_err(|e| format!("journal {journal}: {e}"))?;
-        }
+        self.disk().format(node_id, plan).await?;
         Record {
             role: ROLE.into(),
             id: node_id.0,
@@ -106,7 +98,7 @@ mod tests {
         disk.write_record("node_id 3\n").await.expect("written");
         assert_eq!(disk.read_record().await, Ok(Some("node_id 3\n".into())));
         assert!(!dir.path().join("machine.tmp").exists());
-        fs::create_dir_all(dir.path().join("journals")).expect("mkdir");
+        std::fs::create_dir_all(dir.path().join("journals")).expect("mkdir");
         assert!(
             disk.holds_stores().await,
             "a store without a record is amnesia"

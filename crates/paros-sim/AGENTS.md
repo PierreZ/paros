@@ -12,9 +12,10 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `roles.rs` → `Deployment`, `Role`, group names, `joiner_node_id`, `replica_node_id` → the per-seed role map.
 - `shape.rs` → `NodeShape`, `QuorumPolicy`, `JournalPlan` → every per-seed and per-node draw (below).
 - `process.rs` → `NodeProcess::chaotic`, `MatchmakerProcess`, `ProxyProcess`, `ReplicaProcess`, `JoinerProcess`, `IdleProcess`, `ContractSuiteWorkload` → one `Seat` per journal over `SimStores`.
+- `machine.rs` → `MachineProcess`, `MachineBoard` → the machines (#246): the shipped `paros::machine::run_machine` on the library's `ProviderDisk` over the simulated disk, from an empty disk, formed by the workload's `init`; stores ordered, outside the injector and the power cut; oracles: no cell forms without `init`, every formation names the one cell, a failed record write restarts the machine.
 - `lifecycle.rs` → `ScriptedLifecycle` → the `fault_factory` injector (the chain client's operator crashes and reboots, #173).
 - `hooks.rs` → `BuggifyHooks<T>` → every `DriverHooks` method, one `buggify_with_prob!` each; module table of enabled/consulted/fired/recovered.
-- `client.rs` → `ClientRuntime`, `ChainClient = paros::client::Client<SimProviders>` → a workload's client-only RPC runtime.
+- `client.rs` → `ClientRuntime`, `ChainClient = paros::client::Client<SimProviders>`, `Connector` → a workload's client-only RPC runtime; `Connector` builds clients over servers learned at runtime (the machines, #246).
 - `state.rs` → `published`, `journal_key` → get-or-publish of per-iteration singletons on the `StateHandle`.
 - `chain.rs` → `ChainState` → the Chain-of-Blocks fold a journal client computes (#186).
 - `chain_workload.rs` → `ChainWorkload`, `ChainConfig` → the op alphabet, weights, reconfiguration shape rings.
@@ -22,7 +23,8 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `chain_workload/races.rs` → races 1 and 2 of #205 (`burst`, `ack_race`).
 - `chain_workload/foreign.rs` → the cross-tenant attack (#247): a `Write`, `Truncate` or `SetLeader` under another tenant's journal or an identifier nobody serves, refused and never applied (`AuditWorld::note_foreign`).
 - `chain_workload/fold.rs` → the client's fold and the trim fence · `chain_workload/system.rs` → ops 17–21, 23 and 24, and their read-back (the registry's through a checkpoint `Folder`); `Announce`, the audit observer for library writes to system journals and the logger of every attempt at them into the control journals' shared history (#247, `rpc::control_attempts`).
-- `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229): `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step, target-kill (#247), changed-identity and fleet-tenant checkpoint-crash shapes, a reachable per `Stage`, and the check that the fleet directory equals the cell's tenant list — mid-run when both folds are one instant's, and on every run over the final folds, with the recovery tail's control-plane liveness (`settle`, `final_check`).
+- `chain_workload/fleet.rs` → `FleetOps` → ops 25 and 26 (#229, #246): `init` whole through `paros::client::initialize` against the machines (sent to the layout's seed, again once known, or misdirected to a non-seed that must refuse it), the cell learned from that run or through `Inspect` (never injected), `init`'s fleet half and tenant create/remove through `FleetSession`, the crash-at-a-step, target-kill (#247), changed-identity and fleet-tenant checkpoint-crash shapes, a reachable per `Stage`, and the check that the fleet directory equals the cell's tenant list — mid-run when both folds are one instant's, and on every run over the final folds, with the recovery tail's control-plane liveness (`settle`, `final_check`).
+- `chain_workload/fleet/cell.rs` → `Cell` → `init` whole against the machines (`paros::client::initialize`) and the cell learned from that run or through `Inspect` (#246).
 - `world/mod.rs` → `StorageWorld`, `storage_world_for` → the storage ledger: copy budget, parked ids, provisioning ledger, reconfiguration ledger, custody ledger. There is no fake disk: every role stores on the library's journal stores over moonpool's simulated disk (#261).
 - `world/node_store.rs` → `LedgeredJournal` → `JournalStorage` on `SimStorageProvider` (#187) for acceptors, replicas, joiners and every journal; the journal store tells the audit what each commit has in flight (`AuditWorld::note_in_flight`, #264).
 - `world/registry_store.rs` → `LedgeredRegistry` → `JournalMatchmakerStorage` on `SimStorageProvider` (#176), with the provisioning ledger and the registry's in-flight writes (`AuditWorld::note_registry_in_flight`).
@@ -35,7 +37,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
 - `audit/losses.rs` → `Losses` → an outage's losses as the journal reports them (#263): the shape recognized (no, one, fewer than a quorum of clean copies; `faulty, faulty, none`; the only clean copy on a removed node), the CTRL rule re-derived to name a slot unrecoverable, "an unrecoverable slot is never accepted again", the four outcome gates, and the convergence excuse.
-- `audit/client.rs` → `ClientHistory`, `check_control_history` (the fleet tenant's control journal, the registry and the directory, #247) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
+- `audit/client.rs` → `ClientHistory`, `check_control_history` (the registry, the directory, and the control journals of the cell the machines formed, #247, #246) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, generation chain, monotone `first_seq`).
 - `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
 
@@ -44,7 +46,9 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - **Main campaign**: process groups `paros-node` (acceptors, 3–6), `paros-matchmaker` (0–5),
   `paros-proxy` (0–3, `ProxyId(rank)`), `paros-replica` (0–2, `NodeId(1000 + rank)`, a quiet
   journal store outside the copy budget), `paros-joiner` (0–2, `NodeId(100 + rank)`, idle without system
-  journals). Attrition per group (`AttritionVictims::group`); joiners are no victim. 1–3
+  journals), `paros-machine` (1–3, a minted `node_id`; `shape::machine_layout` draws the seeds,
+  each machine's class, capacity and failure domain, the seed `init` goes to and the
+  assignment). Attrition per group (`AttritionVictims::group`); joiners are no victim. 1–3
   `ChainWorkload` clients. Zero matchmakers = the plain Multi-Paxos deployment.
 - **Bootstrap**: `bootstrap_ranks` — the whole pool, or on a matchmaker seed a subset of at least
   `MIN_BOOTSTRAP` leaving *spares* a `Reconfigure` pulls in.
@@ -66,7 +70,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
 - `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
   window (`hold_journal`). The first is the run's main identifier (`Identifiers::main`; `identifiers` draws it, the
-  directory's, the registry's, the fleet tenant's and the cell id once per seed: no identifier is fixed); the
+  directory's and the registry's once per seed: no identifier is fixed; the cell's and the fleet tenant's are `init`'s, on a machine); the
   others' identifiers are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
   id under another tenant). `journal_layout` → every seed's journal stores (#176, #261): acceptors, replicas, joiners
@@ -77,7 +81,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   (`SelfCrash`, `world/power.rs`), a wipe deletes the journal's files, the ledgered injector
   damages a boot, and moonpool's storage chaos runs under it. A quiet seat (a replica, a held
   journal) stores ordered with the power cut and the injector dark. `withhold_gc` → a seed
-  whose nodes withhold GC requests for the chaos window (#263). `system_journals` → the directory, the registry and the fleet tenant's control journal (#229) on half the seeds (the fleet operations too: kept at 50% from the sweep's coverage, #247), on
+  whose nodes withhold GC requests for the chaos window (#263). `system_journals` → the directory and the registry on half the seeds (kept at 50% from the sweep's coverage, #247; the fleet operations run on every seed, against the machines, #246), on
   `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), seam bias, wipe/loss %, `config_edit_pct`.
 
 ## Chain workload op ids (`chain_workload.rs:47-127`; ids never shift)
@@ -95,7 +99,7 @@ capacity, and a registered joiner registering again is a reboot, #211) · `SET_L
 the generation) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
 `BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
-#211) · `FLEET_INIT=25` (`init`'s fleet half through `paros::client::fleet`, #229) · `TENANT=26`
+#211) · `FLEET_INIT=25` (`init` whole through `paros::client::initialize` while the cell is unknown or on a coin, else `init`'s fleet half through `paros::client::fleet`, #229, #246) · `TENANT=26`
 (create or remove a tenant through the fleet tenant and the cell; either may stop after one step, a BUGGIFY
 crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired ids are no-ops that keep their slot in the alphabet.
 
@@ -156,12 +160,12 @@ crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired
 
 `pub(crate)`: `PROCESS_POOL_RANGE = 3..=6` (`lib.rs:98`), `MATCHMAKER_POOL_RANGE = 0..=5`
 (`:112`), `PROXY_POOL_RANGE = 0..=3` (`:124`), `REPLICA_POOL_RANGE = 0..=2` (`:134`),
-`JOINER_POOL_RANGE = 0..=2` (`:141`), `CLIENT_COUNT_RANGE = 1..4` (`:147`), `PLATEAU_SEEDS = 8`
+`JOINER_POOL_RANGE = 0..=2` (`:141`), `MACHINE_POOL_RANGE = 1..=3`, `CLIENT_COUNT_RANGE = 1..4` (`:147`), `PLATEAU_SEEDS = 8`
 (`:154`), `CHAOS_DURATION_MS = 4_000` (`:188`); `pub`: `SMOKE_ITERATIONS = 50` (`:158`),
 `COVERAGE_ITERATIONS = 1024` (`:161`), `EXPLORATION_TIMELINES_PER_SEED = 8` (`:163`).
 `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`), `ENTRY_BLOCKS_FLOOR = 17` (`:657`),
 `PERSIST_BLOCKS_FLOOR = 2` (`:665`), `SEED_COUNT = 1` (`:712`), `MIN_BOOTSTRAP = 3` (`:939`). `chaos_surfaces()` = `Network(Swarm)` +
-four per-group attritions + the acceptor-and-proxy `Outage(Swarm)` + `BuggifyKnobs` + `Storage(Swarm)`; `BitFlip` masked; storage masked to
+five per-group attritions + the acceptor-and-proxy `Outage(Swarm)` + `BuggifyKnobs` + `Storage(Swarm)`; `BitFlip` masked; storage masked to
 crash damage, failed syncs, short transfers and lost directory entries (`storage_fault_mask()`:
 rot, phantom writes, degradation and disk failure stay out, #176); `prob_wipe = 0`.
 Deps: `paros`, `moonpool-sim` (`exploration`, `Cargo.toml:20`), `moonpool-rpc` (`:29`) — pin

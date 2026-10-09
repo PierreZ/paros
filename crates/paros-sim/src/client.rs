@@ -89,6 +89,17 @@ impl ClientRuntime {
         )
     }
 
+    /// A [`Connector`] on this runtime: what builds a client over servers
+    /// learned at runtime (#246, the machines `init` formed).
+    pub(crate) fn connector(&self, ctx: &SimContext, tunables: ClientTunables) -> Connector {
+        Connector {
+            rpc: self.rpc.clone(),
+            providers: ctx.providers().clone(),
+            shutdown: ctx.shutdown().clone(),
+            tunables,
+        }
+    }
+
     /// One client per server, in `servers` order.
     pub(crate) fn clients(&self, servers: &[String]) -> SimulationResult<Vec<SimClient>> {
         servers
@@ -122,4 +133,45 @@ pub(crate) fn client_rpc_config(
     config.peer.ping_interval = ping_interval;
     config.peer.ping_timeout = ping_timeout;
     config
+}
+
+/// Builds library clients over servers learned at runtime (#246): the
+/// machines a cell formed over, by their minted ids. Bound to its
+/// [`ClientRuntime`]'s RPC runtime, so it lives no longer than the run.
+#[derive(Clone)]
+pub(crate) struct Connector {
+    rpc: RpcHandle<SimProviders>,
+    providers: SimProviders,
+    shutdown: CancellationToken,
+    tunables: ClientTunables,
+}
+
+impl Connector {
+    /// The RPC runtime the clients are bound to.
+    pub(crate) fn rpc(&self) -> &RpcHandle<SimProviders> {
+        &self.rpc
+    }
+
+    /// The run's providers.
+    pub(crate) fn providers(&self) -> &SimProviders {
+        &self.providers
+    }
+
+    /// The library client of `servers` (`(node id, address)`, in the order
+    /// the client indexes them).
+    pub(crate) fn client(&self, servers: &[(u64, std::net::SocketAddr)]) -> ChainClient {
+        moonpool_sim::assert_always!(
+            !servers.is_empty(),
+            "client: a client over learned servers names at least one"
+        );
+        let servers = servers
+            .iter()
+            .map(|(id, addr)| Server {
+                id: *id,
+                node: NodeClient::new(&self.rpc, *addr),
+            })
+            .collect();
+        paros::client::Client::new(&self.providers, servers, self.tunables)
+            .with_shutdown(self.shutdown.clone())
+    }
 }

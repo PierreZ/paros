@@ -37,11 +37,13 @@
 //! one that claims the cell control journal, is the lowest member id
 //! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
 //!
-//! Provider-generic like every driver here, so the simulation can run it
-//! when the cell's bootstrap joins the campaign; today only `parosd` does
-//! (#246). Durability is the caller's ([`MachineDisk`]): the library never
-//! touches a path.
+//! Provider-generic like every driver here: `parosd` runs it on a data
+//! directory and the simulation on its simulated disk, each machine formed by
+//! the workload's `init` (#246). Durability is the caller's ([`MachineDisk`]);
+//! the record's write protocol and the formation's stores are
+//! [`ProviderDisk`], over any storage provider, which both callers use.
 
+mod disk;
 mod lifecycle;
 mod record;
 mod wait;
@@ -51,6 +53,7 @@ use std::net::SocketAddr;
 
 use paros_core::{JournalId, JournalIdentifier, NodeId, TenantId};
 
+pub use disk::ProviderDisk;
 pub use lifecycle::{MachineDisk, MachineError, MachineSettings, run_machine};
 pub use record::{MachineRecord, PlanState, journal_config};
 pub use wait::{CellLedger, wait_for_cell};

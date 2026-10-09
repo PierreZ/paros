@@ -89,6 +89,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Simulation rules
 
+- **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
+  as possible in the simulation, setup included. Always BUGGIFY your way into the complex
+  situations rather than script them. Test several behaviours through the one workload with
+  swarm, never a new workload.
 - **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
   gate: it exits non-zero on any safety violation and must *saturate* assertion and code
   coverage; prove a red→green result there. The nextest sim tests are a fast smoke
@@ -140,8 +144,10 @@ which drives every call through the library client `paros::client`; its misbehav
 writes, duplicates, dual submits) are explicit calls, never the library's defaults. Every run is
 judged by the client's own history (`ClientHistory`, searched for a linearization against the
 journal's model) and the shared `AuditWorld`. Roles come from moonpool process groups
-(`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`) through the
-deployment/role map `paros_sim::roles`. No third workload, no per-scenario process type, no
+(`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`,
+`paros-machine`) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
+running the shipped `run_machine` from an empty disk, formed into a cell by the workload's
+`init` (`paros::client::initialize`) over a per-seed layout (#246). No third workload, no per-scenario process type, no
 check that reads a trace. Depth: `crates/paros-sim/AGENTS.md` (the op-id table, the role map,
 the quorum-system and grid draws, the journal and storage coins).
 

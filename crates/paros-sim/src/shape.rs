@@ -508,6 +508,9 @@ struct Registry {
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
+    /// Run-level: the machines' layout (see [`machine_layout`]), fixed by
+    /// the first caller.
+    machine_layout: Option<MachineLayout>,
     /// Run-level: every identifier the run names (see [`identifiers`]), fixed by the
     /// first caller.
     identifiers: Option<Identifiers>,
@@ -536,24 +539,23 @@ pub(crate) struct JournalPlan {
 }
 
 /// Every identifier the run names (`docs/architecture.md` §3.8: no identifier is
-/// fixed), drawn once per seed: the deployment's journal, the system
+/// fixed), drawn once per seed: the deployment's journal and the system
 /// journals (the directory — a user tenant's control journal — and the
-/// registry — the cell tenant's), the fleet tenant's control journal, and the cell's
-/// id. Each a random tenant and a random journal, both set; no two share a
-/// tenant except the main journal and the directory, which belong to the
-/// one user tenant.
+/// joiners' registry). Each a random tenant and a random journal, both set;
+/// no two share a tenant except the main journal and the directory, which
+/// belong to the one user tenant. The cell's id, its control journal and the
+/// fleet tenant's are not the harness's: `init` draws them on a machine
+/// (#246), and every process learns them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Identifiers {
     /// The deployment's journal.
     pub(crate) main: JournalIdentifier,
     /// The directory: the main journal's tenant's control journal.
     pub(crate) directory: JournalIdentifier,
-    /// The registry: the cell tenant's control journal.
+    /// The node registry the joiners register in (#189): a harness journal
+    /// on the acceptors until #210 and #211 make it the cell control
+    /// journal the machines serve.
     pub(crate) registry: JournalIdentifier,
-    /// The fleet tenant's control journal.
-    pub(crate) fleet: JournalIdentifier,
-    /// The cell's id.
-    pub(crate) cell_id: u64,
 }
 
 /// A random set id.
@@ -582,13 +584,10 @@ pub(crate) fn identifiers(state: &StateHandle) -> Identifiers {
             }
         };
         let registry = fresh();
-        let fleet = fresh();
         Identifiers {
             main,
             directory,
             registry,
-            fleet,
-            cell_id: draw_id(),
         }
     })
 }
@@ -850,6 +849,95 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
                     JoinerMachine { class, capacity }
                 })
                 .collect()
+        })
+        .clone()
+}
+
+/// One machine's half of its record (#246): what its operator configures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MachineDraw {
+    /// Its class, fixed at format.
+    pub(crate) class: paros::machine::Class,
+    /// Its capacity.
+    pub(crate) capacity: u64,
+    /// Its failure domain.
+    pub(crate) failure_domain: String,
+}
+
+/// The run's machines (#246): the layout an operator gives a fleet before
+/// `init`, drawn per seed so every run forms another cell. Forming it is the
+/// run's own business (decided on 2026-10-09): nothing here is a cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MachineLayout {
+    /// How many machines, the lowest ranks, are seeds: every machine's
+    /// rendezvous names them, and `init` forms the cell over them.
+    pub(crate) seeds: usize,
+    /// Each machine's settings, in rank order.
+    pub(crate) machines: Vec<MachineDraw>,
+    /// The seed every operator sends `init` to (every seed's join list
+    /// names it, §3.1).
+    pub(crate) target: usize,
+    /// How many user journals a formed cell serves beside its control
+    /// journals (the static assignment, until #212).
+    pub(crate) assignment: usize,
+}
+
+/// The run's machine layout (#246), drawn once per seed by whoever asks
+/// first, for `count` machines in rank order. The seed count is uniform over
+/// `1..=count`; every seed is a `storage` machine (`init` refuses a
+/// `stateless` seed) and every other machine is `storage` or `stateless` on
+/// a coin, waiting for a placement that is #212's. The capacity is one
+/// `buggify_knob!` for the run (default 2, extreme 1..=4; floor 1, as a
+/// joiner's); the assignment one more (default 1, `parosd`'s; extreme 0..=2:
+/// a cell of control journals alone, or two user journals beside them).
+#[tracing::instrument(level = "debug", skip(state))]
+pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .machine_layout
+        .get_or_insert_with(|| {
+            let seeds = if count == 0 {
+                0
+            } else {
+                moonpool_sim::sim_random_range(1..count + 1)
+            };
+            let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
+            let assignment = buggify_knob!(1_usize, 0_usize..3_usize);
+            let target = if seeds == 0 {
+                0
+            } else {
+                moonpool_sim::sim_random_range(0..seeds)
+            };
+            let machines = (0..count)
+                .map(|rank| {
+                    let class = if rank >= seeds && moonpool_sim::sim_random_bool(0.5) {
+                        assert_reachable!("machine: a machine outside the seeds is stateless");
+                        paros::machine::Class::Stateless
+                    } else {
+                        paros::machine::Class::Storage
+                    };
+                    MachineDraw {
+                        class,
+                        capacity,
+                        failure_domain: format!(
+                            "zone-{}",
+                            moonpool_sim::sim_random_range(0_u32..3_u32)
+                        ),
+                    }
+                })
+                .collect();
+            assert_always!(
+                count == 0 || (seeds >= 1 && seeds <= count && target < seeds),
+                "machine: a layout's seeds and init target are machines of it",
+                { "count" => count, "seeds" => seeds, "target" => target }
+            );
+            MachineLayout {
+                seeds,
+                machines,
+                target,
+                assignment,
+            }
         })
         .clone()
 }

@@ -1270,6 +1270,19 @@ Simulation is the investment. Every milestone lands with its share of:
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a
   client's two-hop resolution keeps succeeding through an outage of the fleet tenant. In M13: the
   witness region, the per-region pools and a move between cell kinds.
+- Setup under simulation (decided on 2026-10-09, #246): all of paros runs in the simulation,
+  setup included. Simulated `parosd` machines run the shipped `paros::machine::run_machine`
+  from an empty disk (format, a minted `node_id`, the machine record, the wait); the workload's
+  `init` is `paros::client::initialize`, the code `parosctl init` prints; the machines it forms
+  host the cell control journal and the fleet tenant, and every other process learns their
+  identifiers through `Inspect`, never by injection. Forming the cell is part of every run, never
+  injected state: the seed draws the layout (machine count, classes, capacities, which machine
+  receives `init`), when and how often `init` and the commands after it are sent, and every
+  fault stays on through setup. The harness's own setup holds only what an operator does offline,
+  outside paros (generating the Biscuit root key pair, #245). Until #190 and #210 make the main journal
+  and the directory plan data, the acceptors that serve them keep the per-seed harness draw
+  (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
+  too.
 - New BUGGIFY sites for every new decision the driver, the frontend, the resolver and the
   coordinators take, and the coverage-guided sweep saturating over them.
 
