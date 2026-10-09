@@ -7,14 +7,14 @@
 //! [`node_store::LedgeredJournal`] and [`registry_store::LedgeredRegistry`].
 //! The [`StorageWorld`] is **protocol-blind** and outlives process crashes
 //! (owned by the `StateHandle`); the damage it permits is the ledgered
-//! injector's ([`injector`]) and the power cuts' ([`power`]).
+//! injector's ([`injector`]) and the power cuts' budget ([`cut`]).
 
 pub(crate) mod bare_outage;
+pub(crate) mod cut;
 pub(crate) mod injector;
 pub(crate) mod late_outage;
 pub(crate) mod node_store;
 pub(crate) mod outage;
-pub(crate) mod power;
 pub(crate) mod registry_store;
 pub(crate) mod wipe;
 
@@ -467,14 +467,16 @@ impl StorageWorld {
     /// `tolerated` distinct acceptors per run (the floor minus the clean
     /// copies every record keeps), a node already cut staying permitted.
     pub(crate) fn permit_power_cut(&mut self, key: &str, tolerated: usize) -> bool {
-        if self.cut_nodes.contains(key) {
-            return true;
-        }
-        if self.cut_nodes.len() >= tolerated {
+        if !self.may_cut_node(key, tolerated) {
             return false;
         }
         self.cut_nodes.insert(key.to_string());
         true
+    }
+
+    /// [`StorageWorld::permit_power_cut`]'s answer, spending nothing.
+    pub(crate) fn may_cut_node(&self, key: &str, tolerated: usize) -> bool {
+        self.cut_nodes.contains(key) || self.cut_nodes.len() < tolerated
     }
 
     /// Whether matchmaker `key` may lose power inside a `Batched` registry
@@ -483,14 +485,23 @@ impl StorageWorld {
     /// one matchmaker loss: only on a bootstrap set that can spare one, never
     /// alongside the wipe coin, and only this matchmaker from then on.
     pub(crate) fn permit_matchmaker_power_cut(&mut self, key: &str, bootstrap: usize) -> bool {
-        if let Some(cut) = &self.cut_matchmaker {
-            return cut == key;
-        }
-        if bootstrap < crate::shape::MATCHMAKER_LOSS_FLOOR || !self.parked_matchmakers.is_empty() {
+        if !self.may_cut_matchmaker(key, bootstrap) {
             return false;
         }
         self.cut_matchmaker = Some(key.to_string());
         true
+    }
+
+    /// [`StorageWorld::permit_matchmaker_power_cut`]'s answer, spending
+    /// nothing.
+    pub(crate) fn may_cut_matchmaker(&self, key: &str, bootstrap: usize) -> bool {
+        match &self.cut_matchmaker {
+            Some(cut) => cut == key,
+            None => {
+                bootstrap >= crate::shape::MATCHMAKER_LOSS_FLOOR
+                    && self.parked_matchmakers.is_empty()
+            }
+        }
     }
 
     /// Whether matchmaker `key` is the one a `Batched` cut was permitted on

@@ -9,20 +9,20 @@
 //! landed when that sync returns), and a process killed in between leaves the
 //! operator honestly unsure, which the next boot resolves by reading the disk
 //! ([`resolve_registry_provisioning`]). A commit may lose power partway
-//! through ([`PowerCut`]); a seam crash is a power loss (`crate::process`).
+//! through, at the store's own `hint!`s, budgeted by [`super::cut`].
 //! moonpool's storage chaos fails syncs on the simulated disk itself.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{SimStorageProvider, assert_reachable, assert_sometimes};
+use moonpool_sim::{SimStorageProvider, StateHandle, assert_reachable, assert_sometimes};
 use paros::{
     Ballot, JournalIdentifier, JournalMatchmakerStorage, MatchmakerConfig, MatchmakerHardState,
     MatchmakerStorage, Registration, RegistryStorage, StorageError,
 };
 
 use super::StorageWorld;
-use super::power::PowerCut;
+use super::cut::{Budget, InFlight, Owner};
 use crate::audit::{AuditWorld, RegistryOp};
 
 /// The directory a matchmaker's registry lives in on its simulated disk.
@@ -36,8 +36,9 @@ pub(crate) struct LedgeredRegistry {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
-    /// How this matchmaker can lose power in the middle of a commit.
-    power: PowerCut,
+    /// The run's state: where a commit in flight registers for the cut's
+    /// budget ([`super::cut`]).
+    state: StateHandle,
     /// The shared checker, told what each commit has in flight.
     checker: Arc<AuditWorld>,
     /// This matchmaker's id, the checker's key.
@@ -60,7 +61,7 @@ impl LedgeredRegistry {
         layout: paros::JournalStoreConfig,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        power: PowerCut,
+        state: StateHandle,
         checker: Arc<AuditWorld>,
         matchmaker: u64,
         cut_budget: Option<usize>,
@@ -70,7 +71,7 @@ impl LedgeredRegistry {
             world,
             ip,
             format_pending: false,
-            power,
+            state,
             checker,
             matchmaker,
             staged: Vec::new(),
@@ -209,37 +210,30 @@ impl MatchmakerStorage for LedgeredRegistry {
     async fn sync(&mut self) -> Result<(), StorageError> {
         let writes = self.inner.has_staged();
         let held = !self.inner.registered_ballots().is_empty();
-        let (budget_world, budget_ip, budget) =
-            (self.world.clone(), self.ip.clone(), self.cut_budget);
-        let permit = move || {
-            budget.is_none_or(|bootstrap| {
-                budget_world.upgrade().is_some_and(|world| {
-                    world
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .permit_matchmaker_power_cut(&budget_ip, bootstrap)
-                })
-            })
-        };
-        let world = self.world.clone();
-        let ip = self.ip.clone();
-        let on_cut = move || {
-            if held && let Some(world) = world.upgrade() {
-                world
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .note_registry_cut(&ip);
-            }
-        };
         // What a crash from here to the driver's report may land unreported.
         let ops = std::mem::take(&mut self.staged);
         if !ops.is_empty() {
             self.checker
                 .note_registry_in_flight(self.matchmaker, Some(ops));
         }
-        self.power
-            .around(writes, permit, on_cut, self.inner.sync())
-            .await?;
+        // A commit that writes is in flight until the sync returns: a hint
+        // that kills the process now spends the matchmaker loss budget.
+        let in_flight = writes.then(|| {
+            let budget = Budget::Matchmaker {
+                bootstrap: self.cut_budget,
+                held,
+            };
+            InFlight::open(
+                &self.state,
+                &self.ip,
+                Owner::Matchmaker,
+                budget,
+                self.world.clone(),
+            )
+        });
+        let synced = self.inner.sync().await;
+        drop(in_flight);
+        synced?;
         // Synced: the driver reports the commit next, with nothing between.
         self.checker.note_registry_in_flight(self.matchmaker, None);
         if std::mem::take(&mut self.format_pending) {

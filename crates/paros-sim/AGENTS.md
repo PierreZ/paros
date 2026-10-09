@@ -12,7 +12,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `roles.rs` → `Deployment`, `Role`, group names, `joiner_node_id`, `replica_node_id` → the per-seed role map.
 - `shape.rs` → `NodeShape`, `QuorumPolicy`, `JournalPlan` → every per-seed and per-node draw (below).
 - `process.rs` → `NodeProcess::chaotic`, `MatchmakerProcess`, `ProxyProcess`, `ReplicaProcess`, `JoinerProcess`, `IdleProcess`, `ContractSuiteWorkload` → one `Seat` per journal over `SimStores`.
-- `machine.rs` → `MachineProcess`, `MachineBoard` → the machines (#246): the shipped `paros::machine::run_machine` on a bare `ProviderDisk` over the simulated disk (no wrapper, #294), from an empty disk, formed by the workload's `init` (`cell init`'s decree over the layout's founding members, #277); stores ordered, outside the injector and the power cut; oracles: no cell forms without `init`, every formation names the one cell, only a founding member forms and over exactly the founders (the lifecycle reports through the audit port, `NodeAudit::on_machines`), a failed record write restarts the machine (the one loop: `parosd`'s supervisor); its faults are the lifecycle's own `hint!`s, struck by the machine group's attrition.
+- `machine.rs` → `MachineProcess`, `MachineBoard` → the machines (#246): the shipped `paros::machine::run_machine` on a bare `ProviderDisk` over the simulated disk (no wrapper, #294), from an empty disk, formed by the workload's `init` (`cell init`'s decree over the layout's founding members, #277); stores ordered (a cut mid-commit is torn or whole), outside the injector; oracles: no cell forms without `init`, every formation names the one cell, only a founding member forms and over exactly the founders (the lifecycle reports through the audit port, `NodeAudit::on_machines`), a failed record write restarts the machine (the one loop: `parosd`'s supervisor); its faults are the lifecycle's own `hint!`s, struck by the machine group's attrition.
 - `lifecycle.rs` → `ScriptedLifecycle` → the `fault_factory` injector (the chain client's operator crashes and reboots, #173).
 - `hooks.rs` → `BuggifyHooks<T>` → every `DriverHooks` method, one `buggify_with_prob!` each; module table of enabled/consulted/fired/recovered. Being deleted (#294): each method moves inline into `paros`; add none.
 - `client.rs` → `ClientRuntime`, `ChainClient = paros::client::Client<SimProviders>`, `Connector` → a workload's client-only RPC runtime; `Connector` builds clients over servers learned at runtime (the machines, #246).
@@ -29,7 +29,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `world/mod.rs` → `StorageWorld`, `storage_world_for` → the storage ledger: copy budget, parked ids, provisioning ledger, reconfiguration ledger, custody ledger. There is no fake disk: every role stores on the library's journal stores over moonpool's simulated disk (#261).
 - `world/node_store.rs` → `LedgeredJournal` → `JournalStorage` on `SimStorageProvider` (#187) for acceptors, replicas, joiners and every journal; the journal store tells the audit what each commit has in flight (`AuditWorld::note_in_flight`, #264).
 - `world/registry_store.rs` → `LedgeredRegistry` → `JournalMatchmakerStorage` on `SimStorageProvider` (#176), with the provisioning ledger and the registry's in-flight writes (`AuditWorld::note_registry_in_flight`).
-- `world/power.rs` → `PowerCut`, `Owner` → the BUGGIFY site that cuts a journal store's power mid-commit (moonpool `SelfCrash`), the cut drawn inside the store's last commit's duration; one reachable per owner. Being replaced by `hint!` points in the journal stores (#294).
+- `world/cut.rs` → `InFlight`, `Budget`, `Owner` → the copy budget of a power loss inside a commit (#176, #294). The cut itself is the shipped stores' own `hint!`s (inside a `moonpool-journal` commit, and between the commits of one `paros::journal` sync), struck by the attrition regime; a store registers each writing commit while it is in flight, and moonpool's `HintVeto` permits a kill only if every commit the process has in flight fits its budget, then spends it. One reachable per owner.
 - `world/injector.rs` → `Custody`, `Injection`, `apply`, `judge` → the ledgered journal-aware injector (#261): the custody ledger each completed sync records (`note_synced`), one family of boot-time byte damage per boot (entry rot, record rot, double fault, metainfo rot, header rot, each its own BUGGIFY location and budget), judged against the journal's verdict at open.
 - `world/outage.rs` → `regime`, `OutageLosses`, `LossShape` → the correlated outage (#263): moonpool's `Chaos::Outage` (moonpool#311) takes every acceptor and proxy down at once on some seeds, each back after its own delay (one straggler last); at its `OutageLanded` notice, a loss of one slot's copies planned for each holder's next boot (`StorageWorld::plan_outage_loss`: aimed at the most recent or a uniform slot, the usual budget or the loss budget's extreme leaving one clean copy or none, or — the departed straggler — exactly one clean copy, on a node the operator's last reconfiguration removed, at a slot most of the successor never held when there is one (#267); the outage strikes 2.5 s into the window at the earliest, once a kind seed has claimed, reconfigured and re-elected).
 - `world/late_outage.rs` → `LateOutage`, `LATE_WINDOW` → the departed-straggler scenario's outage (decided on 2026-10-09): on a scenario seed, once a leadership won under a configuration that removed a bootstrap member (`AuditWorld::has_departure`; a lone matchmaker registration does not count, #278), every acceptor and proxy goes down at once, at most `LATE_WINDOW` into the recovery tail, the straggler loss planned at that instant and its one clean holder back last (#267); the owner's after-claim removal, a rotation onto the spares (the scenario bootstraps at the floor), stays armed until then.
@@ -78,9 +78,9 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
   `Durability` a knob (two syncs by default, one at the extreme) and its segment geometry a knob
   per region (`journal_geometry`: floors `PERSIST_BLOCKS_FLOOR` = 2 blocks,
   `ENTRY_BLOCKS_FLOOR` = 17, the workload's largest write). A crash at a driver `hint!` is a
-  power loss the attrition regime takes, a cut mid-commit is `world/power.rs` (`SelfCrash`), a wipe deletes the journal's files, the ledgered injector
+  power loss the attrition regime takes, a cut mid-commit is a journal store's own `hint!` budgeted by `world/cut.rs`, a wipe deletes the journal's files, the ledgered injector
   damages a boot, and moonpool's storage chaos runs under it. A quiet seat (a replica, a held
-  journal) stores ordered with the power cut and the injector dark. `withhold_gc` → a seed
+  journal) stores ordered with the injector dark; a cut there is torn or whole and spends no budget. `withhold_gc` → a seed
   whose nodes withhold GC requests for the chaos window (#263). `system_journals` → the directory and the registry on half the seeds (kept at 50% from the sweep's coverage, #247; the fleet operations run on every seed, against the machines, #246), on
   `SEED_COUNT` (1) seed ranks. `NodeShape::draw` → `DriverTunables` (one knob per field, or on its own location the whole `DriverTunables::production()` profile `parosd` ships, #209), wipe/loss %, `config_edit_pct`.
 
@@ -147,13 +147,13 @@ crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired
   (moonpool `MAX_ASSERTION_SLOTS`), 256 buckets; no slot, ballot, id, seed or hash as identity.
 - No seed constants, seed lists or seed-replay tests (root *Simulation rules*).
 - **No new fault wrapper here** (root *Simulation rules*, #294). This crate never decides a
-  fault by wrapping shipped code: no new `Ledgered*` store, `Sim*` disk or stores, `PowerCut`-style
-  timer race, `BuggifyHooks` method, `crash_self` call on a code path, or workload that stops the
+  fault by wrapping shipped code: no new `Ledgered*` store, `Sim*` disk or stores, timer race
+  around a commit (the deleted `PowerCut`), `BuggifyHooks` method, `crash_self` call on a code path, or workload that stops the
   library's own loop to fake a crash. Put an inline `buggify!` or a `hint!` in `paros` instead,
   and keep here only what observes (`Audit`, oracles), the environment's injectors (outages,
   disk rot) and an operator's explicit misbehaviour. `LedgeredJournal`, `LedgeredRegistry`,
-  `SimDisk`, `SimMachineStores`, `PowerCut` and `BuggifyHooks` are the old pattern, migrating
-  away; extend none of them.
+  and `BuggifyHooks` are the old pattern, migrating away (`SimDisk`, `SimMachineStores` and
+  `PowerCut` are gone); extend none of them.
 - Hooks are consulted from the node loop only; a decision a spawned task needs is carried.
 - A wiped identity stays down because the **library** refuses it (#147, #183): the ledger parks
   it for the budget and composer only, and `StorageWorld::provisioned` is the `BootKind` claim.

@@ -1,7 +1,8 @@
 //! An acceptor's store (#187, #261): the library's shipped
 //! [`JournalStorage`] over the simulated disk (`SimStorageProvider`), the
 //! store a real deployment runs, under moonpool's crash physics, the power
-//! cuts ([`super::power`]) and the ledgered injector ([`super::injector`]).
+//! cuts its own `hint!`s ask for (budgeted by [`super::cut`]) and the
+//! ledgered injector ([`super::injector`]).
 //!
 //! What the world owns beside it is the operator's **provisioning ledger**
 //! (#147), which [`LedgeredJournal`] keeps: the journal's format
@@ -14,14 +15,16 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{SimStorageProvider, assert_reachable};
+use moonpool_sim::{
+    SimStorageProvider, SimTimeProvider, StateHandle, TimeProvider, assert_reachable,
+};
 use paros::{
     Ballot, Command, Config, HardState, JournalState, JournalStorage, LogStorage, MustSync, Slot,
     Storage, StorageError,
 };
 
 use super::StorageWorld;
-use super::power::PowerCut;
+use super::cut::{Budget, InFlight, Owner};
 use crate::audit::AuditWorld;
 
 /// The journal store, keeping the world's provisioning ledger in step with
@@ -32,8 +35,13 @@ pub(crate) struct LedgeredJournal {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
-    /// How this node can lose power in the middle of a commit.
-    power: PowerCut,
+    /// The run's state: where a commit in flight registers for the cut's
+    /// budget ([`super::cut`]).
+    state: StateHandle,
+    /// The clock and the end of this store's chaos window: the injector's
+    /// damage lands only inside it.
+    time: SimTimeProvider,
+    chaos_until: std::time::Duration,
     /// The shared checker, told what each commit has in flight (#264).
     checker: Arc<AuditWorld>,
     /// The node's id, the checker's key.
@@ -44,7 +52,7 @@ pub(crate) struct LedgeredJournal {
     /// The simulated disk the journal lives on: the injector damages it.
     provider: SimStorageProvider,
     /// Lost copies a power cut may leave (a `Batched` commit's ambiguous
-    /// last batch) budgeted by the world: `None` on an `Ordered` store,
+    /// last batch) budgeted by the world ([`super::cut`]): `None` on an `Ordered` store,
     /// whose cut commit is torn or whole, never ambiguous; else the
     /// distinct acceptors the journal's quorum system tolerates losing.
     cut_budget: Option<usize>,
@@ -54,10 +62,12 @@ pub(crate) struct LedgeredJournal {
     staged_accepts: BTreeMap<u64, (Ballot, u64)>,
 }
 
-/// What damage a [`LedgeredJournal`] takes: its power cuts' copy budget and
-/// whether the ledgered injector aims at it.
+/// What damage a [`LedgeredJournal`] takes: its power cuts' copy budget,
+/// whether the ledgered injector aims at it, and until when.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DamagePolicy {
+    /// The end of the injector's chaos window: zero for a quiet store.
+    pub(crate) chaos_until: std::time::Duration,
     /// See [`LedgeredJournal`]'s `cut_budget`.
     pub(crate) cut_budget: Option<usize>,
     /// See [`LedgeredJournal`]'s `inject`.
@@ -69,7 +79,7 @@ impl LedgeredJournal {
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
-        power: PowerCut,
+        (state, time): (StateHandle, SimTimeProvider),
         checker: Arc<AuditWorld>,
         damage: DamagePolicy,
         provider: SimStorageProvider,
@@ -77,6 +87,9 @@ impl LedgeredJournal {
         let node = inner.initial_state().1.id.0;
         Self {
             node,
+            state,
+            time,
+            chaos_until: damage.chaos_until,
             cut_budget: damage.cut_budget,
             inject: damage.inject,
             provider,
@@ -84,7 +97,6 @@ impl LedgeredJournal {
             world,
             ip,
             format_pending: false,
-            power,
             checker,
             staged_accepts: BTreeMap::new(),
         }
@@ -173,7 +185,11 @@ impl LogStorage for LedgeredJournal {
         // aimed by the custody ledger, applied before the journal
         // opens and judged against what it reports.
         let injection = if self.inject {
-            let (ip, node, in_chaos) = (self.ip.clone(), self.node, self.power.in_chaos());
+            let (ip, node, in_chaos) = (
+                self.ip.clone(),
+                self.node,
+                self.time.now() < self.chaos_until,
+            );
             self.world.upgrade().and_then(|w| {
                 w.lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -323,21 +339,22 @@ impl LogStorage for LedgeredJournal {
         let slots: Vec<Slot> = self.inner.staged_slots().collect();
         let ip = self.ip.clone();
         self.with_world(|w| w.note_sync_started(&ip));
-        let (world, ip, budget) = (self.world.clone(), self.ip.clone(), self.cut_budget);
-        let permit = move || {
-            budget.is_none_or(|tolerated| {
-                world.upgrade().is_some_and(|world| {
-                    world
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .permit_power_cut(&ip, tolerated)
-                })
-            })
-        };
-        let synced = self
-            .power
-            .around(writes, permit, || {}, self.inner.sync(must_sync))
-            .await;
+        // A commit that writes entries is in flight until the sync returns:
+        // a hint that kills the process now spends its copy budget.
+        let in_flight = writes.then(|| {
+            let budget = self
+                .cut_budget
+                .map_or(Budget::Free, |tolerated| Budget::Node { tolerated });
+            InFlight::open(
+                &self.state,
+                &self.ip,
+                Owner::Node,
+                budget,
+                self.world.clone(),
+            )
+        });
+        let synced = self.inner.sync(must_sync).await;
+        drop(in_flight);
         // The sync consumed what was staged, landed or not.
         self.staged_accepts.clear();
         self.ledger(synced)?;

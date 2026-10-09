@@ -90,9 +90,11 @@ Windows are not necessary in the first version, for two reasons:
    storage engine. One draw, as today. This is a moonpool-internal improvement.
 2. A protocol window that the simulator cannot see has a start the code knows. A point at
    the start, with a strike the sink may *delay*, covers it. The mid-commit power cut is
-   this shape: the sink schedules the kill at a random instant inside the span, as
-   `PowerCut::around` does today (`crates/paros-sim/src/world/power.rs:102`), only the
-   draw moves into moonpool.
+   this shape. Landed (#294 step 6, moonpool#317) without a delayed strike: the journal
+   names the instants inside the span itself (entries written, records written, metainfo
+   stale), so a plain point at each covers it. `PowerCut` and its timer race are deleted.
+   The copy budget stays the harness's, through moonpool's `HintVeto`
+   (`crates/paros-sim/src/world/cut.rs`).
 
 How each injector consumes a point, without breaking determinism:
 
@@ -350,7 +352,7 @@ if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
 | `Seam::AfterPrepareSent` (#260) | `hint!("reconfiguring prepare sent")` after the send | hint |
 | `Seam::MatchBeforeSync`, `MatchAfterSyncBeforeReply` | two points in `matchmaker/mod.rs` | hint |
 | `Seam::CellPromised`, `CellFormatted` (`wait.rs`) | two points; `seam_crash` deleted | hint |
-| `world/power.rs` `PowerCut::around` | points between the sync's commits (paros) and inside `commit` (moonpool-journal); the in-span delay drawn by the sink | hint |
+| `world/power.rs` `PowerCut::around` | points between the sync's commits (paros) and inside `commit` (moonpool-journal); the copy budget a `HintVeto` (landed, #294 step 6) | hint |
 | `seam_crash_bias` ×10 | a higher rate literal on the write-side points (`hint!(.., 0.2)`) | rate |
 | quiet seats outside the cut (`shape.rs`) | the regime's victims filter; a protected process gets no kill | moonpool config |
 | `restart_delay!`, `seam_crash` recovery draw | the regime's `recovery_delay_ms` | moonpool |

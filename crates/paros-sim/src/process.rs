@@ -10,8 +10,8 @@
 //! `run_matchmaker` over `JournalMatchmakerStorage`; a [`ProxyProcess`]
 //! runs `run_proxy` (#142) with no store at all — a proxy leader holds
 //! nothing durable, so a kill simply reboots it empty; a [`ReplicaProcess`]
-//! runs `run_replica` (#144) over its own journal store with the power cut
-//! and the injector dark, outside the copy budget — a replica is not an acceptor. Every role with a
+//! runs `run_replica` (#144) over its own ordered journal store with the
+//! injector dark, outside the copy budget — a replica is not an acceptor. Every role with a
 //! disk sits inside a recovery loop that restarts it after a fail-stop
 //! storage fault, as `parosd`'s supervisor would: the driver unwinds, the
 //! volatile core is dropped, and the next iteration rebuilds it from its
@@ -885,8 +885,8 @@ struct Seat {
     floor: usize,
     clean_copies: usize,
     /// A system journal or a journal the directory created (#189): stored
-    /// ordered, with the power cut and the injector dark, outside the copy
-    /// budget — the storage fault model is the genesis journals' business.
+    /// ordered, with the injector dark, outside the copy budget — the
+    /// storage fault model is the genesis journals' business.
     quiet: bool,
     /// Created at runtime by the directory (#189): opened only when the
     /// directory names it, never at boot.
@@ -1071,10 +1071,10 @@ impl JournalStores for SimStores<'_> {
             Some(ParkReason::Wiped) | None => {}
         }
         let (provider, layout) = &self.journal_store;
-        // A system or created journal (#189) is quiet: no injected damage,
-        // no power cut (a zero chaos window: the cut and the injector are
-        // both dark), and two syncs per commit, so a crash never leaves its
-        // last batch ambiguous (a one-member journal could never repair it).
+        // A system or created journal (#189) is quiet: no injected damage
+        // (a zero chaos window), and two syncs per commit, so a crash, a
+        // cut mid-commit included, never leaves its last batch ambiguous (a
+        // one-member journal could never repair it) and spends no budget.
         let (layout, cutoff) = if seat.quiet {
             (
                 JournalStoreConfig {
@@ -1092,21 +1092,14 @@ impl JournalStores for SimStores<'_> {
             seat.config.clone(),
             layout,
         );
-        let power = crate::world::power::PowerCut::new(
-            self.ctx
-                .self_crash()
-                .expect("a node process can crash itself"),
-            self.ctx.time().clone(),
-            cutoff,
-            crate::world::power::Owner::Node,
-        );
         let store = LedgeredJournal::new(
             journal,
             Arc::downgrade(&seat.world),
             self.ip.to_string(),
-            power,
+            (self.ctx.state().clone(), self.ctx.time().clone()),
             seat.checker.clone(),
             crate::world::node_store::DamagePolicy {
+                chaos_until: cutoff,
                 cut_budget: (layout.durability == paros::journal::Durability::Batched)
                     .then(|| seat.floor.saturating_sub(seat.clean_copies)),
                 inject: !seat.quiet,
@@ -1400,20 +1393,13 @@ async fn run_matchmaker_role(
             assert_reachable!("operator: a matchmaker restarts under an edited configuration");
             tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
         }
-        let power = crate::world::power::PowerCut::new(
-            ctx.self_crash()
-                .expect("a matchmaker process can crash itself"),
-            ctx.time().clone(),
-            crate::CHAOS_DURATION,
-            crate::world::power::Owner::Matchmaker,
-        );
         let storage = LedgeredRegistry::new(
             ctx.storage().clone(),
             registry_id,
             layout,
             Arc::downgrade(&world),
             my_ip.to_string(),
-            power,
+            ctx.state().clone(),
             checker.clone(),
             id.0,
             (layout.durability == paros::journal::Durability::Batched).then_some(bootstrap.len()),
@@ -1624,8 +1610,9 @@ async fn run_replica_role(
         guard.note_replica(my_ip);
     }
     // The replica's store: the run's journal layout with two syncs per
-    // commit, no injected damage and no power cut (a zero chaos window):
-    // the replica tier stays outside the copy budget (#144).
+    // commit (a cut mid-commit is torn or whole, never ambiguous) and no
+    // injected damage (a zero chaos window): the replica tier stays outside
+    // the copy budget (#144).
     let layout = JournalStoreConfig {
         durability: paros::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
@@ -1641,13 +1628,6 @@ async fn run_replica_role(
         } else {
             BootKind::FirstBoot
         };
-        let power = crate::world::power::PowerCut::new(
-            ctx.self_crash()
-                .expect("a replica process can crash itself"),
-            ctx.time().clone(),
-            Duration::ZERO,
-            crate::world::power::Owner::Node,
-        );
         let storage = LedgeredJournal::new(
             JournalStorage::new(
                 ctx.storage().clone(),
@@ -1657,9 +1637,10 @@ async fn run_replica_role(
             ),
             Arc::downgrade(&world),
             my_ip.to_string(),
-            power,
+            (ctx.state().clone(), ctx.time().clone()),
             checker.clone(),
             crate::world::node_store::DamagePolicy {
+                chaos_until: Duration::ZERO,
                 cut_budget: None,
                 inject: false,
             },

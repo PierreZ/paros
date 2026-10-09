@@ -16,9 +16,9 @@
 //! machine group's regime, and its facts reach the oracles through the audit
 //! port ([`NodeAudit::on_machines`]). The stores are `JournalStorage`, every
 //! one an existing member's once formed, as `parosd`'s are. They store
-//! ordered, outside the ledgered injector and the power cut (the acceptors'
-//! fault model): a one-member cell has no second copy to repair a torn
-//! batch from.
+//! ordered, outside the ledgered injector (the acceptors' fault model): a
+//! one-member cell has no second copy to repair an ambiguous batch from,
+//! and an ordered commit cut by a hint is torn or whole, never ambiguous.
 //!
 //! The [`MachineBoard`] holds the run's facts about its machines that the
 //! oracles judge: whether an operator sent `init` (no cell forms without

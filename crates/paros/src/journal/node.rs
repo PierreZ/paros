@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use moonpool_buggify::hint::Strike;
 use moonpool_core::StorageProvider;
 use moonpool_journal::{Batch, Journal, ReadError, Recovery};
 use paros_core::{Ballot, Command, Config, HardState, JournalState, MustSync, Slot, Storage};
@@ -517,6 +518,15 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             promise.set_meta(encode(&early));
             self.commit(promise).await?;
             self.durable_meta = early;
+            // The promise is durable and no entry under it is: a crash here
+            // is the #264 shape, which the order of the commits makes safe.
+            let hinted = moonpool_buggify::hint!("promise durable, entries staged");
+            if hinted.strike() == Strike::Killed {
+                moonpool_assertions::reachable!(
+                    "a node crashes between its promise and its entries"
+                );
+            }
+            hinted.await;
         }
         // Packed into batches that each fit one segment: a node catching up
         // a long log after a reboot stages more than one holds (witness
@@ -528,6 +538,15 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             if !staged.is_empty() && !staged.fits_another(geometry, payload.len()) {
                 assert!(staged.fits(geometry), "a packed batch fits one segment");
                 self.commit(std::mem::take(&mut staged)).await?;
+                // A packed batch is durable and the metainfo still covers
+                // only the batches before it.
+                let hinted = moonpool_buggify::hint!("entries durable, metainfo staged");
+                if hinted.strike() == Strike::Killed {
+                    moonpool_assertions::reachable!(
+                        "a node crashes between its entry batches and its metainfo"
+                    );
+                }
+                hinted.await;
             }
             staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
         }
