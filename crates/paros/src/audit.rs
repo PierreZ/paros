@@ -309,7 +309,8 @@ pub trait Audit {
     ) {
     }
 
-    /// The driver asked this leader to resign, and it did.
+    /// This leader resigned on its own (an inline BUGGIFY site in the
+    /// driver), and it did.
     fn stepped_down(&self, node: NodeId) {}
 
     /// This node **relinquished** the Phase-2 authority of `handoff.ballot` to
@@ -473,12 +474,6 @@ pub trait Audit {
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.
     fn recovery_batch(&self, node: NodeId, started: u64, gap_fills: u64, remaining: u64) {}
-
-    /// This node deliberately skipped re-sending its pending `Accept`s.
-    fn resend_skipped(&self, node: NodeId) {}
-
-    /// This node selected the shortest valid election timeout.
-    fn election_timeout_extreme(&self, node: NodeId, ticks: u64) {}
 
     /// This node's election timeout base was doubled `doublings` times: its
     /// previous campaigns expired with no leader known (the election
@@ -727,10 +722,6 @@ pub trait Audit {
         member: bool,
     ) {
     }
-
-    /// This candidate deliberately skipped re-sending its open matchmaking
-    /// request this beat ([`DriverHooks::skip_matchmaking_resend`](crate::DriverHooks)).
-    fn matchmaking_resend_skipped(&self, node: NodeId) {}
 
     /// This candidate's matchmaking quorum named a reconfiguration to a
     /// configuration other than the one its ordinary campaign registered for

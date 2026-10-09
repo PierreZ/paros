@@ -408,7 +408,6 @@ pub(super) struct AuditState {
     pub(super) case1_seen: bool,
     pub(super) case2_seen: bool,
     pub(super) repair_stepdown_seen: bool,
-    pub(super) resend_skipped: bool,
     pub(super) resigned: bool,
     /// Parked reads redirected: by the deadline, and by the early-expiry hook.
     pub(super) read_expired_overdue: bool,
@@ -444,7 +443,6 @@ pub(super) struct AuditState {
     /// A `Truncate` was answered applied (#204).
     pub(super) compact_ack_accepted: bool,
     pub(super) mailbox_dropped: bool,
-    pub(super) shortest_timeout: bool,
     /// The election backoff doubled a timeout base (reach-once).
     pub(super) election_backoff: bool,
     pub(super) dropped_accept: bool,

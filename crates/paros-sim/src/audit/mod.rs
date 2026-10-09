@@ -845,8 +845,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn stepped_down(&self, _node: NodeId) {
-        let mut st = self.state();
-        reach_once!(st.resigned, "the driver voluntarily resigns leadership");
+        // The fired gate is inline at the driver's site; the failover
+        // oracle folds the fact.
+        self.state().resigned = true;
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0))]
@@ -1722,14 +1723,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn resend_skipped(&self, _node: NodeId) {
-        let mut st = self.state();
-        reach_once!(
-            st.resend_skipped,
-            "the driver skips a pending accept re-send"
-        );
-    }
-
     fn election_timeout_set(&self, node: NodeId, ticks: u64) {
         self.state().election_timeouts.insert(node.0, ticks);
     }
@@ -1740,14 +1733,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn ticked(&self, node: NodeId) {
         self.state().observe_tick(node.0);
-    }
-
-    fn election_timeout_extreme(&self, _node: NodeId, _ticks: u64) {
-        let mut st = self.state();
-        reach_once!(
-            st.shortest_timeout,
-            "the driver selects the shortest valid election timeout"
-        );
     }
 
     fn election_backoff(&self, _node: NodeId, _doublings: u32) {
@@ -2195,10 +2180,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn matchmaking_timeout(&self, node: NodeId, ballot: Ballot, _count: u64) {
         self.state().matchmaker.clock_reasked(node, ballot);
-    }
-
-    fn matchmaking_resend_skipped(&self, _node: NodeId) {
-        self.state().matchmaker.resend_skipped();
     }
 
     fn match_registered_by(

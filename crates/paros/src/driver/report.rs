@@ -9,7 +9,7 @@ use paros_core::{
 };
 
 use crate::audit::Audit;
-use crate::hooks::{DriverHooks, HandoffContext};
+use crate::hooks::HandoffContext;
 
 use super::ready::ClientWaiters;
 
@@ -36,33 +36,27 @@ pub(crate) fn handoff_context(node: &ColocatedNode, candidates: usize) -> Handof
 /// seeded RNG. Drawn here, never in the zero-dep core, so the core stays
 /// deterministic and dependency-free while a seed still replays bit-identically.
 #[tracing::instrument(level = "debug", skip_all, fields(node = self_id, base))]
-pub(crate) fn draw_election_timeout<P: Providers, H: DriverHooks, A: Audit>(
-    providers: &P,
-    hooks: &H,
-    audit: &A,
-    self_id: u64,
-    base: u64,
-) -> u64 {
+pub(crate) fn draw_election_timeout<P: Providers>(providers: &P, self_id: u64, base: u64) -> u64 {
     // A base of at least two beats (`check_floors`): the draw's range is
     // never empty.
     assert!(base > 0, "an election timeout base is at least one tick");
-    let ticks = if hooks.shortest_election_timeout() {
-        audit.election_timeout_extreme(NodeId(self_id), base);
+    // The two jitter extremes are rare-but-valid choices, each its own
+    // BUGGIFY location, silent in the recovery tail. The longest is drawn
+    // only when the shortest stayed quiet, so the two never both apply.
+    let ticks = if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+        moonpool_assertions::reachable!("the driver selects the shortest valid election timeout");
         tracing::info!(node = self_id, ticks = base, "election_timeout_extreme");
         base
-    } else if hooks.longest_election_timeout() {
-        // The other jitter extreme: the highest value the honest draw below
-        // could produce. Consulted only when the shortest hook stayed quiet,
-        // so the two extremes remain independent locations. Its BUGGIFY
-        // pairing gate fires in the sim hook implementation (the audit's
-        // `election_timeout_extreme` reach gate is the shortest extreme's).
+    } else if moonpool_buggify::buggify_fault_with_prob!(0.5) {
+        // The highest value the honest draw below could produce.
+        moonpool_assertions::reachable!("the driver selects the longest valid election timeout");
         let ticks = base * 2 - 1;
         tracing::info!(node = self_id, ticks, "election_timeout_extreme");
         ticks
     } else {
         providers.random().random_range(base..base * 2)
     };
-    // Whatever the hooks chose, the timeout is one the honest draw could
+    // Whatever the sites chose, the timeout is one the honest draw could
     // produce: in `[base, 2 * base)`.
     assert!(ticks >= base, "an election timeout is at least its base");
     assert!(
@@ -292,14 +286,13 @@ fn report_membership<A: Audit>(
 // would only rename the same nine things.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
-pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
+pub(crate) fn maintain<P: Providers, A: Audit>(
     node: &mut ColocatedNode,
     providers: &P,
     last: &mut Deltas,
     waiters: &mut ClientWaiters,
     self_id: u64,
     (election_base, backoff_doublings): (u64, u32),
-    hooks: &H,
     audit: &A,
 ) {
     let Deltas {
@@ -344,7 +337,7 @@ pub(crate) fn maintain<P: Providers, H: DriverHooks, A: Audit>(
             tracing::info!(node = self_id, doublings, base, "election_backoff");
             audit.election_backoff(NodeId(self_id), doublings);
         }
-        let ticks = draw_election_timeout(providers, hooks, audit, self_id, base);
+        let ticks = draw_election_timeout(providers, self_id, base);
         node.set_election_timeout(ticks);
         assert!(
             !node.needs_election_timeout(),

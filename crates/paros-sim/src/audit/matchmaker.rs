@@ -312,7 +312,6 @@ pub(super) struct MatchmakerAudit {
     answer_paged: bool,
     campaign_union_several: bool,
     campaign_disagreeing_histories: bool,
-    resend_skipped: bool,
     request_resent: bool,
     reconfiguration_opened: bool,
     // --- garbage collection (#123) ---
@@ -1339,14 +1338,6 @@ impl MatchmakerAudit {
         reach_once!(
             self.clock_reasked,
             "matchmaking: the election clock re-asks a pending matchmaking instead of abandoning it"
-        );
-    }
-
-    /// The candidate deliberately skipped a due re-send.
-    pub(super) fn resend_skipped(&mut self) {
-        reach_once!(
-            self.resend_skipped,
-            "matchmaking: the driver skips a due matchmaking re-send"
         );
     }
 
