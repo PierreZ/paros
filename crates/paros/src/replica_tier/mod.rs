@@ -24,7 +24,7 @@
 //!
 //! **It serves clients reads, and only reads.** The journal `Read` (#204)
 //! is the leaderless read (§3.4): it opens a quorum read in the core (the
-//! grid row is the node's `read_row` hook), parks the reply exactly as the
+//! grid row is the node's own row override), parks the reply exactly as the
 //! node driver does, serves the page from this replica's own journal fold
 //! after the walk that covers the confirmed watermark — read replicas take
 //! read load off the acceptors — long-polls at the tail, and answers
@@ -57,10 +57,10 @@ use crate::driver::boot::check_format_marker;
 use crate::driver::edge::{ReplicaInbox, RpcEdge, edge_reporter};
 use crate::driver::events::{message_kind, message_route};
 use crate::driver::ready::{persist_writes, report_applied, storage_fault_crash};
-use crate::driver::reply::answer;
+use crate::driver::reply::answer_read;
 use crate::driver::transport::{LaneOpener, Outbound, send_messages};
 use crate::driver::{BootKind, DriverTunables, RunError};
-use crate::hooks::{DriverHooks, Reply};
+use crate::hooks::Reply;
 use crate::rpc::{
     InspectRefusal, InspectReply, InspectTarget, Read, ReadAck, ReplySender,
     journal_state_to_proto, quorum_system_to_proto,
@@ -91,12 +91,11 @@ fn report_boot<A: Audit>(replica: &ReplicaNode, self_id: u64, audit: &A) {
 /// hand back the quorum reads this batch confirmed: answered only now, after
 /// the walk that covers them (the node's order, `drain_ready` step 3b).
 #[tracing::instrument(level = "trace", skip_all, fields(replica = self_id))]
-async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
+async fn drain<S: LogStorage, A: Audit>(
     replica: &mut ReplicaNode,
     storage: &mut S,
     out: &Outbound,
     self_id: u64,
-    hooks: &H,
     audit: &A,
 ) -> Result<Vec<ReadState>, RunError> {
     let ready = replica.ready();
@@ -125,7 +124,7 @@ async fn drain<S: LogStorage, H: DriverHooks, A: Audit>(
         }
         hinted.await;
     }
-    send_messages(out, hooks, audit, replica.config().journal, messages);
+    send_messages(out, audit, replica.config().journal, messages);
     for (slot, command, outcome) in &committed {
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
         report_applied(audit, self_id, *slot, command, outcome);
@@ -142,17 +141,16 @@ fn fold_head(replica: &ReplicaNode) -> Option<Slot> {
 
 /// Serve the reads this batch confirmed and re-serve the ones waiting at the
 /// tail: the state the client reads is this replica's own fold.
-fn serve_reads<H: DriverHooks, A: Audit>(
+fn serve_reads<A: Audit>(
     reads: &mut JournalReads,
     served: &[ReadState],
     replica: &ReplicaNode,
     me: NodeId,
-    hooks: &H,
     audit: &A,
 ) {
     let read = |from, limit, bytes| replica.read_log(from, limit, bytes);
-    reads.confirmed(served, read, fold_head(replica), false, me, hooks, audit);
-    reads.wake(read, me, hooks, audit);
+    reads.confirmed(served, read, fold_head(replica), false, me, audit);
+    reads.wake(read, me, audit);
 }
 
 /// Surface an inbound message's arrival for a human reading the trace, the
@@ -179,13 +177,12 @@ fn trace_received(self_id: u64, msg: &paros_core::Message) {
 /// force, and the read is served once the row answered whole and this
 /// replica folded the maximum watermark — parked until then. The row
 /// override is the node's hook, asked only under a grid, from the loop.
-fn open_read<H: DriverHooks, A: Audit>(
+fn open_read<A: Audit>(
     replica: &mut ReplicaNode,
     reads: &mut JournalReads,
     req: &Read,
     reply: ReplySender<ReadAck>,
     tunables: &DriverTunables,
-    hooks: &H,
     audit: &A,
 ) {
     let ctx = reads.next_ctx();
@@ -193,7 +190,12 @@ fn open_read<H: DriverHooks, A: Audit>(
     // and neither the row hook nor the audit hears of the read.
     let basis = replica.read_basis();
     let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-        QuorumSystem::Grid { rows, .. } => hooks.read_row(ctx, rows).filter(|r| *r < rows),
+        QuorumSystem::Grid { rows, .. }
+            if rows >= 2 && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+        {
+            moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
+            Some(crate::driver::log_reads::next_row(ctx, rows))
+        }
         _ => None,
     });
     let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
@@ -226,9 +228,10 @@ fn open_read<H: DriverHooks, A: Audit>(
 /// boot and relearns the log from the acceptors, because a replica holds no
 /// promise — there is nothing an amnesiac replica could regress.
 ///
-/// `tunables`, `hooks` and `audit` are the seams every driver in this crate
-/// takes: the tick cadence and the transport shape, the send seam's drop
-/// and duplicate locations, and the observation port. The durability
+/// `tunables` and `audit` are the seams every driver in this crate takes:
+/// the tick cadence and the transport shape, and the observation port. The
+/// send seam's drops and duplicates and the row override are inline BUGGIFY
+/// locations. The durability
 /// moments are `hint!`s inline.
 ///
 /// # Errors
@@ -241,7 +244,7 @@ fn open_read<H: DriverHooks, A: Audit>(
 // The parameters are the replica's complete wiring; the loop is one select
 // over the lane, the beat and the shutdown.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_replica<P, S, H, A>(
+pub async fn run_replica<P, S, A>(
     providers: P,
     mut storage: S,
     local_addr: String,
@@ -249,7 +252,6 @@ pub async fn run_replica<P, S, H, A>(
     boot: BootKind,
     tunables: DriverTunables,
     shutdown: CancellationToken,
-    hooks: &H,
     audit: &A,
 ) -> Result<(), RunError>
 where
@@ -257,7 +259,6 @@ where
     S: LogStorage,
     // Not `Send + 'static`, as on `run_node`: a hook is consulted from this
     // loop and never from a spawned task.
-    H: DriverHooks,
     A: Audit + Clone + Send + Sync + 'static,
 {
     let self_id = storage.initial_state().1.id.0;
@@ -301,7 +302,7 @@ where
 
     // The boot may already carry a batch: records learned above the prefix
     // before the crash complete it on the way back up.
-    drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
+    drain(&mut replica, &mut storage, &out, self_id, audit).await?;
 
     let mut reads = JournalReads::default();
     let journal = replica.config().journal;
@@ -318,8 +319,8 @@ where
                 }
                 trace_received(self_id, &msg);
                 replica.step(msg);
-                let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
-                serve_reads(&mut reads, &served, &replica, me_id, hooks, audit);
+                let served = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+                serve_reads(&mut reads, &served, &replica, me_id, audit);
             }
             Some((req, reply)) = log_reads.recv() => {
                 // A journal `Read` (#204): a leaderless read served from this
@@ -330,26 +331,25 @@ where
                 // asked only under a grid, from the loop.
                 if refuse_journal(journal, JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal)), "read", me_id, audit) {
                     let refused = ReadAck { unknown_journal: true, ..ReadAck::default() };
-                    answer(hooks, audit, me_id, Reply::LogRead, reply, refused);
+                    answer_read(audit, me_id, Reply::LogRead, reply, refused);
                     continue;
                 }
-                open_read(&mut replica, &mut reads, &req, reply, &tunables, hooks, audit);
-                let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
-                serve_reads(&mut reads, &served, &replica, me_id, hooks, audit);
+                open_read(&mut replica, &mut reads, &req, reply, &tunables, audit);
+                let served = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+                serve_reads(&mut reads, &served, &replica, me_id, audit);
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
                 next_tick = time.now() + tunables.tick_interval;
                 ticks += 1;
                 replica.tick();
-                let served = drain(&mut replica, &mut storage, &out, self_id, hooks, audit).await?;
-                serve_reads(&mut reads, &served, &replica, me_id, hooks, audit);
+                let served = drain(&mut replica, &mut storage, &out, self_id, audit).await?;
+                serve_reads(&mut reads, &served, &replica, me_id, audit);
                 reads.expire(
                     |from, limit, bytes| replica.read_log(from, limit, bytes),
                     ticks,
                     tunables.read_retry_ticks,
                     false,
                     me_id,
-                    hooks,
                     audit,
                 );
                 if let Some((hole, above)) = replica.replica().chosen_gap() {

@@ -1318,9 +1318,9 @@ async fn run_matchmaker_role(
     // write-window crash bias, drawn once per seed like a node's.
     let RoleRig {
         incarnation,
-        hooks,
         checker,
         audit,
+        ..
     } = arm_role(ctx, my_ip);
     let shape = incarnation.shape;
     // The store (#176): the library's `JournalMatchmakerStorage` on the
@@ -1412,7 +1412,6 @@ async fn run_matchmaker_role(
             config.clone(),
             shape.tunables,
             ctx.shutdown().clone(),
-            &hooks,
             &audit,
         )
         .await
@@ -1521,10 +1520,7 @@ async fn run_proxy_role(
     // A proxy has a shape too — its tick cadence and transport tunables —
     // drawn once per seed like a node's and kept across its reboots.
     let RoleRig {
-        incarnation,
-        hooks,
-        audit,
-        ..
+        incarnation, audit, ..
     } = arm_role(ctx, my_ip);
     run_proxy(
         ctx.providers().clone(),
@@ -1534,7 +1530,6 @@ async fn run_proxy_role(
         replica_book(deployment)?,
         incarnation.shape.tunables,
         ctx.shutdown().clone(),
-        &hooks,
         &audit,
     )
     .await
@@ -1600,9 +1595,9 @@ async fn run_replica_role(
     let config = replica_config(ctx, deployment, &members, id);
     let RoleRig {
         incarnation,
-        hooks,
         checker,
         audit,
+        ..
     } = arm_role(ctx, my_ip);
     let world = storage_world(ctx.state());
     {
@@ -1654,7 +1649,6 @@ async fn run_replica_role(
             boot,
             incarnation.shape.tunables,
             ctx.shutdown().clone(),
-            &hooks,
             &audit,
         )
         .await

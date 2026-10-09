@@ -1,48 +1,24 @@
-//! Driver fault-injection hooks.
+//! Driver fault-injection hooks: the three per-seed latches left (#318 E).
 //!
-//! The durability moments inside one batch (staged, not synced; durable,
-//! not sent) are not hooks: the driver names each with moonpool's
-//! `hint!("label").await` inline, and the simulation decides whether to
-//! crash the process there (#294). The accept and matchmaking re-sends, the
-//! resignation and the election-timeout extremes are inline
-//! `buggify_fault_with_prob!` sites in the driver (#294). [`DriverHooks`] exposes
-//! the driver's other optional policy decisions: the peer mailbox's
-//! choices (overtake the queue, evict across kinds, and — armed at enqueue,
-//! applied at the drain — hold a batch or reverse it), and stretching a tick.
-//! Production passes [`NoHooks`], whose defaults never perturb the driver.
+//! Every per-call choice of the driver is an inline BUGGIFY site at the line
+//! that makes it (#294, #318): the re-sends, the handover abandon, the leader
+//! handoff, the send seam's drops and duplicates, the reply seam's drops and
+//! duplicates, the grid and proxy picks, the read expiry, the tick stretch
+//! and the peer mailbox's four choices. The durability moments are inline
+//! `hint!`s. What is left here are the decisions fixed once per seed and
+//! coupled to a simulation scenario (`withhold_gc_requests`,
+//! `hold_journal`, the lost-verdict reply drop): they move inline once
+//! moonpool can force a location's activation per seed. Production passes
+//! [`NoHooks`], whose defaults never perturb the driver.
 //!
 //! **Every hook is consulted from the driver's node loop, never from a spawned
-//! task.** A hook answer is a randomness draw in simulation, and the node loop
-//! is where the simulation steps deterministically; a draw taken inside a
-//! detached task can outlive its simulation and shift the next run's stream.
-//! `PeerMailbox` in `crate::driver` carries the CI failure that established
-//! this.
+//! task.** A hook answer can be a randomness draw in simulation, and the node
+//! loop is where the simulation steps deterministically; a draw taken inside
+//! a detached task can outlive its simulation and shift the next run's
+//! stream. `PeerMailbox` in `crate::driver` carries the CI failure that
+//! established this.
 
-use paros_core::{JournalIdentifier, Message, NodeId, Party, ProxyId, ReconfigurerPhase, Slot};
-
-/// What a cooperative leader handoff would transfer right now, handed to
-/// [`DriverHooks::initiate_handoff`] so a simulation can bias the decision
-/// toward the states that are actually interesting to explore rather than
-/// firing uniformly. Pure read-only context: the driver computes it from the
-/// core's public accessors and nothing here changes with the answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct HandoffContext {
-    /// Slots between this leader's contiguous chosen prefix and its allocator
-    /// frontier — the unfinished business a transfer must carry across
-    /// (accepted-but-unchosen rounds, plus anything decided above the prefix).
-    /// `0` on a fully settled leader.
-    pub tail: usize,
-    /// The allocator frontier the successor would inherit.
-    pub next_slot: Slot,
-    /// Whether the transfer is "clean": nothing unfinished below the frontier.
-    pub settled: bool,
-    /// Whether this leader is itself holding a chosen slot above its applied
-    /// prefix — a hole ordinary replication is still healing.
-    pub healing: bool,
-    /// How many successors are eligible.
-    pub candidates: usize,
-}
+use paros_core::JournalIdentifier;
 
 /// A client-facing reply the driver is about to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,20 +89,11 @@ impl Reply {
     }
 }
 
-/// Optional driver-level fault and policy hooks.
+/// The driver's per-seed latches (see the module doc).
 ///
-/// Each method corresponds to one independent `BUGGIFY` location in simulation.
-/// The default implementation is production behavior. The accept and
-/// matchmaking re-sends, the resignation and the election-timeout extremes
-/// are already inline BUGGIFY sites in the driver (#294).
+/// Each method is one per-seed decision in simulation. The default
+/// implementation is production behavior.
 pub trait DriverHooks {
-    /// Whether to skip re-sending the open garbage-collection request this
-    /// beat ([`paros_core::ColocatedNode::resend_gc`]). Consulted only when a
-    /// re-send is due; skipping always costs a beat, never safety.
-    fn skip_gc_resend(&self) -> bool {
-        false
-    }
-
     /// Whether to withhold every garbage-collection request (#123) this
     /// node would send — the first send of a request and its re-sends alike.
     /// Consulted on the node loop whenever a batch carries GC requests or a
@@ -150,270 +117,13 @@ pub trait DriverHooks {
         false
     }
 
-    /// Whether to skip re-sending the running matchmaker reconfiguration's
-    /// requests this beat ([`paros_core::MatchmakerReconfigurer::resend`]).
-    /// Consulted only while a handover runs; skipping stretches it (and a
-    /// preempted decree waits one more beat to reopen), never breaks it.
-    fn skip_reconfigurer_resend(&self) -> bool {
-        false
-    }
-
-    /// Whether to give up the running matchmaker-set handover this beat
-    /// ([`paros_core::MatchmakerReconfigurer::abandon`]), consulted from the
-    /// handover beat while one runs — `phase` is where it stands, so a
-    /// simulation can select each phase's abandonment independently.
-    ///
-    /// **Abandoning is always safe**, which is why this is a hook and not a
-    /// fault: the reconfigurer holds no durable state, the freeze and the
-    /// bootstrap are idempotent, the decree's votes stay durable at the
-    /// matchmakers, and the next node to meet the frozen generation
-    /// finishes it. It is the driver's own timeout
-    /// ([`DriverTunables::reconfigure_timeout_elections`](crate::DriverTunables::reconfigure_timeout_elections)
-    /// election timeouts) taken early — the rare-but-valid decision that puts a *second*
-    /// reconfigurer on a generation someone else half-replaced.
-    fn abandon_reconfigurer(&self, phase: &ReconfigurerPhase) -> bool {
-        let _ = phase;
-        false
-    }
-
-    /// Whether this leader should **cooperatively hand its Phase-2 authority
-    /// on** right now (`paros_core::ColocatedNode::relinquish_to`), instead of
-    /// keeping it until an election takes it away.
-    ///
-    /// Consulted only when the core reports the leadership is in a
-    /// handoff-eligible state and at least one successor exists, so a `true`
-    /// here always has an observable effect. Answering `false` is always safe:
-    /// a handoff is an *optimization* — it saves the successor a Phase 1 — and
-    /// never a requirement, exactly like the driver's skippable accept
-    /// re-send.
-    ///
-    /// `ctx` describes what the transfer would carry, so a simulation can bias
-    /// toward the adversarial shapes (a non-empty accepted-but-unchosen tail, a
-    /// leader whose own prefix has not caught up) instead of drawing uniformly.
-    fn initiate_handoff(&self, _ctx: HandoffContext) -> bool {
-        false
-    }
-
-    /// Which of `candidates` should receive the authority, when a handoff is
-    /// going ahead. `None` (the default) leaves the choice to the driver's own
-    /// randomized pick. A returned id that is not in `candidates` is ignored.
-    ///
-    /// Every candidate is equally valid — the successor validates the transfer
-    /// against its own durable promise and falls back to an ordinary election
-    /// if it cannot use it — so this only steers *which* valid state the run
-    /// explores.
-    fn handoff_target(&self, _candidates: &[NodeId]) -> Option<NodeId> {
-        None
-    }
-
-    /// Whether to drop this one outbound protocol message after it is durable
-    /// but before it reaches the transport. Always safe: the network could lose
-    /// the same message, and every protocol path already tolerates that loss
-    /// (`resend_pending` re-derives what still matters). Unlike moonpool's
-    /// connection-level faults, this reaches *per-message* loss — e.g. one
-    /// isolated `Accept` for an earlier slot vanishing while later slots land,
-    /// the interleaving behind a stranded chosen-gap wedge.
-    fn drop_outgoing(&self, _to: Party, _msg: &Message) -> bool {
-        false
-    }
-
-    /// Whether to send this one outbound protocol message **twice**. Always
-    /// safe: retransmission is legal transport behavior on any reconnecting
-    /// link, and every quorum in the core is set-based, so a duplicate must be
-    /// harmless — this location exists to keep it that way (a quorum counter
-    /// "optimized" into an integer would let a duplicated `Accepted` fabricate
-    /// a quorum from a sub-quorum). Moonpool has no message-duplication fault.
-    fn duplicate_outgoing(&self, _to: Party, _msg: &Message) -> bool {
-        false
-    }
-
-    /// Whether this outbound message should **overtake** everything already
-    /// queued in its peer mailbox — enqueued at the front instead of the back.
-    /// Always safe: the peer transport never promised ordering (a reconnect,
-    /// a retried RPC or the network itself reorders), and every protocol path
-    /// is built for it — but the unary batch RPC normally preserves the order
-    /// a node enqueued in, so within one peer stream this interleaving is
-    /// otherwise unreachable. Consulted only when the mailbox is non-empty
-    /// (overtaking an empty queue changes nothing).
-    fn overtake_in_mailbox(&self, _to: Party, _msg: &Message) -> bool {
-        false
-    }
-
-    /// Whether a **full** peer mailbox should make room for this message by
-    /// evicting its oldest queued message of *any* kind, instead of the
-    /// default oldest-of-the-same-kind victim. Always safe: the mailbox is
-    /// lossy by contract, so any queued message may be lost, and the
-    /// per-kind default is a liveness policy (it stops one class from
-    /// crowding another out on a slow link), not a safety one. Consulted only
-    /// on overflow, so a `true` always evicts something the default would have
-    /// kept — the occasional cross-kind pressure the liveness argument has to
-    /// survive.
-    fn evict_across_kinds(&self, _to: Party, _msg: &Message) -> bool {
-        false
-    }
-
-    /// Whether the peer-delivery task should **hold** its next drained batch
-    /// for one tick before putting it on the wire. Always safe: the transport
-    /// is allowed to take arbitrarily long (a reconnect, a congested link, a
-    /// stalled TCP window all do exactly this), and the mailbox is lossy by
-    /// contract, so a delayed batch is weaker than a dropped one. What it
-    /// reaches is the *concurrency window* the other mailbox hooks cannot:
-    /// while the drain is parked the mailbox keeps filling, so the backlog
-    /// crosses the shed threshold and the batcher's keep-newest path runs
-    /// against a genuinely stale head instead of a one-message queue.
-    ///
-    /// Consulted at **enqueue** time, on a mailbox that already holds
-    /// something, and applied by the delivery task — this message's arrival is
-    /// what makes the next batch worth holding. The split is a determinism
-    /// requirement rather than a convenience: see `PeerMailbox` in
-    /// `paros::driver`.
-    fn hold_peer_delivery(&self, _to: Party) -> bool {
-        false
-    }
-
-    /// Whether the next delivery batch should be handed to the peer in
-    /// **reverse** enqueue order. Always safe, and for the same reason
-    /// [`DriverHooks::overtake_in_mailbox`] is: the peer transport never
-    /// promised ordering. It is the drain-side half of that location — overtake
-    /// reorders one message against a queue, this reorders a whole batch at
-    /// once, which is the shape a retried RPC or a re-established stream
-    /// produces.
-    ///
-    /// Consulted at **enqueue** time, once this message makes a reorderable
-    /// (two-message) batch possible, and applied by the delivery task only
-    /// when the batch it drains really does hold more than one message.
-    fn reverse_delivery_batch(&self, _to: Party) -> bool {
-        false
-    }
-
-    /// Whether the next tick should wait **twice** the normal interval. Always
-    /// safe: the tick interval is a pacing choice, not a protocol bound — every
-    /// timeout the core owns is counted in ticks, so a node that ticks at half
-    /// speed is exactly a slow node, which the cluster must already tolerate
-    /// (moonpool's clock skew produces the same relative drift). Consulted once
-    /// per tick; a simulation is expected to stop stretching after its chaos
-    /// window so the recovery tail runs at the honest cadence.
-    fn stretch_tick_interval(&self) -> bool {
-        false
-    }
-
-    /// Whether to drop this one client-facing reply after the server state has
-    /// advanced. Always safe: the client-facing RPC response can be lost in
-    /// production at any time, and the whole ack contract is built for it —
-    /// "committed" is re-derivable by a retry through the `(client, seq)`
-    /// dedup path. Deterministically produces "committed, applied, and the
-    /// client does not know", the precondition of the dedup-window edges.
+    /// Whether to drop this one client-facing reply on top of the reply
+    /// seam's own per-kind locations (`crate::driver::reply`, #294). It is
+    /// left only for the lost-verdict scenario, a per-seed latch that drops
+    /// a write's verdict on every node at one rate; it goes with the other
+    /// latches (#318 E). Always safe: the client-facing RPC response can be
+    /// lost in production at any time.
     fn drop_client_reply(&self, _reply: Reply) -> bool {
-        false
-    }
-
-    /// Whether to deliver this one reply **twice**, the mirror of
-    /// [`DriverHooks::drop_client_reply`]. Always safe: a duplicate is what
-    /// the sender's own re-send produces once its first answer was merely
-    /// slow, so every reply the driver folds must already be idempotent —
-    /// this makes the second copy arrive on purpose instead of by luck.
-    ///
-    /// Consulted only where a duplicate is *expressible*: the matchmaker
-    /// plane's replies, which reach the node loop through a channel and are
-    /// folded into `ColocatedNode` / the reconfigurer ([`Reply::Match`],
-    /// [`Reply::GcAck`], [`Reply::MatchmakerReconfigure`]). The client-facing
-    /// seams take no duplicate by construction — a unary RPC reply is
-    /// delivered exactly once, and the *client's* retry is the duplicate that
-    /// path has to survive, which `drop_client_reply` already produces.
-    fn duplicate_client_reply(&self, _reply: Reply) -> bool {
-        false
-    }
-
-    /// Which **column** of the active grid this proposal's Phase 2 should be
-    /// addressed to, instead of the core's own `slot % cols` (#141):
-    /// `None` (the default) keeps the core's choice. Consulted only where it
-    /// can have an effect — on a leader whose active configuration is a
-    /// [`QuorumSystem::Grid`](paros_core::QuorumSystem::Grid), from the node
-    /// loop, right before the proposal opens its round — and handed to the
-    /// core through [`paros_core::ColocatedNode::propose_in`]. A returned
-    /// column at or past `cols` is ignored.
-    ///
-    /// Always safe: every full column is a Phase-2 quorum and every row
-    /// meets every column, so which column carries a slot is a
-    /// load-spreading choice, never a safety one (the method's own doc has
-    /// the argument). What the override reaches is the column mix the
-    /// modulus alone never produces — two consecutive slots on one column,
-    /// a slot whose handoff successor re-derives a different column than
-    /// the one its first fan-out used.
-    fn phase2_column(&self, _slot: Slot, _cols: usize) -> Option<usize> {
-        None
-    }
-
-    /// Which **row** of the active grid a quorum read (#143) should ask for
-    /// its vote watermarks, instead of the core's own `ctx % rows`: `None`
-    /// (the default) keeps the core's choice. The Phase-1 twin of
-    /// [`DriverHooks::phase2_column`]. Consulted only where it can have an
-    /// effect — on a node whose active configuration is a
-    /// [`QuorumSystem::Grid`](paros_core::QuorumSystem::Grid), from the node
-    /// loop, right before the read opens — and handed to the core through
-    /// [`paros_core::ColocatedNode::quorum_read_in`]. A returned row at or
-    /// past `rows` is ignored.
-    ///
-    /// Always safe: every full row is a Phase-1 quorum and meets every
-    /// column, so any row's maximum watermark is at or past every slot a
-    /// column chose. What the override reaches is the row mix the modulus
-    /// alone never produces — consecutive reads on one row, a row the
-    /// reader is not in.
-    fn read_row(&self, _ctx: u64, _rows: usize) -> Option<usize> {
-        None
-    }
-
-    /// Which **proxy leader** this proposal's Phase 2 should be delegated to
-    /// (#142), instead of the core's own `ProxyId(slot % proxy_count)`
-    /// ([`paros_core::ProxyId::of`]): `None` (the default) keeps the core's
-    /// choice. Consulted only where it can have an effect — on a leader of a
-    /// deployment with proxies, from the node loop, right before the
-    /// proposal opens its round — and handed to the core as
-    /// [`paros_core::Delegation::To`]. A returned proxy at or past
-    /// `proxy_count` is ignored.
-    ///
-    /// Always safe: a proxy contributes nothing to the decision and two
-    /// fan-outs of one `(slot, ballot, command)` are P2b-idempotent, so
-    /// which proxy carries a slot is a load-spreading choice, never a
-    /// safety one. What the override reaches is the mix the modulus alone
-    /// never produces — two consecutive slots on one proxy, and a slot whose
-    /// handoff successor re-delegates it (the successor derives `slot %
-    /// proxy_count` afresh) to a different proxy than the one that already
-    /// holds it, so two proxies fan out the same round.
-    fn proxy_for(&self, _slot: Slot, _proxy_count: usize) -> Option<ProxyId> {
-        None
-    }
-
-    /// Whether to run this proposal's Phase 2 **colocated** on the leader
-    /// although the deployment has proxies (#142,
-    /// [`paros_core::Delegation::Colocated`]). Consulted only where it can
-    /// have an effect (a leader of a deployment with proxies), before
-    /// [`DriverHooks::proxy_for`], which is then not asked. Always safe: the
-    /// colocated Phase 2 is the plain deployment's, and the fallback every
-    /// take-back runs anyway — this makes a proxied deployment's log a mix
-    /// of proxied and colocated slots rather than all of one kind.
-    fn skip_delegation(&self) -> bool {
-        false
-    }
-
-    /// Whether a **proxy leader** should skip this beat's re-fan-out of its
-    /// open rounds ([`paros_core::ProxyLeader::resend_pending`]). Consulted
-    /// only while the proxy holds open rounds, so a `true` always costs a
-    /// beat. Always safe: the re-send is a pure optimization, the acceptors
-    /// re-accept idempotently, and a round the proxy never closes is taken
-    /// back by its leader ([`paros_core::ColocatedNode::take_back_delegated`]).
-    fn skip_proxy_resend(&self) -> bool {
-        false
-    }
-
-    /// Whether to answer a parked read with a retry redirect **now**, before
-    /// its confirmation deadline. Always safe: the redirect is the same reply
-    /// the deadline produces, and a client is built to retry it; a late core
-    /// confirmation finds the ctx gone and is ignored, exactly as after the
-    /// deadline. Consulted once per tick while reads are parked, so it
-    /// reaches the "redirected while the confirmation was in flight" edge the
-    /// deadline only reaches under a lost ack.
-    fn expire_parked_read_early(&self) -> bool {
         false
     }
 }

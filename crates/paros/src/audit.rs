@@ -452,24 +452,19 @@ pub trait Audit {
     fn journal_quarantined(&self, node: NodeId) {}
 
     /// `from` (a node, or a proxy leader) dropped one outbound message at
-    /// the send seam (hook-decided per-message loss, indistinguishable from
-    /// network loss to the peers).
+    /// the send seam (an inline BUGGIFY location per kind family, #318:
+    /// per-message loss, indistinguishable from network loss to the peers).
     fn dropped_at_send(&self, from: Party, to: Party, msg: &Message) {}
 
-    /// The driver deliberately sent this one outbound message twice
-    /// ([`DriverHooks::duplicate_outgoing`](crate::DriverHooks)).
+    /// The driver deliberately sent this one outbound message twice (an
+    /// inline BUGGIFY location per kind family at the send seam, #318).
     fn duplicated_at_send(&self, from: Party, to: Party, msg: &Message) {}
 
     /// The driver deliberately dropped this one client-facing reply after the
-    /// server state advanced ([`DriverHooks::drop_client_reply`](crate::DriverHooks)).
+    /// server state advanced (the reply seam's inline location for its kind,
+    /// #318, or the lost-verdict latch,
+    /// [`DriverHooks::drop_client_reply`](crate::DriverHooks)).
     fn client_reply_dropped(&self, node: NodeId, reply: crate::hooks::Reply) {}
-
-    /// The driver deliberately re-queued this one reply so the node loop
-    /// folds it twice
-    /// ([`DriverHooks::duplicate_client_reply`](crate::DriverHooks)) — the
-    /// mirror of [`Audit::client_reply_dropped`], and the test of every
-    /// idempotency claim the matchmaker plane's answers rest on.
-    fn client_reply_duplicated(&self, node: NodeId, reply: crate::hooks::Reply) {}
 
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.
@@ -542,9 +537,9 @@ pub trait Audit {
     }
 
     /// This node answered a journal `Read` `served: false` because its
-    /// quorum read did not confirm: `early` when the
-    /// `expire_parked_read_early` hook fired before the read's confirmation
-    /// deadline, otherwise the deadline itself ran out.
+    /// quorum read did not confirm: `early` when the driver's inline
+    /// early-expiry location fired before the read's confirmation deadline,
+    /// otherwise the deadline itself ran out.
     fn read_expired(&self, node: NodeId, early: bool) {}
 
     /// `from` (a node, or a proxy leader) dropped one outbound message at a
@@ -638,10 +633,6 @@ pub trait Audit {
     /// `ballot` to `leader`, the node that delegated the round, and closed
     /// the round.
     fn proxy_nack_relayed(&self, proxy: ProxyId, leader: NodeId, slot: Slot, ballot: Ballot) {}
-
-    /// The proxy leader `proxy` deliberately skipped this beat's re-fan-out
-    /// of its open rounds ([`DriverHooks::skip_proxy_resend`](crate::DriverHooks)).
-    fn proxy_resend_skipped(&self, proxy: ProxyId) {}
 
     /// This node lost its leadership with `calls` journal calls still
     /// parked, whose slots may yet decide under the successor: their clients
@@ -846,10 +837,6 @@ pub trait Audit {
     ) {
     }
 
-    /// This leader deliberately skipped re-sending its open GC request this
-    /// beat ([`DriverHooks::skip_gc_resend`](crate::DriverHooks)).
-    fn gc_resend_skipped(&self, node: NodeId) {}
-
     /// This leader folded `matchmaker`'s GC ack: what it did to the campaign
     /// — one more ack, or the quorum that makes the floor effective and
     /// names the retirable acceptors.
@@ -880,10 +867,6 @@ pub trait Audit {
         request: &ReconfigureRequest,
     ) {
     }
-
-    /// This node deliberately skipped re-sending its running handover's
-    /// requests this beat ([`DriverHooks::skip_reconfigurer_resend`](crate::DriverHooks)).
-    fn reconfigurer_resend_skipped(&self, node: NodeId) {}
 
     /// This node abandoned a handover whose running phase made no progress
     /// for `reconfigure_timeout_elections` election timeouts (a member that
@@ -1064,12 +1047,6 @@ pub trait Audit {
     /// [`RunError::Refused`](crate::RunError::Refused) exit; nothing was
     /// written and no reply left.
     fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {}
-
-    /// The driver deliberately dropped one matchmaker reply after its write
-    /// was durable ([`DriverHooks::drop_client_reply`](crate::DriverHooks::drop_client_reply) with
-    /// [`Reply::Match`](crate::Reply::Match), [`Reply::GcAck`](crate::Reply::GcAck)
-    /// or [`Reply::MatchmakerReconfigure`](crate::Reply::MatchmakerReconfigure)).
-    fn match_reply_dropped(&self, matchmaker: MatchmakerId, reply: crate::hooks::Reply) {}
 
     /// A [`MatchmakerStorage`](crate::MatchmakerStorage) call surfaced `error`
     /// and the driver decided `decision` (see [`Audit::storage_fault`]).

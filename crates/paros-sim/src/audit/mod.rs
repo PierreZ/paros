@@ -703,14 +703,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .observe_proxy_decision(proxy.0, slot.0, ballot, vhash);
     }
 
-    fn proxy_resend_skipped(&self, _proxy: ProxyId) {
-        let mut st = self.state();
-        reach_once!(
-            st.proxy_resend_skipped,
-            "proxy: a proxy skips a re-fan-out beat"
-        );
-    }
-
     fn proxy_round_expired(&self, _proxy: ProxyId, _slot: Slot) {
         let mut st = self.state();
         reach_once!(
@@ -1664,7 +1656,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     fn read_expired(&self, _node: NodeId, early: bool) {
         let mut st = self.state();
         if early {
-            // BUGGIFY pairing for `expire_parked_read_early`. The recovery
+            // BUGGIFY pairing for the driver's early read expiry. The recovery
             // half is the client's own: "a read is retried across nodes
             // before committing" in the client history fold.
             reach_once!(
@@ -1691,25 +1683,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             st.waiters_cleared,
             "a deposed leader clears client replies it still held"
         );
-    }
-
-    fn client_reply_duplicated(&self, _node: NodeId, reply: paros::Reply) {
-        let mut st = self.state();
-        match reply {
-            paros::Reply::Match => reach_once!(
-                st.reply_duplicated[0],
-                "a matchmaker's registration reply is folded twice"
-            ),
-            paros::Reply::GcAck => reach_once!(
-                st.reply_duplicated[1],
-                "a matchmaker's GC ack is folded twice"
-            ),
-            paros::Reply::MatchmakerReconfigure => reach_once!(
-                st.reply_duplicated[2],
-                "a matchmaker's handover reply is folded twice"
-            ),
-            _ => {}
-        }
     }
 
     fn edge_rejected(&self, _at: Party, _kind: EdgeRejection) {
@@ -2027,10 +2000,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .gc_requested(node, watermark, fence, covered, &uncovered.join(","));
     }
 
-    fn gc_resend_skipped(&self, _node: NodeId) {
-        self.state().matchmaker.gc_resend_skipped();
-    }
-
     fn gc_step(&self, node: NodeId, _matchmaker: MatchmakerId, ack: &GcAck, step: &GcStep) {
         let mut st = self.state();
         let config = st.config_of(ack.watermark).cloned();
@@ -2070,10 +2039,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 "generation: a client's matchmaker reconfiguration is refused"
             );
         }
-    }
-
-    fn reconfigurer_resend_skipped(&self, _node: NodeId) {
-        self.state().matchmaker.reconfigurer_resend_skipped();
     }
 
     fn reconfigurer_step(
@@ -2328,10 +2293,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
                 );
             }
         }
-    }
-
-    fn match_reply_dropped(&self, _matchmaker: MatchmakerId, reply: paros::Reply) {
-        self.state().matchmaker.reply_dropped(reply);
     }
 
     fn matchmaker_storage_fault(

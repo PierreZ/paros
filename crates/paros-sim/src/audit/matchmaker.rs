@@ -287,7 +287,6 @@ pub(super) struct MatchmakerAudit {
     duplicate_answered: bool,
     watermark_raised: bool,
     recovered_after_restart: bool,
-    reply_dropped: bool,
     // --- the leader-side phase (#120) ---
     campaign_opened: bool,
     campaign_completed: bool,
@@ -319,8 +318,6 @@ pub(super) struct MatchmakerAudit {
     gc_effective: bool,
     gc_retired_any: bool,
     gc_refused: bool,
-    gc_resend_skipped: bool,
-    gc_ack_dropped: bool,
     retire_accepted: bool,
     retire_refused: bool,
     node_retired: bool,
@@ -342,8 +339,6 @@ pub(super) struct MatchmakerAudit {
     /// flight, until the driver reports them or the next boot judges them.
     in_flight: BTreeMap<u64, Vec<RegistryOp>>,
     reconfigurer_superseded: bool,
-    reconfigurer_resend_skipped: bool,
-    reconfigure_reply_dropped: bool,
     matchmaker_frozen: bool,
     matchmaker_bootstrapped_flag: bool,
     matchmaker_activated_flag: bool,
@@ -1195,24 +1190,6 @@ impl MatchmakerAudit {
         }
     }
 
-    /// A reply was deliberately dropped after its write was durable.
-    pub(super) fn reply_dropped(&mut self, reply: paros::Reply) {
-        match reply {
-            paros::Reply::GcAck => reach_once!(
-                self.gc_ack_dropped,
-                "gc: a garbage-collection ack is dropped at the reply seam"
-            ),
-            paros::Reply::MatchmakerReconfigure => reach_once!(
-                self.reconfigure_reply_dropped,
-                "generation: a handover reply is dropped at the reply seam"
-            ),
-            _ => reach_once!(
-                self.reply_dropped,
-                "matchmaker: a reply is dropped at the reply seam"
-            ),
-        }
-    }
-
     // ---- the leader-side matchmaking phase (#120) ---------------------------
 
     /// The bootstrap configuration every node boots with.
@@ -1776,14 +1753,6 @@ impl MatchmakerAudit {
         );
     }
 
-    /// The leader skipped a due GC re-send.
-    pub(super) fn gc_resend_skipped(&mut self) {
-        reach_once!(
-            self.gc_resend_skipped,
-            "gc: the driver skips a due garbage-collection re-send"
-        );
-    }
-
     /// A matchmaker answered a GC request.
     pub(super) fn gc_replied(&mut self, matchmaker: MatchmakerId, ack: &GcAck) {
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -1979,14 +1948,6 @@ impl MatchmakerAudit {
         reach_once!(
             self.reconfigurer_started_flag,
             "generation: a matchmaker-set handover starts"
-        );
-    }
-
-    /// The reconfigurer skipped a due re-send.
-    pub(super) fn reconfigurer_resend_skipped(&mut self) {
-        reach_once!(
-            self.reconfigurer_resend_skipped,
-            "generation: the driver skips a due handover re-send"
         );
     }
 

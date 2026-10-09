@@ -21,7 +21,7 @@ production (`parosd`) and in simulation (`paros-sim`). Stack: `paros-core` ← *
 - `driver/calls.rs` → held `Write`/`SetLeader`/`Truncate`, answered with the verdict their slot folded to (#204).
 - `driver/log_reads.rs` → `JournalReads` → the public `Read`: quorum-confirmed, served from the fold, long-polled.
 - `driver/config.rs` → `DriverTunables` → every driver cadence/budget; `default()` is the sim's baseline · `driver/tunables.rs` → `DriverTunables::production`, `check_floors`, `BelowFloor` → the shipped profile and the floors (#209).
-- `hooks.rs` → `DriverHooks`, `NoHooks`, `HandoffContext`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294): add nothing to it. The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs`, `replica_tier/mod.rs` (#297) and the journal stores (#294).
+- `hooks.rs` → `DriverHooks` (three per-seed latches left: `withhold_gc_requests`, `hold_journal`, the lost-verdict `drop_client_reply`), `NoHooks`, `Reply` → the old BUGGIFY prong-1 surface, being deleted (#294, #318 E): add nothing to it. Every per-call choice is an inline `buggify_fault_with_prob!` (send seam `driver/transport.rs`, reply seam `driver/reply.rs`, picks and handoff `driver/mod.rs`, #318). The durability moments are inline `hint!`s in `driver/ready.rs`, `matchmaker/mod.rs`, `replica_tier/mod.rs` (#297) and the journal stores (#294).
 - `audit.rs` → `Audit`, `NoAudit` → the observation port.
 - `storage/mod.rs` → `LogStorage`, `StorageError`, `StorageRecord`, `WriteOutcome` → the async seam.
 - `storage/mem.rs` → `MemStorage` · `storage/contract.rs` → `storage_contract_suite`.

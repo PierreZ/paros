@@ -17,7 +17,6 @@ use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
-use crate::hooks::DriverHooks;
 use crate::rpc::methods::DeliverRpc;
 use crate::rpc::{internal, message_to_proto, well_known};
 
@@ -65,18 +64,18 @@ use super::events::{command_hash, message_kind, message_route, proto_message_kin
 /// message per non-empty lane in journal order. The per-kind eviction rule
 /// holds inside a lane; a journal is never crowded out by another.
 ///
-/// The mailbox also carries the two **drain-side** hook decisions
-/// ([`DriverHooks::hold_peer_delivery`], [`DriverHooks::reverse_delivery_batch`]).
+/// The mailbox also carries the two **drain-side** BUGGIFY decisions (hold
+/// the next batch a tick, reverse it), drawn in [`Outbound::transmit`].
 /// They are taken here, at enqueue time on the node loop, and merely *read* by
 /// the delivery task, because a decision is a randomness draw and the delivery
 /// task is `spawn_task(..).detach()`ed: a detached task's poll schedule is not
 /// part of the simulation's deterministic step order the way the node loop is,
 /// so drawing inside one lets a task that outlives its simulation shift the
-/// *next* run's draw sequence. That is not a theoretical hazard — consulting
-/// these two hooks from inside the delivery task broke
+/// *next* run's draw sequence. That is not a theoretical hazard — drawing
+/// these two decisions inside the delivery task broke
 /// `same_seed_replays_identically` on CI (seed 42's first in-process replay
 /// diverged from its second, on a run that was clean locally). Deciding on the
-/// node loop restores the invariant every other hook already had: **simulation
+/// node loop restores the invariant every other site already has: **simulation
 /// randomness is drawn only where the simulation is stepping deterministically.**
 #[derive(Clone)]
 pub(crate) struct PeerMailbox {
@@ -240,9 +239,9 @@ impl PeerMailbox {
     /// the mailbox is full: the oldest of the *same kind* as `message` if one
     /// is queued, else the oldest overall — unless `evict_across_kinds`, which
     /// takes the oldest overall outright. `overtake` enqueues at the front
-    /// instead of the back. Both are the driver-hook perturbations
-    /// ([`DriverHooks::overtake_in_mailbox`], [`DriverHooks::evict_across_kinds`]);
-    /// production passes `false` for both. Never blocks.
+    /// instead of the back. Both are BUGGIFY perturbations drawn in
+    /// [`Outbound::transmit`]; production passes `false` for both. Never
+    /// blocks.
     #[tracing::instrument(level = "trace", skip_all, fields(overtake, evict_across_kinds))]
     fn push(
         &self,
@@ -472,9 +471,8 @@ impl Outbound {
     /// proposer attempted, independently of delivery. The `msg_sent` trace
     /// event is the human-readable mirror; nothing reads it back.
     #[tracing::instrument(level = "trace", skip_all, fields(from = %self.sender, to = %to, kind = message_kind(msg)))]
-    pub(crate) fn transmit<H: DriverHooks, A: Audit>(
+    pub(crate) fn transmit<A: Audit>(
         &self,
-        hooks: &H,
         audit: &A,
         journal: JournalIdentifier,
         to: Party,
@@ -542,14 +540,25 @@ impl Outbound {
             // receiver demuxes on the pair.
             message.tenant = journal.tenant.0;
             message.journal = journal.journal.0;
-            // The mailbox's four decisions, all taken here on the node loop,
-            // each consulted only where it can have an observable effect.
+            // The mailbox's four decisions, each its own BUGGIFY location,
+            // all drawn here on the node loop, each only where it can have an
+            // observable effect, and silent in the recovery tail.
             //
-            // Two act on this enqueue: overtake needs something already queued
-            // to jump, evicting across kinds needs a full queue to evict from.
-            let overtake = !queue.is_empty() && hooks.overtake_in_mailbox(to, msg);
+            // Two act on this enqueue. Overtake needs something already
+            // queued to jump: a per-peer stream is otherwise delivered in
+            // enqueue order, so this is the only in-stream reorder. Evicting
+            // across kinds needs a full queue to evict from; kept occasional,
+            // because a systematic cross-kind eviction is the starvation the
+            // per-kind default exists to prevent.
+            let overtake = !queue.is_empty() && moonpool_buggify::buggify_fault_with_prob!(0.02);
+            if overtake {
+                moonpool_assertions::reachable!("mailbox: a message overtakes its peer queue");
+            }
             let evict_across_kinds = queue.is_full((journal.tenant.0, journal.journal.0))
-                && hooks.evict_across_kinds(to, msg);
+                && moonpool_buggify::buggify_fault_with_prob!(0.10);
+            if evict_across_kinds {
+                moonpool_assertions::reachable!("mailbox: overflow evicts across kinds");
+            }
             // Two arm the *drain*: this message's arrival is what makes the
             // next batch worth holding or reversing. Holding needs a queue that
             // is already non-empty (parking a drain of nothing changes
@@ -557,10 +566,21 @@ impl Outbound {
             // plus a queued one is the smallest reorderable batch. Decided
             // here, applied there — see [`PeerMailbox`] for why the delivery
             // task must not draw.
-            if !queue.is_empty() && hooks.hold_peer_delivery(to) {
+            //
+            // Both arms are latches, so a node that enqueues a dozen messages
+            // in one tick draws a dozen times and the arms collapse into one:
+            // the per-drain rate is far above the per-call one. Holding most
+            // drains would halve per-peer throughput (a partition, moonpool's
+            // job), and reversing most batches would make the stream
+            // systematically backwards. One tick per hold bounds the backlog
+            // one hold builds to one tick's traffic: enough to cross the shed
+            // threshold, never enough to wedge a link.
+            if !queue.is_empty() && moonpool_buggify::buggify_fault_with_prob!(0.01) {
+                moonpool_assertions::reachable!("mailbox: a peer drain is held for a tick");
                 queue.hold_next.store(true, Ordering::Relaxed);
             }
-            if !queue.is_empty() && hooks.reverse_delivery_batch(to) {
+            if !queue.is_empty() && moonpool_buggify::buggify_fault_with_prob!(0.01) {
+                moonpool_assertions::reachable!("mailbox: a delivery batch is reversed");
                 queue.reverse_next.store(true, Ordering::Relaxed);
             }
             if let Some(evicted) = queue.push(message, overtake, evict_across_kinds) {
@@ -823,7 +843,89 @@ fn delivery_batch<A: Audit>(
     (internal::Deliver { messages: batch }, carried)
 }
 
-/// Surface a hook-decided send drop (the `msg_dropped_at_send` trace and
+/// Whether to drop this one outbound protocol message after it is durable
+/// but before it reaches the transport. One location per kind family, one
+/// macro line per arm, silent in the recovery tail.
+///
+/// Always safe: the network could lose the same message, and every protocol
+/// path tolerates that loss (`resend_pending` re-derives what still
+/// matters). Unlike moonpool's connection-level faults, this reaches
+/// per-message loss: for example, one isolated `Accept` for an earlier slot
+/// vanishes while later slots land, the interleaving behind a stranded
+/// chosen-gap wedge.
+fn drop_at_send(msg: &Message) -> bool {
+    match msg {
+        // An isolated `Accept` loss is the interleaving behind a stranded
+        // chosen-gap wedge (#80): one earlier slot's Accept vanishes while
+        // later slots land.
+        Message::Accept { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // A lost `Promise`/`Prepare` stretches an election open.
+        Message::Prepare { .. } | Message::Promise { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.10)
+        }
+        // A lost `Nack` keeps a below-floor candidate's campaign alive long
+        // enough for the answering trim point to land mid-election (the #88
+        // window).
+        Message::Nack { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
+        // A dropped `Commit` delays a follower's floor raise, widening the
+        // mixed-floor window the #88 mid-election trim jump needs, and
+        // leaves the hole commit-replay catch-up must heal (#80).
+        Message::Commit { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // The lost ack: a slot durably accepted by a quorum whose proposer
+        // never learns it, which forces a re-propose under a new ballot.
+        Message::Accepted { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // Starve the `CheckQuorum` window and the catch-up push direction.
+        // Kept low: these fire per tick per peer, and a high rate is a
+        // partition, which is moonpool's job.
+        Message::Heartbeat { .. } | Message::HeartbeatAck { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.02)
+        }
+        // Repair traffic for a node that is already behind: a lost response
+        // costs one beat and re-derives on the next.
+        Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.10)
+        }
+        // The pull direction of catch-up: the next tick re-asks.
+        Message::CatchUpRequest { .. } => moonpool_buggify::buggify_fault_with_prob!(0.10),
+        // The whole handoff, lost in one message. It must cost availability
+        // only: the outgoing leader already stepped down, so an ordinary
+        // Phase 1 elects the next one. Aggressive, because that fallback must
+        // always work.
+        Message::Relinquish { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
+        _ => false,
+    }
+}
+
+/// Whether to send this one outbound protocol message twice. One location
+/// per kind family, one macro line per arm, silent in the recovery tail.
+///
+/// Always safe: retransmission is legal transport behavior on any
+/// reconnecting link, and every quorum in the core is set-based, so a
+/// duplicate must be harmless. These locations keep it that way: a quorum
+/// counter "optimized" into an integer would let a duplicated `Accepted`
+/// fabricate a quorum. Moonpool has no message-duplication fault.
+fn duplicate_at_send(msg: &Message) -> bool {
+    match msg {
+        // The quorum-counting kinds are the point of the location.
+        Message::Promise { .. } | Message::Accepted { .. } | Message::HeartbeatAck { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.05)
+        }
+        Message::Commit { .. } => moonpool_buggify::buggify_fault_with_prob!(0.05),
+        // A duplicated trim point must be a no-op the second time (the jump
+        // refuses a point at or below its floor).
+        Message::TrimmedTo { .. } | Message::CatchUpResponse { .. } => {
+            moonpool_buggify::buggify_fault_with_prob!(0.10)
+        }
+        // A duplicated catch-up request must only cost a redundant reply.
+        Message::CatchUpRequest { .. } => moonpool_buggify::buggify_fault_with_prob!(0.10),
+        // A re-delivered handoff must be a no-op at its addressee (never an
+        // allocator rewind) and refused everywhere else.
+        Message::Relinquish { .. } => moonpool_buggify::buggify_fault_with_prob!(0.25),
+        _ => false,
+    }
+}
+
+/// Surface a send drop (the `msg_dropped_at_send` trace and
 /// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
 /// exactly which round the loss isolated.
 fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
@@ -844,29 +946,27 @@ fn trace_send_drop<A: Audit>(audit: &A, from: Party, to: Party, msg: &Message) {
 
 /// Send one batch's addressed messages (fire-and-forget). The core addresses
 /// each one; the driver maps a [`Party`] → address. Each message may be dropped
-/// at this seam — per-message loss the network layer cannot produce on its own
-/// (a TCP stream loses intervals, never one isolated message), with
-/// `resend_pending` re-deriving what matters — or sent twice (retransmission
-/// is legal transport behavior; set-based quorum counting must tolerate it).
+/// at this seam ([`drop_at_send`]) — per-message loss the network layer cannot
+/// produce on its own (a TCP stream loses intervals, never one isolated
+/// message), with `resend_pending` re-deriving what matters — or sent twice
+/// ([`duplicate_at_send`]: retransmission is legal transport behavior;
+/// set-based quorum counting must tolerate it). Both are drawn here, on the
+/// node loop.
 #[tracing::instrument(level = "trace", skip_all, fields(from = %out.sender, messages = messages.len()))]
-pub(crate) fn send_messages<H, A>(
+pub(crate) fn send_messages<A: Audit>(
     out: &Outbound,
-    hooks: &H,
     audit: &A,
     journal: JournalIdentifier,
     messages: Vec<(Party, Message)>,
-) where
-    H: DriverHooks,
-    A: Audit,
-{
+) {
     let from = out.sender;
     for (to, msg) in messages {
-        if hooks.drop_outgoing(to, &msg) {
+        if drop_at_send(&msg) {
             trace_send_drop(audit, from, to, &msg);
             continue;
         }
-        out.transmit(hooks, audit, journal, to, &msg);
-        if hooks.duplicate_outgoing(to, &msg) {
+        out.transmit(audit, journal, to, &msg);
+        if duplicate_at_send(&msg) {
             audit.duplicated_at_send(from, to, &msg);
             tracing::info!(
                 from = %from,
@@ -874,7 +974,7 @@ pub(crate) fn send_messages<H, A>(
                 kind = message_kind(&msg),
                 "msg_duplicated_at_send"
             );
-            out.transmit(hooks, audit, journal, to, &msg);
+            out.transmit(audit, journal, to, &msg);
         }
     }
 }

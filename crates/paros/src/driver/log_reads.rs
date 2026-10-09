@@ -28,10 +28,10 @@ use std::time::Duration;
 use paros_core::{JournalIdentifier, LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
-use crate::hooks::{DriverHooks, Reply};
+use crate::hooks::Reply;
 use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
 
-use super::reply::answer;
+use super::reply::answer_read;
 
 /// The records one page carries when the client names no limit.
 pub(crate) const READ_PAGE_RECORDS: usize = 256;
@@ -129,13 +129,12 @@ fn read_ack_unchecked(read: &LogRead) -> ReadAck {
 }
 
 /// Hand one read's answer to the reply seam, reporting it first.
-fn send<H: DriverHooks, A: Audit>(
+fn send<A: Audit>(
     read: &LogRead,
     from: Seq,
     how: LogReadAnswer,
     reply: ReplySender<ReadAck>,
     node: NodeId,
-    hooks: &H,
     audit: &A,
 ) {
     let Some(report) = LogReadReport::of(read, from, how) else {
@@ -145,7 +144,7 @@ fn send<H: DriverHooks, A: Audit>(
         tracing::info!(node = node.0, from = from.0, answer = ?how, "log_read_not_held");
         let ack = read_ack(read);
         assert!(!ack.served, "a read this process does not hold is unserved");
-        answer(hooks, audit, node, Reply::ReadUnserved, reply, ack);
+        answer_read(audit, node, Reply::ReadUnserved, reply, ack);
         return;
     };
     // A woken read is one the fold moved past: never an empty tail page.
@@ -172,7 +171,7 @@ fn send<H: DriverHooks, A: Audit>(
         answer = ?how,
         "log_read_served"
     );
-    answer(hooks, audit, node, Reply::LogRead, reply, ack);
+    answer_read(audit, node, Reply::LogRead, reply, ack);
 }
 
 /// The refusal a call naming a journal this process does not serve gets
@@ -198,6 +197,19 @@ pub(crate) fn refuse_journal<A: Audit>(
     audit.journal_refused(node, asked, call);
     tracing::info!(node = node.0, journal = %asked, call, "journal_refused");
     true
+}
+
+/// The grid row a quorum read asks instead of the core's `ctx % rows`:
+/// `(ctx + 1) % rows`, the next read's row, so consecutive reads land on one
+/// row and the reader is asked about a row it may not sit in. Every row is a
+/// Phase-1 quorum that meets every column, so the choice is always valid.
+/// The draw is the caller's own location (the node and the replica tier).
+pub(crate) fn next_row(ctx: u64, rows: usize) -> usize {
+    assert!(rows >= 2, "a row override needs another row");
+    let modulus = u64::try_from(rows).unwrap_or(u64::MAX);
+    let row = usize::try_from(ctx.wrapping_add(1) % modulus).unwrap_or(0);
+    assert!(row < rows, "an overridden row is one the grid has");
+    row
 }
 
 /// How many ticks `wait_ms` is at `tick`, capped at `cap`.
@@ -287,14 +299,13 @@ impl JournalReads {
     /// left, start the long-poll. `fold` is the serving process's fold head
     /// now and `leader` whether it leads.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn confirmed<H: DriverHooks, A: Audit>(
+    pub(crate) fn confirmed<A: Audit>(
         &mut self,
         served: &[ReadState],
         read: impl Fn(Seq, usize, usize) -> LogRead,
         fold: Option<Slot>,
         leader: bool,
         node: NodeId,
-        hooks: &H,
         audit: &A,
     ) {
         for state in served {
@@ -330,7 +341,6 @@ impl JournalReads {
                     LogReadAnswer::Immediate,
                     pending.reply,
                     node,
-                    hooks,
                     audit,
                 );
             }
@@ -345,11 +355,10 @@ impl JournalReads {
 
     /// Re-serve every read waiting at the tail after a batch: a read the
     /// fold (or a truncation) moved past is answered; the rest keep waiting.
-    pub(crate) fn wake<H: DriverHooks, A: Audit>(
+    pub(crate) fn wake<A: Audit>(
         &mut self,
         read: impl Fn(Seq, usize, usize) -> LogRead,
         node: NodeId,
-        hooks: &H,
         audit: &A,
     ) {
         if self.parked.is_empty() {
@@ -368,7 +377,6 @@ impl JournalReads {
                     LogReadAnswer::Woke,
                     parked.reply,
                     node,
-                    hooks,
                     audit,
                 );
             }
@@ -384,14 +392,13 @@ impl JournalReads {
     /// driver's early-expiry hook) is answered `served: false`, and a read
     /// whose wait at the tail ran out is answered with the empty page.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn expire<H: DriverHooks, A: Audit>(
+    pub(crate) fn expire<A: Audit>(
         &mut self,
         read: impl Fn(Seq, usize, usize) -> LogRead,
         ticks: u64,
         retry_ticks: u64,
         expire_all: bool,
         node: NodeId,
-        hooks: &H,
         audit: &A,
     ) {
         self.now = ticks;
@@ -406,8 +413,7 @@ impl JournalReads {
         for (ctx, early) in overdue {
             if let Some(pending) = self.confirming.remove(&ctx) {
                 audit.read_expired(node, early);
-                answer(
-                    hooks,
+                answer_read(
                     audit,
                     node,
                     Reply::ReadUnserved,
@@ -445,7 +451,6 @@ impl JournalReads {
                 LogReadAnswer::Expired,
                 parked.reply,
                 node,
-                hooks,
                 audit,
             );
         }
