@@ -15,8 +15,8 @@ the end carry the issue numbers.
 
 `parosd`: one binary on N machines, started with `docker compose`, serving journals to tenants
 over a four-call data plane, healing itself through reconfiguration when a disk or a machine is
-lost. One region first, several failure domains; multi-region cells are M13 (decided on
-2026-10-07, #253).
+lost. One region first, several failure domains; multi-region cells are the last item of M12
+(decided on 2026-10-07, #253; folded into M12 on 2026-10-09).
 
 **First-class citizen: paros eats its own food** (decided on 2026-10-09). Journals, leader election and
 the Paxos flavors are first-class citizens of paros itself, not only products it offers: every
@@ -77,7 +77,8 @@ append to, unfenced), and that every consumer tails without a second protocol.
 
 The first deliverable is a toy: a local Docker Compose cluster an operator can initialize, create
 a tenant on, write to, read from, break and watch heal. The homelab is not in scope, and one
-region comes first: multi-region cells are M13 (decided on 2026-10-07, #253).
+region comes first: multi-region cells are the last item of M12 (decided on 2026-10-07, #253;
+folded into M12 on 2026-10-09).
 
 ## 2. The data plane
 
@@ -769,7 +770,7 @@ between cells). Cell creation is refused if its machines span fewer than three z
 
 **A universe mixes cell kinds** (decided on 2026-10-07, #253). A cell entry in the universe directory
 carries its `kind`, `Regional { region }` or `MultiRegion { regions, witness }`, and the cell's
-entry endpoint (given at `universe init` or `add-cell`), which a resolver hands back. A **multi-region** cell (M13, decided on 2026-10-07, #253) spans three regions, each
+entry endpoint (given at `universe init` or `add-cell`), which a resolver hands back. A **multi-region** cell (M12, decided on 2026-10-07, #253) spans three regions, each
 across several AZs; one of them is the **witness region**, which holds acceptors and matchmakers
 with full records and no other role (section 5). A tenant's `survives` (section 3.4) picks the
 kind of its cell: `az` a regional cell, `region` a multi-region cell. Each region has its resolvers
@@ -912,7 +913,7 @@ The same rule covers every future universe-level tenant (for example quotas or b
 in `internal` and not in `cell`, so it moves. Only a cell's own cell tenant stays in its cell
 (section 1).
 
-**Moving between cell kinds** (M12 and M13, decided on 2026-10-07, #253) is the same four phases.
+**Moving between cell kinds** (M12, decided on 2026-10-07, #253) is the same four phases.
 Copy: the tenant coordinator reconfigures each journal to a `C_new` whose members carry
 `(region, az)` failure domains over the target cell's machines; catch-up crosses regions and needs a
 throttle knob; the matchmaker set hands over by generation. Flip: `SetLeader` on the tenant's
@@ -1154,7 +1155,7 @@ already exercises; what changes is who drives the healing: today the harness's c
 the reconfigurations, in the service the tenant's coordinator does, from desired state. Losing a
 control quorum will be recoverable at both the cell and the universe level, without touching user
 data (section 3.10, deferred). Beyond one region, a multi-region cell survives the loss of a
-region (M13, below).
+region (M12, below).
 
 **The storage contract.** paros's stores are moonpool-journal's (`paros::journal`), and the
 simulation must give them at least the chaos the harness's in-memory stores carry today (decided
@@ -1285,7 +1286,7 @@ new capacity and moves wait.
  zone a lost: 3 of 5, zero slack, serves; Degraded, never re-placed into two zones
 ```
 
-**Multi-region cells** (M13, decided on 2026-10-07, #253). Failure domains are two-level,
+**Multi-region cells** (M12, decided on 2026-10-07, #253; M13 folded into M12 on 2026-10-09). Failure domains are two-level,
 `(region, az)`: in a regional cell every member shares one region and the rule runs over AZs; in a
 multi-region cell it runs at both levels. A `triple` journal is placed 2/2/1 over the
 three regions, its lone acceptor in the witness region, and each region's acceptors of one
@@ -1411,7 +1412,7 @@ Simulation is the investment. Every milestone lands with its share of:
 - Regions and the resolver (decided on 2026-10-07, #253): the copy budget counts a region as one fault;
   in a multi-region cell every chosen slot's Phase-2 voters span two regions; a partition through
   the witness region, after which leadership settles (a liveness oracle in recovery mode); a
-  client's two-hop resolution keeps succeeding through an outage of the universe tenant. In M13: the
+  client's two-hop resolution keeps succeeding through an outage of the universe tenant. In M12, with #253: the
   witness region, the per-region pools and a move between cell kinds.
 - Setup under simulation (decided on 2026-10-09, #246): all of paros runs in the simulation,
   setup included. Simulated `parosd` machines run the shipped `paros::machine::run_machine`
@@ -1484,8 +1485,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M9 | The universe with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5) |
-| M13 | Multi-region cells (#253) | the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
+| M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
