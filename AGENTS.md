@@ -98,6 +98,15 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Simulation rules
 
+- **Hard rule: the shipped code injects its own faults** (decided on 2026-10-09, #294). A fault
+  site is an inline `buggify!` or a moonpool hint (`hint::reboot()`, `hint::fragile(..)`) at the
+  line of `paros` or `parosd` that makes the choice, inert in production. Never a sim wrapper
+  around shipped code (`SimDisk`, `LedgeredJournal`, `PowerCut`), never a `SimMachine`: the sim
+  runs the same machine and disk as `parosd`. A sim wrapper only observes, through `Audit` or a
+  `reachable!` probe. `is_simulated()` tilts rates, cadences and checks, never an outcome a
+  client sees. `paros-core` stays sans-IO: no buggify, hint or `is_simulated()`. New sites follow
+  this today; `DriverHooks`, `PowerCut` and `SimDisk` migrate per #294
+  (`docs/analysis/simulation/production-fault-hints.md`).
 - **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
   as possible in the simulation, setup included. Always BUGGIFY your way into the complex
   situations rather than script them. Test several behaviours through the one workload with
@@ -326,7 +335,8 @@ Three layers, and nothing crosses them:
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
-- **Prong 1, `DriverHooks`**: the driver's rare-but-valid choices, one `buggify_with_prob!`
+- **Prong 1, `DriverHooks`** (retiring, #294: each method becomes an inline site per the hard
+  rule above): the driver's rare-but-valid choices, one `buggify_with_prob!`
   location each in `paros-sim` (`NoHooks` in production). Consult a hook only where its answer
   has an observable effect, trace what happened, quiet disruptive hooks after the chaos window.
   Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`

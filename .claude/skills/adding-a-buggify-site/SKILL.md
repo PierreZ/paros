@@ -10,6 +10,13 @@ Three layers, nothing crosses them: moonpool owns environmental faults,
 the driver's own decisions plus the harness's tunables are where paros plants
 its sites. Pick the prong first.
 
+**Hard rule (#294, 2026-10-09):** the site goes inline in the shipped code
+(`paros`, `parosd`) at the line that makes the choice, never in a sim wrapper.
+Until the moonpool hint API lands, prong 1 below is the only inline-equivalent
+seam. Once it lands, write `buggify_with_prob!` or a `hint::` call at the site
+and add no new `DriverHooks` method
+(`docs/analysis/simulation/production-fault-hints.md`).
+
 ## Prong 1: a driver decision → `DriverHooks`
 
 For a timing or policy choice the provider-generic driver owns (skip a
