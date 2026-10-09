@@ -1324,6 +1324,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // quorum-decided oracle here; a re-fold of an already-counted
             // record is idempotent.
             st.observe_durable_accept(node.0, slot.0, ballot, vhash);
+            st.loss_rewritten_at_boot(node.0, slot.0);
         }
         st.settle_dropped_in_flight(node.0, chosen_index);
         // A boot settles what its in-flight commits landed (#263): an
