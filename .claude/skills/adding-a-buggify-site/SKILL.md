@@ -1,6 +1,6 @@
 ---
 name: adding-a-buggify-site
-description: Add fault injection to paros the right way - a DriverHooks method with its BuggifyHooks call site (prong 1, the driver's rare-but-valid decisions, consulted only from the node loop), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability Seam, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
+description: Add fault injection to paros the right way - an inline buggify_with_prob!/buggify_pick! at the line of paros that makes the choice, or a hint!("moment") where a crash is interesting (never a new DriverHooks method, Seam or sim wrapper, #294), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability Seam, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
 ---
 
 # Adding a BUGGIFY site

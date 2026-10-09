@@ -156,7 +156,8 @@ Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENT
 One campaign, one workload, two judges. The **campaign** is a pool of
 `NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
 joiners, every role storing on the library's journal stores over moonpool's simulated disk,
-under every moonpool fault, the driver hooks, the power cuts and the ledgered injector
+under every moonpool fault, the driver hooks, the power cuts and the ledgered injector (the
+hooks and the power cuts migrating to `hint!` and inline buggify in `paros`, #294)
 (`paros_sim::world`). There is no scripted corpus and no fake disk (#261, #263, decided on
 2026-10-08): a shape the corpus once scripted is a per-seed BUGGIFY or swarm draw, judged by the
 same oracles. The one workload is `ChainWorkload`,
@@ -413,7 +414,8 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 The deterministic simulation is the source of truth. For a suspected safety or liveness bug:
 
 1. State the invariant it would violate.
-2. Make it reachable (chaos, `buggify!`/`buggify_knob!`); build a missing harness capability.
+2. Make it reachable (chaos, inline `buggify!`/`hint!` in `paros`, `buggify_knob!`); build a
+   missing harness capability, never a sim wrapper around shipped code.
 3. Put the check where the fact arrives (audit, workload `check()`, storage callbacks).
 4. Run the sweep: **red** on the unfixed code; replay that seed while working.
 5. Fix `paros-core`.
