@@ -1,5 +1,6 @@
 //! Durable state ([`HardState`]) and static node configuration ([`Config`]).
 
+use crate::journal_state::WriterMode;
 use crate::membership::{MatchmakerId, QuorumSystem, ReplicaId};
 use crate::types::{Ballot, JournalIdentifier, NodeId, Slot};
 
@@ -114,6 +115,13 @@ pub struct Config {
     /// and none has a default, `docs/architecture.md` §3.8); a node alone
     /// that routes nothing is given [`JournalIdentifier::UNSET`].
     pub journal: JournalIdentifier,
+    /// Who may write the journal (#241, `docs/architecture.md` §2): fixed
+    /// when the journal is created and recorded with the rest of this
+    /// configuration in the format marker, so a restart never changes it.
+    /// [`WriterMode::Single`] is the default: a fresh configuration is the
+    /// single-writer journal.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub writer_mode: WriterMode,
 }
 
 impl Config {
@@ -139,6 +147,7 @@ impl Config {
             proxy_count: 0,
             replica_count: 0,
             journal,
+            writer_mode: WriterMode::Single,
         };
         // A fresh configuration is the plain deployment: every opt-in is off.
         assert!(

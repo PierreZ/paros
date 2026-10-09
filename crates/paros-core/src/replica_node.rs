@@ -240,7 +240,7 @@ impl ReplicaNode {
                 "every retained slot below a replica's chosen prefix has a durable record"
             );
         }
-        let replica = Replica::from_boot(chosen_index, floor, storage.sealed_state(), &below);
+        let replica = Replica::from_boot(config.writer_mode, chosen_index, floor, storage.sealed_state(), &below);
         let acceptors = AcceptorConfig::new(config.peers.clone(), config.quorum_system);
         let mut node = Self {
             config,

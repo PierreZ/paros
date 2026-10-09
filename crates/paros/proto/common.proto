@@ -69,6 +69,13 @@ message JournalState {
   uint64 term = 6;
 }
 
+// Who may write a journal (#241), fixed when it is created: one leader
+// under its leader uuid, or anyone. Single-writer is the zero value.
+enum WriterMode {
+  WRITER_MODE_SINGLE = 0;
+  WRITER_MODE_MULTI = 1;
+}
+
 // What a client learns of a journal's state (#241): the leader uuid and the
 // positions, never the term.
 message JournalView {

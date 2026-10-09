@@ -100,15 +100,22 @@ impl Call {
                         | Outcome::Duplicate { .. }
                         | Outcome::Refused(_)
                         | Outcome::Truncated(_)
+                        | Outcome::WrongMode(_)
                 ),
                 "a Write is answered with a write's verdict"
             ),
             Call::SetLeader { .. } => assert!(
-                matches!(outcome, Outcome::Leader(_) | Outcome::LeaderRefused(_)),
+                matches!(
+                    outcome,
+                    Outcome::Leader(_) | Outcome::LeaderRefused(_) | Outcome::WrongMode(_)
+                ),
                 "a SetLeader is answered with a SetLeader's verdict"
             ),
             Call::Truncate { .. } => assert!(
-                matches!(outcome, Outcome::Trimmed(_) | Outcome::TruncateRefused(_)),
+                matches!(
+                    outcome,
+                    Outcome::Trimmed(_) | Outcome::TruncateRefused(_) | Outcome::WrongMode(_)
+                ),
                 "a Truncate is answered with a Truncate's verdict"
             ),
         }
@@ -198,7 +205,10 @@ pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
         assert!(ack.count > 0, "an acked write carries records");
         assert!(ack.state.is_none(), "an acked write names no refusal state");
     }
-    if matches!(outcome, Outcome::Refused(_) | Outcome::Truncated(_)) {
+    if matches!(
+        outcome,
+        Outcome::Refused(_) | Outcome::Truncated(_) | Outcome::WrongMode(_)
+    ) {
         assert!(
             ack.state.is_some(),
             "a refused write names the state it was judged against"
@@ -273,6 +283,11 @@ fn write_ack_unchecked(outcome: &Outcome) -> WriteAck {
             state: Some(journal_view_to_proto(*state)),
             ..WriteAck::default()
         },
+        Outcome::WrongMode(state) => WriteAck {
+            outcome: WriteOutcome::WrongMode.into(),
+            state: Some(journal_view_to_proto(*state)),
+            ..WriteAck::default()
+        },
         // A write's slot applies to a write's verdict; anything else is no
         // verdict at all.
         _ => WriteAck::default(),
@@ -285,6 +300,10 @@ pub(crate) fn set_leader_ack(outcome: &Outcome) -> SetLeaderAck {
     // Only a decided SetLeader wins, and a decided one names its state.
     if ack.won {
         assert!(ack.decided, "a won SetLeader was decided");
+        assert!(!ack.wrong_mode, "a won SetLeader is of the journal's mode");
+    }
+    if ack.wrong_mode {
+        assert!(ack.decided, "a wrong-mode SetLeader was decided");
     }
     if ack.decided {
         assert!(ack.state.is_some(), "a decided SetLeader names its state");
@@ -313,6 +332,13 @@ fn set_leader_ack_unchecked(outcome: &Outcome) -> SetLeaderAck {
             state: Some(journal_view_to_proto(*state)),
             ..SetLeaderAck::default()
         },
+        Outcome::WrongMode(state) => SetLeaderAck {
+            decided: true,
+            won: false,
+            wrong_mode: true,
+            state: Some(journal_view_to_proto(*state)),
+            ..SetLeaderAck::default()
+        },
         _ => SetLeaderAck::default(),
     }
 }
@@ -322,6 +348,13 @@ pub(crate) fn truncate_ack(outcome: &Outcome) -> TruncateAck {
     let ack = truncate_ack_unchecked(outcome);
     if ack.refused {
         assert!(ack.decided, "a refused Truncate was decided");
+        assert!(
+            !ack.wrong_mode,
+            "a fenced refusal is of the journal's mode"
+        );
+    }
+    if ack.wrong_mode {
+        assert!(ack.decided, "a wrong-mode Truncate was decided");
     }
     if ack.decided {
         assert!(ack.state.is_some(), "a decided Truncate names its state");
@@ -346,6 +379,12 @@ fn truncate_ack_unchecked(outcome: &Outcome) -> TruncateAck {
         Outcome::TruncateRefused(state) => TruncateAck {
             decided: true,
             refused: true,
+            state: Some(journal_view_to_proto(*state)),
+            ..TruncateAck::default()
+        },
+        Outcome::WrongMode(state) => TruncateAck {
+            decided: true,
+            wrong_mode: true,
             state: Some(journal_view_to_proto(*state)),
             ..TruncateAck::default()
         },

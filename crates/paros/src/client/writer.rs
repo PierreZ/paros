@@ -70,6 +70,12 @@ pub enum WriterOutcome {
         /// The journal state the write was judged against.
         state: JournalView,
     },
+    /// The journal is multi-writer (#241): it has no leader, and refused a
+    /// fenced write. Nothing moved.
+    WrongMode {
+        /// The journal state the write was judged against.
+        state: JournalView,
+    },
     /// The first answer was ambiguous and the journal proved the write is
     /// not in it, and never will be.
     NotWritten {
@@ -456,6 +462,7 @@ impl Writer {
             }
             WriteOutcome::Refused { state } => WriterOutcome::Refused { state },
             WriteOutcome::Truncated { state } => WriterOutcome::Truncated { state },
+            WriteOutcome::WrongMode { state } => WriterOutcome::WrongMode { state },
             WriteOutcome::Redirect { leader } => WriterOutcome::Unavailable { leader },
             WriteOutcome::UnknownJournal => WriterOutcome::UnknownJournal,
             WriteOutcome::TooLarge {

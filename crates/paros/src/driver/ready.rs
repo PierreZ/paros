@@ -323,10 +323,14 @@ pub(crate) fn report_applied<A: Audit>(
                 | Outcome::Refused(_)
                 | Outcome::Truncated(_)
         );
-        assert!(
-            write_verdict == command.write().is_some(),
-            "a write's slot folds to a write's verdict"
-        );
+        // A wrong-mode refusal (#241) answers a write, a truncation or a
+        // claim alike; every other verdict is of its command's kind.
+        if !matches!(outcome, Outcome::WrongMode(_)) {
+            assert!(
+                write_verdict == command.write().is_some(),
+                "a write's slot folds to a write's verdict"
+            );
+        }
         assert!(
             matches!(outcome, Outcome::Noop)
                 == matches!(command, Command::Control(paros_core::Control::Noop)),

@@ -101,6 +101,7 @@ impl JournalIdentifier {
 // No id has a default and `0` is the only value with a meaning: unset.
 const _: () = assert!(!TenantId::UNSET.is_set());
 const _: () = assert!(!JournalId::UNSET.is_set());
+const _: () = assert!(!LeaderUuid::UNSET.is_set());
 const _: () = assert!(!JournalIdentifier::UNSET.is_set());
 const _: () = assert!(JournalIdentifier::new(TenantId(1), JournalId(1)).is_set());
 
@@ -143,6 +144,10 @@ impl core::str::FromStr for JournalIdentifier {
 pub struct LeaderUuid(pub u128);
 
 impl LeaderUuid {
+    /// No leader: what a multi-writer call carries (#241), and what never
+    /// leads a single-writer journal.
+    pub const UNSET: Self = Self(0);
+
     /// Whether this names a leader: `0` is unset.
     #[must_use]
     pub const fn is_set(self) -> bool {

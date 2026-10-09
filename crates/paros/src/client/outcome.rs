@@ -42,6 +42,13 @@ pub enum WriteOutcome {
         /// The journal state the write was judged against.
         state: JournalView,
     },
+    /// Judged and refused (#241): the write is shaped for the other writer
+    /// mode (a leader uuid on a multi-writer journal, none on a
+    /// single-writer one). Nothing moved.
+    WrongMode {
+        /// The journal state the write was judged against.
+        state: JournalView,
+    },
     /// No verdict: the node does not lead the journal (`leader` is its
     /// hint, when it has one).
     Redirect {
@@ -88,6 +95,9 @@ impl WriteOutcome {
             WireWriteOutcome::Truncated => {
                 state().map_or(Self::Malformed, |state| Self::Truncated { state })
             }
+            WireWriteOutcome::WrongMode => {
+                state().map_or(Self::Malformed, |state| Self::WrongMode { state })
+            }
             WireWriteOutcome::TooLarge => Self::TooLarge {
                 max_records: ack.max_records,
                 max_bytes: ack.max_bytes,
@@ -97,12 +107,16 @@ impl WriteOutcome {
     }
 
     /// Whether this is a verdict the journal state machine gave (written,
-    /// refused or truncated), rather than no answer about the write.
+    /// refused, truncated or of the wrong mode), rather than no answer about
+    /// the write.
     #[must_use]
     pub fn is_verdict(&self) -> bool {
         matches!(
             self,
-            Self::Written { .. } | Self::Refused { .. } | Self::Truncated { .. }
+            Self::Written { .. }
+                | Self::Refused { .. }
+                | Self::Truncated { .. }
+                | Self::WrongMode { .. }
         )
     }
 }
@@ -118,6 +132,12 @@ pub enum SetLeaderOutcome {
     /// It lost: `state` names the current writer.
     Lost {
         /// The journal state it lost against.
+        state: JournalView,
+    },
+    /// Judged and refused (#241): the journal is multi-writer and has no
+    /// leader. Nothing moved.
+    WrongMode {
+        /// The journal state it was judged against.
         state: JournalView,
     },
     /// No verdict: the node does not lead the journal.
@@ -149,7 +169,9 @@ impl SetLeaderOutcome {
         let Ok(state) = journal_view_from_proto(ack.state) else {
             return Self::Malformed;
         };
-        if ack.won {
+        if ack.wrong_mode {
+            Self::WrongMode { state }
+        } else if ack.won {
             Self::Won { state }
         } else {
             Self::Lost { state }
@@ -169,6 +191,12 @@ pub enum ClaimOutcome {
     /// It lost: another owner's claim was decided first.
     Lost {
         /// The journal state it lost against.
+        state: JournalView,
+    },
+    /// Judged and refused (#241): the journal is multi-writer and has no
+    /// leader to claim.
+    WrongMode {
+        /// The journal state it was judged against.
         state: JournalView,
     },
     /// Not asked: the read already names the claimant the owner (an
@@ -198,6 +226,7 @@ impl From<SetLeaderOutcome> for ClaimOutcome {
         match outcome {
             SetLeaderOutcome::Won { state } => Self::Won { state },
             SetLeaderOutcome::Lost { state } => Self::Lost { state },
+            SetLeaderOutcome::WrongMode { state } => Self::WrongMode { state },
             SetLeaderOutcome::Redirect { leader } => Self::Redirect { leader },
             SetLeaderOutcome::UnknownJournal => Self::UnknownJournal,
             SetLeaderOutcome::Malformed => Self::Malformed,
@@ -288,10 +317,17 @@ pub enum TruncateOutcome {
         /// The journal state after the truncation.
         state: JournalView,
     },
-    /// Judged and refused (#228): the request's `(generation, owner)` is
-    /// not the journal's current writer. Nothing moved.
+    /// Judged and refused (#228): the request's leader uuid is not the
+    /// journal's current leader. Nothing moved.
     Refused {
         /// The journal state it was judged against, naming the writer.
+        state: JournalView,
+    },
+    /// Judged and refused (#241): the truncation is shaped for the other
+    /// writer mode (a leader uuid on a multi-writer journal, none on a
+    /// single-writer one). Nothing moved.
+    WrongMode {
+        /// The journal state it was judged against.
         state: JournalView,
     },
     /// Not decided by the node asked.
@@ -321,7 +357,9 @@ impl TruncateOutcome {
             return Self::Redirect { leader: ack.leader };
         }
         journal_view_from_proto(ack.state).map_or(Self::Malformed, |state| {
-            if ack.refused {
+            if ack.wrong_mode {
+                Self::WrongMode { state }
+            } else if ack.refused {
                 Self::Refused { state }
             } else {
                 Self::Applied { state }
