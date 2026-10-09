@@ -578,13 +578,7 @@ impl SystemOps {
         } else {
             drawn_id(payload ^ class)
         };
-        // The writer mode is fixed at creation (#241): a create draws it.
-        let mode = if (payload >> 7) & 1 == 1 {
-            assert_reachable!("system: a client creates a multi-writer journal");
-            paros::WriterMode::Multi
-        } else {
-            paros::WriterMode::Single
-        };
+        let mode = drawn_mode(payload);
         for attempt in 0..2_u64 {
             let command = SystemCommand::CreateJournal {
                 id,
@@ -990,6 +984,16 @@ impl SystemOps {
         {
             self.booked.push(booking);
         }
+    }
+}
+
+/// The writer mode a create draws (#241): fixed for the journal's life.
+fn drawn_mode(payload: u64) -> paros::WriterMode {
+    if (payload >> 7) & 1 == 1 {
+        assert_reachable!("system: a client creates a multi-writer journal");
+        paros::WriterMode::Multi
+    } else {
+        paros::WriterMode::Single
     }
 }
 

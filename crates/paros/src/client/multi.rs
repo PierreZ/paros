@@ -62,6 +62,10 @@ pub fn append_request(journal: JournalIdentifier, records: Vec<Vec<u8>>) -> Writ
 
 /// The `Truncate(up_to_seq)` request of a multi-writer journal: anyone may
 /// send it, so it names no leader uuid.
+///
+/// # Panics
+///
+/// If an assertion on its own postconditions fails: a programmer error.
 #[must_use]
 pub fn open_truncate_request(journal: JournalIdentifier, up_to: u64) -> Truncate {
     let request = Truncate {

@@ -170,6 +170,7 @@ impl Node {
             acceptor: Acceptor::new(Ballot::zero(), BTreeMap::new(), Slot(0), BTreeMap::new()),
             proposer: Proposer::new(),
             replica: Replica::from_boot(
+                paros_core::WriterMode::Single,
                 None,
                 Slot(0),
                 paros_core::JournalState::default(),

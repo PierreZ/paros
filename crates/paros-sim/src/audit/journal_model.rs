@@ -157,39 +157,7 @@ impl JournalModel {
         }
         match (&fact.outcome, fact.write) {
             (Outcome::Accepted { seq, count }, Some(write)) => {
-                self.accepted_any = true;
-                *self.accepted_bytes.entry(write.vhash).or_insert(0) += 1;
-                if self.mode == WriterMode::Multi {
-                    assert_always!(
-                        !write.leader.is_set() && write.count == *count && *count > 0,
-                        "journal: a multi-writer write is accepted unfenced, records whole",
-                        { "slot" => slot, "seq" => seq.0 }
-                    );
-                } else {
-                    assert_always!(
-                        write.seq == seq.0 && write.count == *count && *count > 0,
-                        "journal: an accepted write takes the positions it asked for",
-                        { "slot" => slot, "seq" => seq.0, "asked" => write.seq }
-                    );
-                }
-                // No position is accepted twice: the batch below this one
-                // ends at or before it, the one above starts at or after its
-                // end.
-                let below = self.batches.range(..=seq.0).next_back();
-                let above = self.batches.range(seq.0..).next();
-                assert_always!(
-                    below.is_none_or(|(start, (_, w))| start + w.count <= seq.0)
-                        && above.is_none_or(|(start, _)| *start >= seq.0 + count),
-                    "journal: a position is accepted once",
-                    { "slot" => slot, "seq" => seq.0, "count" => *count }
-                );
-                self.batches.insert(seq.0, (slot, write));
-                self.next_seq = self.next_seq.max(seq.0 + count);
-                if let Command::Write(entry) = command {
-                    for (position, record) in (seq.0..).zip(&entry.records) {
-                        self.records.insert(position, record_hash(&record.0));
-                    }
-                }
+                self.accepted(slot, (seq.0, *count), write, command);
             }
             (Outcome::Duplicate { seq, .. }, Some(write)) => {
                 self.duplicate_any = true;
@@ -267,6 +235,50 @@ impl JournalModel {
                     "journal: a verdict matches the command it judged",
                     { "slot" => slot, "outcome" => format!("{outcome:?}"), "write" => write.is_some() }
                 );
+            }
+        }
+    }
+
+    /// An accepted write's first verdict: the positions it takes, taken
+    /// once, and the records there.
+    fn accepted(
+        &mut self,
+        slot: u64,
+        (seq, count): (u64, u64),
+        write: WriteFact,
+        command: &Command,
+    ) {
+        self.accepted_any = true;
+        *self.accepted_bytes.entry(write.vhash).or_insert(0) += 1;
+        if self.mode == WriterMode::Multi {
+            assert_always!(
+                !write.leader.is_set() && write.count == count && count > 0,
+                "journal: a multi-writer write is accepted unfenced, records whole",
+                { "slot" => slot, "seq" => seq }
+            );
+        } else {
+            assert_always!(
+                write.seq == seq && write.count == count && count > 0,
+                "journal: an accepted write takes the positions it asked for",
+                { "slot" => slot, "seq" => seq, "asked" => write.seq }
+            );
+        }
+        // No position is accepted twice: the batch below this one
+        // ends at or before it, the one above starts at or after its
+        // end.
+        let below = self.batches.range(..=seq).next_back();
+        let above = self.batches.range(seq..).next();
+        assert_always!(
+            below.is_none_or(|(start, (_, w))| start + w.count <= seq)
+                && above.is_none_or(|(start, _)| *start >= seq + count),
+            "journal: a position is accepted once",
+            { "slot" => slot, "seq" => seq, "count" => count }
+        );
+        self.batches.insert(seq, (slot, write));
+        self.next_seq = self.next_seq.max(seq + count);
+        if let Command::Write(entry) = command {
+            for (position, record) in (seq..).zip(&entry.records) {
+                self.records.insert(position, record_hash(&record.0));
             }
         }
     }

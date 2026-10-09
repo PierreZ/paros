@@ -1133,7 +1133,13 @@ mod tests {
     /// A replica whose chosen prefix is `commands` from slot 0.
     fn replica(commands: &[Command]) -> Replica {
         let ci = commands.len().checked_sub(1).map(|i| Slot(i as u64));
-        Replica::from_boot(WriterMode::Single, ci, Slot(0), JournalState::default(), &records(commands))
+        Replica::from_boot(
+            WriterMode::Single,
+            ci,
+            Slot(0),
+            JournalState::default(),
+            &records(commands),
+        )
     }
 
     fn page(read: LogRead) -> super::LogPage {
@@ -1337,7 +1343,13 @@ mod tests {
     fn a_hole_below_the_prefix_stops_the_fold_until_it_heals() {
         let mut recs = records(&[claim(), write(0, &[b"a"]), write(1, &[b"b"])]);
         let lost = recs.remove(&Slot(1)).expect("slot 1").1;
-        let mut r = Replica::from_boot(WriterMode::Single, Some(Slot(2)), Slot(0), JournalState::default(), &recs);
+        let mut r = Replica::from_boot(
+            WriterMode::Single,
+            Some(Slot(2)),
+            Slot(0),
+            JournalState::default(),
+            &recs,
+        );
         assert_eq!(r.fold_hole(), Some(Slot(1)));
         assert!(!r.covers(Some(Slot(1))));
         r.learn(Slot(1), &lost);

@@ -348,10 +348,7 @@ pub(crate) fn truncate_ack(outcome: &Outcome) -> TruncateAck {
     let ack = truncate_ack_unchecked(outcome);
     if ack.refused {
         assert!(ack.decided, "a refused Truncate was decided");
-        assert!(
-            !ack.wrong_mode,
-            "a fenced refusal is of the journal's mode"
-        );
+        assert!(!ack.wrong_mode, "a fenced refusal is of the journal's mode");
     }
     if ack.wrong_mode {
         assert!(ack.decided, "a wrong-mode Truncate was decided");

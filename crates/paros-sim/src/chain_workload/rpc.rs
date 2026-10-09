@@ -212,9 +212,7 @@ fn seen(answer: Answered<'_>) -> Option<Seen> {
         Answered::Write(WriteOutcome::Truncated { state }) => Some(Seen::WriteTruncated(*state)),
         Answered::Write(WriteOutcome::WrongMode { state })
         | Answered::SetLeader(SetLeaderOutcome::WrongMode { state })
-        | Answered::Truncate(TruncateOutcome::WrongMode { state }) => {
-            Some(Seen::WrongMode(*state))
-        }
+        | Answered::Truncate(TruncateOutcome::WrongMode { state }) => Some(Seen::WrongMode(*state)),
         Answered::SetLeader(SetLeaderOutcome::Won { state }) => Some(Seen::Won(*state)),
         Answered::SetLeader(SetLeaderOutcome::Lost { state }) => Some(Seen::Lost(*state)),
         Answered::Read(ReadOutcome::Page { records, state, .. }) => Some(Seen::Page {

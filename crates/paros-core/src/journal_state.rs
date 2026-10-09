@@ -206,55 +206,8 @@ impl JournalState {
             );
         }
         let before = *self;
-        let outcome = match (mode, command) {
-            (_, Command::Control(Control::Noop)) => Outcome::Noop,
-            (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
-                Outcome::WrongMode(self.view())
-            }
-            (WriterMode::Single, Command::Control(Control::Truncate { leader, .. }))
-                if !leader.is_set() =>
-            {
-                Outcome::WrongMode(self.view())
-            }
-            (WriterMode::Single, Command::Write(entry)) => self.apply_write(entry, accepted_at),
-            (WriterMode::Single, Command::Control(Control::SetLeader { new, old })) => {
-                self.apply_set_leader(*new, *old)
-            }
-            (WriterMode::Single, Command::Control(Control::Truncate { leader, up_to })) => {
-                self.apply_truncate(*leader, *up_to)
-            }
-            (WriterMode::Multi, Command::Write(entry)) if !entry.leader.is_set() => {
-                self.apply_append(entry)
-            }
-            (WriterMode::Multi, Command::Control(Control::Truncate { leader, up_to }))
-                if !leader.is_set() =>
-            {
-                self.trim(*up_to)
-            }
-            (
-                WriterMode::Multi,
-                Command::Write(_)
-                | Command::Control(Control::Truncate { .. } | Control::SetLeader { .. }),
-            ) => Outcome::WrongMode(self.view()),
-        };
-        if mode == WriterMode::Multi {
-            assert!(
-                self.leader.is_none(),
-                "a multi-writer journal never gains a leader"
-            );
-            assert!(self.term == 0, "a multi-writer journal never has a term");
-            assert!(
-                !matches!(
-                    outcome,
-                    Outcome::Duplicate { .. }
-                        | Outcome::Truncated(_)
-                        | Outcome::Leader(_)
-                        | Outcome::LeaderRefused(_)
-                        | Outcome::TruncateRefused(_)
-                ),
-                "a multi-writer journal judges no fence and no retry"
-            );
-        }
+        let outcome = self.judge(mode, command, accepted_at);
+        self.assert_mode(mode, &outcome);
         // Monotone in every scalar but the leader, and the leader moves only
         // with the term.
         assert!(self.term >= before.term, "a journal's term never decreases");
@@ -387,6 +340,69 @@ impl JournalState {
         Outcome::Accepted {
             seq,
             count: entry.count(),
+        }
+    }
+
+    /// The verdict on `command` under `mode`, the state moved accordingly.
+    fn judge<'a>(
+        &mut self,
+        mode: WriterMode,
+        command: &Command,
+        accepted_at: impl Fn(Seq) -> Option<&'a Entry>,
+    ) -> Outcome {
+        match (mode, command) {
+            (_, Command::Control(Control::Noop)) => Outcome::Noop,
+            (WriterMode::Single, Command::Write(entry)) if !entry.leader.is_set() => {
+                Outcome::WrongMode(self.view())
+            }
+            (WriterMode::Single, Command::Control(Control::Truncate { leader, .. }))
+                if !leader.is_set() =>
+            {
+                Outcome::WrongMode(self.view())
+            }
+            (WriterMode::Single, Command::Write(entry)) => self.apply_write(entry, accepted_at),
+            (WriterMode::Single, Command::Control(Control::SetLeader { new, old })) => {
+                self.apply_set_leader(*new, *old)
+            }
+            (WriterMode::Single, Command::Control(Control::Truncate { leader, up_to })) => {
+                self.apply_truncate(*leader, *up_to)
+            }
+            (WriterMode::Multi, Command::Write(entry)) if !entry.leader.is_set() => {
+                self.apply_append(entry)
+            }
+            (WriterMode::Multi, Command::Control(Control::Truncate { leader, up_to }))
+                if !leader.is_set() =>
+            {
+                self.trim(*up_to)
+            }
+            (
+                WriterMode::Multi,
+                Command::Write(_)
+                | Command::Control(Control::Truncate { .. } | Control::SetLeader { .. }),
+            ) => Outcome::WrongMode(self.view()),
+        }
+    }
+
+    /// The writer mode's postconditions (#241): a multi-writer journal never
+    /// gains a leader or a term, and judges no fence and no retry.
+    fn assert_mode(&self, mode: WriterMode, outcome: &Outcome) {
+        if mode == WriterMode::Multi {
+            assert!(
+                self.leader.is_none(),
+                "a multi-writer journal never gains a leader"
+            );
+            assert!(self.term == 0, "a multi-writer journal never has a term");
+            assert!(
+                !matches!(
+                    *outcome,
+                    Outcome::Duplicate { .. }
+                        | Outcome::Truncated(_)
+                        | Outcome::Leader(_)
+                        | Outcome::LeaderRefused(_)
+                        | Outcome::TruncateRefused(_)
+                ),
+                "a multi-writer journal judges no fence and no retry"
+            );
         }
     }
 
@@ -531,9 +547,7 @@ mod tests {
         let mut accepted: Vec<Entry> = Vec::new();
         let mut outcomes = Vec::new();
         for command in commands {
-            let outcome = state.apply(mode, command, |seq| {
-                accepted.iter().find(|e| e.seq == seq)
-            });
+            let outcome = state.apply(mode, command, |seq| accepted.iter().find(|e| e.seq == seq));
             if let (Outcome::Accepted { .. }, Command::Write(entry)) = (&outcome, command) {
                 accepted.push(entry.clone());
             }
@@ -734,11 +748,7 @@ mod tests {
 
     #[test]
     fn a_single_writer_journal_refuses_a_multi_writer_call() {
-        let (state, outcomes) = fold(&[
-            set_leader(1, None),
-            write(0, 0, &[b"a"]),
-            truncate(0, 0),
-        ]);
+        let (state, outcomes) = fold(&[set_leader(1, None), write(0, 0, &[b"a"]), truncate(0, 0)]);
         assert!(matches!(outcomes[1], Outcome::WrongMode(v) if v.leader == Some(LeaderUuid(1))));
         assert!(matches!(outcomes[2], Outcome::WrongMode(_)));
         assert_eq!(state.next_seq, Seq(0));

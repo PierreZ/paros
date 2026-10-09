@@ -37,6 +37,7 @@ use crate::client::{ChainClient, ClientRuntime, client_rpc_config};
 mod fleet;
 mod fold;
 mod foreign;
+mod multi;
 mod races;
 mod rpc;
 mod system;
@@ -1047,9 +1048,17 @@ impl ChainWorkload {
         seed: u64,
         now_ms: u64,
     ) -> Submission {
-        let op = *next_op;
-        *next_op = next_op.saturating_add(1);
-        let payload_class = usize::try_from(class % 4).unwrap_or(0);
+        let records = Self::draw_records(audit, config, class, seed);
+        // An owner's write; a superseded writer's is the deliberate
+        // misbehaviour (#204: under its old uuid, which the journal must
+        // refuse unless a reinstatement made it lead again).
+        let entry = writer.stale_entry(records);
+        self.issue(audit, entry, next_op, class, now_ms)
+    }
+
+    /// The records of one write: `1..=batch_records` of them, their bytes
+    /// drawn from `class` and `seed`, each registered with the audit.
+    fn draw_records(audit: &AuditWorld, config: &ChainConfig, class: u64, seed: u64) -> Vec<Value> {
         let count = 1 + (seed >> 48) % config.batch_records.max(1);
         let records: Vec<Value> = (0..count)
             .map(|k| {
@@ -1064,10 +1073,21 @@ impl ChainWorkload {
         for record in &records {
             audit.note_submitted(user_command_hash(&record.0));
         }
-        // An owner's write; a superseded writer's is the deliberate
-        // misbehaviour (#204: under its old uuid, which the journal must
-        // refuse unless a reinstatement made it lead again).
-        let entry = writer.stale_entry(records);
+        records
+    }
+
+    /// Issue `entry` as this client's next write operation.
+    fn issue(
+        &mut self,
+        audit: &AuditWorld,
+        entry: Entry,
+        next_op: &mut u64,
+        class: u64,
+        now_ms: u64,
+    ) -> Submission {
+        let op = *next_op;
+        *next_op = next_op.saturating_add(1);
+        let payload_class = usize::try_from(class % 4).unwrap_or(0);
         let cmd_hash = command_hash(&Command::Write(entry.clone()));
         // The non-interference oracle's ground truth (#188): this write
         // belongs to this client's journal and to no other.
@@ -1078,7 +1098,7 @@ impl ChainWorkload {
             op,
             seq = entry.seq.0,
             leader = %entry.leader,
-            records = count,
+            records = entry.count(),
             "chain_command_submitted"
         );
         Submission {
@@ -1355,6 +1375,9 @@ impl Workload for ChainWorkload {
         // journal would have nothing for its tail to converge on.
         let journal_count = self.plan.as_ref().map_or(1, |plan| plan.ids.len().max(1));
         let reader = config.reader && usize::try_from(client_id).unwrap_or(0) >= journal_count;
+        // A multi-writer journal (#241) has no owner: every client of it
+        // that writes appends, with no claim and no fence (`multi`).
+        let multi_writer = audit.mode() == paros::WriterMode::Multi;
         // Its leader uuids derive from a random seed of its own (#241).
         let mut writer = Writer::new(journal, ctx.random().random::<u128>());
         // The system-journal operations (#189), and whether the run runs
@@ -1428,7 +1451,7 @@ impl Workload for ChainWorkload {
         // A claim the cluster leaves unresolved is re-asked within the
         // owner's patience (`claim_patience_ms`), the next server along.
         let mut remove_next = false;
-        if !reader {
+        if !reader && !multi_writer {
             let mut first =
                 usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
             let patience = time.now() + Duration::from_millis(config.claim_patience_ms);
@@ -1483,7 +1506,7 @@ impl Workload for ChainWorkload {
         // fabricating or filtering protocol messages. The batches take
         // consecutive positions; one that reaches the leader out of order is
         // refused and names the position the journal stood at.
-        if operations.contains(&WRITE) && !reader {
+        if operations.contains(&WRITE) && !reader && !multi_writer {
             let mut primer = Vec::with_capacity(config.pipeline_depth);
             let mut ahead = writer;
             let mut raw = 0;
@@ -1645,6 +1668,59 @@ impl Workload for ChainWorkload {
                     (op, &writer),
                     (journal, &journals),
                     (target, raw_payload),
+                    request_timeout,
+                )
+                .await;
+            }
+
+            // A multi-writer journal (#241): the write family appends,
+            // truncates open and claims a journal that must refuse it.
+            if multi_writer
+                && matches!(
+                    op,
+                    WRITE
+                        | WRITE_TO_NON_LEADER
+                        | DUP_WRITE
+                        | DUAL_SUBMIT
+                        | SET_LEADER
+                        | TRUNCATE
+                        | TRUNCATE_STORM
+                )
+            {
+                let trim_to = if matches!(op, TRUNCATE | TRUNCATE_STORM)
+                    && config.compaction
+                    && raw_pause % config.compact_every == 0
+                {
+                    fold.read_to_tail(ctx, &audit, &readers, target, client_id, config.read_limit)
+                        .await;
+                    fold::clamp(ctx.state(), journal, fold.cursor())
+                } else {
+                    None
+                };
+                let step = multi::Step {
+                    ctx,
+                    nodes: &nodes,
+                    log: &log,
+                    audit: &audit,
+                    config: &config,
+                    journal,
+                    target,
+                    retarget,
+                    draws: (raw_class, raw_payload),
+                    trim_to,
+                };
+                self.multi_step(&step, op, &mut next_op, &mut written).await;
+                continue;
+            }
+            // The mode confusion on a single-writer journal (#241), its own
+            // location: an unfenced write, refused as of the wrong mode.
+            if op == WRITE && buggify_with_prob!(0.03) {
+                assert_reachable!("chain: an unfenced write meets a single-writer journal");
+                multi::unfenced_write_refused(
+                    ctx,
+                    (&nodes, &audit),
+                    journal,
+                    target,
                     request_timeout,
                 )
                 .await;
@@ -3311,8 +3387,51 @@ impl Workload for ChainWorkload {
         };
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
         let mut target = nodes.leader().unwrap_or(first) % server_count;
+        // A multi-writer journal's recovery batch (#241): one small record
+        // a write, each sent until it is written, the open truncation
+        // before the last.
+        if multi_writer && !reader {
+            for k in 0..config.recovery_proposals {
+                let trim_to = if k + 1 == config.recovery_proposals
+                    && recovery_acked > 0
+                    && config.compaction
+                    && !shutdown.is_cancelled()
+                {
+                    fold.read_to_tail(ctx, &audit, &readers, target, client_id, config.read_limit)
+                        .await;
+                    fold::clamp(ctx.state(), journal, fold.cursor())
+                } else {
+                    None
+                };
+                let raw = ctx.random().random::<u64>();
+                let step = multi::Step {
+                    ctx,
+                    nodes: &nodes,
+                    log: &log,
+                    audit: &audit,
+                    config: &one_small,
+                    journal,
+                    target,
+                    retarget: Retarget::FollowHint,
+                    draws: (2, raw),
+                    trim_to,
+                };
+                if trim_to.is_some() {
+                    self.multi_step(&step, TRUNCATE, &mut next_op, &mut written)
+                        .await;
+                }
+                if !self
+                    .append_until_written(&step, &mut next_op, &mut written, recovery_deadline)
+                    .await
+                {
+                    break;
+                }
+                recovery_acked = recovery_acked.saturating_add(1);
+                target = (target + 1) % server_count;
+            }
+        }
         for k in 0..config.recovery_proposals {
-            if reader {
+            if reader || multi_writer {
                 break;
             }
             // The tail truncation, before the batch's last write: an owner

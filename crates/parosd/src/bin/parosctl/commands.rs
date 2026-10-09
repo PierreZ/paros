@@ -534,9 +534,7 @@ pub async fn truncate(
             Ending::Success
         }
         // The refusal named another writer: this one was superseded.
-        TruncateOutcome::Refused { state } if superseded => {
-            refused(out, "superseded", &state)
-        }
+        TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", &state),
         TruncateOutcome::Refused { state } => refused(out, "refused", &state),
         TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", &state),
         TruncateOutcome::UnknownJournal => unknown_journal(journal),

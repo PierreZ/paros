@@ -318,7 +318,11 @@ impl World {
         let clone = node.replica().clone();
         let before = clone.journal();
         let mut state = before;
-        let outcome = state.apply(paros_core::WriterMode::Single, &Command::Write(entry.clone()), |at| clone.accepted_at(at));
+        let outcome = state.apply(
+            paros_core::WriterMode::Single,
+            &Command::Write(entry.clone()),
+            |at| clone.accepted_at(at),
+        );
         let id = self.take_prompt_id();
         Some(Prompt::ack_write(
             id,

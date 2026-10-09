@@ -769,7 +769,9 @@ fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
                 return true;
             }
             match &attempt.call {
-                Call::Write { leader, records, .. } => !leader.is_set() && !records.is_empty(),
+                Call::Write {
+                    leader, records, ..
+                } => !leader.is_set() && !records.is_empty(),
                 call @ Call::Truncate { leader, .. } => !leader.is_set() && unknown.insert(call),
                 Call::Read { .. } | Call::SetLeader { .. } => false,
             }
@@ -785,6 +787,11 @@ fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
 /// and nobody can tell their bytes apart, so the search lands them in
 /// invocation order. `None` everywhere on a single-writer journal.
 fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Vec<Option<usize>> {
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Key<'c> {
+        Call(&'c Call),
+        Count(usize),
+    }
     let mut after = vec![None; attempts.len()];
     if mode == WriterMode::Single {
         return after;
@@ -797,11 +804,6 @@ fn interchangeable(attempts: &[Attempt], keep: &[usize], mode: WriterMode) -> Ve
         })
         .flatten()
         .collect();
-    #[derive(PartialEq, Eq, PartialOrd, Ord)]
-    enum Key<'c> {
-        Call(&'c Call),
-        Count(usize),
-    }
     let mut order: Vec<usize> = keep
         .iter()
         .copied()
@@ -1295,10 +1297,13 @@ mod tests {
                 1,
                 3,
                 Call::Read { from: 0, limit: 0 },
-                Some((4, Seen::Page {
-                    records: vec![1, 2],
-                    state: multi_state(2, 0),
-                })),
+                Some((
+                    4,
+                    Seen::Page {
+                        records: vec![1, 2],
+                        state: multi_state(2, 0),
+                    },
+                )),
             ),
         ];
         assert!(check(&history, WriterMode::Multi, 1_000_000).linearizable);
