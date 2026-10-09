@@ -53,7 +53,7 @@ pub(super) struct Step<'a> {
 
 impl ChainWorkload {
     /// One step of the write family on a multi-writer journal.
-    #[tracing::instrument(level = "debug", skip_all, fields(op))]
+    #[tracing::instrument(level = "debug", skip_all, fields(op = op, journal = %step.journal))]
     pub(super) async fn multi_step(
         &mut self,
         step: &Step<'_>,
@@ -95,6 +95,7 @@ impl ChainWorkload {
     /// answer that is no verdict until it is written or `deadline` passes;
     /// whether it was written. A re-send may land the batch twice: the
     /// journal promises at-least-once, and the search allows it.
+    #[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
     pub(super) async fn append_until_written(
         &mut self,
         step: &Step<'_>,
@@ -161,6 +162,7 @@ impl ChainWorkload {
 
     /// The identical batch to two nodes at once: each verdict a position
     /// of its own.
+    #[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
     async fn dual_append(
         &mut self,
         step: &Step<'_>,
@@ -260,6 +262,7 @@ impl ChainWorkload {
 
 /// A claim of a journal that has no leader: refused as of the wrong mode,
 /// or no verdict.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
 async fn claim_refused(step: &Step<'_>) {
     let uuid = LeaderUuid(u128::from(step.draws.1) | 1);
     let ask = set_leader_once(step.nodes, step.journal, step.target, (uuid, None), false);
@@ -287,6 +290,7 @@ async fn claim_refused(step: &Step<'_>) {
 }
 
 /// A truncation anyone may send, below every folding client's cursor.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
 async fn truncate_open(step: &Step<'_>) {
     let Some(up_to) = step.trim_to else {
         return;
@@ -319,6 +323,7 @@ async fn truncate_open(step: &Step<'_>) {
 
 /// A write under a leader uuid to a journal that has none: refused as of
 /// the wrong mode, or no verdict. One attempt, no redirect followed.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
 async fn fenced_write_refused(step: &Step<'_>) {
     let entry = Entry {
         leader: LeaderUuid(u128::from(step.draws.1) | 1),
@@ -350,6 +355,7 @@ async fn fenced_write_refused(step: &Step<'_>) {
 /// The mode confusion on a single-writer journal (#241): an unfenced write,
 /// refused as of the wrong mode, or no verdict. One attempt, no redirect
 /// followed.
+#[tracing::instrument(level = "debug", skip_all, fields(journal = %journal))]
 pub(super) async fn unfenced_write_refused(
     ctx: &SimContext,
     (nodes, audit): (&ChainClient, &AuditWorld),

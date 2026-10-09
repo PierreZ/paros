@@ -981,6 +981,13 @@ impl Seat {
         // adds to what it defends.
         let world = storage_world_for(ctx.state(), journal);
         let checker = audit_world_for(ctx.state(), journal);
+        // The pair of the creator's record (#241): a created journal runs in
+        // the mode its decided create gave it.
+        assert_always!(
+            config.writer_mode == checker.mode(),
+            "journal: a node opens a journal in the mode it was created with",
+            { "journal" => journal.to_string() }
+        );
         let audit = NodeAudit::new(ctx.time().clone(), checker.clone())
             .in_journal(journal, journal_board(ctx.state()))
             .with_system(system.clone());

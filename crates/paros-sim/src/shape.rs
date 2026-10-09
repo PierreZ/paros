@@ -526,10 +526,6 @@ struct Registry {
     /// Run-level: every identifier the run names (see [`identifiers`]), fixed by the
     /// first caller.
     identifiers: Option<Identifiers>,
-    /// Run-level: the writer mode of every journal a client created through
-    /// the directory (see [`note_created_mode`]), recorded before its create
-    /// is sent.
-    created_modes: BTreeMap<JournalIdentifier, WriterMode>,
     nodes: BTreeMap<String, Entry>,
 }
 
@@ -1049,33 +1045,6 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             }
         })
         .clone()
-}
-
-/// Record the writer mode a client asks for `journal` in a directory
-/// create (#241), before the create is sent: the audit judges the journal
-/// in that mode. A journal keeps the first mode recorded for it, as the
-/// directory keeps the first create of an id and refuses the others.
-pub(crate) fn note_created_mode(state: &StateHandle, journal: JournalIdentifier, mode: WriterMode) {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard.created_modes.entry(journal).or_insert(mode);
-}
-
-/// The writer mode `journal` runs in (#241): the plan's for a journal of the
-/// run, the creator's for a journal created through the directory, and
-/// single-writer for every other one (a system journal, a control journal).
-pub(crate) fn writer_mode(state: &StateHandle, journal: JournalIdentifier) -> WriterMode {
-    let plan = journals(state);
-    if plan.ids.contains(&journal) {
-        return plan.mode(journal);
-    }
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .created_modes
-        .get(&journal)
-        .copied()
-        .unwrap_or(WriterMode::Single)
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {

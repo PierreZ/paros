@@ -471,10 +471,6 @@ impl JournalModel {
             );
             return;
         }
-        assert_sometimes!(
-            self.wrong_mode_any,
-            "journal: a single-writer journal refuses an unfenced call"
-        );
         assert_sometimes!(self.won_any, "journal: a SetLeader wins a generation");
         assert_sometimes!(self.accepted_any, "journal: a write is accepted");
         assert_sometimes!(

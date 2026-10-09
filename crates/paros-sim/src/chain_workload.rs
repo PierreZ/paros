@@ -3967,6 +3967,15 @@ impl Workload for ChainWorkload {
     }
 }
 
+/// An owner fences every call it makes of its single-writer journal: a
+/// wrong-mode refusal (#241) there is a bug.
+fn owner_never_of_wrong_mode() {
+    assert_always!(
+        false,
+        "chain: an owner's call is never refused as of the wrong mode"
+    );
+}
+
 /// Adopt the leader a `Reconfigure` reply named as this client's journal's
 /// leader hint — only where that reply speaks for this journal. A
 /// `Reconfigure` names no journal: a node answers it from its *plane*
@@ -3978,15 +3987,6 @@ impl Workload for ChainWorkload {
 /// leader sends this journal's next `Write` to a node that answers
 /// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
 /// created journal led by joiner 100).
-/// An owner fences every call it makes of its single-writer journal: a
-/// wrong-mode refusal (#241) there is a bug.
-fn owner_never_of_wrong_mode() {
-    assert_always!(
-        false,
-        "chain: an owner's call is never refused as of the wrong mode"
-    );
-}
-
 fn adopt_plane_leader(nodes: &ChainClient, has_matchmakers: bool, leader: Option<u64>) {
     if has_matchmakers {
         nodes.observe_leader(leader);

@@ -29,8 +29,8 @@ pub(crate) fn audit_world_for(
 ) -> Arc<AuditWorld> {
     let main = crate::shape::identifiers(state).main;
     // The writer mode the journal was created with (#241): drawn with the
-    // run's journals, or by the client that created it.
-    let mode = crate::shape::writer_mode(state, journal);
+    // run's journals, or asked for by the client that created it.
+    let mode = writer_mode(state, journal);
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
@@ -43,6 +43,52 @@ pub(crate) fn audit_world_for(
             mode,
         },
     )
+}
+
+/// Well-known key of the writer modes clients asked for in directory
+/// creates (#241).
+const CREATED_MODES_KEY: &str = "paros-audit-created-modes";
+
+/// Record the writer mode a client asks for `journal` in a directory
+/// create (#241), before the create is sent. A journal keeps the first mode
+/// recorded for it, as the directory keeps the first create of an id. Every
+/// node that opens the journal pairs it with the mode the decided create
+/// gave it ([`AuditWorld::mode`] against its `Config`).
+pub(crate) fn note_created_mode(
+    state: &StateHandle,
+    journal: paros::JournalIdentifier,
+    mode: paros::WriterMode,
+) {
+    let modes = crate::state::published(
+        state,
+        CREATED_MODES_KEY,
+        BTreeMap::<paros::JournalIdentifier, paros::WriterMode>::new,
+    );
+    modes
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(journal)
+        .or_insert(mode);
+}
+
+/// The writer mode `journal` runs in (#241): the plan's for a journal of the
+/// run, the creator's for a journal created through the directory, and
+/// single-writer for every other one (a system journal, a control journal).
+fn writer_mode(state: &StateHandle, journal: paros::JournalIdentifier) -> paros::WriterMode {
+    let plan = crate::shape::journals(state);
+    if plan.ids.contains(&journal) {
+        return plan.mode(journal);
+    }
+    let modes = crate::state::published(
+        state,
+        CREATED_MODES_KEY,
+        BTreeMap::<paros::JournalIdentifier, paros::WriterMode>::new,
+    );
+    let modes = modes.lock().unwrap_or_else(PoisonError::into_inner);
+    modes
+        .get(&journal)
+        .copied()
+        .unwrap_or(paros::WriterMode::Single)
 }
 
 /// The per-iteration shared checker.

@@ -352,9 +352,7 @@ impl SystemOps {
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
         // A multi-writer journal (#241) takes unfenced writes and no claim:
         // its seq is assigned at apply.
-        let unfenced = (crate::shape::writer_mode(ctx.state(), journal)
-            == paros::WriterMode::Multi)
-            .then_some((LeaderUuid::UNSET, 0));
+        let unfenced = (audit.mode() == paros::WriterMode::Multi).then_some((LeaderUuid::UNSET, 0));
         if unfenced.is_some() {
             assert_reachable!("system: a client appends unfenced to a multi-writer journal");
         }
@@ -586,19 +584,9 @@ impl SystemOps {
         } else {
             drawn_id(payload ^ class)
         };
-        let mode = drawn_mode(payload);
+        let mode = drawn_mode();
         for attempt in 0..2_u64 {
-            crate::shape::note_created_mode(
-                ctx.state(),
-                JournalIdentifier::new(self.directory.tenant, id),
-                mode,
-            );
-            let command = SystemCommand::CreateJournal {
-                id,
-                name: name.clone(),
-                config: config.clone(),
-                mode,
-            };
+            let command = self.create_command(ctx, id, &name, &config, mode);
             let Appended::At(position) = self
                 .append(ctx, nodes, self.directory, &command, payload)
                 .await
@@ -646,6 +634,26 @@ impl SystemOps {
                 }
                 _ => return,
             }
+        }
+    }
+
+    /// The create of journal `id`, its mode first recorded for the audit
+    /// (#241).
+    fn create_command(
+        &self,
+        ctx: &SimContext,
+        id: JournalId,
+        name: &[u8],
+        config: &AcceptorConfig,
+        mode: paros::WriterMode,
+    ) -> SystemCommand {
+        let journal = JournalIdentifier::new(self.directory.tenant, id);
+        crate::audit::note_created_mode(ctx.state(), journal, mode);
+        SystemCommand::CreateJournal {
+            id,
+            name: name.to_vec(),
+            config: config.clone(),
+            mode,
         }
     }
 
@@ -1001,8 +1009,8 @@ impl SystemOps {
 }
 
 /// The writer mode a create draws (#241): fixed for the journal's life.
-fn drawn_mode(payload: u64) -> paros::WriterMode {
-    if (payload >> 7) & 1 == 1 {
+fn drawn_mode() -> paros::WriterMode {
+    if buggify_with_prob!(0.5) {
         assert_reachable!("system: a client creates a multi-writer journal");
         paros::WriterMode::Multi
     } else {

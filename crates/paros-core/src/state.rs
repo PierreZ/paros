@@ -119,7 +119,8 @@ pub struct Config {
     /// when the journal is created and recorded with the rest of this
     /// configuration in the format marker, so a restart never changes it.
     /// [`WriterMode::Single`] is the default: a fresh configuration is the
-    /// single-writer journal.
+    /// single-writer journal. The default does not make an older marker
+    /// decode: a store formatted before this field is not migrated.
     #[cfg_attr(feature = "serde", serde(default))]
     pub writer_mode: WriterMode,
 }
