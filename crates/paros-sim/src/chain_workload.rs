@@ -1891,6 +1891,12 @@ impl Workload for ChainWorkload {
                             nodes.observe_leader(leader);
                             self.history.record_write_failed(submission.op);
                         }
+                        WriteOutcome::TooLarge { .. } => {
+                            assert_reachable!(
+                                "chain: a batch over a node's limits is refused at the edge"
+                            );
+                            self.history.record_write_failed(submission.op);
+                        }
                         WriteOutcome::UnknownJournal
                         | WriteOutcome::Malformed
                         | WriteOutcome::Ambiguous => {
@@ -2010,7 +2016,10 @@ impl Workload for ChainWorkload {
                                 );
                             }
                             WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
-                            WriteOutcome::Truncated { .. }
+                            // A node with smaller limits than the first
+                            // attempt's refuses the identical retry.
+                            WriteOutcome::TooLarge { .. }
+                            | WriteOutcome::Truncated { .. }
                             | WriteOutcome::UnknownJournal
                             | WriteOutcome::Malformed
                             | WriteOutcome::Ambiguous => {}
@@ -2079,7 +2088,8 @@ impl Workload for ChainWorkload {
                                     refused = Some(state);
                                 }
                                 WriteOutcome::Redirect { leader } => nodes.observe_leader(leader),
-                                WriteOutcome::UnknownJournal
+                                WriteOutcome::TooLarge { .. }
+                                | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed
                                 | WriteOutcome::Ambiguous => {}
                             }
@@ -3279,6 +3289,15 @@ impl Workload for ChainWorkload {
         // its fold at the end.
         let recovery_deadline = time.now() + Duration::from_millis(config.recovery_budget_ms);
         let mut recovery_acked = 0_u64;
+        // Once a node's batch limits refuse a recovery write (#241), the
+        // writer splits: every later recovery write is one small record,
+        // which every limit's floor admits (`paros_sim::shape`).
+        let mut split = false;
+        let one_small = ChainConfig {
+            batch_records: 1,
+            large_command_bytes: config.command_bytes,
+            ..config
+        };
         let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
         let mut target = nodes.leader().unwrap_or(first) % server_count;
         for k in 0..config.recovery_proposals {
@@ -3353,7 +3372,10 @@ impl Workload for ChainWorkload {
                     {
                         retry
                     }
-                    _ => self.submit(&audit, &config, writer, &mut next_op, raw, raw, now_ms()),
+                    _ => {
+                        let shape = if split { &one_small } else { &config };
+                        self.submit(&audit, shape, writer, &mut next_op, raw, raw, now_ms())
+                    }
                 };
                 log.open_write(submission.op);
                 let hinted = nodes.leader().is_some();
@@ -3393,6 +3415,17 @@ impl Workload for ChainWorkload {
                     WriterOutcome::NotWritten { .. } => {
                         self.history.record_write_failed(submission.op);
                         ambiguity_resolved = true;
+                    }
+                    WriterOutcome::TooLarge { .. } => {
+                        // Nothing was proposed: the batch is dropped, not
+                        // retried, and the next one is split.
+                        assert_reachable!("chain: a recovery batch over a node's limits is split");
+                        self.history.record_write_failed(submission.op);
+                        split = true;
+                        time.sleep(Duration::from_millis(config.retry_backoff_ms))
+                            .await
+                            .ok();
+                        continue;
                     }
                     WriterOutcome::Refused { .. }
                     | WriterOutcome::Truncated { .. }

@@ -83,6 +83,14 @@ pub enum WriterOutcome {
     },
     /// The server asked does not serve the journal.
     UnknownJournal,
+    /// The batch is over the answering node's limits (#241): nothing was
+    /// written, and the writer's position is unchanged. Split the batch.
+    TooLarge {
+        /// The most records the node accepts in one write.
+        max_records: u64,
+        /// The most record bytes the node accepts in one write.
+        max_bytes: u64,
+    },
     /// Still unknown after the resolution budget: the write may land.
     Ambiguous,
 }
@@ -450,6 +458,13 @@ impl Writer {
             WriteOutcome::Truncated { state } => WriterOutcome::Truncated { state },
             WriteOutcome::Redirect { leader } => WriterOutcome::Unavailable { leader },
             WriteOutcome::UnknownJournal => WriterOutcome::UnknownJournal,
+            WriteOutcome::TooLarge {
+                max_records,
+                max_bytes,
+            } => WriterOutcome::TooLarge {
+                max_records,
+                max_bytes,
+            },
             WriteOutcome::Malformed => WriterOutcome::Unavailable { leader: None },
             WriteOutcome::Ambiguous => {
                 let resolved = client

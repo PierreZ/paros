@@ -201,6 +201,8 @@ Each field has an environment override named after it, `_MS` for a duration:
 | `PAROS_RECONFIGURE_BACKOFF_MAX_TICKS` | 20 | 1 |
 | `PAROS_PROXY_TAKE_BACK_RESENDS` | 20 | 1 |
 | `PAROS_PROXY_ROUND_RESENDS` | 40 | 1 |
+| `PAROS_MAX_BATCH_RECORDS` | 1024 | 1 |
+| `PAROS_MAX_BATCH_BYTES` | 1048576 | 1 |
 
 An override below its floor, or one that does not parse, stops the process
 before it binds (exit 2). The floors are the ones no network makes valid; the

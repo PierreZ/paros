@@ -416,6 +416,15 @@ impl SystemOps {
                         .and_then(|l| targets.iter().position(|t| *t as u64 == l))
                         .unwrap_or(target + 1);
                 }
+                // The record limit's floor admits one record, and the byte
+                // limit's floor a system command (`paros_sim::shape`).
+                WriteOutcome::TooLarge { .. } => {
+                    assert_always!(
+                        false,
+                        "system: a one-record system write fits every node's limits"
+                    );
+                    target += 1;
+                }
                 WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {

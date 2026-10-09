@@ -1101,6 +1101,13 @@ where
                     }
                     continue;
                 };
+                // The batch limits (#241, §2.7) are judged here, at the edge:
+                // a batch over them never reaches consensus.
+                if let Some(ack) = calls::batch_too_large(&req.records, &tunables) {
+                    tracing::debug!(node = self_id, records = req.records.len(), "write_too_large");
+                    shared.with(&node_audit).answer(Reply::Write, reply, ack);
+                    continue;
+                }
                 let entry = Entry {
                     leader: leader_uuid_from_proto(req.leader),
                     seq: Seq(req.seq),

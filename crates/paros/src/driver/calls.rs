@@ -22,6 +22,7 @@ use crate::rpc::{
     ReplySender, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome, journal_view_to_proto,
 };
 
+use super::config::DriverTunables;
 use super::reply::answer;
 
 /// One held journal call.
@@ -211,6 +212,42 @@ pub(crate) fn write_ack(outcome: &Outcome) -> WriteAck {
     ack
 }
 
+/// The edge's verdict on a `Write` batch of `records` (#241,
+/// `docs/architecture.md` §2.7): `Some(TooLarge)` when it carries more
+/// records or more record bytes than `tunables` allow, `None` when it may be
+/// proposed. Judged before consensus, so a refused batch is in no slot.
+pub(crate) fn batch_too_large(records: &[Vec<u8>], tunables: &DriverTunables) -> Option<WriteAck> {
+    assert!(
+        tunables.max_batch_records >= 1,
+        "a one-record batch is always within the record limit"
+    );
+    assert!(
+        tunables.max_batch_bytes >= 1,
+        "the byte limit admits a non-empty record"
+    );
+    let count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    let bytes = records
+        .iter()
+        .map(|record| u64::try_from(record.len()).unwrap_or(u64::MAX))
+        .fold(0_u64, u64::saturating_add);
+    if count <= tunables.max_batch_records && bytes <= tunables.max_batch_bytes {
+        return None;
+    }
+    let ack = WriteAck {
+        outcome: WriteOutcome::TooLarge.into(),
+        max_records: tunables.max_batch_records,
+        max_bytes: tunables.max_batch_bytes,
+        ..WriteAck::default()
+    };
+    // A refusal at the edge names the limits and nothing the journal said.
+    assert!(
+        ack.state.is_none(),
+        "an edge refusal names no journal state"
+    );
+    assert!(ack.count == 0, "an edge refusal acks no records");
+    Some(ack)
+}
+
 /// [`write_ack`] before its postconditions.
 fn write_ack_unchecked(outcome: &Outcome) -> WriteAck {
     match outcome {
@@ -313,5 +350,34 @@ fn truncate_ack_unchecked(outcome: &Outcome) -> TruncateAck {
             ..TruncateAck::default()
         },
         _ => TruncateAck::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DriverTunables, WriteOutcome, batch_too_large};
+
+    fn limits(records: u64, bytes: u64) -> DriverTunables {
+        DriverTunables {
+            max_batch_records: records,
+            max_batch_bytes: bytes,
+            ..DriverTunables::default()
+        }
+    }
+
+    #[test]
+    fn a_batch_at_its_limits_passes_and_one_past_is_refused() {
+        let tunables = limits(2, 8);
+        assert!(batch_too_large(&[vec![0; 4], vec![0; 4]], &tunables).is_none());
+        // One record too many, then one byte too many.
+        let refused = [
+            batch_too_large(&[vec![0; 1], vec![0; 1], vec![0; 1]], &tunables),
+            batch_too_large(&[vec![0; 4], vec![0; 5]], &tunables),
+        ];
+        for ack in refused {
+            let ack = ack.expect("over a limit is refused");
+            assert_eq!(ack.outcome(), WriteOutcome::TooLarge);
+            assert_eq!((ack.max_records, ack.max_bytes), (2, 8));
+        }
     }
 }

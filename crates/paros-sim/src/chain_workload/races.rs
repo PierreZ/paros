@@ -104,6 +104,10 @@ impl ChainWorkload {
                     nodes.observe_leader(leader);
                     self.history.record_write_failed(submission.op);
                 }
+                WriteOutcome::TooLarge { .. } => {
+                    assert_reachable!("chain: a batch over a node's limits is refused at the edge");
+                    self.history.record_write_failed(submission.op);
+                }
                 WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {

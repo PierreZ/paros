@@ -219,6 +219,22 @@ pub async fn write(
                 return Ending::Refused;
             }
             WriterOutcome::UnknownJournal => return unknown_journal(journal),
+            WriterOutcome::TooLarge {
+                max_records,
+                max_bytes,
+            } => {
+                out.emit(
+                    || format!("too large max_records={max_records} max_bytes={max_bytes}"),
+                    || {
+                        json!({
+                            "outcome": "too large",
+                            "max_records": max_records,
+                            "max_bytes": max_bytes,
+                        })
+                    },
+                );
+                return Ending::Refused;
+            }
             WriterOutcome::Unavailable { leader } => {
                 note(&format!(
                     "no leader took the write (last hint: {})",

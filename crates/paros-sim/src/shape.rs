@@ -253,6 +253,17 @@ impl NodeShape {
             // before its slowest promise returns; the ceiling only slows a
             // leaderless cluster's re-election.
             election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
+            // The batch limits refused at the edge (#241, §2.7). Floor 1
+            // record: a one-record write always fits, so the workload's
+            // single-record writes and every system, fleet and checkpoint
+            // write (one record each) still make progress; the extreme
+            // refuses every multi-record batch.
+            max_batch_records: buggify_knob!(1024_u64, 1_u64..9_u64),
+            // Floor 16 KiB: one record of the workload's largest command
+            // (`MAX_LARGE_COMMAND_BYTES`) and every inline checkpoint the
+            // runs build still fit; the extreme refuses a batch of several
+            // large commands.
+            max_batch_bytes: buggify_knob!(1_u64 << 20, 16_384_u64..131_073_u64),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
