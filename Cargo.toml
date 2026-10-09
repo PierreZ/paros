@@ -14,3 +14,10 @@ categories = ["algorithms", "network-programming"]
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 disallowed_types = "deny"
+# Rust 1.99 pedantic lints, allowed as in moonpool:
+# - unused_async_trait_impl wants `fn ... -> impl Future` + `std::future::ready`
+#   for async trait impls that never await; the `async fn` form reads better.
+# - assert_is_empty rewrites `assert!(x.is_empty())` to
+#   `assert_eq!(x, [] as [T; 0])`, noisier than the message it buys.
+unused_async_trait_impl = "allow"
+assert_is_empty = "allow"

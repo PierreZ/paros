@@ -6,7 +6,7 @@
 # Nix-only tooling (AGENTS.md). The builder's Rust version must equal the
 # channel of `rust-toolchain.toml`; CI fails when they differ.
 
-ARG RUST_VERSION=1.95.0
+ARG RUST_VERSION=1.99.0
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 ARG RUST_VERSION
