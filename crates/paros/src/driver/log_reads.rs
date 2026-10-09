@@ -28,10 +28,9 @@ use std::time::Duration;
 use paros_core::{JournalIdentifier, LogRead, NodeId, ReadState, Seq, Slot};
 
 use crate::audit::{Audit, LogReadAnswer, LogReadReport};
-use crate::hooks::Reply;
 use crate::rpc::{Read, ReadAck, ReplySender, journal_view_to_proto};
 
-use super::reply::answer_read;
+use super::reply::{Reply, answer};
 
 /// The records one page carries when the client names no limit.
 pub(crate) const READ_PAGE_RECORDS: usize = 256;
@@ -144,7 +143,7 @@ fn send<A: Audit>(
         tracing::info!(node = node.0, from = from.0, answer = ?how, "log_read_not_held");
         let ack = read_ack(read);
         assert!(!ack.served, "a read this process does not hold is unserved");
-        answer_read(audit, node, Reply::ReadUnserved, reply, ack);
+        answer(audit, node, Reply::ReadUnserved, reply, ack);
         return;
     };
     // A woken read is one the fold moved past: never an empty tail page.
@@ -171,7 +170,7 @@ fn send<A: Audit>(
         answer = ?how,
         "log_read_served"
     );
-    answer_read(audit, node, Reply::LogRead, reply, ack);
+    answer(audit, node, Reply::LogRead, reply, ack);
 }
 
 /// The refusal a call naming a journal this process does not serve gets
@@ -413,7 +412,7 @@ impl JournalReads {
         for (ctx, early) in overdue {
             if let Some(pending) = self.confirming.remove(&ctx) {
                 audit.read_expired(node, early);
-                answer_read(
+                answer(
                     audit,
                     node,
                     Reply::ReadUnserved,

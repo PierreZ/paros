@@ -1472,7 +1472,7 @@ Simulation is the investment. Every milestone lands with its share of:
   moonpool decides whether and how to strike, under the seed's attrition regime. Faults come only
   from these two forms; a `buggify_knob!` is a form of inline buggify. Both are inert in
   production. `paros-core` gets none. `DriverHooks`, `SimDisk`, `LedgeredJournal` and `PowerCut`
-  go; `Audit` stays as the one observation seam, for the facts a cross-node or harness oracle
+  go (`DriverHooks` went with #318); `Audit` stays as the one observation seam, for the facts a cross-node or harness oracle
   folds. A fact that only fires a gate is an inline `reachable!`/`sometimes!` instead, and the
   gate-only callbacks move inline site by site (decided on 2026-10-09)
   (`docs/analysis/simulation/production-fault-hints.md`).

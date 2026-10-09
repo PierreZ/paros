@@ -23,7 +23,6 @@ mod audit;
 mod chain;
 mod chain_workload;
 mod client;
-mod hooks;
 mod lifecycle;
 mod machine;
 mod process;

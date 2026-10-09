@@ -32,9 +32,9 @@ use tokio_util::sync::CancellationToken;
 use crate::audit::{Audit, HistoryPage, StorageFaultDecision};
 use crate::driver::edge::{MatchmakerInbox, RpcEdge};
 use crate::driver::events::{config_hash, reconfigure_kind, reconfigure_reply_kind};
+use crate::driver::reply::Reply;
 use crate::driver::reply::match_answer;
 use crate::driver::{BootKind, BootRefusal, DriverTunables, RunError};
-use crate::hooks::Reply;
 use crate::storage::StorageError;
 
 pub use storage::{MatchmakerStorage, MemMatchmakerStorage, matchmaker_storage_contract_suite};

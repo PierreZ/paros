@@ -13,7 +13,6 @@ use paros_core::{
 use crate::audit::{Audit, StorageFaultDecision};
 use moonpool_buggify::hint::Strike;
 
-use crate::hooks::DriverHooks;
 use crate::storage::{LogStorage, StorageError};
 
 use super::calls::Call;
@@ -60,15 +59,13 @@ pub(crate) fn fold_head(node: &ColocatedNode) -> Option<Slot> {
 /// (`reply::answer`, #318): the journal moved either way, and
 /// the client's retry is answered from the log.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
-fn answer_applied_calls<H, A>(
+fn answer_applied_calls<A>(
     node: &ColocatedNode,
     walked: &[(Slot, Command, Outcome)],
     waiters: &mut ClientWaiters,
-    hooks: &H,
     audit: &A,
     self_id: u64,
 ) where
-    H: DriverHooks,
     A: Audit,
 {
     let folded = node.replica().folded();
@@ -93,12 +90,12 @@ fn answer_applied_calls<H, A>(
                 (Some(command), Some(outcome)) if *command == call.command() => {
                     audit.answered(NodeId(self_id), slot, command, outcome);
                     tracing::info!(node = self_id, slot = slot.0, ?outcome, "call_answered");
-                    call.answer(outcome, self_id, hooks, audit);
+                    call.answer(outcome, self_id, audit);
                 }
                 _ => {
                     audit.waiter_superseded(NodeId(self_id), slot);
                     tracing::info!(node = self_id, slot = slot.0, "call_superseded");
-                    call.no_verdict(Some(self_id), hooks, audit, self_id);
+                    call.no_verdict(Some(self_id), audit, self_id);
                 }
             }
         }
@@ -142,17 +139,15 @@ fn report_recovery_batch<A: Audit>(audit: &A, self_id: u64, batch: (usize, usize
 // (persist → send → learn → acks), so slicing it into helpers would scatter
 // the ordering contract this function *is*.
 #[tracing::instrument(level = "trace", skip_all, fields(node = node.config().id.0))]
-pub(crate) async fn drain_ready<S, H, A>(
+pub(crate) async fn drain_ready<S, A>(
     node: &mut ColocatedNode,
     storage: &mut S,
     out: &Outbound,
     waiters: &mut ClientWaiters,
-    hooks: &H,
     audit: &A,
 ) -> Result<Outbox, RunError>
 where
     S: LogStorage,
-    H: DriverHooks,
     A: Audit,
 {
     let self_id = out.self_node().0;
@@ -259,7 +254,7 @@ where
         let outcome = (*outcome != Outcome::Noop).then_some(outcome);
         report_applied(audit, self_id, *slot, command, outcome);
     }
-    answer_applied_calls(node, &committed, waiters, hooks, audit, self_id);
+    answer_applied_calls(node, &committed, waiters, audit, self_id);
 
     // 3b. Answer confirmed reads — after the learn step, so the fold this
     //     same batch carried is covered by what the read observes: the page

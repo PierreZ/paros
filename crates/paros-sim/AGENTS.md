@@ -14,7 +14,6 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `process.rs` → `NodeProcess::chaotic`, `MatchmakerProcess`, `ProxyProcess`, `ReplicaProcess`, `JoinerProcess`, `IdleProcess`, `ContractSuiteWorkload` → one `Seat` per journal over `SimStores`.
 - `machine.rs` → `MachineProcess`, `MachineBoard` → the machines (#246): the shipped `paros::machine::run_machine` on a bare `ProviderDisk` over the simulated disk (no wrapper, #294), from an empty disk, formed by the workload's `init` (`cell init`'s decree over the layout's founding members, #277); stores ordered (a cut mid-commit is torn or whole), outside the injector; oracles: no cell forms without `init`, every formation names the one cell, only a founding member forms and over exactly the founders (the lifecycle reports through the audit port, `NodeAudit::on_machines`), a failed record write restarts the machine (the one loop: `parosd`'s supervisor); its faults are the lifecycle's own `hint!`s, struck by the machine group's attrition, which also draws moonpool's `CrashAndWipe` (`MACHINE_WIPE_WEIGHT`): a wiped machine is a new one, recognized at its boot on an empty disk, and a vote that names the old one makes the cell lost (`cell_lost`, `cell_exists`; the control-plane liveness is excused).
 - `lifecycle.rs` → `ScriptedLifecycle` → the `fault_factory` injector (the chain client's operator crashes and reboots, #173).
-- `hooks.rs` → `BuggifyHooks<T>` → the three per-seed latches left in `DriverHooks` (withhold GC, hold a journal, the lost verdict), each drawn in `shape.rs` and coupled to a scenario. Being deleted (#294, #318 E): they move inline into `paros` once moonpool can force a location's activation per seed; add none.
 - `client.rs` → `ClientRuntime`, `ChainClient = paros::client::Client<SimProviders>`, `Connector` → a workload's client-only RPC runtime; `Connector` builds clients over servers learned at runtime (the machines, #246).
 - `state.rs` → `published`, `journal_key` → get-or-publish of per-iteration singletons on the `StateHandle`.
 - `chain.rs` → `ChainState` → the Chain-of-Blocks fold a journal client computes (#186).
@@ -69,8 +68,8 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `config_floor` → `MIN_BOOTSTRAP` on a matchmaker seed, the whole pool otherwise.
   `QuorumPolicy::clean_copies(floor, pool)` → floor minus the smallest `tolerated_loss` over
   `floor..=pool`; a grid tolerates zero, so a grid seed injects no lost leg and parks nobody.
-- `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), one held for the chaos
-  window (`hold_journal`). Each journal but the first is multi-writer on a coin (`JournalPlan::multi`, #241); a directory create draws its mode too, and `writer_mode` answers the mode of either. The first is the run's main identifier (`Identifiers::main`; `identifiers` draws it, the
+- `journals` → `JournalPlan`: 1–3 journals (on matchmaker seeds too, #201), on a multi-journal seed a draw that
+  turns on `paros::scenario::HOLD_JOURNAL` (`set_activation`): every node holds its highest journal for the chaos window, and the driver reports it (`Audit::journal_held`). Each journal but the first is multi-writer on a coin (`JournalPlan::multi`, #241); a directory create draws its mode too, and `writer_mode` answers the mode of either. The first is the run's main identifier (`Identifiers::main`; `identifiers` draws it, the
   directory's and the registry's once per seed: no identifier is fixed; the cell's and the fleet tenant's are `init`'s, on a machine); the
   others' identifiers are drawn
   (#235: a random journal id in the default tenant or a random one, sometimes the first's journal
@@ -149,13 +148,13 @@ crash, and is resumed by the client's next fleet step) · `OP_COUNT=27`. Retired
 - No seed constants, seed lists or seed-replay tests (root *Simulation rules*).
 - **No new fault wrapper here** (root *Simulation rules*, #294). This crate never decides a
   fault by wrapping shipped code: no new `Ledgered*` store, `Sim*` disk or stores, timer race
-  around a commit (the deleted `PowerCut`), `BuggifyHooks` method, `crash_self` call on a code path, or workload that stops the
+  around a commit (the deleted `PowerCut`), hook trait (the deleted `BuggifyHooks`), `crash_self` call on a code path, or workload that stops the
   library's own loop to fake a crash. Put an inline `buggify!` or a `hint!` in `paros` instead,
   and keep here only what observes (`Audit`, oracles), the environment's injectors (outages,
-  disk rot) and an operator's explicit misbehaviour. `LedgeredJournal`, `LedgeredRegistry`,
-  and `BuggifyHooks` are the old pattern, migrating away (`SimDisk`, `SimMachineStores` and
-  `PowerCut` are gone); extend none of them.
-- Hooks are consulted from the node loop only; a decision a spawned task needs is carried.
+  disk rot) and an operator's explicit misbehaviour. `LedgeredJournal` and `LedgeredRegistry`
+  are the old pattern, migrating away (`SimDisk`, `SimMachineStores`, `PowerCut` and
+  `BuggifyHooks` are gone); extend none of them. A per-seed scenario decides the driver's named
+  locations with `moonpool_sim::set_activation` in `shape.rs`, never with a wrapper.
 - A wiped identity stays down because the **library** refuses it (#147, #183): the ledger parks
   it for the budget and composer only, and `StorageWorld::provisioned` is the `BootKind` claim.
 - Operators coordinate through `StorageWorld::retire` / `reserve_joiner_retirement`. Spans are non-optional.

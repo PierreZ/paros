@@ -1,8 +1,8 @@
 //! The machines in the simulation (#246): every process of the
 //! [`MACHINE_GROUP`] is a `parosd`, running the shipped
 //! [`paros::machine::run_machine`] from an empty simulated disk — format (a
-//! minted `node_id`), the wait, then the cell's journals — under the run's
-//! driver hooks and every fault the campaign draws. All of paros runs in the
+//! minted `node_id`), the wait, then the cell's journals — under the
+//! driver's BUGGIFY sites and every fault the campaign draws. All of paros runs in the
 //! simulation, setup included (decided on 2026-10-09): no cell is handed to
 //! a machine; the workload's operators form it with `init`
 //! (`paros::client::initialize`, the code `parosctl init` prints) against
@@ -267,9 +267,7 @@ async fn run_machine_role(
         ..crate::shape::journal_layout(ctx.state())
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
-    let RoleRig {
-        incarnation, hooks, ..
-    } = arm_role(ctx, my_ip);
+    let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
     let time = ctx.time().clone();
     let state = ctx.state().clone();
@@ -296,7 +294,6 @@ async fn run_machine_role(
             layout.assignment,
             tunables,
             ctx.shutdown().clone(),
-            &hooks,
         ))
         .await;
         match ran {

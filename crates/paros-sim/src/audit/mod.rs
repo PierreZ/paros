@@ -72,8 +72,7 @@ use paros::{
 
 use self::state::AuditState;
 
-/// One node's view of the shared checker. Constructed beside the node's
-/// `BuggifyHooks` and handed to `paros::run_node`; it stamps simulated time on
+/// One node's view of the shared checker, handed to `paros::run_node`; it stamps simulated time on
 /// the observations that need it and forwards everything else unchanged.
 ///
 /// The driver hands each peer-delivery task its own handle to the audit (the
@@ -1141,6 +1140,12 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     ) {
         if let Some(mut board) = self.system_board() {
             board.checkpoint_folded(node, seq, verified, state);
+        }
+    }
+
+    fn journal_held(&self, _node: NodeId) {
+        if let Some((journal, board)) = &self.journal {
+            journals::lock(board).held(*journal);
         }
     }
 

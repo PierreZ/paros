@@ -107,8 +107,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   `SimMachine`: the sim runs the same machine and disk as `parosd`. A sim wrapper only observes,
   through `Audit` or a `reachable!` probe. `is_simulated()` tilts rates, cadences and checks,
   never an outcome a client sees. `paros-core` stays sans-IO: no buggify, hint or
-  `is_simulated()`. Add no new `DriverHooks` method; the existing ones migrate per #294 (the
-  `Seam`s, `SimDisk` and `PowerCut` are gone) (`docs/analysis/simulation/production-fault-hints.md`).
+  `is_simulated()`. There is no hook trait: `DriverHooks`, the `Seam`s, `SimDisk` and `PowerCut`
+  are gone (#294, #318) (`docs/analysis/simulation/production-fault-hints.md`).
 - **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
   as possible in the simulation, setup included. Always BUGGIFY your way into the complex
   situations rather than script them. Test several behaviours through the one workload with
@@ -131,7 +131,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   protocol, harness or fault-model change, more only when the user asks. A hunt's deliverable
   is a failing seed and its diagnosis.
 - **Canary** (`sim-paros-hunt canary`, moonpool's `check_determinism`): run a few hundred seeds
-  after any change to the harness's randomness, the driver hooks or the process lifecycle.
+  after any change to the harness's randomness, the driver's BUGGIFY sites or the process lifecycle.
 - **Mutation hunt** (`cargo xtask mutants`, #269): cargo-mutants over the safety-critical
   `paros-core` modules (`.cargo/mutants.toml`), each mutant judged by a fixed-seed hunt of the
   main campaign (`paros_sim::chain_mutants`, seeds `1..=300`, the same for every mutant, so
@@ -156,8 +156,8 @@ Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/paros-sim-runner/AGENT
 One campaign, one workload, two judges. The **campaign** is a pool of
 `NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
 joiners, every role storing on the library's journal stores over moonpool's simulated disk,
-under every moonpool fault, the driver hooks, the stores' own mid-commit `hint!`s and the
-ledgered injector (the hooks migrating to inline buggify in `paros`, #294)
+under every moonpool fault, the driver's inline BUGGIFY sites (#294, #318), the stores' own
+mid-commit `hint!`s and the ledgered injector
 (`paros_sim::world`). There is no scripted corpus and no fake disk (#261, #263, decided on
 2026-10-08): a shape the corpus once scripted is a per-seed BUGGIFY or swarm draw, judged by the
 same oracles. The one workload is `ChainWorkload`,
@@ -340,11 +340,11 @@ Three layers, and nothing crosses them:
   perturbed only by a caller that stops calling.
 - **Prong 1, the driver's choices are inline sites** (#294, #318): every per-call rare-but-valid
   choice is a `buggify_fault_with_prob!` at the line that makes it (silent in the recovery tail),
-  with a `reachable!` beside it or a fired gate in the audit. Three per-seed latches are left in
-  `DriverHooks` (`NoHooks` in production) until moonpool can force a location's activation per
-  seed (#318 E). Draw a site only where its answer has an observable effect.
-  Hooks are consulted **only from the node loop**, which is compile-enforced (`H: DriverHooks`
-  is deliberately not `Send + 'static`); a decision a spawned task needs is carried to it.
+  with a `reachable!` beside it or a fired gate in the audit. A site that is one ingredient of a
+  per-seed scenario is a named location (`buggify_named!`, `paros::scenario`, #318 E): the
+  harness turns it on with the scenario's other ingredients (`set_activation`). Draw a site only
+  where its answer has an observable effect. A driver site draws **only on the node loop**,
+  never in a spawned task; a decision a spawned task needs is carried to it.
 - **Durability moments are hints** (#294): the drivers name each with moonpool's
   `hint!("label").await` inline, at its own rate (staged, not synced; durable, not sent; a
   matchmaker's registration on both sides of its sync; a reconfiguring `Prepare` sent, #260).
@@ -358,7 +358,7 @@ Three layers, and nothing crosses them:
   `PLATEAU_SEEDS`, `CHAOS_DURATION_MS`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
   (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
 
-Depth: the `adding-a-buggify-site` skill, `crates/paros/src/hooks.rs`.
+Depth: the `adding-a-buggify-site` skill, `crates/paros/src/scenario.rs`.
 
 ## Audit, correctness, assertions, spans
 

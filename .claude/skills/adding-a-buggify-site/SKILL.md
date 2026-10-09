@@ -1,6 +1,6 @@
 ---
 name: adding-a-buggify-site
-description: Add fault injection to paros the right way - an inline buggify_with_prob!/buggify_pick! at the line of paros that makes the choice, or a hint!("moment") where a crash is interesting (never a new DriverHooks method, Seam or sim wrapper, #294), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability hint!, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
+description: Add fault injection to paros the right way - an inline buggify_with_prob!/buggify_pick! at the line of paros that makes the choice, or a hint!("moment") where a crash is interesting (never a hook trait, Seam or sim wrapper, #294), a buggify_knob! tunable with a documented floor in ChainConfig or NodeShape (prong 2), a durability hint!, and the fired/recovery gates every site must pair with. Use when a rare state needs to become likely, when a constant should vary per seed, when adding a driver policy choice, or when a sweep gate never fires.
 ---
 
 # Adding a BUGGIFY site
@@ -13,35 +13,40 @@ its sites. Pick the prong first.
 **Hard rule (#294, 2026-10-09):** the site goes inline in the shipped code
 (`paros`, `parosd`) at the line that makes the choice, never in a sim wrapper.
 A choice is `buggify_with_prob!` or `buggify_pick!`; a moment where a crash is
-interesting is `hint!("label").await`. Add no new `DriverHooks` method (the
-`Seam`s are gone): prong 1 below describes the code being migrated
+interesting is `hint!("label").await`. There is no hook trait (`DriverHooks`
+and the `Seam`s are gone, #318)
 (`docs/analysis/simulation/production-fault-hints.md`).
 
-## Prong 1: a driver decision → `DriverHooks`
+## Prong 1: a driver decision → an inline site
 
 For a timing or policy choice the provider-generic driver owns (skip a
 resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 
-1. Add a method to `DriverHooks` in `crates/paros/src/hooks.rs` with an honest
-   contract in its doc: what the driver does when it answers `true`, and why
-   that is always safe (`NoHooks` keeps the default `false`). If the core must
-   expose the decision, add a method to `ColocatedNode` with the same honesty
+1. Put a `moonpool_buggify::buggify_fault_with_prob!(p)` at the line that
+   makes the choice, one macro line per match arm (`driver/transport.rs`,
+   `driver/reply.rs`, `driver/mod.rs` are the pattern). A disruptive site is
+   silent in the recovery tail by itself. If the core must expose the
+   decision, add a method to `ColocatedNode` with an honest contract
    ("skipping is always safe; re-send is pure optimization"); the core gains
    no RNG and no flag.
-2. Consult it in the driver **only where the answer can have an observable
-   effect** (ask "skip the resend?" only when accepts are pending), trace the
-   action that actually happened, and report it through the `Audit` port.
-3. Implement it in `BuggifyHooks` (`crates/paros-sim/src/hooks.rs`) with its
-   **own** `buggify_with_prob!` call site, so per-seed activation composes
-   with every other site. Disruptive sites check the chaos cutoff and go quiet
-   for the recovery tail.
-4. **Consult only from the node loop, never from a spawned task.** A hook
-   answer is a draw; a `spawn_task(..).detach()`ed task can outlive its run
-   and shift the next run's stream (this broke the same-seed replay on CI
-   once). Take the decision on the loop and carry it (the mailbox's
-   `hold_next`/`reverse_next` flags are the pattern). The `H: DriverHooks`
-   bound on `run_node` is deliberately not `Send + 'static` so the compiler
-   catches the obvious version of this mistake.
+2. Draw it **only where the answer can have an observable effect** (ask
+   "skip the resend?" only when accepts are pending), and trace the action
+   that actually happened.
+3. Pair it with a `moonpool_assertions::reachable!("…")` beside it. Report it
+   through the `Audit` port only when a cross-node or harness oracle needs the
+   fact.
+4. **Draw only on the node loop, never in a spawned task.** A draw is a
+   random number; a `spawn_task(..).detach()`ed task can outlive its run and
+   shift the next run's stream (this broke the same-seed replay on CI once).
+   Take the decision on the loop and carry it (the mailbox's
+   `hold_next`/`reverse_next` flags are the pattern).
+5. **A per-seed scenario ingredient is a named location.** When a scenario
+   needs the site on together with its other ingredients, use
+   `moonpool_buggify::buggify_named!(LABEL, p)` with a `pub const` label in
+   `crates/paros/src/scenario.rs`, and decide it in the scenario's draw in
+   `crates/paros-sim/src/shape.rs` with `moonpool_sim::set_activation(LABEL,
+   on)` (`WITHHOLD_GC`, `HOLD_JOURNAL`, `LOSE_VERDICTS` are the pattern).
+   Never reword a label.
 
 ## Prong 2: a tunable → `buggify_knob!`
 
@@ -96,12 +101,12 @@ campaign builds it; there is no scripted corpus to fall back on (#263).
 
 ## The four questions every site must answer
 
-`BuggifyHooks`'s module doc keeps a table of *enabled / consulted / fired /
-recovered* per hook. The rule for the **fired** gate: it sits wherever the
-fact is reported (the audit callback for a hook the driver reports, an inline
-`assert_reachable!` for one it only traces); the **recovery** gate is the
+Every site answers *enabled / consulted / fired / recovered*. The rule for
+the **fired** gate: it sits wherever the fact is reported (the audit callback
+for a fact an oracle folds, an inline `reachable!` for one the driver only
+traces); the **recovery** gate is the
 protocol outcome the fault exists to exercise, a `sometimes` in the audit.
-Add the row when you add the hook. A perturbation never gets a `sometimes`
+A perturbation never gets a `sometimes`
 of its own.
 
 Finally, run the sweep and confirm the new site fires and the recovery gate
