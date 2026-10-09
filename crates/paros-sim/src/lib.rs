@@ -30,11 +30,13 @@ mod process;
 mod roles;
 mod shape;
 mod state;
+mod view;
 mod world;
 
 pub use moonpool_sim::{AssertKind, SimulationReport};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+pub use view::{SeedEvent, SeedRun, VIEW_EVENTS, run_chain_seed_view};
 
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationConfig,
