@@ -12,9 +12,8 @@
 //! The record is rewritten whole and atomically: a temporary file, synced,
 //! renamed into place, and every directory on its way synced, so a crash
 //! leaves the old record or the new one, and a name `create_dir_all` made is
-//! never lost under a record that names the cell. What a caller keeps beside
-//! it (`parosd`'s provisioning record, the simulation's ledger) is the
-//! caller's: this type implements no [`super::MachineDisk`] of its own.
+//! never lost under a record that names the cell. `parosd` and the
+//! simulation hand [`super::run_machine`] this type and nothing around it.
 
 use std::io;
 

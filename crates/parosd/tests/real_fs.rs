@@ -185,3 +185,28 @@ fn a_store_dropped_mid_batch_reopens_with_every_acknowledged_write() {
         }
     });
 }
+
+/// The machine record on a real disk (#246): absent, then read back whole,
+/// with no staged file left behind; a journals directory without a record
+/// is a machine that lost its identity.
+#[test]
+fn the_machine_record_is_absent_then_read_back_whole() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let disk = paros::machine::ProviderDisk::new(
+        TokioStorageProvider::new(),
+        dir(&root, "machine"),
+        JournalStoreConfig::small(),
+    );
+    runtime().block_on(async {
+        assert_eq!(disk.read_record().await, Ok(None));
+        assert!(!disk.holds_journals().await);
+        disk.write_record("node_id 3\n").await.expect("written");
+        assert_eq!(disk.read_record().await, Ok(Some("node_id 3\n".into())));
+        assert!(!root.path().join("machine/machine.tmp").exists());
+        std::fs::create_dir_all(root.path().join("machine/journals")).expect("mkdir");
+        assert!(
+            disk.holds_journals().await,
+            "a store without a record is amnesia"
+        );
+    });
+}

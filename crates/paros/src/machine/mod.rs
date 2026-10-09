@@ -57,6 +57,7 @@ mod disk;
 mod formed;
 mod lifecycle;
 mod record;
+mod stores;
 mod wait;
 
 use std::collections::BTreeSet;
@@ -66,8 +67,9 @@ use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, Tena
 
 pub use disk::ProviderDisk;
 pub use formed::FormedCell;
-pub use lifecycle::{MachineDisk, MachineError, MachineSettings, run_machine};
+pub use lifecycle::{MachineError, MachineSettings, run_machine};
 pub use record::{MachineRecord, journal_config};
+pub use stores::AuditScope;
 pub use wait::{CellLedger, wait_for_cell};
 
 use crate::rpc::machine as wire;

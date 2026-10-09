@@ -18,6 +18,7 @@
 //! Production passes [`NoAudit`]; every method defaults to a no-op.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 use paros_core::{
     AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalView,
@@ -29,6 +30,7 @@ use paros_core::{
 
 use crate::driver::BootRefusal;
 use crate::hooks::Seam;
+use crate::machine::{CellPlan, MachineRecord};
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
 
@@ -414,6 +416,21 @@ pub trait Audit {
 
     /// This node crashed at a durability `seam` inside a `Ready` batch.
     fn crashed(&self, node: NodeId, seam: Seam) {}
+
+    /// A machine at `addr` read its record at boot (#246): `None` for an
+    /// empty disk, which it formats next. Reported before anything is
+    /// written, on the machine's own audit.
+    fn machine_booted(&self, addr: SocketAddr, record: Option<&MachineRecord>) {}
+
+    /// A machine rewrote its record durably (after the rename and the
+    /// directory syncs): its identity, or a step of the cell decree — a
+    /// raised promise, or the vote that forms it.
+    fn machine_recorded(&self, record: &MachineRecord) {}
+
+    /// A machine at `addr` is about to format the stores of `plan` as
+    /// member `node` (the step before its vote); `leftovers` when the disk
+    /// already holds journals an unvoted attempt left.
+    fn cell_formatting(&self, addr: SocketAddr, node: NodeId, plan: &CellPlan, leftovers: bool) {}
 
     /// The driver refused to boot this identity (#147): the operator's
     /// [`BootKind`](crate::BootKind) claim and the store's format marker

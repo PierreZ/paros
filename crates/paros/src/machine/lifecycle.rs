@@ -15,22 +15,29 @@
 //!    ([`super::FormedCell`]). Every start after formation is an existing
 //!    member's, so a lost store is refused as amnesia by the driver.
 //!
-//! The disk is the caller's ([`MachineDisk`]): `parosd` keeps the record and
-//! the stores in a data directory, the simulation on moonpool's simulated
-//! disk. Names are the caller's too: the library sees socket addresses only.
+//! The disk is a [`ProviderDisk`] over the caller's storage provider:
+//! `parosd` passes Tokio's filesystem, the simulation moonpool's simulated
+//! disk, and both run this code and nothing else (#294: no sim wrapper).
+//! What the run observes goes to the caller's audit port ([`AuditScope`]).
+//! Names are the caller's too: the library sees socket addresses only.
+//!
+//! Two moments of a machine's life are worth a fault, and the code names
+//! them (`hint!`, inert outside a simulation): a late boot, and the two
+//! steps of the decree in [`super::wait_for_cell`].
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use moonpool_core::{Providers, RandomProvider, TimeProvider};
-use paros_core::{Config, JournalIdentifier, NodeId};
+use std::time::Duration;
+
+use moonpool_core::{Providers, RandomProvider, StorageProvider, TimeProvider};
+use paros_core::{Ballot, Config, JournalIdentifier, NodeId};
 use tokio_util::sync::CancellationToken;
 
-use paros_core::Ballot;
-
 use super::record::{MachineRecord, journal_config};
-use super::{CellLedger, CellPlan, Class, FormedCell, MachineFacts};
-use crate::{DriverHooks, DriverTunables, JournalStores, RunError};
+use super::stores::{AuditScope, MachineStores};
+use super::{CellLedger, CellPlan, Class, FormedCell, MachineFacts, ProviderDisk};
+use crate::{Audit, DriverHooks, DriverTunables, RunError};
 
 /// What a machine is configured with: the operator's half of its record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,73 +79,25 @@ impl core::fmt::Display for MachineError {
     }
 }
 
-/// A machine's disk: its record and its journal stores. Every write returns
-/// only once what it wrote survives a crash.
-pub trait MachineDisk {
-    /// The journal stores a formed machine serves.
-    type Stores: JournalStores;
-
-    /// The machine record's text, or `None` when there is none.
-    ///
-    /// # Errors
-    ///
-    /// The record exists and cannot be read.
-    fn read_record(&mut self) -> impl Future<Output = Result<Option<String>, String>>;
-
-    /// Replace the machine record with `text`, whole and durably: a crash
-    /// leaves the old record or the new one.
-    ///
-    /// # Errors
-    ///
-    /// The record could not be made durable.
-    fn write_record(&mut self, text: &str) -> impl Future<Output = Result<(), String>>;
-
-    /// Whether the disk holds anything of a journal store: with no record,
-    /// that is a machine that lost its identity.
-    fn holds_stores(&mut self) -> impl Future<Output = bool>;
-
-    /// Format the store of every journal `plan` names for member `node_id`
-    /// ([`crate::provision_store`]) and remember them as provisioned. An
-    /// interrupted run resumes: a store already formatted is left as it is.
-    ///
-    /// # Errors
-    ///
-    /// A store could not be formatted durably.
-    fn provision(
-        &mut self,
-        node_id: NodeId,
-        plan: &CellPlan,
-    ) -> impl Future<Output = Result<(), String>>;
-
-    /// The stores of member `node_id` serving `genesis`, every one an
-    /// existing member's.
-    ///
-    /// # Errors
-    ///
-    /// The disk disagrees with the plan (a store of another machine).
-    fn stores(
-        &mut self,
-        node_id: NodeId,
-        genesis: BTreeMap<JournalIdentifier, Config>,
-    ) -> impl Future<Output = Result<Self::Stores, String>>;
-}
-
 /// The [`CellLedger`] of a machine's disk: the record, rewritten whole at
-/// every step.
-struct DiskLedger<'a, D> {
-    disk: &'a mut D,
+/// every step, each durable rewrite reported to the machine's audit.
+struct DiskLedger<'a, S, A> {
+    disk: &'a ProviderDisk<S>,
+    audit: &'a A,
+    addr: SocketAddr,
     record: MachineRecord,
 }
 
-impl<D: MachineDisk> DiskLedger<'_, D> {
+impl<S: StorageProvider + Clone, A: Audit> DiskLedger<'_, S, A> {
     async fn commit(&mut self, record: MachineRecord) -> Result<(), String> {
         self.disk.write_record(&record.render()).await?;
+        self.audit.machine_recorded(&record);
         self.record = record;
         Ok(())
     }
 }
 
-impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
+impl<S: StorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S, A> {
     fn promised(&self) -> Ballot {
         self.record.promised
     }
@@ -166,7 +125,17 @@ impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
             self.record.plan.is_none(),
             "a formed machine formats no other cell"
         );
-        self.disk.provision(self.record.node_id, plan).await
+        let leftovers = self.disk.holds_journals().await;
+        if leftovers {
+            moonpool_assertions::reachable!(
+                "machine: a machine formats over journals an unvoted attempt left"
+            );
+        }
+        self.audit
+            .cell_formatting(self.addr, self.record.node_id, plan, leftovers);
+        self.disk.format(self.record.node_id, plan).await?;
+        moonpool_assertions::reachable!("machine: a seed formats its cell's journals");
+        Ok(())
     }
 
     async fn form(&mut self, ballot: Ballot, plan: &CellPlan) -> Result<(), String> {
@@ -191,11 +160,16 @@ impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
     }
 }
 
+/// The longest a machine's boot is held back in a simulation: long enough
+/// for a `cell init` to meet a founding member that is not up yet.
+const LATE_BOOT_MS: u64 = 2_500;
+
 /// Run a machine on `disk` until `shutdown`: format it on its first start,
 /// wait for its cell while it has none, then serve the cell's journals.
-/// `addr` is the address this machine serves at. `assignment` is how many
-/// user journals a cell this machine draws at `cell init` serves beside its
-/// control journals (the static assignment, until #212).
+/// `audits` names the audit port of each [`AuditScope`]. `addr` is the
+/// address this machine serves at. `assignment` is how many user journals a
+/// cell this machine draws at `cell init` serves beside its control journals
+/// (the static assignment, until #212).
 ///
 /// # Errors
 ///
@@ -203,13 +177,14 @@ impl<D: MachineDisk> CellLedger for DiskLedger<'_, D> {
 ///
 /// # Panics
 ///
-/// When the disk breaks its contract: a formed record that is not the plan
-/// the wait formed, or a plan this machine is not a member of.
+/// When the record breaks its contract: a formed record that is not the
+/// plan the wait formed, or a plan this machine is not a member of.
 #[tracing::instrument(level = "debug", skip_all, fields(addr = %addr))]
 #[allow(clippy::too_many_arguments)]
-pub async fn run_machine<P, D, H>(
+pub async fn run_machine<P, S, A, F, H>(
     providers: P,
-    mut disk: D,
+    disk: ProviderDisk<S>,
+    audits: F,
     settings: &MachineSettings,
     addr: SocketAddr,
     assignment: usize,
@@ -219,16 +194,27 @@ pub async fn run_machine<P, D, H>(
 ) -> Result<(), MachineError>
 where
     P: Providers,
-    D: MachineDisk,
+    S: StorageProvider + Clone + 'static,
+    A: Audit + Clone + Send + Sync + 'static,
+    F: Fn(AuditScope) -> A,
     H: DriverHooks,
 {
-    if let Some(delay) = hooks.delay_boot() {
-        tracing::info!(delay_ms = delay.as_millis(), "machine_boot_delayed");
-        if providers.time().sleep(delay).await.is_err() {
+    // A machine that starts late (#246), so a `cell init` meets a founding
+    // member that is not up yet. Always safe: a late machine is a slow one.
+    if let Some(delay_ms) = moonpool_buggify::buggify_range!(0.1, 250..LATE_BOOT_MS + 1) {
+        moonpool_assertions::reachable!("machine: a machine starts late");
+        tracing::info!(delay_ms, "machine_boot_delayed");
+        if providers
+            .time()
+            .sleep(Duration::from_millis(delay_ms))
+            .await
+            .is_err()
+        {
             return Ok(());
         }
     }
-    let record = identity(&providers, &mut disk, settings).await?;
+    let audit = audits(AuditScope::Machine);
+    let record = identity(&providers, &disk, &audit, addr, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
     let facts = MachineFacts {
         node_id: record.node_id,
@@ -251,7 +237,9 @@ where
         }
     } else {
         let mut ledger = DiskLedger {
-            disk: &mut disk,
+            disk: &disk,
+            audit: &audit,
+            addr,
             record,
         };
         let waited = super::wait_for_cell(
@@ -261,7 +249,6 @@ where
             &mut ledger,
             &tunables,
             shutdown.clone(),
-            hooks,
         )
         .await
         .map_err(MachineError::Run)?;
@@ -275,14 +262,16 @@ where
         );
         cell
     };
-    serve(providers, disk, cell, tunables, shutdown, hooks).await
+    serve(providers, disk, audits, cell, tunables, shutdown, hooks).await
 }
 
 /// The machine's record: read, or minted on an empty disk; the
 /// configuration's mutable fields recorded.
-async fn identity<P: Providers, D: MachineDisk>(
+async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
     providers: &P,
-    disk: &mut D,
+    disk: &ProviderDisk<S>,
+    audit: &A,
+    addr: SocketAddr,
     settings: &MachineSettings,
 ) -> Result<MachineRecord, MachineError> {
     let refused = |error: String| MachineError::Refused(format!("machine record: {error}"));
@@ -291,7 +280,7 @@ async fn identity<P: Providers, D: MachineDisk>(
     let Some(text) = read else {
         // A disk with stores and no identity lost it: never a new machine
         // on top of an old one's stores.
-        if disk.holds_stores().await {
+        if disk.holds_journals().await {
             return Err(MachineError::Refused(
                 "stores without a machine record — this machine lost its identity \
                  (amnesia); wipe its disk to start a new machine, which never rejoins \
@@ -299,6 +288,8 @@ async fn identity<P: Providers, D: MachineDisk>(
                     .into(),
             ));
         }
+        audit.machine_booted(addr, None);
+        moonpool_assertions::reachable!("machine: a machine formats an empty disk");
         let node_id = loop {
             let id: u64 = providers.random().random();
             if id != 0 {
@@ -314,11 +305,23 @@ async fn identity<P: Providers, D: MachineDisk>(
             plan: None,
         };
         disk.write_record(&record.render()).await.map_err(failed)?;
+        audit.machine_recorded(&record);
         tracing::info!(node = node_id.0, "machine_formatted");
         return Ok(record);
     };
     let mut record = MachineRecord::parse(&text).map_err(refused)?;
     assert_ne!(record.node_id, NodeId(0), "a minted identity is set");
+    audit.machine_booted(addr, Some(&record));
+    if record.formed().is_some() {
+        moonpool_assertions::reachable!("machine: a formed machine restarts and serves its cell");
+    } else {
+        moonpool_assertions::reachable!("machine: a formatted machine restarts and waits");
+        if record.promised != Ballot::default() {
+            moonpool_assertions::reachable!(
+                "machine: a machine restarts promised in cell init and unvoted"
+            );
+        }
+    }
     if record.class != settings.class {
         return Err(MachineError::Refused(format!(
             "this machine was formatted as {}, not {}: a class is fixed at format",
@@ -332,14 +335,16 @@ async fn identity<P: Providers, D: MachineDisk>(
     record.failure_domain.clone_from(&settings.failure_domain);
     if changed {
         disk.write_record(&record.render()).await.map_err(failed)?;
+        audit.machine_recorded(&record);
     }
     Ok(record)
 }
 
 /// Serve the cell's journals until shutdown.
-async fn serve<P, D, H>(
+async fn serve<P, S, A, F, H>(
     providers: P,
-    mut disk: D,
+    disk: ProviderDisk<S>,
+    audits: F,
     cell: FormedCell,
     tunables: DriverTunables,
     shutdown: CancellationToken,
@@ -347,7 +352,9 @@ async fn serve<P, D, H>(
 ) -> Result<(), MachineError>
 where
     P: Providers,
-    D: MachineDisk,
+    S: StorageProvider + Clone + 'static,
+    A: Audit + Clone + Send + Sync + 'static,
+    F: Fn(AuditScope) -> A,
     H: DriverHooks,
 {
     let node_id = cell.facts.node_id;
@@ -361,10 +368,7 @@ where
         .iter()
         .map(|&journal| (journal, journal_config(plan, node_id, journal)))
         .collect();
-    let stores = disk
-        .stores(node_id, genesis)
-        .await
-        .map_err(MachineError::Refused)?;
+    let stores = MachineStores::new(disk, node_id, genesis, audits);
     let addr = plan
         .members
         .iter()

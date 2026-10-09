@@ -28,8 +28,7 @@
 //!
 //! | hook | fired gate | recovery gate |
 //! |---|---|---|
-//! | `crash_at` (per seam) | audit `crashed` / `matchmaker_crashed`, one per seam; a machine's decree seams in `crate::machine` | boot re-report checks in audit `recovered` / `matchmaker_recovered`; a machine's boot reachables |
-//! | `delay_boot` | inline ("machine: a machine starts late") | "init: a run that decided nothing in time is run again" |
+//! | `crash_at` (per seam) | audit `crashed` / `matchmaker_crashed`, one per seam | boot re-report checks in audit `recovered` / `matchmaker_recovered` |
 //! | `skip_accept_resend` | audit `resend_skipped` | the slot is still applied (final convergence) |
 //! | `skip_matchmaking_resend` | audit `matchmaking_resend_skipped` | "matchmaking: a campaign closes with a matchmaker quorum" |
 //! | `resign_leadership` | audit `stepped_down` | "chain: failover completed" |
@@ -167,38 +166,13 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
                 // finishes. Kept off the write-window bias: a campaign is not
                 // a write window.
                 Seam::AfterPrepareSent => buggify_with_prob!(0.5),
-                // An idle machine's two decree seams (#246), consulted once
-                // per promise and once per format: a handful per run, so the
-                // rates are well above the write seams'. Kept off the bias:
-                // a decree step is not a batch's write window.
-                Seam::CellPromised => buggify_with_prob!(0.05),
-                Seam::CellFormatted => buggify_with_prob!(0.1),
             };
-        if fired
-            && self.seam_crash_bias > 1.0
-            && !matches!(
-                seam,
-                Seam::AfterPrepareSent | Seam::CellPromised | Seam::CellFormatted
-            )
-        {
+        if fired && self.seam_crash_bias > 1.0 && seam != Seam::AfterPrepareSent {
             // BUGGIFY pairing: the biased write-window crash pressure genuinely
             // fires on some seed (no slot is created when it never does).
             assert_reachable!("a write-window-biased seam crash fires");
         }
         fired
-    }
-
-    fn delay_boot(&self) -> Option<Duration> {
-        // A machine that starts late (#246): consulted once per boot, so a
-        // `cell init` meets a founding member that is not up yet. Inside
-        // the chaos window only, so the recovery tail starts every machine
-        // at once.
-        if !fire_gate!(self, 0.1, "machine: a machine starts late") {
-            return None;
-        }
-        Some(Duration::from_millis(moonpool_sim::sim_random_range(
-            250..2_501,
-        )))
     }
 
     fn skip_accept_resend(&self) -> bool {

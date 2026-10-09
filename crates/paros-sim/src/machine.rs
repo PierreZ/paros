@@ -10,11 +10,15 @@
 //! with `cell init`'s decree (#277).
 //!
 //! The disk is the library's [`ProviderDisk`] over moonpool's simulated
-//! disk — the record's write protocol `parosd` ships — and the stores are
-//! `JournalStorage`, every one an existing member's once formed, as
-//! `parosd`'s are. They store ordered, outside the ledgered injector and the
-//! power cut (the acceptors' fault model): a one-member cell has no second
-//! copy to repair a torn batch from.
+//! disk, handed to `run_machine` bare: no wrapper sits between the shipped
+//! lifecycle and the disk (#294). Its faults are the lifecycle's own
+//! `hint!`s and `buggify_*!` sites, struck by moonpool's attrition under the
+//! machine group's regime, and its facts reach the oracles through the audit
+//! port ([`NodeAudit::on_machines`]). The stores are `JournalStorage`, every
+//! one an existing member's once formed, as `parosd`'s are. They store
+//! ordered, outside the ledgered injector and the power cut (the acceptors'
+//! fault model): a one-member cell has no second copy to repair a torn
+//! batch from.
 //!
 //! The [`MachineBoard`] holds the run's facts about its machines that the
 //! oracles judge: whether an operator sent `init` (no cell forms without
@@ -29,17 +33,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimStorageProvider, SimTimeProvider, SimulationError, SimulationResult,
-    StateHandle, TimeProvider, assert_always, assert_reachable,
+    Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, StateHandle,
+    TimeProvider, assert_always, assert_reachable,
 };
 use paros::machine::{
-    CellPlan, ControlJournals, MachineDisk, MachineError, MachineRecord, MachineSettings,
+    AuditScope, CellPlan, ControlJournals, MachineError, MachineRecord, MachineSettings,
     ProviderDisk,
 };
-use paros::{
-    Ballot, BootKind, Config, JournalIdentifier, JournalStorage, JournalStores, NodeId, RunError,
-    Seam,
-};
+use paros::{Ballot, NodeId, RunError};
 
 use crate::audit::NodeAudit;
 use crate::audit::journals::journal_board;
@@ -54,6 +55,8 @@ const ROOT: &str = "paros/machine";
 pub(crate) struct MachineBoard {
     /// An operator sent `init` to a machine.
     init_sent: bool,
+    /// The founding members the run's `cell init` lists (the layout's).
+    founders: BTreeSet<SocketAddr>,
     /// The cell the first durable vote named: every later one names it too.
     cell: Option<ControlJournals>,
     /// The machines that formed, by minted id.
@@ -139,9 +142,11 @@ pub(crate) fn machine_addrs(deployment: &Deployment) -> SimulationResult<Vec<Soc
         .collect()
 }
 
-/// One machine: the shipped lifecycle on this process's simulated disk, in
-/// the seam-crash recovery loop every role with a disk runs. A process kill
-/// aborts it; the next incarnation reads its record back.
+/// One machine: the shipped lifecycle on this process's simulated disk. A
+/// process kill aborts it; the next incarnation reads its record back. The
+/// one loop here is `parosd`'s supervisor: a run that ended on a storage
+/// failure (`parosd` exits 75) is started again on the same disk (moonpool
+/// has no restart policy for a process that returns yet, #294).
 #[tracing::instrument(level = "debug", skip_all, fields(rank = rank))]
 async fn run_machine_role(
     ctx: &SimContext,
@@ -156,7 +161,8 @@ async fn run_machine_role(
         )));
     };
     let addrs = machine_addrs(deployment)?;
-    let founders: BTreeSet<SocketAddr> = addrs[..layout.founders].iter().copied().collect();
+    let board = machine_board(ctx.state());
+    lock(&board).founders = addrs[..layout.founders].iter().copied().collect();
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
@@ -173,16 +179,26 @@ async fn run_machine_role(
         durability: paros::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
+    let time = ctx.time().clone();
+    let state = ctx.state().clone();
+    let audits = move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
+        match scope {
+            AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
+                .on_machines(machine_board(&state)),
+            AuditScope::Node(home) => {
+                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+            }
+            AuditScope::Journal(journal) => {
+                NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
+                    .in_journal(journal, journal_board(&state))
+            }
+        }
+    };
     loop {
-        let disk = SimDisk {
-            ctx,
-            addr,
-            founders: &founders,
-            disk: ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
-        };
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),
-            disk,
+            ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout),
+            &audits,
             &settings,
             addr,
             layout.assignment,
@@ -193,29 +209,30 @@ async fn run_machine_role(
         .await;
         match ran {
             Ok(()) => return Ok(()),
-            Err(MachineError::Storage(_)) => {
-                // The record's write or read failed under a storage fault:
-                // the machine stops, as `parosd` exits 75, and restarts.
+            Err(MachineError::Storage(_) | MachineError::Run(RunError::Storage(_))) => {
+                // The record's write or read, or a store, failed under a
+                // storage fault: the machine stops, as `parosd` exits 75,
+                // and its supervisor starts it again.
                 assert_reachable!("machine: a failed record write stops a machine, which restarts");
                 crate::process::restart_delay!(
                     ctx,
                     "a machine whose record write failed restarts after a buggified delay"
                 );
             }
-            Err(MachineError::Run(RunError::SeamCrash(seam))) => {
-                if seam_crash(ctx, seam).await {
+            Err(MachineError::Run(RunError::SeamCrash(_))) => {
+                // A serving node's driver seam (`BeforeSync`,
+                // `AfterSyncBeforeSend`): a power loss, until those seams
+                // are `hint!`s too (#294).
+                let restart = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
+                if ctx
+                    .crash_self(moonpool_sim::RebootKind::Crash, Some(restart))
+                    .is_err()
+                {
                     return Ok(());
                 }
-                crate::process::restart_delay!(
-                    ctx,
-                    "a seam-crashed machine restarts after a buggified delay"
-                );
-            }
-            Err(MachineError::Run(RunError::Storage(_))) => {
-                crate::process::restart_delay!(
-                    ctx,
-                    "a seam-crashed machine restarts after a buggified delay"
-                );
+                // The kill lands within a scheduler tick: wait for it.
+                let _ = ctx.time().sleep(Duration::from_hours(1)).await;
+                return Ok(());
             }
             Err(MachineError::Run(RunError::Infra(e))) => return Err(e),
             Err(MachineError::Run(RunError::Refused(refusal))) => {
@@ -242,73 +259,28 @@ async fn run_machine_role(
     }
 }
 
-/// The lifecycle's own seam crash (#246): a power loss through moonpool's
-/// `SelfCrash`, as every role's seam crash, so the next incarnation boots
-/// from what the step left. Whether the kill landed (else the caller
-/// restarts in place).
-async fn seam_crash(ctx: &SimContext, seam: Seam) -> bool {
-    match seam {
-        Seam::CellPromised => {
-            assert_reachable!("machine: a machine dies right after its cell init promise");
-        }
-        Seam::CellFormatted => {
-            assert_reachable!("machine: a machine dies between the format and its vote");
-        }
-        _ => {}
-    }
-    let restart = Duration::from_millis(moonpool_sim::sim_random_range(250..2_501));
-    if ctx
-        .crash_self(moonpool_sim::RebootKind::Crash, Some(restart))
-        .is_err()
-    {
-        return false;
-    }
-    // The kill lands within a scheduler tick: wait for it.
-    let _ = ctx.time().sleep(Duration::from_hours(1)).await;
-    true
-}
-
-/// What a boot reads, as a reachable each: an empty disk, a record still
-/// waiting for its cell (a founding member promised in the decree but
-/// unvoted, or a machine no `cell init` lists), or a formed one about to
-/// serve it — judged on the lifecycle's own read, never a read of the
-/// harness's.
-fn note_boot(read: &Result<Option<String>, String>, founder: bool) {
-    let record = match read {
-        Ok(None) => {
-            assert_reachable!("machine: a machine formats an empty disk");
-            return;
-        }
-        Ok(Some(text)) => MachineRecord::parse(text),
-        Err(_) => return,
-    };
-    let Ok(record) = record else {
+/// A machine read its record at boot ([`paros::Audit::machine_booted`]):
+/// the one boot fact that needs the run's layout.
+pub(crate) fn booted(
+    board: &Mutex<MachineBoard>,
+    addr: SocketAddr,
+    record: Option<&MachineRecord>,
+) {
+    let Some(record) = record else {
         return;
     };
-    if record.formed().is_some() {
-        assert_reachable!("machine: a formed machine restarts and serves its cell");
-        return;
-    }
-    assert_reachable!("machine: a formatted machine restarts and waits");
-    if record.promised != Ballot::default() {
-        assert_reachable!("machine: a machine restarts promised in cell init and unvoted");
-    }
-    if !founder {
+    if record.formed().is_none() && !lock(board).founders.contains(&addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
 }
 
-/// What a durable record says of the cell decree (#277), as a reachable
-/// each: two proposers' ballots met at one machine (a promise raised over
-/// another machine's), and a plan was accepted at a second ballot — a later
-/// `cell init` finished what an earlier one proposed (P2c).
-fn note_decree(state: &StateHandle, text: &str) {
-    let Ok(record) = MachineRecord::parse(text) else {
-        assert_always!(false, "machine: a written record parses", { "bytes" => text.len() });
-        return;
-    };
-    let board = machine_board(state);
-    let mut board = lock(&board);
+/// A machine rewrote its record durably
+/// ([`paros::Audit::machine_recorded`]), as a reachable each: two proposers'
+/// ballots met at one machine (a promise raised over another machine's),
+/// and a plan was accepted at a second ballot — a later `cell init`
+/// finished what an earlier one proposed (P2c).
+pub(crate) fn recorded(board: &Mutex<MachineBoard>, record: &MachineRecord) {
+    let mut board = lock(board);
     let node = record.node_id.0;
     if record.promised != Ballot::default() {
         let before = board.promises.insert(node, record.promised);
@@ -345,134 +317,29 @@ fn note_decree(state: &StateHandle, text: &str) {
     }
 }
 
-/// A machine's [`MachineDisk`] on its simulated disk: the library's
-/// [`ProviderDisk`], and stores every one an existing member's.
-struct SimDisk<'a> {
-    ctx: &'a SimContext,
-    /// The address this machine serves at.
+/// A machine is about to format `plan`'s stores
+/// ([`paros::Audit::cell_formatting`]): only after an operator's `init`,
+/// only on a founding member, and over exactly the founders.
+pub(crate) fn formatting(
+    board: &Mutex<MachineBoard>,
     addr: SocketAddr,
-    /// The founding members the run's `cell init` lists.
-    founders: &'a BTreeSet<SocketAddr>,
-    disk: ProviderDisk<SimStorageProvider>,
-}
-
-impl<'a> MachineDisk for SimDisk<'a> {
-    type Stores = SimMachineStores<'a>;
-
-    async fn read_record(&mut self) -> Result<Option<String>, String> {
-        let read = self.disk.read_record().await;
-        note_boot(&read, self.founders.contains(&self.addr));
-        read
-    }
-
-    async fn write_record(&mut self, text: &str) -> Result<(), String> {
-        self.disk.write_record(text).await?;
-        note_decree(self.ctx.state(), text);
-        Ok(())
-    }
-
-    async fn holds_stores(&mut self) -> bool {
-        self.disk.holds_journals().await
-    }
-
-    async fn provision(&mut self, node_id: NodeId, plan: &CellPlan) -> Result<(), String> {
-        let state = self.ctx.state();
-        {
-            let board = machine_board(state);
-            let board = lock(&board);
-            assert_always!(
-                board.init_sent,
-                "machine: no cell forms without init",
-                { "node" => node_id.0, "cell" => plan.cell_id }
-            );
-            assert_always!(
-                self.founders.contains(&self.addr),
-                "machine: only a founding member forms",
-                { "node" => node_id.0, "cell" => plan.cell_id }
-            );
-            assert_always!(
-                plan.addrs() == *self.founders,
-                "machine: a cell forms over the founding members init listed",
-                { "node" => node_id.0, "members" => plan.members.len(), "founders" => self.founders.len() }
-            );
-        }
-        if self.disk.holds_journals().await {
-            assert_reachable!("machine: a machine formats over journals an unvoted attempt left");
-        }
-        self.disk.format(node_id, plan).await?;
-        assert_reachable!("machine: a seed formats its cell's journals");
-        Ok(())
-    }
-
-    async fn stores(
-        &mut self,
-        node_id: NodeId,
-        genesis: BTreeMap<JournalIdentifier, Config>,
-    ) -> Result<SimMachineStores<'a>, String> {
-        assert_always!(
-            !genesis.is_empty(),
-            "machine: a formed machine serves journals",
-            { "node" => node_id.0 }
-        );
-        Ok(SimMachineStores {
-            ctx: self.ctx,
-            disk: self.disk.clone(),
-            node: node_id,
-            genesis,
-        })
-    }
-}
-
-/// A formed machine's stores: one `JournalStorage` per journal of its plan,
-/// each an existing member's (the formation formatted them), as `parosd`'s.
-pub(crate) struct SimMachineStores<'a> {
-    ctx: &'a SimContext,
-    disk: ProviderDisk<SimStorageProvider>,
     node: NodeId,
-    genesis: BTreeMap<JournalIdentifier, Config>,
-}
-
-impl JournalStores for SimMachineStores<'_> {
-    type Store = JournalStorage<SimStorageProvider>;
-    type Audit = NodeAudit<SimTimeProvider>;
-
-    fn journals(&self) -> Vec<JournalIdentifier> {
-        self.genesis.keys().copied().collect()
-    }
-
-    async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
-        let config = self.genesis.get(&journal)?.clone();
-        assert_always!(
-            config.id == self.node,
-            "machine: a store is opened as its machine",
-            { "node" => self.node.0, "config" => config.id.0 }
-        );
-        Some((
-            JournalStorage::new(
-                self.disk.provider().clone(),
-                self.disk.journal_dir(journal),
-                config,
-                self.disk.layout(),
-            ),
-            BootKind::ExistingMember,
-        ))
-    }
-
-    fn audit(&self, journal: JournalIdentifier) -> Self::Audit {
-        NodeAudit::new(
-            self.ctx.time().clone(),
-            crate::audit::audit_world_for(self.ctx.state(), journal),
-        )
-        .in_journal(journal, journal_board(self.ctx.state()))
-    }
-
-    /// The node's own facts report to its first journal's audit world (the
-    /// plan's lowest identifier), on no journal's board.
-    fn node_audit(&self) -> Self::Audit {
-        let world = match self.genesis.keys().next() {
-            Some(first) => crate::audit::audit_world_for(self.ctx.state(), *first),
-            None => crate::audit::audit_world(self.ctx.state()),
-        };
-        NodeAudit::new(self.ctx.time().clone(), world)
-    }
+    plan: &CellPlan,
+) {
+    let board = lock(board);
+    assert_always!(
+        board.init_sent,
+        "machine: no cell forms without init",
+        { "node" => node.0, "cell" => plan.cell_id }
+    );
+    assert_always!(
+        board.founders.contains(&addr),
+        "machine: only a founding member forms",
+        { "node" => node.0, "cell" => plan.cell_id }
+    );
+    assert_always!(
+        plan.addrs() == board.founders,
+        "machine: a cell forms over the founding members init listed",
+        { "node" => node.0, "members" => plan.members.len(), "founders" => board.founders.len() }
+    );
 }
