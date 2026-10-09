@@ -85,5 +85,5 @@ Prefix each with `nix develop --command` (on the web, see root *Environment & Ni
 ## Deps & pins (`Cargo.toml`)
 
 `paros-core` with `default-features = false`, `serde` (`:17`); `serde`, `serde_json`, `ts-rs`
-`serde-compat` (`:20-24`); wasm-only `wasm-bindgen = "=0.2.117"` (`:29`, must equal the flake's
+`serde-compat` (`:20-24`); wasm-only `wasm-bindgen = "=0.2.129"` (`:29`, must equal the flake's
 `wasm-bindgen-cli`, bumped together) and `console_error_panic_hook` (`:30`).

@@ -429,15 +429,14 @@ impl ColocatedNode {
                     .get(&slot)
                     .expect("a chosen slot holds its authoritative accepted record");
                 decided.insert(slot, (*b, command.clone()));
-            } else if let Some(round) = self.proposer.rounds().get(&slot) {
-                pending.insert(slot, round.command().clone());
             } else {
                 // A slot inside the allocated range that is neither chosen nor
                 // in flight cannot exist on a settled leader (recovery closed,
                 // nothing blocked). Refuse rather than ship a tail with a hole
                 // the successor would have to guess at: an election recovers it
                 // properly.
-                return None;
+                let round = self.proposer.rounds().get(&slot)?;
+                pending.insert(slot, round.command().clone());
             }
         }
         // The tail this node is about to ship must satisfy exactly the contract
