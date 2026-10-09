@@ -18,8 +18,17 @@ over a four-call data plane, healing itself through reconfiguration when a disk 
 lost. One region first, several failure domains; multi-region cells are M13 (decided on
 2026-10-07, #253).
 
+**First principle: paros eats its own food** (decided on 2026-10-09). Every hard problem paros
+has is solved with paros's own pieces, never with a side mechanism: state lives in **journals**,
+who acts is decided by **leader election** over a journal, and agreement comes from one of the
+**Paxos flavors** already in `paros-core`: Multi-Paxos for logs, single-decree Paxos for one-shot
+decisions (the matchmaker handover's decree, the cell plan at `cell init`), Matchmaker Paxos for
+reconfiguration, Compartmentalized Paxos for scale. A new control-plane need is first asked
+"which journal, which election, which flavor?" before anything new is built; a cluster file, a
+lock service, gossip or a hand-rolled agreement protocol is the wrong answer.
+
 The control plane is itself stored in journals and coordinated through the same election
-primitive the tenants use: paros eats its own food. It has four levels, all built the same way:
+primitive the tenants use. It has four levels, all built the same way:
 one actor elected over an election journal and installed as its control journal's leader with
 `SetLeader`, holding no state that journal does not hold (section 3.3).
 
