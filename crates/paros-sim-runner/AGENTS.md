@@ -1,13 +1,18 @@
 # paros-sim-runner
 
-Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobins = false`).
-Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. No
-environment variables, no flags beyond the positional arguments below.
+Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobins = false`),
+and the mutation hunt's test target.
+Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. The
+binaries read no environment variables and take no flags beyond the positional arguments below;
+the `mutants` test reads `PAROS_MUTANT_SEEDS`.
 
 ## Map
 
 - `src/main.rs` → `sim-paros-chain` → the CI gate; the only binary `cargo xtask sim` registers.
 - `src/hunt.rs` → `sim-paros-hunt` → raw seed volume and single-seed replays, coverage-blind.
+- `tests/mutants.rs` → the mutation hunt (#269), cargo-mutants' test command: `chain_mutants`
+  over seeds `1..=PAROS_MUTANT_SEEDS` (default `MUTANT_SEEDS`), exit 1 on any violation or
+  failed run. Built only with the `mutants` feature, so nextest never runs it.
 - `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_never_fired` → shared parsing and printing.
 
 ## Entry points
@@ -37,6 +42,8 @@ environment variables, no flags beyond the positional arguments below.
 - `cargo xtask sim run paros-chain` (= `run-all`; CI `sim` job) builds `sim-paros-chain` under
   sancov and runs it.
 - Hunts: `cargo run --release -p paros-sim-runner --bin sim-paros-hunt -- main 2000`.
+- Mutation hunt: `cargo xtask mutants [--seeds N] [cargo-mutants args]` (weekly in CI,
+  `.github/workflows/mutants.yml`); one mutant by name: `--re '<name from --list>'`.
 
 ## Deps
 

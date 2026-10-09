@@ -108,6 +108,15 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   is a failing seed and its diagnosis.
 - **Canary** (`sim-paros-hunt canary`, moonpool's `check_determinism`): run a few hundred seeds
   after any change to the harness's randomness, the driver hooks or the process lifecycle.
+- **Mutation hunt** (`cargo xtask mutants`, #269): cargo-mutants over the safety-critical
+  `paros-core` modules (`.cargo/mutants.toml`), each mutant judged by a fixed-seed hunt of the
+  main campaign (`paros_sim::chain_mutants`, seeds `1..=300`, the same for every mutant, so
+  survivors compare between runs; not witnesses). Cadence decided on 2026-10-09: **weekly**
+  (`.github/workflows/mutants.yml`, 16 shards, plus `workflow_dispatch`), never a PR gate. Its
+  survivors land in one rolling issue (label `mutation-survivors`); triage each as an
+  equivalent mutant (excluded in `.cargo/mutants.toml` with a reason), a missing oracle, an
+  unreachable state, or a mechanism to pin once proven. Hand-made mutation proofs it cannot
+  generate (#263, #267) stay documented next to the rule they prove.
 - **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use
@@ -400,11 +409,11 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.
-- `xtask` — `cargo xtask sim` (the sancov runner).
+- `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
 Elsewhere: `book/` (mdbook; `book/CLAUDE.md`, the `update-the-book` skill),
 `docs/architecture.md`, `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`), `.claude/skills/` and
+references), `scripts/` (`sancov-rustc.sh`, `build-play.sh`, `check-dockerfile-toolchain.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate

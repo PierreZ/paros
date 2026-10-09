@@ -1,5 +1,6 @@
-//! Build automation for paros. Currently hosts the sancov-instrumented
-//! simulation runner. Mirrors moonpool's `xtask`.
+//! Build automation for paros: the sancov-instrumented simulation runner
+//! (mirrors moonpool's `xtask`) and the mutation hunt (`cargo xtask mutants`,
+//! #269).
 //!
 //! The runner machinery (`run_binaries`) sets `SANCOV_CRATES` and a separate
 //! `--target-dir target/sancov` so cargo doesn't serve a cached
@@ -39,6 +40,7 @@ fn main() {
 
     match args.first().map(std::string::String::as_str) {
         Some("sim") => sim_dispatch(&args[1..]),
+        Some("mutants") => mutants(&args[1..]),
         Some("help" | "--help" | "-h") | None => print_usage(),
         Some(cmd) => {
             eprintln!("unknown command: {cmd}");
@@ -52,7 +54,8 @@ fn print_usage() {
     eprintln!("Usage: cargo xtask <command>");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("  sim   Simulation binary management");
+    eprintln!("  sim       Simulation binary management");
+    eprintln!("  mutants   Mutation-test paros-core with the simulation as the test");
     eprintln!();
     eprintln!("Run 'cargo xtask sim --help' for simulation subcommands.");
 }
@@ -82,6 +85,129 @@ fn sim_help() {
     eprintln!("Examples:");
     eprintln!("  cargo xtask sim list");
     eprintln!("  cargo xtask sim run-all");
+}
+
+fn mutants_help() {
+    eprintln!("Usage: cargo xtask mutants [--seeds N] [cargo-mutants args...]");
+    eprintln!();
+    eprintln!("Runs cargo-mutants over the paros-core modules .cargo/mutants.toml scopes,");
+    eprintln!("with a fixed-seed hunt of the main campaign as the test (#269): a mutant is");
+    eprintln!("caught when the hunt reports a violation. --seeds sets the hunt's seed count");
+    eprintln!("(default: paros_sim::MUTANT_SEEDS); every other argument goes to cargo-mutants.");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  cargo xtask mutants --list");
+    eprintln!("  cargo xtask mutants --seeds 100 --file crates/paros-core/src/acceptor.rs");
+    eprintln!("  cargo xtask mutants --shard 3/16 --jobs 2");
+}
+
+/// A mutant's hunt may take this many times the unmutated hunt before
+/// cargo-mutants stops it as a timeout: a mutant that livelocks the
+/// simulation counts as caught, and is not left to run for the job's lifetime.
+const MUTANT_TIMEOUT_MULTIPLIER: u64 = 3;
+
+/// The floor on that timeout, in seconds, for a tiny `--seeds`.
+const MUTANT_TIMEOUT_FLOOR_SECS: u64 = 60;
+
+/// The unmutated hunt, as `cargo test` arguments: the test cargo-mutants runs
+/// for each mutant (`.cargo/mutants.toml`).
+const MUTANT_HUNT: &[&str] = &[
+    "test",
+    "--profile",
+    "release",
+    "--package",
+    "paros-sim-runner",
+    "--features",
+    "mutants",
+    "--test",
+    "mutants",
+];
+
+/// `cargo xtask mutants`: `cargo mutants` with the hunt's seed count in
+/// `PAROS_MUTANT_SEEDS`. The scope, the test target and the release profile
+/// live in `.cargo/mutants.toml`.
+///
+/// cargo-mutants' own baseline builds the mutated package rather than the
+/// configured `test_package`, which has no `mutants` test, so this runs the
+/// baseline itself: the unmutated hunt must be clean, and its time sizes the
+/// per-mutant timeout passed with `--baseline skip`. A listing (`--list`,
+/// `--list-files`) or an explicit `--baseline`/`--timeout` skips it.
+fn mutants(args: &[String]) {
+    if args
+        .first()
+        .is_some_and(|a| matches!(a.as_str(), "help" | "--help" | "-h"))
+    {
+        mutants_help();
+        return;
+    }
+    let mut seeds = None;
+    let mut forwarded = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--seeds" {
+            let Some(n) = rest.next().and_then(|n| n.parse::<u64>().ok()) else {
+                eprintln!("--seeds needs a seed count");
+                process::exit(2);
+            };
+            seeds = Some(n);
+        } else {
+            forwarded.push(arg.clone());
+        }
+    }
+    let own_baseline = !forwarded.iter().any(|a| {
+        a.starts_with("--list")
+            || a.starts_with("--baseline")
+            || a.starts_with("--timeout")
+            || a == "-t"
+    });
+    let mut cmd = Command::new("cargo");
+    cmd.arg("mutants");
+    if let Some(n) = seeds {
+        // Inherited by cargo-mutants' test runs.
+        cmd.env("PAROS_MUTANT_SEEDS", n.to_string());
+    }
+    if own_baseline {
+        let timeout = mutant_baseline(seeds) * MUTANT_TIMEOUT_MULTIPLIER;
+        let timeout = timeout.max(MUTANT_TIMEOUT_FLOOR_SECS);
+        eprintln!("per-mutant test timeout: {timeout}s");
+        cmd.args(["--baseline", "skip", "--timeout", &timeout.to_string()]);
+    }
+    cmd.args(&forwarded);
+    match cmd.status() {
+        Ok(status) => process::exit(status.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("cargo mutants failed to launch ({e}): is cargo-mutants on the PATH?");
+            process::exit(1);
+        }
+    }
+}
+
+/// Build and run the unmutated hunt; exit unless it is clean. Returns the
+/// run's wall time in whole seconds, the build excluded.
+fn mutant_baseline(seeds: Option<u64>) -> u64 {
+    eprintln!("--- mutants: the unmutated baseline hunt ---");
+    let hunt = || {
+        let mut cmd = Command::new("cargo");
+        cmd.args(MUTANT_HUNT);
+        if let Some(n) = seeds {
+            cmd.env("PAROS_MUTANT_SEEDS", n.to_string());
+        }
+        cmd
+    };
+    let build = hunt().arg("--no-run").status();
+    if !build.is_ok_and(|s| s.success()) {
+        eprintln!("the baseline hunt failed to build");
+        process::exit(4);
+    }
+    let start = Instant::now();
+    let run = hunt().status();
+    let elapsed = start.elapsed();
+    if !run.is_ok_and(|s| s.success()) {
+        eprintln!("the unmutated hunt is red: no mutant can be judged against it");
+        process::exit(4);
+    }
+    eprintln!("baseline hunt clean in {}", fmt_duration(elapsed));
+    elapsed.as_secs().max(1)
 }
 
 /// Format a duration as a human-readable string.

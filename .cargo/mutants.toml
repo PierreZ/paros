@@ -1,0 +1,41 @@
+# cargo-mutants over paros-core, with the simulation as the test (#269).
+#
+# Run it with `cargo xtask mutants` (it sets the seed count and forwards
+# `--shard`, `--list` and the rest); the weekly `mutants` workflow shards it.
+# A mutant is caught when the fixed-seed hunt (`paros-sim-runner`'s `mutants`
+# test target, `paros_sim::chain_mutants`) reports a violation or a panic.
+
+# The safety-critical modules, the first pass's scope (#269).
+examine_globs = [
+  "crates/paros-core/src/acceptor.rs",
+  "crates/paros-core/src/acceptor/retention.rs",
+  "crates/paros-core/src/proposer/election.rs",
+  "crates/paros-core/src/proposer/recovery.rs",
+  "crates/paros-core/src/proposer/probe.rs",
+  "crates/paros-core/src/proposer/rounds.rs",
+  "crates/paros-core/src/replica.rs",
+  "crates/paros-core/src/journal_state.rs",
+  "crates/paros-core/src/matchmaking.rs",
+  "crates/paros-core/src/membership.rs",
+  "crates/paros-core/src/node/catch_up.rs",
+]
+
+# Equivalent mutants, excluded by construction, one reason each. `#[cfg(test)]`
+# code (the model checkers included) is never mutated.
+exclude_re = [
+  # Formatting is observation only: it changes no decision.
+  "impl (std::fmt::|fmt::|core::fmt::)?(Debug|Display) for",
+  # An invariant check emptied changes nothing while the invariant holds, and
+  # the hunt runs code that keeps it: no test can catch it.
+  "replace .*::assert_invariants with \\(\\)",
+]
+
+# The hunt is the test: only `paros-sim-runner`'s `mutants` target runs, in
+# release (a debug build runs the simulation many times slower). cargo-mutants'
+# own baseline builds the mutated package (paros-core) rather than
+# `test_package`, so `cargo xtask mutants` runs the baseline hunt itself and
+# passes `--baseline skip` with a timeout sized from it.
+test_package = ["paros-sim-runner"]
+features = ["mutants"]
+additional_cargo_test_args = ["--test", "mutants"]
+profile = "release"
