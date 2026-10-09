@@ -5,6 +5,13 @@ assumes about every durable record, the spec the future production storage engin
 implement, and the semantics the simulation's `StorageWorld` models — as first-class *read
 outcomes* at the `LogStorage` seam, never as serialized bytes.
 
+> **Status (2026-10-08, #261).** The production store is now `paros::journal` on
+> moonpool-journal (CLSTORE), which implements this contract itself: the journal classifies at
+> open, and `paros::journal` maps its states onto `CorruptionVerdict`. The simulation's world
+> stores, `paros::corruption::decide` and `classify_log` named below are gone; the faults are
+> injected as bytes on the simulated disk by `paros_sim::world::injector` and judged against the
+> journal's verdict. The contract below stands; the names of the deleted code are history.
+
 Sources: CTRL §3.3/§4.1 (the CLStore design from *Protocol-Aware Recovery for
 Consensus-Based Storage*, FAST '18), TigerBeetle's journal recovery + checksum machinery,
 and the #70/#71 review decisions (fixed constraints).

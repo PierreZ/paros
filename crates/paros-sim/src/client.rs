@@ -2,9 +2,8 @@
 //! client-only moonpool-rpc runtime per workload run, and a [`NodeClient`]
 //! per server bound to it.
 //!
-//! The corpus builds its [`CorpusClients`](crate::corpus) on it, and the
-//! chain workload opens one per run and builds its [`ChainClient`]s — the
-//! library's `paros::client` — over it.
+//! The chain workload opens one per run and builds its [`ChainClient`]s —
+//! the library's `paros::client` — over it.
 
 use std::time::Duration;
 
@@ -108,8 +107,7 @@ impl ClientRuntime {
 /// The client runtime's shape: its connect budget and its liveness pings
 /// (provider time, so a connection left half-open by a node restart is
 /// failed deterministically instead of swallowing requests forever). The
-/// three durations are the chain workload's knobs; the corpus passes the
-/// production defaults through [`default_client_rpc_config`].
+/// three durations are the chain workload's knobs.
 pub(crate) fn client_rpc_config(
     connect_timeout: Duration,
     ping_interval: Duration,
@@ -124,13 +122,4 @@ pub(crate) fn client_rpc_config(
     config.peer.ping_interval = ping_interval;
     config.peer.ping_timeout = ping_timeout;
     config
-}
-
-/// [`client_rpc_config`] at the production defaults.
-pub(crate) fn default_client_rpc_config() -> RpcConfig {
-    client_rpc_config(
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-        Duration::from_secs(1),
-    )
 }

@@ -2,7 +2,7 @@
 //! workload reaches it through, and the run's final judgement
 //! ([`check_run`], [`AuditWorld::check_final_convergence`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
@@ -51,16 +51,6 @@ impl AuditWorld {
     /// The run's deployment journal, when this checker belongs to a run.
     pub(crate) fn main(&self) -> Option<paros::JournalIdentifier> {
         self.main
-    }
-
-    /// A private checker for a run with **no client** at all (the storage
-    /// contract suite drives the world-backed storage directly): every
-    /// per-transition check still runs, except the "applied command was
-    /// proposed" claim, which has no client to be proposed by.
-    pub(crate) fn client_free() -> Self {
-        let world = Self::default();
-        world.lock().client_free = true;
-        world
     }
 
     pub(super) fn lock(&self) -> MutexGuard<'_, AuditState> {
@@ -136,7 +126,7 @@ impl AuditWorld {
         );
         st.fold_agreed |= met;
         assert_always!(
-            st.client_free || st.submitted.contains(&cmd_hash),
+            st.submitted.contains(&cmd_hash),
             "chain: applied command was proposed",
             { "client" => client, "lsn" => lsn, "command" => cmd_hash }
         );
@@ -145,22 +135,6 @@ impl AuditWorld {
     /// The cluster's applied high-water mark so far (`None` before any apply).
     pub(crate) fn cluster_applied_max(&self) -> Option<u64> {
         self.lock().cluster_applied_max
-    }
-
-    /// Whether a node outside a ballot's own configuration has answered that
-    /// ballot's Phase 1 — the mechanism the departed-straggler corpus case is
-    /// named for ("removed is not shut down"), read by that case so it can
-    /// assert it actually happened.
-    pub(crate) fn removed_member_promised(&self) -> bool {
-        self.lock().removed_member_promised
-    }
-
-    /// Whether a node outside the configuration in force served a catch-up
-    /// with entries: the second way a removed member's copy reaches the
-    /// cluster, read by the departed-straggler case beside
-    /// [`AuditWorld::removed_member_promised`].
-    pub(crate) fn removed_member_served(&self) -> bool {
-        self.lock().removed_member_served
     }
 
     /// A one-line picture of the run for the red path: per-node applied
@@ -213,6 +187,7 @@ impl AuditWorld {
         st.check_tier_gates();
         st.check_driver_hook_gates();
         st.matchmaker.check_gates();
+        st.check_loss_gates();
     }
 
     /// Merge one client's recorded history into the shared one and run the
@@ -290,8 +265,8 @@ impl AuditWorld {
         self.lock().matchmaker.lost();
     }
 
-    /// A node booted again after a process-level kill (moonpool attrition on
-    /// the main campaign, the script on the corpus) while `parked_peers` other
+    /// A node booted again after a process-level kill (moonpool attrition, or
+    /// the chain client's scripted reboot) while `parked_peers` other
     /// nodes sat terminally parked. Until this very boot the node was down, so
     /// the two loss kinds — persistent (a parked disk that never comes back)
     /// and transient (a process that does) — overlapped for the whole hold-down.
@@ -343,35 +318,142 @@ impl AuditWorld {
         !self.lock().lagged.is_empty()
     }
 
-    /// Ground-truth feed from the storage world (issue #19 C). A record can
-    /// become durable through an *ambiguous* fault leg — the flush happened,
-    /// but the driver crashed on the reported error before surfacing it — so
-    /// the driver's audit stream alone would go stale and the next reboot
-    /// would trip the cross-restart checks as false positives. The world owns
-    /// the ground truth, so every flush refreshes the **reference data** those
-    /// checks compare against: the per-`(node, slot)` persisted value, the
-    /// compaction floor, and the admitted trim-point landings. Reference data
-    /// only — progress/liveness state (`applied_max`, quiescence clocks) stays
-    /// driver-reported, so this observation cannot mask a liveness bug. This
-    /// is what keeps recovered-equals-persisted checkable against *actual*
-    /// durable state (the #71 weakening is for Stage 7-8, not this).
-    pub(crate) fn note_flushed_ground_truth(
+    /// A journal registry booted with `scalars` and `registry` (#176): fold
+    /// what its last sync had in flight and the boot shows landed, as the
+    /// driver would have reported it, before the driver reports the boot
+    /// (see `MatchmakerAudit::landed_in_flight`).
+    pub(crate) fn note_registry_recovered(
         &self,
-        node: u64,
-        now_ms: u64,
-        accepted: &[(u64, u64)],
-        floor: Option<u64>,
-        landing: Option<u64>,
+        matchmaker: paros::MatchmakerId,
+        scalars: &paros::MatchmakerHardState,
+        registry: &BTreeMap<paros::Ballot, paros::Registration>,
     ) {
         let mut st = self.lock();
+        let ops = st
+            .matchmaker
+            .landed_in_flight(matchmaker.0, scalars, registry);
+        for op in ops {
+            match op {
+                super::matchmaker::RegistryOp::Register(ballot, registration) => {
+                    st.matchmaker.registered(matchmaker, ballot, &registration);
+                    st.bind_config(ballot, &registration.config);
+                }
+                super::matchmaker::RegistryOp::Scalars(written) => {
+                    st.matchmaker.scalars_persisted(matchmaker, &written);
+                }
+                super::matchmaker::RegistryOp::Install(installed, registrations) => {
+                    let set =
+                        paros::MatchmakerSet::new(installed.generation, installed.members.clone());
+                    st.matchmaker.activated(
+                        matchmaker,
+                        &set,
+                        installed.gc_watermark,
+                        installed.effective.as_ref(),
+                        &registrations,
+                    );
+                }
+            }
+        }
+        // The boot raised the effective scalar over the reconfigurations it
+        // keeps (`paros::journal::matchmaker`).
+        if let Some((ballot, _)) = &scalars.effective {
+            st.matchmaker.raise_effective(matchmaker, *ballot);
+        }
+    }
+
+    /// Ground truth from a journal registry (#176): the writes of the commit
+    /// matchmaker `matchmaker` is about to start, or `None` once its sync
+    /// returned (the driver reports them next, with nothing in between).
+    pub(crate) fn note_registry_in_flight(
+        &self,
+        matchmaker: u64,
+        ops: Option<Vec<super::matchmaker::RegistryOp>>,
+    ) {
+        self.lock().matchmaker.note_in_flight(matchmaker, ops);
+    }
+
+    /// A correlated outage planned to lose `slot` on `damaged` of its
+    /// `holders` (#263, `crate::world::outage`).
+    pub(crate) fn note_outage_loss(&self, slot: u64, holders: &[u64], damaged: &[u64]) {
+        self.lock().note_outage_loss(slot, holders, damaged);
+    }
+
+    /// The journal reported `node`'s copy of `slot` lost at its boot, as an
+    /// outage planned (#263).
+    pub(crate) fn note_copy_lost(&self, node: u64, slot: u64) {
+        self.lock().note_copy_lost(node, slot);
+    }
+
+    /// The journal reported `node`'s entries at `faulty` slots at its open
+    /// (#263): a faulty copy of an outage-planned slot is lost, whatever
+    /// damaged it.
+    pub(crate) fn note_faulty_copies(&self, node: u64, faulty: &[u64]) {
+        self.lock().note_faulty_copies(node, faulty);
+    }
+
+    /// Whether a configuration bound to some ballot removed a member of the
+    /// bootstrap one (#263): the departed straggler's first half, what the
+    /// late outage waits for (`crate::world::late_outage`).
+    pub(crate) fn has_departure(&self) -> bool {
+        let st = self.lock();
+        st.bootstrap.as_ref().is_some_and(|bootstrap| {
+            st.configs.values().any(|config| {
+                bootstrap
+                    .members()
+                    .iter()
+                    .any(|member| !config.members().contains(member))
+            })
+        })
+    }
+
+    /// The slots a durable accept quorum decided (#263: what an outage
+    /// aims at), above the pruned prefix, each with the members of the
+    /// configuration its deciding ballot was bound to (the departed
+    /// straggler's copy is kept on one of them).
+    pub(crate) fn decided_slots(&self) -> BTreeMap<u64, Vec<u64>> {
+        let st = self.lock();
+        st.decided
+            .iter()
+            .map(|(slot, (round, by, _))| {
+                let members = st
+                    .config_of(paros::Ballot {
+                        round: *round,
+                        node: paros::NodeId(*by),
+                    })
+                    .map(|config| config.members().iter().map(|member| member.0).collect())
+                    .unwrap_or_default();
+                (*slot, members)
+            })
+            .collect()
+    }
+
+    /// Whether an outage's losses excuse the journal's liveness (#263): a
+    /// slot no leader can decide again, or one whose every clean copy is out
+    /// of reach. Its safety is never excused.
+    pub(crate) fn loss_excuses_liveness(&self) -> bool {
+        self.lock().loss_excuses_liveness()
+    }
+
+    /// Ground truth from a journal store (#264): the accepts of the commit
+    /// it is about to start, `(slot, vhash)`. A store cannot know what a
+    /// crash inside the commit lands, so it names what may land, and
+    /// the cross-restart check admits exactly those values (see
+    /// `AuditState::in_flight`).
+    pub(crate) fn note_in_flight(&self, node: u64, accepted: &[(u64, u64)]) {
+        let mut st = self.lock();
         for &(slot, vhash) in accepted {
-            st.persisted.insert((node, slot), vhash);
+            st.in_flight.insert((node, slot), vhash);
         }
-        if let Some(first) = floor {
-            st.floor.entry(node).or_default().raise(first, now_ms);
-        }
-        if let Some(landing) = landing {
-            st.landings.entry(node).or_default().insert(landing);
+    }
+
+    /// The accepts of the commit a journal store is about to start that the
+    /// commit's own floor drops, `(slot, ballot, vhash)`: never written, yet
+    /// the metainfo the commit lands decides them (see
+    /// `AuditState::dropped_in_flight`).
+    pub(crate) fn note_dropped_in_flight(&self, node: u64, dropped: &[(u64, paros::Ballot, u64)]) {
+        let mut st = self.lock();
+        for &(slot, ballot, vhash) in dropped {
+            st.dropped_in_flight.insert((node, slot), (ballot, vhash));
         }
     }
 
@@ -455,13 +537,19 @@ impl AuditWorld {
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn check_final_convergence(&self, acked_max: Option<u64>) {
         let mut st = self.lock();
+        // A journal holding a slot no leader can decide again (#263) is
+        // excused from every liveness leg below: it must wait, forever. Its
+        // safety is judged all along (`AuditState::loss_accepted`), and so
+        // is the leg that is safety: nothing applied runs ahead of the
+        // decided frontier.
+        let excused = st.loss_excuses_liveness();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),
                 "every acked slot is inside the cluster's applied prefix at the end of the tail"
             );
             assert_always!(
-                st.decided_max.is_none(),
+                excused || st.decided_max.is_none(),
                 "every quorum-decided slot is applied by the end of the tail",
                 { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => -1_i64 }
             );
@@ -476,7 +564,7 @@ impl AuditWorld {
         );
         // The decided frontier and the applied frontier coincide (see above).
         assert_always!(
-            st.decided_max.is_none_or(|decided| decided <= cluster_max),
+            excused || st.decided_max.is_none_or(|decided| decided <= cluster_max),
             "every quorum-decided slot is applied by the end of the tail",
             { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => cluster_max }
         );
@@ -517,7 +605,8 @@ impl AuditWorld {
             );
         }
         for node in cluster {
-            if st.storage_dead.contains(&node)
+            if excused
+                || st.storage_dead.contains(&node)
                 || st.wiped.contains(&node)
                 || st.retired.contains(&node)
                 || st.left_pool.contains(&node)

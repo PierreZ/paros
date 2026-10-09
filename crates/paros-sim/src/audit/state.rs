@@ -140,6 +140,23 @@ pub(super) struct AuditState {
     pub(super) accepted: BTreeMap<(u64, u64, u64), u64>,
     /// Per `(node, slot)`: the last value the node made durable.
     pub(super) persisted: BTreeMap<(u64, u64), u64>,
+    /// Per `(node, slot)`: the value a journal store's commit in flight
+    /// carries (#264), reported before the commit starts and retired when
+    /// the driver reports it persisted. A crash inside the commit, or after
+    /// it and before the report, may leave it durable unreported: the next
+    /// boot may recover it in place of `persisted`, and only it.
+    pub(super) in_flight: BTreeMap<(u64, u64), u64>,
+    /// The accepts a commit carried that its own floor dropped (the core
+    /// staged a slot and a truncation past it in one flush), keyed
+    /// `(node, slot)`, until the driver reports them or a boot settles
+    /// them. The record is never written, but a boot whose durable chosen
+    /// index covers the slot proves the commit landed, so the accept counts
+    /// as a vote: on a quorum of one it *is* the decision (witness
+    /// 6582812142291039425: a leader alone a Phase-2 quorum accepted slot
+    /// 27, its truncation dropped the record in the same flush, and the
+    /// power went before the driver reported the accept; the boot's chosen
+    /// index 27 then stood past every decision the tally knew).
+    pub(super) dropped_in_flight: BTreeMap<(u64, u64), (Ballot, u64)>,
     /// The bootstrap acceptor configuration, from the boot reports (one
     /// shared deployment per run). The configuration of every ballot on plain
     /// Multi-Paxos, and of the ballots below the first registration on a
@@ -193,6 +210,12 @@ pub(super) struct AuditState {
     /// (`SetChosenIndex` flushes relaxed, so a crash may legally rewind it
     /// across incarnations — within one it only advances).
     pub(super) chosen_watermark: BTreeMap<u64, u64>,
+    /// Per node: one past the chosen index it durably holds — the one its
+    /// boot recovered, raised by every durable `SetChosenIndex` and every
+    /// trim-point landing — or `0` for none. Every slot below it is one the
+    /// node knows decided, whatever its record of it says (#263,
+    /// `losses::loss_recoverable`).
+    pub(super) decided_prefix: BTreeMap<u64, u64>,
     /// Per node: the highest read index served, reset each boot.
     pub(super) read_watermark: BTreeMap<u64, Option<u64>>,
 
@@ -238,8 +261,6 @@ pub(super) struct AuditState {
     /// another journal's fence — the cross-tenant attack (#247,
     /// `AuditWorld::note_foreign`): refused at apply, never accepted.
     pub(super) foreign: BTreeSet<u64>,
-    /// This run has no client (see `AuditWorld::client_free`).
-    pub(super) client_free: bool,
     /// The client fold (#186): per client, the last position it folded (its
     /// contiguity frontier).
     pub(super) fold_lsn: BTreeMap<u64, u64>,
@@ -286,6 +307,8 @@ pub(super) struct AuditState {
 
     // --- the matchmaker registry (#119) -------------------------------------
     pub(super) matchmaker: MatchmakerAudit,
+    /// A correlated outage's losses (#263, `super::losses`).
+    pub(super) losses: super::losses::Losses,
 
     // --- sticky coverage flags ---------------------------------------------
     pub(super) any_chosen: bool,
@@ -356,7 +379,7 @@ pub(super) struct AuditState {
     pub(super) reconfigure_matchmakers_started: bool,
     /// Some leader refused a matchmaker-set reconfiguration request.
     pub(super) reconfigure_matchmakers_refused: bool,
-    /// A process-level restart (attrition, or the corpus script) booted while
+    /// A process-level restart (attrition, or a scripted reboot) booted while
     /// at least one *other* node sat terminally parked: a transient process
     /// loss overlapped a persistent storage loss.
     pub(super) parked_overlap: bool,
@@ -375,6 +398,13 @@ pub(super) struct AuditState {
     /// speaks *before* [`Audit::recovered`](paros::Audit::recovered) fires, so the swap-in happens
     /// there — the boot report is the incarnation edge.
     pub(super) faulty_staged: BTreeMap<u64, BTreeSet<u64>>,
+    /// Per `(node, slot)`: the ballot the node's last boot reported its
+    /// faulty entry under — the identity its Phase-1 answer carries, which
+    /// is what CTRL's rule is judged on (#263, `losses::loss_recoverable`).
+    /// It may sit below the highest accept the tally heard from that node
+    /// (witness 4059871466191551614: an accept at round 3 reported, the
+    /// boot finding the round-1 record faulty).
+    pub(super) faulty_ballots: BTreeMap<(u64, u64), (u64, u64)>,
     /// Repair progress observed (from [`Audit::repair_progress`](paros::Audit::repair_progress)): in-place
     /// repairs, straggler Case-1 re-proposals, Case-2 no-op fills, and
     /// recovery-timeout resignations.
@@ -493,11 +523,6 @@ pub(super) struct AuditState {
     pub(super) reconfigured_across_grid_boundary: bool,
     pub(super) joined_member_accepted: bool,
     pub(super) removed_member_promised: bool,
-    /// A node outside the configuration bound to the highest ballot served
-    /// a catch-up — the other way a removed member's copy reaches the
-    /// cluster ("removed is not shut down"), read by the departed-straggler
-    /// corpus case.
-    pub(super) removed_member_served: bool,
     pub(super) cross_config_phase1_checked: bool,
 
     // --- proxy leaders (#142) ---------------------------------------------
@@ -602,21 +627,6 @@ impl AuditState {
     /// ballot's leader may count, and — when the node sits outside the
     /// ballot's own configuration — the proof that a removed member keeps
     /// answering Phase 1 for the ballots it took part in.
-    /// Fold one `CatchUpResponse` leaving `node`: a sender outside the
-    /// configuration bound to the highest ballot yet is a removed member
-    /// still serving what it holds.
-    pub(super) fn observe_catch_up_serve(&mut self, node: u64) {
-        let outside = self
-            .configs
-            .last_key_value()
-            .map(|(_, config)| config)
-            .or(self.bootstrap.as_ref())
-            .is_some_and(|config| !config.contains(paros::NodeId(node)));
-        if outside {
-            self.removed_member_served = true;
-        }
-    }
-
     pub(super) fn observe_promise_send(&mut self, node: u64, ballot: Ballot) {
         self.promise_senders
             .entry((ballot.round, ballot.node.0))
@@ -965,6 +975,76 @@ impl AuditState {
         if let Some(prev) = self.promised.insert(node, ballot) {
             assert_always!(ballot >= prev, "a node's promised ballot never decreases");
         }
+    }
+
+    /// Judge the value `node` recovered at `slot` against the one it last
+    /// reported durable there. A synced accept is never lost or altered by a
+    /// crash. A record a commit had in flight when the node died
+    /// (`in_flight`) may have landed without the driver reporting it: that
+    /// value, and no other, may replace the reported one, and becomes the
+    /// reference (witness 16805388934600808394: a promise and an accept at a
+    /// higher ballot both landed, then a power cut, #264).
+    pub(super) fn judge_recovered_value(
+        &mut self,
+        node: u64,
+        slot: u64,
+        vhash: u64,
+        in_flight: Option<u64>,
+    ) {
+        let Some(&prev) = self.persisted.get(&(node, slot)) else {
+            return;
+        };
+        let landed = in_flight == Some(vhash);
+        assert_always!(
+            prev == vhash || landed,
+            "a restart never changes a pre-crash accepted value for a slot"
+        );
+        if landed {
+            self.persisted.insert((node, slot), vhash);
+        }
+    }
+
+    /// The values `node`'s journal store had in flight when it last died, by
+    /// slot, cleared: what its boot may recover in place of the reported ones
+    /// (#264, see `in_flight`).
+    pub(super) fn take_in_flight(&mut self, node: u64) -> BTreeMap<u64, u64> {
+        let keys: Vec<(u64, u64)> = self
+            .in_flight
+            .range((node, 0)..=(node, u64::MAX))
+            .map(|(key, _)| *key)
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.in_flight.remove(&key).map(|vhash| (key.1, vhash)))
+            .collect()
+    }
+
+    /// Settle `node`'s accepts its own commit's floor dropped, unreported,
+    /// at its boot: the durable chosen index covering one proves the
+    /// commit landed, so it counts as the vote it was (see
+    /// `dropped_in_flight`); one it does not cover never landed.
+    pub(super) fn settle_dropped_in_flight(&mut self, node: u64, chosen_index: Option<Slot>) {
+        let dropped: Vec<(u64, (Ballot, u64))> = self
+            .dropped_in_flight
+            .range((node, 0)..=(node, u64::MAX))
+            .map(|((_, slot), entry)| (*slot, *entry))
+            .collect();
+        for (slot, (ballot, vhash)) in dropped {
+            self.dropped_in_flight.remove(&(node, slot));
+            if chosen_index.is_some_and(|ci| slot <= ci.0) {
+                assert_reachable!(
+                    "storage: a boot counts an accept its own commit's floor dropped"
+                );
+                self.observe_durable_accept(node, slot, ballot, vhash);
+            }
+        }
+        assert_always!(
+            self.dropped_in_flight
+                .range((node, 0)..=(node, u64::MAX))
+                .next()
+                .is_none(),
+            "storage: a boot settles every dropped accept it had in flight",
+            { "node" => node }
+        );
     }
 
     /// Fold one durable accept into the acceptor tally and run the

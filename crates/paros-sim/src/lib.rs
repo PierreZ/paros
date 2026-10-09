@@ -4,21 +4,18 @@
 //! The node driver itself lives in `paros` (provider-generic, runs in production
 //! *or* simulation). This crate adapts it to a moonpool [`Process`] under
 //! `SimProviders`, drives it with one randomized client workload, perturbs it
-//! through the driver's hooks and a budgeted fake disk, and judges it from two
+//! through the driver's hooks and the ledgered storage faults on moonpool's
+//! simulated disk, and judges it from two
 //! perspectives only: the client's own history and the audit's fold of every
 //! driver transition.
 //!
-//! Two axes, one check:
-//!
-//! - the **main campaign** ([`explore`], [`chain_smoke`], [`run_chain_seed`]):
-//!   a 3–6 node acceptor pool plus a 0–5 matchmaker pool plus a 0–3 proxy
-//!   leader pool, each its own moonpool process group with its own per-seed
-//!   count, under swarm network
-//!   turbulence, crash/restart attrition scoped per group, buggified provider
-//!   knobs, the driver's BUGGIFY hooks and the disk's fault sites, driven by
-//!   the Chain-of-Blocks workload;
-//! - the **corpus** ([`corpus_hunt`], [`run_corpus_mask`], …): scripted,
-//!   analytically-judged recovery cases on a fixed three-node cluster.
+//! One campaign ([`explore`], [`chain_smoke`], [`run_chain_seed`]): a 3–6
+//! node acceptor pool plus a 0–5 matchmaker pool plus a 0–3 proxy leader
+//! pool, each its own moonpool process group with its own per-seed count,
+//! under swarm network turbulence, crash/restart attrition scoped per group,
+//! buggified provider knobs, the driver's BUGGIFY hooks and the journal
+//! stores' damage sites, driven by the Chain-of-Blocks workload. Every shape
+//! is provoked through BUGGIFY and swarm, never scripted (#263).
 //!
 //! [`Process`]: moonpool_sim::Process
 
@@ -26,7 +23,6 @@ mod audit;
 mod chain;
 mod chain_workload;
 mod client;
-mod corpus;
 mod hooks;
 mod lifecycle;
 mod process;
@@ -47,9 +43,7 @@ use moonpool_sim::{
 
 use crate::chain_workload::ChainWorkload;
 use crate::lifecycle::ScriptedLifecycle;
-use crate::process::{
-    JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess, ScriptedOptions,
-};
+use crate::process::{JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess};
 use crate::roles::{ACCEPTOR_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
 
 /// An optional slot or watermark as a signed trace/detail value: `None`
@@ -77,9 +71,9 @@ impl RunConfigured for SimulationBuilder {
     }
 }
 
-fn exploration_config(max_runs_per_seed: u64) -> ExplorationConfig {
+fn exploration_config(max_runs_per_seed: u64, workers: usize) -> ExplorationConfig {
     ExplorationConfig {
-        workers: 0,
+        workers,
         max_runs_per_seed,
         branching_factor: 4,
         max_frontier: 256,
@@ -166,8 +160,6 @@ pub const SMOKE_ITERATIONS: usize = 50;
 /// Cap on the sancov coverage run (`cargo xtask sim`). A schedule parameter,
 /// not a safety margin: a saturating run stops early.
 pub const COVERAGE_ITERATIONS: usize = 1024;
-/// Seeded-mask volume for the E1 evaluation corpus in the CI campaign.
-pub const CORPUS_CI_ITERATIONS: usize = 64;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 
@@ -198,10 +190,6 @@ pub(crate) const CHAOS_DURATION_MS: u64 = 4_000;
 /// [`CHAOS_DURATION_MS`] as a `Duration`: the cutoff every role's hooks and
 /// fault coins share (`crate::process`).
 pub(crate) const CHAOS_DURATION: Duration = Duration::from_millis(CHAOS_DURATION_MS);
-/// The corpus keeps its "chaos window" open for the whole scripted run: its
-/// only fault injector is the scripted lifecycle, which must be able to crash
-/// and restart nodes at every phase of the script.
-const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 
 /// The main campaign's chaos surfaces: swarm network turbulence, one
 /// crash/restart attrition regime **per process group**, and buggified
@@ -221,10 +209,12 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// leader (#142) is the fault the leader's take-back exists for: every slot
 /// delegated to it stalls until the leader runs it colocated, and a proxy
 /// killed at the chaos cutoff stays down for the whole recovery tail.
-/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe`
-/// wipes its own storage provider, which paros does not use (the fake disk is
-/// the `StorageWorld`), so the amnesia fault is the world's own coin, drawn at
-/// a restart in `crate::process` (#124) and answered by replacement through
+/// `prob_wipe = 0` **stays** zero: moonpool's `CrashAndWipe` now reaches
+/// the disk paros stores on, but it wipes a whole machine without asking the
+/// copy budget, so it could lose a quorum's copies at once. The amnesia fault
+/// is the storage ledger's own coin instead, drawn at a restart in
+/// `crate::process` (#124) under the dead-node budget and the provisioning
+/// ledger, and executed on the simulated disk (`world::wipe`) and answered by replacement through
 /// reconfiguration, never by a rejoin. The recovery window is
 /// deliberately wide: a node kept down that long while the cluster keeps
 /// committing and truncating comes back below every peer's compaction floor,
@@ -236,7 +226,7 @@ const CORPUS_CHAOS: Duration = Duration::from_mins(10);
 /// transfers; lost unsynced directory entries), swarm-masked per seed by
 /// moonpool. A world-store seed has no files and is untouched. See
 /// [`storage_fault_mask`] for what is masked.
-fn chaos_surfaces() -> [Chaos; 7] {
+fn chaos_surfaces() -> [Chaos; 8] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -265,6 +255,7 @@ fn chaos_surfaces() -> [Chaos; 7] {
             config: regime(AttritionVictims::group(REPLICA_GROUP)),
             mode: ChaosMode::Swarm,
         },
+        crate::world::outage::regime(),
         Chaos::BuggifyKnobs,
         Chaos::Storage(ChaosMode::Swarm),
     ]
@@ -315,6 +306,8 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         })
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
+        .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
+        .fault_factory(|| Box::new(crate::world::late_outage::LateOutage))
         .chaos_duration(CHAOS_DURATION)
         .swarm_operations()
 }
@@ -322,6 +315,20 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
 /// Where a run publishes its end-of-run audit digest (see
 /// [`chain_seed_digest`]). Shared by the workload factory's clones.
 pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
+
+/// The forked exploration workers the sweep runs with: one per core but the
+/// controller's (decided on 2026-10-08). Each worker replays one explored
+/// timeline and exits, merging its assertion and sancov counts into the
+/// controller's tables, so the sweep reaches the same coverage as in-process
+/// exploration, faster (1.4x on 4 cores over 240 pinned seeds); only the
+/// order of the search depends on which worker finishes first, and every
+/// timeline still replays from its seed and recipe. A replay or a focused
+/// exploration stays in-process (`workers: 0`): fully deterministic.
+fn sweep_workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .saturating_sub(1)
+}
 
 /// Run the DST bug-finding sweep: regional latency, swarm network turbulence,
 /// attrition, driver hooks, operation swarm, and the safety/recovery checks under
@@ -335,7 +342,10 @@ pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
 #[tracing::instrument(level = "debug")]
 pub fn explore(max_iterations: usize) -> SimulationReport {
     chain_builder(None)
-        .enable_exploration(exploration_config(EXPLORATION_TIMELINES_PER_SEED))
+        .enable_exploration(exploration_config(
+            EXPLORATION_TIMELINES_PER_SEED,
+            sweep_workers(),
+        ))
         .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
         .run_configured()
 }
@@ -425,17 +435,15 @@ pub fn chain_smoke(iterations: usize) -> SimulationReport {
 pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
     chain_builder(None)
         .set_debug_seeds(vec![seed])
-        .enable_exploration(exploration_config(max_runs))
+        .enable_exploration(exploration_config(max_runs, 0))
         .until_coverage_stable(1, 1)
         .run_configured()
 }
 
-/// Run the shared `LogStorage` behavioral contract suite against the
-/// simulation's world-backed storage, inside one quiet iteration. `MemStorage`
-/// runs the identical suite as a `paros` unit test; together they keep the fake
-/// and the trait contract from drifting apart. The same iteration runs both
+/// Run the shared `LogStorage` and `MatchmakerStorage` behavioral contract
 /// suites against the library's journal stores (`paros::journal`) on the
-/// simulation's own disk.
+/// simulation's own disk, inside one quiet iteration. `MemStorage` runs the
+/// identical suites as a `paros` unit test.
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_storage_contract_suite() -> SimulationReport {
@@ -444,180 +452,4 @@ pub fn run_storage_contract_suite() -> SimulationReport {
         .workload_factory(|| Box::new(crate::process::ContractSuiteWorkload))
         .set_iterations(1)
         .run_configured()
-}
-
-// --- the CTRL evaluation corpus ----------------------------------------------
-
-/// The scripted corpus cluster, the one shape every corpus case is built
-/// from: `nodes` scripted-lifecycle nodes choreographed by `options` (a
-/// fixed bootstrap subset that leaves spares, the GC requests withheld —
-/// the default is the plain case: bootstrapped on all, every site dark), `matchmakers` scripted matchmakers (zero on every case but
-/// the departed straggler, which needs a prior configuration), and no swarm
-/// chaos at all — every fault is a targeted injection from the workload.
-/// The caller adds its `workload_factory`, iterations and seeds. See
-/// `crate::corpus`.
-fn scripted_builder(
-    nodes: usize,
-    matchmakers: usize,
-    options: ScriptedOptions,
-) -> SimulationBuilder {
-    let mut builder = SimulationBuilder::new()
-        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
-        .processes(nodes, move || Box::new(NodeProcess::scripted_with(options)));
-    if matchmakers > 0 {
-        builder = builder.processes(matchmakers, || Box::new(MatchmakerProcess::scripted()));
-    }
-    builder
-        .fault_factory(|| Box::new(ScriptedLifecycle))
-        .chaos_duration(CORPUS_CHAOS)
-}
-
-/// The E1 mask corpus builder (see `crate::corpus`). `non_vacuous` is where
-/// the workload publishes whether its run judged its analytic outcome (see
-/// [`corpus_mask_case`]); the hunt axes pass `None`.
-fn corpus_builder(
-    source: corpus::MaskSource,
-    non_vacuous: Option<NonVacuousSink>,
-) -> SimulationBuilder {
-    scripted_builder(corpus::CORPUS_NODES, 0, ScriptedOptions::default()).workload_factory(
-        move || Box::new(corpus::E1MaskWorkload::new(source, non_vacuous.clone())),
-    )
-}
-
-/// The canonical E1 mask cases the nextest corpus runner enumerates: the
-/// exhaustive 2-slot × 3-node sub-grid (bits `node * 3 + slot`, slot ∈ {0, 1} —
-/// 64 masks, every recoverable/unrecoverable boundary shape over two slots),
-/// plus the full-grid corner cases: each slot lost on every node, each node
-/// fully rotted, and the everything-lost mask.
-#[must_use]
-pub fn corpus_canonical_masks() -> Vec<u16> {
-    let mut masks: Vec<u16> = Vec::new();
-    for low in 0_u16..64 {
-        let mut mask = 0_u16;
-        for node in 0..3_u16 {
-            mask |= (low >> (node * 2) & 0b11) << (node * 3);
-        }
-        masks.push(mask);
-    }
-    for extra in [
-        0b001_001_001, // slot 0 lost everywhere
-        0b010_010_010, // slot 1 lost everywhere
-        0b100_100_100, // slot 2 lost everywhere
-        0b000_000_111, // node 0 fully rotted
-        0b111_000_000, // node 2 fully rotted
-        0b111_111_111, // everything lost
-        0b011_101_110, // mixed: every slot down to exactly one clean copy
-    ] {
-        if !masks.contains(&extra) {
-            masks.push(extra);
-        }
-    }
-    masks
-}
-
-/// Run one explicit E1 mask case deterministically (seeded by the mask itself,
-/// so a failing case names its own replay).
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_corpus_mask(mask: u16) -> SimulationReport {
-    corpus_mask_case(mask).0
-}
-
-/// The same run, reporting whether it was **non-vacuous**: `true` means the
-/// workload judged its analytically derived outcome (a recoverable mask
-/// converged intact, or an unrecoverable one waited without fabricating);
-/// `false` means a late write healed a masked record before the cluster died,
-/// so the run was released unjudged and observed nothing (see
-/// `E1MaskWorkload`). Its `sometimes` gates are recorded, never asserted, by
-/// nextest, so a caller that enumerates masks must require a minimum number of
-/// `true`s or the corpus passes on vacuous runs alone.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn corpus_mask_case(mask: u16) -> (SimulationReport, bool) {
-    let sink: NonVacuousSink = Arc::new(Mutex::new(false));
-    let report = corpus_builder(corpus::MaskSource::Fixed(mask), Some(sink.clone()))
-        .set_iterations(1)
-        .set_debug_seeds(vec![u64::from(mask)])
-        .run_configured();
-    let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
-    (report, non_vacuous)
-}
-
-/// Raw-volume E1 sampling: each seed draws its mask from the seeded RNG, so a
-/// hunt densely samples the full 512-case space. Replay with
-/// [`run_corpus_seed`].
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn corpus_hunt(iterations: usize) -> SimulationReport {
-    corpus_builder(corpus::MaskSource::Seeded, None)
-        .set_iterations(iterations)
-        .run_configured()
-}
-
-/// Replay one seeded E1 corpus case deterministically.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_corpus_seed(seed: u64) -> SimulationReport {
-    corpus_builder(corpus::MaskSource::Seeded, None)
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run_configured()
-}
-
-/// Run the bare-quorum lost-slot case (see `crate::corpus`): one slot decided
-/// by a bare quorum, then every copy of it rotted — the `faulty, faulty, none`
-/// Phase-1 tally that must WAIT, and the deterministic red target of CTRL
-/// §5.1.1's mutation (b) (a sub-Q1 `none` count no-op-filling a chosen slot).
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_bare_quorum_case(seed: u64) -> SimulationReport {
-    scripted_builder(corpus::CORPUS_NODES, 0, ScriptedOptions::default())
-        .workload_factory(|| Box::new(corpus::BareQuorumWorkload::new()))
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run_configured()
-}
-
-/// Where a scripted corpus case publishes whether its run genuinely judged
-/// what it was written for — the E1 mask corpus its analytic outcome (see
-/// [`corpus_mask_case`]), the departed-straggler case its injection (see
-/// [`departed_straggler_case`]). Shared by the workload factory's clones.
-pub(crate) type NonVacuousSink = Arc<Mutex<bool>>;
-
-/// Run the departed-straggler case (see `crate::corpus`, #124): a four-node
-/// pool bootstrapped on three, reconfigured onto the spare, then the only
-/// clean copy of a slot left on the node the reconfiguration removed — CTRL
-/// Case 3 across a configuration boundary. The cluster must WAIT while the
-/// straggler is down (its leader resigning under `REPAIR_TIMEOUT_ELECTIONS`)
-/// and recover the slot through the prior configuration once it returns.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn run_departed_straggler_case(seed: u64) -> SimulationReport {
-    departed_straggler_case(seed).0
-}
-
-/// The same run, reporting whether it was **non-vacuous**: `false` means the
-/// case was superseded before its injection (GC forgot the prior
-/// configuration, or a late write healed the mask) and observed nothing. A
-/// caller that enumerates seeds must require at least one `true`.
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn departed_straggler_case(seed: u64) -> (SimulationReport, bool) {
-    let sink: NonVacuousSink = Arc::new(Mutex::new(false));
-    let workload_sink = sink.clone();
-    let options = ScriptedOptions {
-        bootstrap: Some(corpus::DEPARTED_BOOTSTRAP),
-        withhold_gc: true,
-    };
-    let report = scripted_builder(corpus::DEPARTED_POOL, 1, options)
-        .workload_factory(move || {
-            Box::new(corpus::DepartedStragglerWorkload::new(
-                workload_sink.clone(),
-            ))
-        })
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run_configured();
-    let non_vacuous = *sink.lock().unwrap_or_else(PoisonError::into_inner);
-    (report, non_vacuous)
 }

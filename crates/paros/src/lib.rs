@@ -47,9 +47,7 @@ pub use audit::{
     Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
     StorageFaultDecision,
 };
-pub use corruption::{
-    CorruptionVerdict, IntegrityFault, RecoveryCase, SlotRecord, WitnessStatus, classify_log,
-};
+pub use corruption::{CorruptionVerdict, IntegrityFault};
 pub use driver::{
     BelowFloor, BootKind, BootRefusal, DriverTunables, JournalStores, RunError, SystemPlan,
     command_hash, message_kind, parse_addr, registration_history_hash, run_journals, run_node,

@@ -45,7 +45,7 @@
 //! | `skip_proxy_resend` | audit `proxy_resend_skipped` | "proxy: a leader takes a delegated round back" |
 //! | `abandon_reconfigurer` (per phase) | inline, one per phase | "generation: a matchmaker-set handover completes" |
 //! | mailbox hooks, `skip_*`, `stretch_tick_interval`, `evict_across_kinds` | inline | the protocol gates the delay feeds |
-//! | `withhold_gc_requests` | scripted, never drawn (`ScriptedOptions::withhold_gc`) | the departed-straggler case's non-vacuous floor |
+//! | `withhold_gc_requests` | inline ("gc: a seed withholds its GC requests for the chaos window"), drawn per seed in `crate::shape::withhold_gc` | "storage: a departed straggler's slot is recovered through the prior configuration" (#263) |
 //!
 //! Message kinds keep their own gates where they walk different Paxos paths:
 //! a lost `Accept` is the stranded-slot terrain, a lost `Accepted` is the
@@ -84,7 +84,6 @@ macro_rules! fire_gate {
 pub(crate) struct BuggifyHooks<T> {
     time: T,
     cutoff: Duration,
-    enabled: bool,
     /// Write-window crash bias (issue #19 B, the `TigerBeetle` "×10 while writes
     /// are in flight" pressure): a workload-buggified multiplier on the
     /// durability-seam crash probability. The seams are only ever consulted
@@ -92,9 +91,8 @@ pub(crate) struct BuggifyHooks<T> {
     /// write window. Part of the node's per-seed shape (`crate::shape`), so a
     /// restarted node keeps the bias its first boot drew.
     seam_crash_bias: f64,
-    /// A scripted corpus case's standing choice to withhold every GC
-    /// request (`ScriptedOptions::withhold_gc`); `false` on the main
-    /// campaign, where it draws nothing.
+    /// Whether this run's nodes withhold their GC requests for the chaos
+    /// window (`crate::shape::withhold_gc`, drawn once per seed).
     withhold_gc: bool,
     /// The journal held on every node for the chaos window (#188), drawn
     /// once per seed (`crate::shape::journals`); `None` on most seeds.
@@ -102,11 +100,10 @@ pub(crate) struct BuggifyHooks<T> {
 }
 
 impl<T: TimeProvider> BuggifyHooks<T> {
-    pub(crate) fn new(time: T, cutoff: Duration, enabled: bool, seam_crash_bias: f64) -> Self {
+    pub(crate) fn new(time: T, cutoff: Duration, seam_crash_bias: f64) -> Self {
         Self {
             time,
             cutoff,
-            enabled,
             seam_crash_bias,
             withhold_gc: false,
             held_journal: None,
@@ -120,15 +117,15 @@ impl<T: TimeProvider> BuggifyHooks<T> {
         self
     }
 
-    /// Withhold every GC request these hooks' node would send (a scripted
-    /// corpus case; see `DriverHooks::withhold_gc_requests`).
-    pub(crate) fn withholding_gc(mut self) -> Self {
-        self.withhold_gc = true;
+    /// Withhold every GC request these hooks' node would send for the chaos
+    /// window when `withhold` (see `DriverHooks::withhold_gc_requests`).
+    pub(crate) fn withholding_gc(mut self, withhold: bool) -> Self {
+        self.withhold_gc = withhold;
         self
     }
 
     fn active(&self) -> bool {
-        self.enabled && self.time.now() < self.cutoff
+        self.time.now() < self.cutoff
     }
 }
 
@@ -187,8 +184,15 @@ impl<T: TimeProvider> DriverHooks for BuggifyHooks<T> {
     }
 
     fn withhold_gc_requests(&self) -> bool {
-        // Scripted, never drawn: a corpus choice, not a swarm site.
-        self.withhold_gc
+        // Drawn once per seed (`crate::shape::withhold_gc`, its own
+        // location), never per call; only inside the chaos window, so GC
+        // resumes in the recovery tail. The driver asks only when a request
+        // is due, so a withheld answer here is a request withheld.
+        let withheld = self.active() && self.withhold_gc;
+        if withheld {
+            assert_reachable!("gc: a seed withholds its GC requests for the chaos window");
+        }
+        withheld
     }
 
     fn hold_journal(&self, journal: JournalIdentifier) -> bool {

@@ -8,27 +8,24 @@ environment variables, no flags beyond the positional arguments below.
 
 - `src/main.rs` → `sim-paros-chain` → the CI gate; the only binary `cargo xtask sim` registers.
 - `src/hunt.rs` → `sim-paros-hunt` → raw seed volume and single-seed replays, coverage-blind.
-- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_never_fired` → shared parsing and printing.
+- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_never_fired` → shared parsing and printing.
 
 ## Entry points
 
 - `sim-paros-chain [iterations]` (default `COVERAGE_ITERATIONS`): runs `explore`, prints
   saturated-vs-cap, saturation signal, exploration stats and bug recipes, guidance watermarks
-  and the gates that never fired; then `corpus_hunt(CORPUS_CI_ITERATIONS)` through
-  `gate_corpus`. Exits 1 on any assertion violation, failed run, coverage violation or
+  and the gates that never fired. Exits 1 on any assertion violation, failed run, coverage violation or
   convergence timeout.
-- `sim-paros-hunt [main|canary|corpus] [iterations]` (default 2000, the normal evidence budget;
+- `sim-paros-hunt [main|canary] [iterations]` (default 2000, the normal evidence budget;
   root *Simulation rules*): prints seed counts, assertion slots used and dropped, and gates
   that never fired; exits 1 on a violation, 2 on an unknown axis. Coverage never decides it.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
-  (`EXPLORATION_TIMELINES_PER_SEED` timelines), `replay-corpus`, `replay-corpus-mask` (the
-  argument is the mask, taken `% 512`), `replay-bare-quorum`, `replay-departed`: prints GREEN or
-  RED with the violations, exits 1 on red (`replay_for`, `hunt.rs:34`).
+  (`EXPLORATION_TIMELINES_PER_SEED` timelines): prints GREEN or RED with the violations, exits
+  1 on red (`replay_for`, `hunt.rs:25`). There is one campaign: the CTRL corpus is folded into
+  it (#263).
 
 ## Local rules
 
-- A new corpus family adds its `replay-*` arm to `replay_for` and, if CI must sweep it, a
-  `gate_corpus` call in `main.rs`.
 - Verbosity: neither binary installs a tracing subscriber or reads `RUST_LOG`; the only capture
   is moonpool's sim layer at `SimulationBuilder::trace_level` (default `INFO`), which `paros-sim`
   never raises. Read violations and their detail maps from the printed report.

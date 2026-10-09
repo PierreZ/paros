@@ -3,8 +3,9 @@
 //!
 //! The runner machinery (`run_binaries`) sets `SANCOV_CRATES` and a separate
 //! `--target-dir target/sancov` so cargo doesn't serve a cached
-//! non-instrumented build. `SIM_BINARIES` lists the deterministic-simulation
-//! binaries to drive under coverage.
+//! non-instrumented build, and builds in release mode: a debug build runs the
+//! whole simulation many times slower. `SIM_BINARIES` lists the
+//! deterministic-simulation binaries to drive under coverage.
 
 use std::collections::BTreeSet;
 use std::process::{self, Command};
@@ -174,7 +175,7 @@ fn ensure_instrumentation_fresh(sancov_crates: &str) {
              rebuild with the right instrumentation"
         );
         let mut clean = Command::new("cargo");
-        clean.args(["clean", "--target-dir", "target/sancov"]);
+        clean.args(["clean", "--release", "--target-dir", "target/sancov"]);
         for pkg in &flipped {
             clean.args(["-p", pkg]);
         }
@@ -204,7 +205,7 @@ fn run_binaries(binaries: &[&SimBinary], extra_args: &[String]) {
         let bin_start = Instant::now();
 
         let mut cmd = Command::new("cargo");
-        cmd.args(["run", "--bin", bin.name]);
+        cmd.args(["run", "--release", "--bin", bin.name]);
 
         cmd.env("SANCOV_CRATES", bin.sancov_crates);
         // Use a separate target dir so cargo doesn't serve a cached

@@ -16,12 +16,27 @@
 //! | accepted / learned `(slot, ballot, command)` | the entry at position `slot`, the ballot in its identity |
 //! | promise, format marker and its `Config` (#147, #207), chosen index, floor, sealed journal state | the journal's **metainfo** (two local copies) |
 //! | truncation floor, trim-point jump (#186) | the journal's floor, raised in the same commit as the sealed state |
-//! | matchmaker registration | the entry at a registration number, the ballot in its identity |
+//! | matchmaker registration | the entry at a registration number, the ballot and the generation in its identity |
 //! | matchmaker scalars and format marker (#183) | the metainfo |
 //!
 //! The chosen index is relaxed (re-derivable after a crash): it rides the
 //! next commit that writes the metainfo for another reason, a promise, a
 //! truncation or a format, and is never a reason to write it on its own.
+//!
+//! # Ordering: a commit is atomic one way only
+//!
+//! The journal writes a commit's metainfo only once its batch is durable
+//! (moonpool#309): a durable metainfo vouches for its batch, but a crash
+//! between the two can land the batch without its metainfo. So a store puts
+//! in one commit a batch and the metainfo that depends on it, never a batch
+//! that depends on the metainfo; that order goes across commits, each
+//! durable before the next starts (#264, #176). [`JournalStorage`] commits a
+//! raised promise alone (before any entry it covers: an entry durable above
+//! its promise would be an accept the node never promised), then the
+//! entries with the floor and the metainfo (a chosen index never ahead of
+//! the entry that makes its slot chosen); [`JournalMatchmakerStorage`]
+//! commits its new registrations with the metainfo, then its clears, and its
+//! boot keeps only what the durable metainfo vouches for.
 //!
 //! # Corruption: what the journal reports, what paros does with it
 //!
@@ -65,7 +80,8 @@ use crate::storage::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
 pub use matchmaker::JournalMatchmakerStorage;
 /// The journal's commit protocol and segment shape, re-exported so a store's
 /// caller configures it without depending on `moonpool-journal`.
-pub use moonpool_journal::{Durability, Geometry};
+pub use moonpool_core::LayoutRegion;
+pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
 pub use node::{JournalBootFacts, JournalStorage};
 
 /// How a journal store lays out and writes its journal.

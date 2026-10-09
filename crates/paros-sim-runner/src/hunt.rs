@@ -3,7 +3,7 @@
 //! saturation gate), a hunt never stops at a coverage plateau and treats
 //! coverage gates as irrelevant — its only deliverable is failing seeds.
 //!
-//! Usage: `sim-paros-hunt [main|canary|corpus] [iterations]`
+//! Usage: `sim-paros-hunt [main|canary] [iterations]`
 //!        `sim-paros-hunt replay-main <seed>` — deterministic single-seed
 //!        replay on the main campaign (the red→green witness command).
 //!        `sim-paros-hunt canary [iterations]` — the main campaign under
@@ -12,22 +12,13 @@
 //!        deliverable is an entropy leak, named by the first diverging draw.
 //!        `sim-paros-hunt explore-main <seed>` — root + explored continuation
 //!        timelines, for failures that live only on explorer branches.
-//!        `sim-paros-hunt corpus [iterations]` — the E1 mask corpus: each seed
-//!        draws a per-slot × per-node corruption mask and asserts its
-//!        analytically derived outcome (Correct vs `CorrectlyUnavailable`).
-//!        `sim-paros-hunt replay-corpus <seed>` — deterministic replay.
-//!        `sim-paros-hunt replay-corpus-mask <mask>` — one explicit mask.
-//!        `sim-paros-hunt replay-bare-quorum <seed>` — the bare-quorum
-//!        lost-slot case; `replay-departed <seed>` — the departed-straggler
-//!        case (#124).
 
 mod common;
 
-use common::{arg, is_clean, print_never_fired, print_seed_counts};
+use common::{arg, is_clean, print_failed_runs, print_never_fired, print_seed_counts};
 use paros_sim::{
     EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
-    chain_smoke, corpus_hunt, explore_chain_seed, run_bare_quorum_case, run_chain_seed,
-    run_corpus_mask, run_corpus_seed, run_departed_straggler_case,
+    chain_smoke, explore_chain_seed, run_chain_seed,
 };
 
 /// The single-seed replay a `replay-*` / `explore-main` axis names, if any.
@@ -36,12 +27,6 @@ fn replay_for(axis: &str) -> Option<fn(u64) -> SimulationReport> {
         "replay-main" => run_chain_seed,
         "replay-canary" => chain_seed_canary,
         "explore-main" => |seed| explore_chain_seed(seed, EXPLORATION_TIMELINES_PER_SEED),
-        "replay-corpus" => run_corpus_seed,
-        "replay-corpus-mask" => {
-            |seed| run_corpus_mask(u16::try_from(seed % 512).unwrap_or_default())
-        }
-        "replay-bare-quorum" => run_bare_quorum_case,
-        "replay-departed" => run_departed_straggler_case,
         _ => return None,
     })
 }
@@ -58,6 +43,7 @@ fn main() {
             return;
         }
         println!("seed {seed}: RED");
+        print_failed_runs(&report);
         println!("VIOLATIONS: {:#?}", report.assertion_violations);
         std::process::exit(1);
     }
@@ -71,9 +57,8 @@ fn main() {
     let report = match axis.as_str() {
         "main" => chain_smoke(iterations),
         "canary" => chain_canary_hunt(iterations),
-        "corpus" => corpus_hunt(iterations),
         other => {
-            eprintln!("unknown axis: {other} (expected 'main', 'canary' or 'corpus')");
+            eprintln!("unknown axis: {other} (expected 'main' or 'canary')");
             std::process::exit(2);
         }
     };
@@ -99,6 +84,7 @@ fn main() {
         println!("no violations — the hunt came back empty");
         return;
     }
+    print_failed_runs(&report);
     println!("VIOLATIONS: {:#?}", report.assertion_violations);
     println!("FAILING SEEDS: {:?}", report.seeds_failing);
     std::process::exit(1);

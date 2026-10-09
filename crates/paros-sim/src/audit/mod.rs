@@ -44,6 +44,7 @@ mod client;
 mod journal_model;
 pub(crate) mod journals;
 mod linearizability;
+mod losses;
 mod matchmaker;
 mod state;
 pub(crate) mod system;
@@ -51,6 +52,7 @@ mod world;
 
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use linearizability::{Attempt, Call, Seen};
+pub(crate) use matchmaker::RegistryOp;
 pub(crate) use world::{AuditWorld, audit_world, audit_world_for, check_run};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -309,6 +311,9 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // ballot)` would be a ratified double-allocation), together with the
         // acceptor tally behind the quorum-decided oracle.
         st.observe_durable_accept(node.0, slot.0, ballot, vhash);
+        // An outage's losses (#263): an unrecoverable slot is never accepted
+        // again, and a lost copy rewritten is a recovery.
+        st.loss_accepted(node.0, slot.0, vhash);
         // The truncated prefix is genuinely gone: nothing below the durable
         // floor is ever written again.
         let floor = st.floor.get(&node.0).copied().unwrap_or_default();
@@ -317,6 +322,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             "a node never persists an accept below its compaction floor"
         );
         st.persisted.insert((node.0, slot.0), vhash);
+        // The commit that carried it is no longer in flight for this slot.
+        st.dropped_in_flight.remove(&(node.0, slot.0));
+        if st.in_flight.get(&(node.0, slot.0)) == Some(&vhash) {
+            st.in_flight.remove(&(node.0, slot.0));
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(node = node.0, first = first.0))]
@@ -387,6 +397,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // `SetChosenIndex` or `Truncate` report is judged against them.
         let watermark = st.chosen_watermark.entry(node.0).or_insert(0);
         *watermark = (*watermark).max(landing);
+        let prefix = st.decided_prefix.entry(node.0).or_insert(0);
+        *prefix = (*prefix).max(landing + 1);
         let was = st.truncate_watermark.get(&node.0).copied().unwrap_or(0);
         st.truncate_watermark.insert(node.0, point.0.max(was));
         st.floor.entry(node.0).or_default().raise(point.0, now);
@@ -525,11 +537,6 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         if let Message::Promise { ballot, .. } = msg {
             self.state().observe_promise_send(node.0, *ballot);
         }
-        if let Message::CatchUpResponse { entries, .. } = msg
-            && !entries.is_empty()
-        {
-            self.state().observe_catch_up_serve(node.0);
-        }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
         // node's folded durable-accept tally (the same-batch write is flushed
@@ -621,6 +628,17 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         st.replicas.insert(replica.0);
         // A replica's read frontier is per boot, as a node's.
         st.read_watermark.remove(&replica.0);
+        // So is its chosen-index watermark: the scalar is flushed relaxed
+        // (on the journal store it rides the next metainfo write, which a
+        // replica rarely makes, #261), so a crash may legally rewind it, and
+        // the boot re-walks its retained prefix from the durable index. The
+        // index reported here is the walk's, ahead of the writes that walk
+        // then persists: the watermark restarts below them. Not at the
+        // floor: the chosen index rides a relaxed write the floor's commit
+        // does not wait for, so the walk may restart below the floor and
+        // re-report slots under it (#263's hunt, witness
+        // 12128186601581481183: floor 3, walk reports 0 and 1).
+        st.chosen_watermark.remove(&replica.0);
         // The recovered prefix is walked, exactly as a node's boot report
         // says in `recovered`: with no application to replay (#186) the
         // walk resumes one past the durable chosen index, so a crash that
@@ -1029,6 +1047,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             { "node" => node.0, "index" => index.0, "watermark" => *watermark }
         );
         *watermark = (*watermark).max(index.0);
+        let prefix = st.decided_prefix.entry(node.0).or_insert(0);
+        *prefix = (*prefix).max(index.0 + 1);
     }
 
     fn log_read_served(&self, node: NodeId, report: &LogReadReport<'_>) {
@@ -1273,6 +1293,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         // watermarks from what this boot actually recovered.
         st.chosen_watermark
             .insert(node.0, chosen_index.map_or(0, |s| s.0));
+        st.decided_prefix
+            .insert(node.0, chosen_index.map_or(0, |s| s.0 + 1));
         st.read_watermark.remove(&node.0);
         let boot_floor = st
             .floor
@@ -1280,14 +1302,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             .copied()
             .unwrap_or_default()
             .strictly_before(now);
+        // What a journal store's last commits had in flight (#264): the only
+        // values a boot may recover in place of the reported ones.
+        let in_flight = st.take_in_flight(node.0);
         for &(slot, ballot, vhash) in accepted {
-            // A synced accept is never lost or altered by a crash.
-            if let Some(&prev) = st.persisted.get(&(node.0, slot.0)) {
-                assert_always!(
-                    prev == vhash,
-                    "a restart never changes a pre-crash accepted value for a slot"
-                );
-            }
+            st.judge_recovered_value(node.0, slot.0, vhash, in_flight.get(&slot.0).copied());
             assert_always!(
                 slot.0 >= boot_floor,
                 "a truncated record is never recovered on boot (the log stays bounded)"
@@ -1299,6 +1318,10 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
             // record is idempotent.
             st.observe_durable_accept(node.0, slot.0, ballot, vhash);
         }
+        st.settle_dropped_in_flight(node.0, chosen_index);
+        // A boot settles what its in-flight commits landed (#263): an
+        // outage's loss is judged again over what the tally now knows.
+        st.reevaluate_losses();
         // A chosen index is only ever set once the commits below it were
         // learned, every one of which needed a durable accept quorum — one
         // the tally has folded from live reports, or one this very boot
@@ -1736,12 +1759,15 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn faulty_reported(&self, node: NodeId, entries: &[(Slot, Ballot)]) {
         let mut st = self.state();
+        let st = &mut *st;
         // Staged, not live: this fires from the boot path *before* the boot's
         // `recovered` report, which swaps the staged set in as this
         // incarnation's classification (and drops the previous boot's).
         let staged = st.faulty_staged.entry(node.0).or_default();
-        for &(slot, _ballot) in entries {
+        for &(slot, ballot) in entries {
             staged.insert(slot.0);
+            st.faulty_ballots
+                .insert((node.0, slot.0), (ballot.round, ballot.node.0));
         }
     }
 

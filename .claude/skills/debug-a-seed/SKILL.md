@@ -18,8 +18,7 @@ cargo run -p paros-sim-runner --bin sim-paros-hunt explore-main <seed>     # for
 cargo run -p paros-sim-runner --bin sim-paros-hunt replay-canary <seed>    # run twice, compare draws
 ```
 
-Corpus seeds have their own commands (`replay-corpus`, `replay-corpus-mask`,
-`replay-bare-quorum`, `replay-departed`). The binary prints `GREEN`/`RED`
+There is one campaign (the corpus folded into it, #263). The binary prints `GREEN`/`RED`
 and the `assertion_violations` list. The nextest smoke
 (`crates/paros-sim/tests/sim.rs`) drives the same entry points
 (`run_chain_seed`, `chain_seed_canary`, `chain_smoke`) if you want it inside a

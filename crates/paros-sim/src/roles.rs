@@ -26,11 +26,9 @@
 //! members deploys no matchmakers, and every campaign goes straight to
 //! `Prepare`; a seed whose proxy group drew zero members delegates nothing
 //! and runs every Phase 2 colocated. The main campaign draws both counts per
-//! seed ([`crate::MATCHMAKER_POOL_RANGE`], [`crate::PROXY_POOL_RANGE`]); the
-//! scripted corpus registers the [`ACCEPTOR_GROUP`] and neither other group,
-//! which reads here **exactly** like a main-campaign seed whose other groups
-//! drew zero members — byte-identical, one code path, no corpus special
-//! case.
+//! seed ([`crate::MATCHMAKER_POOL_RANGE`], [`crate::PROXY_POOL_RANGE`]); a
+//! group that drew zero members reads here exactly like a group never
+//! registered — one code path, no special case.
 
 use std::net::IpAddr;
 
@@ -192,8 +190,7 @@ fn sort_ips(ips: &mut Vec<String>) {
 /// The seed's deployment, read off the topology's process groups. Every
 /// builder registers its nodes as the [`ACCEPTOR_GROUP`] — a process is named
 /// by [`NodeProcess`](crate::process::NodeProcess)'s
-/// [`Process::name`](moonpool_sim::Process::name), corpus and main campaign
-/// alike — so a topology with no matchmaker group is simply a deployment whose
+/// [`Process::name`](moonpool_sim::Process::name) — so a topology with no matchmaker group is simply a deployment whose
 /// matchmaker list is empty: the plain one.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn deployment(topology: &WorkloadTopology) -> Deployment {

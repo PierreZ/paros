@@ -95,6 +95,20 @@ use paros::{
     StorageFaultDecision,
 };
 
+/// One write a journal registry's commit carries (#176), reported before
+/// the commit starts ([`MatchmakerAudit::note_in_flight`]): a power cut may
+/// land the whole commit (one journal commit per sync) without the driver
+/// reporting any of it.
+#[derive(Clone, Debug)]
+pub(crate) enum RegistryOp {
+    /// A registration.
+    Register(Ballot, Registration),
+    /// The durable scalars.
+    Scalars(MatchmakerHardState),
+    /// A successor's registry, installed whole.
+    Install(MatchmakerHardState, BTreeMap<Ballot, Registration>),
+}
+
 /// One matchmaker's folded registry.
 #[derive(Default)]
 struct Registry {
@@ -323,6 +337,9 @@ pub(super) struct MatchmakerAudit {
     reconfigurer_preempted: bool,
     reconfigurer_chosen: bool,
     reconfigurer_done: bool,
+    /// Per journal-backed matchmaker: the writes of the commit it has in
+    /// flight, until the driver reports them or the next boot judges them.
+    in_flight: BTreeMap<u64, Vec<RegistryOp>>,
     reconfigurer_superseded: bool,
     reconfigurer_resend_skipped: bool,
     reconfigure_reply_dropped: bool,
@@ -2271,6 +2288,83 @@ impl MatchmakerAudit {
             self.reconfigurer_bootstrapping,
             "generation: a frozen quorum is reconstructed and bootstrapped"
         );
+    }
+
+    /// `matchmaker`'s durable effective scalar rose to `ballot` at its boot:
+    /// a journal registry rebuilds it over the reconfiguration registrations
+    /// it keeps (#176).
+    pub(super) fn raise_effective(&mut self, matchmaker: MatchmakerId, ballot: Ballot) {
+        let entry = self.registries.entry(matchmaker.0).or_default();
+        entry.effective = entry.effective.max(Some(ballot));
+    }
+
+    /// The writes `matchmaker`'s journal registry is about to commit, or
+    /// `None` once its sync returned and the driver reports them.
+    pub(super) fn note_in_flight(&mut self, matchmaker: u64, ops: Option<Vec<RegistryOp>>) {
+        match ops {
+            Some(ops) => self.in_flight.insert(matchmaker, ops),
+            None => self.in_flight.remove(&matchmaker),
+        };
+    }
+
+    /// What `matchmaker`'s journal registry had in flight when it last
+    /// died and its boot shows landed, to fold as durable before the driver
+    /// reports the boot (#176); cleared either way. A sync commits the
+    /// registrations, then the metainfo (alone, one atomic metainfo write),
+    /// then the clears, and a boot keeps only what the durable metainfo
+    /// vouches for (`paros::journal::matchmaker`), so: an install landed
+    /// exactly when the recovered generation is the one it installs, and
+    /// then whole; a register landed when its registration is recovered and
+    /// was never reported; the scalars landed when the recovered ones are
+    /// the last in flight (the effective configuration aside, which the boot
+    /// may raise). Anything else is judged as is.
+    pub(super) fn landed_in_flight(
+        &mut self,
+        matchmaker: u64,
+        scalars: &MatchmakerHardState,
+        registry: &BTreeMap<Ballot, Registration>,
+    ) -> Vec<RegistryOp> {
+        let Some(ops) = self.in_flight.remove(&matchmaker) else {
+            return Vec::new();
+        };
+        let entry = self.registries.get(&matchmaker);
+        let folded = entry.and_then(|entry| entry.generation.map(|(g, _)| g));
+        let reported = entry
+            .map(|entry| entry.registered.clone())
+            .unwrap_or_default();
+        let generation = scalars.generation.0;
+        let install = ops.iter().find(|op| {
+            matches!(op, RegistryOp::Install(installed, _)
+                if installed.generation.0 == generation && folded.is_none_or(|g| g < generation))
+        });
+        if let Some(install) = install {
+            return vec![install.clone()];
+        }
+        let same_scalars = |written: &MatchmakerHardState| {
+            let mut written = written.clone();
+            written.effective.clone_from(&scalars.effective);
+            written == *scalars
+        };
+        let last_scalars = ops
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                RegistryOp::Scalars(written) => Some(written),
+                _ => None,
+            })
+            .cloned();
+        let scalars_landed = last_scalars.as_ref().is_some_and(same_scalars);
+        ops.into_iter()
+            .filter(|op| match op {
+                RegistryOp::Register(ballot, registration) => {
+                    !reported.contains_key(ballot) && registry.get(ballot) == Some(registration)
+                }
+                RegistryOp::Scalars(written) => {
+                    scalars_landed && last_scalars.as_ref() == Some(written)
+                }
+                RegistryOp::Install(..) => false,
+            })
+            .collect()
     }
 
     /// A matchmaker durably persisted its generation scalars.

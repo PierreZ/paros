@@ -1030,7 +1030,10 @@ does not cover; if paros does not stay live on them, that is a finding, not a kn
 Matchmaker stores take damage too, under a minority or rolling pattern counted as the run's one
 matchmaker loss and exclusive with the matchmaker wipe; matchmakers get their failure domains
 as a second `.cluster()` group with its own `replicated_storage_faults` call (moonpool#297
-gives `.processes()` groups no locality). moonpool reports no per-process damage (moonpool#295,
+gives `.processes()` groups no locality). moonpool now lets a `.cluster()` group draw zero
+processes (moonpool#310, pinned since 0a68199), so nothing blocks the move; matchmakers stay a
+`.processes()` group until the replicated fault patterns that need them land (#202; an
+implementation deferral of 2026-10-08, #176, not a change of direction). moonpool reports no per-process damage (moonpool#295,
 closed as not planned), so the ground truth stays the ledgered injector's and the journal's
 own verdicts.
 
@@ -1043,7 +1046,16 @@ the copies written one after the other; no snapshots and no compaction. A commit
 (CLSTORE's, the last batch ambiguous) or two (always decided), recorded per batch; production
 ships two, the simulation draws either. paros stores the state itself: a slot is a position, its
 ballot the entry's identity, the promise, chosen index, floor, sealed state and format marker the
-metainfo; a matchmaker registration is a position of its own. Storage chaos on journal seeds is the
+metainfo; a matchmaker registration is a position of its own, its generation in its identity.
+**A commit is atomic one way only**: the journal writes a commit's metainfo only once its batch
+is durable (moonpool#309, pinned since 0a68199), so a durable metainfo vouches for its batch,
+but a crash between the two lands the batch without its metainfo. paros puts a batch and the
+metainfo that depends on it in one commit, and orders the reverse across commits, each durable
+before the next (#264, #176): a node commits a raised promise alone (an entry never lands above
+its promise), then its entries with its floor and metainfo (a chosen index never lands ahead of
+the entry that makes its slot chosen); a matchmaker commits its new registrations with its
+metainfo, then its clears, and a boot keeps only the registrations the durable metainfo vouches
+for (at or above its watermark, of its generation). Storage chaos on journal seeds is the
 local half of this contract: moonpool's crash damage, failed syncs, short transfers and lost
 directory entries, a seam crash as a power loss, and a power cut inside a commit; rot waits for
 replicated fault patterns. The simulation was proven to catch journal durability bugs by
@@ -1228,12 +1240,18 @@ Simulation is the investment. Every milestone lands with its share of:
   unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
   it. In M12: a second cell, a tenant move and a move of the fleet tenant. With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
-- Storage chaos on the shipped stores: every node and matchmaker runs on moonpool-journal, with a
-  journal-aware injector aimed through `Journal::regions` (striped by slot) under the copy budget, corpus
-  masks re-expressed as journal targets, crashes inside a sync, then moonpool's environmental
-  storage chaos with replicated fault patterns (#176, #202). Gates name journal verdicts (slot
-  rebuilt, double fault parked, meta repaired, ambiguous batch kept); the in-memory stores and
-  their gates retire.
+- Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
+  with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
+  under the copy budget, power cuts inside a sync, and moonpool's environmental storage chaos
+  under it; its gates name journal verdicts (slot rebuilt, double fault parked, meta repaired).
+  The in-memory stores and the scripted corpus are gone: one campaign (#263, 2026-10-08). The
+  corpus's shapes are provoked, never scripted: a correlated outage of every acceptor plans one
+  slot's loss for each holder's next boot (aimed at the most recent slot, its holders, every
+  copy, or leaving the clean copy on a removed node), and a loss budget's extreme lets at most
+  two slots lose every clean copy. The audit recognizes the E1, bare-quorum and
+  departed-straggler shapes from the journal's verdicts, excuses an unrecoverable slot's journal
+  from convergence, and asserts it is never accepted again. Still to come: replicated fault
+  patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
   (one zone at a time, the outage length drawn across the re-placement bound and restored inside
   `CHAOS_DURATION_MS`); moonpool#297 gives `.processes()` groups no locality, so paros keeps its
@@ -1279,8 +1297,6 @@ AGENTS.md.
   and replicas follow (#193).
 - The coordinators replace the operator's client: `parosctl` stops writing as the lowest seed's
   node id (#240, #212).
-- The in-memory "world" stores of the simulation retire; every role runs on moonpool-journal
-  under at least the same chaos (section 5, #176, #202).
 
 ## 8. Milestones
 

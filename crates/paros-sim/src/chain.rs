@@ -9,7 +9,7 @@
 //! on the state after every record, and the audit checks exactly that
 //! (`AuditWorld::fold_applied`).
 
-use paros::{ClientId, Command, Control, Generation, JournalState, Seq};
+use paros::{ClientId, Command, Control, Generation, Seq};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -55,35 +55,6 @@ impl ChainState {
             applied_count: self.applied_count.saturating_add(1),
             chain_hash: fnv1a(&chained),
         }
-    }
-
-    /// The analytic fold of a decided command sequence starting at slot 0:
-    /// `states[i]` is the state after the first `i` slots — what a reader of
-    /// that log computes. Each slot is judged by the core's own pure journal
-    /// state machine (`paros::JournalState::apply`, #204), and the records a
-    /// slot's write was accepted with fold at their positions; every other
-    /// slot folds nothing.
-    pub(crate) fn expected(commands: &[Command]) -> Vec<Self> {
-        let mut states = vec![Self::default()];
-        let mut journal = JournalState::default();
-        let mut accepted: Vec<paros::Entry> = Vec::new();
-        for command in commands {
-            let previous = *states.last().expect("seeded with the initial state");
-            let outcome = journal.apply(command, |seq| accepted.iter().find(|e| e.seq == seq));
-            let next = match (outcome, command) {
-                (paros::Outcome::Accepted { seq, .. }, Command::Write(entry)) => {
-                    accepted.push(entry.clone());
-                    (seq.0..)
-                        .zip(&entry.records)
-                        .fold(previous, |state, (position, record)| {
-                            state.fold(position, &record.0)
-                        })
-                }
-                _ => previous,
-            };
-            states.push(next);
-        }
-        states
     }
 }
 

@@ -1,7 +1,6 @@
 //! The per-iteration [`StateHandle`] as the registry of the harness's shared
 //! singletons: the audit world, the storage world, the shape registry, the
-//! scripted lifecycle queue, the corpus's scripted-crash flag, the chain
-//! workload's tail bookkeeping. Each is published under its own well-known
+//! scripted lifecycle queue, the chain workload's tail bookkeeping. Each is published under its own well-known
 //! key by whoever asks first and found by everyone after — fresh per seed,
 //! stable across a process's reboots.
 

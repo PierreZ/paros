@@ -155,9 +155,21 @@ const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-lead
 /// The `shrink` entry of [`RECONFIGURE_SHAPES`], the shape a rotation through
 /// a ring no larger than the set in force actually composes.
 const SHRINK_SHAPE: usize = 1;
+/// The shapes that move a member out, as indices into
+/// [`RECONFIGURE_SHAPES`]: every one but `grow`.
+const REMOVING_SHAPES: [usize; 4] = [1, 2, 3, 4];
 /// The shapes a [`RECONFIGURE_MATCHMAKERS`] step draws from, as indices into
 /// [`RECONFIGURE_SHAPES`]: a matchmaker set has no leader to remove.
 const MATCHMAKER_SHAPES: [usize; 4] = [0, 1, 2, 4];
+
+/// The most records one write carries (`ChainConfig::batch_records`'s
+/// ceiling): with [`MAX_LARGE_COMMAND_BYTES`], the largest entry a node's
+/// journal store must hold (`crate::shape::ENTRY_BLOCKS_FLOOR`).
+pub(crate) const MAX_BATCH_RECORDS: u64 = 4;
+
+/// The largest payload one record carries (`ChainConfig::large_command_bytes`'s
+/// ceiling).
+pub(crate) const MAX_LARGE_COMMAND_BYTES: usize = 16_384;
 
 /// Per-timeline client shape — every field is a `buggify_knob!` (AGENTS.md,
 /// prong 2): the default is production's ordinary client, and an activated seed
@@ -338,6 +350,21 @@ struct ChainConfig {
     /// may commit through or not; ceiling 3 s, inside the 4 s chaos window,
     /// so the seed is back for the recovery tail.
     parent_hold_ms: u64,
+    /// How long an owner keeps re-asking its opening claim while the
+    /// cluster leaves it unresolved (unread, ambiguous, a redirect to
+    /// nobody), `retry_backoff_ms` apart — the patience
+    /// `paros::client::claim_cell` gives a cell's claim. Floor 0: the one
+    /// attempt, after which every write is fenced until a later `SET_LEADER`
+    /// claims again, a valid (slow) owner; ceiling 6 s, past the chaos
+    /// window, an owner that keeps asking through it.
+    claim_patience_ms: u64,
+    /// Whether the main journal's owner, on a matchmaker seed, makes a
+    /// member-removing reconfiguration its first operation once it owns the
+    /// journal (#263): an operator who rotates a node out right after
+    /// taking over, the departed-straggler shape's first half (a slot
+    /// decided under the configuration the removal supersedes). Drawn per
+    /// seed, its own BUGGIFY location; either value is a valid operator.
+    reconfigure_after_claim: bool,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -359,10 +386,10 @@ impl ChainConfig {
     fn for_timeline() -> Self {
         Self {
             steps: buggify_knob!(32_u64, 0_u64..65_u64),
-            batch_records: buggify_knob!(1_u64, 1_u64..5_u64),
+            batch_records: buggify_knob!(1_u64, 1_u64..MAX_BATCH_RECORDS + 1),
             reader: buggify_knob!(0_u64, 0_u64..2_u64) == 1,
             command_bytes: buggify_knob!(64_usize, 1_usize..257_usize),
-            large_command_bytes: buggify_knob!(4096_usize, 512_usize..16_385_usize),
+            large_command_bytes: buggify_knob!(4096_usize, 512_usize..MAX_LARGE_COMMAND_BYTES + 1),
             request_timeout_ms: buggify_knob!(1500_u64, 1000_u64..3001_u64),
             pause_ms: buggify_knob!(75_u64, 1_u64..501_u64),
             compact_every: buggify_knob!(4_u64, 1_u64..9_u64),
@@ -398,6 +425,8 @@ impl ChainConfig {
             fleet_kill_delay_ms: buggify_knob!(20_u64, 0_u64..201_u64),
             fleet_kill_down_ms: buggify_knob!(500_u64, 50_u64..2_001_u64),
             parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
+            claim_patience_ms: buggify_knob!(3_000_u64, 0_u64..6_001_u64),
+            reconfigure_after_claim: buggify_with_prob!(1.0),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
@@ -1100,7 +1129,7 @@ impl Workload for ChainWorkload {
         let has_matchmakers = !crate::roles::deployment(ctx.topology())
             .matchmakers()
             .is_empty();
-        let plan = crate::shape::journals(ctx.state(), true);
+        let plan = crate::shape::journals(ctx.state());
         if has_matchmakers && plan.ids.len() > 1 {
             // #201: several journals beside the matchmaker plane, the
             // composition PR #199 had withheld (a cause; the outcomes are
@@ -1145,7 +1174,7 @@ impl Workload for ChainWorkload {
         // client composes runs under, at the successor's own size. Drawn by
         // whoever asked first — a node or this client — and the same for
         // both.
-        let policy = crate::shape::quorum_policy(ctx.state(), servers.len(), true);
+        let policy = crate::shape::quorum_policy(ctx.state(), servers.len());
         // The matchmaker pool's address book and the floor no matchmaker set
         // this client asks for goes below (#125): the bootstrap set's size,
         // capped at three — the smallest set that keeps a quorum after the
@@ -1153,8 +1182,7 @@ impl Workload for ChainWorkload {
         let matchmaker_ips = deployment.matchmakers().to_vec();
         let matchmaker_floor = if has_matchmakers {
             crate::shape::matchmaker_floor(
-                crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_ips.len(), true)
-                    .len(),
+                crate::shape::matchmaker_bootstrap_ranks(ctx.state(), matchmaker_ips.len()).len(),
             )
         } else {
             1
@@ -1284,14 +1312,14 @@ impl Workload for ChainWorkload {
         let mut fleet_ops = fleet::FleetOps::new(
             &deployment,
             crate::shape::identifiers(ctx.state()),
-            crate::shape::system_journals(ctx.state(), true),
+            crate::shape::system_journals(ctx.state()),
             client_id,
             (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
         );
         let mut system_ops = system::SystemOps::new(
             &deployment,
             crate::shape::identifiers(ctx.state()),
-            crate::shape::system_journals(ctx.state(), true),
+            crate::shape::system_journals(ctx.state()),
             self.plan
                 .as_ref()
                 .map(|plan| plan.ids.clone())
@@ -1345,10 +1373,51 @@ impl Workload for ChainWorkload {
         // An owner claims the journal first (#204): read where it stands and
         // `SetLeader` against it. Losing is a valid start — another owner
         // won, and this client's writes are fenced until it claims again.
+        // A claim the cluster leaves unresolved is re-asked within the
+        // owner's patience (`claim_patience_ms`), the next server along.
+        let mut remove_next = false;
         if !reader {
-            let first = usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
-            let outcome = claim(&nodes, journal, first, (client_id, false)).await;
-            writer.claimed(&outcome);
+            let mut first =
+                usize::try_from(ctx.random().random::<u64>()).unwrap_or(0) % server_count;
+            let patience = time.now() + Duration::from_millis(config.claim_patience_ms);
+            loop {
+                let outcome = claim(&nodes, journal, first, (client_id, false)).await;
+                writer.claimed(&outcome);
+                match outcome {
+                    ClaimOutcome::Won { .. } => {
+                        // An owner who reconfigures first (see
+                        // `reconfigure_after_claim`): the main journal's
+                        // alone, on a deployment that honors one.
+                        remove_next = (config.reconfigure_after_claim
+                            || crate::shape::departed_straggler(ctx.state()))
+                            && has_matchmakers
+                            && journal == main;
+                        break;
+                    }
+                    ClaimOutcome::Lost { .. }
+                    | ClaimOutcome::Owned { .. }
+                    | ClaimOutcome::UnknownJournal
+                    | ClaimOutcome::Malformed => break,
+                    ClaimOutcome::Redirect { leader } => {
+                        first = leader
+                            .and_then(|id| nodes.index_of(id))
+                            .unwrap_or((first + 1) % server_count);
+                    }
+                    ClaimOutcome::Unread | ClaimOutcome::Ambiguous => {
+                        first = (first + 1) % server_count;
+                    }
+                }
+                if time.now() >= patience
+                    || shutdown.is_cancelled()
+                    || time
+                        .sleep(Duration::from_millis(config.retry_backoff_ms))
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
+                assert_reachable!("chain: an owner re-asks its opening claim within its patience");
+            }
         }
 
         // Start with a small concurrent batch when writes are enabled. This
@@ -1409,7 +1478,7 @@ impl Workload for ChainWorkload {
         // cell's control journal and the directory — down for
         // `parent_hold_ms` of the chaos window, while every tenant journal
         // keeps committing without it (the journal board's gate).
-        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state(), true))
+        let parent_seed = (client_id == 0 && crate::shape::system_journals(ctx.state()))
             .then(|| servers[0].clone());
         let mut parent_until: Option<Duration> = None;
         let mut parent_held_once = false;
@@ -1447,8 +1516,25 @@ impl Workload for ChainWorkload {
             let raw_pause = ctx.random().random::<u64>();
             let raw_policy = ctx.random().random::<u64>();
             let after_register = std::mem::take(&mut reconfigure_next);
+            // The owner's removal stays its next operation until a request
+            // leaves (an inspect the chaos swallows, a shape nothing admits),
+            // and for the chaos window only: the tail runs the drawn mix.
+            // On a departed-straggler seed it stays armed into the late
+            // outage's window (`crate::world::late_outage`): the owner's
+            // claim usually lands after the chaos window.
+            let deadline = if crate::shape::departed_straggler(ctx.state()) {
+                crate::world::late_outage::late_deadline()
+            } else {
+                Duration::from_millis(CHAOS_DURATION_MS)
+            };
+            if time.now() >= deadline {
+                remove_next = false;
+            }
+            let after_claim = remove_next;
             let op = if after_register {
                 assert_reachable!("system: a client reconfigures right after registering a joiner");
+                RECONFIGURE
+            } else if after_claim {
                 RECONFIGURE
             } else {
                 Self::choose_operation(&config, &operations, raw_op)
@@ -1634,7 +1720,36 @@ impl Workload for ChainWorkload {
                                 chosen_target,
                                 nodes.leader().map(|leader| nodes.id_of(leader)),
                             );
-                            let resolved = nodes.resolve(&request, retry_target, retarget).await;
+                            // An impatient operator (#204's retry edge,
+                            // its own BUGGIFY location): the identical
+                            // write re-sent at once, before any read-back,
+                            // which a journal that committed the first must
+                            // answer from the log. `resolve` reads back
+                            // first, so without this the retry that meets a
+                            // committed write is all but never sent.
+                            let resent = if buggify_with_prob!(0.5) {
+                                assert_reachable!(
+                                    "client: an ambiguous write is re-sent before any read-back"
+                                );
+                                let again = nodes
+                                    .write_attempt(retry_target, request.clone(), None)
+                                    .await;
+                                match judged_write(again, false) {
+                                    WriteOutcome::Written { seq, count, .. } => {
+                                        Some(Resolution::Written { seq, count })
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let resolved = match resent {
+                                Some(resolution) => paros::client::ResolveReport {
+                                    resolution,
+                                    by_read_back: false,
+                                },
+                                None => nodes.resolve(&request, retry_target, retarget).await,
+                            };
                             if resolved.by_read_back {
                                 assert_reachable!(
                                     "client: a read-back alone proves an ambiguous write fenced"
@@ -2253,7 +2368,14 @@ impl Workload for ChainWorkload {
                     });
                     let members = in_force.as_ref().map(|(members, _)| members.clone());
                     let system_in_force = in_force.and_then(|(_, system)| system);
-                    let drawn = weighted_index(&config.reconfigure_shape_weights, raw_class);
+                    // The owner's first operation after its claim (see
+                    // `reconfigure_after_claim`) starts the shape ring at
+                    // one that moves a member out — never `grow`.
+                    let drawn = if after_claim {
+                        REMOVING_SHAPES[usize::try_from(raw_class % 4).unwrap_or(0)]
+                    } else {
+                        weighted_index(&config.reconfigure_shape_weights, raw_class)
+                    };
                     let leader_id = nodes.leader().map(|l| nodes.id_of(l));
                     // The successor draws from the live pool: an identity the
                     // run lost for good (wiped, retired, corruption-parked)
@@ -2416,6 +2538,13 @@ impl Workload for ChainWorkload {
                                 "reconfiguration: the drawn shape is impossible and the step falls through"
                             );
                         }
+                        if after_claim && REMOVING_SHAPES.contains(&shape) {
+                            // BUGGIFY pairing: the owner's first operation
+                            // after its claim moves a member out.
+                            assert_reachable!(
+                                "reconfiguration: an owner's first operation after its claim removes a member"
+                            );
+                        }
                         let disjoint = members
                             .as_deref()
                             .is_some_and(|in_force| in_force.iter().all(|m| !next.contains(m)));
@@ -2442,6 +2571,7 @@ impl Workload for ChainWorkload {
                             system = QuorumSystem::Flexible { q1: 1, q2: 1 };
                         }
                         tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
+                        remove_next = false;
                         // The operators' ledger (#198): filed before the
                         // request leaves, answered below; a retirement reads
                         // it (`StorageWorld::retire`).
@@ -2517,11 +2647,11 @@ impl Workload for ChainWorkload {
                                         "reconfiguration: a configuration that does not admit its quorum system is refused"
                                     );
                                 }
-                                nodes.observe_leader(leader);
+                                adopt_plane_leader(&nodes, has_matchmakers, leader);
                             }
                             ReconfigureOutcome::NotLeader { leader }
                             | ReconfigureOutcome::Unrecognized { leader } => {
-                                nodes.observe_leader(leader);
+                                adopt_plane_leader(&nodes, has_matchmakers, leader);
                             }
                             ReconfigureOutcome::Ambiguous => {}
                         }
@@ -3431,8 +3561,12 @@ impl Workload for ChainWorkload {
         // audit's final-convergence claim is the arbiter for that run.
         let ended_by_sibling = !converged && shutdown.is_cancelled();
         let storage = crate::world::storage_fault_stats(ctx.state(), journal);
+        // A slot an outage left unrecoverable, or with every clean copy out
+        // of reach (#263), is waited on for good: the run's liveness is
+        // excused, never its safety.
+        let unrecoverable = audit.loss_excuses_liveness();
         assert_always!(
-            converged || ended_by_sibling || !storage.clean_quorum_everywhere,
+            converged || ended_by_sibling || unrecoverable || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
         );
         // Liveness under the budget: faults were injected and the cluster
@@ -3449,7 +3583,7 @@ impl Workload for ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling) {
+        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable) {
             // Which leg failed: the cluster, or this owner's recovery writes.
             eprintln!(
                 "chain run RED: client {client_id} converged={converged} recovery_acked={recovery_acked} reader={reader} owned={:?} next_seq={}",
@@ -3490,24 +3624,9 @@ impl Workload for ChainWorkload {
                     crate::audit::audit_world_for(ctx.state(), *other).diagnostics()
                 );
             }
-            for (ip, disk_journal) in journals
-                .iter()
-                .flat_map(|j| servers.iter().map(move |ip| (ip, *j)))
-            {
-                if let Some(probe) = crate::world::disk_probe_for(ctx.state(), disk_journal, ip) {
-                    eprint!("  [journal {disk_journal}]");
-                    eprintln!(
-                        "  DISK {ip}: floor={} chosen={:?} clean_slots={}..={}",
-                        probe.floor,
-                        probe.chosen_index,
-                        probe.clean_slots.first().copied().unwrap_or(0),
-                        probe.clean_slots.last().copied().unwrap_or(0),
-                    );
-                }
-            }
         }
         assert_always!(
-            ((recovery_acked > 0 || reader) && converged) || ended_by_sibling,
+            ((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable,
             "chain: cluster converged after chaos"
         );
         assert_sometimes_greater_than!(
@@ -3546,7 +3665,7 @@ impl Workload for ChainWorkload {
         // The control journals' histories (#247): every client's library
         // calls at the fleet tenant, the registry and the directory, searched once (by
         // client 0, after every run) against the journal model.
-        if self.client_id == 0 && crate::shape::system_journals(ctx.state(), true) {
+        if self.client_id == 0 && crate::shape::system_journals(ctx.state()) {
             let identifiers = crate::shape::identifiers(ctx.state());
             for journal in [
                 identifiers.fleet,
@@ -3569,6 +3688,23 @@ impl Workload for ChainWorkload {
         // (Every acked slot being inside the applied prefix is the audit's
         // final claim, judged once over every client's history.)
         Ok(())
+    }
+}
+
+/// Adopt the leader a `Reconfigure` reply named as this client's journal's
+/// leader hint — only where that reply speaks for this journal. A
+/// `Reconfigure` names no journal: a node answers it from its *plane*
+/// journal (`Journals::plane`), which on a matchmaker deployment is the
+/// journal whose configuration names the matchmakers (the main one), but on
+/// a plain deployment is the node's first live user journal in id order —
+/// with system journals, possibly a journal the directory created at
+/// runtime and led by a joiner that never serves this one. Adopting that
+/// leader sends this journal's next `Write` to a node that answers
+/// `UnknownJournal` (seed 10308963497620992383: node 4's plane was a
+/// created journal led by joiner 100).
+fn adopt_plane_leader(nodes: &ChainClient, has_matchmakers: bool, leader: Option<u64>) {
+    if has_matchmakers {
+        nodes.observe_leader(leader);
     }
 }
 

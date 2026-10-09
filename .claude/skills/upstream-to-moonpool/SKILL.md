@@ -57,7 +57,7 @@ never a silent local reimplementation of simulator infrastructure.
    fine, and expect the same seed to still replay identically, which is not
    negotiable.
 3. Run the compatibility gates: `cargo nextest run` (the smoke, the canary
-   pair, the corpus), then `cargo xtask sim run paros-chain` to saturation,
+   pair), then `cargo xtask sim run paros-chain` to saturation,
    then a few hundred `sim-paros-hunt canary` seeds (`/sim-sweep`).
 4. Delete the paros-side stand-in the upstream fix replaces, in the same PR,
    and note the rev in the commit message (the root `AGENTS.md` cites pins by

@@ -50,6 +50,9 @@ pub struct JournalStorage<P: StorageProvider> {
     config: Config,
     journal: Option<Journal<P>>,
     meta: NodeMeta,
+    /// The metainfo as of the last commit that wrote it (or the boot that
+    /// read it): what a crash leaves on disk until the next one lands.
+    durable_meta: NodeMeta,
     /// The metainfo changed (a promise, a format, a floor): the next sync
     /// writes it.
     meta_dirty: bool,
@@ -110,6 +113,7 @@ impl<P: StorageProvider> JournalStorage<P> {
             config,
             journal: None,
             meta: NodeMeta::default(),
+            durable_meta: NodeMeta::default(),
             meta_dirty: false,
             promise_raised: false,
             chosen_index: None,
@@ -166,6 +170,30 @@ impl<P: StorageProvider> JournalStorage<P> {
         self.staged.len()
     }
 
+    /// The slots the next sync commits entries for (observation: a harness
+    /// records what a commit cut by a crash may have landed).
+    pub fn staged_slots(&self) -> impl Iterator<Item = Slot> + '_ {
+        self.staged.keys().copied()
+    }
+
+    /// Where `slot`'s persist record and entry live on disk, if the journal
+    /// holds it (observation: a harness aims targeted damage at it).
+    #[must_use]
+    pub fn layout(&self, slot: Slot) -> Option<moonpool_journal::Layout> {
+        self.journal.as_ref()?.layout(slot.0)
+    }
+
+    /// Every region of the journal a fault could hit: each held slot's
+    /// record and entry, the two metainfo copies, every segment's two header
+    /// copies (observation, like [`Self::layout`]). Empty before the journal
+    /// exists.
+    #[must_use]
+    pub fn regions(&self) -> Vec<moonpool_core::LayoutRegion> {
+        self.journal
+            .as_ref()
+            .map_or_else(Vec::new, Journal::regions)
+    }
+
     /// Open the journal, if there is one, and read it back. The body of
     /// [`LogStorage::boot_scan`].
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0))]
@@ -192,6 +220,7 @@ impl<P: StorageProvider> JournalStorage<P> {
         *self = fresh;
         report(self.config.id.0, &recovery);
         self.meta = decode(journal.meta()).ok_or(undecodable(StorageRecord::Promise))?;
+        self.durable_meta = self.meta.clone();
         self.first = Slot(journal.floor());
         self.chosen_index = self.meta.chosen_index;
         let replay = journal.replay(..).await.map_err(|_| StorageError::Io {
@@ -273,19 +302,35 @@ impl<P: StorageProvider> JournalStorage<P> {
         }
     }
 
-    /// Commit `batch`, creating the journal first if none is on disk yet.
+    /// The metainfo a commit may land ahead of the entries staged with it:
+    /// the last durable one with only the promise and the format marker
+    /// raised. The chosen index and the sealed state stay behind, since each
+    /// covers entries (or a floor) the same flush has not committed yet.
+    fn early_meta(&self) -> NodeMeta {
+        NodeMeta {
+            formatted: self.meta.formatted.clone(),
+            promise: self.meta.promise,
+            ..self.durable_meta.clone()
+        }
+    }
+
+    /// Commit `batch`, creating the journal first if none is on disk yet
+    /// (its first metainfo is [`Self::early_meta`]: a creation lands before
+    /// the batch it opens for).
     async fn commit(&mut self, batch: Batch) -> Result<(), StorageError> {
         if self.journal.is_none() {
+            let early = self.early_meta();
             let created = Journal::create(
                 self.provider.clone(),
                 &self.dir,
                 store_id(self.config.journal),
                 self.store.journal(),
-                &encode(&self.meta),
+                &encode(&early),
             )
             .await
             .map_err(|e| open_error(&e, StorageRecord::Promise))?;
             self.journal = Some(created);
+            self.durable_meta = early;
         }
         let journal = self.journal.as_mut().expect("created above");
         journal.commit(batch).await.map_err(|e| commit_error(&e))
@@ -426,10 +471,12 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
         Ok(())
     }
 
-    /// One journal commit. A raised promise goes first, in a commit of its
-    /// own, so it is durable before any entry it covers. The chosen index
-    /// is never a reason to write: a [`MustSync::Relaxed`] flush holding
-    /// nothing else writes nothing, and the next metainfo write carries it.
+    /// Up to three kinds of journal commit, each durable before the next: a
+    /// raised promise alone, so it is durable before any entry it covers;
+    /// the entries; then the floor and the metainfo, alone, so neither is
+    /// durable before the entries under it. The chosen index is never a
+    /// reason to write: a [`MustSync::Relaxed`] flush holding nothing else
+    /// writes nothing, and the next metainfo write carries it.
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0))]
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
         let _ = must_sync;
@@ -448,22 +495,33 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             self.meta.chosen_index = self.chosen_index;
             encode(&self.meta)
         });
-        // A raised promise is durable before any entry accepted under it.
-        if let Some(meta) = &meta
-            && self.promise_raised
-            && !entries.is_empty()
-        {
+        // A raised promise is durable before any entry accepted under it,
+        // and nothing else of the flush is: the promise's own commit carries
+        // the last durable metainfo with the promise raised, never the new
+        // chosen index or sealed state. A chosen index landed ahead of the
+        // entry that makes its slot chosen would boot a node that applies
+        // its stale lower-ballot accept as the decided value (#264, witness
+        // 1126530436175411981: node 0 applied its own unchosen round-1
+        // value at slot 0 after a power cut between the two commits).
+        if meta.is_some() && self.promise_raised && !entries.is_empty() {
+            let early = self.early_meta();
+            assert!(
+                early.promise == self.meta.promise,
+                "the promise's own commit carries the raised promise"
+            );
+            assert!(
+                early.chosen_index == self.durable_meta.chosen_index,
+                "the promise's own commit never moves the chosen index"
+            );
             let mut promise = Batch::new();
-            promise.set_meta(meta.clone());
+            promise.set_meta(encode(&early));
             self.commit(promise).await?;
+            self.durable_meta = early;
         }
         // Packed into batches that each fit one segment: a node catching up
         // a long log after a reboot stages more than one holds (witness
         // 6142474209351073489, refused `BatchTooLarge` on every boot before
-        // the split). Every batch but the last carries entries only; the
-        // last carries the floor and the metainfo, so neither is durable
-        // before the entries under it. Nothing is acknowledged before the
-        // whole sync returns.
+        // the split). Nothing is acknowledged before the whole sync returns.
         let geometry = self.store.geometry;
         let mut staged = Batch::new();
         for (slot, (ballot, payload)) in entries {
@@ -473,13 +531,25 @@ impl<P: StorageProvider> LogStorage for JournalStorage<P> {
             }
             staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
         }
-        if let Some(floor) = floor {
-            staged.truncate_prefix(floor.0);
+        // The floor and the metainfo ride the last batch: the journal writes
+        // a batch's metainfo only once the batch is durable (moonpool#309),
+        // so a durable chosen index always covers its entries, and every
+        // earlier batch was synced before this one started. A chosen index
+        // landing ahead of the entry that makes its slot chosen was the #264
+        // shape (#176).
+        if floor.is_some() || meta.is_some() || !staged.is_empty() {
+            if let Some(floor) = floor {
+                staged.truncate_prefix(floor.0);
+            }
+            let wrote_meta = meta.is_some();
+            if let Some(meta) = meta {
+                staged.set_meta(meta);
+            }
+            self.commit(staged).await?;
+            if wrote_meta {
+                self.durable_meta = self.meta.clone();
+            }
         }
-        if let Some(meta) = meta {
-            staged.set_meta(meta);
-        }
-        self.commit(staged).await?;
         self.meta_dirty = false;
         self.promise_raised = false;
         Ok(())

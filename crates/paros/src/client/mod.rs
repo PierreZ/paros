@@ -876,7 +876,11 @@ impl<P: Providers> Client<P> {
 
     /// Claim `journal` for `owner` (#204): read where it stands — from
     /// server `first` on, see [`Client::read_any`] — then `SetLeader`
-    /// against the generation read, asked of `first`.
+    /// against the generation read, asked of the server that served the
+    /// read, the one just proven reachable (asked of `first` instead, a
+    /// claim whose read had moved past an unreachable `first` sent its
+    /// `SetLeader` down the same dead link and came back ambiguous at
+    /// once).
     ///
     /// A claim against the claimant's own generation would supersede its
     /// own ownership (a claim that won and whose answer was lost, asked
@@ -890,7 +894,8 @@ impl<P: Providers> Client<P> {
         first: usize,
         fresh: bool,
     ) -> ClaimOutcome {
-        let state = match self.read_any(&state_read(journal), first).await.outcome {
+        let report = self.read_any(&state_read(journal), first).await;
+        let state = match report.outcome {
             ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } => state,
             ReadOutcome::UnknownJournal => return ClaimOutcome::UnknownJournal,
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
@@ -899,7 +904,7 @@ impl<P: Providers> Client<P> {
         if !fresh && state.owner.is_some_and(|current| current.0 == owner) {
             return ClaimOutcome::Owned { state };
         }
-        self.set_leader(journal, state.generation.0, owner, first)
+        self.set_leader(journal, state.generation.0, owner, report.server)
             .await
             .into()
     }

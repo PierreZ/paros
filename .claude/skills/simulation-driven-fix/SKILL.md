@@ -29,6 +29,13 @@ rare-but-valid driver decision, or a `buggify_knob!` extreme for a tunable
 needs (a durability seam, a fault the world cannot inject yet), build the
 capability; do not downgrade to a unit test.
 
+Shapes are **provoked, never scripted** (#263): there is no scripted corpus
+and no per-scenario process. A shape that needs several faults in one order
+(every copy of a slot lost, a straggler that returns last) is made likely by
+generic BUGGIFY sites combined per seed (the correlated outage in
+`world/outage.rs` and its planned losses are the model), and the audit
+*recognizes* it from facts it already holds, proving it with a reachable.
+
 ## 3. Put the check where the fact arrives
 
 - a driver-observable transition → `paros_sim::audit` (add the `Audit`

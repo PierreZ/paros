@@ -473,6 +473,25 @@ impl ColocatedNode {
                 .map_or(self.first_unchosen(), |s| Slot(s.0.saturating_add(1)))
                 .max(self.first_unchosen()),
         );
+        // The fresh-leader fence: nothing decided under an earlier ballot can
+        // sit above `next_slot - 1` (the prepare quorum reported it all). An
+        // ack must echo the current ballot to count, so no earlier
+        // leadership's ack confuses the fresh window.
+        // CheckQuorum: a fresh leadership starts a fresh ack window (self is
+        // always reachable — when it is an acceptor at all).
+        let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
+        self.proposer
+            .open_authority(fence, self.is_acceptor().then_some(me));
+        // The won ballot is a read basis (#260): its configuration, with the
+        // fence standing for everything the earlier configurations chose.
+        // Both are opened before any recovery runs, as the handoff install
+        // does: under `q2 = 1` the leader's own accept decides a re-proposed
+        // slot inside the pump below, a decided `Truncate` compacts, and
+        // `compact` asserts a leader's invariants, its read basis at its own
+        // ballot among them. Opened after the pump, a leader re-elected over
+        // an earlier basis panicked there and left the run (#263's hunt,
+        // witness 17670199652380691451: red, then green with this order).
+        self.learn_read_basis(self.acceptors.clone(), self.ballot, fence);
         // ---- No-op gap fill: the slots the promise quorum reported *nothing* for.
         //
         // Re-proposing `recovered` covers every slot the quorum saw accepted, and
@@ -531,18 +550,6 @@ impl ColocatedNode {
             RecoveryPolicy::Phase1Backed,
         );
         self.pump_leader_recovery();
-        // The fresh-leader fence: nothing decided under an earlier ballot can
-        // sit above `next_slot - 1` (the prepare quorum reported it all). An
-        // ack must echo the current ballot to count, so no earlier
-        // leadership's ack confuses the fresh window.
-        // CheckQuorum: a fresh leadership starts a fresh ack window (self is
-        // always reachable — when it is an acceptor at all).
-        let fence = self.proposer.next_slot().0.checked_sub(1).map(Slot);
-        self.proposer
-            .open_authority(fence, self.is_acceptor().then_some(me));
-        // The won ballot is a read basis (#260): its configuration, with the
-        // fence standing for everything the earlier configurations chose.
-        self.learn_read_basis(self.acceptors.clone(), self.ballot, fence);
         // Fresh-leader postconditions (#67/#88): the win condition demanded
         // `e.ballot >= max_promised_ballot`, and nothing in the re-propose or
         // gap-fill loops raises the promise past the leader's own ballot.
