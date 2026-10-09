@@ -86,12 +86,15 @@ impl CellSession {
     /// control journals, and every machine of the cell it knows — the
     /// founding members and every registered machine not retired — by id
     /// and address. Two ids at one address are a wiped machine's old id
-    /// beside its new one: a founder, then `node`, then the lowest id keeps
-    /// the address, so every address names one machine.
+    /// beside its new one: `node`, the machine this admits, then a founder,
+    /// then the lowest id keeps the address, so every address names one
+    /// machine. `node` answered at its address just now, so it wins even
+    /// over the wiped founding member it replaced (#323: the cell heals
+    /// around that dead member).
     #[must_use]
     pub fn admission(&self, node: NodeId) -> Admission {
         let founder = |id: NodeId| self.founders.iter().any(|(f, _)| *f == id);
-        let rank = |id: NodeId| (!founder(id), id != node, id);
+        let rank = |id: NodeId| (id != node, !founder(id), id);
         let mut by_addr: BTreeMap<SocketAddr, NodeId> = BTreeMap::new();
         let registered = self
             .cell
