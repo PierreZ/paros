@@ -362,7 +362,10 @@ Depth: the `adding-a-buggify-site` skill, `crates/paros/src/hooks.rs`.
   meaningful transition once, typed, where its `tracing` event is; it returns nothing, draws no
   randomness, reads no clock.
 - **Correctness lives in `paros_sim::audit` and the workload's `check()`**, folded into O(1)
-  incremental state — never a scan of the trace. A missing fact gets a new `Audit` callback.
+  incremental state — never a scan of the trace. A missing fact gets a new `Audit` callback
+  only when a cross-node or harness oracle needs it (decided on 2026-10-09, #294): a fact that
+  only fires a gate is an inline `reachable!`/`sometimes!` in paros, and a gate-only callback
+  moves inline (and is deleted) in the PR that touches its site.
 - **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
   on external input (operating errors are results). `ColocatedNode::assert_invariants` runs at
   boot and every public mutating entry; public functions that assert document `# Panics`.
