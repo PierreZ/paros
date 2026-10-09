@@ -98,15 +98,17 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 
 ## Simulation rules
 
-- **Hard rule: the shipped code injects its own faults** (decided on 2026-10-09, #294). A fault
-  site is an inline `buggify!` or a moonpool hint (`hint::reboot()`, `hint::fragile(..)`) at the
-  line of `paros` or `parosd` that makes the choice, inert in production. Never a sim wrapper
-  around shipped code (`SimDisk`, `LedgeredJournal`, `PowerCut`), never a `SimMachine`: the sim
-  runs the same machine and disk as `parosd`. A sim wrapper only observes, through `Audit` or a
-  `reachable!` probe. `is_simulated()` tilts rates, cadences and checks, never an outcome a
-  client sees. `paros-core` stays sans-IO: no buggify, hint or `is_simulated()`. New sites follow
-  this today; `DriverHooks`, `PowerCut` and `SimDisk` migrate per #294
-  (`docs/analysis/simulation/production-fault-hints.md`).
+- **Hard rule: the shipped code injects its own faults** (decided on 2026-10-09, #294). A choice
+  the code makes is an inline `buggify_with_prob!` / `buggify_pick!` at the line that makes it. A
+  moment where an environmental fault is interesting is a hint at that line:
+  `hint!("batch durable, not sent").await`. The code names the moment, never the fault; moonpool
+  decides whether and how to strike, under the seed's own chaos. Both are inert in production.
+  Never a sim wrapper around shipped code (`SimDisk`, `LedgeredJournal`, `PowerCut`), never a
+  `SimMachine`: the sim runs the same machine and disk as `parosd`. A sim wrapper only observes,
+  through `Audit` or a `reachable!` probe. `is_simulated()` tilts rates, cadences and checks,
+  never an outcome a client sees. `paros-core` stays sans-IO: no buggify, hint or
+  `is_simulated()`. Add no new `DriverHooks` method or `Seam`; the existing ones, `PowerCut` and
+  `SimDisk` migrate per #294 (`docs/analysis/simulation/production-fault-hints.md`).
 - **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
   as possible in the simulation, setup included. Always BUGGIFY your way into the complex
   situations rather than script them. Test several behaviours through the one workload with

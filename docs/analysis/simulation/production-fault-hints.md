@@ -1,310 +1,421 @@
-# Production code hints its own failures (#294)
+# The hint API: production code tells the simulator about a moment (#294)
 
-Decided on 2026-10-09. No `SimMachine`, no `SimDisk`: the simulation runs the shipped machine
-and disk, and the shipped code hints its failures. FDB citations point into
-FoundationDB's source (`flow/`, `fdbrpc/`, `fdbserver/`).
+Decided on 2026-10-09 (Pierre approved the recommendations of section 13). Line numbers point
+into the two checkouts as read that day.
 
-## 0. The worked example: the cell init promise
+## 1. The question in one sentence
 
-Today (`crates/paros/src/machine/wait.rs:271`), after the promise is durable:
+What is the smallest thing production code must say so that a deterministic simulator
+can strike at the moments the code knows are interesting?
+
+The answer this note defends: **the code names a moment. It never names a fault.**
+The simulator decides whether to strike, with which fault, and how hard, from the seed's
+own chaos configuration and from the state it already owns. The code's statement is a
+buggify site with a label. That is all.
+
+## 2. What the code expresses (question 1)
+
+Four candidates were on the table. Each is judged by one test: does it tell the
+simulator something it cannot see by itself?
+
+### (a) A named fault: "reboot me"
+
+This is FDB's `throw please_reboot()` behind a `buggify()`
+(`fdbserver/storageserver/storageserver.cpp:13158`). It is precise and it is proven.
+Its cost: the production code chooses the fault. A site that says "reboot" never tests a
+failed sync at the same moment. A site that says "partition me" is wrong at a storage
+seam. Pierre already moved away from it: "everything is a hint", "reboot will choose
+what kind of reboot".
+
+### (b) A weakness taxonomy: `Unsynced`, `Unannounced`, `Awaiting`, `Recovering`
+
+This is the draft in moonpool `0f40fe9`. The code describes its own state. The
+simulator keeps a table from weakness to fault family. Two problems. First, the table
+is a policy about paros's protocol living inside moonpool. Every new paros state asks
+for a new variant and a new mapping. Second, the taxonomy duplicates what the simulator
+already knows: `Unsynced` is the disk's dirty-sector set (`storage/image.rs:590`,
+`dirty_sectors`), `Awaiting` is the network's pending deliveries. The only variant the
+simulator cannot see is `Unannounced`: durable but not yet sent. And that one is a
+moment, not a state. It has zero width in the code.
+
+### (c) A resource-scoped statement: "file X has unsynced writes", "RPC to Y in flight"
+
+This is pure duplication. The simulated disk owns every unsynced sector per file and per
+process. The simulated network owns every pending send per connection. `moonpool-rpc`
+owns every in-flight call. A statement from the code adds nothing and can disagree with
+the ledger.
+
+### (d) Nothing new: the simulator infers from its own state
+
+This is right for *what* is at stake and wrong for *when*. The disk knows the batch is
+dirty. It does not know the batch is about to be synced, or that the sync just returned
+and the `Accepted` replies are about to leave. Attrition lands "wherever a task happens
+to yield" (`crates/paros/src/hooks.rs:3`). The persist-then-send edge is one await
+wide. Volume alone does not hit it. The code must name the moment.
+
+### The recommendation: a labelled point, no taxonomy
+
+Combine (d) for the *what* with the shape of (a) for the *when*:
+
+- The code calls `hint!("batch durable, not sent").await` at the moment.
+- The label is a human string and a coverage bucket. It carries no semantics the
+  simulator acts on.
+- The simulator strikes the **calling process**. It chooses the fault among the families
+  the seed enabled: a reboot (any moment), a storage fault on the process's next disk
+  operations, a cut of the process's links. It weighs the choice by what it owns: dirty
+  sectors make storage faults worthwhile, pending sends make network faults worthwhile.
+  A reboot is always worthwhile. That weighing is internal to moonpool and can start as
+  "always reboot".
+
+This answers Pierre's doubt directly. Storage and network do not share one *weakness*.
+They share one *moment*. A moment is the same thing for both. What differs is the strike,
+and the strike is the simulator's. A reboot is the one fault that tests both at once: it
+loses the unsynced bytes and the unsent messages. So "reboot for both" is not a
+coincidence; it is why the first PR maps every hint to a reboot and is already useful.
+
+## 3. Point versus window (question 2)
+
+A **point** is a moment: "here, now". A **window** is a span: "from here until the
+guard drops".
+
+Points are necessary. The seams are points. The cell-init promise is a point. The step
+between the promise commit and the entries commit in `JournalStorage::sync`
+(`crates/paros/src/journal/node.rs:481-557`) is a point.
+
+Windows are not necessary in the first version, for two reasons:
+
+1. The storage window Pierre described, "pending work not saved durably", is the disk's
+   dirty-sector set. moonpool can weight attrition's victim draw by it with **no API**:
+   `AttritionInjector::inject_process` draws one victim; the draw's weights can read the
+   storage engine. One draw, as today. This is a moonpool-internal improvement.
+2. A protocol window that the simulator cannot see has a start the code knows. A point at
+   the start, with a strike the sink may *delay*, covers it. The mid-commit power cut is
+   this shape: the sink schedules the kill at a random instant inside the span, as
+   `PowerCut::around` does today (`crates/paros-sim/src/world/power.rs:102`), only the
+   draw moves into moonpool.
+
+How each injector consumes a point, without breaking determinism:
+
+| injector | consumes a point how | draws |
+|---|---|---|
+| attrition (`fault_injector.rs:650`) | the sink asks the regime whose victims filter admits the process; `max_dead`, kind weights and recovery delay apply as for a timed reboot | one kind draw, one delay draw, inside the sink call |
+| storage faults | the sink arms a short "focus in time" on the process's disk: the next `n` operations draw the enabled families at a raised rate; a `FaultFocus` in time, next to the one in sectors (`storage/provider.rs:49`) | one draw for `n` |
+| network faults | the sink cuts the process's links for a drawn duration (`FaultContext::partition` per peer, or a black hole on the process) | one duration draw |
+
+Every draw goes through the installed `RandomSource`, inside the call, from the task
+being polled. A point never draws when its site is not active. The swarm masks are
+untouched: a family the mask removed is never chosen, and choosing among the remaining
+families is one draw that happens only when the site fires.
+
+## 4. Who decides (question 3)
+
+Three layers, each a veto, none a command:
+
+1. **The call site.** A buggify location. Activated once per run at the run's activation
+   probability. Fires per call at a rate. The rate is a literal at the site, FDB style,
+   with a crate default of 5% (`POINT_PROB`). Silent in the recovery tail
+   (`buggify_fault_internal`). A site at rate `1.0` is a per-seed scenario: activation
+   is the scenario draw.
+2. **The seed's chaos.** The sink consults the regimes and masks the seed drew. A seed
+   with `max_dead = 0` never reboots on a hint (`runner/process.rs:284`). A seed whose
+   storage mask dropped `SyncFailure` never fails a sync on a hint. The sink picks one
+   family among those enabled; the pick is the sink's one draw.
+3. **The budget.** `max_dead` over the eligible pool, as for timed reboots. A
+   process a regime protects (the quiet seats, FDB's `protectAddress`) is never
+   killed; it may still get a storage or network strike.
+
+"Low probability" is the product: activation × fire rate × family enabled × budget.
+In the sweep, 25% activation × 5% fire on a site reached ten times per run gives
+roughly 10% of seeds one strike at that site. That matches the seam rates
+`BuggifyHooks::crash_at` uses today, which is where "measure the per-seed rate before
+and after" (AGENTS.md, "Amplify the worst states") keeps its meaning.
+
+No rate lives in moonpool's config. No rate lives in paros's `DriverTunables`. A rate is
+a literal next to the moment it describes, and the activation knob is the run's.
+
+## 5. Attribution (question 4)
+
+The sink must know which process called it. FDB uses `g_simulator->getCurrentProcess()`.
+moonpool has no such thing today; only the `process` tracing span carries the ip.
+
+Proposed, as in the draft: `TaskMeta.owner: Option<IpAddr>`, set on a process's root
+task by `spawn_process` (`runner/process_manager.rs:101`), inherited by every task
+spawned while one of its tasks polls, and a thread-local `CURRENT_OWNER` the executor
+sets around each `runnable.run()` (`executor/mod.rs:477`). This is one field and one
+cell. The alternative, a handle passed into `run_*`, is a hook again, and Pierre wants
+hooks gone.
+
+A hint from the driver, a workload or an injector has no owner. The sink answers
+"no strike" and records `assert_reachable!("hint: a hint outside a process is ignored")`.
+That makes a client-side hint (the fleet session, the checkpointer) a no-op by
+construction; see section 8 for what stays a harness injector.
+
+File and peer are not needed. The simulated disk is scoped by owner ip
+(`SimStorageProvider::new(sim, owner_ip)`), and so is the network. A later version may
+add `hint!("..").file(path)` or `.peer(addr)` to narrow a strike; nothing in the first
+version needs it.
+
+## 6. Production cost, inertness, wasm, dependencies (question 5)
+
+- `hint!` expands to `buggify_fault_internal(prob, location)`. With buggify disabled
+  that is one thread-local borrow and one `bool` read; no draw, no allocation. The
+  returned future is `Ready` and `.await` on it is a no-op after inlining.
+- `is_simulated()` is one thread-local read. paros uses it to tilt a rate or a cadence.
+  It never changes a result a client can observe (rule to record in AGENTS.md).
+- `moonpool-buggify` stays `std`-only with zero dependencies. `thread_local!` compiles on
+  `wasm32-unknown-unknown`. The paros wasm gates (`cargo check --target
+  wasm32-unknown-unknown -p paros`) must pass with the new dependency; moonpool's
+  portability check gains `-p moonpool-buggify` for the same target.
+- `paros-core` gets nothing. No buggify, no hint, no probe. Every site lives in `paros`
+  and `parosd`.
+- `Sink` is `Box<dyn Sink>` in a thread-local, set by `buggify_init` and cleared by
+  `buggify_reset` and at the recovery boundary. Simulated ⇔ a sink is installed.
+
+## 7. Probes (question 6)
+
+`reachable!` is FDB's `CODE_PROBE` (`flow/include/flow/CodeProbe.h:331`). A probe is
+accounting, not a decision, so it belongs in `moonpool-assertions`, the zero-dependency
+crate that already owns the slot table and `assertion_bool` (`slots.rs:320`), not in
+`moonpool-buggify`.
+
+- `moonpool-assertions` gains `reachable!(msg)` and `sometimes!(cond, msg)`, both over
+  `assertion_bool`. A slot is the hash of its message (`msg_hash`), so a probe in paros
+  and the sim's `assert_reachable!` with the same text already land in one slot. The
+  macros make the production spelling exist; they do not change hashing.
+- `moonpool-sim` re-exports them, and its `assert_reachable!` keeps its extra tracing.
+- Inert path: `assertion_bool` returns at `find_or_alloc_slot` when no table is
+  installed. Ask moonpool to check the region pointer *before* hashing the message, so a
+  production probe costs one pointer read and nothing else.
+- Rule for paros: a probe message is never reworded. A changed probe is a new message,
+  and the old one is deleted in the same PR.
+
+No merge of the two crates. Each keeps one concern: `moonpool-buggify` decides,
+`moonpool-assertions` counts. `paros` depends on both.
+
+## 8. The API
 
 ```rust
-if hooks.crash_at(Seam::CellPromised) { return Err(Seam::CellPromised); }
-```
+// moonpool_buggify (std only, zero deps, wasm-clean)
 
-The error climbs to `run_machine`, then to `paros-sim/src/machine.rs::seam_crash`, which
-calls `ctx.crash_self(..)`. The sim wraps the disk in `SimDisk` to observe what each boot
-and each record write left. `NoHooks` keeps production inert.
-
-After, in the same function:
-
-```rust
-use moonpool_buggify::{buggify_fault_with_prob, hint, is_simulated};
-use moonpool_assertions::reachable;
-
-ledger.promise(ballot).await?;                 // the promise is durable
-if is_simulated() && buggify_fault_with_prob!(0.05) {
-    reachable!("machine: a machine dies right after its cell init promise");
-    tracing::warn!(seam = "cell_promised", "hint_reboot");
-    hint::reboot().await;                      // sim: killed here; production: never reached
-}
-```
-
-This is FDB's shape: `if (!history.empty() && buggify()) throw please_reboot();`
-(`fdbserver/storageserver/storageserver.cpp:13158-13161`), and the worker turns
-`please_reboot` into a simulated reboot only when `g_network->isSimulated()`
-(`fdbserver/worker/worker.cpp:2105-2110`). `buggify()` itself is
-`isEnabled && activatedAtThisFileLine && random01() < p` (`flow/include/flow/Buggify.h:92-96`),
-which `moonpool_buggify::buggify_internal` already mirrors.
-
-- The disk is the library's `ProviderDisk` in both `parosd` and the sim. `ProviderDisk`
-  itself implements `MachineDisk`. `SimDisk`, `SimMachineStores` and the `DirDisk` wrapper go.
-- One BUGGIFY location, activated per seed, firing per call, silent in the recovery tail
-  (`buggify_fault_with_prob!`, FDB's `!speedUpSimulation` guard, `storageserver.cpp:1741`).
-- moonpool turns the hint into the `ProcessForceKill` a `SelfCrash` schedules; the future
-  never resolves, so no code after the seam runs. In production `is_simulated()` is one
-  thread-local read and the branch is dead.
-- The observations `SimDisk` makes today move (section 3): a path the lifecycle walks becomes
-  a `reachable!` probe in `wait.rs`/`lifecycle.rs`, same message text (FDB's `CODE_PROBE`,
-  `flow/include/flow/CodeProbe.h:331`); a fact the sim folds with harness knowledge (`init`
-  was sent, the founders) becomes an `Audit` callback reported where its `tracing` event is.
-
-## 1. The moonpool hint API
-
-**Where.** Extend the two zero-dependency crates that exist. No new crate.
-
-- `moonpool-buggify` (`buggify!`, `buggify_fault_with_prob!`, recovery mode, thread-local
-  state, `RandomSource = fn() -> f64`) gains `is_simulated()` and a `hint` module: the
-  production side of the fault injector.
-- `moonpool-assertions` (zero-dep, wasm-safe; `assertion_bool` is a no-op while the table is
-  not initialized, `slots.rs:320`) gains the macros production code needs; today they live
-  in `moonpool-sim/src/chaos/assertions.rs:408-540`.
-
-**`is_simulated()`.** FDB's `g_network->isSimulated()` (`flow/include/flow/network.h:230`,
-`fdbrpc/sim2.cpp:1466`) is a global on the network. moonpool's `Providers` has no such
-method, and the journal store and the client have no reason to carry one. So the flag lives
-in `moonpool-buggify`'s thread-local state, set by `moonpool-sim` at run start together with
-the random source and the hint sink, cleared at run end. One source of truth: simulated ⇔ a
-sink is installed. `moonpool-sim` may add `Providers::is_simulated()` as a convenience that
-reads it; paros uses the free function. Rule for paros: `is_simulated()` tilts rates, cadences
-and extra checks (FDB's `EXPENSIVE_VALIDATION`, `Buggify.h:98`); it never changes an outcome
-a client can see.
-
-**Three kinds of hint.** A *point* is an order about now: "reboot me here", "sleep here"
-(`please_reboot`). A *window* is advice about a span: "a bad moment to die" (what Pierre
-asked for: pending work not durable). A *chosen moment* is the process deciding to reboot
-later at a point it names (FDB's `rebootAfterDurableVersion`: the simulated storage server
-arms a version, then throws `please_reboot` once that version is durable,
-`storageserver.cpp:1741-1748`, `11328-11340`). The injector obeys a point and weighs a window.
-
-```rust
-// moonpool_buggify — every call is inert without an installed sink.
+/// Buggify is enabled and a random source is installed: this thread runs a simulation.
 pub fn is_simulated() -> bool;
 
 pub mod hint {
-    /// The sink a simulation installs (per thread, by `buggify_init`).
-    pub trait Sink {
-        fn reboot_now(&self) -> bool;                                // true: a kill is scheduled
-        fn open(&self, label: &'static str, weight: Weight) -> u64;  // a window id
-        fn close(&self, id: u64);
+    /// What the simulator did with a hint that fired.
+    pub enum Strike {
+        /// Nothing: no family fits, the seed's chaos forbids it, or the caller is no process.
+        None,
+        /// A fault that lets the caller go on (a storage focus, a cut link).
+        Struck,
+        /// A kill is scheduled: the caller's future never resolves.
+        Killed,
     }
-    pub fn set_sink(sink: &'static dyn Sink); pub fn clear_sink();
 
-    /// Reboot the calling process now, as a power loss. With a sink the kill lands within
-    /// one scheduler tick and this future never resolves. Without one it resolves at once.
-    pub fn reboot() -> impl Future<Output = ()>;
+    /// The simulator's side, installed per thread for one run.
+    pub trait Sink {
+        fn strike(&self, label: &'static str) -> Strike;
+    }
+    pub fn set_sink(sink: Box<dyn Sink>);
+    pub fn clear_sink();
 
-    /// How much a window attracts the injector: `Avoid` ×0, `Normal` ×1, `High` ×10.
-    pub enum Weight { Avoid, Normal, High }
-    /// A fragile window: unsynced work in flight. Open on construction, closed on drop;
-    /// a killed process's windows are cleared by the sim.
-    #[must_use] pub struct Fragile(Option<u64>);
-    pub fn fragile(label: &'static str, weight: Weight) -> Fragile;
+    /// The crate default firing rate of an active point, per call.
+    pub const POINT_PROB: f64 = 0.05;
+
+    /// Report a moment. Use `hint!`, which names the location.
+    #[must_use = "await it, so no code after the moment runs once the process is killed"]
+    pub fn at(label: &'static str, prob: f64, location: &'static str) -> Hinted;
+
+    /// Ready unless the strike killed the caller; then Pending forever.
+    pub struct Hinted { .. }
+    impl Future for Hinted { type Output = (); .. }
 }
 
-/// `Some(d)` drawn in `range` when this site is active and fires (one draw).
-#[macro_export] macro_rules! buggify_delay { ($prob:expr, $range:expr) => { .. } }
-/// `Some(i)` among `n` when this site fires.
-#[macro_export] macro_rules! buggify_pick { ($prob:expr, $n:expr) => { .. } }
-/// A `rand`-free knob over the f64 source (integer and f64 ranges).
-#[macro_export] macro_rules! buggify_knob { ($default:expr, $range:expr) => { .. } }
+/// `hint!("label")` at the default rate, `hint!("label", 0.2)` at a site rate.
+#[macro_export]
+macro_rules! hint {
+    ($label:literal) => { $crate::hint::at($label, $crate::hint::POINT_PROB, concat!(file!(), ":", line!())) };
+    ($label:literal, $prob:expr) => { $crate::hint::at($label, $prob as f64, concat!(file!(), ":", line!())) };
+}
 
+/// A `rand`-free draw over the f64 source, for the sites that pick a value.
+#[macro_export] macro_rules! buggify_pick { ($prob:expr, $n:expr) => { .. } }   // Option<usize>
+#[macro_export] macro_rules! buggify_range { ($prob:expr, $range:expr) => { .. } } // Option<u64>
+```
+
+```rust
 // moonpool_assertions
-#[macro_export] macro_rules! reachable { ($msg:expr) => { .. } }   // AssertKind::Reachable
+#[macro_export] macro_rules! reachable { ($msg:expr) => { .. } }
 #[macro_export] macro_rules! sometimes { ($cond:expr, $msg:expr) => { .. } }
 ```
 
-A window, replacing `world/power.rs` (`paros::journal::node`, `JournalStorage::sync`):
-
 ```rust
-let _fragile = hint::fragile("journal commit", Weight::High);   // was seam_crash_bias ×10
-write_entries().await?; sync().await?;                            // first durable step
-write_metainfo().await?; sync().await?;                           // drop closes the window
-```
-
-A chosen moment (the driver, `drain_ready`), the `rebootAfterDurableVersion` pattern:
-
-```rust
-// armed once per boot, in the node loop
-if is_simulated() && self.reboot_after.is_none() && buggify_with_prob!(0.02) {
-    self.reboot_after = Some(self.applied + buggify_knob!(1, 1..64));
-}
-// consumed where the batch is durable and its messages are not yet sent
-if self.reboot_after.is_some_and(|at| self.applied >= at) {
-    self.audit.crashed(self.id, Seam::AfterSyncBeforeSend);
-    hint::reboot().await;
+// moonpool_sim (internal): the sink
+pub(crate) struct HintSink { ctx: FaultContext, regimes: Vec<AttritionInjector> }
+impl Sink for HintSink {
+    fn strike(&self, label: &'static str) -> Strike {
+        let Some(ip) = executor::current_owner() else { return Strike::None };
+        // v1: the first regime that admits `ip` decides a reboot under its budget.
+        // v2: one draw among {reboot, storage focus, link cut} restricted to the
+        //     seed's enabled families, weighted by the engine's state for `ip`.
+        ..
+        assert_sometimes_each!("hint struck", [("label", hash(label)), ("kind", kind)]);
+    }
 }
 ```
 
-**The network, the same three shapes.** A window attracts every fault moonpool owns, not only
-reboots: partition and clog draws weight their victim by open windows as attrition does. Points:
-`hint::isolate(dur)` cuts the calling process off from every peer, and `hint::clog(peer, dur)`
-holds one link (FDB's `clogInterface` and `clogPair`). Example: Accepts sent, quorum not in yet.
-The drop and duplicate hooks become inline `buggify!` at paros's send line, as moonpool-rpc already
-does in its own transport. A hint steers moonpool's network chaos and never replaces it: the swarm
-mask still decides whether the fault family is on for the seed. Network points land in moonpool
-PR B, with the windows.
+The `Hinted` future is taken at the call, not at the poll. A kill lands within one
+scheduler tick through `Event::ProcessForceKill`, the `SelfCrash::crash` path
+(`runner/context.rs:277`). Every unsynced sector resolves by the disk's crash physics
+(`storage/image.rs:379`). The recovery delay is the regime's, not paros's.
 
-**How the sim consumes a window.** `moonpool-sim` keeps a per-process window table in the
-world (`ip -> Vec<(label, weight)>`), written only at `open`/`close`, with no draw.
+## 9. Call sites in paros
 
-- *Attrition* (`AttritionInjector`, `runner/fault_injector.rs:650`): when its timer says
-  "kill one", it draws the victim among the alive processes weighted by their open windows
-  (`Avoid` 0, none 1, `High` 10). One draw, as `reboot_random` makes today (`:542`); only
-  the weights change. `assert_sometimes_each!("attrition_window", label)` records the window
-  a kill landed in, so the sweep sees "a kill inside a journal commit".
-- *Aimed cut* (new; `PowerCut::around`'s timer race moved into moonpool): on `open` of a
-  `High` window, one `buggify_fault_with_prob!(p)` draw; when it fires the kill is scheduled
-  at a random instant inside the window's expected length (the sink keeps the last length per
-  label, as `PowerCut::last_commit` does). Chaos window only.
+Four, from the shipped paths. Each replaces a `DriverHooks` method and its sim arm.
 
-"Yes, this is a bad time to reboot" raises the chance a kill lands there. It never forces
-one. Everything is a weight on a draw the injector already makes.
+**The persist-then-send edge** (`crates/paros/src/driver/ready.rs:220-241`), two
+seams today:
 
-**No `fail_io_point!`.** Failed syncs, short transfers and lost directory entries are
-moonpool storage chaos (`storage_fault_mask()`), as FDB's `AsyncFileChaos` draws its own disk
-delays and bit flips (`fdbrpc/AsyncFileChaos.h:63,96`); a storage fault is environment, not a
-decision of paros. The quarantine and `MachineError::Storage` paths are reached that way.
+```rust
+use moonpool_buggify::hint;
 
-**Process attribution.** A sink call must know its process (FDB:
-`g_simulator->getCurrentProcess()`, used all over `fdbrpc/AsyncFileNonDurable.cpp:51-60`).
-Today only the `process` tracing span carries the ip (`process_manager.rs:123`). Proposed:
-`TaskMeta` gains `owner: Option<IpAddr>`, inherited at spawn as the span is, and the executor
-sets a thread-local `CURRENT_OWNER` around each poll (next to `IN_TASK`, `executor/mod.rs:150`).
-`reboot_now` schedules `Event::ProcessForceKill` for it through the `SelfCrash::crash` path
-(`runner/context.rs:275`), with its `assert_reachable!("crash: a process crashed itself")`.
-From a workload or the driver the sink returns `false` and warns.
+// inside persist_writes, writes staged, before the flush (was Seam::BeforeSync)
+if !writes.is_empty() {
+    hint!("batch staged, not synced").await;
+}
+storage.sync(must_sync).await?;
 
-**Recovery delay.** Today paros draws it (`restart_delay!`, `seam_crash`). It is the
-environment's: the sink draws it from a moonpool knob and the factory restarts the process.
+// back in drain_ready, after persist_writes, before the sends (was AfterSyncBeforeSend)
+if !writes.is_empty() || !messages.is_empty() {
+    hint!("batch durable, not sent").await;
+}
+send_messages(out, audit, journal, messages);
+```
 
-**Recovery mode.** Reboots, delays and aimed cuts use the fault form, silent after
-`buggify_enter_recovery` (the runner calls it when the chaos window closes). Paros's
-`active()` cutoff in `BuggifyHooks` goes. The late and bare outages stay moonpool chaos.
+`audit.crashed(node, seam)` goes. The boot that follows reports what it found
+(`Audit::recovered`), and the sweep's gate is the `sometimes_each` label bucket the
+sink records. `Seam` survives as the audit's label enum only where a boot can tell the
+seams apart; otherwise it goes too.
 
-**Determinism.** Every draw goes through the installed `RandomSource`. Opening and closing
-a window draws nothing; the aimed cut draws once per open; the kill is a scheduled event.
-The rule stays: a hint is consulted from the node loop or from work the process awaits,
-never from a task that can outlive the run. A `Fragile` guard is held across awaits in one
-task, never moved into a spawned one. The canary proves it after each PR.
+**The matchmaker's registration** (`crates/paros/src/matchmaker/mod.rs:207-221`):
 
-**Inert in production.** `is_simulated()` is one thread-local read; `reboot()` a `Ready`
-future; `fragile` returns `Fragile(None)`; a `reachable!` a null-pointer check (ask moonpool
-to check the pointer before hashing). `std` only, `wasm32` clean.
+```rust
+hint!("registration staged, not synced").await;
+storage.sync().await.map_err(|e| storage_fault_crash(audit, id, e))?;
+hint!("registration durable, reply not sent").await;
+reply(..);
+```
 
-**Fewer Sim-vs-Real interfaces.** After the migration the shared surface is `Providers`,
-`moonpool-journal`, `moonpool-rpc` and `moonpool_buggify::{is_simulated, hint, buggify_*}`.
-`DriverHooks`, `NoHooks`, `BuggifyHooks`, `RunError::SeamCrash`, `SimDisk`, `DirDisk`,
-`PowerCut` and `restart_delay!` are deleted. `Audit`/`NoAudit` stays: observation is the one
-seam the sim needs that production does not.
+**The cell init promise** (`crates/paros/src/machine/wait.rs:267-271`):
 
-**Activation is the per-seed draw.** A location is activated once per run and fires per
-call (`Buggify.h:107-112`). A site at `prob = 1.0` is a per-seed scenario. `withhold_gc`,
-`hold_journal` and `lose_verdicts` need no harness state: they are sites with a high rate.
+```rust
+ledger.promise(ballot).await?;
+hint!("cell promise durable, ack not sent").await;   // was crash_at(Seam::CellPromised)
+```
 
-## 2. What paros hints, and where
+`RunError::SeamCrash` goes: a killed process never returns. `paros-sim/src/machine.rs::
+seam_crash` and `restart_delay!` go with it.
 
-`paros-core` gets nothing: no `buggify`, no `is_simulated`, no hint (confirmed by Pierre).
-Every site lives in `paros` (drivers, stores, machine, client) and `parosd`.
+**The three commits of one sync** (`crates/paros/src/journal/node.rs:481-557`), the
+#264 shape made likely:
 
-| today | after | kind | gate (message kept verbatim) |
-|---|---|---|---|
-| `Seam::CellPromised` via `crash_at` | section 0 | point | `"machine: a machine dies right after its cell init promise"` at the site |
-| `Seam::CellFormatted` | same, after `ledger.format`, before `ledger.form` | point | `"machine: a machine dies between the format and its vote"` |
-| `delay_boot` | `buggify_delay!(0.1, 250..2_501)` + `time().sleep` in `run_machine` | point | `"machine: a machine starts late"` |
-| `BeforeSync` (`driver/ready.rs`) | `fragile("ready batch", High)` from staging to the sync | window | audit `crashed(node, seam)` from the boot that finds the torn batch; `recovered` as today |
-| `AfterSyncBeforeSend` | point after the sync, before the sends; plus the chosen-moment arm above | point | audit `crashed` |
-| `MatchBeforeSync` / `MatchAfterSyncBeforeReply` | one window, one point, in `matchmaker/mod.rs` | window + point | audit `matchmaker_crashed` |
-| `AfterPrepareSent` (#260) | point after the campaign's `Prepare` send | point | as today |
-| `world/power.rs` | `fragile("journal commit", High)` in both journal syncs; the aimed cut in moonpool | window | `"journal store: a node loses power mid-commit"` from the sink's label bucket |
-| `seam_crash_bias` ×10 | `Weight::High` on the write windows | weight | `"a write-window-biased seam crash fires"` |
-| quiet seats "outside the power cut" (`shape.rs`) | `Weight::Avoid` on a replica's and a held journal's windows | weight | unchanged |
-| `skip_*_resend`, `resign_leadership`, election timeout extremes, `stretch_tick_interval`, `expire_parked_read_early`, `skip_delegation` | `is_simulated() && buggify_with_prob!(p)` inline, rates as `BuggifyHooks` | bool | the audit gates they feed today |
-| `drop/duplicate_outgoing`, mailbox hooks, `drop/duplicate_client_reply` | inline bool sites at the send and the mailbox | bool | `dropped_at_send`, `duplicated_at_send`, `client_reply_dropped`, … |
-| `withhold_gc_requests`, `hold_journal`, lost verdicts | inline sites at rate 1.0 | bool | the gates they feed today |
-| `handoff_target`, `phase2_column`, `read_row`, `proxy_for` | `buggify_pick!(p, n)` inline | choice | inline `reachable!` moved next to the site |
-| `abandon_reconfigurer(phase)` | one site per phase arm | bool | one `reachable!` per phase |
-| `restart_delay!` | gone: moonpool's recovery delay | environment | moonpool's reachable |
-| `world/injector.rs` | stays: disk rot aimed by the custody ledger, judged against the journal's verdict; a later `upstream-to-moonpool` candidate | environment | unchanged |
-| `lifecycle.rs` `ScriptedLifecycle`, `fleet.rs` target kill | stay: moonpool faults (FDB's `MachineAttrition.cpp:527`) | environment | unchanged |
-| `fleet.rs` "stop after one step", checkpoint-crash shapes | stay: an operator's explicit misbehaviour in the workload | operator | unchanged |
+```rust
+self.commit(promise).await?;                 // the raised promise, alone
+hint!("promise durable, entries staged").await;
+.. commit the packed entry batches ..
+hint!("entries durable, metainfo staged").await;
+self.commit(staged).await?;                  // floor and metainfo ride the last batch
+```
 
-**Does `DriverHooks` survive?** No. Every method is a draw, a choice or a window, and
-`buggify_pick!` covers the choices. `Seam` survives as the audit's label; `RunError::SeamCrash`
-goes: a crashed process never returns. `BuggifyHooks` shrinks one family per PR.
-`DriverTunables` stays: a tunable is configuration, a hint is a decision.
+The cut *inside* one commit, between the segment write and its sync, is
+`moonpool-journal`'s own seam (`journal.rs:638`, `commit`). moonpool-journal can hold
+that `hint!` itself: it depends on `moonpool-core` only, and `moonpool-buggify` is
+zero-dep. Then every user of the journal gets mid-commit cuts, and `PowerCut`'s timer
+race is deleted from paros rather than moved.
 
-## 3. SimDisk and SimMachine go away
+**A hook that is not a hint** (`crates/paros/src/driver/mod.rs:516`,
+`skip_accept_resend`): the driver's own rare-but-valid decision needs no simulator
+action, so it is a plain inline site:
 
-`MachineProcess` keeps its `Process` adapter (the role map needs one) and runs
-`run_machine(providers, ProviderDisk::new(..), ..)` with no wrapper.
+```rust
+if pending_accepts && !moonpool_buggify::buggify_with_prob!(0.95) {
+    node.resend_pending();
+}
+```
 
-Library change: `ProviderDisk<P>` implements `MachineDisk` with
-`Stores = ProviderStores<P, A>`, `A` from an audit factory the caller passes (`parosd`:
-`NoAudit`; sim: `NodeAudit` per journal, as `SimMachineStores::audit` builds it today).
-`parosd`'s provisioning `Record` moves into `ProviderDisk::format`; `DirDisk` is deleted.
-`run_machine` gains `audit: &A` (`A: Audit`).
+## 10. Mapping every existing site (question 7)
 
-| observation today (`paros-sim/src/machine.rs`) | after |
-|---|---|
-| `note_boot`: empty disk, formed restarts, formatted waits, promised and unvoted | `reachable!` probes in `lifecycle.rs::identity` and `wait.rs`, same messages |
-| "no `cell init` lists it restarts and waits" | `Audit::machine_booted(node, &record)`; the sim knows the founders |
-| `note_decree`: promise never falls, two ballots meet, one cell per run, several seeds form, a later ballot finishes | `Audit::decree_promised(node, ballot)`, `Audit::cell_formed(node, ballot, &plan)` where `cell_promised`/`cell_formed` are traced; `MachineBoard` moves to `paros_sim::audit::machine`, text kept |
-| `provision`: no cell forms without `init`, only a founder, over the founders listed | `Audit::cell_formatting(node, &plan)` before `ledger.format`; the board checks `init_sent` and the layout |
-| "formats over journals an unvoted attempt left", "a seed formats its cell's journals" | `reachable!` probes in `wait.rs` around `ledger.format` |
-| "a formed machine serves journals", "a store is opened as its machine" | hard `assert!` in `ProviderDisk::stores` and `ProviderStores::open` (library postconditions) |
-| "a failed record write stops a machine, which restarts" | `reachable!` where `MachineError::Storage` is built |
+| today | after | kind |
+|---|---|---|
+| `Seam::BeforeSync`, `AfterSyncBeforeSend` (`ready.rs`) | two `hint!` points, section 9 | hint |
+| `Seam::AfterPrepareSent` (#260) | `hint!("reconfiguring prepare sent")` after the send | hint |
+| `Seam::MatchBeforeSync`, `MatchAfterSyncBeforeReply` | two points in `matchmaker/mod.rs` | hint |
+| `Seam::CellPromised`, `CellFormatted` (`wait.rs`) | two points; `seam_crash` deleted | hint |
+| `world/power.rs` `PowerCut::around` | points between the sync's commits (paros) and inside `commit` (moonpool-journal); the in-span delay drawn by the sink | hint |
+| `seam_crash_bias` ×10 | a higher rate literal on the write-side points (`hint!(.., 0.2)`) | rate |
+| quiet seats outside the cut (`shape.rs`) | the regime's victims filter; a protected process gets no kill | moonpool config |
+| `restart_delay!`, `seam_crash` recovery draw | the regime's `recovery_delay_ms` | moonpool |
+| `delay_boot` | `if buggify_with_prob!(0.1) { time.sleep(buggify_range!(1.0, 250..2_501)) }` in `run_machine` | inline |
+| `skip_*_resend`, `resign_leadership`, `stretch_tick_interval`, `expire_parked_read_early`, `skip_delegation`, mailbox hooks (`overtake`, `hold`, `reverse`, `evict`), election-timeout extremes, `abandon_reconfigurer` per phase | `buggify_with_prob!(p)` inline, same rates as `BuggifyHooks` | inline |
+| `drop_outgoing`, `duplicate_outgoing`, `drop_client_reply`, `duplicate_client_reply` | `buggify_with_prob!` at the send and the reply, one site per message kind that has its own gate | inline |
+| `handoff_target`, `phase2_column`, `read_row`, `proxy_for`, `initiate_handoff` | `buggify_pick!(p, n)` inline; `HandoffContext` stays as the tilt's input | inline |
+| `withhold_gc_requests`, `hold_journal`, `lose_verdicts` (per-seed latched) | `buggify_with_prob!(1.0)` at the site: activation is the per-seed draw | inline, scenario |
+| `DriverTunables` draws (`NodeShape`) | stay knobs, drawn by the harness: configuration, not a decision | unchanged |
+| `world/injector.rs` boot damage | stays: storage chaos aimed by `FaultFocus`; `upstream-to-moonpool` candidate | environment |
+| `ScriptedLifecycle`, `fleet.rs` target kill, late and bare outages | stay harness injectors over audit facts (FDB's `MachineAttrition`) | environment |
+| fleet "stop after one step", checkpoint-then-stop | stay: an operator's explicit misbehaviour in the workload | operator |
+| `DriverHooks`, `NoHooks`, `BuggifyHooks`, `RunError::SeamCrash`, `SimDisk`, `DirDisk` | deleted, one family per PR | — |
 
-Rule: a probe names a path the library walked; an audit callback carries a fact the sim folds
-with harness knowledge.
+Two rules fall out. A **hint** is a moment where an *environmental* fault would be
+interesting. An **inline buggify** is a *decision of the code* that needs no
+environment. Nothing is both.
 
-## 4. Migration plan
+## 11. The first moonpool PR (question 8)
 
-1. **moonpool PR A: points.** `is_simulated()`, `hint::{reboot, Sink, set_sink, clear_sink}`,
-   `buggify_delay!`, `buggify_pick!`, a `rand`-free `buggify_knob!`; `TaskMeta.owner`,
-   `CURRENT_OWNER`; the sink and flag installed in `buggify_init`; the recovery-delay knob.
-   Tests: a hint in a process schedules the kill and stays pending; in a workload it
-   resolves; one seed, two runs, one digest.
-2. **moonpool PR B: windows.** `Weight`, `Fragile`, the world's window table cleared on kill,
-   attrition's weighted victim draw, the aimed cut, the `sometimes_each` label bucket.
-3. **moonpool PR C: probes.** `moonpool-assertions::{reachable!, sometimes!}` over
-   `assertion_bool`; `moonpool-sim` re-exports them so both spellings hash to one slot.
-4. **Pin advance.** One rev on the eight lines. Proof: build, nextest,
-   `cargo xtask sim run-all` saturates as before, canary 300 seeds.
-5. **paros PR 1: the machine** (section 0). `moonpool-buggify` and `moonpool-assertions`
-   become `paros` deps; the two seams and `delay_boot` become points; `Audit` gains four
-   machine callbacks; `ProviderDisk: MachineDisk`; delete `SimDisk`, `SimMachineStores`,
-   `DirDisk`, `seam_crash`. Proof: sweep saturates with every moved message reached; hunt
-   3,000; canary 300. Record the two seam reachables' per-seed rate before and after.
-6. **paros PR 2: the journal commit window.** `fragile` in both syncs; delete
-   `world/power.rs` and the quiet-seat exclusion. Proof: the mid-commit reachable's per-seed
-   rate before and after; hunt 10,000 (fault model); `injector::judge` still saturates.
-7. **paros PR 3: the five driver seams.** Windows, points and the chosen-moment arm in
-   `driver/ready.rs`, the matchmaker and the campaign; delete `RunError::SeamCrash`,
-   `crash_at`, every sim `SeamCrash` arm, `restart_delay!`. Proof: sweep (per-seam
-   `crashed`/`recovered`); hunt 10,000; canary 300.
-8. **paros PRs 4..n: one hook family per PR** (resends and elections; sends and mailbox;
-   client replies; grid and proxy choices; reconfigurer; GC and held journal). Each: inline
-   sites, gate text kept, the method deleted from both traits; sweep saturation, hunt 2,000.
-   The last PR deletes `hooks.rs` and rewrites the `adding-a-buggify-site` skill.
-9. **Docs.** `AGENTS.md` *Turbulence layers* (prong 1 becomes "hints in `paros`": points,
-   windows, chosen moments, probes; `is_simulated` tilts, never decides an outcome), both
-   crate maps, `docs/architecture.md` (dated, #246), the book.
+**PR A: points, reboot only.** Useful to paros on its own: it deletes the seven seams,
+`seam_crash`, `restart_delay!` and `RunError::SeamCrash`.
 
-## 5. Risks and open questions for Pierre
+- `moonpool-buggify`: `is_simulated()`, `hint!`, `hint::{Sink, Strike, set_sink,
+  clear_sink, at, Hinted, POINT_PROB}`, `buggify_pick!`, `buggify_range!`.
+- `moonpool-sim`: `TaskMeta.owner`, `CURRENT_OWNER`, `spawn_owned`; `HintSink` mapping
+  every hint to `AttritionInjector::reboot_on_hint` under the admitting regime; sink
+  installed by the orchestrator for the chaos window, cleared with
+  `buggify_enter_recovery`; `assert_sometimes_each!("hint struck", label, kind)`.
+- `moonpool-assertions`: `reachable!`, `sometimes!`; the pointer check before the hash.
+- Tests: a hint inside a process schedules the kill and stays pending; a hint from a
+  workload resolves; a hint under `max_dead = 0` resolves; one seed, two runs, one
+  digest (`check_determinism`).
 
-1. **Process attribution.** The sink must know the calling process; `TaskMeta.owner` touches
-   moonpool's executor. The alternative is a handle passed into `run_*`, a hook again.
-2. **Rates and weights in production code.** Each site's rate and each window's `Weight` is a
-   literal next to the code, as in FDB. A three-step `Weight` or a bare `f64`?
-3. **Window granularity.** One window per commit is coarse. A commit could open two
-   (`"entries unsynced"`, `"metainfo unsynced"`) so the aimed cut names the step it cut.
-   Start with one and split when a gate asks for it.
-4. **`reachable!` text ownership.** Probe messages are slot hashes shared with the sim. Moving
-   them into `paros` is safe only verbatim. Rule to record: a message in `paros` is never
-   reworded; a changed probe is a new message and the old one is deleted in the same PR.
-5. **`is_simulated()` discipline.** FDB lets it change timeouts (`storageserver.cpp:3033`) and
-   severities. For paros the proposed rule is narrower: tilt rates, cadences and checks only.
-   Agree, or allow sim-only shortcuts too?
-6. **Recovery window.** Hints rely on moonpool's recovery mode, not paros's time cutoff.
-   Confirm in PR 1 that `buggify_enter_recovery` fires at `CHAOS_DURATION_MS` exactly.
+Deferred, in order: **PR B** storage and network strikes in the sink (one family draw,
+weighted by engine state), the delayed strike for in-span cuts, and `moonpool-journal`'s
+own commit point. **PR C** windows, only if a gate asks for one after PR B. Client-side
+hints stay out until a workload needs the sink to reach a *named* process.
+
+paros follows the plan in `docs/analysis/simulation/production-fault-hints.md` §4, with
+one change: the `Weight`/`Fragile` window API and the `Weakness` enum are not built.
+
+## 12. Trade-offs
+
+- **A label is weaker than a type.** A typo makes a new bucket. A `&'static str` also
+  cannot be matched on. Accepted: the simulator never matches on it, and the sweep shows
+  every label it saw.
+- **The sink's one draw shifts every seed** when a new family joins (PR B). That is the
+  normal cost of any added draw; the canary proves determinism, not seed stability.
+- **A hint cannot aim at another process.** The fleet killer and the outages stay harness
+  injectors. That is consistent: those are environment events timed by audit facts, not
+  moments of the code that dies.
+- **Rates in production source.** Pierre accepted this. The rule: a rate is a literal, a
+  default of 5%, and never a knob.
+- **No `Weakness` means no "what would be lost" in the trace.** The label and the boot's
+  `Audit::recovered` say it instead, and `sometimes_each` pairs label with strike kind.
+
+## 13. Open questions for Pierre
+
+Each answerable in one word.
+
+1. Label as a free string, or a closed enum? (recommended: string)
+2. A site rate literal next to the code, with a 5% default? (recommended: yes)
+3. `reachable!` in `moonpool-assertions`, not `moonpool-buggify`? (recommended: yes)
+4. `moonpool-journal` hints its own write-then-sync seam? (recommended: yes)
+5. Windows in the first version? (recommended: no)
+6. Hints from client code (workload process) in the first version? (recommended: no)
+7. Keep `Seam` as the audit's label enum, or let the label replace it? (recommended: replace)

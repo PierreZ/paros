@@ -1413,12 +1413,13 @@ Simulation is the investment. Every milestone lands with its share of:
   (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
   too.
 - Faults in the shipped code (decided on 2026-10-09, #294): the simulation runs the same machine
-  and disk as `parosd`, with no sim substitute. The shipped code hints its own failures: an
-  inline `buggify!` site, a reboot point (`hint::reboot()`, FDB's `please_reboot`), a fragile
-  window that weights attrition toward unsynced work (`hint::fragile`), or a reboot armed at a
-  chosen moment (FDB's `rebootAfterDurableVersion`). All are inert in production. `paros-core`
-  gets none. `DriverHooks`, `SimDisk`, `LedgeredJournal` and `PowerCut` go; `Audit` stays as the
-  one observation seam (`docs/analysis/simulation/production-fault-hints.md`).
+  and disk as `parosd`, with no sim substitute. A choice the code makes is an inline buggify. A
+  moment where an environmental fault is interesting is a hint: the code names the moment
+  (`hint!("batch durable, not sent").await`, FDB's `if (buggify()) throw please_reboot()`), and
+  moonpool decides whether and how to strike, under the seed's attrition regime. Both are inert in
+  production. `paros-core` gets none. `DriverHooks`, `SimDisk`, `LedgeredJournal` and `PowerCut`
+  go; `Audit` stays as the one observation seam
+  (`docs/analysis/simulation/production-fault-hints.md`).
 - New BUGGIFY sites for every new decision the driver, the frontend, the resolver and the
   coordinators take, and the coverage-guided sweep saturating over them.
 
