@@ -180,7 +180,7 @@ impl FleetOps {
             assert_reachable!("init: an operator sends init to a machine outside the seeds");
             let span = (outside.end - outside.start) as u64;
             let target = self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)];
-            return self.misdirected(target, &members).await;
+            return self.misdirected(ctx, target, &members).await;
         }
         if founders > 1 && buggify_with_prob!(0.25) {
             assert_reachable!("init: an operator starts cell init at another founder");
@@ -284,8 +284,14 @@ impl FleetOps {
     }
 
     /// A `cell init` sent to a machine outside the founders: refused as not a
-    /// member, and nothing forms. Whether it ended.
-    async fn misdirected(&self, target: SocketAddr, members: &[SocketAddr]) -> bool {
+    /// member, or as `cell_exists` once `cell add-machine` admitted it (#216),
+    /// and nothing forms. Whether it ended.
+    async fn misdirected(
+        &self,
+        ctx: &SimContext,
+        target: SocketAddr,
+        members: &[SocketAddr],
+    ) -> bool {
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),
@@ -295,6 +301,15 @@ impl FleetOps {
         )
         .await;
         match outcome {
+            InitOutcome::Refused(label) if label == "cell_exists" => {
+                assert_always!(
+                    crate::machine::is_admitted(ctx.state(), target)
+                        || crate::machine::was_wiped(ctx.state(), target),
+                    "init: a machine outside the seeds refuses init as not a seed",
+                    { "refusal" => label.as_str() }
+                );
+                true
+            }
             InitOutcome::Refused(label) => {
                 assert_always!(
                     label == "not_a_member",

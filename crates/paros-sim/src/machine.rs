@@ -141,6 +141,25 @@ pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
         .collect()
 }
 
+/// Whether the machine at `addr` holds an admission on its disk now (#216).
+pub(crate) fn is_admitted(state: &StateHandle, addr: SocketAddr) -> bool {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .nodes
+        .get(&addr)
+        .is_some_and(|node| board.admitted.contains_key(node))
+}
+
+/// Whether a wipe replaced the machine at `addr` this run: an answer it sent
+/// before the wipe may name a disk that is gone.
+pub(crate) fn was_wiped(state: &StateHandle, addr: SocketAddr) -> bool {
+    lock(&machine_board(state))
+        .wiped
+        .iter()
+        .any(|(wiped, _)| *wiped == addr)
+}
+
 /// Whether the machine at `addr` is a founding member `init` lists.
 pub(crate) fn is_founder(state: &StateHandle, addr: SocketAddr) -> bool {
     lock(&machine_board(state)).founders.contains(&addr)
