@@ -53,8 +53,7 @@ Each line names the rule and the mutants it kills.
   `is_phase1_addressee`).
 - `take_back_delegated`, `ProxyLeader::expire_stale`: no round past its budget
   stays delegated or retained (`stalled_delegations`). `Rounds::stalled ->
-  vec![]` still survives: no seed keeps a delegated round past its budget
-  (#341).
+  vec![]` survived until the stalled-proxy scenario (#341, below).
 - `on_nack`: a Nack at the work in flight deposes it, and a Nack at no work in
   flight leaves the role alone (the four `supersedes` mutants).
 - `learn`: a slot learned chosen leaves the repair probe
@@ -146,6 +145,35 @@ Each mutant applied by hand, 100 seeds:
 - `entry.seq >= at.first_seq` to `<`, and `entry.seq < at.next_seq` to `==`
   and to `>`: caught in seeds 1..=20 (safety).
 - `&&` to `||` in the same test: caught in seeds 81..=100 (progress).
+
+## Proxy take-back, eviction and supersession (#341)
+
+The oracles existed. No seed in `1..=300` reached the three proxy states the
+mutants need. The stalled-proxy scenario (`shape::stalled_proxy`) turns on
+three ingredients together on one per-seed draw:
+
+- Every proxy drops the `Accepted`s and `Nack`s it hears for the chaos window
+  (`paros::scenario::STALL_PROXY`).
+- A leader that holds delegated rounds resigns and campaigns again at once
+  (`paros::scenario::RESIGN_DELEGATING`).
+- The run runs an acceptor grid where the pool tiles one.
+
+Two probes mark the states: "proxy: a leader takes a delegated round back on
+a grid column" and "proxy: a higher-ballot delegation meets a superseded
+leadership's rounds". The leader change needs the second ingredient: without
+it, a new election raised the acceptors' promises, the proxy's re-send met
+their `Nack`s and closed its rounds before the next leader delegated.
+
+Each mutant applied by hand, at the weekly 300 seeds:
+
+- `Round::column -> None`: caught in seeds 61..=80 ("every vote behind a
+  decision comes from the round's column"; the take-back re-sends to the
+  whole membership).
+- `Rounds::close_below -> vec![]`, `<` to `==` and `<` to `>`: caught in
+  seeds 1..=20 ("a superseded leadership's rounds are gone", "no round below
+  the ballot survives").
+- `Rounds::stalled -> vec![]`: caught in seeds 1..=20 ("no round past the
+  retention budget survives").
 
 ## Equivalent edits a regex cannot isolate
 
