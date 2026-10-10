@@ -25,14 +25,15 @@ pub struct KeyArgs {
 
 #[derive(Subcommand, Debug)]
 enum KeyCommand {
-    /// Write a new root key pair: `root-<key id>.private` (mode 0600) and
-    /// `root-<key id>.public`. Refuses to overwrite a file.
+    /// Write a new root key pair: `<label>.private` (mode 0600) and
+    /// `<label>.public`. Refuses to overwrite a file.
     Generate {
         /// The directory to write to.
         #[arg(long)]
         out: PathBuf,
-        /// The key pair's human name.
-        #[arg(long, default_value = "root")]
+        /// The key pair's name, e.g. `prod-2026-10`: letters, digits, `.`,
+        /// `_` and `-`. It names the files and the key in every output.
+        #[arg(long, value_parser = parse_label)]
         label: String,
     },
     /// Print the public half of a `.private` or `.public` file.
@@ -40,6 +41,20 @@ enum KeyCommand {
         /// The key file.
         file: PathBuf,
     },
+}
+
+/// A key label: it names files, so letters, digits, `.`, `_` and `-` only.
+fn parse_label(text: &str) -> Result<String, String> {
+    let valid = !text.is_empty()
+        && !text.starts_with('.')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(text.to_string())
+    } else {
+        Err(format!("{text:?}: letters, digits, '.', '_' and '-' only"))
+    }
 }
 
 /// Entropy for one key or block, from the provider's random source.
@@ -92,14 +107,7 @@ pub fn run(out: &Printer, args: KeyArgs) -> Ending {
             .and_then(|text| RootPublicKey::from_file(&text).map_err(|e| e.to_string()))
             .map(|key| {
                 out.emit(
-                    || {
-                        format!(
-                            "key_id={} label={} {}",
-                            key.key_id(),
-                            key.label(),
-                            key.key_text()
-                        )
-                    },
+                    || format!("{} {}", key.label(), key.key_text()),
                     || public_json(&key),
                 );
             }),
@@ -115,9 +123,8 @@ pub fn run(out: &Printer, args: KeyArgs) -> Ending {
 
 fn generate(out: &Printer, dir: &Path, label: &str) -> Result<(), String> {
     let key = RootKey::generate(label, &entropy());
-    let stem = format!("root-{:08x}", key.key_id());
-    let private = dir.join(format!("{stem}.private"));
-    let public = dir.join(format!("{stem}.public"));
+    let private = dir.join(format!("{label}.private"));
+    let public = dir.join(format!("{label}.public"));
     if public.exists() {
         return Err(format!("{}: already exists", public.display()));
     }
@@ -126,14 +133,15 @@ fn generate(out: &Printer, dir: &Path, label: &str) -> Result<(), String> {
     out.emit(
         || {
             format!(
-                "key_id={} private={} public={}",
-                key.key_id(),
+                "key={} private={} public={}",
+                key.label(),
                 private.display(),
                 public.display()
             )
         },
         || {
             json!({
+                "key": key.label(),
                 "key_id": key.key_id(),
                 "private": private.display().to_string(),
                 "public": public.display().to_string(),
@@ -141,4 +149,18 @@ fn generate(out: &Printer, dir: &Path, label: &str) -> Result<(), String> {
         },
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_label;
+
+    #[test]
+    fn labels_are_file_names() {
+        assert!(parse_label("prod-2026.10_a").is_ok());
+        assert!(parse_label("").is_err());
+        assert!(parse_label("../x").is_err());
+        assert!(parse_label(".hidden").is_err());
+        assert!(parse_label("a b").is_err());
+    }
 }

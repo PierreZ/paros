@@ -32,7 +32,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/journal.rs` → `parosctl journal create|delete|list` over `paros::client::journals` (#210): the tenant named, found in the fleet directory; one request id per run, re-sent by the library until decided.
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
-- `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; key files written once, the private one mode 0600.
+- `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; `<label>.private` (mode 0600) and `<label>.public`, written once; outputs name a key by its label, never its id.
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.

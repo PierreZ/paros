@@ -250,4 +250,6 @@ fn a_token_round_trips_through_text_and_prints() {
     let text = inspect(&acme, Some(&world.ring)).unwrap();
     assert!(text.contains(r#"tenant("acme")"#), "{text}");
     assert!(text.contains(r#"role("tenant")"#), "{text}");
+    assert!(text.contains("verified with key test"), "{text}");
+    assert!(text.contains(r#"root_key("test")"#), "{text}");
 }

@@ -863,9 +863,13 @@ pairs and mints tokens for any role.
   Datalog policy in the server: the meaning of a role changes without new tokens. A view of #399
   asks `view.detail` (admin only) for full detail, else its own operation for the tenant detail.
   A refusal is `InvalidToken`, `Expired` or `Forbidden`.
-- **Keys** (#400). `parosctl key generate` writes `root-<key id>.private` (mode 0600) and
-  `.public`: JSON with a random `u32` key id (the Biscuit `root_key_id`), a label, and the key
-  in Biscuit's own text form. A token without a key id the universe entry holds is refused. An
+- **Keys** (#400). `parosctl key generate --label <name>` writes `<name>.private` (mode 0600)
+  and `<name>.public`: JSON with the label, a random `u32` key id (the Biscuit `root_key_id`,
+  inside the token format only) and the key in Biscuit's own text form. A token without a key id
+  the universe entry holds is refused.
+- **Names for people, hex ids for local debugging only** (decided on 2026-10-10): everything a
+  human reads or types names a key by its label and a tenant or journal by its name. A minted
+  authority block carries `root_key(<label>)`, and `token inspect` names the key that verified it. An
   idle machine pins the key with `parosd --root-public-key` to check `FormCell` and `Admit`
   (#245).
 - **Derive, macaroon style**: any holder narrows a token offline with `parosctl token derive`

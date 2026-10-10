@@ -42,6 +42,8 @@ pub struct Grant {
     /// The role granted.
     pub role: Role,
     /// Who the token is for: a label for logs, never read by a policy.
+    /// The authority block also names the root key by its label,
+    /// `root_key(..)`, for people reading the token.
     pub subject: String,
     /// The last instant the token is valid.
     pub expires: SystemTime,
@@ -149,6 +151,7 @@ pub fn mint(
     let mut block = Biscuit::builder()
         .fact(builder::fact("role", &[builder::string(grant.role.name())]))?
         .fact(builder::fact("subject", &[builder::string(&grant.subject)]))?
+        .fact(builder::fact("root_key", &[builder::string(key.label())]))?
         .check(expiry_check(grant.expires)?)?
         .root_key_id(key.key_id());
     if let Role::Tenant(tenant) = &grant.role {
@@ -245,8 +248,9 @@ pub fn seal(token: &Token) -> Result<Token, Error> {
     Ok(Token(token.unverified()?.seal()?.to_vec()?))
 }
 
-/// Every block of `token` as Datalog source, and its root key id. With a
-/// ring, the signature is checked first.
+/// Every block of `token` as Datalog source. With a ring, the signature
+/// is checked first and the text names the key that verified it, by its
+/// label: a human reads names, never ids.
 ///
 /// # Errors
 ///
@@ -254,13 +258,15 @@ pub fn seal(token: &Token) -> Result<Token, Error> {
 /// signature does not verify.
 pub fn inspect(token: &Token, ring: Option<&KeyRing>) -> Result<String, Error> {
     let unverified = token.unverified()?;
+    let mut text = String::new();
     if let Some(ring) = ring {
         Biscuit::from(token.as_bytes(), |id| ring.choose(id))?;
+        let label = unverified
+            .root_key_id()
+            .and_then(|id| ring.get(id))
+            .map_or("?", |key| key.label());
+        let _ = writeln!(text, "verified with key {label}");
     }
-    let mut text = match unverified.root_key_id() {
-        Some(id) => format!("root key id: {id}\n"),
-        None => "root key id: none\n".to_string(),
-    };
     for index in 0..unverified.block_count() {
         let source = unverified.print_block_source(index)?;
         let _ = writeln!(text, "block {index}:\n{source}");

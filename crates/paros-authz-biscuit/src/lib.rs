@@ -23,8 +23,9 @@
 //! - a decision is allow or a refusal judged by its kind; no query result is
 //!   read.
 //!
-//! Tenants and journals are named by their full string names, never by hex
-//! ids (decided on 2026-10-10).
+//! A human reads and types names, never hex ids (decided on 2026-10-10):
+//! tenants and journals by their full string names, root keys by their
+//! labels. A key id exists only inside the token format.
 
 mod entropy;
 mod error;
