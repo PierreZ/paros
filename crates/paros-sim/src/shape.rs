@@ -793,8 +793,13 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// scenario the gate fired on about 0.1% of seeds (2,000 hunt seeds, after
 /// #210 (tenant control journal) removed the directory's create that named
 /// an unregistered joiner). On a scenario seed every node opens its follow
-/// reads late (`paros::scenario::LAG_FOLLOW`). Rare-but-valid: a slow
-/// follower is.
+/// reads late (`paros::scenario::LAG_FOLLOW`), the seed runs the system
+/// journals ([`system_journals`]), and a client that registers a joiner
+/// reconfigures onto it next whatever the swarm mask (`ChainWorkload`):
+/// the gate fired on 0 of 417 checks (600 hunt seeds) before these
+/// ingredients came together and 7 of 637 (600) after. Rare-but-valid: a
+/// slow follower is, and each ingredient keeps its own coin on the other
+/// seeds.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
     let registry = registry(state);
@@ -940,10 +945,11 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 /// in `chain_workload/fleet.rs`, not by this draw.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn system_journals(state: &StateHandle) -> bool {
+    let lagging = lagging_fold(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.system.get_or_insert_with(|| {
-        if !moonpool_sim::sim_random_bool(0.5) {
+        if !lagging && !moonpool_sim::sim_random_bool(0.5) {
             return false;
         }
         // BUGGIFY pairing: a seed genuinely runs the system journals (a

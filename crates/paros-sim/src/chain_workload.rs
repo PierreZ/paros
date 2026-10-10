@@ -3199,11 +3199,15 @@ impl Workload for ChainWorkload {
                     // An operator who registers a node usually adds it next
                     // (#189): the client's next step grows a configuration
                     // onto the joiner it just registered.
+                    // On a lagging-fold seed the reconfiguration follows
+                    // whatever the swarm mask: the scenario's ingredients
+                    // come together (`crate::shape::lagging_fold`).
                     reconfigure_next = system_ops
                         .registry_step(ctx, &nodes, None, raw_payload)
                         .await
                         && journal == main
-                        && operations.contains(&RECONFIGURE);
+                        && (operations.contains(&RECONFIGURE)
+                            || crate::shape::lagging_fold(ctx.state()));
                 }
                 DRAIN_NODE => {
                     let _ = system_ops
