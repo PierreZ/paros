@@ -434,10 +434,12 @@ pub(crate) fn booted(
         let founder = board.founders.contains(&addr);
         let unformed = board.voters.len() < board.founders.len();
         board.wiped.insert((addr, old));
+        // Judge the loss while the wiped machine's vote still names its
+        // plan: a wipe of a plan's last voter loses its cell too.
+        board.note_lost();
         if board.voters.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's vote with its disk");
         }
-        board.note_lost();
         if board.admitted.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's admission with its disk");
         }
