@@ -75,7 +75,10 @@ impl FaultInjector for LateOutage {
         // The loss is planned at the instant of the strike, with no await
         // between them, so no peer repairs a copy from memory first; it is
         // planned first so the straggler is the holder it left clean.
-        let kept = plan_losses(ctx.state(), LossShape::DEPARTED_STRAGGLER);
+        let kept = plan_losses(
+            ctx.state(),
+            LossShape::DEPARTED_STRAGGLER.with_spares_kept(),
+        );
         strike(ctx, &kept)
     }
 }

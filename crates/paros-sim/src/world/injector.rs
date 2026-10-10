@@ -359,14 +359,32 @@ impl StorageWorld {
             })
             .map(|(key, node, _)| (key.clone(), *node))
             .collect();
+        // A spare (`LossShape::spare_kept`): a holder neither the last
+        // installed configuration nor the deciding one names, kept clean
+        // after the straggler (#375).
+        let spare = |node: &u64| {
+            loss.spare_kept
+                && installed
+                    .as_ref()
+                    .is_some_and(|members| !members.contains(node))
+                && deciders.is_some_and(|members| !members.contains(node))
+        };
         if loss.prefer_removed {
-            damageable.sort_by_key(|(_, node)| departed(node));
+            damageable.sort_by_key(|(_, node)| (spare(node), departed(node)));
         }
         // The departed straggler (`LossShape::prefer_removed`): a removed
-        // holder's copy is the one left clean, and the only one — kept
+        // holder's copy is the one left clean, and the only member's — kept
         // beside a quorum of clean members it would be no shape at all.
         let straggler = loss.prefer_removed && damageable.iter().any(|(_, node)| departed(node));
-        let keep = if straggler { Some(1) } else { loss.keep };
+        let spares = damageable.iter().filter(|(_, node)| spare(node)).count();
+        if straggler && spares > 0 {
+            assert_reachable!("storage: an outage keeps a spare's copy beside the straggler");
+        }
+        let keep = if straggler {
+            Some(1 + spares)
+        } else {
+            loss.keep
+        };
         let count = match keep {
             Some(keep) if self.loss_permitted(slot, loss.loss_budget()) => if straggler {
                 damageable.len()
@@ -467,10 +485,33 @@ impl StorageWorld {
             // Phase 1 the one thing standing between the slot and a no-op
             // fill (#267). An unsettled custody may hold anything, so it
             // counts as a holder.
+            // With the spares kept clean (`LossShape::spare_kept`), a slot a
+            // settled spare holds instead: a successor that holds it too
+            // lost its copies above the straggler's ballot, so only the
+            // spare's copy, which no Phase 1 asks, would qualify them (#375).
+            let spare_held: BTreeSet<u64> = candidates
+                .iter()
+                .copied()
+                .filter(|slot| {
+                    loss.spare_kept
+                        && live.iter().any(|(_, c)| {
+                            c.settled
+                                && c.records.contains_key(slot)
+                                && installed.is_some_and(|m| !m.contains(&c.node))
+                                && decided.get(slot).is_some_and(|m| !m.contains(&c.node))
+                        })
+                })
+                .collect();
+            if !spare_held.is_empty() {
+                assert_reachable!("storage: an outage aims at a departed slot a spare holds");
+                candidates = spare_held;
+            }
             let never_held: BTreeSet<u64> = candidates
                 .iter()
                 .copied()
-                .filter(|slot| Self::successor_never_held(live, *slot, installed))
+                .filter(|slot| {
+                    !loss.spare_kept && Self::successor_never_held(live, *slot, installed)
+                })
                 .collect();
             if !never_held.is_empty() {
                 assert_reachable!(
