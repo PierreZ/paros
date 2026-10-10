@@ -120,6 +120,33 @@ The survivors #343 lists, each now judged or gone:
   at a hole under the chosen prefix" fired on 326 boots in 600 hunt seeds.
 - `Matchmaking::disagreements -> 0`: excluded as equivalent.
 
+## Compaction progress and the #204 retained retry (#342)
+
+`Replica::assert_compacted` judges every compaction that follows a folded
+`Truncate`. It is checked apart from `compaction_target`, at both callers
+(`ColocatedNode` and `ReplicaNode`):
+
+- Safety: every retained single-writer retry still holds the record it was
+  judged against ("a compaction keeps every record a retained retry reads").
+  This is the #204 shape without the refold: a floor that drops the record
+  fails at once, not only after a reboot or a trim-point jump.
+- Progress: the floor slot is needed. It is the fold's head, or it holds the
+  journal's first record, or it holds a record a retained retry read ("a
+  compaction leaves a needed slot at the floor").
+
+A probe marks the fixed point moving down ("compaction: a retained retry
+holds the floor down"). It fired 1,341 times in a 300-seed hunt, so the
+#204 shape needs no new scenario or BUGGIFY.
+
+Each mutant applied by hand, 100 seeds:
+
+- `compaction_target -> None`, `-> Some(Default)` and `slot_holding ->
+  Default`: caught in seeds 1..=20 (progress).
+- `==` to `!=` at the mode test: caught in seeds 1..=20 (both checks).
+- `entry.seq >= at.first_seq` to `<`, and `entry.seq < at.next_seq` to `==`
+  and to `>`: caught in seeds 1..=20 (safety).
+- `&&` to `||` in the same test: caught in seeds 81..=100 (progress).
+
 ## Equivalent edits a regex cannot isolate
 
 These stay in the rolling report. Each one is equivalent; a regex that names
