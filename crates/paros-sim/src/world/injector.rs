@@ -607,6 +607,15 @@ impl StorageWorld {
                 pick(held)
             }
         };
+        // The double fault rolled first (#351), its own BUGGIFY location:
+        // last in the order, it fired on 1 of 2,000 hunt seeds, too rare
+        // to reach a reserved park whose apply never landed whole.
+        if buggify_with_prob!(0.5)
+            && let Some(injection) = self.plan_double_fault(key, node, &custody, &whole)
+        {
+            assert_reachable!("journal store: a boot rolls the double fault first");
+            return Some(injection);
+        }
         if buggify_with_prob!(P_ENTRY_ROT)
             && let Some(slot) = aim(&whole)
             && self.may_corrupt_record(key, slot)
@@ -635,24 +644,9 @@ impl StorageWorld {
                 outage: false,
             });
         }
-        let settled: Vec<u64> = whole
-            .iter()
-            .copied()
-            .filter(|slot| !custody.last_batch.contains(slot))
-            .collect();
         if buggify_with_prob!(P_DOUBLE_FAULT)
-            && let Some(slot) = pick(&settled)
-            && self.may_park(key)
+            && let Some(injection) = self.plan_double_fault(key, node, &custody, &whole)
         {
-            // The plan only reserves the park (#351): the damage may never
-            // land whole, and only the journal's refusal makes it terminal.
-            let layout = &custody.records[&slot];
-            let injection = Injection {
-                family: Family::DoubleFault(slot),
-                regions: vec![layout.record.clone(), layout.entry.clone()],
-                outage: false,
-            };
-            self.reserve_park(key, node, injection.clone());
             return Some(injection);
         }
         if buggify_with_prob!(P_META_ROT) && custody.meta.len() == 2 {
@@ -673,6 +667,39 @@ impl StorageWorld {
             });
         }
         None
+    }
+}
+
+impl StorageWorld {
+    /// A double fault on a `whole` slot of `custody` outside its last
+    /// batch, when the dead-node budget permits a park: the plan reserves
+    /// it (#351), since the damage may never land whole and only the
+    /// journal's refusal makes it terminal.
+    fn plan_double_fault(
+        &mut self,
+        key: &str,
+        node: u64,
+        custody: &Custody,
+        whole: &[u64],
+    ) -> Option<Injection> {
+        let settled: Vec<u64> = whole
+            .iter()
+            .copied()
+            .filter(|slot| !custody.last_batch.contains(slot))
+            .collect();
+        if settled.is_empty() || !self.may_park(key) {
+            return None;
+        }
+        let at = moonpool_sim::sim_random_range(0..settled.len() as u64);
+        let slot = settled[usize::try_from(at).unwrap_or(0)];
+        let layout = &custody.records[&slot];
+        let injection = Injection {
+            family: Family::DoubleFault(slot),
+            regions: vec![layout.record.clone(), layout.entry.clone()],
+            outage: false,
+        };
+        self.reserve_park(key, node, injection.clone());
+        Some(injection)
     }
 }
 
