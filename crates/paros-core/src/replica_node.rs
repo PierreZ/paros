@@ -702,6 +702,7 @@ impl ReplicaNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
+        self.replica.assert_compacted();
         assert!(
             self.replica.chosen_index() >= chosen,
             "a replica's walk never retreats"

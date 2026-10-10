@@ -145,6 +145,9 @@ pub struct Replica {
     /// A `Truncate` was folded since the last walk: the caller compacts to
     /// [`Replica::compaction_target`] after it.
     truncate_due: bool,
+    /// The last walk handed a folded `Truncate` to the caller: the caller's
+    /// compaction is judged by [`Replica::assert_compacted`] (#342).
+    compaction_due: bool,
     /// Newly applied `(slot, command, verdict)` triples, in order, for the
     /// caller's `Ready` batch. The verdict rides with the slot because a
     /// `Truncate` folded later in the same walk may compact the slot — and
@@ -198,6 +201,7 @@ impl Replica {
             outcomes: BTreeMap::new(),
             positions: BTreeMap::new(),
             truncate_due: false,
+            compaction_due: false,
             committed: Vec::new(),
             mode,
         };
@@ -677,6 +681,10 @@ impl Replica {
             if needed >= first {
                 break;
             }
+            probe!(
+                reachable,
+                "compaction: a retained retry holds the floor down"
+            );
             first = needed;
         }
         assert!(
@@ -992,11 +1000,72 @@ impl Replica {
             writes.len() - writes_before <= APPLY_BATCH,
             "one walk writes one bounded batch"
         );
-        if std::mem::take(&mut self.truncate_due) {
+        self.compaction_due = std::mem::take(&mut self.truncate_due);
+        if self.compaction_due {
             self.compaction_target()
         } else {
             None
         }
+    }
+
+    /// Judge the compaction the caller ran after a walk that folded a
+    /// `Truncate` (#342): call it after every [`Replica::advance`], once the
+    /// caller compacted to the target it returned. A walk that folded no
+    /// `Truncate` is not judged.
+    ///
+    /// Checked apart from [`Replica::compaction_target`], so a wrong target
+    /// fails here and not only on a later refold:
+    ///
+    /// - **Safety.** Every retained single-writer retry still holds the
+    ///   record it was judged against. A floor that drops it leaves a refold
+    ///   (a reboot, a trim-point jump) nothing to compare with, the #204
+    ///   shape.
+    /// - **Progress.** The floor slot is needed: it is the fold's head, or
+    ///   it holds the journal's first record, or it holds a record a
+    ///   retained retry read. A floor that stays below the slots a decided
+    ///   truncation released never compacts (the mutants
+    ///   `compaction_target -> None`, `-> Some(Default)` and
+    ///   `slot_holding -> Default` of the first mutation run, #269).
+    ///
+    /// # Panics
+    ///
+    /// If the compaction dropped a record a retained retry reads, or left an
+    /// unneeded slot at the floor.
+    pub fn assert_compacted(&mut self) {
+        if !std::mem::take(&mut self.compaction_due) {
+            return;
+        }
+        assert!(
+            self.floor <= self.folded,
+            "a judged compaction lies at or below the fold"
+        );
+        // The records the floor slot holds: those its own accepted write
+        // holds, and every record below the floor's base (dropped with the
+        // prefix, or never held on a node that jumped to a trim point).
+        let held = match self.outcomes.get(&self.floor) {
+            Some(Outcome::Accepted { seq, count }) => seq.0..seq.0 + count,
+            _ => 0..0,
+        };
+        let at_floor = |position: Seq| position < self.base.next_seq || held.contains(&position.0);
+        let mut pinned = self.floor == self.folded
+            || (self.state.first_seq < self.state.next_seq && at_floor(self.state.first_seq));
+        if self.mode == WriterMode::Single {
+            for (slot, command) in self.chosen.range(self.floor..self.folded) {
+                let Some(entry) = command.write() else {
+                    continue;
+                };
+                let at = self.state_at(*slot);
+                if entry.seq < at.first_seq || entry.seq >= at.next_seq {
+                    continue;
+                }
+                assert!(
+                    entry.seq >= self.base.next_seq,
+                    "a compaction keeps every record a retained retry reads"
+                );
+                pinned |= at_floor(entry.seq);
+            }
+        }
+        assert!(pinned, "a compaction leaves a needed slot at the floor");
     }
 
     // ---- log prefix drops -----------------------------------------------------

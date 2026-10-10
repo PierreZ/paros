@@ -152,6 +152,7 @@ impl ColocatedNode {
         if let Some(up_to) = truncate_up_to {
             self.compact(up_to);
         }
+        self.replica.assert_compacted();
         self.serve_quorum_reads();
         // The walk only advances the prefix, and never past what it holds.
         assert!(
