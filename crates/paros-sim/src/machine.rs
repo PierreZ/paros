@@ -248,6 +248,19 @@ fn is_other_cell(board: &MachineBoard, addr: SocketAddr, plan: &CellPlan) -> boo
         && plan.addrs() != board.founders
 }
 
+/// Whether another cell an operator founded holds the address of one of
+/// this run's founders (#216 (another cell)): a re-run `init` over the
+/// founders is then refused `other_cell_init`, because no vote of the run's
+/// own plan survives to adopt.
+pub(crate) fn founder_in_other_cell(state: &StateHandle) -> bool {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .other_founder
+        .is_some_and(|addr| board.founders.contains(&addr))
+        && !board.others.is_empty()
+}
+
 /// Whether the run's cell is lost (#246): a vote named a plan that lost a
 /// majority of its members to wipes, so no `cell init` can choose it and
 /// every later one refuses `cell_lost`, and the cell's majority journals

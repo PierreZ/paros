@@ -550,6 +550,9 @@ struct Registry {
     /// Run-level: whether the run draws the lost-verdict scenario (see
     /// [`lost_verdict`]), fixed by the first caller.
     lost_verdict: Option<bool>,
+    /// Run-level: whether the run draws the lagging-fold scenario (see
+    /// [`lagging_fold`]), fixed by the first caller.
+    lagging_fold: Option<bool>,
     /// Run-level: whether the run draws the wiped-founder scenario (see
     /// [`wiped_founder`]), fixed by the first caller.
     wiped_founder: Option<bool>,
@@ -768,6 +771,27 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
         let lose = moonpool_sim::buggify_with_prob!(1.0);
         moonpool_sim::set_activation(paros::scenario::LOSE_VERDICTS, lose);
         lose
+    })
+}
+
+/// Whether the run draws the **lagging-fold scenario** (#189): drawn once
+/// per seed, its own BUGGIFY location. A node registered at runtime is
+/// refused by a member whose registry fold has not admitted it yet only
+/// when it speaks before that fold catches up: a joiner reconfigured into
+/// the default journal and a member's lagging follow read. Without the
+/// scenario the gate fired on about 0.1% of seeds (2,000 hunt seeds, after
+/// #210 (tenant control journal) removed the directory's create that named
+/// an unregistered joiner). On a scenario seed every node opens its follow
+/// reads late (`paros::scenario::LAG_FOLLOW`). Rare-but-valid: a slow
+/// follower is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.lagging_fold.get_or_insert_with(|| {
+        let lag = moonpool_sim::buggify_with_prob!(1.0);
+        moonpool_sim::set_activation(paros::scenario::LAG_FOLLOW, lag);
+        lag
     })
 }
 

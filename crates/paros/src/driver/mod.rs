@@ -1657,7 +1657,9 @@ where
                         let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, rpc: &rpc_handle, audit: &node_audit };
                         sys.apply(f, journal, events, checkpoints).await;
                     }
-                    f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                    if !crate::scenario::lag_follow() {
+                        f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                    }
                 }
                 if journals.exhausted() && (!follows || journals.stranded()) {
                     return journals.exit();

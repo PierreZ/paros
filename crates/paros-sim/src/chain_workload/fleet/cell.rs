@@ -278,6 +278,18 @@ impl FleetOps {
                 assert_reachable!("init: a cell that lost a majority of its founders refuses init");
                 true
             }
+            InitRun::Refused(InitRefusal::Formation(label)) if label == "other_cell_init" => {
+                // A founder's address now belongs to another cell an
+                // operator founded (#216), and no vote of this run's plan
+                // survives: the founders can no longer be one cell.
+                assert_always!(
+                    crate::machine::founder_in_other_cell(ctx.state()),
+                    "init: init is refused as other_cell_init only once another cell holds a founder",
+                    { "founders" => founders }
+                );
+                assert_reachable!("init: a founder's address in another cell refuses init");
+                true
+            }
             InitRun::Refused(refusal) => {
                 assert_always!(
                     false,
@@ -357,7 +369,9 @@ fn judge_second(ctx: &SimContext, second: &InitOutcome) {
         InitOutcome::Refused(label) => {
             assert_always!(
                 label == "storage"
-                    || (label == "cell_lost" && crate::machine::cell_lost(ctx.state())),
+                    || (label == "cell_lost" && crate::machine::cell_lost(ctx.state()))
+                    || (label == "other_cell_init"
+                        && crate::machine::founder_in_other_cell(ctx.state())),
                 "init: a second concurrent cell init is refused only for a failed write",
                 { "refusal" => label.as_str() }
             );
