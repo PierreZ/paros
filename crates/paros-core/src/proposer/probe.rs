@@ -85,24 +85,6 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
         self.promises.ballot
     }
 
-    /// First slot the original Phase 1 covered — the cursor a re-sent
-    /// `Prepare` echoes.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn suffix_start(&self) -> Slot {
-        assert!(
-            self.blocked
-                .first()
-                .is_none_or(|s| *s >= self.promises.from_slot),
-            "a blocked slot lies inside the campaign range"
-        );
-        self.promises.from_slot
-    }
-
     /// The slots still undecidable (Case 3: wait).
     ///
     /// # Panics
@@ -122,26 +104,83 @@ impl<Id: Copy + Ord, V> RepairProbe<Id, V> {
         &self.blocked
     }
 
-    /// The stragglers to re-query: the members of the prior configurations
-    /// the election covered — the Phase-1 addressee union — that have not
-    /// answered their full suffix. `me` is never a straggler.
+    /// The members whose complete suffix answer the probe holds: the
+    /// election's promise quorum, the leader itself included, and every
+    /// straggler that answered since.
     ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     #[must_use]
-    pub fn stragglers(&self, me: Id) -> Vec<Id> {
-        let stragglers: Vec<Id> = member_union(&self.prior)
+    pub fn answered(&self) -> &BTreeSet<Id> {
+        assert!(
+            !self.promises.answered.is_empty(),
+            "a repair probe inherits a promise quorum"
+        );
+        &self.promises.answered
+    }
+
+    /// The prior configurations the election covered: the straggler
+    /// re-query fans out to their union.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn prior(&self) -> &[AcceptorConfig<Id>] {
+        assert!(
+            !self.prior.is_empty(),
+            "a repair probe covers some prior configuration"
+        );
+        &self.prior
+    }
+
+    /// The `Prepare` the leader re-sends this tick (#343): at the
+    /// leadership's ballot, from the first slot the original Phase 1 covered
+    /// (the cursor the tally expects a first page at), to the stragglers —
+    /// the members of the prior configurations the election covered (the
+    /// Phase-1 addressee union) that have not answered their full suffix.
+    /// `me` is never a straggler.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn requery(&self, me: Id) -> RepairQuery<Id> {
+        let to: Vec<Id> = member_union(&self.prior)
             .into_iter()
             .filter(|p| *p != me && !self.promises.answered.contains(p))
             .collect();
+        assert!(!to.contains(&me), "the leader is never its own straggler");
         assert!(
-            !stragglers.contains(&me),
-            "the leader is never its own straggler"
+            self.blocked
+                .first()
+                .is_none_or(|s| *s >= self.promises.from_slot),
+            "a blocked slot lies inside the campaign range"
         );
-        stragglers
+        RepairQuery {
+            ballot: self.promises.ballot,
+            from_slot: self.promises.from_slot,
+            to,
+        }
     }
+}
+
+/// One tick's straggler re-query of an open [`RepairProbe`]: the `Prepare`
+/// the leader re-sends, and to whom.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepairQuery<Id> {
+    /// The leadership ballot the probe queries at.
+    pub ballot: Ballot,
+    /// The first slot the original Phase 1 covered: the cursor a straggler's
+    /// first page must carry.
+    pub from_slot: Slot,
+    /// The stragglers: every member of the prior configurations but the
+    /// leader that has not answered its full suffix.
+    pub to: Vec<Id>,
 }
 
 impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {

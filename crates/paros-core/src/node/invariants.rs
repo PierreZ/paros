@@ -10,6 +10,7 @@
 //! that may exist only on a leader.
 
 use super::{Ballot, BeliefSource, ColocatedNode, LeadershipOrigin, NodeRole, Slot};
+use crate::membership::AcceptorConfig;
 use crate::proposer::Round;
 
 /// The three durable watermarks a node only ever raises: the promise, the
@@ -30,6 +31,17 @@ impl ColocatedNode {
             "the compaction floor never outruns the chosen prefix"
         );
         marks
+    }
+
+    /// Whether every member of `config` is in this node's pool, restated
+    /// over the pool itself rather than through
+    /// [`AcceptorConfig::is_drawn_from`], the guard every learning path
+    /// asks (#343): the invariant must not lean on the guard it checks.
+    pub(super) fn pooled_all(&self, config: &AcceptorConfig) -> bool {
+        config
+            .members()
+            .iter()
+            .all(|m| self.pool.binary_search(m).is_ok())
     }
 
     /// The write-side half of the boot read-back: across any public entry
@@ -93,10 +105,42 @@ impl ColocatedNode {
                 .is_none_or(|s| *s >= self.acceptor.first_slot()),
             "no in-flight round survives below the compaction floor"
         );
+        self.assert_hole_invariants();
         self.assert_deployment_invariants();
         self.assert_read_basis_invariants();
         self.assert_role_invariants();
         self.assert_leadership_state_invariants();
+    }
+
+    /// The repair hole (#343): a faulty record under the chosen prefix is a
+    /// chosen slot whose value this node does not hold, so the fold stops at
+    /// or below it. The fold's hole alone then starts both a campaign's
+    /// recovery range and the per-tick repair pull.
+    fn assert_hole_invariants(&self) {
+        let first_unchosen = self.first_unchosen();
+        let hole = self.replica.fold_hole();
+        if let Some(faulty) = self
+            .acceptor
+            .faulty()
+            .keys()
+            .next()
+            .filter(|s| **s < first_unchosen)
+        {
+            assert!(
+                hole.is_some_and(|h| h <= *faulty),
+                "the fold's hole covers every faulty slot under the chosen prefix"
+            );
+        }
+        if let Some(h) = hole {
+            assert!(
+                h < first_unchosen,
+                "a fold hole lies below the first unchosen slot"
+            );
+            assert!(
+                !self.replica.chosen().contains_key(&h),
+                "a fold hole is a slot not held"
+            );
+        }
     }
 
     /// The read basis (#260): only a matchmaker deployment stores one; it is
@@ -111,7 +155,7 @@ impl ColocatedNode {
             "a plain deployment stores no read basis"
         );
         assert!(
-            basis.config.is_drawn_from(&self.pool),
+            self.pooled_all(&basis.config),
             "a read basis is drawn from the pool"
         );
         if self.role == NodeRole::Leader && self.proposer.election().is_none() {
@@ -167,7 +211,7 @@ impl ColocatedNode {
             );
         }
         assert!(
-            self.acceptors.is_drawn_from(&self.pool),
+            self.pooled_all(&self.acceptors),
             "the active configuration is drawn from the node pool"
         );
         // The pool is grow-only from the boot pool, and stays the sorted,

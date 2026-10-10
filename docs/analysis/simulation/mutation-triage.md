@@ -91,6 +91,35 @@ seeds, then the survivors at the weekly 300 seeds:
     chosen record below the prefix, and no seed makes one (#343).
   - `read_row`'s guard to `false`: equivalent (next section).
 
+## Liveness and matchmaker rules (#343)
+
+The survivors #343 lists, each now judged or gone:
+
+- `MembershipProbe::quorum_held -> true`: `MatchStep::ProbeClosed` carries
+  `answered_by`, and the audit asserts "matchmaking: a membership probe
+  closes only on a matchmaker quorum".
+- `RepairProbe::stragglers` and `suffix_start`: the re-sent `Prepare` is one
+  value, `RepairProbe::requery`. `ColocatedNode::tick_repair` restates the
+  straggler set over `RepairProbe::answered` and `prior`: every unanswered
+  prior member is asked again, and nobody else. The ballot keeps its check;
+  the first slot is a field, not a function to mutate.
+- `AcceptorConfig::is_drawn_from -> true` still survives. The node's pool
+  invariants now use the pool itself (`pooled_all`), so the mutant fails the
+  moment a node adopts a configuration naming a node it has not pooled. A
+  probe marks each `UnknownMember` return; neither fired in 600 hunt seeds.
+  A trial BUGGIFY that deferred a node's pool admission fired twice in 600
+  seeds and did not reach the race either: a reconfiguration rarely names a
+  freshly registered joiner. #387 (an unpooled joiner in a configuration)
+  makes that shape likely.
+- `Acceptor::first_faulty -> None`: deleted with both its call sites.
+  `assert_invariants` asserts that the fold's hole covers every faulty slot
+  under the chosen prefix.
+- `Replica::fold_hole -> None` and `<` to `>`: they survived because the
+  `first_faulty` leg did the hole's work. An entry rot may also aim at the
+  oldest slot held (its own BUGGIFY location); the boot probe "the fold stops
+  at a hole under the chosen prefix" fired on 326 boots in 600 hunt seeds.
+- `Matchmaking::disagreements -> 0`: excluded as equivalent.
+
 ## Equivalent edits a regex cannot isolate
 
 These stay in the rolling report. Each one is equivalent; a regex that names
@@ -107,7 +136,7 @@ it would also hide a real mutant of the same function.
   to `<=` (two of three sites) and `>` to `<`; `refold`'s guard `<` to `>`;
   `trim_to` `<` to `<=`; `compaction_target` `<` to `<=` on the position test.
 - `proposer/probe.rs`: `RepairProbe::blocked -> empty` (read only in
-  assertions); `stragglers` `&&` to `||` (extra traffic only).
+  assertions).
 - `proposer/rounds.rs`: `close_below` and `resend_page` `<` to `<=` (the
   boundary cannot occur).
 

@@ -313,28 +313,6 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         faulty
     }
 
-    /// The lowest faulty slot, if any.
-    ///
-    /// # Panics
-    ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    #[must_use]
-    pub fn first_faulty(&self) -> Option<Slot> {
-        let first = self.faulty.first_key();
-        if let Some(slot) = first {
-            assert!(
-                slot >= self.first_slot(),
-                "a faulty entry sits above the floor"
-            );
-            assert!(
-                !self.records.contains_key(slot),
-                "a faulty slot is never readable"
-            );
-        }
-        first
-    }
-
     /// The **vote watermark** (#143, Compartmentalized Paxos §3.4): the
     /// highest slot this acceptor has voted in — the last retained record,
     /// the last faulty entry (identity known, value lost: it *was* voted),

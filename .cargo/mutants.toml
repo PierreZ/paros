@@ -51,6 +51,10 @@ exclude_re = [
   # where it holds), never a decision.
   "replace > with (==|<|>=) in Matchmaking::(watermark|disagreements)$",
   "replace Matchmaking::heard_anyone -> bool with true",
+  # No two matchmakers ever disagree on a ballot's configuration (the
+  # write-once ledger, asserted by the audit): the count is always zero, so
+  # zero is the same answer (#343).
+  "replace Matchmaking::disagreements -> u64 with 0",
   "replace > with (==|<|>=) in majority_of$",
   "replace == with != in QuorumSystem::phase[12]_quorum_size$",
   "delete ! in QuorumSystem::(is_majority|is_phase[12]_quorum_in)$",

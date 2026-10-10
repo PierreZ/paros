@@ -321,6 +321,8 @@ impl World {
         }
     }
 
+    // One arm per step: the narration reads as one table.
+    #[allow(clippy::too_many_lines)]
     fn narrate_match_step(&mut self, id: NodeId, step: &MatchStep) {
         let text = match step {
             MatchStep::Ignored => return,
@@ -385,7 +387,9 @@ impl World {
                 "{} counts one answer to its question. It waits for a matchmaker quorum.",
                 who(id)
             ),
-            MatchStep::ProbeClosed { effective, member } => format!(
+            MatchStep::ProbeClosed {
+                effective, member, ..
+            } => format!(
                 "{} knows which configuration is in force now{}. {}",
                 who(id),
                 effective.map_or_else(String::new, |at| format!(

@@ -941,35 +941,54 @@ impl ColocatedNode {
                     "a resigned leader holds no probe"
                 );
             } else {
-                let (ballot, from_slot, unanswered) = {
+                let query = {
                     let probe = self.proposer.probe().expect("checked above");
-                    // The stragglers are the members of the prior
-                    // configurations the election covered — the Phase-1
-                    // addressee union — that have not answered their full
-                    // suffix.
-                    (
-                        probe.ballot(),
-                        probe.suffix_start(),
-                        probe.stragglers(self.config.id),
-                    )
+                    let query = probe.requery(self.config.id);
+                    // The caller's restatement of the straggler set (#343):
+                    // every member of the prior configurations the election
+                    // covered — the Phase-1 addressee union — that has not
+                    // answered its full suffix is asked again, and nobody
+                    // else. A probe that stopped re-asking would sit blocked
+                    // until the repair timeout resigns the leadership.
+                    let me = self.config.id;
+                    let prior = probe.prior();
+                    assert!(
+                        !prior.is_empty(),
+                        "a repair probe covers some prior configuration"
+                    );
+                    for member in prior.iter().flat_map(|c| c.members().iter()) {
+                        if *member != me && !probe.answered().contains(member) {
+                            assert!(
+                                query.to.contains(member),
+                                "a repair probe re-asks every unanswered prior member"
+                            );
+                        }
+                    }
+                    for to in &query.to {
+                        assert!(
+                            !probe.answered().contains(to),
+                            "a repair probe never re-asks a member that answered"
+                        );
+                        assert!(
+                            prior.iter().any(|c| c.contains(*to)),
+                            "a repair probe asks only members of a prior configuration"
+                        );
+                    }
+                    query
                 };
                 // The probe runs the leadership's own Phase 1, never another.
                 assert!(
-                    ballot == self.ballot,
+                    query.ballot == self.ballot,
                     "a repair probe queries at the leader's ballot"
                 );
                 let config = self.phase1_wire_config();
-                self.send_prepare(unanswered, ballot, from_slot, config);
+                self.send_prepare(query.to, query.ballot, query.from_slot, config);
             }
         }
-        let hole = self
-            .acceptor
-            .first_faulty()
-            .filter(|slot| *slot < self.first_unchosen())
-            .into_iter()
-            .chain(self.replica.fold_hole())
-            .min();
-        if let Some(first_faulty) = hole {
+        // The fold's hole covers every faulty slot under the chosen prefix
+        // (`assert_invariants`, #343): a faulty chosen record is a slot the
+        // fold does not hold, so the fold stops at or below it.
+        if let Some(first_faulty) = self.replica.fold_hole() {
             // The hole is inside the retained, chosen-or-faulty prefix.
             assert!(
                 first_faulty >= self.acceptor.first_slot(),

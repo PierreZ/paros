@@ -190,6 +190,15 @@ struct Campaign {
     effective_at_start: Option<(Ballot, AcceptorConfig)>,
 }
 
+/// One open membership probe (#173).
+struct OpenProbe {
+    /// The effective configuration a quorum of the probed generation already
+    /// held durably when it opened: what its answers cannot miss.
+    held: Option<(Ballot, AcceptorConfig)>,
+    /// The generation it asked: whose quorum must answer before it closes.
+    generation: u64,
+}
+
 /// The fold and the flag set (independent sticky bits per gate).
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -207,10 +216,8 @@ pub(super) struct MatchmakerAudit {
     reconfigurations: BTreeMap<Ballot, (AcceptorConfig, BTreeSet<u64>)>,
     /// Every candidate's matchmaking phase, keyed by `(node, ballot)`.
     campaigns: BTreeMap<(u64, Ballot), Campaign>,
-    /// Every open membership probe (#173), keyed by `(node, tag)`: the
-    /// effective configuration a quorum of the probed generation already
-    /// held durably when it opened — what its answers cannot miss.
-    probes: BTreeMap<(u64, Ballot), Option<(Ballot, AcceptorConfig)>>,
+    /// Every open membership probe (#173), keyed by `(node, tag)`.
+    probes: BTreeMap<(u64, Ballot), OpenProbe>,
     /// Nodes whose last membership probe closed on a heard reconfiguration
     /// that leaves them outside: their election clock re-probes (#270).
     probed_outside: BTreeSet<u64>,
@@ -1572,7 +1579,8 @@ impl MatchmakerAudit {
             node: NodeId(u64::MAX),
         };
         let held = self.effective_at(generation, ceiling);
-        self.probes.insert((node.0, ballot), held);
+        self.probes
+            .insert((node.0, ballot), OpenProbe { held, generation });
     }
 
     /// A node's membership probe closed (#173). A reconfiguration a
@@ -1587,8 +1595,25 @@ impl MatchmakerAudit {
         ballot: Ballot,
         effective: Option<Ballot>,
         member: bool,
+        answered_by: usize,
     ) {
-        let held = self.probes.remove(&(node.0, ballot)).flatten();
+        let opened = self.probes.remove(&(node.0, ballot));
+        // The probe's twin of the campaign's quorum check (#343): a probe
+        // closes only once a quorum of the set it asked has answered. An
+        // unknown probe (its opening lost to a reboot) counts against the
+        // bootstrap set.
+        let quorum = self.quorum(opened.as_ref().map_or(0, |p| p.generation));
+        assert_always!(
+            answered_by >= quorum,
+            "matchmaking: a membership probe closes only on a matchmaker quorum",
+            {
+                "node" => node.0,
+                "round" => ballot.round,
+                "answered" => answered_by,
+                "quorum" => quorum
+            }
+        );
+        let held = opened.and_then(|p| p.held);
         let learned = held
             .as_ref()
             .is_none_or(|(at, _)| effective.is_some_and(|adopted| adopted >= *at));
