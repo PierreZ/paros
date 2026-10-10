@@ -246,12 +246,30 @@ pub(crate) struct PlannedLoss {
     pub(crate) damaged: Vec<u64>,
 }
 
+/// Every acceptor and proxy leader: the processes a strike takes down.
+fn victims(ctx: &FaultContext) -> Vec<String> {
+    let mut victims = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
+    victims.extend(ctx.ips_in_group(crate::roles::PROXY_GROUP));
+    victims
+}
+
+/// Whether a [`strike`] may take every victim down now: no victim has a
+/// commit in flight whose cut a budget would have to pay (#332,
+/// [`super::cut`]).
+pub(super) fn may_strike(ctx: &FaultContext) -> bool {
+    super::cut::outage_permitted(ctx.state(), &victims(ctx))
+}
+
 /// Take every acceptor and proxy leader down now, each back after its own
 /// delay in [`DOWN`], one acceptor straggling in [`STRAGGLER`]: the one
 /// clean copy the loss left (`kept`, node ids, which are ranks in the
 /// acceptor group), so the cluster must recover through the prior
 /// configuration while it is still down (#267), else a random acceptor.
+///
+/// The caller strikes only once [`may_strike`] permits it, with no await
+/// between them (#332).
 pub(super) fn strike(ctx: &FaultContext, kept: &[u64]) -> SimulationResult<()> {
+    super::cut::assert_outage_permitted(ctx.state(), &victims(ctx));
     let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
     let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);
     let clean = match kept {

@@ -23,7 +23,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
 
-use super::outage::{LossShape, POLL, STRAGGLER, plan_losses, strike};
+use super::outage::{LossShape, POLL, STRAGGLER, may_strike, plan_losses, strike};
 
 /// How far into the recovery tail the late outage may still strike. Far
 /// below the workload's recovery budget (45 s at its floor), so a straggler
@@ -60,7 +60,10 @@ impl FaultInjector for LateOutage {
                 return Ok(());
             }
             if crate::audit::audit_world_for(ctx.state(), main).has_departure() {
-                break;
+                if may_strike(ctx) {
+                    break;
+                }
+                assert_reachable!("outage: a late outage waits for a commit in flight");
             }
             if time.sleep(POLL).await.is_err() {
                 return Ok(());
