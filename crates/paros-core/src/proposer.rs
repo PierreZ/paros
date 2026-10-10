@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub use self::authority::Authority;
 pub use self::election::Election;
-pub use self::probe::RepairProbe;
+pub use self::probe::{RepairProbe, RepairQuery};
 pub use self::recovery::{Recovery, RecoveryPolicy, RecoveryStep};
 pub use self::rounds::{Custody, PendingAccept, Round, Rounds};
 use crate::acceptor::PROMISE_BATCH;
@@ -271,7 +271,7 @@ fn qualifying_answers<Id: Copy + Ord>(
 
 /// The members of `configs`, unioned: sorted and deduplicated, so the
 /// Phase-1 addressee list ([`Election::targets`]) and the probe's straggler
-/// list ([`RepairProbe::stragglers`]) — both unions over the prior
+/// list ([`RepairProbe::requery`]) — both unions over the prior
 /// configurations — derive it one way.
 fn member_union<'a, Id: Copy + Ord + 'a>(
     configs: impl IntoIterator<Item = &'a AcceptorConfig<Id>>,
@@ -699,7 +699,8 @@ mod tests {
         assert_eq!(
             p.probe()
                 .expect("the probe opens for the blocked slot")
-                .suffix_start(),
+                .requery(NodeId(0))
+                .from_slot,
             Slot(0),
             "the probe inherits the election's first slot"
         );
@@ -719,7 +720,7 @@ mod tests {
             PromiseFold::Continue(Slot(PROMISE_BATCH as u64))
         );
         assert_eq!(
-            p.probe().expect("still open").stragglers(NodeId(0)),
+            p.probe().expect("still open").requery(NodeId(0)).to,
             vec![NodeId(2)],
             "a straggler mid-suffix is still a straggler"
         );
@@ -769,7 +770,7 @@ mod tests {
             "a faulty report with no have blocks"
         );
         let probe = p.probe().expect("the probe opens for the blocked slot");
-        assert_eq!(probe.stragglers(NodeId(0)), vec![NodeId(2)]);
+        assert_eq!(probe.requery(NodeId(0)).to, vec![NodeId(2)]);
         assert!(p.resolve_probe().is_empty(), "Case 3: wait");
         let mut have = BTreeMap::new();
         have.insert(Slot(0), (ballot(0, 2), cmd(7)));

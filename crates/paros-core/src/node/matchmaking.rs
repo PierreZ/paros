@@ -200,6 +200,10 @@ pub enum MatchStep {
         effective: Option<Ballot>,
         /// Whether the belief now names this node (and a campaign opened).
         member: bool,
+        /// How many distinct matchmakers answered the probe: a quorum of
+        /// its set, which an observer judges apart from the probe's own
+        /// predicate (#343).
+        answered_by: usize,
     },
     /// A matchmaker answered a probe that had already closed with this node
     /// outside, naming a reconfiguration newer than the one the belief
@@ -640,6 +644,10 @@ impl ColocatedNode {
                 .is_some_and(|(_, c)| unknown(&c, &self.pool))
                 || m.prior().iter().any(|c| unknown(c, &self.pool)))
         {
+            probe!(
+                reachable,
+                "matchmaking: a campaign meets a configuration outside the pool"
+            );
             self.matchmaking = None;
             self.become_follower(None);
             return MatchStep::UnknownMember;
@@ -697,7 +705,7 @@ impl ColocatedNode {
                 "Phase 1 opens only once a matchmaker quorum registered the ballot"
             );
             assert!(
-                prior.iter().all(|c| c.is_drawn_from(&self.pool)),
+                prior.iter().all(|c| self.pooled_all(c)),
                 "every prior configuration is drawn from the node pool"
             );
             self.matchmaking = None;
@@ -744,6 +752,8 @@ impl ColocatedNode {
         }
         let effective = probe.effective().cloned();
         let tag = probe.ballot();
+        let answered_by = probe.answered_by();
+        assert!(answered_by > 0, "a closed probe was answered by someone");
         self.probe = None;
         // The probe's twin of the campaign's guard (#189): an effective
         // configuration naming a node outside the pool is not adopted; the
@@ -753,6 +763,10 @@ impl ColocatedNode {
             .as_ref()
             .is_some_and(|(_, c)| !c.is_drawn_from(&self.pool))
         {
+            probe!(
+                reachable,
+                "matchmaking: a membership probe meets a configuration outside the pool"
+            );
             return MatchStep::UnknownMember;
         }
         // A belief heard since the probe opened would have closed it
@@ -788,6 +802,7 @@ impl ColocatedNode {
         MatchStep::ProbeClosed {
             effective: adopted,
             member,
+            answered_by,
         }
     }
 

@@ -237,10 +237,14 @@ impl ColocatedNode {
         // a leader's own re-proposal repaired its record of slot 0, its
         // next election opened at slot 1, and every node's prefix froze
         // below slot 0 for good).
-        let from_slot = [self.acceptor.first_faulty(), self.replica.fold_hole()]
-            .into_iter()
-            .flatten()
-            .fold(self.first_unchosen(), Slot::min);
+        // A faulty slot under the prefix is covered by the fold's hole
+        // (`assert_invariants`, #343), and one at or above it by the prefix.
+        let from_slot = self
+            .replica
+            .fold_hole()
+            .map_or(self.first_unchosen(), |hole| {
+                hole.min(self.first_unchosen())
+            });
         assert!(
             from_slot <= self.first_unchosen(),
             "a campaign's recovery range starts at or below the chosen prefix"

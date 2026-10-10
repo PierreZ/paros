@@ -719,12 +719,14 @@ pub trait Audit {
     /// already held; `None`: the bootstrap stands, now heard), and `member`
     /// whether the belief names
     /// the node — in which case a campaign opened in the same step.
+    /// `answered_by` is how many distinct matchmakers answered (#343).
     fn membership_probe_closed(
         &self,
         node: NodeId,
         ballot: Ballot,
         effective: Option<Ballot>,
         member: bool,
+        answered_by: usize,
     ) {
     }
 

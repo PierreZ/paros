@@ -2177,10 +2177,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         ballot: Ballot,
         effective: Option<Ballot>,
         member: bool,
+        answered_by: usize,
     ) {
         self.state()
             .matchmaker
-            .probe_closed(node, ballot, effective, member);
+            .probe_closed(node, ballot, effective, member, answered_by);
     }
 
     fn membership_probe_late(

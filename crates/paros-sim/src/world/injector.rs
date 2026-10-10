@@ -576,11 +576,17 @@ impl StorageWorld {
             .collect();
         // Aimed by what the ledger knows (#263): on some boots the most
         // recent slot this node holds, the one a lagging peer is likeliest
-        // to still need, rather than a uniform one.
+        // to still need; on others the oldest, the one likeliest to lie
+        // under the durable chosen index, where the lost copy stops the
+        // journal fold at a hole the node must pull back (#343); else a
+        // uniform one.
         let aim = |held: &[u64]| {
             if buggify_with_prob!(0.5) {
                 assert_reachable!("journal store: an entry rot aims at the most recent slot held");
                 held.last().copied()
+            } else if buggify_with_prob!(0.5) {
+                assert_reachable!("journal store: an entry rot aims at the oldest slot held");
+                held.first().copied()
             } else {
                 pick(held)
             }

@@ -416,15 +416,23 @@ fn report_probe_closed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: 
         matches!(step, MatchStep::ProbeClosed { .. }),
         "only a closed probe is reported closed"
     );
-    let MatchStep::ProbeClosed { effective, member } = *step else {
+    let MatchStep::ProbeClosed {
+        effective,
+        member,
+        answered_by,
+    } = *step
+    else {
         return;
     };
-    audit.membership_probe_closed(NodeId(self_id), ballot, effective, member);
+    // A closed probe rests on a quorum: at least one answer.
+    assert!(answered_by > 0, "a closed probe was answered by someone");
+    audit.membership_probe_closed(NodeId(self_id), ballot, effective, member, answered_by);
     tracing::info!(
         node = self_id,
         round = ballot.round,
         effective_round = effective.map_or(0, |b| b.round),
         member,
+        answered_by = answered_by as u64,
         "membership_probe_closed"
     );
 }

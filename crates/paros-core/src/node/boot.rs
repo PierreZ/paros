@@ -136,6 +136,14 @@ impl ColocatedNode {
             handoff_fence_elapsed: 0,
             handoff: HandoffCounters::default(),
         };
+        if node.replica.fold_hole().is_some() {
+            // A faulty record under the durable chosen index (#343): the fold
+            // stops at its hole until a peer brings the value back.
+            probe!(
+                reachable,
+                "boot: the fold stops at a hole under the chosen prefix"
+            );
+        }
         node.assert_invariants();
         node
     }

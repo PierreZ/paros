@@ -740,6 +740,13 @@ impl MembershipProbe {
         held
     }
 
+    /// How many distinct matchmakers have answered: the count a closed
+    /// probe reports, so an observer can judge the quorum on its own.
+    #[must_use]
+    pub fn answered_by(&self) -> usize {
+        self.answered.len()
+    }
+
     /// The matchmakers that have not answered — whom a re-send addresses.
     ///
     /// # Panics

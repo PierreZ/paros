@@ -111,6 +111,7 @@ fn a_probe_that_finds_its_node_inside_opens_a_campaign() {
     assert!(steps.contains(&MatchStep::ProbeClosed {
         effective: Some(ballot(2, 2)),
         member: true,
+        answered_by: 2,
     }));
     assert_eq!(*n.acceptors(), cfg(&[3, 4, 5]));
     assert_eq!(n.acceptors_since(), ballot(2, 2));
@@ -140,6 +141,7 @@ fn a_probe_that_finds_no_reconfiguration_settles_a_spare() {
     assert!(steps.contains(&MatchStep::ProbeClosed {
         effective: None,
         member: false,
+        answered_by: 2,
     }));
     assert_eq!(n.belief_source(), BeliefSource::Heard);
     assert_eq!(n.role(), NodeRole::Follower);
@@ -178,6 +180,7 @@ fn a_re_probe_never_moves_a_belief_backwards() {
     assert!(steps.contains(&MatchStep::ProbeClosed {
         effective: Some(ballot(3, 4)),
         member: false,
+        answered_by: 2,
     }));
     assert_eq!(n.acceptors(), &cfg(&[0, 1, 4]), "the newer belief stands");
 }
@@ -288,6 +291,7 @@ fn a_late_probe_answer_moves_an_outside_node() {
     assert!(steps.contains(&MatchStep::ProbeClosed {
         effective: None,
         member: false,
+        answered_by: 2,
     }));
     assert_eq!(n.role(), NodeRole::Follower);
     let steps: Vec<MatchStep> = matchmake(&mut mms, late)
@@ -354,6 +358,7 @@ fn a_probe_prefers_a_fact_to_a_campaign_heard_belief() {
     assert!(steps.contains(&MatchStep::ProbeClosed {
         effective: Some(ballot(4, 1)),
         member: true,
+        answered_by: 2,
     }));
     assert_eq!(*n.acceptors(), cfg(&[3, 4, 5]));
     assert_eq!(n.acceptors_since(), ballot(4, 1));
@@ -383,6 +388,7 @@ fn a_won_leadership_outranks_an_older_reconfiguration() {
     assert!(steps.contains(&MatchStep::ProbeClosed {
         effective: Some(ballot(4, 1)),
         member: false,
+        answered_by: 2,
     }));
     assert_eq!(
         *n.acceptors(),
