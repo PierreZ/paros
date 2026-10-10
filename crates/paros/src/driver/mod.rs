@@ -75,7 +75,7 @@ use paros_core::{
     NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
     ReconfigurerPhase, ReconfigurerStep, Seq, TenantId, Value,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
@@ -1200,6 +1200,13 @@ where
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
     let mut peer_book = formed.as_ref().map(book::PeerBook::new);
+    // A founding member that came back at another address than the one its
+    // cell knows (#390) holds its journals' clocks until its registration
+    // ends. Its peers send to the address they know, so it hears none of
+    // them, and its campaigns only raise their promises above the sitting
+    // leader's: the cell control journal that would register it stalls.
+    // Held, it still answers every message that reaches it.
+    let mut unregistered: Option<watch::Receiver<bool>> = None;
     if let Some(formed) = formed {
         // Every founding member campaigns for the cell coordinator (#240).
         crate::machine::coordinator::spawn(
@@ -1218,7 +1225,13 @@ where
             .is_set()
             .then_some(formed.plan.election)
         {
-            crate::machine::register::spawn(
+            // A lone founding member is its own quorum: it needs no peer.
+            let moved = formed.plan.members.len() > 1
+                && formed
+                    .founders()
+                    .iter()
+                    .any(|(id, addr)| *id == formed.facts.node_id && *addr != formed.facts.addr);
+            let ended = crate::machine::register::spawn(
                 &providers,
                 &rpc_handle,
                 crate::machine::register::Registration {
@@ -1226,7 +1239,7 @@ where
                     cell_id: formed.plan.cell_id,
                     election,
                     book: crate::machine::with_own(
-                        &formed.plan.members,
+                        &formed.founders(),
                         formed.facts.node_id,
                         &formed.facts.addr,
                     ),
@@ -1234,6 +1247,7 @@ where
                 &tunables,
                 incarnation_shutdown.clone(),
             );
+            unregistered = moved.then_some(ended);
         }
         formed.serve(&providers, &rpc_handle, incarnation_shutdown.clone())?;
     }
@@ -1749,8 +1763,21 @@ where
                 if let Some(f) = follower.as_ref().filter(|_| !due.is_empty()) {
                     admit_pool(&mut journals, f);
                 }
+                // A moved founding member's clocks wait for its registration
+                // (#390).
+                if unregistered.as_ref().is_some_and(|ended| *ended.borrow()) {
+                    moonpool_assertions::reachable!(
+                        "machine: a moved founding member resumes its journals once registered"
+                    );
+                    tracing::info!(node = self_id, "moved_member_registered");
+                    unregistered = None;
+                }
                 // Every live journal's beat, in id order.
-                let live: Vec<JournalIdentifier> = journals.live.keys().copied().collect();
+                let live: Vec<JournalIdentifier> = if unregistered.is_some() {
+                    Vec::new()
+                } else {
+                    journals.live.keys().copied().collect()
+                };
                 for journal in live {
                     let Some(rt) = journals.live.get_mut(&journal) else { continue };
                     if crate::scenario::hold_journal(hold_candidate, journal) {
@@ -1764,10 +1791,16 @@ where
                 // The peer book (#349): a peer the registry moved is dialed
                 // at its registered address from its lane's next batch on.
                 if let Some(book) = peer_book.as_mut() {
-                    for (peer, addr) in book.follow(&journals) {
+                    let (moved, cache) = book.follow(&journals);
+                    for (peer, addr) in moved {
                         let moved = out.readdress(peer, addr.clone());
                         assert!(moved, "every founding member but this one has a lane");
                         tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
+                    }
+                    // The durable cached registry fold (#211), written off
+                    // the loop.
+                    if let Some(cache) = cache {
+                        stores.cache_registry(cache);
                     }
                 }
                 // The system journals (#189): fold what this node's own

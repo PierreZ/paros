@@ -570,6 +570,9 @@ struct Registry {
     /// Run-level: whether the run draws the stalled-proxy scenario (see
     /// [`stalled_proxy`]), fixed by the first caller.
     stalled_proxy: Option<bool>,
+    /// Run-level: whether the run draws the moved-founder scenario (see
+    /// [`moved_founder`]), fixed by the first caller.
+    moved_founder: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -839,6 +842,25 @@ pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **moved-founder scenario** (#211): drawn once
+/// per seed, its own BUGGIFY location. A machine boots from its durable
+/// cached registry fold only after another machine of its cell moved, the
+/// cache followed the move, and the machine restarted: the machines'
+/// attrition and the rename knob lined that up 0 times in 300 hunt seeds.
+/// On a scenario seed the machines advertise names, and
+/// `crate::world::moved_founder` crashes a founding member that comes back
+/// under a new name, then a machine
+/// whose cache names the founder's new name. Rare-but-valid: a machine that
+/// comes back under a new name is (#349).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn moved_founder(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .moved_founder
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **silent-machine scenario** (#211): drawn once
 /// per seed, its own BUGGIFY location. The cell coordinator marks a machine
 /// down only when it is silent past `machine_down_after`, while a
@@ -1069,6 +1091,8 @@ pub(crate) struct MachineLayout {
 /// machine that keeps its name).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
+    // Drawn before the lock: the scenario takes the registry's lock too.
+    let moved = moved_founder(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -1080,7 +1104,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 moonpool_sim::sim_random_range(1..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
-            let named = moonpool_sim::sim_random_bool(0.5);
+            let named = moonpool_sim::sim_random_bool(0.5) || moved;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
             let machines = (0..count)

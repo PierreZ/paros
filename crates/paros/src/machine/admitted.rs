@@ -17,14 +17,18 @@
 //!
 //! On every start it asks the cell coordinator to register the address it
 //! advertises now (`super::register`, #349), so a machine that moved is
-//! dialed at its new address.
+//! dialed at its new address. It dials the cell's machines where its
+//! durable cached registry fold says (#211), else where its admission says,
+//! and follows the registry to keep that cache current (`super::follow`).
 
 use std::collections::BTreeSet;
 
 use moonpool_core::Providers;
 use tokio_util::sync::CancellationToken;
 
-use super::{Admission, MachineFacts};
+use paros_core::NodeId;
+
+use super::{Admission, CacheSink, CachedRegistry, MachineFacts};
 use crate::Address;
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
@@ -42,18 +46,24 @@ pub struct AdmittedMachine {
     pub facts: MachineFacts,
     /// Its admission.
     pub admission: Admission,
+    /// The cached registry fold its disk held at start (#211), if any.
+    pub cached: Option<CachedRegistry>,
 }
 
 impl AdmittedMachine {
-    /// The cell's machines this one knows, by address: what it caches of the
-    /// registry (§3.2).
+    /// The cell's machines this one knows, by address: its admission's,
+    /// where its cached registry fold dials them (§3.2, #211), and every
+    /// other machine the cache names.
     #[must_use]
     pub fn known(&self) -> BTreeSet<Address> {
-        self.admission
-            .members
-            .iter()
-            .map(|(_, addr)| addr.clone())
-            .collect()
+        self.book().into_iter().map(|(_, addr)| addr).collect()
+    }
+
+    /// The cell's machines this one dials at start, by id: see
+    /// [`super::starting_book`].
+    #[must_use]
+    pub fn book(&self) -> Vec<(NodeId, Address)> {
+        super::starting_book(&self.admission.members, self.cached.as_ref())
     }
 
     /// `Admit` at an admitted machine: acked for its own cell, refused for
@@ -85,6 +95,51 @@ impl AdmittedMachine {
         }
     }
 
+    /// Start what an admitted machine runs beside its answers: the follow
+    /// that keeps its cached registry fold current (#211), and its
+    /// registration of the address it advertises now (#349).
+    fn follow_and_register<P: Providers>(
+        &self,
+        providers: &P,
+        rpc: &moonpool_rpc::RpcHandle<P>,
+        cache: CacheSink,
+        tunables: &DriverTunables,
+        shutdown: &CancellationToken,
+    ) {
+        let cell = self.admission.cell;
+        let book = self.book();
+        // It keeps its cached registry fold current (#211).
+        super::follow::spawn(
+            providers,
+            rpc,
+            super::follow::Follow {
+                facts: self.facts.clone(),
+                cell,
+                book: book.clone(),
+                floor: self.cached.as_ref().map_or(0, |c| c.position),
+                sink: cache,
+            },
+            tunables,
+            shutdown.clone(),
+        );
+        // It asks the cell coordinator to register the address it
+        // advertises now (#349): the registry may hold another one.
+        if let Some(election) = cell.election {
+            super::register::spawn(
+                providers,
+                rpc,
+                super::register::Registration {
+                    facts: self.facts.clone(),
+                    cell_id: cell.cell_id,
+                    election,
+                    book: super::with_own(&book, self.facts.node_id, &self.facts.addr),
+                },
+                tunables,
+                shutdown.clone(),
+            );
+        }
+    }
+
     /// Serve the machine contract and a node-only `Inspect` at the
     /// machine's listen address until `shutdown`.
     ///
@@ -97,6 +152,7 @@ impl AdmittedMachine {
         mut self,
         providers: &P,
         tunables: &DriverTunables,
+        cache: CacheSink,
         shutdown: CancellationToken,
     ) -> Result<(), RunError> {
         assert!(
@@ -123,26 +179,7 @@ impl AdmittedMachine {
         let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(&rpc).map_err(served)?);
         let mut inspect = Inbound::plain(serve_well_known::<P, InspectRpc>(&rpc).map_err(served)?);
         let cell = self.admission.cell;
-        // It asks the cell coordinator to register the address it
-        // advertises now (#349): the registry may hold another one.
-        if let Some(election) = cell.election {
-            super::register::spawn(
-                providers,
-                &rpc,
-                super::register::Registration {
-                    facts: self.facts.clone(),
-                    cell_id: cell.cell_id,
-                    election,
-                    book: super::with_own(
-                        &self.admission.members,
-                        self.facts.node_id,
-                        &self.facts.addr,
-                    ),
-                },
-                tunables,
-                shutdown.clone(),
-            );
-        }
+        self.follow_and_register(providers, &rpc, cache, tunables, &shutdown);
         tracing::info!(
             node = self.facts.node_id.0,
             cell = cell.cell_id,

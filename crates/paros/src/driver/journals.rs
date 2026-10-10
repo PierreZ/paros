@@ -108,6 +108,13 @@ pub trait JournalStores {
     fn delete(&mut self, journal: JournalIdentifier) {
         let _ = journal;
     }
+
+    /// The node's registry fold reached a new book (#211): an opener that
+    /// keeps a cached registry fold beside its stores caches it. Never
+    /// waits on the disk. The default keeps nothing.
+    fn cache_registry(&self, cache: crate::machine::CachedRegistry) {
+        let _ = cache;
+    }
 }
 
 /// The one-journal node [`crate::run_node`] runs: the store it was handed,

@@ -46,11 +46,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, ScriptedResolver, SimContext, SimTimeProvider, SimulationError, SimulationResult,
-    StateHandle, assert_always, assert_reachable,
+    StateHandle, assert_always, assert_reachable, assert_sometimes,
 };
 use paros::machine::{
-    AuditScope, CellPlan, ControlJournals, MachineAddresses, MachineError, MachineRecord,
-    MachineSettings, ProviderDisk,
+    AuditScope, CachedRegistry, CellPlan, ControlJournals, MachineAddresses, MachineError,
+    MachineRecord, MachineSettings, ProviderDisk,
 };
 use paros::{Address, Ballot, NodeId, RunError};
 
@@ -114,6 +114,15 @@ pub(crate) struct MachineBoard {
     renamed: BTreeMap<usize, Address>,
     /// How many times each machine was renamed, by rank.
     renames: BTreeMap<usize, u8>,
+    /// Each machine's last durable cached registry fold, by minted id
+    /// (#211).
+    cached: BTreeMap<u64, CachedRegistry>,
+    /// Every cached registry fold each machine tried to write, by minted id
+    /// and position: what its disk may hold.
+    cache_writes: BTreeMap<u64, BTreeMap<u64, CachedRegistry>>,
+    /// The rank the moved-founder scenario crashed (#211): its next reboot
+    /// comes back under a new name.
+    rename_next: Option<usize>,
 }
 
 impl MachineBoard {
@@ -360,6 +369,75 @@ pub(crate) fn wipe_target(
             .find(|(_, node)| board.founders.len() == 1 || board.first_promiser != Some(*node))
             .map(|(ip, _)| ip.clone())
     }
+}
+
+/// The founding member the moved-founder scenario crashes first
+/// (`crate::world::moved_founder`, #211), once every founding member formed:
+/// a live one `may_rename` lets come back under a new name, once another
+/// machine of the cell cached the registry. Its next reboot is a rename.
+/// `None` before that, or when none may.
+pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let formed = board.founders.iter().all(|addr| {
+        board
+            .nodes
+            .get(addr)
+            .is_some_and(|n| board.formed.contains(n))
+    });
+    if board.founders.is_empty() || !formed {
+        return None;
+    }
+    // The cell formed, so the machines drew the layout already.
+    let layout = crate::shape::machine_layout(state, 0);
+    // Another machine of the cell cached the registry: once the founder
+    // registers its new name, that machine's cache can name it there.
+    let (rank, ip) = (0..layout.founders)
+        .filter(|rank| may_rename(&board, &layout, *rank))
+        .find_map(|rank| {
+            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(rank))).ok()?;
+            let node = board.nodes.get(&addr)?;
+            let cached_elsewhere = board.cached.keys().any(|other| other != node);
+            cached_elsewhere
+                .then(|| board.ips.get(&addr).filter(|ip| !dead(ip)).cloned())
+                .flatten()
+                .map(|ip| (rank, ip))
+        })?;
+    // Its next boot comes back under a new name.
+    board.rename_next = Some(rank);
+    Some(ip)
+}
+
+/// The machine the moved-founder scenario crashes second (#211): a live
+/// machine of the cell, other than a renamed founding member, whose durable
+/// cached registry fold names that founder at its new name. Its next boot
+/// dials the founder where only the cache knows it is. `None` before that.
+pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if board.renamed.is_empty() {
+        return None;
+    }
+    // A machine renamed, so the machines drew the layout already.
+    let layout = crate::shape::machine_layout(state, 0);
+    let moved: Vec<(u64, &Address)> = board
+        .renamed
+        .iter()
+        .filter(|(rank, _)| **rank < layout.founders)
+        .filter_map(|(rank, name)| {
+            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
+            board.nodes.get(&addr).map(|node| (*node, name))
+        })
+        .collect();
+    board.nodes.iter().find_map(|(addr, node)| {
+        let cache = board.cached.get(node)?;
+        let follows = moved.iter().any(|(founder, name)| {
+            founder != node && cache.address(NodeId(*founder)) == Some(*name)
+        });
+        follows
+            .then(|| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+            .flatten()
+    })
 }
 
 /// The machine the silent-machine scenario crashes now
@@ -638,10 +716,14 @@ fn boot_listen(
     if disk == OnDisk::Empty && board.renamed.remove(&rank).is_some() {
         assert_reachable!("machine: a wiped renamed machine advertises its rank's name again");
     }
+    let forced = board.rename_next == Some(rank);
+    if forced {
+        board.rename_next = None;
+    }
     let renames = rebooted
         && disk == OnDisk::InCell
         && may_rename(&board, layout, rank)
-        && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct;
+        && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct);
     let moves =
         renames || (rebooted && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.move_pct);
     let ip = if moves {
@@ -750,6 +832,7 @@ async fn run_machine_role(
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+                    .on_machines(machine_board(&state), audit_addr.clone())
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(
@@ -854,6 +937,83 @@ pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option
     if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
+}
+
+/// Machine `node` tried to write its cached registry fold (#211,
+/// [`paros::Audit::registry_cached`]), `durable` when the write landed: a
+/// durable cache only moves forward.
+pub(crate) fn registry_cached(
+    board: &Mutex<MachineBoard>,
+    node: NodeId,
+    cache: &CachedRegistry,
+    durable: bool,
+) {
+    let mut board = lock(board);
+    assert_always!(
+        cache.node == node && cache.check().is_ok(),
+        "machine: a machine caches its own checked registry fold",
+        { "node" => node.0 }
+    );
+    board
+        .cache_writes
+        .entry(node.0)
+        .or_default()
+        .insert(cache.position, cache.clone());
+    if !durable {
+        return;
+    }
+    let before = board.cached.insert(node.0, cache.clone());
+    assert_always!(
+        before.as_ref().is_none_or(|b| b.position < cache.position),
+        "machine: a cached registry fold only moves forward",
+        { "node" => node.0, "position" => cache.position }
+    );
+    let moved = before.is_some_and(|b| {
+        b.machines
+            .iter()
+            .any(|(id, addr)| cache.address(*id).is_some_and(|now| now != addr))
+    });
+    if moved {
+        assert_reachable!("machine: a cached registry fold follows a moved machine");
+    }
+}
+
+/// Machine `node` booted into its cell with `cache` (#211,
+/// [`paros::Audit::registry_cache_read`]): a cache the machine wrote, never
+/// another's or one it never offered.
+pub(crate) fn registry_cache_read(
+    board: &Mutex<MachineBoard>,
+    node: NodeId,
+    cache: Option<&CachedRegistry>,
+) {
+    let board = lock(board);
+    if let Some(cache) = cache {
+        let wrote = board
+            .cache_writes
+            .get(&node.0)
+            .and_then(|writes| writes.get(&cache.position));
+        assert_always!(
+            wrote == Some(cache),
+            "machine: a boot reads a cached registry fold the machine wrote",
+            { "node" => node.0, "position" => cache.position }
+        );
+    }
+    let Some(cache) = cache else { return };
+    assert_sometimes!(
+        board.cached.get(&node.0) == Some(cache),
+        "machine: a boot reads the last cached registry fold"
+    );
+    // The static-stability case: the cache dials a founding member away
+    // from the address its plan names, where only the cache knows it is.
+    let moved = board.voters.values().any(|plan| {
+        plan.members
+            .iter()
+            .any(|(id, planned)| cache.address(*id).is_some_and(|a| a != planned))
+    });
+    assert_sometimes!(
+        moved,
+        "machine: a cached registry fold serves a boot with a moved machine"
+    );
 }
 
 /// A machine rewrote its record durably

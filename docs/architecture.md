@@ -495,8 +495,8 @@ restart is supported:
   machine. So the registry write needs a majority of the other members. A cell of two cannot
   heal a moved member, and neither can a cell that lost another member. A machine whose cached
   book names no reachable machine cannot find its coordinator: the same static-stability limit
-  as a machine whose cached members are all gone (below). The durable cached registry fold is
-  still not built.
+  as a machine whose cached members are all gone (below). The durable cached registry fold
+  (below) lets a machine that restarts after others moved dial them where they are.
 - **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
   back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
   nobody listens. The operators' entry for the machine follows it. After chaos, the oracle
@@ -519,8 +519,41 @@ does not land ends the watch for the term. `RegisterNode` and `IdentifyAck` carr
 incarnation: with the address, it is the machine's `InterfaceRef` identity, since a machine serves
 well-known endpoints only. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
 the role names the class, and a booking id is never booked twice, across checkpoints (the
-registry keeps the spent ids). The re-placement bound and the re-placement itself are #212. The
-durable cached registry fold is not built yet.
+registry keeps the spent ids). The re-placement bound and the re-placement itself are #212.
+
+Landed in #211 (2026-10-10): the **durable cached registry fold**
+(`paros::machine::CachedRegistry`). Every machine of a cell keeps the cell's address book
+(`cell_book`) at one registry position in a file `registry` beside its record, rewritten whole
+and atomically, as the record is:
+
+- **Who writes it.** A founding member offers each book its own registry fold reaches
+  (`driver/book.rs`). An admitted machine serves no journal, so it folds the registry through
+  the machines it knows, each renewal period (`machine/follow.rs`). It learns the genesis pool
+  from the control journal's membership. A writer task beside the machine writes a book only
+  at a later position and only when the book changed. The node loop never waits on the disk.
+- **Who reads it.** At every start, a formed or admitted machine dials the machines of its
+  cell where the cache says, else where its plan or admission says (`starting_book`): its peer
+  lanes, its control-journal seeds, its coordinator client and its registration (#349). A new
+  incarnation folds the registry again from position 0. Its book moves no lane until the fold
+  passes the cache's position: below it, the cache is the newer book.
+- **A hint, never a fact.** The cache names its machine (`node`), and a cache another
+  identity left, or one that does not parse, is ignored. A wrong address costs liveness, never
+  safety: every peer batch names its cell (#216).
+- **The simulation.** A durable cache only moves forward, and a boot reads only a cache its
+  machine wrote. The gate is a boot that dials a moved machine from its cache, the
+  static-stability case.
+
+The same change fixed a restore bug from #349: a founding member that registered its address
+broke every restore of a registry checkpoint, because the restore refused a genesis node in the
+state.
+
+It also fixed #390 (renamed founder never registers). A founding member that comes back at a
+new address hears none of its peers: they send to the address the registry knows. Its election
+clocks still fired, and each campaign raised its peers' promises above the sitting leader's. The
+cell control journal then stalled, so the registration that would move the peers' lanes never
+landed. Now such a member holds its journals' clocks until its registration ends
+(`driver/mod.rs`). It still answers every message that reaches it. A lone founding member is its
+own quorum, so it never holds.
 
 **Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
 A machine's configuration names no cell and no peer: it learns its cell when it is admitted

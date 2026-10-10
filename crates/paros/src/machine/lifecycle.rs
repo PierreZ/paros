@@ -43,8 +43,8 @@ use tokio_util::sync::CancellationToken;
 use super::record::{MachineRecord, journal_config};
 use super::stores::{AuditScope, MachineStores};
 use super::{
-    Admission, AdmittedMachine, CellLedger, CellPlan, Class, FormedCell, Joined, MachineFacts,
-    ProviderDisk,
+    Admission, AdmittedMachine, CachedRegistry, CellLedger, CellPlan, Class, FormedCell, Joined,
+    MachineFacts, ProviderDisk,
 };
 use crate::ControlPlan;
 use crate::{Address, Audit, DriverTunables, Names, RunError};
@@ -310,15 +310,19 @@ where
         "machine_starting"
     );
     let joined = if let Some((ballot, plan)) = &record.plan {
+        let cached = read_cache(&disk, &audit, record.node_id).await;
         Joined::Founded(FormedCell {
             facts,
             plan: plan.clone(),
             ballot: *ballot,
+            cached,
         })
     } else if let Some(admission) = &record.admitted {
+        let cached = read_cache(&disk, &audit, record.node_id).await;
         Joined::Admitted(AdmittedMachine {
             facts,
             admission: admission.clone(),
+            cached,
         })
     } else {
         let mut ledger = DiskLedger {
@@ -355,11 +359,62 @@ where
     };
     match joined {
         Joined::Founded(cell) => serve(providers, disk, audits, cell, &tunables, shutdown).await,
-        Joined::Admitted(admitted) => admitted
-            .serve(&providers, &tunables, shutdown)
-            .await
-            .map_err(MachineError::Run),
+        Joined::Admitted(admitted) => {
+            let cache = super::spawn_writer(
+                &providers,
+                disk,
+                audit.clone(),
+                admitted.facts.node_id,
+                admitted.cached.clone(),
+                shutdown.clone(),
+            );
+            admitted
+                .serve(&providers, &tunables, cache, shutdown)
+                .await
+                .map_err(MachineError::Run)
+        }
     }
+}
+
+/// The cached registry fold on `disk` (#211), if it holds one that machine
+/// `node` wrote. A cache that cannot be read or parsed is no cache: it only
+/// says where to dial, so the machine starts from its plan or admission.
+async fn read_cache<S: StorageProvider + Clone, A: Audit>(
+    disk: &ProviderDisk<S>,
+    audit: &A,
+    node: NodeId,
+) -> Option<CachedRegistry> {
+    let cache = match disk.read_cache().await {
+        Ok(Some(text)) => match CachedRegistry::parse(&text) {
+            Ok(cache) if cache.node == node => Some(cache),
+            Ok(_) => {
+                tracing::warn!(node = node.0, "registry_cache_foreign");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(node = node.0, %error, "registry_cache_unreadable");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(node = node.0, %error, "registry_cache_unread");
+            None
+        }
+    };
+    if cache.is_some() {
+        moonpool_assertions::reachable!(
+            "machine: a machine restarts with its cached registry fold"
+        );
+    }
+    assert!(
+        cache
+            .as_ref()
+            .is_none_or(|c| c.node == node && c.check().is_ok()),
+        "a machine starts from its own checked cache"
+    );
+    audit.registry_cache_read(node, cache.as_ref());
+    cache
 }
 
 /// The machine's record: read, or minted on an empty disk; the
@@ -482,11 +537,13 @@ where
         record.node_id, node_id,
         "the record names the serving machine"
     );
+    // The founding members where the cached registry fold dials them, else
+    // at the plan's addresses (#211).
+    let founders = cell.founders();
     let control = ControlPlan {
         self_id: node_id,
         class: cell.facts.class,
-        seeds: plan
-            .members
+        seeds: founders
             .iter()
             .map(|(id, addr)| (*id, addr.to_string()))
             .collect(),
@@ -494,12 +551,19 @@ where
         founders: plan.members.iter().map(|(id, _)| *id).collect(),
         spares: Vec::new(),
     };
-    let stores = MachineStores::new(disk, record, genesis, audits);
+    let cache = super::spawn_writer(
+        &providers,
+        disk.clone(),
+        audits(AuditScope::Machine),
+        node_id,
+        cell.cached.clone(),
+        shutdown.clone(),
+    );
+    let stores = MachineStores::new(disk, record, genesis, audits).with_cache(cache);
     // Bind where the machine is (#257), never at the address the plan
     // froze: a machine whose address changed across a restart still serves.
     let listen = cell.facts.listen;
-    let book: Vec<(NodeId, String)> = plan
-        .members
+    let book: Vec<(NodeId, String)> = founders
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();

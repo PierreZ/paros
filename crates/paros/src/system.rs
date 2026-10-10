@@ -1322,10 +1322,9 @@ impl Checkpointable for Registry {
             wire::RegistryState::decode(state).map_err(|_| "a registry state does not decode")?;
         let mut nodes = BTreeMap::new();
         for n in state.nodes {
+            // A genesis node registers too (#349): its entry is the address
+            // peers dial, and it crosses a checkpoint like any other (#211).
             let id = NodeId(n.id);
-            if self.genesis.contains(&id) {
-                return Err("a registry state names a genesis node");
-            }
             nodes.insert(
                 id,
                 RegisteredNode {
@@ -1783,6 +1782,35 @@ mod tests {
         );
         reg.fold(13, &one(&SystemCommand::RetireNode { id: NodeId(100) }));
         assert_eq!(reg.bookings().count(), 0);
+    }
+
+    #[test]
+    fn a_registered_genesis_node_crosses_a_checkpoint() {
+        use crate::client::checkpoint::{Folded, Folder, run};
+        // A founding member registers its address (#349), then the owner
+        // checkpoints: a fold that restores there keeps the address.
+        let records = [register(7, Class::Storage, 1)];
+        let mut whole = Folder::new(Registry::new([NodeId(7)]));
+        assert!(matches!(whole.fold(0, &records[0]), Some(Folded::Entry(_))));
+        assert!(whole.state().address(NodeId(7)).is_some());
+        let run = run(1, &whole.state().checkpoint(), 64);
+        let mut restored = Folder::new(Registry::new([NodeId(7)]));
+        restored.jump(1);
+        let end = run.len() as u64;
+        for (seq, record) in (1..end).zip(&run) {
+            assert_eq!(restored.fold(seq, record), Some(Folded::Run));
+        }
+        assert_eq!(
+            restored.fold(end, run.last().expect("a run has an End")),
+            Some(Folded::Checkpoint {
+                covers_up_to: 1,
+                verified: None
+            })
+        );
+        assert!(restored.is_whole());
+        assert_eq!(restored.state().checkpoint(), whole.state().checkpoint());
+        assert_eq!(restored.state().address(NodeId(7)), Some("n7"));
+        assert!(restored.state().contains(NodeId(7)));
     }
 
     #[test]

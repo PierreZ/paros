@@ -140,6 +140,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                 facts: facts.clone(),
                 plan,
                 ballot,
+                cached: None,
             })
         })
     };
@@ -159,6 +160,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                     return Ok(Some(Joined::Admitted(AdmittedMachine {
                         facts: facts.clone(),
                         admission,
+                        cached: None,
                     })));
                 }
             }
@@ -283,6 +285,7 @@ async fn answer_prepare<L: CellLedger>(
             facts: facts.clone(),
             plan,
             ballot: voted,
+            cached: None,
         }
         .prepare_ack();
     }
@@ -355,6 +358,7 @@ async fn answer_form<L: CellLedger>(
             facts: facts.clone(),
             plan: held,
             ballot: voted,
+            cached: None,
         }
         .form_ack(request);
     }

@@ -58,9 +58,11 @@
 
 mod admitted;
 mod book;
+mod cache;
 mod cell_init;
 pub mod coordinator;
 mod disk;
+mod follow;
 mod formed;
 mod lifecycle;
 mod record;
@@ -77,6 +79,7 @@ use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, Tena
 pub use admitted::AdmittedMachine;
 pub(crate) use book::with_own;
 pub use book::{address_book, cell_book};
+pub use cache::{CacheSink, CachedRegistry, spawn_writer, starting_book};
 pub use disk::ProviderDisk;
 pub use formed::FormedCell;
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
