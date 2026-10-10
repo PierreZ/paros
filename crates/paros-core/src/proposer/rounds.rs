@@ -523,6 +523,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
                 self.column(slot) == Some(column),
                 "a counted vote's round keeps its column"
             );
+            // Read from the addressee list, apart from the guard above (#269).
+            assert!(
+                config.phase2_addressees(column).contains(&from),
+                "a counted vote is from the round's column"
+            );
         }
         counted
     }

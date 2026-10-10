@@ -172,9 +172,14 @@ pub const COVERAGE_ITERATIONS: usize = 1024;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// Seeds the mutation hunt runs per mutant (#269), when `cargo xtask mutants`
-/// is given no `--seeds`: about 1.5 minutes in release on a 4-core machine.
-/// A schedule parameter like the `*_ITERATIONS` caps, never buggified.
+/// is given no `--seeds`: about 2.5 minutes in release for a survivor. A
+/// schedule parameter like the `*_ITERATIONS` caps, never buggified.
 pub const MUTANT_SEEDS: u64 = 300;
+
+/// Seeds per batch of the mutation hunt (#269): the hunt stops at the first
+/// batch with a violation, so a caught mutant costs a fraction of the range.
+/// A schedule parameter, never buggified.
+pub const MUTANT_BATCH: u64 = 20;
 
 /// Simulated window (ms) over which chaos fires — network faults, attrition
 /// reboots, and the paros-side driver/storage perturbations. It ends well
@@ -465,24 +470,30 @@ pub fn chain_smoke(iterations: usize) -> SimulationReport {
         .run_configured()
 }
 
-/// The mutation hunt (#269): seeds `1..=seeds` of the main campaign, the
-/// same ones for every mutant, so survivors compare between runs. These are
-/// not witnesses (AGENTS.md, *No pinned seeds*): the range is a fixed sample,
-/// and a draw added to the harness simply shifts which states it covers.
-/// `paros-sim-runner`'s `mutants` test target runs it under `cargo mutants`;
-/// a mutant is caught when the report is not clean.
+/// The mutation hunt (#269): one batch of the seeds `1..=MUTANT_SEEDS` of the
+/// main campaign, the same ones for every mutant, so survivors compare between
+/// runs. These are not witnesses (AGENTS.md, *No pinned seeds*): the range is
+/// a fixed sample, and a draw added to the harness simply shifts which states
+/// it covers. `paros-sim-runner`'s `mutants` test target runs the range in
+/// batches of [`MUTANT_BATCH`] under `cargo mutants` and stops at the first
+/// batch whose report is not clean: the mutant is caught.
 ///
 /// # Panics
 ///
-/// Panics if `seeds` is zero or does not fit a `usize`.
+/// Panics if `seeds` is empty, starts at zero or does not fit a `usize`.
 #[must_use]
 #[tracing::instrument(level = "debug")]
-pub fn chain_mutants(seeds: u64) -> SimulationReport {
-    assert!(seeds > 0, "the mutation hunt runs at least one seed");
-    let iterations = usize::try_from(seeds).expect("the seed count fits a usize");
+pub fn chain_mutants(seeds: std::ops::RangeInclusive<u64>) -> SimulationReport {
+    assert!(
+        !seeds.is_empty(),
+        "the mutation hunt runs at least one seed"
+    );
+    assert!(*seeds.start() > 0, "seed 0 is not a hunt seed");
+    let count = seeds.end() - seeds.start() + 1;
+    let iterations = usize::try_from(count).expect("the seed count fits a usize");
     chain_builder(None)
         .set_iterations(iterations)
-        .set_debug_seeds((1..=seeds).collect())
+        .set_debug_seeds(seeds.collect())
         .run_configured()
 }
 

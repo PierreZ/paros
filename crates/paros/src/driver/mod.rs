@@ -1449,7 +1449,7 @@ where
                 );
                 let folded = folded_answer(&reply);
                 let step = rt.node.on_match_reply(reply);
-                report_match_step(&rt.node, &rt.audit, self_id, matchmaker, ballot, folded, &step);
+                report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
                 shared.with(&rt.audit).on_match_refusal(&rt.node, &mut handover, matchmaker, &step);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;

@@ -16,6 +16,7 @@
 //! [`QuorumReads`]: crate::quorum_read::QuorumReads
 
 use super::{BeliefSource, ColocatedNode, Message, NodeId, NodeRole, ReadState, Slot};
+use crate::membership::QuorumSystem;
 use crate::quorum_read::PreReadFold;
 use crate::types::Ballot;
 use crate::{Command, Control, Delegation, ProposeResult};
@@ -105,10 +106,21 @@ impl ColocatedNode {
         // watermark is a fact its durable log holds, exactly what a peer's
         // ack would claim.
         let row = basis.config.read_row(ctx, row);
+        // A grid reads one row; a majority or a flexible split the whole
+        // membership (#269).
+        assert!(
+            row.is_some() == matches!(basis.config.quorum_system(), QuorumSystem::Grid { .. }),
+            "a read names a row exactly under a grid"
+        );
         let own = basis
             .config
             .is_phase1_addressee(me, row)
             .then(|| (me, self.acceptor.vote_watermark()));
+        // Read from the addressee list, apart from the predicate above.
+        assert!(
+            own.is_none() || basis.config.phase1_addressees(row).contains(&me),
+            "a reader answers itself only from inside its row"
+        );
         let config = basis.config.clone();
         let addressees = self
             .quorum_reads

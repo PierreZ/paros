@@ -370,15 +370,21 @@ fn folded_answer_unchecked(reply: &MatchReply) -> Option<(Ballot, u64)> {
 }
 
 /// Report a matchmaking phase that closed with a quorum and opened Phase 1.
-fn report_completed<A: Audit>(
-    node: &ColocatedNode,
-    audit: &A,
-    self_id: u64,
-    ballot: Ballot,
-    prior: &[paros_core::AcceptorConfig],
-    watermark: Ballot,
-    registered_by: usize,
-) {
+fn report_completed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: &MatchStep) {
+    assert!(
+        matches!(step, MatchStep::Completed { .. }),
+        "only a completed phase is reported completed"
+    );
+    let MatchStep::Completed {
+        prior,
+        watermark,
+        registered_by,
+        disagreements,
+    } = step
+    else {
+        return;
+    };
+    let (watermark, registered_by, disagreements) = (*watermark, *registered_by, *disagreements);
     // A completed registration rests on a quorum: at least one answer.
     assert!(
         registered_by > 0,
@@ -390,7 +396,7 @@ fn report_completed<A: Audit>(
         prior,
         watermark,
         registered_by,
-        node.matchmaking_disagreements(),
+        disagreements,
     );
     tracing::info!(
         node = self_id,
@@ -470,7 +476,6 @@ fn assert_step_source(folded: bool, step: &MatchStep) {
 /// [`folded_answer`] for that reply.
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn report_match_step<A: Audit>(
-    node: &ColocatedNode,
     audit: &A,
     self_id: u64,
     matchmaker: MatchmakerId,
@@ -525,11 +530,7 @@ pub(crate) fn report_match_step<A: Audit>(
                 "match_paged"
             );
         }
-        MatchStep::Completed {
-            prior,
-            watermark,
-            registered_by,
-        } => {
+        MatchStep::Completed { .. } => {
             // The closing reply is a registration too: fold it before the
             // completion so the audit's registering set is the full quorum.
             audit.match_registered_by(
@@ -540,15 +541,7 @@ pub(crate) fn report_match_step<A: Audit>(
                 folded_watermark,
                 folded_hash,
             );
-            report_completed(
-                node,
-                audit,
-                self_id,
-                ballot,
-                prior,
-                *watermark,
-                *registered_by,
-            );
+            report_completed(audit, self_id, ballot, step);
         }
         MatchStep::StaleConfiguration { newest } => {
             audit.matchmaking_stale_configuration(NodeId(self_id), ballot, *newest);

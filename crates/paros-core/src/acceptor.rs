@@ -594,9 +594,14 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         let watermark_before = self.vote_watermark();
         let writes_before = writes.len();
         let repaired = self.faulty.remove(slot).is_some();
+        let repaired_before = self.faulty_repaired;
         if repaired {
             self.faulty_repaired += 1;
         }
+        assert!(
+            self.faulty_repaired == repaired_before + u64::from(repaired),
+            "a repair is counted once"
+        );
         if let Some((recorded_ballot, recorded)) = self.records.get(slot)
             && ballot <= *recorded_ballot
         {

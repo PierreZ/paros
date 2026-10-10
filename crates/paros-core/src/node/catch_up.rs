@@ -119,6 +119,16 @@ impl ColocatedNode {
                 .all(|(a, b)| b.0 == a.0 + 1),
             "a catch-up page is contiguous"
         );
+        // A page stops only at its bound, at the end of the prefix, or at the
+        // server's own hole: never short of a chosen slot it could serve
+        // (#269: a mutant that cut every page after one entry survived).
+        let last = *entries.keys().next_back().expect("a non-empty page");
+        assert!(
+            entries.len() == CATCHUP_BATCH
+                || last == ci
+                || !self.replica.chosen().contains_key(&Slot(last.0 + 1)),
+            "a catch-up page stops only at its bound, the prefix's end or a hole"
+        );
         self.send(to, Message::CatchUpResponse { from: me, entries });
     }
 
