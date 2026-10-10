@@ -5,7 +5,8 @@
 //! The cell step is `cell init` over the founding members: sent to the
 //! first listed machine still idle, which drives the cell decree over every
 //! listed machine ([`crate::machine`]); a formed one has no `CellInit` and
-//! the next is asked. Then `init` waits for the cell's first coordinator:
+//! the next is asked, and so is one `cell add-machine` admitted (#423), which
+//! refuses it as `cell_exists`. Then `init` waits for the cell's first coordinator:
 //! the founding members campaign in the cell's election journal, and the
 //! winner installs its uuid on the cell control journal with
 //! `SetLeader(uuid, unset)` (#240, [`crate::machine`]'s coordinator). `init`
@@ -223,6 +224,15 @@ pub async fn initialize<P: Providers>(
             InitOutcome::Formed(plan) => {
                 formation = Some(plan);
                 break;
+            }
+            // A machine `cell add-machine` admitted (#216) at a listed
+            // address: a wiped member's replacement, in a cell already, like
+            // a formed one (#423). The next listed machine may still be idle,
+            // and `found` names the cell a majority of the members serve.
+            InitOutcome::Refused(refusal) if refusal == "cell_exists" => {
+                moonpool_assertions::reachable!(
+                    "init: a re-run passes an admitted machine at a listed address"
+                );
             }
             InitOutcome::Refused(refusal) => {
                 return InitRun::Refused(InitRefusal::Formation(refusal));

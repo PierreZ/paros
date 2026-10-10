@@ -371,6 +371,67 @@ pub(crate) fn wipe_target(
     }
 }
 
+/// The founding member the replaced-founder scenario wipes now
+/// (`crate::world::replaced_founder`, #423), if the run is at its moment:
+/// every founder of a cell of three or more formed, and no machine was
+/// wiped yet. The highest-ranked live founder, so the cell keeps a majority
+/// of its members. The answer is the founder's process IP, what the wipe
+/// strikes.
+pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if board.founders.len() < 3 || !board.wiped.is_empty() {
+        return None;
+    }
+    let formed = board.founders.iter().all(|addr| {
+        board
+            .nodes
+            .get(addr)
+            .is_some_and(|node| board.formed.contains(node))
+    });
+    if !formed {
+        return None;
+    }
+    board
+        .founders
+        .iter()
+        .rev()
+        .filter_map(|addr| board.ips.get(addr))
+        .find(|ip| !dead(ip))
+        .cloned()
+}
+
+/// Where the replaced-founder scenario stands (#423): the machine that
+/// replaced a wiped founder, at the founder's address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Replacement {
+    /// The machine at the address is idle: an operator may admit it.
+    Idle(Address),
+    /// The machine at the address holds an admission: a re-run `init` meets
+    /// it among the founders.
+    Admitted,
+}
+
+/// The machine that replaced a wiped founder (#423), when it is idle or
+/// admitted. `None` before a wipe, and once the machine there holds a vote
+/// or is wiped in turn before its boot is known.
+pub(crate) fn replacement(state: &StateHandle) -> Option<Replacement> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let (addr, node) = board
+        .wiped
+        .iter()
+        .filter(|(addr, _)| board.founders.contains(addr))
+        .find_map(|(addr, old)| {
+            let node = *board.nodes.get(addr)?;
+            (node != *old).then(|| (addr.clone(), node))
+        })?;
+    if board.admitted.contains_key(&node) {
+        return Some(Replacement::Admitted);
+    }
+    (!board.voters.contains_key(&node)).then_some(Replacement::Idle(addr))
+}
+
 /// The founding member the moved-founder scenario crashes first
 /// (`crate::world::moved_founder`, #211), once every founding member formed:
 /// a live one `may_rename` lets come back under a new name, once another

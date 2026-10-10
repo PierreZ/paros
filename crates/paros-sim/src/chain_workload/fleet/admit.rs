@@ -29,7 +29,10 @@ impl FleetOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) {
+        let replaced = self.replaced_target(ctx);
         if self.admitting.is_none()
+            && replaced.is_none()
+            && !crate::shape::replaced_founder(ctx.state())
             && crate::machine::other_cell_target(ctx.state()).is_some()
             // The wiped-founder scenario lines up the wipe this needs: on
             // its seeds, the operator always founds the other cell.
@@ -40,7 +43,7 @@ impl FleetOps {
         }
         let founders = self.layout.founders;
         let outside = founders..self.machines.len();
-        let target = match self.admitting.take() {
+        let target = match self.admitting.take().or(replaced) {
             Some(target) => target,
             None if outside.is_empty() || buggify_with_prob!(0.1) => {
                 self.machines[usize::try_from(draw % founders.max(1) as u64).unwrap_or(0)].clone()
