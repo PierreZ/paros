@@ -5,7 +5,8 @@ description: Add or change an operation in paros's ChainWorkload (the one main-c
 
 # Extending the chain workload
 
-`ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`) is the only
+`ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`; the op ids and
+`ChainConfig` in `chain_workload/config.rs`) is the only
 main-campaign workload: one to three factory-created clients driving a
 chaotic pool through the journal API of #204 (`Write`, `Read`, `Truncate`,
 `SetLeader`). paros runs no application (#186): each client *is* the

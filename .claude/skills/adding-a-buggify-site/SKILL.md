@@ -53,7 +53,7 @@ resend, resign, hand off, drop a reply, hold a mailbox, stretch a tick):
 For anything that shapes a run (a count, a window, a capacity, a rate):
 
 - **Workload tunables** live in `ChainConfig::for_timeline`
-  (`crates/paros-sim/src/chain_workload.rs`); **per-node driver tunables** in
+  (`crates/paros-sim/src/chain_workload/config.rs`); **per-node driver tunables** in
   `NodeShape::draw` (`crates/paros-sim/src/shape.rs`), which draws once per
   logical node per seed and reuses the shape across restarts; **disk fault
   rates** in the injector's families (`world/injector.rs`); a cut mid-commit is a
@@ -67,7 +67,7 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`).
 - Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
   `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_DURATION_MS` in `lib.rs`,
-  `SETTLE` in `chain_workload.rs`) or a schedule
+  `SETTLE` in `chain_workload/reads.rs`) or a schedule
   ceiling (`*_ITERATIONS`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.
 - A new production tunable is **born** as a `DriverTunables` field with a

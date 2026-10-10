@@ -62,7 +62,7 @@ linearizability checker judge is the client an operator runs. The module doc
 - **Tunables are plain data with floors.** A new `ClientTunables` field
   documents its floor (the smallest value that is still a working client) and
   its `Default`, and in the same change becomes its own `buggify_knob!` field
-  in `ChainConfig` (`crates/paros-sim/src/chain_workload.rs`), mapped in
+  in `ChainConfig` (`crates/paros-sim/src/chain_workload/config.rs`), mapped in
   `ChainConfig::tunables()` (and `truncate_tunables()` /
   `reconfigure_tunables()` / `matchmakers_tunables()` where a call family
   overrides it). Floors already in use: `write_redirect_limit` and
