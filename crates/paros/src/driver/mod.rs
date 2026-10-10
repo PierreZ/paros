@@ -421,15 +421,23 @@ impl<P: Providers, A: Audit> NodeLoop<'_, P, A> {
         }
         // A sitting leader resigns on its own, rarely: a rare-but-valid
         // choice (`step_down` is always safe) that makes the cell elect
-        // again. Silent in the recovery tail.
-        if !handed_off
-            && node.role() == NodeRole::Leader
-            && moonpool_buggify::buggify_fault_with_prob!(0.004)
-        {
-            moonpool_assertions::reachable!("the driver voluntarily resigns leadership");
-            audit.stepped_down(NodeId(self_id));
-            tracing::info!(node = self_id, "leadership_resigned");
-            node.step_down();
+        // again. Silent in the recovery tail. A leader that holds delegated
+        // rounds has its own named location too (`RESIGN_DELEGATING`, #341):
+        // it campaigns again at once, so its next leadership's delegations
+        // meet the rounds a proxy still holds for this one.
+        if !handed_off && node.role() == NodeRole::Leader {
+            let again = !node.delegated_rounds().is_empty() && crate::scenario::resign_delegating();
+            if again || moonpool_buggify::buggify_fault_with_prob!(0.004) {
+                moonpool_assertions::reachable!("the driver voluntarily resigns leadership");
+                audit.stepped_down(NodeId(self_id));
+                tracing::info!(node = self_id, "leadership_resigned");
+                let promised = node.acceptor().promised();
+                node.step_down();
+                if again {
+                    // Any node may campaign at any time, at any fresh round.
+                    node.campaign_above(promised);
+                }
+            }
         }
         // Either way the authority is given up in the same call.
         if handed_off {

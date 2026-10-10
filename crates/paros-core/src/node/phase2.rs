@@ -427,6 +427,14 @@ impl ColocatedNode {
         if !self.proposer.take_back_round(slot, own_vote) {
             return;
         }
+        if column.is_some() {
+            // The take-back whose re-send must stay on the round's column
+            // (#341): only a grid names one.
+            probe!(
+                reachable,
+                "proxy: a leader takes a delegated round back on a grid column"
+            );
+        }
         self.send_accept(slot, ballot, command, column, None);
         self.try_decide(slot);
     }

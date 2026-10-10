@@ -365,6 +365,16 @@ where
                 } else {
                     tracing::info!(proxy = id.0, kind, "msg_received");
                 }
+                // The stalled-proxy scenario (`crate::scenario::STALL_PROXY`,
+                // #341): the proxy drops the acceptors' answers it hears, so
+                // its rounds stay open. Drawn only for an answer, where the
+                // decision has an effect.
+                if matches!(msg, Message::Accepted { .. } | Message::Nack { .. })
+                    && crate::scenario::stall_proxy()
+                {
+                    tracing::info!(proxy = id.0, "proxy_answer_dropped");
+                    continue;
+                }
                 let accept = DelegatedAccept::of(&msg);
                 let before = proxy.counters();
                 proxy.step(msg);

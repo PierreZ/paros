@@ -292,6 +292,14 @@ impl ProxyLeader {
             return;
         }
         if ballot > self.ballot {
+            if !self.rounds.is_empty() {
+                // The state `close_below` exists for (#341): a new
+                // leadership's delegation meets rounds the old one left.
+                probe!(
+                    reachable,
+                    "proxy: a higher-ballot delegation meets a superseded leadership's rounds"
+                );
+            }
             self.ballot = ballot;
             self.close_below(ballot);
         }

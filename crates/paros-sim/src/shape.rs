@@ -567,6 +567,9 @@ struct Registry {
     /// Run-level: whether the run draws the silent-machine scenario (see
     /// [`silent_machine`]), fixed by the first caller.
     silent_machine: Option<bool>,
+    /// Run-level: whether the run draws the stalled-proxy scenario (see
+    /// [`stalled_proxy`]), fixed by the first caller.
+    stalled_proxy: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -854,6 +857,33 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
     *guard
         .silent_machine
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **stalled-proxy scenario** (#341): drawn once
+/// per seed, its own BUGGIFY location. Three mutation survivors of #269
+/// need a proxy whose rounds stay open: a leader that takes a delegated
+/// round back on a grid (the re-send must stay on the round's column), a
+/// proxy that evicts a round nobody answers, and a new leadership whose
+/// delegation meets the rounds a proxy still holds. A proxy's round closes
+/// within a few beats on almost every seed, and a grid is two knobs deep,
+/// so no seed in `1..=300` lined them up. On a scenario seed every proxy
+/// drops the `Accepted`s and `Nack`s it hears for the chaos window
+/// (`paros::scenario::STALL_PROXY`), a leader that holds delegated rounds
+/// resigns now and then (`paros::scenario::RESIGN_DELEGATING`), and the run
+/// runs an acceptor grid
+/// where the pool tiles one ([`quorum_policy`]). Each ingredient keeps its
+/// own coin on the other seeds. Rare-but-valid: a lost vote is, and so is a
+/// grid.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.stalled_proxy.get_or_insert_with(|| {
+        let stall = moonpool_sim::buggify_with_prob!(1.0);
+        moonpool_sim::set_activation(paros::scenario::STALL_PROXY, stall);
+        moonpool_sim::set_activation(paros::scenario::RESIGN_DELEGATING, stall);
+        stall
+    })
 }
 
 /// The fewest blocks a segment's entry log may have (floor of
@@ -1217,12 +1247,22 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
 /// before the policy existed.
 #[tracing::instrument(level = "debug", skip(state), fields(pool))]
 pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
+    let stalled = stalled_proxy(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.quorum.get_or_insert_with(|| {
         let majority = pool / 2 + 1;
         if pool < 2 {
             return QuorumPolicy::Majority;
+        }
+        // The stalled-proxy scenario (#341) runs a grid wherever the pool
+        // tiles one, so its take-back runs on a column.
+        let layouts = grid_layouts(pool);
+        if stalled && !layouts.is_empty() {
+            let pick = moonpool_sim::sim_random_range(0..layouts.len());
+            let (rows, cols) = layouts[pick];
+            assert_reachable!("a run draws an acceptor grid");
+            return QuorumPolicy::Grid { rows, cols };
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
         if q2 != majority {
@@ -1236,7 +1276,6 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
         // The grid knob, its own location: index 0 is "no grid", `k` the
         // `k`-th layout of the pool. A pool that tiles no grid (three or
         // five nodes) draws nothing here and stays a majority.
-        let layouts = grid_layouts(pool);
         if layouts.is_empty() {
             return QuorumPolicy::Majority;
         }
