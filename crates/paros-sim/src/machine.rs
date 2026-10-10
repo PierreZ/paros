@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use moonpool_sim::{
     Process, ScriptedResolver, SimContext, SimTimeProvider, SimulationError, SimulationResult,
-    StateHandle, assert_always, assert_reachable,
+    StateHandle, assert_always, assert_reachable, assert_sometimes,
 };
 use paros::machine::{
     AuditScope, CachedRegistry, CellPlan, ControlJournals, MachineAddresses, MachineError,
@@ -366,6 +366,64 @@ pub(crate) fn wipe_target(
             .find(|(_, node)| board.founders.len() == 1 || board.first_promiser != Some(*node))
             .map(|(ip, _)| ip.clone())
     }
+}
+
+/// The founding member the moved-founder scenario crashes first
+/// (`crate::world::moved_founder`, #211), once every founding member formed:
+/// a live one `may_rename` lets come back under a new name, its reboot
+/// renamed on that seed. `None` before that, or when none may.
+pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let formed = board.founders.iter().all(|addr| {
+        board
+            .nodes
+            .get(addr)
+            .is_some_and(|n| board.formed.contains(n))
+    });
+    if board.founders.is_empty() || !formed {
+        return None;
+    }
+    // The cell formed, so the machines drew the layout already.
+    let layout = crate::shape::machine_layout(state, 0);
+    (0..layout.founders)
+        .filter(|rank| may_rename(&board, &layout, *rank))
+        .find_map(|rank| {
+            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(rank))).ok()?;
+            board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()
+        })
+}
+
+/// The machine the moved-founder scenario crashes second (#211): a live
+/// machine of the cell, other than a renamed founding member, whose durable
+/// cached registry fold names that founder at its new name. Its next boot
+/// dials the founder where only the cache knows it is. `None` before that.
+pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if board.renamed.is_empty() {
+        return None;
+    }
+    // A machine renamed, so the machines drew the layout already.
+    let layout = crate::shape::machine_layout(state, 0);
+    let moved: Vec<(u64, &Address)> = board
+        .renamed
+        .iter()
+        .filter(|(rank, _)| **rank < layout.founders)
+        .filter_map(|(rank, name)| {
+            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
+            board.nodes.get(&addr).map(|node| (*node, name))
+        })
+        .collect();
+    board.nodes.iter().find_map(|(addr, node)| {
+        let cache = board.cached.get(node)?;
+        let follows = moved.iter().any(|(founder, name)| {
+            founder != node && cache.address(NodeId(*founder)) == Some(*name)
+        });
+        follows
+            .then(|| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+            .flatten()
+    })
 }
 
 /// The machine the silent-machine scenario crashes now
@@ -921,9 +979,22 @@ pub(crate) fn registry_cache_read(
             { "node" => node.0, "position" => cache.position }
         );
     }
-    if cache.is_some() && cache == board.cached.get(&node.0) {
-        assert_reachable!("machine: a boot reads the last cached registry fold");
-    }
+    let Some(cache) = cache else { return };
+    assert_sometimes!(
+        board.cached.get(&node.0) == Some(cache),
+        "machine: a boot reads the last cached registry fold"
+    );
+    // The static-stability case: the cache dials a founding member away
+    // from the address its plan names, where only the cache knows it is.
+    let moved = board.voters.values().any(|plan| {
+        plan.members
+            .iter()
+            .any(|(id, planned)| cache.address(*id).is_some_and(|a| a != planned))
+    });
+    assert_sometimes!(
+        moved,
+        "machine: a cached registry fold serves a boot with a moved machine"
+    );
 }
 
 /// A machine rewrote its record durably
