@@ -40,6 +40,10 @@ use paros::{
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
 
+/// The longest a drawn quarantine holds a journal down, in milliseconds:
+/// production's 80 ticks of 100 ms (`DriverTunables::production`).
+const QUARANTINE_CEILING_MS: u64 = 8_000;
+
 /// The wall-clock floor of every driver timeout that races the network: one
 /// Phase-1 round trip over moonpool's default cross-datacenter link plus one
 /// delivery batch, i.e. production's `5 ticks × 50 ms`. See [`NodeShape::draw`]
@@ -238,9 +242,14 @@ impl NodeShape {
             // A quarantined journal's re-open delay (#188), in ticks. Floor
             // 1: a journal re-opened the next beat is a restart loop that
             // still leaves the node's other journals their beats; the
-            // ceiling holds one journal down on one node for a few seconds,
-            // which the recovery tail outlasts.
-            quarantine_ticks: buggify_knob!(40_u64, 1_u64..161_u64),
+            // ceiling holds one journal down on one node for at most
+            // `QUARANTINE_CEILING_MS` (production's 8 s), which the
+            // recovery tail outlasts. The ceiling is wall-clock: at a slow
+            // tick, 160 ticks held a one-copy registry down past
+            // `FLEET_SETTLE` (witness: seed 15408472114085943299, a 32 s
+            // quarantine).
+            quarantine_ticks: buggify_knob!(40_u64, 1_u64..161_u64)
+                .min(QUARANTINE_CEILING_MS.div_ceil(tick_ms)),
             // The election backoff's ceiling (doublings of the base across
             // consecutive failed campaigns). Floor 2: below it a sole
             // candidate over a degraded link can still abandon every round
