@@ -242,6 +242,13 @@ pub struct DriverTunables {
     /// contract, never a wrong answer. The default leaves room under the RPC
     /// frame (`MAX_FRAME_BYTES`) for the request's other fields.
     pub max_batch_bytes: u64,
+    /// The most rounds one page of a leader's recovery visits (#330,
+    /// `ColocatedNode::set_recovery_page`) before the driver advances the
+    /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
+    /// still drains the recovery, one `Ready` per slot. The ceiling is
+    /// [`paros_core::LEADER_RECOVERY_BATCH`], the default; a larger value
+    /// runs the ceiling.
+    pub recovery_page: usize,
 }
 
 impl Default for DriverTunables {
@@ -273,6 +280,7 @@ impl Default for DriverTunables {
             proxy_round_resends: PROXY_ROUND_RESENDS,
             max_batch_records: MAX_BATCH_RECORDS,
             max_batch_bytes: MAX_BATCH_BYTES,
+            recovery_page: paros_core::LEADER_RECOVERY_BATCH,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
