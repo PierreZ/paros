@@ -321,10 +321,17 @@ async fn campaign<P: Providers>(
         );
         (term, desk)
     };
+    // The term a superseded desk resigned: resigned again while the
+    // election still names it (a resignation can be lost).
+    let mut resigned: Option<u64> = None;
     let mut steps = 0_u64;
     while !shutdown.is_cancelled() {
         steps += 1;
         match election.step(jitter(seed, steps, tunables.lease)).await {
+            Step::Leading { leader, .. } if resigned == Some(leader.term) => {
+                desk = None;
+                election.resign(None).await;
+            }
             Step::Leading { leader, .. } if served != Some(leader.term) => {
                 let duty = serve_term(
                     &providers,
@@ -386,9 +393,10 @@ async fn campaign<P: Providers>(
         // Answer the journal requests until the next step is due.
         let wake = providers.time().sleep(pace);
         answer_requests(wake, &mut requests, &mut desk, &client, &shutdown).await;
-        if desk.as_ref().is_some_and(|(_, desk)| desk.superseded()) {
+        if let Some((term, _)) = desk.as_ref().filter(|(_, desk)| desk.superseded()) {
             // A tenant control journal refused the term's uuid: end the
             // term, as a refused cell control journal does.
+            resigned = Some(*term);
             desk = None;
             election.resign(None).await;
         }
