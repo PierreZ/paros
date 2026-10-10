@@ -72,8 +72,9 @@ impl FleetOps {
     }
 
     /// The cell: the one this operator knows, or — while it knows none, or
-    /// reached only some of its members — the one the machines name now,
-    /// learned through `Inspect` (§3.8), never from the harness.
+    /// reached only some of its members — the one a majority of the
+    /// founding members name now, learned through `Inspect` (§3.8), never
+    /// from the harness.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn learn(&mut self, ctx: &SimContext) -> Option<Cell> {
         if let Some(cell) = &self.cell
@@ -81,6 +82,18 @@ impl FleetOps {
         {
             return Some(cell.clone());
         }
+        // The cell a majority of the founding members serve: an address a
+        // wiped member left may serve another cell now (#216).
+        let Some((journals, _)) = bootstrap::majority_cell(
+            self.connector.providers(),
+            self.connector.rpc(),
+            &self.machines[..self.layout.founders],
+            self.patience,
+        )
+        .await
+        else {
+            return self.cell.clone();
+        };
         let servers = bootstrap::discover(
             self.connector.providers(),
             self.connector.rpc(),
@@ -92,9 +105,6 @@ impl FleetOps {
             return self.cell.clone();
         }
         let client = self.connect(ctx, &servers);
-        let Some(journals) = bootstrap::control_journals(&client).await else {
-            return self.cell.clone();
-        };
         self.note_learned([Some(journals.cell), journals.fleet].into_iter().flatten());
         let Some(fleet) = journals.fleet else {
             assert_always!(

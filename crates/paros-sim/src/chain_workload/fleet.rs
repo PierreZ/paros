@@ -71,6 +71,7 @@ use crate::shape::MachineLayout;
 
 mod admit;
 mod cell;
+mod other_cell;
 
 use cell::Cell;
 

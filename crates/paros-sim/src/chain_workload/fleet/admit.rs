@@ -4,7 +4,8 @@
 //! machine, or one admitted before), or on its own BUGGIFY location a
 //! founding member, which is in the cell already. The admission may stop
 //! after its registration (a crash at a step) and is resumed by this
-//! operator's next `ADMIT`.
+//! operator's next `ADMIT`. On its own BUGGIFY location, an operator founds
+//! another cell on a wiped member's address instead (`other_cell`).
 
 use std::net::SocketAddr;
 
@@ -28,6 +29,13 @@ impl FleetOps {
         policy: CheckpointPolicy,
         draw: u64,
     ) {
+        if self.admitting.is_none()
+            && crate::machine::other_cell_target(ctx.state()).is_some()
+            && buggify_with_prob!(0.5)
+            && self.found_other_cell(ctx).await
+        {
+            return;
+        }
         let founders = self.layout.founders;
         let outside = founders..self.machines.len();
         let target = match self.admitting.take() {

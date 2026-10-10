@@ -282,6 +282,8 @@ where
         &edge,
         &tunables,
         me,
+        // No cell plan reaches a replica yet: it runs on no machine.
+        0,
         edge_reporter(audit, me),
         incarnation_shutdown.clone(),
     )?;
@@ -392,6 +394,8 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
         shutdown: shutdown.clone(),
         audit,
         from: me,
+        // No cell plan reaches this role yet: it runs on no machine.
+        cell_id: 0,
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

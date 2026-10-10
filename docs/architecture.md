@@ -492,7 +492,13 @@ there it calls `Resolve` (below).
   answer, refusals included.
 - `cell_id` and `universe_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
-  cannot talk after a bad configuration.
+  cannot talk after a bad configuration. The `Hello` is the peer lane's `Deliver` batch (decided
+  on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
+  cell refuses the whole batch before it decodes a message. `universe_id` joins it when the cell
+  plan carries one. The simulation makes the shape: an operator founds another cell on the
+  machine that replaced a wiped member, and the first cell still sends to that address.
+  Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
+  members serve, and `cell init` never adopts a vote for another list's plan.
 - **Well-known endpoints** are the bootstrap set — `Identify`, `FormCell`, `Admit`, `Inspect` —
   and **`Resolve`**, keyed by tenant: "which references serve tenant T" (named on 2026-10-09).
   Everything else is a dynamic reference (amended on 2026-10-04:

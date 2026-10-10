@@ -158,7 +158,10 @@ fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
             "cell init over {target} and the other members decided nothing in time: a member \
              is not up yet; run it again"
         ),
-        Unreachable::NothingAnswered => format!("nothing answered init or inspect at {target}"),
+        Unreachable::NothingAnswered => format!(
+            "nothing answered init at {target}, or no cell answered inspect from a majority of \
+             the members"
+        ),
         Unreachable::NoControlJournals => "no server named its cell's control journals".into(),
         Unreachable::NoCoordinator => {
             "no server described the cell control journal's members".into()

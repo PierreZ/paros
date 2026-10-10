@@ -1006,6 +1006,10 @@ where
         )));
     }
     let cell: Option<ControlJournals> = formed.as_ref().map(FormedCell::control_journals);
+    // The cell every peer batch carries and every inbound one must name
+    // (#216): `0` on a deployment without a cell plan.
+    let cell_id = cell.map_or(0, |cell| cell.cell_id);
+    assert!(cell.is_none() || cell_id != 0, "a cell plan names its cell");
     // No identifier is fixed (§3.8): the deployment names its control journals —
     // the cell's and the fleet tenant's from the cell plan, the system journals a
     // `SystemPlan` follows — and every other journal is a user's.
@@ -1091,6 +1095,7 @@ where
         &edge,
         &tunables,
         me,
+        cell_id,
         edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
     )?;
@@ -1133,6 +1138,7 @@ where
         shutdown: incarnation_shutdown.clone(),
         audit: &node_audit,
         from: me,
+        cell_id,
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

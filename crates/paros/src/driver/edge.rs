@@ -128,7 +128,8 @@ pub(crate) struct NodeInbox {
 
 impl NodeInbox {
     /// Register a node's endpoints on `edge`; the peer lane holds
-    /// `peer_inbox_capacity` messages and ends with `shutdown`.
+    /// `peer_inbox_capacity` messages of cell `cell_id` and ends with
+    /// `shutdown`.
     ///
     /// # Errors
     ///
@@ -139,6 +140,7 @@ impl NodeInbox {
         edge: &RpcEdge<P>,
         tunables: &DriverTunables,
         me: Party,
+        cell_id: u64,
         on_reject: OnReject,
         shutdown: CancellationToken,
     ) -> SimulationResult<Self> {
@@ -157,6 +159,7 @@ impl NodeInbox {
                 rpc,
                 tunables.peer_inbox_capacity,
                 me,
+                cell_id,
                 on_reject,
                 shutdown,
             )?,
@@ -175,7 +178,8 @@ pub(crate) struct ReplicaInbox {
 }
 
 impl ReplicaInbox {
-    /// Register a replica's endpoints on `edge`.
+    /// Register a replica's endpoints on `edge`; the peer lane takes
+    /// messages of cell `cell_id`.
     ///
     /// # Errors
     ///
@@ -186,6 +190,7 @@ impl ReplicaInbox {
         edge: &RpcEdge<P>,
         tunables: &DriverTunables,
         me: Party,
+        cell_id: u64,
         on_reject: OnReject,
         shutdown: CancellationToken,
     ) -> SimulationResult<Self> {
@@ -198,6 +203,7 @@ impl ReplicaInbox {
                 rpc,
                 tunables.peer_inbox_capacity,
                 me,
+                cell_id,
                 on_reject,
                 shutdown,
             )?,
