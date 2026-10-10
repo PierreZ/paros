@@ -120,6 +120,9 @@ pub(crate) struct MachineBoard {
     /// Every cached registry fold each machine tried to write, by minted id
     /// and position: what its disk may hold.
     cache_writes: BTreeMap<u64, BTreeMap<u64, CachedRegistry>>,
+    /// The rank the moved-founder scenario crashed (#211): its next reboot
+    /// comes back under a new name.
+    rename_next: Option<usize>,
 }
 
 impl MachineBoard {
@@ -370,11 +373,12 @@ pub(crate) fn wipe_target(
 
 /// The founding member the moved-founder scenario crashes first
 /// (`crate::world::moved_founder`, #211), once every founding member formed:
-/// a live one `may_rename` lets come back under a new name, its reboot
-/// renamed on that seed. `None` before that, or when none may.
+/// a live one `may_rename` lets come back under a new name, once another
+/// machine of the cell cached the registry. Its next reboot is a rename.
+/// `None` before that, or when none may.
 pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
     let board = machine_board(state);
-    let board = lock(&board);
+    let mut board = lock(&board);
     let formed = board.founders.iter().all(|addr| {
         board
             .nodes
@@ -386,12 +390,22 @@ pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) 
     }
     // The cell formed, so the machines drew the layout already.
     let layout = crate::shape::machine_layout(state, 0);
-    (0..layout.founders)
+    // Another machine of the cell cached the registry: once the founder
+    // registers its new name, that machine's cache can name it there.
+    let (rank, ip) = (0..layout.founders)
         .filter(|rank| may_rename(&board, &layout, *rank))
         .find_map(|rank| {
             let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(rank))).ok()?;
-            board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()
-        })
+            let node = board.nodes.get(&addr)?;
+            let cached_elsewhere = board.cached.keys().any(|other| other != node);
+            cached_elsewhere
+                .then(|| board.ips.get(&addr).filter(|ip| !dead(ip)).cloned())
+                .flatten()
+                .map(|ip| (rank, ip))
+        })?;
+    // Its next boot comes back under a new name.
+    board.rename_next = Some(rank);
+    Some(ip)
 }
 
 /// The machine the moved-founder scenario crashes second (#211): a live
@@ -702,10 +716,14 @@ fn boot_listen(
     if disk == OnDisk::Empty && board.renamed.remove(&rank).is_some() {
         assert_reachable!("machine: a wiped renamed machine advertises its rank's name again");
     }
+    let forced = board.rename_next == Some(rank);
+    if forced {
+        board.rename_next = None;
+    }
     let renames = rebooted
         && disk == OnDisk::InCell
         && may_rename(&board, layout, rank)
-        && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct;
+        && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct);
     let moves =
         renames || (rebooted && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.move_pct);
     let ip = if moves {
@@ -814,6 +832,7 @@ async fn run_machine_role(
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+                    .on_machines(machine_board(&state), audit_addr.clone())
                     .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(

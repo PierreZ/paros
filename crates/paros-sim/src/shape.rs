@@ -847,9 +847,9 @@ pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
 /// cached registry fold only after another machine of its cell moved, the
 /// cache followed the move, and the machine restarted: the machines'
 /// attrition and the rename knob lined that up 0 times in 300 hunt seeds.
-/// On a scenario seed the machines advertise names, every cell machine's
-/// reboot is a rename where `may_rename` allows it, and
-/// `crate::world::moved_founder` crashes a founding member, then a machine
+/// On a scenario seed the machines advertise names, and
+/// `crate::world::moved_founder` crashes a founding member that comes back
+/// under a new name, then a machine
 /// whose cache names the founder's new name. Rare-but-valid: a machine that
 /// comes back under a new name is (#349).
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1107,9 +1107,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let named = moonpool_sim::sim_random_bool(0.5) || moved;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct = buggify_knob!(0_u32, 20_u32..61_u32);
-            // The moved-founder scenario renames every cell machine's
-            // reboot that `may_rename` allows (#211).
-            let rename_pct = if moved { 100 } else { rename_pct };
             let machines = (0..count)
                 .map(|rank| {
                     let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {

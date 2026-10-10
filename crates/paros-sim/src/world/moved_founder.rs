@@ -5,9 +5,8 @@
 //! where only its cache knows it is: the static-stability case of
 //! `docs/architecture.md` §3.2.
 //!
-//! On that seed the machines advertise names and every cell machine's
-//! reboot is a rename where `crate::machine::may_rename` allows it, so the
-//! first crash renames the founder (`crate::machine::founder_to_move`). The
+//! On that seed the machines advertise names, and the first crash's reboot
+//! renames the founder (`crate::machine::founder_to_move`). The
 //! second strikes once a machine's cache holds the new name
 //! (`crate::machine::cached_mover`). Both are short crashes through
 //! moonpool's own `Crash`. Like the silent machine (`super::silent_machine`)
