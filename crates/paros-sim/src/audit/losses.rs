@@ -542,14 +542,22 @@ impl AuditState {
 
     /// The best ballot among `slot`'s `clean` copies, the CTRL threshold a
     /// lost copy qualifies under, or [`Threshold::Unheard`] when a clean
-    /// holder's ballot is one the tally never heard (a commit in flight that
-    /// landed unreported, #264), on which no claim rests.
+    /// holder's ballot is one the tally never heard, or one a commit in
+    /// flight may have raised unreported (#264): no claim rests on either.
     fn clean_threshold(&self, slot: u64, clean: &[u64]) -> Threshold {
         let ballots: Vec<Option<(u64, u64)>> = clean
             .iter()
             .map(|node| self.accept_ballot(*node, slot))
             .collect();
-        if ballots.iter().any(Option::is_none) {
+        // A clean holder with a commit of the slot in flight may have
+        // landed a higher ballot unreported: its heard ballot is not its
+        // durable one (witness: seed 17867571935699901919, a claim made at
+        // the clean holder's old ballot while its re-accept was in flight).
+        if ballots.iter().any(Option::is_none)
+            || clean
+                .iter()
+                .any(|node| self.in_flight.contains_key(&(*node, slot)))
+        {
             return Threshold::Unheard;
         }
         Threshold::Best(ballots.into_iter().flatten().max())

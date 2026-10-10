@@ -123,6 +123,12 @@ pub(crate) struct StorageWorld {
     /// first reason wins — a corruption park on an identity already wiped
     /// or retired changes nothing.
     parked: BTreeMap<String, ParkReason>,
+    /// Double faults a boot applied, by identity, whose journal gave no
+    /// verdict yet: the process died between the damage and the scan's
+    /// answer. The next boot judges the same injection, never a second one,
+    /// and until then a corruption park is not honored: the park is
+    /// terminal only once the journal reported the damage once.
+    unjudged: BTreeMap<String, injector::Injection>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -200,7 +206,30 @@ impl StorageWorld {
     /// wiped identity is parked for the budget but boots (#147): the
     /// library, not the harness, refuses its empty store.
     pub(crate) fn park_reason(&self, ip: &str) -> Option<ParkReason> {
-        self.parked.get(ip).copied()
+        match self.parked.get(ip).copied() {
+            Some(ParkReason::Corruption) if self.unjudged.contains_key(ip) => None,
+            reason => reason,
+        }
+    }
+
+    /// The injection `ip`'s last boot applied and never judged, if any.
+    pub(crate) fn unjudged(&self, ip: &str) -> Option<injector::Injection> {
+        self.unjudged.get(ip).cloned()
+    }
+
+    /// `ip`'s boot applied `injection`: when its plan parked `ip` for
+    /// corruption (a double fault, which no open repairs), it stays to
+    /// judge until [`StorageWorld::judged`]. Any other family may be
+    /// repaired by the killed open itself, so it is never carried.
+    pub(crate) fn note_applied(&mut self, ip: &str, injection: injector::Injection) {
+        if self.parked.get(ip) == Some(&ParkReason::Corruption) {
+            self.unjudged.insert(ip.to_owned(), injection);
+        }
+    }
+
+    /// `ip`'s journal gave its verdict on the applied injection.
+    pub(crate) fn judged(&mut self, ip: &str) {
+        self.unjudged.remove(ip);
     }
 
     /// Whether `ip`'s disk was wiped (a wiped node is also parked).

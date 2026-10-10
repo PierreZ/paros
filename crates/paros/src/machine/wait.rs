@@ -1,7 +1,8 @@
 //! Waiting for a cell (#196, #216, #277): the machine contract an idle
 //! machine serves — `Identify`, the cell decree's two phases (`PrepareCell`,
-//! `FormCell`) as an acceptor, and `CellInit` as the decree's proposer —
-//! until it forms (see the parent module).
+//! `FormCell`) as an acceptor, `CellInit` as the decree's proposer, and
+//! `Admit` — until it forms a cell or a cell admits it (see the parent
+//! module).
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -13,12 +14,13 @@ use paros_core::decree::DECREE_SLOT;
 use paros_core::{AcceptorWrite, Ballot};
 use tokio_util::sync::CancellationToken;
 
+use super::admitted::AdmittedMachine;
 use super::formed::{FormedCell, vote_ballot};
-use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
+use super::{Admission, CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
 use crate::driver::edge::RpcEdge;
 use crate::driver::{DriverTunables, RunError};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
+use crate::rpc::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, ReplySender, serve_well_known};
 
 /// How long a waiting machine keeps its listener up after the answer that
@@ -62,6 +64,23 @@ pub trait CellLedger {
     /// The record could not be made durable.
     fn form(&mut self, ballot: Ballot, plan: &CellPlan)
     -> impl Future<Output = Result<(), String>>;
+
+    /// Record `admission` as this machine's cell (#216), durably, before
+    /// the answer leaves. Only an idle machine with no promise is admitted.
+    ///
+    /// # Errors
+    ///
+    /// The record could not be made durable.
+    fn admit(&mut self, admission: &Admission) -> impl Future<Output = Result<(), String>>;
+}
+
+/// How a wait ended: the machine formed a cell, or a cell admitted it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Joined {
+    /// It accepted a plan: a founding member of the cell it formed.
+    Founded(FormedCell),
+    /// `cell add-machine` admitted it (#216).
+    Admitted(AdmittedMachine),
 }
 
 /// The decree a `CellInit` drives, in flight on the waiting loop, with the
@@ -73,7 +92,8 @@ type Proposal<'a> = (
 
 /// Wait for a cell: serve the machine contract at `facts.addr` until this
 /// machine forms — it accepted a `FormCell` and no `CellInit` it drives is
-/// still in flight — and return its cell, or `None` on `shutdown`.
+/// still in flight — or a cell admits it, and return how it joined, or
+/// `None` on `shutdown`.
 /// `assignment` is how many user journals a cell this machine draws serves
 /// beside its control journals — the static assignment, until #212 — each
 /// under an identifier `cell init` draws.
@@ -94,7 +114,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     ledger: &mut L,
     tunables: &DriverTunables,
     shutdown: CancellationToken,
-) -> Result<Option<FormedCell>, RunError> {
+) -> Result<Option<Joined>, RunError> {
     assert!(ledger.vote().is_none(), "a formed machine does not wait");
     let addr = facts.addr.to_string();
     let mut edge = RpcEdge::listen(&providers, &addr, "machine", tunables)
@@ -109,6 +129,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
         Inbound::plain(serve_well_known::<P, FormCellRpc>(&rpc).map_err(RunError::Infra)?);
     let mut init =
         Inbound::plain(serve_well_known::<P, CellInitRpc>(&rpc).map_err(RunError::Infra)?);
+    let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(&rpc).map_err(RunError::Infra)?);
     tracing::info!(
         node = facts.node_id.0,
         class = facts.class.as_str(),
@@ -116,10 +137,12 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     );
     let mut proposal: Option<Proposal<'_>> = None;
     let formed = |ledger: &L| {
-        ledger.vote().map(|(ballot, plan)| FormedCell {
-            facts: facts.clone(),
-            plan,
-            ballot,
+        ledger.vote().map(|(ballot, plan)| {
+            Joined::Founded(FormedCell {
+                facts: facts.clone(),
+                plan,
+                ballot,
+            })
         })
     };
     loop {
@@ -127,7 +150,19 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
             () = shutdown.cancelled() => return Ok(None),
             error = edge.run() => return Err(RunError::Infra(error)),
             Some((_, reply)) = identify.recv() => {
-                reply.send(facts.identify_ack());
+                reply.send(facts.identify_ack(0));
+            }
+            Some((request, reply)) = admit.recv() => {
+                let in_init = proposal.is_some();
+                let (ack, admitted) = answer_admit(facts, ledger, &request, in_init).await;
+                reply.send(ack);
+                if let Some(admission) = admitted {
+                    flush(&providers, &mut edge).await;
+                    return Ok(Some(Joined::Admitted(AdmittedMachine {
+                        facts: facts.clone(),
+                        admission,
+                    })));
+                }
             }
             Some((request, reply)) = prepare.recv() => {
                 reply.send(answer_prepare(facts, ledger, &request).await);
@@ -234,7 +269,7 @@ async fn answer_prepare<L: CellLedger>(
     ledger: &mut L,
     request: &wire::PrepareCell,
 ) -> wire::PrepareCellAck {
-    let identity = Some(facts.identify_ack());
+    let identity = Some(facts.identify_ack(0));
     let answer = |refusal: &str| wire::PrepareCellAck {
         identity: identity.clone(),
         refusal: refusal.into(),
@@ -370,4 +405,53 @@ async fn answer_form<L: CellLedger>(
             }
         }
     }
+}
+
+/// `Admit` on an idle machine (#216): record the admission durably, then
+/// answer. Refused while the machine holds a promise in the cell decree or
+/// drives one (`in_init`): a `cell init` that lists it may still form a cell
+/// over it, and a machine is in one cell only — a stalled `cell init` is
+/// safer than a machine in two cells. Between the durable admission and the
+/// answer is a moment worth a crash: the machine is in the cell, the caller
+/// does not know, and its next `Admit` is acked by the admitted machine.
+/// The admission, when this call admitted the machine.
+#[tracing::instrument(level = "trace", skip_all, fields(node = facts.node_id.0))]
+async fn answer_admit<L: CellLedger>(
+    facts: &MachineFacts,
+    ledger: &mut L,
+    request: &wire::Admit,
+    in_init: bool,
+) -> (wire::AdmitAck, Option<Admission>) {
+    let refuse = |refusal: &str| {
+        (
+            wire::AdmitAck {
+                admitted: false,
+                refusal: refusal.into(),
+            },
+            None,
+        )
+    };
+    assert!(ledger.vote().is_none(), "an idle machine holds no vote");
+    let Ok(admission) = Admission::from_wire(request) else {
+        return refuse("malformed");
+    };
+    if in_init || ledger.promised() != Ballot::default() {
+        moonpool_assertions::reachable!(
+            "machine: a machine promised in cell init refuses an admission"
+        );
+        return refuse("in_cell_init");
+    }
+    if let Err(error) = ledger.admit(&admission).await {
+        tracing::error!(%error, "machine_admit_failed");
+        return refuse("storage");
+    }
+    moonpool_buggify::hint!("admission durable, answer not sent").await;
+    tracing::info!(cell = admission.cell.cell_id, "machine_admitted");
+    (
+        wire::AdmitAck {
+            admitted: true,
+            refusal: String::new(),
+        },
+        Some(admission),
+    )
 }

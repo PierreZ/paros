@@ -55,6 +55,7 @@
 //! the record's write protocol and the formation's stores are
 //! [`ProviderDisk`], over any storage provider, which both callers use.
 
+mod admitted;
 mod cell_init;
 mod disk;
 mod formed;
@@ -68,12 +69,13 @@ use std::net::SocketAddr;
 
 use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, TenantId};
 
+pub use admitted::AdmittedMachine;
 pub use disk::ProviderDisk;
 pub use formed::FormedCell;
 pub use lifecycle::{MachineError, MachineSettings, run_machine};
 pub use record::{MachineRecord, journal_config};
 pub use stores::AuditScope;
-pub use wait::{CellLedger, wait_for_cell};
+pub use wait::{CellLedger, Joined, wait_for_cell};
 
 use crate::rpc::machine as wire;
 
@@ -145,13 +147,120 @@ pub struct MachineFacts {
 }
 
 impl MachineFacts {
-    fn identify_ack(&self) -> wire::IdentifyAck {
+    /// Who this machine is, in cell `cell_id` (0 while it is idle).
+    fn identify_ack(&self, cell_id: u64) -> wire::IdentifyAck {
         wire::IdentifyAck {
             node_id: self.node_id.0,
             class: self.class.as_str().into(),
             capacity: self.capacity,
             failure_domain: self.failure_domain.clone(),
             addr: self.addr.to_string(),
+            cell_id,
+        }
+    }
+}
+
+/// A machine's admission into a cell (#216): what `cell add-machine`'s
+/// `Admit` carries, and what the admitted machine records durably — the
+/// cell, its control journals, and the cell's machines the caller knew at
+/// admission, by id and address, in id order (the machine's cached registry
+/// fold, `docs/architecture.md` §3.2). On every later start the machine
+/// finds its cell from this record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Admission {
+    /// The cell and its control journals.
+    pub cell: ControlJournals,
+    /// The cell's machines known at admission, in id order.
+    pub members: Vec<(NodeId, SocketAddr)>,
+}
+
+impl Admission {
+    /// Whether a machine may record this admission: a set cell id and cell
+    /// control journal, the fleet tenant's (when named) set and under a
+    /// tenant of its own, at least one known machine, unique by id and by
+    /// address, in id order.
+    ///
+    /// # Errors
+    ///
+    /// The first thing wrong with it.
+    pub fn check(&self) -> Result<(), &'static str> {
+        if self.cell.cell_id == 0 || !self.cell.cell.is_set() {
+            return Err("an admission names its cell and the cell control journal");
+        }
+        if let Some(fleet) = self.cell.fleet
+            && (!fleet.is_set() || fleet.tenant == self.cell.cell.tenant)
+        {
+            return Err("the fleet tenant is set, under a tenant of its own");
+        }
+        if self.members.is_empty() {
+            return Err("an admission names a machine of the cell");
+        }
+        let ids: BTreeSet<NodeId> = self.members.iter().map(|(id, _)| *id).collect();
+        let addrs: BTreeSet<SocketAddr> = self.members.iter().map(|(_, a)| *a).collect();
+        if ids.len() != self.members.len() || addrs.len() != self.members.len() {
+            return Err("a cell's machines are unique by id and by address");
+        }
+        if !self.members.is_sorted() {
+            return Err("an admission's machines are in id order");
+        }
+        Ok(())
+    }
+
+    /// The admission an `Admit` carries, normalized and checked.
+    ///
+    /// # Errors
+    ///
+    /// An address that does not parse, or an admission
+    /// [`Admission::check`] refuses.
+    pub fn from_wire(admit: &wire::Admit) -> Result<Self, &'static str> {
+        let identifier = |f: &wire::JournalIdentifier| {
+            JournalIdentifier::new(TenantId(f.tenant), JournalId(f.journal))
+        };
+        let mut members = admit
+            .members
+            .iter()
+            .map(|m| {
+                m.addr
+                    .parse()
+                    .map(|addr| (NodeId(m.node_id), addr))
+                    .map_err(|_| "a member's address is HOST:PORT, resolved")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        members.sort_unstable();
+        let admission = Self {
+            cell: ControlJournals {
+                cell_id: admit.cell_id,
+                cell: admit
+                    .control
+                    .as_ref()
+                    .map_or(JournalIdentifier::UNSET, identifier),
+                fleet: admit
+                    .fleet
+                    .as_ref()
+                    .map(identifier)
+                    .filter(|fleet| fleet.is_set()),
+            },
+            members,
+        };
+        admission.check()?;
+        Ok(admission)
+    }
+
+    /// The `Admit` that carries this admission.
+    #[must_use]
+    pub fn to_wire(&self) -> wire::Admit {
+        wire::Admit {
+            cell_id: self.cell.cell_id,
+            control: Some(CellPlan::identifier_to_wire(self.cell.cell)),
+            fleet: self.cell.fleet.map(CellPlan::identifier_to_wire),
+            members: self
+                .members
+                .iter()
+                .map(|(id, addr)| wire::Member {
+                    node_id: id.0,
+                    addr: addr.to_string(),
+                })
+                .collect(),
         }
     }
 }
@@ -471,6 +580,36 @@ mod tests {
         let mut other = again.clone();
         other.cell_id = 8;
         assert_ne!(other.fingerprint(), again.fingerprint());
+    }
+
+    #[test]
+    fn an_admission_round_trips_normalized_and_a_malformed_one_is_refused() {
+        let admission = Admission {
+            cell: plan().control_journals(),
+            members: vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))],
+        };
+        assert_eq!(admission.check(), Ok(()));
+        let mut wire = admission.to_wire();
+        wire.members.reverse();
+        assert_eq!(Admission::from_wire(&wire), Ok(admission.clone()));
+        let mut no_cell = admission.clone();
+        no_cell.cell.cell_id = 0;
+        assert!(no_cell.check().is_err());
+        let mut unset = admission.clone();
+        unset.cell.cell = JournalIdentifier::UNSET;
+        assert!(unset.check().is_err());
+        let mut shared = admission.clone();
+        shared.cell.fleet = Some(identifier(0x51, 0x99));
+        assert!(shared.check().is_err());
+        let mut nobody = admission.clone();
+        nobody.members.clear();
+        assert!(nobody.check().is_err());
+        let mut twice = admission.clone();
+        twice.members.push((NodeId(11), addr(1)));
+        assert!(twice.check().is_err());
+        let mut unordered = admission;
+        unordered.members.reverse();
+        assert!(unordered.check().is_err());
     }
 
     #[test]

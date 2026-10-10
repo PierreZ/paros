@@ -69,6 +69,7 @@ use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 use crate::client::{ChainClient, Connector};
 use crate::shape::MachineLayout;
 
+mod admit;
 mod cell;
 
 use cell::Cell;
@@ -124,6 +125,9 @@ pub(super) struct FleetOps {
     /// The journals this operator learned (#246): every call it makes at
     /// the cell names one of them.
     learned: super::system::Learned,
+    /// The machine whose admission this operator stopped after its
+    /// registration (#216), to finish on its next `ADMIT`.
+    admitting: Option<SocketAddr>,
 }
 
 impl FleetOps {
@@ -160,6 +164,7 @@ impl FleetOps {
             kill_ms,
             killed: false,
             learned: super::system::Learned::default(),
+            admitting: None,
         })
     }
 
@@ -916,6 +921,7 @@ impl FleetOps {
         };
         let cell = cell.state();
         let cell_id = known.journals.cell_id;
+        admit::admitted_registered(ctx, cell, cell_id);
         assert_reachable!("fleet: the final folds of the directory and the cell are compared");
         if let Some(fleet) = directory.fleet() {
             let ready = directory.cell(cell_id).map(|c| c.state);
@@ -1049,6 +1055,10 @@ fn reach(stage: Stage) {
         Stage::RemoveTenant => {
             assert_reachable!("fleet: a step removes a tenant from the directory");
         }
+        Stage::RegisterMachine => {
+            assert_reachable!("admit: a step registers a machine in the cell");
+        }
+        Stage::Admit => assert_reachable!("admit: a step admits a machine"),
     }
 }
 

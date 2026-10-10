@@ -17,6 +17,7 @@
 //! | 5 | no server answered: nothing was decided |
 //! | 2 | bad arguments (clap's own) |
 
+mod cell;
 mod commands;
 mod fleet;
 mod init;
@@ -121,6 +122,10 @@ enum Command {
     /// leader uuid of its own, and the fleet steps register the cell in the fleet directory
     /// (#229). Refused on an initialized fleet; a re-run resumes.
     Init(init::InitArgs),
+    /// Cell administration (#216): `cell add-machine <addr>` admits an idle
+    /// machine into the cell of the servers.
+    #[command(name = "cell")]
+    CellAdmin(cell::CellArgs),
     /// A call to a formed cell.
     #[command(flatten)]
     Cell(CellCommand),
@@ -268,6 +273,24 @@ async fn main() -> ExitCode {
                 connect,
                 &out,
                 &args,
+            )
+            .await
+            .into();
+        }
+        Command::CellAdmin(args) => {
+            let servers = servers(&runtime, &cli.global).await;
+            if servers.is_empty() {
+                eprintln!("parosctl: no server answered with its node id");
+                return Ending::Unreachable.into();
+            }
+            let client = client(&runtime, &servers, cli.global.timeout());
+            return cell::run(
+                &runtime.providers,
+                &runtime.rpc,
+                &client,
+                &servers,
+                &out,
+                args,
             )
             .await
             .into();

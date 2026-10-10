@@ -86,6 +86,30 @@ pub(crate) struct MachineBoard {
     first_promiser: Option<u64>,
     /// The ballots each plan was accepted at, by cell id.
     votes: BTreeMap<u64, BTreeSet<Ballot>>,
+    /// The machines `cell add-machine` admitted (#216), still on their
+    /// disks, by minted id: the cell each recorded.
+    admitted: BTreeMap<u64, ControlJournals>,
+    /// The cells a vote named with a majority of its members wiped, by cell
+    /// id: lost for the rest of the run, even once a later wipe takes the
+    /// last such vote.
+    lost: BTreeSet<u64>,
+}
+
+impl MachineBoard {
+    /// Remember as lost every cell a vote still on a disk names with a
+    /// majority of its members wiped. Called after each wipe and after each vote lands.
+    fn note_lost(&mut self) {
+        let lost: Vec<u64> = self
+            .voters
+            .values()
+            .filter(|plan| {
+                let n = plan.members.len();
+                n - wiped_members(self, plan) < n / 2 + 1
+            })
+            .map(|plan| plan.cell_id)
+            .collect();
+        self.lost.extend(lost);
+    }
 }
 
 const MACHINE_BOARD_KEY: &str = "paros-machine-board";
@@ -127,19 +151,56 @@ fn wiped_members(board: &MachineBoard, plan: &CellPlan) -> usize {
         .count()
 }
 
-/// Whether the run's cell is lost (#246): a vote still on a disk names a
-/// plan that lost a majority of its members to wipes, so no `cell init` can
-/// choose it and every later one refuses `cell_lost`, and the cell's
-/// majority journals cannot serve. The Paxos limit: the control plane's
-/// liveness is excused. A plan that kept a majority heals: its members
-/// choose it around the wiped ones.
-pub(crate) fn cell_lost(state: &StateHandle) -> bool {
+/// The machines admitted into cell `cell_id` (#216) whose admission is still
+/// on their disks, by minted id.
+pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
+    lock(&machine_board(state))
+        .admitted
+        .iter()
+        .filter(|(_, cell)| cell.cell_id == cell_id)
+        .map(|(node, _)| *node)
+        .collect()
+}
+
+/// Whether the machine at `addr` holds an admission on its disk now (#216).
+pub(crate) fn is_admitted(state: &StateHandle, addr: SocketAddr) -> bool {
     let board = machine_board(state);
     let board = lock(&board);
-    board.voters.values().any(|plan| {
-        let n = plan.members.len();
-        n - wiped_members(&board, plan) < n / 2 + 1
-    })
+    board
+        .nodes
+        .get(&addr)
+        .is_some_and(|node| board.admitted.contains_key(node))
+}
+
+/// Whether a wipe replaced the machine at `addr` this run: an answer it sent
+/// before the wipe may name a disk that is gone.
+pub(crate) fn was_wiped(state: &StateHandle, addr: SocketAddr) -> bool {
+    lock(&machine_board(state))
+        .wiped
+        .iter()
+        .any(|(wiped, _)| *wiped == addr)
+}
+
+/// Whether the machine at `addr` is a founding member `init` lists.
+pub(crate) fn is_founder(state: &StateHandle, addr: SocketAddr) -> bool {
+    lock(&machine_board(state)).founders.contains(&addr)
+}
+
+/// Whether any machine was wiped this run: the one way a machine can hold
+/// another cell than the operator's.
+pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
+    !lock(&machine_board(state)).wiped.is_empty()
+}
+
+/// Whether the run's cell is lost (#246): a vote named a plan that lost a
+/// majority of its members to wipes, so no `cell init` can choose it and
+/// every later one refuses `cell_lost`, and the cell's majority journals
+/// cannot serve. The Paxos limit: the control plane's liveness is excused.
+/// A plan that kept a majority heals: its members choose it around the
+/// wiped ones. The fact is sticky: a later wipe that takes the last such
+/// vote leaves the cell no less lost.
+pub(crate) fn cell_lost(state: &StateHandle) -> bool {
+    !lock(&machine_board(state)).lost.is_empty()
 }
 
 /// The founding member the wiped-founder scenario wipes now
@@ -350,13 +411,17 @@ pub(crate) fn booted(
         };
         let founder = board.founders.contains(&addr);
         let unformed = board.voters.len() < board.founders.len();
+        board.wiped.insert((addr, old));
         if board.voters.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's vote with its disk");
+        }
+        board.note_lost();
+        if board.admitted.remove(&old).is_some() {
+            assert_reachable!("machine: a wipe takes a machine's admission with its disk");
         }
         if founder && board.init_sent && unformed {
             assert_reachable!("machine: a founding member is wiped during init");
         }
-        board.wiped.insert((addr, old));
         tracing::info!(%addr, node = old, "machine_wiped");
         return;
     };
@@ -365,7 +430,7 @@ pub(crate) fn booted(
         "machine: a machine boots with the id it minted",
         { "node" => record.node_id.0 }
     );
-    if record.formed().is_none() && !board.founders.contains(&addr) {
+    if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(&addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
 }
@@ -391,6 +456,25 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
             if before.node != record.promised.node {
                 assert_reachable!("machine: two cell init ballots meet at one machine");
             }
+        }
+    }
+    if let Some(admission) = &record.admitted {
+        // An admission names a cell some `cell init` formed (#216): the
+        // operator learned it from `init` or through `Inspect`, never
+        // from the harness. A wiped one-founder cell's successor may form
+        // since, so every cell a vote ever named counts.
+        assert_always!(
+            board.votes.contains_key(&admission.cell.cell_id),
+            "machine: an admission names a cell init formed",
+            { "node" => node, "cell" => admission.cell.cell_id }
+        );
+        assert_always!(
+            record.plan.is_none() && record.promised == Ballot::default(),
+            "machine: an admitted machine holds no vote and no promise",
+            { "node" => node }
+        );
+        if board.admitted.insert(node, admission.cell).is_none() {
+            assert_reachable!("machine: a machine is admitted into the cell");
         }
     }
     if let Some((ballot, plan)) = &record.plan {
@@ -425,6 +509,7 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
             assert_reachable!("machine: a cell forms around a wiped founder's old id");
         }
         board.voters.insert(node, plan.clone());
+        board.note_lost();
         if board.formed.insert(node) && board.formed.len() > 1 {
             assert_reachable!("machine: a cell forms over several seeds");
         }

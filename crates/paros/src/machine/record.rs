@@ -15,6 +15,11 @@
 //! is written after every journal store of the plan is formatted
 //! ([`super::MachineDisk::provision`]), so the plan line is the commit point.
 //!
+//! A machine that `cell add-machine` admitted (#216) has no vote: its record
+//! holds the **admission** instead — the cell, its control journals and the
+//! cell's machines it knew then (`admitted`, `control`, `fleet`, `peer`).
+//! A record holds a vote or an admission, never both.
+//!
 //! ```text
 //! node_id 6150928431937019931
 //! class storage
@@ -36,7 +41,7 @@ use std::net::SocketAddr;
 
 use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem};
 
-use super::{CellPlan, Class};
+use super::{Admission, CellPlan, Class, ControlJournals};
 
 /// Parse a journal identifier written `<tenant>/<journal>` (#235).
 fn parse_identifier(text: &str) -> Option<JournalIdentifier> {
@@ -50,6 +55,44 @@ fn parse_ballot(text: &str) -> Option<Ballot> {
         round: round.parse().ok()?,
         node: NodeId(node.parse().ok()?),
     })
+}
+
+/// The admission an `admitted` line and its `control`, `fleet` and `peer`
+/// lines name, checked; `None` with no `admitted` line (and no peer).
+fn admission(
+    admitted: Option<u64>,
+    control: Option<JournalIdentifier>,
+    fleet: Option<JournalIdentifier>,
+    peers: Vec<(NodeId, SocketAddr)>,
+) -> Result<Option<Admission>, String> {
+    let Some(cell_id) = admitted else {
+        if !peers.is_empty() {
+            return Err("the machine record names peers and no admission".into());
+        }
+        return Ok(None);
+    };
+    let admission = Admission {
+        cell: ControlJournals {
+            cell_id,
+            cell: control.ok_or("the machine record's admission names no control journal")?,
+            fleet,
+        },
+        members: peers,
+    };
+    admission.check()?;
+    Ok(Some(admission))
+}
+
+/// Parse a `member` or `peer` line's value, `<node_id> <addr>`.
+fn parse_member(value: &str) -> Result<(NodeId, SocketAddr), String> {
+    let (id, addr) = value
+        .split_once(' ')
+        .ok_or_else(|| format!("bad member line {value:?}"))?;
+    Ok((
+        NodeId(id.parse().map_err(|e| format!("bad member id: {e}"))?),
+        addr.parse::<SocketAddr>()
+            .map_err(|e| format!("bad member address: {e}"))?,
+    ))
 }
 
 /// What the record holds.
@@ -69,6 +112,9 @@ pub struct MachineRecord {
     /// Its vote, which is its cell: the plan it accepted (and formed) and
     /// the ballot it accepted it at.
     pub plan: Option<(Ballot, CellPlan)>,
+    /// Its admission into a cell by `cell add-machine` (#216), which is its
+    /// cell when it has no vote.
+    pub admitted: Option<Admission>,
 }
 
 impl MachineRecord {
@@ -76,6 +122,16 @@ impl MachineRecord {
     #[must_use]
     pub fn formed(&self) -> Option<&CellPlan> {
         self.plan.as_ref().map(|(_, plan)| plan)
+    }
+
+    /// The cell this machine belongs to, founded or admitted: 0 while it is
+    /// idle.
+    #[must_use]
+    pub fn cell_id(&self) -> u64 {
+        self.formed()
+            .map(|plan| plan.cell_id)
+            .or(self.admitted.as_ref().map(|a| a.cell.cell_id))
+            .unwrap_or(0)
     }
 
     /// The record as text, the form a [`MachineDisk`](super::MachineDisk) keeps.
@@ -109,6 +165,16 @@ impl MachineRecord {
                 let _ = writeln!(text, "journal {journal}");
             }
         }
+        if let Some(admission) = &self.admitted {
+            let _ = writeln!(text, "admitted {}", admission.cell.cell_id);
+            let _ = writeln!(text, "control {}", admission.cell.cell);
+            if let Some(fleet) = admission.cell.fleet {
+                let _ = writeln!(text, "fleet {fleet}");
+            }
+            for (id, addr) in &admission.members {
+                let _ = writeln!(text, "peer {} {addr}", id.0);
+            }
+        }
         text
     }
 
@@ -123,11 +189,15 @@ impl MachineRecord {
         let mut plan: Option<(Ballot, u64)> = None;
         let mut promised = Ballot::default();
         let mut members = Vec::new();
+        let mut peers = Vec::new();
+        let mut admitted: Option<u64> = None;
         let mut journals = Vec::new();
         let mut control = None;
         let mut fleet = None;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            let identifier =
+                || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
             match key {
                 "node_id" | "class" | "capacity" | "failure_domain" => {
                     fields.insert(key, value);
@@ -145,31 +215,18 @@ impl MachineRecord {
                         .ok_or_else(|| format!("bad plan ballot {ballot:?}"))?;
                     plan = Some((ballot, cell));
                 }
-                "member" => {
-                    let (id, addr) = value
-                        .split_once(' ')
-                        .ok_or_else(|| format!("bad member line {line:?}"))?;
-                    members.push((
-                        NodeId(id.parse().map_err(|e| format!("bad member id: {e}"))?),
-                        addr.parse::<SocketAddr>()
-                            .map_err(|e| format!("bad member address: {e}"))?,
-                    ));
-                }
-                "journal" => {
-                    journals.push(
-                        parse_identifier(value).ok_or_else(|| format!("bad journal {value:?}"))?,
+                "admitted" => {
+                    admitted = Some(
+                        value
+                            .parse()
+                            .map_err(|e| format!("bad admitted cell id: {e}"))?,
                     );
                 }
-                "control" => {
-                    control = Some(
-                        parse_identifier(value).ok_or_else(|| format!("bad control {value:?}"))?,
-                    );
-                }
-                "fleet" => {
-                    fleet = Some(
-                        parse_identifier(value).ok_or_else(|| format!("bad fleet {value:?}"))?,
-                    );
-                }
+                "member" => members.push(parse_member(value)?),
+                "peer" => peers.push(parse_member(value)?),
+                "journal" => journals.push(identifier()?),
+                "control" => control = Some(identifier()?),
+                "fleet" => fleet = Some(identifier()?),
                 _ => return Err(format!("unknown machine record key {key:?}")),
             }
         }
@@ -179,6 +236,10 @@ impl MachineRecord {
                 .copied()
                 .ok_or_else(|| format!("the machine record names no {name}"))
         };
+        if plan.is_some() && admitted.is_some() {
+            return Err("the machine record holds a vote and an admission".into());
+        }
+        let admitted = admission(admitted, control, fleet, peers)?;
         let plan = match plan {
             Some((ballot, cell_id)) => {
                 let plan = CellPlan {
@@ -209,6 +270,7 @@ impl MachineRecord {
             failure_domain: field("failure_domain")?.to_string(),
             promised,
             plan,
+            admitted,
         })
     }
 }
@@ -247,6 +309,7 @@ mod tests {
             failure_domain: "zone-a".into(),
             promised,
             plan,
+            admitted: None,
         }
     }
 
@@ -278,6 +341,48 @@ mod tests {
             MachineRecord::parse(&above.render()).is_err(),
             "a vote never outranks the promise"
         );
+    }
+
+    #[test]
+    fn an_admitted_record_round_trips_and_never_holds_a_vote_too() {
+        let identifier =
+            |tenant, journal| JournalIdentifier::new(TenantId(tenant), JournalId(journal));
+        let admission = Admission {
+            cell: ControlJournals {
+                cell_id: 912_873,
+                cell: identifier(0x51, 0x52),
+                fleet: None,
+            },
+            members: vec![
+                (NodeId(5), "10.0.0.2:4500".parse().expect("an address")),
+                (NodeId(8), "10.0.0.3:4500".parse().expect("an address")),
+            ],
+        };
+        let admitted = MachineRecord {
+            admitted: Some(admission.clone()),
+            ..record(Ballot::default(), None)
+        };
+        let read = MachineRecord::parse(&admitted.render()).expect("a record");
+        assert_eq!(read, admitted);
+        assert_eq!(read.cell_id(), 912_873);
+        assert_eq!(record(Ballot::default(), None).cell_id(), 0);
+        let plan = CellPlan {
+            cell_id: 912_873,
+            members: vec![(NodeId(5), "10.0.0.2:4500".parse().expect("an address"))],
+            control: identifier(0x51, 0x52),
+            fleet: None,
+            journals: vec![identifier(0x51, 0x52)],
+        };
+        let both = MachineRecord {
+            admitted: Some(admission),
+            ..record(ballot(9), Some((ballot(7), plan)))
+        };
+        assert!(
+            MachineRecord::parse(&both.render()).is_err(),
+            "a record holds a vote or an admission"
+        );
+        let bare = record(Ballot::default(), None).render();
+        assert!(MachineRecord::parse(&format!("{bare}peer 5 10.0.0.2:4500\n")).is_err());
     }
 
     #[test]

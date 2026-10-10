@@ -51,7 +51,7 @@ mod handover;
 mod journals;
 pub(crate) mod log_reads;
 mod matchmaking;
-mod operator;
+pub(crate) mod operator;
 pub(crate) mod ready;
 pub(crate) mod reply;
 mod report;

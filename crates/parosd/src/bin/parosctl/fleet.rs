@@ -134,6 +134,23 @@ pub fn refusal_text(refusal: &FleetRefusal) -> String {
                 ""
             }
         ),
+        FleetRefusal::OtherCell { node, cell_id } => format!(
+            "other_cell: machine {} belongs to {}",
+            node.0,
+            if *cell_id == 0 {
+                "another cell".to_string()
+            } else {
+                format!("cell {cell_id}")
+            }
+        ),
+        FleetRefusal::InCellInit { node } => format!(
+            "in_cell_init: machine {} promised in a cell init and has no cell: \
+             finish that cell init, or wipe the machine",
+            node.0
+        ),
+        FleetRefusal::Retired { node } => {
+            format!("retired: machine {} was retired from this cell", node.0)
+        }
         FleetRefusal::Removed { tenant } => {
             format!(
                 "removed: tenant {} was removed while being created",
@@ -251,7 +268,7 @@ pub async fn run(
     }
 }
 
-fn refused(out: &Printer, refusal: &FleetRefusal) -> Ending {
+pub fn refused(out: &Printer, refusal: &FleetRefusal) -> Ending {
     let text = refusal_text(refusal);
     out.emit(
         || format!("refused: {text}"),

@@ -75,6 +75,47 @@ pub(crate) struct DamagePolicy {
 }
 
 impl LedgeredJournal {
+    /// The ledgered injector (#261) at one boot: at most one family's
+    /// damage, aimed by the custody ledger, applied before the journal
+    /// opens and judged against what it reports. Returns the injection and
+    /// whether it landed.
+    async fn damage(&mut self) -> (Option<super::injector::Injection>, bool) {
+        // An injection a kill left unjudged is judged now, as applied:
+        // a second apply would flip its bytes back.
+        let pending = self.world.upgrade().and_then(|w| {
+            w.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unjudged(&self.ip)
+        });
+        let carried = pending.is_some();
+        let injection = if carried {
+            pending
+        } else if self.inject {
+            let (ip, node, in_chaos) = (
+                self.ip.clone(),
+                self.node,
+                self.time.now() < self.chaos_until,
+            );
+            self.world.upgrade().and_then(|w| {
+                w.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .plan_boot_damage(&ip, node, in_chaos)
+            })
+        } else {
+            None
+        };
+        let confirmed = match &injection {
+            Some(_) if carried => true,
+            Some(injection) => super::injector::apply(&self.provider, injection).await,
+            None => false,
+        };
+        if let Some(injection) = injection.as_ref().filter(|_| confirmed && !carried) {
+            let (ip, injection) = (self.ip.clone(), injection.clone());
+            self.with_world(|w| w.note_applied(&ip, injection));
+        }
+        (injection, confirmed)
+    }
+
     pub(crate) fn new(
         inner: JournalStorage<SimStorageProvider>,
         world: Weak<Mutex<StorageWorld>>,
@@ -181,27 +222,7 @@ impl Storage for LedgeredJournal {
 impl LogStorage for LedgeredJournal {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        // The ledgered injector (#261): at most one family's damage,
-        // aimed by the custody ledger, applied before the journal
-        // opens and judged against what it reports.
-        let injection = if self.inject {
-            let (ip, node, in_chaos) = (
-                self.ip.clone(),
-                self.node,
-                self.time.now() < self.chaos_until,
-            );
-            self.world.upgrade().and_then(|w| {
-                w.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .plan_boot_damage(&ip, node, in_chaos)
-            })
-        } else {
-            None
-        };
-        let confirmed = match &injection {
-            Some(injection) => super::injector::apply(&self.provider, injection).await,
-            None => false,
-        };
+        let (injection, confirmed) = self.damage().await;
         // An open writes too (moonpool-journal's `begin_generation` rewrites
         // both metainfo copies; a header or record repair rewrites its
         // region), so a kill inside it may tear a copy the last sync left
@@ -246,6 +267,8 @@ impl LogStorage for LedgeredJournal {
             if crashed {
                 self.with_world(StorageWorld::note_injected_crash);
             }
+            let ip = self.ip.clone();
+            self.with_world(|w| w.judged(&ip));
             // An outage's planned loss landed: the journal's own verdict is
             // the audit's ground truth that this copy is gone (#263).
             if let Some(slot) = injection.outage_loss()

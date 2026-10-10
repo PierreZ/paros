@@ -17,9 +17,9 @@ use paros_core::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
 
 use super::Client;
 use super::outcome::SetLeaderOutcome;
-use crate::machine::{CellPlan, ControlJournals};
+use crate::machine::{Admission, CellPlan, ControlJournals};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{CellInitRpc, InspectRpc};
+use crate::rpc::methods::{AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc};
 use crate::rpc::{InspectReply, InspectRequest, well_known};
 
 /// What one `CellInit` sent to a listed machine came back with.
@@ -92,6 +92,59 @@ pub async fn cell_init<P: Providers>(
         if time.now() >= deadline || time.sleep(INIT_RETRY).await.is_err() {
             return InitOutcome::Unreachable;
         }
+    }
+}
+
+/// Who the machine at `target` is (#216): its `Identify`, asked once within
+/// `timeout`. `None` when it does not answer.
+pub async fn identify<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    target: SocketAddr,
+    timeout: Duration,
+) -> Option<wire::IdentifyAck> {
+    let client = well_known::<P, IdentifyRpc>(rpc, target);
+    match providers
+        .time()
+        .timeout(timeout, client.try_get_reply(&wire::Identify {}))
+        .await
+    {
+        Ok(Ok(ack)) if ack.node_id != 0 => Some(ack),
+        _ => None,
+    }
+}
+
+/// What one `Admit` sent to a machine came back with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdmitOutcome {
+    /// The machine is in the cell: admitted now, or before.
+    Admitted,
+    /// The machine answered, and refused: its label (`other_cell`,
+    /// `in_cell_init`, `malformed`, `storage`).
+    Refused(String),
+    /// No answer within the timeout: the admission may have landed. Send it
+    /// again; an admitted machine acks its own cell's.
+    Unreachable,
+}
+
+/// Send `admission` to the machine at `target` (#216), once, within
+/// `timeout`.
+pub async fn admit<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    target: SocketAddr,
+    admission: &Admission,
+    timeout: Duration,
+) -> AdmitOutcome {
+    let client = well_known::<P, AdmitRpc>(rpc, target);
+    match providers
+        .time()
+        .timeout(timeout, client.try_get_reply(&admission.to_wire()))
+        .await
+    {
+        Ok(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
+        Ok(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),
+        _ => AdmitOutcome::Unreachable,
     }
 }
 
@@ -171,6 +224,29 @@ pub async fn control_journals<P: Providers>(client: &Client<P>) -> Option<Contro
             .filter(|journals| journals.fleet.is_some())
         {
             return Some(journals);
+        }
+    }
+    None
+}
+
+/// The cell control journal's members (#216): its acceptor set as the first
+/// server that serves `control` reports it, sorted. An admitted machine
+/// serves no journal, so the servers are asked in turn. `None` when none
+/// answers with a member.
+pub async fn cell_members<P: Providers>(
+    client: &Client<P>,
+    control: JournalIdentifier,
+) -> Option<Vec<u64>> {
+    for server in 0..client.server_count() {
+        if let Some(mut members) = client
+            .inspect(server, control)
+            .await
+            .map(|view| view.members)
+            .filter(|members| !members.is_empty())
+        {
+            members.sort_unstable();
+            members.dedup();
+            return Some(members);
         }
     }
     None

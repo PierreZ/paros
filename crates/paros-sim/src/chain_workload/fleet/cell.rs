@@ -104,16 +104,11 @@ impl FleetOps {
             );
             return self.cell.clone();
         };
-        let mut members = client
-            .inspect(0, journals.cell)
-            .await
-            .map(|view| view.members)
-            .unwrap_or_default();
-        members.sort_unstable();
-        members.dedup();
-        if members.is_empty() {
+        // An admitted machine serves no journal (#216): the first server
+        // that serves the cell control journal names its members.
+        let Some(members) = bootstrap::cell_members(&client, journals.cell).await else {
             return self.cell.clone();
-        }
+        };
         assert_always!(
             crate::machine::formed_cell(ctx.state()) == Some(journals),
             "fleet: the control journals Inspect names are the ones init formed",
@@ -185,7 +180,7 @@ impl FleetOps {
             assert_reachable!("init: an operator sends init to a machine outside the seeds");
             let span = (outside.end - outside.start) as u64;
             let target = self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)];
-            return self.misdirected(target, &members).await;
+            return self.misdirected(ctx, target, &members).await;
         }
         if founders > 1 && buggify_with_prob!(0.25) {
             assert_reachable!("init: an operator starts cell init at another founder");
@@ -289,8 +284,14 @@ impl FleetOps {
     }
 
     /// A `cell init` sent to a machine outside the founders: refused as not a
-    /// member, and nothing forms. Whether it ended.
-    async fn misdirected(&self, target: SocketAddr, members: &[SocketAddr]) -> bool {
+    /// member, or as `cell_exists` once `cell add-machine` admitted it (#216),
+    /// and nothing forms. Whether it ended.
+    async fn misdirected(
+        &self,
+        ctx: &SimContext,
+        target: SocketAddr,
+        members: &[SocketAddr],
+    ) -> bool {
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),
@@ -300,6 +301,15 @@ impl FleetOps {
         )
         .await;
         match outcome {
+            InitOutcome::Refused(label) if label == "cell_exists" => {
+                assert_always!(
+                    crate::machine::is_admitted(ctx.state(), target)
+                        || crate::machine::was_wiped(ctx.state(), target),
+                    "init: a machine outside the seeds refuses init as not a seed",
+                    { "refusal" => label.as_str() }
+                );
+                true
+            }
             InitOutcome::Refused(label) => {
                 assert_always!(
                     label == "not_a_member",
