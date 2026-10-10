@@ -31,7 +31,9 @@ impl FleetOps {
     ) {
         if self.admitting.is_none()
             && crate::machine::other_cell_target(ctx.state()).is_some()
-            && buggify_with_prob!(0.5)
+            // The wiped-founder scenario lines up the wipe this needs: on
+            // its seeds, the operator always founds the other cell.
+            && (crate::shape::wiped_founder(ctx.state()) || buggify_with_prob!(0.5))
             && self.found_other_cell(ctx).await
         {
             return;
