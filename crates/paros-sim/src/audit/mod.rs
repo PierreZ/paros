@@ -1553,6 +1553,18 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
+    fn registry_cached(&self, node: NodeId, cache: &paros::machine::CachedRegistry, durable: bool) {
+        if let Some((board, _)) = &self.machines {
+            crate::machine::registry_cached(board, node, cache, durable);
+        }
+    }
+
+    fn registry_cache_read(&self, node: NodeId, cache: Option<&paros::machine::CachedRegistry>) {
+        if let Some((board, _)) = &self.machines {
+            crate::machine::registry_cache_read(board, node, cache);
+        }
+    }
+
     fn cell_formatting(
         &self,
         addr: &paros::Address,

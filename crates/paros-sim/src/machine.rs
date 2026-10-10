@@ -49,8 +49,8 @@ use moonpool_sim::{
     StateHandle, assert_always, assert_reachable,
 };
 use paros::machine::{
-    AuditScope, CellPlan, ControlJournals, MachineAddresses, MachineError, MachineRecord,
-    MachineSettings, ProviderDisk,
+    AuditScope, CachedRegistry, CellPlan, ControlJournals, MachineAddresses, MachineError,
+    MachineRecord, MachineSettings, ProviderDisk,
 };
 use paros::{Address, Ballot, NodeId, RunError};
 
@@ -114,6 +114,12 @@ pub(crate) struct MachineBoard {
     renamed: BTreeMap<usize, Address>,
     /// How many times each machine was renamed, by rank.
     renames: BTreeMap<usize, u8>,
+    /// Each machine's last durable cached registry fold, by minted id
+    /// (#211).
+    cached: BTreeMap<u64, CachedRegistry>,
+    /// Every cached registry fold each machine tried to write, by minted id
+    /// and position: what its disk may hold.
+    cache_writes: BTreeMap<u64, BTreeMap<u64, CachedRegistry>>,
 }
 
 impl MachineBoard {
@@ -853,6 +859,70 @@ pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option
     );
     if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
+    }
+}
+
+/// Machine `node` tried to write its cached registry fold (#211,
+/// [`paros::Audit::registry_cached`]), `durable` when the write landed: a
+/// durable cache only moves forward.
+pub(crate) fn registry_cached(
+    board: &Mutex<MachineBoard>,
+    node: NodeId,
+    cache: &CachedRegistry,
+    durable: bool,
+) {
+    let mut board = lock(board);
+    assert_always!(
+        cache.node == node && cache.check().is_ok(),
+        "machine: a machine caches its own checked registry fold",
+        { "node" => node.0 }
+    );
+    board
+        .cache_writes
+        .entry(node.0)
+        .or_default()
+        .insert(cache.position, cache.clone());
+    if !durable {
+        return;
+    }
+    let before = board.cached.insert(node.0, cache.clone());
+    assert_always!(
+        before.as_ref().is_none_or(|b| b.position < cache.position),
+        "machine: a cached registry fold only moves forward",
+        { "node" => node.0, "position" => cache.position }
+    );
+    let moved = before.is_some_and(|b| {
+        b.machines
+            .iter()
+            .any(|(id, addr)| cache.address(*id).is_some_and(|now| now != addr))
+    });
+    if moved {
+        assert_reachable!("machine: a cached registry fold follows a moved machine");
+    }
+}
+
+/// Machine `node` booted into its cell with `cache` (#211,
+/// [`paros::Audit::registry_cache_read`]): a cache the machine wrote, never
+/// another's or one it never offered.
+pub(crate) fn registry_cache_read(
+    board: &Mutex<MachineBoard>,
+    node: NodeId,
+    cache: Option<&CachedRegistry>,
+) {
+    let board = lock(board);
+    if let Some(cache) = cache {
+        let wrote = board
+            .cache_writes
+            .get(&node.0)
+            .and_then(|writes| writes.get(&cache.position));
+        assert_always!(
+            wrote == Some(cache),
+            "machine: a boot reads a cached registry fold the machine wrote",
+            { "node" => node.0, "position" => cache.position }
+        );
+    }
+    if cache.is_some() && cache == board.cached.get(&node.0) {
+        assert_reachable!("machine: a boot reads the last cached registry fold");
     }
 }
 

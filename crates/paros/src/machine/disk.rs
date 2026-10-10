@@ -6,6 +6,7 @@
 //! ```text
 //! <root>/
 //!   machine                       the machine record ([`super::MachineRecord`])
+//!   registry                      the cached registry fold ([`super::CachedRegistry`], #211)
 //!   journals/<tenant>/<journal>/  one journal store per journal of the plan
 //! ```
 //!
@@ -29,6 +30,12 @@ const RECORD: &str = "machine";
 
 /// The staged record a rewrite renames into place.
 const STAGED: &str = "machine.tmp";
+
+/// The cached registry fold's file name under the root (#211).
+const CACHE: &str = "registry";
+
+/// The staged cache a rewrite renames into place.
+const CACHE_STAGED: &str = "registry.tmp";
 
 /// A machine's disk: the record and the journal stores under `root`, on
 /// `provider`.
@@ -100,9 +107,24 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
     /// damage no restart repairs.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_record(&self) -> Result<Option<String>, String> {
+        self.read(RECORD).await
+    }
+
+    /// The cached registry fold's text (#211), or `None` when there is
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// The cache exists and the disk failed to read it.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
+    pub async fn read_cache(&self) -> Result<Option<String>, String> {
+        self.read(CACHE).await
+    }
+
+    async fn read(&self, name: &str) -> Result<Option<String>, String> {
         let file = match self
             .provider
-            .open(&self.path(RECORD), OpenOptions::read_only())
+            .open(&self.path(name), OpenOptions::read_only())
             .await
         {
             Ok(file) => file,
@@ -126,12 +148,34 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
     pub async fn write_record(&self, text: &str) -> Result<(), String> {
         assert!(!text.is_empty(), "a machine record is never empty");
-        self.write(text).await.map_err(|e| e.to_string())
+        self.write(text, STAGED, RECORD)
+            .await
+            .map_err(|e| e.to_string())
     }
 
-    async fn write(&self, text: &str) -> io::Result<()> {
+    /// Replace the cached registry fold with `text` (#211), whole and
+    /// durably, as the record is.
+    ///
+    /// # Errors
+    ///
+    /// Any storage failure; the old cache (or none) is then what a crash
+    /// leaves.
+    ///
+    /// # Panics
+    ///
+    /// When `text` is empty: a cache always names its position.
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
+    pub async fn write_cache(&self, text: &str) -> Result<(), String> {
+        assert!(!text.is_empty(), "a cached registry fold is never empty");
+        self.write(text, CACHE_STAGED, CACHE)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn write(&self, text: &str, staged: &str, name: &str) -> io::Result<()> {
+        assert_ne!(staged, name, "a rewrite stages beside its file");
         self.provider.create_dir_all(&self.root).await?;
-        let staged = self.path(STAGED);
+        let staged = self.path(staged);
         {
             let file = self
                 .provider
@@ -145,7 +189,7 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
                 "a synced record holds exactly its text"
             );
         }
-        self.provider.rename(&staged, &self.path(RECORD)).await?;
+        self.provider.rename(&staged, &self.path(name)).await?;
         sync_names(&self.provider, &self.root).await
     }
 

@@ -1226,7 +1226,7 @@ where
                     cell_id: formed.plan.cell_id,
                     election,
                     book: crate::machine::with_own(
-                        &formed.plan.members,
+                        &formed.founders(),
                         formed.facts.node_id,
                         &formed.facts.addr,
                     ),
@@ -1764,10 +1764,16 @@ where
                 // The peer book (#349): a peer the registry moved is dialed
                 // at its registered address from its lane's next batch on.
                 if let Some(book) = peer_book.as_mut() {
-                    for (peer, addr) in book.follow(&journals) {
+                    let (moved, cache) = book.follow(&journals);
+                    for (peer, addr) in moved {
                         let moved = out.readdress(peer, addr.clone());
                         assert!(moved, "every founding member but this one has a lane");
                         tracing::info!(node = self_id, peer = peer.0, %addr, "peer_book_moved");
+                    }
+                    // The durable cached registry fold (#211), written off
+                    // the loop.
+                    if let Some(cache) = cache {
+                        stores.cache_registry(cache);
                     }
                 }
                 // The system journals (#189): fold what this node's own

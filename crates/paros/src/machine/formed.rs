@@ -10,10 +10,11 @@
 
 use moonpool_core::{Detach, Providers, SimulationResult, TaskProvider};
 use moonpool_rpc::RpcHandle;
-use paros_core::Ballot;
+use paros_core::{Ballot, NodeId};
 use tokio_util::sync::CancellationToken;
 
-use super::{Admission, CellPlan, Class, ControlJournals, MachineFacts};
+use super::{Admission, CachedRegistry, CellPlan, Class, ControlJournals, MachineFacts};
+use crate::Address;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{AdmitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use crate::rpc::{Inbound, serve_well_known};
@@ -28,6 +29,8 @@ pub struct FormedCell {
     pub plan: CellPlan,
     /// The ballot it accepted the plan at.
     pub ballot: Ballot,
+    /// The cached registry fold its disk held at start (#211), if any.
+    pub cached: Option<CachedRegistry>,
 }
 
 impl FormedCell {
@@ -36,6 +39,33 @@ impl FormedCell {
     #[must_use]
     pub fn control_journals(&self) -> ControlJournals {
         self.plan.control_journals()
+    }
+
+    /// The founding members where this machine dials them at start: at the
+    /// addresses its cached registry fold names (#211), else the plan's.
+    /// The registry fold takes over once it passes the cache's position.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertion checks that every founding member keeps one
+    /// address.
+    #[must_use]
+    pub fn founders(&self) -> Vec<(NodeId, Address)> {
+        let founders: Vec<(NodeId, Address)> = self
+            .plan
+            .members
+            .iter()
+            .map(|(id, planned)| {
+                let cached = self.cached.as_ref().and_then(|c| c.address(*id));
+                (*id, cached.unwrap_or(planned).clone())
+            })
+            .collect();
+        assert_eq!(
+            founders.len(),
+            self.plan.members.len(),
+            "every founding member keeps one address"
+        );
+        founders
     }
 
     /// This member's vote, as the decree reports it.

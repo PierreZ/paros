@@ -31,7 +31,7 @@ use paros_core::{
 use crate::Address;
 use crate::client::CallObserver;
 use crate::driver::BootRefusal;
-use crate::machine::{CellPlan, MachineRecord};
+use crate::machine::{CachedRegistry, CellPlan, MachineRecord};
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
 use crate::storage::StorageError;
 
@@ -441,6 +441,16 @@ pub trait Audit {
     /// directory syncs): its identity, or a step of the cell decree — a
     /// raised promise, or the vote that forms it.
     fn machine_recorded(&self, record: &MachineRecord) {}
+
+    /// Machine `node` tried to write its cached registry fold (#211):
+    /// `durable` once the rename and the directory syncs landed, else the
+    /// disk failed and may hold the old cache or this one.
+    fn registry_cached(&self, node: NodeId, cache: &CachedRegistry, durable: bool) {}
+
+    /// Machine `node` booted into its cell with the cached registry fold its
+    /// disk holds (`None`: no cache, or one that does not parse or names
+    /// another machine).
+    fn registry_cache_read(&self, node: NodeId, cache: Option<&CachedRegistry>) {}
 
     /// A machine advertising `addr` is about to format the stores of `plan` as
     /// member `node` (the step before its vote); `leftovers` when the disk

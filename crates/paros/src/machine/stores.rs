@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use moonpool_core::StorageProvider;
 use paros_core::{Config, JournalIdentifier, NodeId};
 
-use super::ProviderDisk;
 use super::record::MachineRecord;
+use super::{CacheSink, CachedRegistry, ProviderDisk};
 use crate::{Audit, BootKind, JournalStorage, JournalStores};
 
 /// Which audit port a machine's facts report to, named by the caller of
@@ -45,6 +45,8 @@ pub(crate) struct MachineStores<S, F> {
     /// The machine record, rewritten whole when a store is provisioned.
     record: MachineRecord,
     audits: F,
+    /// Where the node's registry fold offers each new book (#211).
+    cache: Option<CacheSink>,
 }
 
 impl<S, F> MachineStores<S, F> {
@@ -76,7 +78,17 @@ impl<S, F> MachineStores<S, F> {
             created: BTreeMap::new(),
             record,
             audits,
+            cache: None,
         }
+    }
+
+    /// These stores, offering each book the registry fold reaches to
+    /// `sink`, the machine's cached registry fold (#211).
+    #[must_use]
+    pub(crate) fn with_cache(mut self, sink: CacheSink) -> Self {
+        assert!(self.cache.is_none(), "a machine has one registry cache");
+        self.cache = Some(sink);
+        self
     }
 }
 
@@ -181,6 +193,13 @@ where
         }
         self.created.entry(journal).or_insert(config);
         true
+    }
+
+    fn cache_registry(&self, cache: CachedRegistry) {
+        assert_eq!(cache.node, self.node, "a machine caches its own fold");
+        if let Some(sink) = &self.cache {
+            sink.offer(cache);
+        }
     }
 
     fn node_audit(&self) -> A {
