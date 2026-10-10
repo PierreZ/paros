@@ -62,6 +62,18 @@ pub(crate) struct LedgeredJournal {
     staged_accepts: BTreeMap<u64, (Ballot, u64)>,
 }
 
+/// How a boot's injection is judged against the journal's verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Judging {
+    /// No injection, or one that never confirmed and holds no park.
+    Skip,
+    /// Every write and sync confirmed: the family's verdict is exact.
+    Landed,
+    /// A double fault that never confirmed (#351): it may have landed
+    /// whole, in part or not at all, so the verdict decides its park.
+    Uncertain,
+}
+
 /// What damage a [`LedgeredJournal`] takes: its power cuts' copy budget,
 /// whether the ledgered injector aims at it, and until when.
 #[derive(Clone, Copy, Debug)]
@@ -78,19 +90,24 @@ impl LedgeredJournal {
     /// The ledgered injector (#261) at one boot: at most one family's
     /// damage, aimed by the custody ledger, applied before the journal
     /// opens and judged against what it reports. Returns the injection and
-    /// whether it landed.
-    async fn damage(&mut self) -> (Option<super::injector::Injection>, bool) {
-        // An injection a kill left unjudged is judged now, as applied:
-        // a second apply would flip its bytes back.
+    /// how its verdict is judged.
+    async fn damage(&mut self) -> (Option<super::injector::Injection>, Judging) {
+        // A double fault a boot planned and its journal never judged is
+        // judged now (#351): a second apply would flip its bytes back.
         let pending = self.world.upgrade().and_then(|w| {
             w.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .unjudged(&self.ip)
         });
-        let carried = pending.is_some();
-        let injection = if carried {
-            pending
-        } else if self.inject {
+        if let Some(reserved) = pending {
+            let judging = if reserved.landed {
+                Judging::Landed
+            } else {
+                Judging::Uncertain
+            };
+            return (Some(reserved.injection), judging);
+        }
+        let injection = if self.inject {
             let (ip, node, in_chaos) = (
                 self.ip.clone(),
                 self.node,
@@ -104,16 +121,21 @@ impl LedgeredJournal {
         } else {
             None
         };
-        let confirmed = match &injection {
-            Some(_) if carried => true,
-            Some(injection) => super::injector::apply(&self.provider, injection).await,
-            None => false,
+        let Some(injection) = injection else {
+            return (None, Judging::Skip);
         };
-        if let Some(injection) = injection.as_ref().filter(|_| confirmed && !carried) {
-            let (ip, injection) = (self.ip.clone(), injection.clone());
-            self.with_world(|w| w.note_applied(&ip, injection));
+        if super::injector::apply(&self.provider, &injection).await {
+            let ip = self.ip.clone();
+            self.with_world(|w| w.note_applied(&ip));
+            (Some(injection), Judging::Landed)
+        } else if injection.double_fault().is_some() {
+            // The reserved park waits for the journal's verdict.
+            (Some(injection), Judging::Uncertain)
+        } else {
+            // Any other family that never confirmed may or may not have
+            // landed; the open may repair it either way. Not judged.
+            (Some(injection), Judging::Skip)
         }
-        (injection, confirmed)
     }
 
     pub(crate) fn new(
@@ -222,7 +244,7 @@ impl Storage for LedgeredJournal {
 impl LogStorage for LedgeredJournal {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        let (injection, confirmed) = self.damage().await;
+        let (injection, judging) = self.damage().await;
         // An open writes too (moonpool-journal's `begin_generation` rewrites
         // both metainfo copies; a header or record repair rewrites its
         // region), so a kill inside it may tear a copy the last sync left
@@ -238,7 +260,7 @@ impl LogStorage for LedgeredJournal {
         // that carried an injection re-opens, as the driver's
         // quarantine would, until the journal gives its verdict.
         let mut retries = 0;
-        while confirmed
+        while judging != Judging::Skip
             && retries < super::injector::REOPEN_ATTEMPTS
             && matches!(
                 scanned,
@@ -248,14 +270,35 @@ impl LogStorage for LedgeredJournal {
             retries += 1;
             scanned = self.inner.boot_scan().await;
         }
-        if let Some(injection) = injection.as_ref().filter(|_| confirmed) {
+        let refused = matches!(scanned, Err(StorageError::Corruption { .. }));
+        let faulty: Vec<u64> = self
+            .inner
+            .faulty_entries()
+            .iter()
+            .map(|(slot, _)| slot.0)
+            .collect();
+        if let Some(slot) = injection
+            .as_ref()
+            .and_then(super::injector::Injection::double_fault)
+            && judging == Judging::Uncertain
+            && !matches!(
+                scanned,
+                Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. })
+            )
+        {
+            // A double fault that may have landed in part (#351): a refusal
+            // is the damage landed whole, a crash decision like any other;
+            // an open is the reserved park released.
+            if refused {
+                self.with_world(StorageWorld::note_injected);
+                self.with_world(StorageWorld::note_injected_crash);
+                assert_reachable!("journal store: an unconfirmed double fault refuses the journal");
+            }
+            let (ip, lost) = (self.ip.clone(), faulty.contains(&slot));
+            self.with_world(|w| w.judged(&ip, refused, slot, lost));
+        }
+        if let Some(injection) = injection.as_ref().filter(|_| judging == Judging::Landed) {
             self.with_world(StorageWorld::note_injected);
-            let faulty: Vec<u64> = self
-                .inner
-                .faulty_entries()
-                .iter()
-                .map(|(slot, _)| slot.0)
-                .collect();
             let crashed = super::injector::judge(
                 injection,
                 &scanned,
@@ -267,8 +310,10 @@ impl LogStorage for LedgeredJournal {
             if crashed {
                 self.with_world(StorageWorld::note_injected_crash);
             }
-            let ip = self.ip.clone();
-            self.with_world(|w| w.judged(&ip));
+            if let Some(slot) = injection.double_fault() {
+                let (ip, lost) = (self.ip.clone(), faulty.contains(&slot));
+                self.with_world(|w| w.judged(&ip, refused, slot, lost));
+            }
             // An outage's planned loss landed: the journal's own verdict is
             // the audit's ground truth that this copy is gone (#263).
             if let Some(slot) = injection.outage_loss()
@@ -286,12 +331,6 @@ impl LogStorage for LedgeredJournal {
             .filter(|region| region.kind == paros::journal::Layout::ENTRY)
             .filter_map(|region| region.stripe)
             .filter_map(|slot| self.inner.layout(Slot(slot)).map(|at| (slot, at)))
-            .collect();
-        let faulty: Vec<u64> = self
-            .inner
-            .faulty_entries()
-            .iter()
-            .map(|(slot, _)| slot.0)
             .collect();
         self.checker.note_faulty_copies(self.node, &faulty);
         let (ip, node, first) = (self.ip.clone(), self.node, self.inner.first_slot().0);
