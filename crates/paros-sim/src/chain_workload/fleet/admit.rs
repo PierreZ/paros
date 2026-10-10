@@ -70,7 +70,6 @@ impl FleetOps {
             let step = session
                 .admit_step(&providers, &rpc, &client, &names, first, &target)
                 .await;
-            eprintln!("DBG admit-step client={} target={target} step={step:?}", self.client_id);
             if let Step::Advanced(stage) = step {
                 assert_reachable!("admit: an admission stops after its registration");
                 reach(stage);
@@ -89,7 +88,6 @@ impl FleetOps {
                 self.patience,
             )
             .await;
-        eprintln!("DBG admit t={:?} client={} target={target} run={run:?}", ctx.time().now(), self.client_id);
         self.judge_admission(ctx, &session, target, run);
     }
 

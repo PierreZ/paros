@@ -243,7 +243,6 @@ impl FleetOps {
         } else {
             whole.await
         };
-        eprintln!("DBG init-run t={:?} client={} members={members:?} run={run:?}", ctx.time().now(), self.client_id);
         self.judge(ctx, run, founders)
     }
 
@@ -318,7 +317,6 @@ impl FleetOps {
     /// member, or as `cell_exists` once `cell add-machine` admitted it (#216),
     /// and nothing forms. Whether it ended.
     async fn misdirected(&self, ctx: &SimContext, target: Address, members: &[Address]) -> bool {
-        eprintln!("DBG misdirected target={target}");
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),
