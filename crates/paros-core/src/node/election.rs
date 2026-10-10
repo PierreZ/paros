@@ -56,6 +56,10 @@ impl ColocatedNode {
             return;
         }
         if self.config.has_matchmakers() && !self.acceptors.contains(self.config.id) {
+            probe!(
+                reachable,
+                "reconfiguration: a node outside the acceptor set declines to campaign"
+            );
             self.counters.non_member_campaigns_skipped =
                 self.counters.non_member_campaigns_skipped.saturating_add(1);
             // A heard belief that leaves this node outside is re-asked on
@@ -66,6 +70,10 @@ impl ColocatedNode {
             // sweep went red on "cluster converged after chaos", and green
             // with it).
             if self.role != NodeRole::Follower {
+                probe!(
+                    reachable,
+                    "reconfiguration: a removed candidate abandons its reconfiguration campaign before probing"
+                );
                 // A removed leader's own reconfiguration campaign timed out:
                 // give it up, as a member's timed-out campaign is given up,
                 // before the probe opens (a probe never overlaps a campaign).
@@ -377,6 +385,10 @@ impl ColocatedNode {
         ) {
             PromiseFold::Ignored => return,
             PromiseFold::Continue(next) => {
+                probe!(
+                    reachable,
+                    "repair: a leader's probe pages a straggler's late Promise"
+                );
                 self.request_promise_page(from, ballot, next);
                 return;
             }
@@ -671,6 +683,10 @@ impl ColocatedNode {
             // continuation (especially in a single-node cluster), so each slot
             // is re-checked at the instant its round starts.
             if slot < self.acceptor.first_slot() || self.replica.is_chosen(slot) {
+                probe!(
+                    reachable,
+                    "recovery: a recovery page skips a slot compacted or chosen beneath its cursor"
+                );
                 continue;
             }
             // A blocked slot (Case 3: wait) is neither re-proposed nor

@@ -238,10 +238,19 @@ impl FleetOps {
             return;
         };
         if buggify_with_prob!(0.2) {
-            if let Step::Advanced(stage) = session.init_step(&client, first, draw | 1).await {
-                assert_reachable!("fleet: an init stops after one step");
-                reach(stage);
-                self.pending = Some(Pending::Init);
+            match session.init_step(&client, first, draw | 1).await {
+                Step::Advanced(stage) => {
+                    assert_reachable!("fleet: an init stops after one step");
+                    reach(stage);
+                    self.pending = Some(Pending::Init);
+                }
+                // An interrupted step may have landed (an ambiguous or
+                // unanswered write): the operator keeps it to resume.
+                Step::Interrupted(interrupted) => {
+                    self.forget_unknown(&interrupted);
+                    self.pending = Some(Pending::Init);
+                }
+                _ => {}
             }
             judge_folds(&session);
             return;
@@ -361,10 +370,20 @@ impl FleetOps {
             if buggify_with_prob!(0.2) {
                 let identifier = tenant_identifier(payload);
                 let step = session.create_step(&client, first, &name, identifier).await;
-                if let Step::Advanced(stage) = step {
-                    assert_reachable!("fleet: a tenant creation stops after one step");
-                    reach(stage);
-                    self.pending = Some(Pending::Create(name, vec![identifier]));
+                match step {
+                    Step::Advanced(stage) => {
+                        assert_reachable!("fleet: a tenant creation stops after one step");
+                        reach(stage);
+                        self.pending = Some(Pending::Create(name, vec![identifier]));
+                    }
+                    // An interrupted step may have landed: a creation resumes
+                    // only by its own identifier, so the operator keeps it
+                    // (seed 17211107884392273235 left one `Registering`).
+                    Step::Interrupted(interrupted) => {
+                        self.forget_unknown(&interrupted);
+                        self.pending = Some(Pending::Create(name, vec![identifier]));
+                    }
+                    _ => {}
                 }
                 judge_folds(&session);
                 return;
@@ -386,10 +405,18 @@ impl FleetOps {
             // step at all, so a shared 20% left "a tenant removal resumed
             // after a crash" the sweep's rarest gate, near its seed cap.
             if buggify_with_prob!(0.5) {
-                if let Step::Advanced(stage) = session.remove_step(&client, first, &name).await {
-                    assert_reachable!("fleet: a tenant removal stops after one step");
-                    reach(stage);
-                    self.pending = Some(Pending::Remove(name));
+                match session.remove_step(&client, first, &name).await {
+                    Step::Advanced(stage) => {
+                        assert_reachable!("fleet: a tenant removal stops after one step");
+                        reach(stage);
+                        self.pending = Some(Pending::Remove(name));
+                    }
+                    // An interrupted step may have landed: keep it to resume.
+                    Step::Interrupted(interrupted) => {
+                        self.forget_unknown(&interrupted);
+                        self.pending = Some(Pending::Remove(name));
+                    }
+                    _ => {}
                 }
                 judge_folds(&session);
                 return;

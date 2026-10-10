@@ -13,8 +13,8 @@
 - Membership-probe wedge (residual of #270): a reconfiguration registered at a matchmaker
   minority, then its leader dies. Old members' probes adopt it (outside), new members' probes
   close on the first quorum, which in the tail (fixed per-pair latencies) never contains the
-  holder, so they keep the bootstrap (outside too). Nobody campaigns; every node logs
-  `campaign_skipped_non_member` forever. Look for `membership_probe_closed member=false` on
+  holder, so they keep the bootstrap (outside too). Nobody campaigns; every node skips its
+  campaign as a non-member forever. Look for `membership_probe_closed member=false` on
   every node and `match_probed effective_round` differing across matchmakers.
 - `AuditWorld::has_departure` is true on one matchmaker's registration, not on a removal that
   took effect; the late outage can strike mid-reconfiguration.

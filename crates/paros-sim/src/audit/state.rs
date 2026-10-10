@@ -331,10 +331,6 @@ pub(super) struct AuditState {
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.
     pub(super) waiter_superseded: bool,
-    /// A node opened no quorum read for want of a read basis (#260).
-    pub(super) read_without_basis: bool,
-    /// A rebooted node left a `PreRead` unanswered before it heard (#260).
-    pub(super) pre_read_refused_unheard: bool,
     /// Typed Stage-6 write/fsync crash decisions folded in
     /// ([`Audit::storage_fault`](paros::Audit::storage_fault) with `Io`/`FsyncFailed`).
     pub(super) storage_faults_detected: u64,
@@ -475,12 +471,10 @@ pub(super) struct AuditState {
     pub(super) propose_reply_dropped: bool,
     pub(super) read_reply_dropped: bool,
     pub(super) dedup_after_dropped_reply: bool,
-    /// Reconfiguration coverage (#122): a request started / refused, a
-    /// non-member declined to campaign, a removed leader resigned.
+    /// Reconfiguration coverage (#122): a request started / refused (the
+    /// non-member campaign skip and resignation are core probes).
     pub(super) reconfigure_started: bool,
     pub(super) reconfigure_refused: bool,
-    pub(super) non_member_campaign_skipped: bool,
-    pub(super) non_member_leader_resigned: bool,
     /// A leadership under a configuration other than the bootstrap one: a
     /// reconfiguration went all the way through matchmaking and the
     /// cross-configuration Phase 1.

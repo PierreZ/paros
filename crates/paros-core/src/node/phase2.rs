@@ -232,6 +232,10 @@ impl ColocatedNode {
     /// `Relinquish` is then refused by the promise guard instead).
     fn record_own_round(&mut self, slot: Slot, ballot: Ballot, command: &Command) -> bool {
         if ballot < self.acceptor.promised() {
+            probe!(
+                reachable,
+                "phase2: a leader whose promise moved past its ballot opens a round it cannot record"
+            );
             return false;
         }
         self.acceptor.set_promise(ballot, &mut self.pending_writes);

@@ -87,6 +87,10 @@ impl ColocatedNode {
                 // close that stale campaign before following the prepared
                 // ballot.
                 if ballot.node != me && self.role != NodeRole::Follower {
+                    probe!(
+                        reachable,
+                        "acceptor: another proposer's Prepare closes a live campaign"
+                    );
                     self.become_follower(None);
                 }
                 self.election_elapsed = 0;
@@ -174,7 +178,12 @@ impl ColocatedNode {
             // there would break agreement, and a Nack would needlessly depose
             // a leader that can still assemble a quorum on live slots.
             // Heartbeat commit reconciliation heals any real gap.
-            AcceptOutcome::BelowFloor => {}
+            AcceptOutcome::BelowFloor => {
+                probe!(
+                    reachable,
+                    "acceptor: an Accept below the compaction floor is ignored, not nacked"
+                );
+            }
             AcceptOutcome::Admitted => {
                 // The redirect hint is the message's own `leader`, never
                 // `ballot.node`. They are the same node for an elected
