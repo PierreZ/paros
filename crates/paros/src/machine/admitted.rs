@@ -14,6 +14,10 @@
 //!   after a lost answer), and into any other cell, refused;
 //! - the cell decree, refused: it is in a cell, so a `cell init` that lists
 //!   it is refused as `cell_exists`, and it accepts no plan.
+//!
+//! On every start it asks the cell coordinator to register the address it
+//! advertises now (`super::register`, #349), so a machine that moved is
+//! dialed at its new address.
 
 use std::collections::BTreeSet;
 
@@ -119,6 +123,26 @@ impl AdmittedMachine {
         let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(&rpc).map_err(served)?);
         let mut inspect = Inbound::plain(serve_well_known::<P, InspectRpc>(&rpc).map_err(served)?);
         let cell = self.admission.cell;
+        // It asks the cell coordinator to register the address it
+        // advertises now (#349): the registry may hold another one.
+        if let Some(election) = cell.election {
+            super::register::spawn(
+                providers,
+                &rpc,
+                super::register::Registration {
+                    facts: self.facts.clone(),
+                    cell_id: cell.cell_id,
+                    election,
+                    book: super::with_own(
+                        &self.admission.members,
+                        self.facts.node_id,
+                        &self.facts.addr,
+                    ),
+                },
+                tunables,
+                shutdown.clone(),
+            );
+        }
         tracing::info!(
             node = self.facts.node_id.0,
             cell = cell.cell_id,

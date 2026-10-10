@@ -26,12 +26,21 @@
 //!    `machine_down_after` is written `MachineDown`. Only changes are
 //!    written, never a heartbeat. The watch ends with the term, or at the
 //!    term's first write that does not land: a coordinator an admin session
-//!    fenced does not fight back.
+//!    fenced does not fight back. It resigns the term instead, so that the
+//!    next term installs itself under a fresh uuid and its duties go on
+//!    (#349: a moved machine is otherwise refused for the rest of the term).
+//! 6. **Register moved machines** (#349): a machine of the cell asks the
+//!    coordinator with `Register` to record the address it advertises now
+//!    (`super::register`). The coordinator checks that the machine answers
+//!    `Identify` there as itself, then writes `RegisterNode` with that
+//!    address, unless the cell's address book holds it already. Every
+//!    founding member serves `Register`; one that does not serve a term
+//!    refuses it (`not_coordinator`).
 //!
 //! Until admin calls become requests to the coordinator (#212, #225), an
 //! admin session still claims the cell control journal and fences the
-//! coordinator. The coordinator does not fight back: it writes only when a
-//! term starts.
+//! coordinator. The coordinator does not fight back within its term: it
+//! resigns, and the next term claims the journal again.
 //!
 //! The candidate draws no randomness of its own: its seed and its two
 //! BUGGIFY decisions (a stalled leader, a hand-off) are drawn on the node
@@ -41,7 +50,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
+use moonpool_core::{
+    Detach, Providers, RandomProvider, SimulationResult, TaskProvider, TimeProvider,
+};
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +64,9 @@ use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Ste
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
 use crate::client::{CallObserver, ClaimOutcome, Client, ClientTunables, Server, bootstrap};
 use crate::rpc::NodeClient;
+use crate::rpc::machine as wire;
+use crate::rpc::methods::RegisterRpc;
+use crate::rpc::{Inbound, serve_well_known};
 use crate::system::{NodeStanding, SystemCommand};
 use crate::{Address, DriverTunables, Names};
 
@@ -215,14 +229,11 @@ impl Watch {
         }
         self.next = client.now() + self.every;
         let timeout = client.tunables().request_timeout;
-        let mut machines: BTreeMap<NodeId, Address> = session.founders().iter().cloned().collect();
-        machines.extend(
-            session
-                .registry()
-                .nodes()
-                .filter(|(_, n)| n.standing != NodeStanding::Retired)
-                .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr))),
-        );
+        // Each machine where the cell's address book says it is (#349).
+        let machines: BTreeMap<NodeId, Address> =
+            super::cell_book(session.founders(), session.registry())
+                .into_iter()
+                .collect();
         let mut wrote = 0;
         for (id, addr) in machines {
             let answer = bootstrap::identify(providers, rpc, names, &addr, timeout)
@@ -319,9 +330,14 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
 /// The library client of the cell's members, each dialed by its advertised
 /// address, resolved at each call (#257).
 fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, formed: &FormedCell) -> Client<P> {
-    let servers = formed
-        .plan
-        .members
+    // This member at the address it advertises now (#349), the others at
+    // the plan's.
+    let book = super::with_own(
+        &formed.plan.members,
+        formed.facts.node_id,
+        &formed.facts.addr,
+    );
+    let servers = book
         .iter()
         .map(|(id, addr)| Server {
             id: id.0,
@@ -347,12 +363,18 @@ struct Candidacy {
     /// The leader hands its first term on to another founding member after
     /// its duties (a BUGGIFY decision).
     hand_off: bool,
+    /// The machines' `Register` requests (#349).
+    registers: Inbound<RegisterRpc, wire::Register, wire::RegisterAck>,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
 /// coordinator, in a task that stops with `shutdown`. Draws its seed and its
 /// BUGGIFY decisions here, on the node loop. Nothing starts when the plan
 /// names no election journal or the tunables are not a working election.
+///
+/// # Errors
+///
+/// The `Register` endpoint could not be registered.
 pub(crate) fn spawn<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -360,10 +382,10 @@ pub(crate) fn spawn<P: Providers>(
     tunables: &DriverTunables,
     observer: Option<Arc<dyn CallObserver>>,
     shutdown: CancellationToken,
-) {
+) -> SimulationResult<()> {
     let election = election_tunables(tunables);
     if !election.is_valid() || !formed.plan.election.is_set() {
-        return;
+        return Ok(());
     }
     let candidacy = Candidacy {
         me: formed.facts.node_id,
@@ -375,6 +397,7 @@ pub(crate) fn spawn<P: Providers>(
         down_after: tunables.machine_down_after,
         stall: moonpool_buggify::buggify_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
+        registers: Inbound::plain(serve_well_known::<P, RegisterRpc>(rpc)?),
     };
     let mut client = cell_client(providers, rpc, formed).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -389,6 +412,7 @@ pub(crate) fn spawn<P: Providers>(
             campaign(providers.clone(), rpc, client, candidacy, shutdown),
         )
         .detach();
+    Ok(())
 }
 
 /// A jitter in `[0, lease / 2]` derived from `seed` and the step count.
@@ -425,6 +449,9 @@ fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 /// The candidate's loop: step the election, serve every term it wins, and
 /// stop with `shutdown`.
 #[tracing::instrument(level = "debug", skip_all, fields(node = candidacy.me.0, cell = candidacy.plan.cell_id))]
+// One loop over the election's steps: each arm is a thin call into the
+// term's duties, and splitting the arms out would scatter its shared state.
+#[allow(clippy::too_many_lines)]
 async fn campaign<P: Providers>(
     providers: P,
     rpc: RpcHandle<P>,
@@ -442,6 +469,7 @@ async fn campaign<P: Providers>(
         down_after,
         mut stall,
         hand_off: mut handing,
+        mut registers,
     } = candidacy;
     let journals = plan.control_journals();
     let founders = plan.members.clone();
@@ -491,6 +519,17 @@ async fn campaign<P: Providers>(
                     TermDuty::Unavailable => {}
                 }
             }
+            Step::Leading { .. } if served.is_some() && watching.is_none() => {
+                // Another writer fenced the term's session (an operator's
+                // claim): the term cannot do its duties, and a machine that
+                // asks it to register is refused. Never fight the session:
+                // give the term to the next campaign, which installs itself
+                // under a fresh uuid (#349).
+                moonpool_assertions::reachable!("coordinator: a fenced term resigned");
+                election.resign(None).await;
+                served = None;
+                assert!(watching.is_none(), "a resigned term holds no session");
+            }
             Step::Leading { leader, .. } if handing => {
                 handing = false;
                 if let Some(next) = successor(&plan, me)
@@ -533,8 +572,133 @@ async fn campaign<P: Providers>(
             }
             Step::Leading { .. } | Step::Following { .. } => {}
         }
-        let _ = providers.time().sleep(pace).await;
+        // Until the next step, answer the machines' `Register` requests
+        // (#349).
+        let until = providers.time().now() + pace;
+        let ctx = (&providers, &rpc, &client, &names);
+        let cell = (plan.cell_id, tunables.renew_every);
+        answer_until(ctx, cell, until, &mut registers, &mut watching, &shutdown).await;
     }
+}
+
+/// Answer `Register` requests until `until` (#349). The deadline is
+/// absolute: a request does not push the candidate's next step back.
+async fn answer_until<P: Providers>(
+    (providers, rpc, client, names): (&P, &RpcHandle<P>, &Client<P>, &Names),
+    cell: (u64, Duration),
+    until: Duration,
+    registers: &mut Inbound<RegisterRpc, wire::Register, wire::RegisterAck>,
+    watching: &mut Option<(CellSession, Watch)>,
+    shutdown: &CancellationToken,
+) {
+    loop {
+        let left = until.saturating_sub(providers.time().now());
+        if left.is_zero() || shutdown.is_cancelled() {
+            return;
+        }
+        moonpool_core::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            Some((request, reply)) = registers.recv() => {
+                let ack = register(providers, rpc, client, names, cell, watching, request).await;
+                reply.send(ack);
+            }
+            _ = providers.time().sleep(left) => return,
+        }
+    }
+}
+
+/// Answer a machine's `Register` (#349): register the address it advertises
+/// now in the cell control journal, through the served term's session, when
+/// the cell's address book does not hold it. Refused while this member
+/// serves no term. A write that does not land ends the term's watch, as in
+/// [`Watch::round`]. The machine's `Identify` waits at most `patience`, one
+/// renewal period, so a request to an address nobody answers at does not
+/// cost the term its renewals.
+#[tracing::instrument(level = "debug", skip_all, fields(cell = cell_id))]
+async fn register<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    client: &Client<P>,
+    names: &Names,
+    (cell_id, patience): (u64, Duration),
+    watching: &mut Option<(CellSession, Watch)>,
+    request: wire::Register,
+) -> wire::RegisterAck {
+    let refuse = |refusal: &str| wire::RegisterAck {
+        registered: false,
+        refusal: refusal.into(),
+    };
+    let Some(identity) = request.identity else {
+        return refuse("malformed");
+    };
+    let (Ok(addr), Ok(class)) = (
+        Address::parse(&identity.addr),
+        identity.class.parse::<Class>(),
+    ) else {
+        return refuse("malformed");
+    };
+    let id = NodeId(identity.node_id);
+    if id.0 == 0 {
+        return refuse("malformed");
+    }
+    if identity.cell_id != cell_id {
+        return refuse("other_cell");
+    }
+    let Some((session, _)) = watching.as_mut() else {
+        return refuse("not_coordinator");
+    };
+    let book = super::cell_book(session.founders(), session.registry());
+    let Some((_, known)) = book.iter().find(|(member, _)| *member == id) else {
+        return refuse("unknown_machine");
+    };
+    let registered = wire::RegisterAck {
+        registered: true,
+        refusal: String::new(),
+    };
+    if *known == addr {
+        return registered;
+    }
+    // The machine answers there as itself, and as the incarnation that
+    // asked: a late request from an earlier start names an address the
+    // machine left.
+    let incarnation = incarnation_from_halves(identity.incarnation_high, identity.incarnation_low);
+    let answer = bootstrap::identify(
+        providers,
+        rpc,
+        names,
+        &addr,
+        patience.min(client.tunables().request_timeout),
+    )
+    .await
+    .filter(|ack| {
+        ack.node_id == id.0
+            && incarnation_from_halves(ack.incarnation_high, ack.incarnation_low) == incarnation
+    });
+    if answer.is_none() {
+        return refuse("unreachable");
+    }
+    let command = SystemCommand::RegisterNode {
+        id,
+        addr: addr.to_string(),
+        class,
+        capacity: identity.capacity,
+        failure_domain: identity.failure_domain,
+        incarnation,
+    };
+    if session.record(client, 0, &command).await.is_err() {
+        // The term's first write that did not land ends its watch.
+        *watching = None;
+        return refuse("unavailable");
+    }
+    let book = super::cell_book(session.founders(), session.registry());
+    if !book.iter().any(|entry| *entry == (id, addr.clone())) {
+        // The registry refused it (a changed class): the book stands.
+        return refuse("unknown_machine");
+    }
+    moonpool_assertions::reachable!("coordinator: a moved machine registers its new address");
+    tracing::info!(cell = cell_id, node = id.0, %addr, "machine_address_registered");
+    registered
 }
 
 #[cfg(test)]

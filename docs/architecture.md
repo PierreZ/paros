@@ -472,10 +472,35 @@ wildcard listen address with no advertised one, and a wildcard advertised one. A
 part in `cell init` only when the member list names its own advertised address, so
 `parosctl init --members` lists the advertised addresses. The simulation advertises a name on
 half the seeds, and a rebooted machine on such a seed comes back at a new IP behind its name
-(`move_pct`). Deferred to #349 (registry address books): the peer book is still built from the
-plan's member strings, because a machine has no request path yet to re-register a changed
-advertised string (#212, #225). Until #349, a changed `PAROS_ADVERTISE` across a restart is not
-supported; a changed IP behind the same name is.
+(`move_pct`).
+
+Landed on 2026-10-10 (#349, registry address books). A changed `PAROS_ADVERTISE` across a
+restart is supported:
+
+- **The registry holds every machine's address.** A founding member registers too: its
+  `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool and is
+  never drained. `paros::machine::address_book` is the founding members at their registered
+  addresses, else at the plan's; `cell_book` adds every registered machine not retired.
+- **The request path.** On every start, a formed or admitted machine reads the election
+  journal, finds the coordinator's published interface, and sends it `Register` (machine
+  method `0x5041_0307`) with its identity and the address it advertises now. The coordinator
+  calls `Identify` at that address. When the machine answers there as the same incarnation, and
+  the cell's address book holds another address, the coordinator writes `RegisterNode`. A
+  member that serves no term refuses (`not_coordinator`); the machine asks again after one
+  renewal period. A restart at the same address writes nothing.
+- **The peer book.** A founding member folds its own copy of the cell control journal after
+  each tick. When the address book moves a peer, that peer's lane dials the new address from
+  its next batch on. The coordinator's watch also dials each machine where the book says.
+- **The limit.** Until the registry holds the new address, no peer can send to the moved
+  machine. So the registry write needs a majority of the other members. A cell of two cannot
+  heal a moved member, and neither can a cell that lost another member. A machine whose cached
+  book names no reachable machine cannot find its coordinator: the same static-stability limit
+  as a machine whose cached members are all gone (below). The durable cached registry fold is
+  still not built.
+- **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
+  back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
+  nobody listens. The operators' entry for the machine follows it. After chaos, the oracle
+  judges that the registry holds every renamed founding member at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
@@ -614,7 +639,8 @@ coordinator is `paros::machine::coordinator`:
   publishes its interface. A lost install ends the term, and the coordinator resigns.
 - **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
   admin session still claims the cell control journal and fences the coordinator. The
-  coordinator writes only when a term starts, so the two do not fight. `parosctl init` claims
+  coordinator does not fight back within its term: it resigns, and the next term installs
+  a fresh uuid (#349: a fenced term cannot register a moved machine). `parosctl init` claims
   nothing: it waits until the coordinator installed its uuid, then runs the fleet steps.
 - **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
   each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
@@ -625,6 +651,8 @@ draining a machine, a user creating a journal — sends a **request RPC to the e
 coordinator**, found through the `InterfaceRef` the coordinator publishes in its journal when it
 wins. A request carries an idempotency id; the coordinator records the outcome in its journal,
 so a retry that crosses a coordinator change finds the answer there instead of acting twice.
+The first one landed is a machine's `Register` (#349, section 3.2): its idempotency is the
+registry itself, which holds the address once the request is done.
 
 - **Single writer per journal.** Only the cell coordinator writes capacity. A tenant coordinator
   *asks* the cell coordinator for capacity and never writes capacity itself; it then computes

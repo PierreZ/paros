@@ -150,3 +150,9 @@ well_known_method!(
     AdmitRpc, 0x5041_0306, machine::Admit => machine::AdmitAck,
     "paros.machine.Admit"
 );
+well_known_method!(
+    /// A machine of a cell asks the cell coordinator to register its
+    /// advertised address (#349).
+    RegisterRpc, 0x5041_0307, machine::Register => machine::RegisterAck,
+    "paros.machine.Register"
+);

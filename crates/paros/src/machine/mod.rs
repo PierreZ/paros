@@ -57,12 +57,14 @@
 //! [`ProviderDisk`], over any storage provider, which both callers use.
 
 mod admitted;
+mod book;
 mod cell_init;
 pub mod coordinator;
 mod disk;
 mod formed;
 mod lifecycle;
 mod record;
+pub(crate) mod register;
 mod stores;
 mod wait;
 
@@ -72,6 +74,8 @@ use std::net::SocketAddr;
 use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, TenantId};
 
 pub use admitted::AdmittedMachine;
+pub(crate) use book::with_own;
+pub use book::{address_book, cell_book};
 pub use disk::ProviderDisk;
 pub use formed::FormedCell;
 pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
