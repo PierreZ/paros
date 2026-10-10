@@ -846,6 +846,10 @@ impl ColocatedNode {
                 && !self.phase1_work_open()
                 && self.proposer.rounds().is_empty()
             {
+                probe!(
+                    reachable,
+                    "reconfiguration: a leader its own reconfiguration removed resigns"
+                );
                 self.counters.non_member_step_downs =
                     self.counters.non_member_step_downs.saturating_add(1);
                 self.become_follower(None);

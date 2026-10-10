@@ -509,6 +509,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             return false;
         };
         if !config.is_phase2_addressee(from, column) {
+            probe!(
+                reachable,
+                "phase2: an Accepted from outside the round's column or configuration is not counted"
+            );
             return false;
         }
         let counted = self.fold_accepted(from, ballot, slot, vhash);
@@ -589,7 +593,13 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             .collect();
         if pending.len() < RESEND_BATCH {
             let remaining = RESEND_BATCH - pending.len();
+            let wrapped = pending.len();
             pending.extend(self.by_slot.range(..start).take(remaining).map(page));
+            probe!(
+                sometimes,
+                pending.len() > wrapped && wrapped > 0,
+                "phase2: a re-send page wraps around past the highest open round"
+            );
         }
         for accept in &pending {
             if let Some(round) = self.by_slot.get_mut(&accept.slot) {

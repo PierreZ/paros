@@ -406,6 +406,10 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
         }
         if config_since.is_some_and(|since| since > self.reads[position].config_since) {
             self.reads.remove(position);
+            probe!(
+                reachable,
+                "quorum read: a pre-read ack from a newer configuration abandons the read"
+            );
             return PreReadFold::Superseded;
         }
         let read = &mut self.reads[position];
@@ -509,8 +513,14 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// If an assertion on its own invariants, preconditions or postconditions
     /// fails: a programmer error, never an operating condition.
     pub fn expire(&mut self, now: u64, ttl: u64) {
+        let before = self.reads.len();
         self.reads
             .retain(|r| now.saturating_sub(r.created_tick) <= ttl);
+        probe!(
+            sometimes,
+            self.reads.len() < before,
+            "quorum read: the core drops a read that outlived its window"
+        );
         assert!(
             self.reads
                 .iter()

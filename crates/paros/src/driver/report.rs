@@ -4,8 +4,7 @@
 
 use moonpool_core::{Providers, RandomProvider};
 use paros_core::{
-    Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, MembershipCounters, NodeId, NodeRole,
-    RepairCounters,
+    Ballot, ColocatedNode, HandoffCounters, LeadershipOrigin, NodeId, NodeRole, RepairCounters,
 };
 
 use crate::audit::Audit;
@@ -161,7 +160,6 @@ pub(crate) struct Deltas {
     pub(crate) watermark_fills: u64,
     pub(crate) repair: RepairCounters,
     pub(crate) handoff: HandoffCounters,
-    pub(crate) membership: MembershipCounters,
     pub(crate) matchmaking: Option<Ballot>,
     pub(crate) matchmaking_timeouts: u64,
     pub(crate) matchmaker_generation: u64,
@@ -180,7 +178,6 @@ impl Deltas {
             watermark_fills: node.watermark_fills(),
             repair: node.repair_counters(),
             handoff: node.handoff_counters(),
-            membership: node.membership_counters(),
             matchmaking: None,
             matchmaking_timeouts: node.matchmaking_timeouts(),
             matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
@@ -226,68 +223,6 @@ impl Cadence {
     }
 }
 
-/// Surface the campaign-membership transitions (#122): a campaign this node
-/// declined as a non-member, and a leadership it resigned once its own
-/// reconfiguration removed it.
-#[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
-fn report_membership<A: Audit>(
-    node: &ColocatedNode,
-    last_membership: &mut MembershipCounters,
-    self_id: u64,
-    audit: &A,
-) {
-    let membership = node.membership_counters();
-    assert!(
-        membership.campaigns_skipped >= last_membership.campaigns_skipped,
-        "skipped campaigns are counted monotonically"
-    );
-    assert!(
-        membership.step_downs >= last_membership.step_downs,
-        "non-member step-downs are counted monotonically"
-    );
-    if membership.campaigns_skipped != last_membership.campaigns_skipped {
-        audit.campaign_skipped_non_member(NodeId(self_id), membership.campaigns_skipped);
-        tracing::info!(
-            node = self_id,
-            count = membership.campaigns_skipped,
-            "campaign_skipped_non_member"
-        );
-    }
-    assert!(
-        membership.reads_without_basis >= last_membership.reads_without_basis,
-        "reads without a basis are counted monotonically"
-    );
-    assert!(
-        membership.pre_reads_refused_unheard >= last_membership.pre_reads_refused_unheard,
-        "unheard pre-read refusals are counted monotonically"
-    );
-    if membership.reads_without_basis != last_membership.reads_without_basis {
-        audit.read_without_basis(NodeId(self_id), membership.reads_without_basis);
-        tracing::info!(
-            node = self_id,
-            count = membership.reads_without_basis,
-            "read_without_basis"
-        );
-    }
-    if membership.pre_reads_refused_unheard != last_membership.pre_reads_refused_unheard {
-        audit.pre_read_refused_unheard(NodeId(self_id), membership.pre_reads_refused_unheard);
-        tracing::info!(
-            node = self_id,
-            count = membership.pre_reads_refused_unheard,
-            "pre_read_refused_unheard"
-        );
-    }
-    if membership.step_downs != last_membership.step_downs {
-        audit.non_member_leader_resigned(NodeId(self_id), membership.step_downs);
-        tracing::info!(
-            node = self_id,
-            count = membership.step_downs,
-            "non_member_leader_resigned"
-        );
-    }
-    *last_membership = membership;
-}
-
 /// Post-batch upkeep: feed the core a fresh randomized election timeout whenever
 /// its election clock reset, emit `leader_elected` on the transition to Leader,
 /// and drop held client replies on step-down (so clients time out and retry the
@@ -312,7 +247,6 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
         watermark_fills: last_watermark_fills,
         repair: last_repair,
         handoff: last_handoff,
-        membership: last_membership,
         matchmaking: _,
         matchmaking_timeouts: last_matchmaking_timeouts,
         matchmaker_generation: last_generation,
@@ -378,7 +312,6 @@ pub(crate) fn maintain<P: Providers, A: Audit>(
         );
     }
     let installed_now = report_handoff(node, last_handoff, self_id, audit);
-    report_membership(node, last_membership, self_id, audit);
     // Surface a matchmaker set learned through a path that reports nothing
     // itself (#125): a handover this node's reconfigurer completed, a reply
     // from a later generation.

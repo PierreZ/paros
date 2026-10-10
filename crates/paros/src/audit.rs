@@ -800,28 +800,6 @@ pub trait Audit {
     ) {
     }
 
-    /// This node declined to campaign because it is not a member of the
-    /// configuration it would have registered (a spare, or a removed node).
-    /// `count` is the monotone total for this incarnation.
-    fn campaign_skipped_non_member(&self, node: NodeId, count: u64) {}
-
-    /// This node opened no quorum read for want of a read basis (#260): it
-    /// has heard no won leadership since it booted, or it promised a newer
-    /// campaign than its basis. `count` is the monotone total for this
-    /// incarnation.
-    fn read_without_basis(&self, node: NodeId, count: u64) {}
-
-    /// This node left a `PreRead` unanswered because its belief was still
-    /// the bootstrap default (#260). `count` is the monotone total for this
-    /// incarnation.
-    fn pre_read_refused_unheard(&self, node: NodeId, count: u64) {}
-
-    /// This leader resigned because its own reconfiguration removed it from
-    /// the acceptor set and the change is complete; an ordinary election
-    /// lands leadership inside the new configuration. `count` is the monotone
-    /// total for this incarnation.
-    fn non_member_leader_resigned(&self, node: NodeId, count: u64) {}
-
     /// This node answered a client `Reconfigure` request with `result`
     /// (started at a fresh ballot, refused with a reason, or redirected).
     fn reconfigure_acked(&self, node: NodeId, members: &[NodeId], result: ReconfigureResult) {}

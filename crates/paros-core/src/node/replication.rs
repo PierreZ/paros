@@ -131,6 +131,10 @@ impl ColocatedNode {
             // our first unchosen slot.
             self.send(from, self.catch_up_request(self.first_unchosen()));
         } else if commit < ci {
+            probe!(
+                reachable,
+                "catch-up: a follower replays the decided prefix to a leader that advertises a lower commit"
+            );
             // We are ahead of the sender: push what it is missing. This is what
             // heals a leader that lost its (relaxed, non-fsync'd) chosen index to a
             // crash — it beats a stale low `commit`, so no follower would ever pull;
