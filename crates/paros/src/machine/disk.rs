@@ -21,6 +21,7 @@ use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use paros_core::{JournalIdentifier, NodeId};
 
 use super::{CellPlan, journal_config};
+use crate::journal::sync_names;
 use crate::{JournalStorage, JournalStoreConfig};
 
 /// The machine record's file name under the root.
@@ -165,7 +166,8 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
 
     /// Format the store of every journal `plan` names for member `node_id`
     /// ([`crate::provision_store`]). An interrupted run resumes: a store
-    /// already formatted under the same configuration is left as it is.
+    /// already formatted under the same configuration is left as it is, and
+    /// made durable as it stands ([`crate::journal::settle`], #348).
     ///
     /// # Errors
     ///
@@ -188,9 +190,16 @@ impl<S: StorageProvider + Clone> ProviderDisk<S> {
                 journal_config(plan, node_id, journal),
                 self.layout,
             );
-            crate::provision_store(&mut store)
+            let provisioned = crate::provision_store(&mut store)
                 .await
                 .map_err(|e| format!("journal {journal}: {e}"))?;
+            if provisioned == crate::Provisioned::Resumed {
+                // A marker this process can read may be one a failed sync
+                // left staged (#348): the vote that follows names it.
+                crate::journal::settle(&self.provider, &self.journal_dir(journal))
+                    .await
+                    .map_err(|e| format!("journal {journal}: {e}"))?;
+            }
         }
         Ok(())
     }
@@ -226,21 +235,4 @@ async fn write_all<F: StorageFile>(file: &F, bytes: &[u8]) -> io::Result<()> {
     }
     assert_eq!(done, bytes.len(), "a whole write covers the text");
     Ok(())
-}
-
-/// Make every name on the way to `dir`, and the names inside it, durable:
-/// a name `create_dir_all` or a rename made is lost in a crash unless its
-/// directory is synced, and a synced child does not survive the loss of its
-/// parent's own name (`moonpool-journal`'s rule).
-async fn sync_names<S: StorageProvider>(provider: &S, dir: &str) -> io::Result<()> {
-    let mut current = if dir.starts_with('/') { "/" } else { "." }.to_string();
-    for component in dir.split('/').filter(|c| !c.is_empty() && *c != ".") {
-        provider.sync_dir(&current).await?;
-        current = match current.as_str() {
-            "." => component.to_string(),
-            "/" => format!("/{component}"),
-            _ => format!("{current}/{component}"),
-        };
-    }
-    provider.sync_dir(dir).await
 }

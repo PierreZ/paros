@@ -956,8 +956,9 @@ fn journal_dir(journal: paros::JournalIdentifier) -> String {
 /// store's format marker lands only with the sync after the format, and a
 /// process killed in between leaves the operator's ledger saying "begun"
 /// and nothing else. The operator does what an operator would: looks at the
-/// disk — a store that carries the marker was provisioned, one that does
-/// not was not, and its next boot is a first boot again.
+/// disk — made durable as it stands first (#348) — a store that carries
+/// the marker was provisioned, one that does not was not, and its next boot
+/// is a first boot again.
 #[tracing::instrument(level = "debug", skip_all, fields(ip = %ip))]
 async fn resolve_provisioning(ctx: &SimContext, seats: &[Seat], ip: &str) {
     for seat in seats {
@@ -987,9 +988,15 @@ async fn resolve_journal_provisioning(
     if !ambiguous {
         return;
     }
+    // Make the store durable as it stands first (#348): after a failed
+    // format sync in this process, a readable marker is only staged.
+    let dir = journal_dir(journal);
+    if !crate::world::settle::settle_store(ctx.storage(), &dir).await {
+        return;
+    }
     // Read the marker without opening the store: a probe that recovered and
     // repaired the journal would change what the boot it decides then finds.
-    let formatted = JournalStorage::peek_formatted(ctx.storage(), &journal_dir(journal), journal)
+    let formatted = JournalStorage::peek_formatted(ctx.storage(), &dir, journal)
         .await
         .unwrap_or(false);
     let mut guard = world.lock().unwrap_or_else(PoisonError::into_inner);

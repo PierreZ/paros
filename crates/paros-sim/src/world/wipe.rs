@@ -9,7 +9,7 @@ use moonpool_sim::{SimStorageProvider, StorageProvider, assert_always};
 /// How many times a directory sync is retried: moonpool's storage chaos fails
 /// a sync now and then, never for long (a failed disk is masked, #176), so
 /// the bound is a hang guard far above any streak, not a fault budget.
-const SYNC_ATTEMPTS: usize = 1024;
+pub(crate) const SYNC_ATTEMPTS: usize = 1024;
 
 /// Delete every file in `dir` and sync `dir` and its parent, so the
 /// deletions are durable. A directory that does not exist is already empty.

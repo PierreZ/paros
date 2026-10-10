@@ -103,6 +103,10 @@ pub(crate) async fn resolve_registry_provisioning(
     if !ambiguous {
         return;
     }
+    // Durable as it stands first: a readable marker may be staged (#348).
+    if !super::settle::settle_store(provider, REGISTRY_DIR).await {
+        return;
+    }
     let formatted = JournalMatchmakerStorage::peek_formatted(provider, REGISTRY_DIR, id)
         .await
         .unwrap_or(false);
