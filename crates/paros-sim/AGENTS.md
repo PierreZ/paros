@@ -39,6 +39,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `world/late_outage.rs` → `LateOutage`, `LATE_WINDOW` → the departed-straggler scenario's outage (decided on 2026-10-09): on a scenario seed, once a leadership won under a configuration that removed a bootstrap member (`AuditWorld::has_departure`; a lone matchmaker registration does not count, #278), every acceptor and proxy goes down at once, at most `LATE_WINDOW` into the recovery tail, the straggler loss planned at that instant and its one clean holder back last (#267); the owner's after-claim removal, a rotation onto the spares (the scenario bootstraps at the floor), stays armed until then.
 - `world/bare_outage.rs` → `BareOutage` → the bare-quorum scenario's outage (#270): on a scenario seed (`shape::bare_quorum`), every acceptor and proxy goes down the moment the custody ledger holds a decided slot a deciding member never held (`StorageWorld::holds_short_slot`), and every copy of it is lost (`LossShape::BARE_QUORUM`), so the tally reads `faulty, faulty, none`; its gate fired on 3 of 2,094 checks over 1,000 hunt seeds before it and 42 of 2,898 over 1,400 after.
 - `world/wiped_founder.rs` → `WipedFounder` → the wiped-founder scenario (#246, `shape::wiped_founder`): client 0 runs `init` first, and once every founder promised (a founder other than `cell init`'s receiver) or once a founder voted and another did not (that one), the founder is wiped through moonpool's `CrashAndWipe`; the founders that kept their disks then choose the plan with the old id as a dead member, a two-founder decree with no vote redraws over the new machine, and a plan that lost a majority is refused `cell_lost`.
+- `world/silent_machine.rs` → `SilentMachine` → the silent-machine scenario (#211, `shape::silent_machine`): once the cell formed, one admitted machine (or a founder of a cell of three or more) crashes through moonpool's `Crash` and stays down 4.5–6.5 s, past every `machine_down_after`, so the cell coordinator marks it down and then up; it may strike up to `LATE_WINDOW` into the tail, the cell keeping a majority. Gate rate: 1 machine marked down and none back up in 1,000 hunt seeds without it; 51 marked down and 9 back up in 2,000 with it.
 - `world/wipe.rs` → `wipe_dir` → the wipe coin's physical half on a journal seed: the journal's files deleted and the deletion synced.
 - `audit/mod.rs` → `NodeAudit`, `reach_once!` · `audit/world.rs` → `AuditWorld`, `audit_world_for`, `check_run`, `check_final_convergence`.
 - `audit/state.rs` → `AuditState` (per-transition protocol safety) · `audit/matchmaker.rs` → `MatchmakerAudit`.
@@ -47,6 +48,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, the leader chain — every verdict names the leader in force, a write accepted only under a uuid won in the log — monotone `first_seq`; a reinstated uuid is reachable, never a violation, #241).
 - `audit/journals.rs`, `audit/system.rs`, `audit/tenants.rs` → the journal board (#188), the system board (#189) and the tenant board (#210), below.
 - `chain_workload/fleet/journals.rs` → ops 17 and 18 (#210): a tenant's journals through the tenant coordinator (`paros::client::journals`).
+- `audit/liveness.rs` → `JudgedRegistry` → the cell control journal's fold with an observer (#211): the final fleet check reads the cell through it, and every liveness refusal in the log (`LivenessUnchanged`, `StaleIncarnation`) is a coordinator that wrote a non-change; gates for a machine marked down, one back up without re-placement, and a rebooted machine registered again.
 
 ## Harness shape
 
@@ -108,7 +110,7 @@ append) · `REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to t
 capacity, and a registered joiner registering again is a reboot, #211) · `SET_LEADER=22` (CAS on
 the leader uuid; a superseded writer reinstates the uuid it last led with, `reinstate_pct`, the misbehaviour the journal does not refuse, #241) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
-`BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
+`BOOK_CAPACITY=24` (book or release a joiner's slot for a role of a journal or matchmaker set; a role of the other class must be refused, and so must a booking under an id the client released,
 #211) · `FLEET_INIT=25` (`init` whole through `paros::client::initialize` while the cell is unknown or on a coin, else `init`'s fleet half through `paros::client::fleet`, #229, #246) · `TENANT=26`
 (create or remove a tenant through the fleet tenant and the cell; either may stop after one step, a BUGGIFY
 crash, and is resumed by the client's next fleet step) · `ADMIT=27` (`cell add-machine` through
@@ -139,11 +141,12 @@ then admitted; it may stop after the registration and is resumed by the client's
   journals' seed is held down (static stability, #247).
 - **System board** (`audit/system.rs`): every node folds the registry alike per LSN; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves
-  a journal, a booking takes a slot of its node's class and never past its capacity, and a live
-  booking id is never booked again (#211, on the registry's events in LSN order; the model
-  crosses a truncation at the checkpoint a restoring node meets and equals every checkpoint it
-  reaches, #247); no genesis node's message waits on the registry fold; every live node's
-  registry fold reaches the tail after chaos; gates for joiners learning before admission, refused-then-accepted joiner messages, a re-registration,
+  a journal, a booking takes a slot of its node's class and never past its capacity, and a
+  booking id is booked at most once, across checkpoints (#211, on the registry's events in LSN
+  order; the model crosses a truncation at the checkpoint a restoring node meets, resuming its
+  bookings and spent ids, and equals every checkpoint it reaches, #247); no genesis node's message waits on the registry fold; every live node's
+  registry fold reaches the tail after chaos; gates for
+  joiners learning before admission, refused-then-accepted joiner messages, a re-registration,
   and a fold restarting from a checkpoint once one truncated.
 - **Tenant board** (`audit/tenants.rs`, #210): every machine folds a tenant control journal alike
   per LSN; a created journal takes a set id never used before, inside its own tenant (`IdTaken`

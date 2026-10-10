@@ -303,6 +303,14 @@ impl NodeShape {
             ),
             // Floor 1: the coordinator truncates at every renewal.
             election_compact_after: buggify_knob!(16_u64, 1_u64..65_u64),
+            // The cell coordinator's failure detector (#211). Floor: one
+            // renewal period and a round trip past it, so one missed probe
+            // never marks a machine down. The range crosses a machine's
+            // reboot in both directions: a short one marks a rebooting
+            // machine down, then up again.
+            machine_down_after: ms(
+                election_renew_ms + buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)
+            ),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
@@ -556,6 +564,9 @@ struct Registry {
     /// Run-level: whether the run draws the wiped-founder scenario (see
     /// [`wiped_founder`]), fixed by the first caller.
     wiped_founder: Option<bool>,
+    /// Run-level: whether the run draws the silent-machine scenario (see
+    /// [`silent_machine`]), fixed by the first caller.
+    silent_machine: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -817,6 +828,26 @@ pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .wiped_founder
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
+}
+
+/// Whether the run draws the **silent-machine scenario** (#211): drawn once
+/// per seed, its own BUGGIFY location. The cell coordinator marks a machine
+/// down only when it is silent past `machine_down_after`, while a
+/// coordinator's term is served, then up when it answers again. That needs
+/// a machine of a formed cell to die during the run and stay down longer
+/// than a usual reboot, which the machines' attrition almost never lines up
+/// (1 machine marked down, and none back up, in 1,000 hunt seeds without
+/// the scenario). On a scenario seed `crate::world::silent_machine` crashes
+/// one machine of the cell once it formed, and holds it down past every
+/// `machine_down_after` the knob draws. Rare-but-valid: a machine down for
+/// a few seconds is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn silent_machine(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .silent_machine
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 

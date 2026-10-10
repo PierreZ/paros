@@ -104,6 +104,7 @@ type Proposal<'a> = (
 ///
 /// If `ledger` already holds a vote: a formed machine does not wait.
 #[tracing::instrument(level = "debug", skip_all, fields(node = facts.node_id.0, addr = %facts.addr))]
+#[allow(clippy::too_many_lines)] // one select! over the machine contract's calls
 pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     providers: P,
     facts: &MachineFacts,
@@ -117,6 +118,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
         .await
         .map_err(RunError::Infra)?;
     let rpc = edge.handle().clone();
+    let facts = &facts.serving(&rpc);
     let mut identify =
         Inbound::plain(serve_well_known::<P, IdentifyRpc>(&rpc).map_err(RunError::Infra)?);
     let mut prepare =

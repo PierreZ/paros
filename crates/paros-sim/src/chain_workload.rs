@@ -8,7 +8,7 @@
 //! owner, so every journal is written). Every client folds the journal it reads into a
 //! `ChainState` (`fold.rs`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -967,6 +967,11 @@ struct Tail {
     /// How many clients finished their fleet operations in the recovery
     /// tail (#247): the last one judges the control plane's final folds.
     fleet_settled: usize,
+    /// The applied count each journal's tail must move past (#357), taken
+    /// once per journal by its first client to reach the tail. A client that
+    /// took its own later could find the owner's recovery batch already
+    /// applied, and wait on a write nobody makes.
+    snapshots: BTreeMap<JournalIdentifier, u64>,
 }
 
 fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
@@ -3450,7 +3455,14 @@ impl Workload for ChainWorkload {
         }
         // The applied count the tail must move past (the audit tracks the
         // applied *slot*; the count is one past it).
-        let pre_tail_count = audit.cluster_applied_max().map_or(0, |slot| slot + 1);
+        // One snapshot per journal (#357): the first client to get here takes
+        // it, and every sibling on the journal reads it.
+        let pre_tail_count = {
+            let own = audit.cluster_applied_max().map_or(0, |slot| slot + 1);
+            let tail = tail(ctx.state());
+            let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
+            *guard.snapshots.entry(journal).or_insert(own)
+        };
 
         // A small recovery batch proves post-chaos forward progress and gives
         // the state frontier useful depth even when the swarmed operation mask

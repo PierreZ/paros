@@ -300,6 +300,7 @@ where
         addr: advertise.clone(),
         listen,
         names,
+        incarnation: 0,
     };
     tracing::info!(
         node = facts.node_id.0,

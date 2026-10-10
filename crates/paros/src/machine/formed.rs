@@ -114,11 +114,12 @@ impl FormedCell {
     /// An endpoint could not be registered.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.facts.node_id.0, cell = self.plan.cell_id))]
     pub(crate) fn serve<P: Providers>(
-        self,
+        mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
+        self.facts = self.facts.serving(rpc);
         let mut identify = Inbound::plain(serve_well_known::<P, IdentifyRpc>(rpc)?);
         let mut prepare = Inbound::plain(serve_well_known::<P, PrepareCellRpc>(rpc)?);
         let mut form = Inbound::plain(serve_well_known::<P, FormCellRpc>(rpc)?);

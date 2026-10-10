@@ -22,12 +22,21 @@
 //!   retired ([`Registry::pool`]). A node registers with its class
 //!   (`storage` or `stateless`) and its capacity (role slots of its class);
 //!   a reboot registers the same id again, updating address and capacity,
-//!   never class. It is drained, then retired — an id is never reused, a
-//!   retired one included. Capacity **bookings** (`BookCapacity`, written
-//!   by the cell coordinator) are judged at apply: a slot of the node's own
-//!   class only, never past its capacity. The registry is checkpointed with
-//!   `paros::client::checkpoint` (#230): its state is the latest entry per
-//!   `node_id`, the live bookings and the cell's side of the fleet.
+//!   never class, and records the machine's RPC incarnation (with the
+//!   address, its `InterfaceRef` identity). It is drained, then retired — an
+//!   id is never reused, a retired one included. Capacity **bookings**
+//!   (`BookCapacity`, written by the cell coordinator) are keyed by role:
+//!   one slot holds one [`Role`] of one journal or matchmaker set
+//!   ([`BookingTarget`]). They are judged at apply: a slot of the role's
+//!   class on a node of that class only, never past its capacity, one live
+//!   booking per node, target and role, and a booking id is never booked
+//!   twice ([`Registry::spent`], kept across checkpoints). **Liveness** (D6)
+//!   is written by the cell coordinator as changes only: `MachineDown` and
+//!   `MachineUp`, each refused when it changes nothing
+//!   ([`RegistryRefusal::LivenessUnchanged`]). The registry is checkpointed
+//!   with `paros::client::checkpoint` (#230): its state is the latest entry
+//!   per `node_id`, the live bookings, the spent booking ids, the liveness
+//!   and the cell's side of the fleet.
 //!
 //!   The cell's side of the fleet (#229, §3.7): `JoinFleet` records, once,
 //!   the fleet this cell belongs to and its own `cell_id` (`init` step 3),
@@ -39,9 +48,9 @@
 //!   repeat folds to [`RegistryEvent::Unchanged`], so a re-run step is
 //!   harmless.
 //!
-//!   Not yet (follow-ups of #211): a machine registering itself at start
-//!   and on a cadence, the `InterfaceRef` of #216, and placement by booking
-//!   (#212).
+//!   Not yet: placement by booking and re-placement of a machine down past
+//!   its bound (#212), and the durable cached registry fold on every
+//!   machine.
 //!
 //! Every malformed entry — a record that does not decode, a configuration
 //! that does not admit its quorum system — folds to a refusal, never a
@@ -54,6 +63,7 @@ use prost::Message as _;
 
 use crate::client::checkpoint::{Checkpointable, Folded};
 pub use crate::machine::Class;
+use crate::machine::{incarnation_from_halves, incarnation_halves};
 
 use crate::rpc::system as wire;
 
@@ -77,6 +87,9 @@ pub enum SystemCommand {
         capacity: u64,
         /// Its failure domain (opaque; placement reads it).
         failure_domain: String,
+        /// Its RPC incarnation (`0` unknown): with `addr`, its
+        /// `InterfaceRef` identity.
+        incarnation: u128,
     },
     /// Stop placing new work on node `id`.
     DrainNode {
@@ -88,17 +101,33 @@ pub enum SystemCommand {
         /// The node to retire.
         id: NodeId,
     },
-    /// Book one `class` slot of `node` for `journal` (#211): written by the
-    /// cell coordinator, the registry's single writer.
+    /// Book one slot of `node` for `role` of `target` (#211): written by
+    /// the cell coordinator, the registry's single writer.
     BookCapacity {
-        /// The id its writer drew; refused while a live booking holds it.
+        /// The id its writer drew; refused if it was ever booked.
         booking: u64,
         /// The node.
         node: NodeId,
-        /// The slot's class.
-        class: Class,
-        /// The journal the slot is for.
-        journal: JournalIdentifier,
+        /// The role the slot holds; its class is the slot's.
+        role: Role,
+        /// The journal or matchmaker set the slot is for.
+        target: BookingTarget,
+    },
+    /// The cell coordinator saw machine `id`, as `incarnation`, stop
+    /// answering (#211, D6).
+    MachineDown {
+        /// The machine.
+        id: NodeId,
+        /// The incarnation the registry holds for it.
+        incarnation: u128,
+    },
+    /// The cell coordinator saw machine `id` answer as `incarnation`
+    /// (#211, D6).
+    MachineUp {
+        /// The machine.
+        id: NodeId,
+        /// The incarnation that answered.
+        incarnation: u128,
     },
     /// Release a booking.
     ReleaseCapacity {
@@ -147,27 +176,50 @@ impl SystemCommand {
                 class,
                 capacity,
                 failure_domain,
+                incarnation,
             } => Kind::RegisterNode(wire::RegisterNode {
                 id: id.0,
                 addr: addr.clone(),
                 failure_domain: failure_domain.clone(),
                 class: class.as_str().into(),
                 capacity: *capacity,
+                incarnation_high: incarnation_halves(*incarnation).0,
+                incarnation_low: incarnation_halves(*incarnation).1,
             }),
             SystemCommand::DrainNode { id } => Kind::DrainNode(wire::DrainNode { id: id.0 }),
             SystemCommand::RetireNode { id } => Kind::RetireNode(wire::RetireNode { id: id.0 }),
             SystemCommand::BookCapacity {
                 booking,
                 node,
-                class,
-                journal,
-            } => Kind::BookCapacity(wire::BookCapacity {
-                booking: *booking,
-                node: node.0,
-                class: class.as_str().into(),
-                tenant: journal.tenant.0,
-                journal: journal.journal.0,
-            }),
+                role,
+                target,
+            } => {
+                let (tenant, journal, set) = target.to_wire();
+                Kind::BookCapacity(wire::BookCapacity {
+                    booking: *booking,
+                    node: node.0,
+                    tenant,
+                    journal,
+                    role: role.as_str().into(),
+                    set,
+                })
+            }
+            SystemCommand::MachineDown { id, incarnation } => {
+                let (incarnation_high, incarnation_low) = incarnation_halves(*incarnation);
+                Kind::MachineDown(wire::MachineDown {
+                    id: id.0,
+                    incarnation_high,
+                    incarnation_low,
+                })
+            }
+            SystemCommand::MachineUp { id, incarnation } => {
+                let (incarnation_high, incarnation_low) = incarnation_halves(*incarnation);
+                Kind::MachineUp(wire::MachineUp {
+                    id: id.0,
+                    incarnation_high,
+                    incarnation_low,
+                })
+            }
             SystemCommand::ReleaseCapacity { booking } => {
                 Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
             }
@@ -215,6 +267,10 @@ impl SystemCommand {
                 class: register.class.parse()?,
                 capacity: register.capacity,
                 failure_domain: register.failure_domain,
+                incarnation: incarnation_from_halves(
+                    register.incarnation_high,
+                    register.incarnation_low,
+                ),
             },
             Kind::DrainNode(drain) => SystemCommand::DrainNode {
                 id: NodeId(drain.id),
@@ -225,8 +281,16 @@ impl SystemCommand {
             Kind::BookCapacity(book) => SystemCommand::BookCapacity {
                 booking: book.booking,
                 node: NodeId(book.node),
-                class: book.class.parse()?,
-                journal: JournalIdentifier::new(TenantId(book.tenant), JournalId(book.journal)),
+                role: book.role.parse()?,
+                target: BookingTarget::from_wire(book.tenant, book.journal, book.set)?,
+            },
+            Kind::MachineDown(down) => SystemCommand::MachineDown {
+                id: NodeId(down.id),
+                incarnation: incarnation_from_halves(down.incarnation_high, down.incarnation_low),
+            },
+            Kind::MachineUp(up) => SystemCommand::MachineUp {
+                id: NodeId(up.id),
+                incarnation: incarnation_from_halves(up.incarnation_high, up.incarnation_low),
             },
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
@@ -250,6 +314,145 @@ impl SystemCommand {
                 tenant: TenantId(drop.tenant),
             },
         })
+    }
+}
+
+/// A role a capacity booking holds a slot for (§3.2): its class is the
+/// slot's. One slot holds one role instance of one journal or matchmaker
+/// set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Role {
+    /// A journal's acceptor.
+    Acceptor,
+    /// A journal's replica (a learner).
+    Replica,
+    /// A matchmaker of a matchmaker set.
+    Matchmaker,
+    /// A tenant's frontend, its entry role.
+    Frontend,
+    /// A tenant's resolver.
+    Resolver,
+    /// A journal's proxy leader.
+    ProxyLeader,
+    /// A journal's batcher.
+    Batcher,
+    /// A journal's unbatcher.
+    Unbatcher,
+    /// A coordinator.
+    Coordinator,
+}
+
+impl Role {
+    /// Every role, in a fixed order.
+    pub const ALL: [Role; 9] = [
+        Role::Acceptor,
+        Role::Replica,
+        Role::Matchmaker,
+        Role::Frontend,
+        Role::Resolver,
+        Role::ProxyLeader,
+        Role::Batcher,
+        Role::Unbatcher,
+        Role::Coordinator,
+    ];
+
+    /// The role's name on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Acceptor => "acceptor",
+            Role::Replica => "replica",
+            Role::Matchmaker => "matchmaker",
+            Role::Frontend => "frontend",
+            Role::Resolver => "resolver",
+            Role::ProxyLeader => "proxy_leader",
+            Role::Batcher => "batcher",
+            Role::Unbatcher => "unbatcher",
+            Role::Coordinator => "coordinator",
+        }
+    }
+
+    /// The class of the machines that run it (FDB's classes, §3.2): the
+    /// roles with a durable store are `storage`, every other one is
+    /// `stateless`.
+    #[must_use]
+    pub fn class(self) -> Class {
+        match self {
+            Role::Acceptor | Role::Replica | Role::Matchmaker => Class::Storage,
+            Role::Frontend
+            | Role::Resolver
+            | Role::ProxyLeader
+            | Role::Batcher
+            | Role::Unbatcher
+            | Role::Coordinator => Class::Stateless,
+        }
+    }
+
+    /// The roles of `class`, in [`Role::ALL`]'s order.
+    pub fn of(class: Class) -> impl Iterator<Item = Role> {
+        Role::ALL
+            .into_iter()
+            .filter(move |role| role.class() == class)
+    }
+}
+
+impl core::str::FromStr for Role {
+    type Err = &'static str;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Role::ALL
+            .into_iter()
+            .find(|role| role.as_str() == text)
+            .ok_or("a role is one of the placement's roles")
+    }
+}
+
+/// What a capacity booking is for (§3.2): a journal, or a matchmaker set of
+/// a tenant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BookingTarget {
+    /// A journal.
+    Journal(JournalIdentifier),
+    /// A matchmaker set of `tenant`.
+    Set {
+        /// The tenant.
+        tenant: TenantId,
+        /// The set's id within the tenant (never `0`).
+        set: u64,
+    },
+}
+
+impl BookingTarget {
+    /// The target's tenant.
+    #[must_use]
+    pub fn tenant(self) -> TenantId {
+        match self {
+            BookingTarget::Journal(journal) => journal.tenant,
+            BookingTarget::Set { tenant, .. } => tenant,
+        }
+    }
+
+    /// The wire's `(tenant, journal, set)`: `set` is `0` for a journal and
+    /// `journal` is `0` for a set.
+    fn to_wire(self) -> (u64, u64, u64) {
+        match self {
+            BookingTarget::Journal(journal) => (journal.tenant.0, journal.journal.0, 0),
+            BookingTarget::Set { tenant, set } => (tenant.0, 0, set),
+        }
+    }
+
+    fn from_wire(tenant: u64, journal: u64, set: u64) -> Result<Self, &'static str> {
+        match (journal, set) {
+            (_, 0) => Ok(BookingTarget::Journal(JournalIdentifier::new(
+                TenantId(tenant),
+                JournalId(journal),
+            ))),
+            (0, set) => Ok(BookingTarget::Set {
+                tenant: TenantId(tenant),
+                set,
+            }),
+            _ => Err("a booking names a journal or a matchmaker set, not both"),
+        }
     }
 }
 
@@ -299,17 +502,37 @@ pub struct RegisteredNode {
     /// How many registrations it made: 1, plus one per re-registration (a
     /// reboot).
     pub registrations: u64,
+    /// Its RPC incarnation (the latest registration's; `0` unknown).
+    pub incarnation: u128,
 }
 
-/// One capacity booking: a role slot of `node` held for `journal`.
+/// What the cell coordinator last wrote of one machine's liveness (#211,
+/// D6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Liveness {
+    /// The incarnation last seen (`0` unknown).
+    pub incarnation: u128,
+    /// Whether it was answering.
+    pub up: bool,
+}
+
+/// One capacity booking: a slot of `node` held for `role` of `target`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Booking {
     /// The node whose slot it holds.
     pub node: NodeId,
-    /// The class of the slot (always the node's).
-    pub class: Class,
-    /// The journal it was booked for.
-    pub journal: JournalIdentifier,
+    /// The role the slot holds.
+    pub role: Role,
+    /// The journal or matchmaker set it was booked for.
+    pub target: BookingTarget,
+}
+
+impl Booking {
+    /// The class of the slot: the role's, always the node's.
+    #[must_use]
+    pub fn class(&self) -> Class {
+        self.role.class()
+    }
 }
 
 /// What one registry record folded to.
@@ -352,8 +575,23 @@ pub enum RegistryEvent {
         booking: u64,
         /// The node.
         node: NodeId,
-        /// The slot's class.
-        class: Class,
+        /// The slot's role.
+        role: Role,
+    },
+    /// The cell coordinator marked machine `id` down (#211).
+    MachineDown {
+        /// The machine.
+        id: NodeId,
+    },
+    /// The cell coordinator marked machine `id` up as `incarnation`
+    /// (#211): `was_down` when it was marked down before.
+    MachineUp {
+        /// The machine.
+        id: NodeId,
+        /// The incarnation that answered.
+        incarnation: u128,
+        /// Whether the registry held it down.
+        was_down: bool,
     },
     /// A booking was released.
     Released {
@@ -424,7 +662,9 @@ pub enum RegistryRefusal {
         /// The node named.
         id: NodeId,
     },
-    /// A booking under an id a live booking holds: its writer redraws.
+    /// A booking under an id that was ever booked (a live booking holds it,
+    /// or one held it and was released): booking ids are never reused, and
+    /// its writer redraws.
     BookingTaken {
         /// The id asked for.
         booking: u64,
@@ -437,6 +677,30 @@ pub enum RegistryRefusal {
     },
     /// A booking of a node with no slot left.
     NoCapacity {
+        /// The node named.
+        id: NodeId,
+    },
+    /// A booking of a node that already holds a live booking for the same
+    /// role of the same journal or set: one slot per role instance.
+    AlreadyBooked {
+        /// The node named.
+        id: NodeId,
+    },
+    /// A liveness entry that changes nothing: `MachineDown` of a machine
+    /// held down, or `MachineUp` of the incarnation held up (D6: changes
+    /// only).
+    LivenessUnchanged {
+        /// The node named.
+        id: NodeId,
+    },
+    /// A `MachineDown` naming another incarnation than the one the registry
+    /// holds: a later incarnation answered since.
+    StaleIncarnation {
+        /// The node named.
+        id: NodeId,
+    },
+    /// A liveness entry of a node that is not in the pool.
+    NotInPool {
         /// The node named.
         id: NodeId,
     },
@@ -488,6 +752,11 @@ pub struct Registry {
     /// operator's removal has since overtaken — is refused here, where the
     /// cell's single writer judges it.
     dropped: BTreeSet<TenantId>,
+    /// Every booking id ever booked (#211): never booked again, across
+    /// checkpoints.
+    spent: BTreeSet<u64>,
+    /// What the cell coordinator last wrote of each machine's liveness.
+    liveness: BTreeMap<NodeId, Liveness>,
     next_seq: u64,
 }
 
@@ -548,7 +817,8 @@ impl Registry {
                 class,
                 capacity,
                 failure_domain,
-            }) => self.register(id, addr, class, capacity, failure_domain),
+                incarnation,
+            }) => self.register(id, addr, class, (capacity, incarnation), failure_domain),
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
                 Some(node) if node.standing == NodeStanding::Registered => {
                     node.standing = NodeStanding::Draining;
@@ -560,6 +830,7 @@ impl Registry {
                 Some(node) if node.standing == NodeStanding::Draining => {
                     node.standing = NodeStanding::Retired;
                     self.bookings.retain(|_, booking| booking.node != id);
+                    self.liveness.remove(&id);
                     RegistryEvent::Retired { id }
                 }
                 _ => RegistryEvent::Refused(RegistryRefusal::NotDraining { id }),
@@ -567,9 +838,11 @@ impl Registry {
             Some(SystemCommand::BookCapacity {
                 booking,
                 node,
-                class,
-                journal,
-            }) => self.book(booking, node, class, journal),
+                role,
+                target,
+            }) => self.book(booking, node, role, target),
+            Some(SystemCommand::MachineDown { id, incarnation }) => self.down(id, incarnation),
+            Some(SystemCommand::MachineUp { id, incarnation }) => self.up(id, incarnation),
             Some(SystemCommand::ReleaseCapacity { booking }) => {
                 match self.bookings.remove(&booking) {
                     Some(held) => RegistryEvent::Released {
@@ -605,7 +878,7 @@ impl Registry {
         id: NodeId,
         addr: String,
         class: Class,
-        capacity: u64,
+        (capacity, incarnation): (u64, u128),
         failure_domain: String,
     ) -> RegistryEvent {
         if self.genesis.contains(&id) {
@@ -623,6 +896,16 @@ impl Registry {
                 node.capacity = capacity;
                 node.failure_domain = failure_domain;
                 node.registrations += 1;
+                node.incarnation = incarnation;
+                // A registration is a machine that answered: up, as the
+                // incarnation it names.
+                self.liveness.insert(
+                    id,
+                    Liveness {
+                        incarnation,
+                        up: true,
+                    },
+                );
                 RegistryEvent::Reregistered { id, addr, capacity }
             }
             None => {
@@ -635,6 +918,14 @@ impl Registry {
                         capacity,
                         standing: NodeStanding::Registered,
                         registrations: 1,
+                        incarnation,
+                    },
+                );
+                self.liveness.insert(
+                    id,
+                    Liveness {
+                        incarnation,
+                        up: true,
                     },
                 );
                 RegistryEvent::Registered {
@@ -744,12 +1035,17 @@ impl Registry {
         &mut self,
         booking: u64,
         id: NodeId,
-        class: Class,
-        journal: JournalIdentifier,
+        role: Role,
+        target: BookingTarget,
     ) -> RegistryEvent {
-        if self.bookings.contains_key(&booking) {
+        if self.spent.contains(&booking) {
             return RegistryEvent::Refused(RegistryRefusal::BookingTaken { booking });
         }
+        assert!(
+            !self.bookings.contains_key(&booking),
+            "a live booking's id is spent"
+        );
+        let class = role.class();
         let Some(node) = self
             .nodes
             .get(&id)
@@ -763,19 +1059,105 @@ impl Registry {
         if self.booked(id) >= node.capacity {
             return RegistryEvent::Refused(RegistryRefusal::NoCapacity { id });
         }
+        if self
+            .bookings
+            .values()
+            .any(|b| b.node == id && b.role == role && b.target == target)
+        {
+            return RegistryEvent::Refused(RegistryRefusal::AlreadyBooked { id });
+        }
+        self.spent.insert(booking);
         self.bookings.insert(
             booking,
             Booking {
                 node: id,
-                class,
-                journal,
+                role,
+                target,
             },
+        );
+        assert!(
+            self.booked(id) <= self.nodes.get(&id).map_or(0, |n| n.capacity),
+            "a node is never booked past its capacity"
         );
         RegistryEvent::Booked {
             booking,
             node: id,
-            class,
+            role,
         }
+    }
+
+    /// `MachineDown` (#211, D6): a change only. Refused for a machine
+    /// outside the pool, for one held down, and for an incarnation other
+    /// than the one held (a later one answered since).
+    fn down(&mut self, id: NodeId, incarnation: u128) -> RegistryEvent {
+        if !self.contains(id) {
+            return RegistryEvent::Refused(RegistryRefusal::NotInPool { id });
+        }
+        let held = self.liveness(id);
+        if !held.up {
+            return RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id });
+        }
+        if held.incarnation != incarnation {
+            return RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id });
+        }
+        self.liveness.insert(
+            id,
+            Liveness {
+                incarnation,
+                up: false,
+            },
+        );
+        assert!(!self.liveness(id).up, "a machine marked down is held down");
+        RegistryEvent::MachineDown { id }
+    }
+
+    /// `MachineUp` (#211, D6): a change only. Refused for a machine outside
+    /// the pool and for the incarnation held up.
+    fn up(&mut self, id: NodeId, incarnation: u128) -> RegistryEvent {
+        if !self.contains(id) {
+            return RegistryEvent::Refused(RegistryRefusal::NotInPool { id });
+        }
+        let held = self.liveness(id);
+        if held.up && held.incarnation == incarnation {
+            return RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id });
+        }
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.incarnation = incarnation;
+        }
+        self.liveness.insert(
+            id,
+            Liveness {
+                incarnation,
+                up: true,
+            },
+        );
+        RegistryEvent::MachineUp {
+            id,
+            incarnation,
+            was_down: !held.up,
+        }
+    }
+
+    /// What the cell coordinator last wrote of `id`'s liveness: a pool
+    /// member it never wrote of is up, its incarnation the registration's
+    /// (`0` for a genesis node).
+    #[must_use]
+    pub fn liveness(&self, id: NodeId) -> Liveness {
+        self.liveness.get(&id).copied().unwrap_or(Liveness {
+            incarnation: self.nodes.get(&id).map_or(0, |n| n.incarnation),
+            up: true,
+        })
+    }
+
+    /// Whether `id` was seen alive: in the pool, and not marked down.
+    #[must_use]
+    pub fn seen_alive(&self, id: NodeId) -> bool {
+        self.contains(id) && self.liveness(id).up
+    }
+
+    /// Every booking id ever booked, in id order: none is booked again.
+    pub fn spent(&self) -> impl Iterator<Item = u64> + '_ {
+        self.spent.iter().copied()
     }
 
     /// Whether `id` is in the pool: a genesis node, or registered and not
@@ -855,17 +1237,34 @@ impl Registry {
                     capacity: n.capacity,
                     standing: n.standing.to_wire(),
                     registrations: n.registrations,
+                    incarnation_high: incarnation_halves(n.incarnation).0,
+                    incarnation_low: incarnation_halves(n.incarnation).1,
                 })
                 .collect(),
             bookings: self
                 .bookings
                 .iter()
-                .map(|(id, b)| wire::BookingState {
-                    booking: *id,
-                    node: b.node.0,
-                    class: b.class.as_str().into(),
-                    tenant: b.journal.tenant.0,
-                    journal: b.journal.journal.0,
+                .map(|(id, b)| {
+                    let (tenant, journal, set) = b.target.to_wire();
+                    wire::BookingState {
+                        booking: *id,
+                        node: b.node.0,
+                        tenant,
+                        journal,
+                        role: b.role.as_str().into(),
+                        set,
+                    }
+                })
+                .collect(),
+            spent: self.spent.iter().copied().collect(),
+            liveness: self
+                .liveness
+                .iter()
+                .map(|(id, l)| wire::LivenessState {
+                    id: id.0,
+                    incarnation_high: incarnation_halves(l.incarnation).0,
+                    incarnation_low: incarnation_halves(l.incarnation).1,
+                    up: l.up,
                 })
                 .collect(),
             fleet_id: self.fleet.map_or(0, |f| f.fleet_id),
@@ -915,17 +1314,32 @@ impl Checkpointable for Registry {
                     capacity: n.capacity,
                     standing: NodeStanding::from_wire(n.standing)?,
                     registrations: n.registrations,
+                    incarnation: incarnation_from_halves(n.incarnation_high, n.incarnation_low),
                 },
             );
         }
+        let spent: BTreeSet<u64> = state.spent.into_iter().collect();
         let mut bookings = BTreeMap::new();
         for b in state.bookings {
+            if !spent.contains(&b.booking) {
+                return Err("a registry state holds a booking whose id is not spent");
+            }
             bookings.insert(
                 b.booking,
                 Booking {
                     node: NodeId(b.node),
-                    class: b.class.parse()?,
-                    journal: JournalIdentifier::new(TenantId(b.tenant), JournalId(b.journal)),
+                    role: b.role.parse()?,
+                    target: BookingTarget::from_wire(b.tenant, b.journal, b.set)?,
+                },
+            );
+        }
+        let mut liveness = BTreeMap::new();
+        for l in state.liveness {
+            liveness.insert(
+                NodeId(l.id),
+                Liveness {
+                    incarnation: incarnation_from_halves(l.incarnation_high, l.incarnation_low),
+                    up: l.up,
                 },
             );
         }
@@ -961,6 +1375,8 @@ impl Checkpointable for Registry {
         }
         self.nodes = nodes;
         self.bookings = bookings;
+        self.spent = spent;
+        self.liveness = liveness;
         self.fleet = fleet;
         self.hosted = hosted;
         self.dropped = dropped;
@@ -1016,14 +1432,35 @@ mod tests {
                 class: Class::Storage,
                 capacity: 3,
                 failure_domain: "rack-a".into(),
+                incarnation: (7_u128 << 64) | 9,
             },
             SystemCommand::DrainNode { id: NodeId(100) },
             SystemCommand::RetireNode { id: NodeId(100) },
             SystemCommand::BookCapacity {
                 booking: 7,
                 node: NodeId(100),
-                class: Class::Stateless,
-                journal: JournalIdentifier::new(TenantId(300), JournalId(400)),
+                role: Role::Frontend,
+                target: BookingTarget::Journal(JournalIdentifier::new(
+                    TenantId(300),
+                    JournalId(400),
+                )),
+            },
+            SystemCommand::BookCapacity {
+                booking: 8,
+                node: NodeId(100),
+                role: Role::Matchmaker,
+                target: BookingTarget::Set {
+                    tenant: TenantId(300),
+                    set: 2,
+                },
+            },
+            SystemCommand::MachineDown {
+                id: NodeId(100),
+                incarnation: u128::MAX,
+            },
+            SystemCommand::MachineUp {
+                id: NodeId(100),
+                incarnation: 1,
             },
             SystemCommand::ReleaseCapacity { booking: 7 },
             SystemCommand::JoinFleet {
@@ -1099,16 +1536,144 @@ mod tests {
             class,
             capacity,
             failure_domain: String::new(),
+            incarnation: u128::from(id),
         })
     }
 
     fn book(booking: u64, node: u64, class: Class) -> Vec<u8> {
+        let role = Role::of(class).next().expect("every class has a role");
         one(&SystemCommand::BookCapacity {
             booking,
             node: NodeId(node),
-            class,
-            journal: JournalIdentifier::new(TenantId(300), JournalId(booking)),
+            role,
+            target: BookingTarget::Journal(JournalIdentifier::new(
+                TenantId(300),
+                JournalId(booking),
+            )),
         })
+    }
+
+    fn liveness(id: u64, incarnation: u128, up: bool) -> Vec<u8> {
+        let id = NodeId(id);
+        one(&if up {
+            SystemCommand::MachineUp { id, incarnation }
+        } else {
+            SystemCommand::MachineDown { id, incarnation }
+        })
+    }
+
+    #[test]
+    fn every_role_names_its_class_and_parses_back() {
+        for role in Role::ALL {
+            assert_eq!(role.as_str().parse::<Role>(), Ok(role));
+            assert!(Role::of(role.class()).any(|r| r == role));
+        }
+        assert_eq!(Role::of(Class::Storage).count(), 3);
+        assert!("seed".parse::<Role>().is_err());
+        assert!(BookingTarget::from_wire(1, 2, 3).is_err());
+    }
+
+    #[test]
+    fn a_booking_id_is_never_booked_twice_even_after_its_release() {
+        let mut reg = Registry::new([NodeId(0)]);
+        reg.fold(0, &register(100, Class::Storage, 4));
+        assert!(matches!(
+            reg.fold(1, &book(1, 100, Class::Storage)),
+            RegistryEvent::Booked { booking: 1, .. }
+        ));
+        reg.fold(2, &one(&SystemCommand::ReleaseCapacity { booking: 1 }));
+        assert_eq!(
+            reg.fold(3, &book(1, 100, Class::Storage)),
+            RegistryEvent::Refused(RegistryRefusal::BookingTaken { booking: 1 })
+        );
+        assert_eq!(reg.spent().collect::<Vec<_>>(), vec![1]);
+        // One slot per role instance: the same role of the same journal
+        // twice on one node is refused, another role is not.
+        let again = |booking, role| {
+            one(&SystemCommand::BookCapacity {
+                booking,
+                node: NodeId(100),
+                role,
+                target: BookingTarget::Journal(JournalIdentifier::new(TenantId(300), JournalId(9))),
+            })
+        };
+        assert!(matches!(
+            reg.fold(4, &again(2, Role::Acceptor)),
+            RegistryEvent::Booked { .. }
+        ));
+        assert_eq!(
+            reg.fold(5, &again(3, Role::Acceptor)),
+            RegistryEvent::Refused(RegistryRefusal::AlreadyBooked { id: NodeId(100) })
+        );
+        assert!(matches!(
+            reg.fold(6, &again(4, Role::Replica)),
+            RegistryEvent::Booked { .. }
+        ));
+        // The spent ids cross a checkpoint.
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(6, &reg.checkpoint())
+            .expect("a registry's own checkpoint restores");
+        assert_eq!(
+            restored,
+            Registry {
+                next_seq: 7,
+                ..reg.clone()
+            }
+        );
+        assert_eq!(
+            restored.fold(7, &book(1, 100, Class::Storage)),
+            RegistryEvent::Refused(RegistryRefusal::BookingTaken { booking: 1 })
+        );
+    }
+
+    #[test]
+    fn liveness_entries_are_changes_only() {
+        let mut reg = Registry::new([NodeId(0)]);
+        reg.fold(0, &register(100, Class::Storage, 1));
+        // A registration is up, as its incarnation.
+        assert_eq!(
+            reg.fold(1, &liveness(100, 100, true)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(100) })
+        );
+        assert_eq!(
+            reg.fold(2, &liveness(100, 5, false)),
+            RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id: NodeId(100) })
+        );
+        assert_eq!(
+            reg.fold(3, &liveness(100, 100, false)),
+            RegistryEvent::MachineDown { id: NodeId(100) }
+        );
+        assert!(!reg.seen_alive(NodeId(100)));
+        // No `Down` after `Down`.
+        assert_eq!(
+            reg.fold(4, &liveness(100, 100, false)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(100) })
+        );
+        // Back as a new incarnation: a reboot.
+        assert_eq!(
+            reg.fold(5, &liveness(100, 101, true)),
+            RegistryEvent::MachineUp {
+                id: NodeId(100),
+                incarnation: 101,
+                was_down: true
+            }
+        );
+        assert_eq!(reg.get(NodeId(100)).map(|n| n.incarnation), Some(101));
+        // A genesis node is watched too; an unknown node is not.
+        assert_eq!(
+            reg.fold(6, &liveness(0, 9, true)),
+            RegistryEvent::MachineUp {
+                id: NodeId(0),
+                incarnation: 9,
+                was_down: false
+            }
+        );
+        assert_eq!(
+            reg.fold(7, &liveness(7, 9, true)),
+            RegistryEvent::Refused(RegistryRefusal::NotInPool { id: NodeId(7) })
+        );
+        assert!(reg.seen_alive(NodeId(0)) && reg.seen_alive(NodeId(100)));
     }
 
     #[test]

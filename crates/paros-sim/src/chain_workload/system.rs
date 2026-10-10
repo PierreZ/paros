@@ -40,7 +40,8 @@ use paros::client::checkpoint::{
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
-    Class, NodeStanding, Registry, RegistryEvent, SystemCommand, SystemEvent, registry_event,
+    BookingTarget, Class, NodeStanding, Registry, RegistryEvent, Role, SystemCommand, SystemEvent,
+    registry_event,
 };
 use paros::{Command, Entry, JournalIdentifier, LeaderUuid, NodeId, Seq, Value};
 
@@ -94,6 +95,8 @@ pub(super) struct SystemOps {
     leader_seeds: super::LeaderSeeds,
     /// The bookings this client made and has not released.
     booked: Vec<u64>,
+    /// The booking ids this client released: never bookable again (#211).
+    released: Vec<u64>,
     timeout: Duration,
 }
 
@@ -364,6 +367,7 @@ impl SystemOps {
             client_id,
             leader_seeds,
             booked: Vec::new(),
+            released: Vec::new(),
             timeout,
         }
     }
@@ -664,6 +668,9 @@ impl SystemOps {
                     class,
                     capacity: machine.capacity,
                     failure_domain: format!("zone-{}", id.0 % 2),
+                    // A joiner's registration names a fresh incarnation:
+                    // each one is a (re)boot.
+                    incarnation: u128::from(crate::chain::splitmix(draw)) | 1,
                 }
             }
             Some(standing) => {
@@ -823,10 +830,13 @@ impl SystemOps {
     }
 
     /// `BOOK_CAPACITY` (#211): what the cell coordinator writes — book one
-    /// slot of a registered joiner for a journal, under a booking id drawn
-    /// here, or release one of this client's bookings. One location books a
-    /// slot of the other class than the node's, which the registry must
-    /// refuse; the capacity knob's floor makes a full node common.
+    /// slot of a registered joiner for a role of a journal or matchmaker
+    /// set, under a booking id drawn here, or release one of this client's
+    /// bookings. One location books a role of the other class than the
+    /// node's, which the registry must refuse; another books again under an
+    /// id this client released, which the registry must refuse too (ids are
+    /// never reused, across checkpoints); the capacity knob's floor makes a
+    /// full node common.
     pub(super) async fn book(&mut self, ctx: &SimContext, nodes: &ChainClient, draw: u64) {
         if self.joiners.is_empty() {
             return;
@@ -838,7 +848,27 @@ impl SystemOps {
             let command = SystemCommand::ReleaseCapacity { booking };
             if let Appended::At(_) = self.append(ctx, nodes, self.registry, &command, draw).await {
                 assert_reachable!("registry: a client releases a booking");
+                self.released.push(booking);
             }
+            if !buggify_with_prob!(0.5) {
+                return;
+            }
+        }
+        if let Some(booking) = self.released.last().copied()
+            && draw.is_multiple_of(3)
+        {
+            // A booking under an id this client released: the registry
+            // must refuse it, whatever the node (ids are never reused).
+            assert_reachable!("registry: a client books again under an id it released");
+            let (node, _, machine) = self.joiners[0].clone();
+            let role = Role::of(machine.class).next().unwrap_or(Role::Acceptor);
+            let command = SystemCommand::BookCapacity {
+                booking,
+                node,
+                role,
+                target: BookingTarget::Journal(self.main),
+            };
+            self.append(ctx, nodes, self.registry, &command, draw).await;
             return;
         }
         let (node, _, machine) = self.joiners
@@ -853,13 +883,23 @@ impl SystemOps {
         } else {
             machine.class
         };
+        let roles: Vec<Role> = Role::of(class).collect();
+        let role = roles[usize::try_from((draw >> 16) % roles.len() as u64).unwrap_or(0)];
         let journal = self.main;
+        let target = if role == Role::Matchmaker {
+            BookingTarget::Set {
+                tenant: journal.tenant,
+                set: 1 + (draw >> 24) % 2,
+            }
+        } else {
+            BookingTarget::Journal(journal)
+        };
         let booking = crate::chain::splitmix(draw ^ self.client_id.rotate_left(32));
         let command = SystemCommand::BookCapacity {
             booking,
             node,
-            class,
-            journal,
+            role,
+            target,
         };
         let Appended::At(position) = self.append(ctx, nodes, self.registry, &command, draw).await
         else {

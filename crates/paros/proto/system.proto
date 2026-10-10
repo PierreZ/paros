@@ -33,19 +33,28 @@ message SystemEntry {
     JoinFleet join_fleet = 8;
     HostTenant host_tenant = 9;
     DropTenant drop_tenant = 10;
+    MachineDown machine_down = 11;
+    MachineUp machine_up = 12;
   }
 }
 
 // Add node `id`, reachable at `addr`, to the pool, as a machine of `class`
 // (`storage` or `stateless`) advertising `capacity` role slots of it. A
-// registered node registering again (a reboot) updates its address and
-// capacity; its class never changes.
+// registered node registering again (a reboot, a new incarnation) updates its
+// address, capacity and incarnation; its class never changes.
+//
+// `incarnation` is the machine's RPC incarnation (moonpool-rpc's
+// `Incarnation`, new at every process start), split in two halves: with
+// `addr` it is the machine's `InterfaceRef` identity, since a machine serves
+// well-known endpoints only. 0 is unknown.
 message RegisterNode {
   uint64 id = 1;
   string addr = 2;
   string failure_domain = 3;
   string class = 4;
   uint64 capacity = 5;
+  fixed64 incarnation_high = 6;
+  fixed64 incarnation_low = 7;
 }
 
 // Stop placing new work on node `id` (it stays in the pool).
@@ -59,16 +68,40 @@ message RetireNode {
   uint64 id = 1;
 }
 
-// Book one `class` role slot of node `node` for the journal
-// `(tenant, journal)`, under the booking id `booking` its writer drew. Refused
-// at apply when the id names a live booking, the node is not registered (or is
-// draining), is of another class, or has no slot left.
+// Book one role slot of node `node` for role `role` of the journal
+// `(tenant, journal)`, or of the matchmaker set `(tenant, set)` when `set` is
+// set (then `journal` is 0), under the booking id `booking` its writer drew.
+// The role names the slot's class. Refused at apply when the id was ever
+// booked (ids are never reused, across checkpoints too), the node is not
+// registered (or is draining), is of another class than the role's, has no
+// slot left, or already holds a live booking for the same role of the same
+// journal or set.
 message BookCapacity {
   uint64 booking = 1;
   uint64 node = 2;
-  string class = 3;
+  // 3 was `class`: the role names it.
+  reserved 3;
   uint64 tenant = 4;
   uint64 journal = 5;
+  string role = 6;
+  uint64 set = 7;
+}
+
+// The cell coordinator saw machine `id` stop answering (#211, D6): written
+// only on a change, never twice for one incarnation. `incarnation` is the
+// one the registry holds for the machine (two halves, as in `RegisterNode`).
+message MachineDown {
+  uint64 id = 1;
+  fixed64 incarnation_high = 2;
+  fixed64 incarnation_low = 3;
+}
+
+// The cell coordinator saw machine `id` answer again, as incarnation
+// `incarnation` (#211, D6): written only on a change.
+message MachineUp {
+  uint64 id = 1;
+  fixed64 incarnation_high = 2;
+  fixed64 incarnation_low = 3;
 }
 
 // Release booking `booking`: its slot is free again.
@@ -121,8 +154,14 @@ message RegistryState {
   reserved 6;
   // The tenants the cell dropped, in id order: never hosted again.
   repeated uint64 dropped = 7;
+  // Every booking id ever booked, in id order: a booking id is never booked
+  // twice, across checkpoints (#211).
+  repeated uint64 spent = 8;
+  // What the cell coordinator last wrote of each machine's liveness, by id
+  // (#211, D6): a genesis node or a registered one.
+  repeated LivenessState liveness = 9;
   // The tenants the cell hosts, in id order (#210).
-  repeated HostedTenantState hosted = 8;
+  repeated HostedTenantState hosted = 10;
 }
 
 message HostedTenantState {
@@ -130,6 +169,13 @@ message HostedTenantState {
   uint64 control_journal = 2;
   bytes name = 3;
   uint32 survives = 4;
+}
+
+message LivenessState {
+  uint64 id = 1;
+  fixed64 incarnation_high = 2;
+  fixed64 incarnation_low = 3;
+  bool up = 4;
 }
 
 message RegisteredNodeState {
@@ -141,12 +187,17 @@ message RegisteredNodeState {
   // 0 registered, 1 draining, 2 retired.
   uint32 standing = 6;
   uint64 registrations = 7;
+  fixed64 incarnation_high = 8;
+  fixed64 incarnation_low = 9;
 }
 
 message BookingState {
   uint64 booking = 1;
   uint64 node = 2;
-  string class = 3;
+  // 3 was `class`: the role names it.
+  reserved 3;
   uint64 tenant = 4;
   uint64 journal = 5;
+  string role = 6;
+  uint64 set = 7;
 }

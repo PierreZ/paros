@@ -68,6 +68,7 @@ use paros::machine::ControlJournals;
 use paros::system::Registry;
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 
+use crate::audit::liveness::JudgedRegistry;
 use crate::client::{ChainClient, Connector};
 use crate::shape::MachineLayout;
 
@@ -996,7 +997,7 @@ impl FleetOps {
             attempt += 1;
             let directory =
                 paros::client::fleet::read_directory(&known.client, first, known.fleet).await;
-            let mut cell = Folder::new(Registry::new(known.members.iter().copied().map(NodeId)));
+            let mut cell = judged_cell(&known.members);
             let loaded = paros::client::checkpoint::load(
                 &mut cell,
                 known.journals.cell,
@@ -1039,7 +1040,7 @@ impl FleetOps {
         let Some((directory, cell)) = folds else {
             return;
         };
-        let cell = cell.state();
+        let cell = cell.state().registry();
         let cell_id = known.journals.cell_id;
         admit::admitted_registered(ctx, cell, cell_id);
         assert_reachable!("fleet: the final folds of the directory and the cell are compared");
@@ -1114,6 +1115,13 @@ impl FleetOps {
             { "tail" => tail, "lagging" => format!("{lagging:?}") }
         );
     }
+}
+
+/// A reader's fold of the cell control journal over the founding
+/// `members`, the cell coordinator's liveness entries judged as they fold
+/// (#211).
+fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
+    Folder::new(JudgedRegistry::new(members.iter().copied().map(NodeId)))
 }
 
 /// The fleet directory against the cell's tenant list (FDB's

@@ -15,10 +15,11 @@
 //!   checkpoint yields what folding the full history does);
 //! - **classes and capacity** (#211) — a `stateless` machine never starts a
 //!   journal, a booking takes a slot of its node's own class, and a node is
-//!   never booked past its capacity, and a live booking id is never booked
-//!   again (judged on the registry's events in position order; a
-//!   truncation is crossed at the checkpoint a restoring node meets, which
-//!   the model equals wherever it reaches one whole, #247).
+//!   never booked past its capacity, and a booking id is never booked
+//!   twice, a released one and one across a checkpoint included (judged on
+//!   the registry's events in position order; a truncation is crossed at
+//!   the checkpoint a restoring node meets, which the model equals —
+//!   bookings and spent ids — wherever it reaches one whole, #247).
 //!
 //! The gates are outcomes the run must be proven to reach: a joiner that
 //! learned the registry before any node had it in its pool, and a joiner's
@@ -76,6 +77,8 @@ pub(crate) struct SystemBoard {
     registry_next: Option<u64>,
     /// The live bookings the model knows, to their node.
     bookings: BTreeMap<u64, u64>,
+    /// Every booking id the model saw booked (#211): never booked again.
+    spent: BTreeSet<u64>,
     /// An owner truncated the registry to a checkpoint (#230).
     truncated: bool,
     /// The booking model crossed a truncation at a restored checkpoint.
@@ -84,10 +87,12 @@ pub(crate) struct SystemBoard {
     /// reported (its latest incarnation's, as folds report in order), for
     /// the recovery tail's liveness claim (#247).
     registry_at: BTreeMap<u64, u64>,
-    /// The bookings of each checkpoint a whole fold verified at or past
-    /// the model's next position, to compare the model with when it gets
-    /// there.
-    checkpoints: BTreeMap<u64, BTreeMap<u64, u64>>,
+    /// The bookings and spent ids of each checkpoint a whole fold verified
+    /// at or past the model's next position, to compare the model with
+    /// when it gets there.
+    checkpoints: BTreeMap<u64, (BTreeMap<u64, u64>, BTreeSet<u64>)>,
+    /// A checkpoint held a live booking (#211).
+    booking_crossed: bool,
     /// A fold — a node's or a client's — restarted from a checkpoint.
     restarted: bool,
 }
@@ -185,25 +190,35 @@ impl SystemBoard {
         self.registry_next = Some(lsn + 1);
         let reached = self.checkpoints.remove(&lsn);
         self.checkpoints.retain(|seq, _| *seq > lsn);
-        if let (RegistryEvent::Checkpoint { .. }, Some(held)) = (event, reached) {
+        if let (RegistryEvent::Checkpoint { .. }, Some((held, spent))) = (event, reached) {
             // The model folded every position below the checkpoint: it holds
-            // exactly the checkpoint's bookings.
+            // exactly the checkpoint's bookings and spent ids.
             assert_always!(
                 held == self.bookings,
                 "registry: the booking model equals every checkpoint it reaches",
                 { "lsn" => lsn, "model" => self.bookings.len(), "checkpoint" => held.len() }
+            );
+            assert_always!(
+                spent == self.spent,
+                "registry: the spent booking ids equal every checkpoint the model reaches",
+                { "lsn" => lsn, "model" => self.spent.len(), "checkpoint" => spent.len() }
             );
         }
         match event {
             RegistryEvent::Booked {
                 booking,
                 node,
-                class,
+                role,
             } => {
                 let machine = self.machines.get(&node.0).copied();
                 assert_always!(
-                    machine.is_none_or(|(drawn, _)| drawn == *class),
+                    machine.is_none_or(|(drawn, _)| drawn == role.class()),
                     "registry: a booking takes a slot of the node's own class",
+                    { "node" => node.0, "lsn" => lsn }
+                );
+                assert_always!(
+                    self.spent.insert(*booking),
+                    "registry: a booking id is booked at most once across checkpoints",
                     { "node" => node.0, "lsn" => lsn }
                 );
                 let held = self.bookings.values().filter(|n| **n == node.0).count() as u64;
@@ -237,6 +252,14 @@ impl SystemBoard {
             RegistryEvent::Refused(RegistryRefusal::ClassChanged { .. }) => {
                 assert_reachable!("registry: a re-registration under another class is refused");
             }
+            RegistryEvent::Refused(RegistryRefusal::BookingTaken { booking })
+                if !self.bookings.contains_key(booking) =>
+            {
+                assert_reachable!("registry: a released booking id is refused at apply");
+            }
+            RegistryEvent::Refused(RegistryRefusal::AlreadyBooked { .. }) => {
+                assert_reachable!("registry: a second booking of one role instance is refused");
+            }
             _ => {}
         }
     }
@@ -264,12 +287,17 @@ impl SystemBoard {
         }
         self.registry_at.insert(node.0, seq + 1);
         let held: BTreeMap<u64, u64> = state.bookings().map(|(id, b)| (id, b.node.0)).collect();
+        let spent: BTreeSet<u64> = state.spent().collect();
+        if !held.is_empty() && !self.booking_crossed {
+            assert_reachable!("registry: a live booking crosses a checkpoint");
+            self.booking_crossed = true;
+        }
         match self.registry_next {
             Some(next) if next == seq || (next < seq && verified.is_some()) => {
                 // The model reaches this checkpoint through the positions
                 // below it (a whole fold folded them), and is compared there
                 // (`model_registry`).
-                self.checkpoints.entry(seq).or_insert(held);
+                self.checkpoints.entry(seq).or_insert((held, spent));
             }
             Some(next) if next < seq => {
                 // A truncation took `next..seq` before any node folded them:
@@ -279,6 +307,7 @@ impl SystemBoard {
                 }
                 self.resumed_at_checkpoint = true;
                 self.bookings = held;
+                self.spent = spent;
                 self.checkpoints.retain(|at, _| *at > seq);
                 self.registry_next = Some(seq + 1);
             }

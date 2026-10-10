@@ -84,6 +84,7 @@ impl DriverTunables {
     /// | `proxy_take_back_resends`, `proxy_round_resends` | 20, 40 beats | two and four seconds |
     /// | `election_lease`, `election_renew` | 3 s, 1 s | a cell coordinator renews three times per lease (#240) |
     /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
+    /// | `machine_down_after` | 10 s | a machine silent for ten renewal periods is down; a reboot is shorter (#211) |
     ///
     /// # Panics
     ///
@@ -113,6 +114,7 @@ impl DriverTunables {
             election_lease: Duration::from_secs(3),
             election_renew: Duration::from_secs(1),
             election_compact_after: 64,
+            machine_down_after: Duration::from_secs(10),
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -148,7 +150,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 30] = [
+        let fields: [(&'static str, u64, u64); 31] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -209,6 +211,12 @@ impl DriverTunables {
                 ms(self.election_renew).saturating_add(1),
             ),
             ("election_compact_after", self.election_compact_after, 1),
+            // One missed probe never marks a machine down (#211).
+            (
+                "machine_down_after",
+                ms(self.machine_down_after),
+                ms(self.election_renew).saturating_add(1),
+            ),
             ("recovery_page", count(self.recovery_page), 1),
         ];
         assert!(
