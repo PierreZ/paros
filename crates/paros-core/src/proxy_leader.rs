@@ -499,7 +499,7 @@ impl ProxyLeader {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
     pub fn resend_pending(&mut self) {
         let ballot = self.ballot;
-        for accept in self.rounds.resend_page() {
+        for accept in self.rounds.resend_page(crate::proposer::RESEND_BATCH) {
             let leader = *self
                 .delegators
                 .get(&accept.slot)

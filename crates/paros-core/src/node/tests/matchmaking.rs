@@ -970,13 +970,14 @@ fn a_paged_answer_counts_only_once_its_last_page_lands() {
         n.on_match_reply(registered_page(0, b, Ballot::zero(), BTreeMap::new(), None)),
         MatchStep::Ignored
     );
-    // A page carrying a continuation without filling the page is malformed.
+    // A page carrying a continuation but no registration is malformed: a
+    // matchmaker's page size is at least one (#338).
     assert_eq!(
         n.on_match_reply(registered_page(
             0,
             b,
             cursor,
-            BTreeMap::from([belief(ballot(200, 1), &[1, 2, 3])]),
+            BTreeMap::new(),
             Some(ballot(300, 1))
         )),
         MatchStep::Ignored

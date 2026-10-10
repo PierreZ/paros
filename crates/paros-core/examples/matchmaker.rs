@@ -324,7 +324,10 @@ impl AcceptorNode {
         from_slot: Slot,
     ) -> Result<BTreeMap<Slot, (Ballot, Command)>, Ballot> {
         match self.role.prepare(ballot, from_slot, &mut self.disk) {
-            PrepareOutcome::Promised { .. } => Ok(self.role.promise_page(from_slot).accepted),
+            PrepareOutcome::Promised { .. } => Ok(self
+                .role
+                .promise_page(from_slot, paros_core::PROMISE_BATCH)
+                .accepted),
             PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Err(self.role.promised()),
         }
     }

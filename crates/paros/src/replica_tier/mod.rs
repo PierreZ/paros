@@ -66,6 +66,20 @@ use crate::rpc::{
 };
 use crate::storage::LogStorage;
 
+/// Hand a booted replica the driver's tunables: it keeps a quorum read as
+/// long as the driver waits (#386), and walks the driver's apply page,
+/// capped at the core's ceiling (#338; an operator's override is external
+/// input, never a panic).
+fn tune(replica: &mut ReplicaNode, tunables: &DriverTunables) {
+    replica.set_read_window(tunables.read_retry_ticks);
+    let apply_page = tunables.apply_page.clamp(1, paros_core::APPLY_BATCH);
+    replica.set_apply_page(apply_page);
+    assert!(
+        replica.replica().apply_page() == apply_page,
+        "a booted replica runs the driver's apply page"
+    );
+}
+
 /// Report a (re)boot: the chosen index this replica rebuilt from its log
 /// and its floor. Nothing is replayed — a replica runs no application
 /// (#186); its chosen prefix is its whole state.
@@ -284,8 +298,7 @@ where
     )?;
 
     let mut replica = ReplicaNode::new(&storage);
-    // The replica keeps a quorum read as long as the driver waits (#386).
-    replica.set_read_window(tunables.read_retry_ticks);
+    tune(&mut replica, &tunables);
     report_boot(&replica, self_id, audit);
 
     let out = acceptor_lanes(

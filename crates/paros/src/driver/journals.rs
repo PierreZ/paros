@@ -224,6 +224,26 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         node.recovery_page() == page,
         "a booted journal runs the driver's recovery page"
     );
+    // The promise, re-send and apply page sizes (#338), each capped at the
+    // core's ceiling in the same way.
+    let promise_page = tunables.promise_page.clamp(1, paros_core::PROMISE_BATCH);
+    node.set_promise_page(promise_page);
+    let resend_page = tunables.resend_page.clamp(1, paros_core::RESEND_BATCH);
+    node.set_resend_page(resend_page);
+    let apply_page = tunables.apply_page.clamp(1, paros_core::APPLY_BATCH);
+    node.set_apply_page(apply_page);
+    assert!(
+        node.promise_page() == promise_page,
+        "a booted journal runs the driver's promise page"
+    );
+    assert!(
+        node.resend_page() == resend_page,
+        "a booted journal runs the driver's re-send page"
+    );
+    assert!(
+        node.apply_page() == apply_page,
+        "a booted journal runs the driver's apply page"
+    );
     // The core keeps a quorum read as long as the driver waits on it
     // (#386): a fast tick must not make the core drop a read first.
     node.set_read_window(tunables.read_retry_ticks);

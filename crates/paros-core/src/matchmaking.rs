@@ -367,11 +367,13 @@ impl Matchmaking {
         // Only the lower bound, exactly as `promise_page_shape_valid` checks
         // its page: an entry above the request's ballot would merely add a
         // configuration to `H_b`, which Phase 1 covering more than it must
-        // is always safe.
+        // is always safe. A page with a cursor carries at least one
+        // registration: the sender's page size is its own tunable under
+        // `REGISTRY_PAGE` (#338), so a full page is not a size to check.
         page.history.len() <= REGISTRY_PAGE
             && page.history.keys().all(|b| *b >= page.from_ballot)
             && page.next_from_ballot.is_none_or(|next| {
-                page.history.len() == REGISTRY_PAGE
+                !page.history.is_empty()
                     && next > page.from_ballot
                     && page
                         .history

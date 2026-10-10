@@ -565,7 +565,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     }
 
     /// The next fair page of rounds whose `Accept`s are to be re-sent: at
-    /// most [`RESEND_BATCH`] rounds from the cursor up, wrapping
+    /// most `limit` rounds (`1..=RESEND_BATCH`, #338) from the cursor up, wrapping
     /// around from the lowest round held, and the cursor advances past the
     /// page. Each entry carries the column the round was opened against, so
     /// the re-send addresses exactly the column the first send did, and the
@@ -576,9 +576,15 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     ///
     /// # Panics
     ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
+    /// If `limit` is zero or above [`RESEND_BATCH`], or an assertion on its
+    /// own invariants, preconditions or postconditions fails: a programmer
+    /// error, never an operating condition.
+    pub fn resend_page(&mut self, limit: usize) -> Vec<PendingAccept<V>> {
+        assert!(limit > 0, "a re-send page carries at least one round");
+        assert!(
+            limit <= RESEND_BATCH,
+            "a re-send page never exceeds its ceiling"
+        );
         // No round survives below the compaction floor (the cross-role
         // invariant `ColocatedNode::assert_invariants` pins), so a fresh cursor
         // starts at the bottom of the map and needs no floor handed in.
@@ -590,14 +596,10 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             column: r.column,
             proxy: r.proxy(),
         };
-        let mut pending: Vec<PendingAccept<V>> = self
-            .by_slot
-            .range(start..)
-            .take(RESEND_BATCH)
-            .map(page)
-            .collect();
-        if pending.len() < RESEND_BATCH {
-            let remaining = RESEND_BATCH - pending.len();
+        let mut pending: Vec<PendingAccept<V>> =
+            self.by_slot.range(start..).take(limit).map(page).collect();
+        if pending.len() < limit {
+            let remaining = limit - pending.len();
             let wrapped = pending.len();
             pending.extend(self.by_slot.range(..start).take(remaining).map(page));
             probe!(
@@ -616,9 +618,9 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             .and_then(|p| p.slot.0.checked_add(1).map(Slot));
         // Postconditions: bounded, every entry an open round, no slot twice
         // (the two ranges the page draws from are disjoint).
-        assert!(pending.len() <= RESEND_BATCH, "a re-send page is bounded");
+        assert!(pending.len() <= limit, "a re-send page is bounded");
         assert!(
-            pending.len() == RESEND_BATCH.min(self.by_slot.len()),
+            pending.len() == limit.min(self.by_slot.len()),
             "a re-send page is as full as the open rounds allow"
         );
         assert!(
@@ -886,15 +888,16 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Proposer<Id, V> {
     }
 
     /// The next fair page of rounds whose `Accept`s are to be re-sent
-    /// ([`Rounds::resend_page`]).
+    /// ([`Rounds::resend_page`]), at most `limit` rounds.
     ///
     /// # Panics
     ///
-    /// If an assertion on its own invariants, preconditions or postconditions
-    /// fails: a programmer error, never an operating condition.
-    pub fn resend_page(&mut self) -> Vec<PendingAccept<V>> {
-        let page = self.rounds.resend_page();
-        assert!(page.len() <= RESEND_BATCH, "a re-send page is bounded");
+    /// If `limit` is zero or above [`RESEND_BATCH`], or an assertion on its
+    /// own invariants, preconditions or postconditions fails: a programmer
+    /// error, never an operating condition.
+    pub fn resend_page(&mut self, limit: usize) -> Vec<PendingAccept<V>> {
+        let page = self.rounds.resend_page(limit);
+        assert!(page.len() <= limit, "a re-send page is bounded");
         assert!(
             page.iter()
                 .all(|p| self.rounds.is_open_at(p.slot, p.ballot)),
@@ -1016,7 +1019,7 @@ mod tests {
         for slot in 0..3 {
             rounds.open(Slot(slot), ballot(1, 0), cmd(slot), None, None);
         }
-        let first = rounds.resend_page();
+        let first = rounds.resend_page(RESEND_BATCH);
         assert_eq!(
             first.iter().map(|p| p.slot).collect::<Vec<_>>(),
             vec![Slot(0), Slot(1), Slot(2)]
@@ -1026,7 +1029,7 @@ mod tests {
         assert_eq!(rounds.by_slot().len(), 2);
         rounds.clear();
         assert!(rounds.is_empty());
-        assert!(rounds.resend_page().is_empty());
+        assert!(rounds.resend_page(RESEND_BATCH).is_empty());
     }
 
     /// A delegated round is remembered, never counted and never decided
@@ -1056,7 +1059,7 @@ mod tests {
         assert!(rounds.is_open_at(Slot(3), ballot(1, 0)));
         assert!(rounds.stalled_delegations(1).is_empty());
         assert!(rounds.stalled(1).is_empty());
-        let page = rounds.resend_page();
+        let page = rounds.resend_page(RESEND_BATCH);
         assert_eq!(page[0].proxy, Some(ProxyId(1)));
         assert_eq!(rounds.by_slot()[&Slot(3)].resends(), 1);
         assert_eq!(rounds.stalled_delegations(1), vec![Slot(3)]);
@@ -1087,6 +1090,6 @@ mod tests {
             Some((ballot(1, 0), cmd(3))),
             "the opener's own vote plus one is the majority"
         );
-        assert_eq!(rounds.resend_page()[0].proxy, None);
+        assert_eq!(rounds.resend_page(RESEND_BATCH)[0].proxy, None);
     }
 }
