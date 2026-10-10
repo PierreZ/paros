@@ -24,7 +24,9 @@
 //! #225): it answers the journal requests sent to the interface it
 //! published, writing each tenant's control journal under its term uuid
 //! ([`super::tenants`]). A machine that serves no term answers
-//! `not_coordinator`.
+//! `not_coordinator`. A tenant control journal that refuses the term uuid
+//! ends the term as a refused cell control journal does: the desk stops and
+//! the coordinator resigns, so no write under that uuid follows.
 //!
 //! Until admin calls become requests to the coordinator (#212, #225), an
 //! admin session still claims the cell control journal and fences the
@@ -270,6 +272,7 @@ fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 
 /// The candidate's loop: step the election, serve every term it wins,
 /// answer the journal requests between steps, and stop with `shutdown`.
+#[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = candidacy.me.0, cell = candidacy.plan.cell_id))]
 async fn campaign<P: Providers>(
     providers: P,
@@ -366,6 +369,9 @@ async fn campaign<P: Providers>(
                     .time()
                     .sleep(tunables.lease + tunables.lease / 2)
                     .await;
+                // Step the election before the desk answers again: the term
+                // may be over.
+                continue;
             }
             Step::Deposed { .. } => {
                 served = None;
@@ -380,6 +386,12 @@ async fn campaign<P: Providers>(
         // Answer the journal requests until the next step is due.
         let wake = providers.time().sleep(pace);
         answer_requests(wake, &mut requests, &mut desk, &client, &shutdown).await;
+        if desk.as_ref().is_some_and(|(_, desk)| desk.superseded()) {
+            // A tenant control journal refused the term's uuid: end the
+            // term, as a refused cell control journal does.
+            desk = None;
+            election.resign(None).await;
+        }
     }
 }
 
@@ -401,7 +413,14 @@ async fn answer_requests<P: Providers, F: std::future::Future>(
             Some((request, reply)) = requests.recv() => {
                 let answer = match (JournalRequest::from_wire(&request), desk.as_mut()) {
                     (Err(_), _) => JournalAnswer::Malformed,
-                    (Ok(request), Some((_, desk))) => desk.answer(client, &request).await,
+                    (Ok(request), Some((_, desk))) => {
+                        let answer = desk.answer(client, &request).await;
+                        reply.send(answer.to_wire());
+                        if desk.superseded() {
+                            return;
+                        }
+                        continue;
+                    }
                     (Ok(_), None) => {
                         moonpool_assertions::reachable!(
                             "coordinator: a request to a machine serving no term is refused"

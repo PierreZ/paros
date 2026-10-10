@@ -77,6 +77,10 @@ pub(crate) struct TenantDesk {
     /// redraw's way in.
     reuse: bool,
     policy: CheckpointPolicy,
+    /// A tenant control journal refused the term's uuid: a later term
+    /// fenced it. The term is over for the desk, which claims nothing again
+    /// under that uuid (#240's actor rule: stop at the first refusal).
+    superseded: bool,
 }
 
 impl TenantDesk {
@@ -103,7 +107,14 @@ impl TenantDesk {
             draws: 0,
             reuse,
             policy,
+            superseded: false,
         }
+    }
+
+    /// A tenant control journal refused the term's uuid: the coordinator
+    /// must end its term, never claim again under that uuid.
+    pub(crate) fn superseded(&self) -> bool {
+        self.superseded
     }
 
     /// Answer `request`, through `client`.
@@ -113,10 +124,17 @@ impl TenantDesk {
         client: &Client<P>,
         request: &JournalRequest,
     ) -> JournalAnswer {
+        if self.superseded {
+            return JournalAnswer::NotCoordinator;
+        }
         let answer = self.decide(client, request).await;
         if matches!(answer, JournalAnswer::NotCoordinator) {
-            // Superseded on this tenant: a later term's claim fenced it.
-            self.tenants.remove(&request.tenant);
+            // A later term's claim fenced a tenant control journal. A fresh
+            // claim under the same uuid would take back what the journal
+            // refused: the desk stops, and its term ends.
+            moonpool_assertions::reachable!("tenant coordinator: a desk superseded");
+            self.superseded = true;
+            self.tenants.clear();
         }
         answer
     }
@@ -273,6 +291,10 @@ impl TenantDesk {
         if self.tenants.contains_key(&tenant) {
             return Ok(());
         }
+        assert!(
+            !self.superseded,
+            "a refused term uuid is never claimed again"
+        );
         let journal = JournalIdentifier::new(tenant, control);
         let mut desk = Checkpointer::with_uuid(
             journal,
