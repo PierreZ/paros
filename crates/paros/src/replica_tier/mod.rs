@@ -284,6 +284,8 @@ where
     )?;
 
     let mut replica = ReplicaNode::new(&storage);
+    // The replica keeps a quorum read as long as the driver waits (#386).
+    replica.set_read_window(tunables.read_retry_ticks);
     report_boot(&replica, self_id, audit);
 
     let out = acceptor_lanes(

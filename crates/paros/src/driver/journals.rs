@@ -224,6 +224,13 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         node.recovery_page() == page,
         "a booted journal runs the driver's recovery page"
     );
+    // The core keeps a quorum read as long as the driver waits on it
+    // (#386): a fast tick must not make the core drop a read first.
+    node.set_read_window(tunables.read_retry_ticks);
+    assert!(
+        node.read_window() >= tunables.read_retry_ticks,
+        "a booted journal keeps its reads as long as its driver waits"
+    );
     let last = Deltas::new(&node);
     Ok(JournalRt {
         node,

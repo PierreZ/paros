@@ -292,11 +292,12 @@ impl ColocatedNode {
         );
     }
 
-    /// Per-tick upkeep: drop the reads that outlived [`READ_TTL_TICKS`],
-    /// then serve what the prefix may have covered since.
+    /// Per-tick upkeep: drop the reads that outlived the node's read window
+    /// (at least [`READ_TTL_TICKS`], #386), then serve what the prefix may
+    /// have covered since.
     pub(super) fn tick_quorum_reads(&mut self) {
         let now = self.tick_count;
-        self.quorum_reads.expire(now, READ_TTL_TICKS);
+        self.quorum_reads.expire(now, self.read_window());
         self.serve_quorum_reads();
     }
 }

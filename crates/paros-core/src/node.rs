@@ -291,6 +291,11 @@ pub struct ColocatedNode {
     /// sets it once at boot ([`ColocatedNode::set_recovery_page`]); a small
     /// page makes a leader's recovery span several pages.
     recovery_page: usize,
+    /// How many ticks an open quorum read may wait before the node drops
+    /// it (#386): at least `READ_TTL_TICKS` (20 ticks), and at least the driver's
+    /// own read window ([`ColocatedNode::set_read_window`]), so the core
+    /// never drops a read its driver still waits on.
+    read_window: u64,
 
     /// Logical clock, advanced by [`ColocatedNode::tick`].
     tick_count: u64,
@@ -1350,6 +1355,40 @@ impl ColocatedNode {
             self.recovery_page == page,
             "the driver's page size is in force"
         );
+    }
+
+    /// The driver hands the core its own read window (#386): the ticks it
+    /// waits on a read before it answers the client unserved. The core
+    /// then keeps an open quorum read at least that long, never less than
+    /// `READ_TTL_TICKS` (20 ticks). Both windows count this node's ticks, so a fast
+    /// tick and a slow link cannot make the core drop a read first. A
+    /// per-node window, never on the wire.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, ticks)))]
+    pub fn set_read_window(&mut self, ticks: u64) {
+        self.read_window = ticks.max(READ_TTL_TICKS);
+        assert!(
+            self.read_window >= ticks,
+            "the core keeps a read as long as its driver waits"
+        );
+        assert!(
+            self.read_window >= READ_TTL_TICKS,
+            "a read window is never shorter than its floor"
+        );
+    }
+
+    /// The ticks an open quorum read may wait before the node drops it
+    /// ([`ColocatedNode::set_read_window`]).
+    ///
+    /// # Panics
+    ///
+    /// If the window fell below its floor: a programmer error.
+    #[must_use]
+    pub fn read_window(&self) -> u64 {
+        assert!(
+            self.read_window >= READ_TTL_TICKS,
+            "a read window keeps its floor"
+        );
+        self.read_window
     }
 
     /// The election timeout in force (in ticks; zero until the driver set
