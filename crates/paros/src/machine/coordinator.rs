@@ -347,7 +347,11 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
 
 /// The library client of the cell's members, each dialed by its advertised
 /// address, resolved at each call (#257).
-fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, formed: &FormedCell) -> Client<P> {
+pub(crate) fn cell_client<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    formed: &FormedCell,
+) -> Client<P> {
     // This member at the address it advertises now (#349), the others where
     // its cached registry fold dials them, else at the plan's (#211).
     let book = super::with_own(&formed.founders(), formed.facts.node_id, &formed.facts.addr);

@@ -1251,6 +1251,13 @@ where
             node_audit.call_observer(),
             incarnation_shutdown.clone(),
         )?;
+        // Every founding member answers the cell's views (#399).
+        crate::machine::views::spawn(
+            &providers,
+            &rpc_handle,
+            &formed,
+            incarnation_shutdown.clone(),
+        )?;
         // It asks the coordinator to register the address it advertises
         // now (#349): the cell may know another one.
         if let Some(election) = formed

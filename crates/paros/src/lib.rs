@@ -45,6 +45,7 @@ pub mod scenario;
 mod storage;
 pub mod system;
 pub mod tenant;
+pub mod view;
 
 pub use address::{Address, Names};
 pub use audit::{
@@ -72,6 +73,7 @@ pub mod wire {
     pub use crate::rpc::methods;
     pub use crate::rpc::{
         checkpoint, common, election, fleet, internal, machine, matchmaker, public, system, tenant,
+        view,
     };
 }
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

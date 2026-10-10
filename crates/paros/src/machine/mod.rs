@@ -69,6 +69,7 @@ mod record;
 pub(crate) mod register;
 mod stores;
 mod tenants;
+pub(crate) mod views;
 mod wait;
 
 use std::collections::BTreeSet;

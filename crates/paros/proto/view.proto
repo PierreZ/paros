@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+package paros.view.v1;
+
+// The administrative views (#399): read-only answers about one cell, its
+// machines, its tenants and who holds which role. Every view is a request to
+// one cell: a founding member of that cell answers it from the cell's own
+// journals (the registry, the universe directory, the election journal and
+// the tenant control journals), and filters the answer by the caller's scope
+// before it sends it. The caller never filters.
+//
+// Ids are on the wire; every entity also carries its name, which is what
+// `parosctl` prints (hex ids are for local debugging only).
+service Views {
+  rpc View(.paros.view.v1.ViewRequest) returns (.paros.view.v1.ViewReply);
+}
+
+// Who asks. Until the frontend checks tokens (#192, #245), every caller is
+// an admin and may narrow itself to one tenant's scope; #245 derives the
+// scope from the caller's Biscuit token instead (`view.detail` is admin).
+message Scope {
+  oneof kind {
+    // Every detail of the cell.
+    AdminScope admin = 1;
+    // The spread of one tenant over its cell, by the tenant's name.
+    bytes tenant = 2;
+  }
+}
+
+message AdminScope {}
+
+message ViewRequest {
+  Scope scope = 1;
+  oneof query {
+    // The cell: its machines, its tenants and every role holder (admin).
+    CellQuery cell = 2;
+    // One tenant, by name: its journals and the machines they use.
+    TenantQuery tenant = 3;
+    // The universe directory: its cells and its tenants (admin), answered
+    // by the cell that hosts the universe tenant.
+    UniverseQuery universe = 4;
+  }
+}
+
+message CellQuery {}
+
+message TenantQuery {
+  bytes name = 1;
+}
+
+message UniverseQuery {}
+
+message ViewReply {
+  // Empty when answered. Else: "forbidden" (the scope does not cover the
+  // query), "unknown_tenant", "other_cell" (the tenant lives in the cell
+  // `cell_id`, `cell_name` names it), "not_universe" (this cell does not
+  // host the universe tenant), "unavailable" (a journal could not be read
+  // to its tail), "malformed".
+  string refusal = 1;
+  // The answering cell (or, on "other_cell", the tenant's cell).
+  uint64 cell_id = 2;
+  bytes cell_name = 3;
+  bytes universe_name = 4;
+  // The cell's state in the universe directory ("" unknown).
+  string cell_state = 5;
+  // Where the answer was folded: the next position of the registry and of
+  // the universe directory it read (0: not read). An answer is never newer
+  // than these.
+  uint64 registry_at = 6;
+  uint64 directory_at = 7;
+  // The machine that answered.
+  uint64 answered_by = 8;
+  // The cell coordinator now, as the election journal names it (0: none).
+  uint64 coordinator = 9;
+  uint64 coordinator_term = 10;
+  repeated MachineView machines = 11;
+  repeated TenantView tenants = 12;
+  repeated CellView cells = 13;
+}
+
+// One machine. A tenant scope sees only the machines its journals use, and
+// of each only its id, name, failure domain and up/down state.
+message MachineView {
+  uint64 node_id = 1;
+  string name = 2;
+  string addr = 3;
+  string class = 4;
+  uint64 capacity = 5;
+  uint64 booked = 6;
+  string failure_domain = 7;
+  // "registered", "draining", "retired"; "founding" for a founding member
+  // the registry never held.
+  string standing = 8;
+  bool up = 9;
+  fixed64 incarnation_high = 10;
+  fixed64 incarnation_low = 11;
+  bool founder = 12;
+  repeated BookingView bookings = 13;
+}
+
+message BookingView {
+  uint64 booking = 1;
+  string role = 2;
+  uint64 tenant = 3;
+  // The journal booked for (0 for a matchmaker set).
+  uint64 journal = 4;
+  // The matchmaker set booked for (0 for a journal).
+  uint64 set = 5;
+}
+
+// One tenant. A tenant scope sees only its own.
+message TenantView {
+  uint64 tenant = 1;
+  // The tenant's name; for an internal tenant, the universe's or the
+  // cell's.
+  bytes name = 2;
+  // "users", "universe" or "cell".
+  string kind = 3;
+  string state = 4;
+  string groups = 5;
+  string survives = 6;
+  uint64 cell_id = 7;
+  repeated JournalView journals = 8;
+}
+
+message JournalView {
+  uint64 journal = 1;
+  bytes name = 2;
+  // "control", "election", "directory" (the universe directory), or
+  // "data" for a journal the tenant created.
+  string kind = 3;
+  string writer = 4;
+  string desired = 5;
+  // The acceptors, by node id (their names are in `machines`).
+  repeated uint64 acceptors = 6;
+  // The matchmaker set's members (empty: plain Multi-Paxos).
+  repeated uint64 matchmakers = 7;
+}
+
+// One cell of the universe directory.
+message CellView {
+  uint64 cell_id = 1;
+  bytes name = 2;
+  string state = 3;
+  // How many tenants it hosts.
+  uint64 tenants = 4;
+}
