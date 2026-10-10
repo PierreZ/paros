@@ -21,9 +21,9 @@ paros-authz-biscuit = { path = "../paros-authz-biscuit" }
 # `nextest`), cargo unifies moonpool-core's features and this binary gets
 # moonpool-sim's deterministic `select!` expansion; `cargo build -p parosd`
 # alone — the shipped build — keeps tokio's macro verbatim.
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "389125e9227cd48ea572784f93f26cb24c3e9ba1", features = ["tokio-providers", "select"] }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "0b6ca9ac15e4a3b7d1d1a51a901765995e39bd7d", features = ["tokio-providers", "select"] }
 # `parosctl`'s client-only RPC runtime, under `paros::client`.
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "389125e9227cd48ea572784f93f26cb24c3e9ba1", default-features = false, features = ["prost"] }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "0b6ca9ac15e4a3b7d1d1a51a901765995e39bd7d", default-features = false, features = ["prost"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }

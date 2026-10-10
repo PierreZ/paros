@@ -298,6 +298,11 @@ pub struct DriverTunables {
     /// history, one round trip per registration. The ceiling is
     /// [`paros_core::REGISTRY_PAGE`], the default.
     pub registry_page: usize,
+    /// How often a machine samples its busyness counters (#424): the length
+    /// of the window `Load` answers with. FDB's `WORKER_LOGGING_INTERVAL`
+    /// is 5 s. Floor 1 s: a shorter window measures the sampler's own
+    /// jitter, not the machine.
+    pub load_interval: Duration,
 }
 
 impl Default for DriverTunables {
@@ -338,6 +343,7 @@ impl Default for DriverTunables {
             resend_page: paros_core::RESEND_BATCH,
             apply_page: paros_core::APPLY_BATCH,
             registry_page: paros_core::REGISTRY_PAGE,
+            load_interval: LOAD_INTERVAL,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(
@@ -401,6 +407,14 @@ const ELECTION_RENEW: Duration = Duration::from_millis(500);
 const MACHINE_DOWN_AFTER: Duration = Duration::from_millis(1500);
 
 const _: () = assert!(MACHINE_DOWN_AFTER.as_millis() > ELECTION_RENEW.as_millis());
+
+/// Default [`DriverTunables::load_interval`]: FDB's 5 s.
+const LOAD_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The floor of [`DriverTunables::load_interval`].
+pub const LOAD_INTERVAL_FLOOR: Duration = Duration::from_secs(1);
+
+const _: () = assert!(LOAD_INTERVAL.as_millis() >= LOAD_INTERVAL_FLOOR.as_millis());
 
 /// Default [`DriverTunables::election_compact_after`].
 const ELECTION_COMPACT_AFTER: u64 = 16;

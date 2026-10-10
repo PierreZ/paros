@@ -46,9 +46,9 @@ mod write;
 use crate::{CHAOS_DURATION_MS, DigestSink};
 use config::{
     ADMIT, BOOK_CAPACITY, CHECK_TAIL, CHECKPOINT, CREATE_JOURNAL, ChainConfig, DELETE_JOURNAL,
-    DRAIN_NODE, DUAL_SUBMIT, DUP_WRITE, ELECTION, FLEET_INIT, MATCH_GC, MATCHMAKE, OP_COUNT, PAUSE,
-    QUORUM_READ, READ, READ_INDEX, READ_STATE, RECONFIGURE, RECONFIGURE_MATCHMAKERS, REGISTER_NODE,
-    RETIRE, RETIRE_NODE, SET_LEADER, TENANT, TRUNCATE, TRUNCATE_STORM, VIEW, WRITE,
+    DRAIN_NODE, DUAL_SUBMIT, DUP_WRITE, ELECTION, FLEET_INIT, LOAD, MATCH_GC, MATCHMAKE, OP_COUNT,
+    PAUSE, QUORUM_READ, READ, READ_INDEX, READ_STATE, RECONFIGURE, RECONFIGURE_MATCHMAKERS,
+    REGISTER_NODE, RETIRE, RETIRE_NODE, SET_LEADER, TENANT, TRUNCATE, TRUNCATE_STORM, VIEW, WRITE,
     WRITE_TO_NON_LEADER, weighted_index,
 };
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
@@ -1368,6 +1368,7 @@ impl Workload for ChainWorkload {
                         .await;
                 }
                 VIEW => fleet_ops.view(ctx, raw_payload).await,
+                LOAD => fleet_ops.load(ctx, raw_payload).await,
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }

@@ -34,6 +34,7 @@ mod corruption;
 mod driver;
 pub mod fleet;
 pub mod journal;
+pub mod load;
 pub mod machine;
 mod matchmaker;
 pub mod name;
@@ -56,8 +57,8 @@ pub use corruption::{CorruptionVerdict, IntegrityFault};
 pub use driver::reply::Reply;
 pub use driver::{
     BelowFloor, BootKind, BootRefusal, ControlPlan, DriverTunables, JournalStores,
-    MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr, registration_history_hash,
-    run_journals, run_node,
+    LOAD_INTERVAL_FLOOR, MAX_READ_RECORDS, RunError, command_hash, message_kind, parse_addr,
+    registration_history_hash, run_journals, run_node,
 };
 pub use rpc::{
     EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,
