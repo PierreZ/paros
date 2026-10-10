@@ -49,8 +49,8 @@ use paros::{Command, Entry, JournalIdentifier, LeaderUuid, NodeId, Seq, Value};
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
 
 use super::rpc::{CallLog, read_once, set_leader_once, within, write_once};
-use crate::audit::audit_world_for;
 use crate::audit::system::{lock as board_lock, system_board};
+use crate::audit::{audit_world_for, audit_world_named};
 use crate::chain::user_command_hash;
 use crate::client::ChainClient;
 use crate::shape::JoinerMachine;
@@ -227,7 +227,7 @@ impl Announce {
         } else {
             journals.push((
                 journal,
-                audit_world_for(&self.state, journal),
+                audit_world_named(&self.state, journal),
                 CallLog::shared(
                     journal,
                     self.client,

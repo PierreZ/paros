@@ -101,12 +101,13 @@ pub(crate) fn record_hash(record: &[u8]) -> u64 {
 }
 
 impl JournalModel {
-    /// The model of a journal of `mode`.
-    pub(super) fn new(mode: WriterMode) -> Self {
-        Self {
-            mode,
-            ..Self::default()
-        }
+    /// Learn the journal's writer mode (#241), before any verdict.
+    pub(super) fn settle(&mut self, mode: WriterMode) {
+        assert_always!(
+            self.slots.is_empty(),
+            "audit: a journal's mode is settled before any verdict"
+        );
+        self.mode = mode;
     }
 
     /// The journal's writer mode.

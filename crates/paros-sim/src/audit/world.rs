@@ -3,7 +3,7 @@
 //! ([`check_run`], [`AuditWorld::check_final_convergence`]).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
@@ -27,40 +27,58 @@ pub(crate) fn audit_world_for(
     state: &StateHandle,
     journal: paros::JournalIdentifier,
 ) -> Arc<AuditWorld> {
+    let world = published_world(state, journal);
+    // Every journal no plan, election or tenant names is a system journal
+    // (a control journal, the registry): single-writer.
+    world.settle(writer_mode(state, journal).unwrap_or(paros::WriterMode::Single));
+    world
+}
+
+/// `journal`'s [`AuditWorld`] for a client's call (`Announce`): a frontend
+/// resolves names from a directory read ahead of every machine's fold
+/// (#192 (the frontend)), so a created journal's mode can be unknown yet.
+/// The first machine that serves the journal settles it.
+pub(crate) fn audit_world_named(
+    state: &StateHandle,
+    journal: paros::JournalIdentifier,
+) -> Arc<AuditWorld> {
+    let world = published_world(state, journal);
+    if let Some(mode) = writer_mode(state, journal) {
+        world.settle(mode);
+    }
+    world
+}
+
+/// The published [`AuditWorld`] of `journal`, its mode not settled.
+fn published_world(state: &StateHandle, journal: paros::JournalIdentifier) -> Arc<AuditWorld> {
     let main = crate::shape::identifiers(state).main;
-    // The writer mode the journal was created with (#241): drawn with the
-    // run's journals, or asked for by the client that created it.
-    let mode = writer_mode(state, journal);
     crate::state::published_arc(
         state,
         &crate::state::journal_key(AUDIT_WORLD_KEY, journal),
         || AuditWorld {
-            state: Mutex::new(AuditState {
-                journal: super::journal_model::JournalModel::new(mode),
-                ..AuditState::default()
-            }),
+            state: Mutex::new(AuditState::default()),
             main: Some(main),
-            mode,
+            mode: OnceLock::new(),
         },
     )
 }
 
 /// The writer mode `journal` runs in (#241): the plan's for a journal of the
-/// run, the one its tenant's control journal created it in (#210, folded
-/// before any machine starts it), multi-writer for a cell's election journal
-/// (#240), and single-writer for every other one (a system journal, a
-/// control journal).
-fn writer_mode(state: &StateHandle, journal: paros::JournalIdentifier) -> paros::WriterMode {
+/// run, multi-writer for a cell's election journal (#240), and the one its
+/// tenant's control journal created it in (#210, folded before any machine
+/// starts it). `None` for any other journal.
+fn writer_mode(
+    state: &StateHandle,
+    journal: paros::JournalIdentifier,
+) -> Option<paros::WriterMode> {
     let plan = crate::shape::journals(state);
     if plan.ids.contains(&journal) {
-        return plan.mode(journal);
+        return Some(plan.mode(journal));
     }
     if crate::machine::is_election(state, journal) {
-        return paros::WriterMode::Multi;
+        return Some(paros::WriterMode::Multi);
     }
-    super::tenants::lock(&super::tenants::tenant_board(state))
-        .mode(journal)
-        .unwrap_or(paros::WriterMode::Single)
+    super::tenants::lock(&super::tenants::tenant_board(state)).mode(journal)
 }
 
 /// The per-iteration shared checker.
@@ -70,8 +88,9 @@ pub(crate) struct AuditWorld {
     /// The run's deployment journal ([`crate::shape::Identifiers::main`]); `None`
     /// for a private checker outside any run.
     main: Option<paros::JournalIdentifier>,
-    /// This journal's writer mode (#241).
-    mode: paros::WriterMode,
+    /// This journal's writer mode (#241), set once it is known: a call
+    /// can name a created journal before any machine folded its creation.
+    mode: OnceLock<paros::WriterMode>,
 }
 
 impl AuditWorld {
@@ -80,9 +99,29 @@ impl AuditWorld {
         self.main
     }
 
-    /// This journal's writer mode (#241).
+    /// This journal's writer mode (#241). A machine and a workload reach a
+    /// journal only through [`audit_world_for`], which settles it.
     pub(crate) fn mode(&self) -> paros::WriterMode {
-        self.mode
+        let mode = self.mode.get().copied();
+        assert_always!(
+            mode.is_some(),
+            "audit: a journal's mode is known before it is served"
+        );
+        mode.unwrap_or_default()
+    }
+
+    /// Learn this journal's writer mode, once. The model judges nothing
+    /// before: a machine applies a slot only once the creation is folded.
+    fn settle(&self, mode: paros::WriterMode) {
+        if let Some(known) = self.mode.get() {
+            assert_always!(
+                *known == mode,
+                "audit: a journal's writer mode never changes"
+            );
+            return;
+        }
+        self.lock().journal.settle(mode);
+        let _ = self.mode.set(mode);
     }
 
     pub(super) fn lock(&self) -> MutexGuard<'_, AuditState> {
