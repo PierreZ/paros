@@ -257,6 +257,14 @@ pub struct DriverTunables {
     /// before it truncates the election journal to it (#240): the bound on
     /// the journal's log. Floor 1: a truncation per renewal.
     pub election_compact_after: u64,
+    /// How long the cell coordinator hears nothing from a machine before it
+    /// writes `MachineDown` for it (#211, D6): the timeout of its failure
+    /// detector, an `Identify` per machine at every renewal period. Floor:
+    /// above `election_renew` (refused at or below it), so one missed
+    /// probe never marks a machine down. It should also outlast a reboot;
+    /// below that every reboot is a `Down` then an `Up`, which is noise,
+    /// never a wrong answer.
+    pub machine_down_after: Duration,
     /// The most rounds one page of a leader's recovery visits (#330,
     /// `ColocatedNode::set_recovery_page`) before the driver advances the
     /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
@@ -298,6 +306,7 @@ impl Default for DriverTunables {
             election_lease: ELECTION_LEASE,
             election_renew: ELECTION_RENEW,
             election_compact_after: ELECTION_COMPACT_AFTER,
+            machine_down_after: MACHINE_DOWN_AFTER,
             recovery_page: paros_core::LEADER_RECOVERY_BATCH,
         };
         // The simulation's baseline is itself a winnable profile.
@@ -357,6 +366,11 @@ const ELECTION_LEASE: Duration = Duration::from_secs(2);
 
 /// Default [`DriverTunables::election_renew`].
 const ELECTION_RENEW: Duration = Duration::from_millis(500);
+
+/// Default [`DriverTunables::machine_down_after`]: three renewal periods.
+const MACHINE_DOWN_AFTER: Duration = Duration::from_millis(1500);
+
+const _: () = assert!(MACHINE_DOWN_AFTER.as_millis() > ELECTION_RENEW.as_millis());
 
 /// Default [`DriverTunables::election_compact_after`].
 const ELECTION_COMPACT_AFTER: u64 = 16;

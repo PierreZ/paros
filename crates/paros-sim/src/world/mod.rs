@@ -16,6 +16,7 @@ pub(crate) mod late_outage;
 pub(crate) mod node_store;
 pub(crate) mod outage;
 pub(crate) mod registry_store;
+pub(crate) mod silent_machine;
 pub(crate) mod wipe;
 pub(crate) mod wiped_founder;
 

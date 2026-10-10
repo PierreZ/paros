@@ -53,6 +53,11 @@ message IdentifyAck {
   // The cell this machine belongs to, founded or admitted (#216); 0 while it
   // is idle.
   uint64 cell_id = 7;
+  // The process's RPC incarnation (moonpool-rpc's `Incarnation`, new at every
+  // start), in two halves: what the registry records, and how the cell
+  // coordinator tells a reboot (#211). 0 is unknown.
+  fixed64 incarnation_high = 8;
+  fixed64 incarnation_low = 9;
 }
 
 // One member of a cell's bootstrap: its identity and address.

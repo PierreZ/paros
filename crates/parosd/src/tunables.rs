@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 30] = [
+const FIELDS: [Field; 31] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -66,6 +66,7 @@ const FIELDS: [Field; 30] = [
     Field::Count("max_batch_bytes", |t, v| t.max_batch_bytes = v),
     Field::Millis("election_lease", |t, v| t.election_lease = v),
     Field::Millis("election_renew", |t, v| t.election_renew = v),
+    Field::Millis("machine_down_after", |t, v| t.machine_down_after = v),
     Field::Count("election_compact_after", |t, v| {
         t.election_compact_after = v;
     }),
@@ -220,6 +221,7 @@ mod tests {
             election_lease: _,
             election_renew: _,
             election_compact_after: _,
+            machine_down_after: _,
             recovery_page: _,
         } = DriverTunables::production();
         let mut names: Vec<String> = FIELDS

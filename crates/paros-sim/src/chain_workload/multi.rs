@@ -99,7 +99,11 @@ impl ChainWorkload {
     /// The recovery tail's write (#241): one batch, sent again after every
     /// answer that is no verdict until it is written or `deadline` passes;
     /// whether it was written. A re-send may land the batch twice: the
-    /// journal promises at-least-once, and the search allows it.
+    /// journal promises at-least-once, and the search allows it. Each
+    /// re-send without a leader hint goes to the next node of the pool, as
+    /// the single-writer batch does: a node down for good never answers
+    /// (witness 5275168170391165849: every re-send to a node whose journal
+    /// was parked, for the whole budget, red before, green after).
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
     pub(super) async fn append_until_written(
         &mut self,
@@ -110,10 +114,13 @@ impl ChainWorkload {
     ) -> bool {
         let submission = self.submit_append(step, next_op);
         let time = step.ctx.time();
+        let mut target = step.target;
         while time.now() < deadline && !step.ctx.shutdown().is_cancelled() {
-            if self.append(step, &submission, written).await {
+            let attempt = Step { target, ..*step };
+            if self.append(&attempt, &submission, written).await {
                 return true;
             }
+            target = (target + 1) % step.server_count;
             time.sleep(Duration::from_millis(step.config.retry_backoff_ms))
                 .await
                 .ok();
