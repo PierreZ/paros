@@ -214,7 +214,8 @@ pub trait Audit {
     fn journal_refused(&self, node: NodeId, journal: JournalIdentifier, call: &'static str) {}
 
     /// This node folded the system-journal record at position `seq` of
-    /// `journal` (#189: the directory or the node registry) into `event` —
+    /// `journal` (#189, #210: the node registry or a tenant's control journal)
+    /// into `event` —
     /// reported once per position, in order, at the instant the fold moves.
     fn system_folded(
         &self,
@@ -241,8 +242,8 @@ pub trait Audit {
     ) {
     }
 
-    /// This node started serving `journal`, a journal the directory created
-    /// naming it (#189).
+    /// This node started serving `journal`, a journal a tenant created naming
+    /// it, or a spare's (#189, #210).
     fn journal_started(&self, node: NodeId, journal: JournalIdentifier) {}
 
     /// This node held this port's journal for one beat

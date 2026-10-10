@@ -59,6 +59,10 @@ enum TenantCommand {
     Create {
         /// The tenant's name.
         name: String,
+        /// What its journals survive: `az` (a zone, the default) or
+        /// `region` (#252). Fixed at creation.
+        #[arg(long, default_value = "az")]
+        survives: paros::tenant::Survives,
     },
     /// Remove a `users` tenant (`REMOVING`, dropped by the cell, then
     /// removed). A re-run resumes.
@@ -216,7 +220,7 @@ pub async fn run(
     };
     let patience = Duration::from_millis(args.patience_ms);
     match args.command {
-        TenantCommand::Create { name } => {
+        TenantCommand::Create { name, survives } => {
             // Random identifiers, the tenant's and its control journal's; the
             // library moves past one the fleet tenant holds already.
             let draws: Vec<JournalIdentifier> = (0..DRAWS)
@@ -227,6 +231,7 @@ pub async fn run(
                     )
                 })
                 .collect();
+            let mut fleet = fleet.with_survives(survives);
             let run = fleet
                 .create_tenant(client, 0, name.as_bytes(), draws, patience)
                 .await;

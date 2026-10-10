@@ -3,9 +3,14 @@
 //! member's (the formation formatted them). `parosd` and the simulation
 //! open the same stores; only the provider and the audit port differ.
 //!
-//! A machine serves no system journal yet (`run_machine` passes no
-//! `SystemPlan`), so no journal is created at run time and every store is a
-//! genesis one: [`JournalStores::create`] keeps its refusing default.
+//! A founding member also serves the journals its cell's control journals
+//! create at run time (#210): every hosted tenant's control journal, and
+//! every journal a tenant creates naming it. Such a store is
+//! **provisioned** at its first open, as the operator's own act (#208):
+//! formatted durably, then recorded in the machine record (`created`), and
+//! only then booted, as an existing member's. A restart opens it as an
+//! existing member's again, so a store the record names and the disk lost
+//! is refused as amnesia.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +18,7 @@ use moonpool_core::StorageProvider;
 use paros_core::{Config, JournalIdentifier, NodeId};
 
 use super::ProviderDisk;
+use super::record::MachineRecord;
 use crate::{Audit, BootKind, JournalStorage, JournalStores};
 
 /// Which audit port a machine's facts report to, named by the caller of
@@ -34,6 +40,10 @@ pub(crate) struct MachineStores<S, F> {
     disk: ProviderDisk<S>,
     node: NodeId,
     genesis: BTreeMap<JournalIdentifier, Config>,
+    /// Journals created at run time, with their configuration.
+    created: BTreeMap<JournalIdentifier, Config>,
+    /// The machine record, rewritten whole when a store is provisioned.
+    record: MachineRecord,
     audits: F,
 }
 
@@ -45,21 +55,69 @@ impl<S, F> MachineStores<S, F> {
     /// When `genesis` is empty, or names a configuration of another node.
     pub(crate) fn new(
         disk: ProviderDisk<S>,
-        node: NodeId,
+        record: MachineRecord,
         genesis: BTreeMap<JournalIdentifier, Config>,
         audits: F,
     ) -> Self {
+        let node = record.node_id;
         assert!(!genesis.is_empty(), "a formed machine serves journals");
         assert!(
             genesis.values().all(|config| config.id == node),
             "a machine's stores are opened as that machine"
         );
+        assert!(
+            record.created.iter().all(|j| !genesis.contains_key(j)),
+            "a plan journal is never provisioned at run time"
+        );
         Self {
             disk,
             node,
             genesis,
+            created: BTreeMap::new(),
+            record,
             audits,
         }
+    }
+}
+
+impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
+    fn store(&self, journal: JournalIdentifier, config: Config) -> JournalStorage<S> {
+        JournalStorage::new(
+            self.disk.provider().clone(),
+            self.disk.journal_dir(journal),
+            config,
+            self.disk.layout(),
+        )
+    }
+
+    /// Provision created journal `journal` under `config`: format its store
+    /// (an interrupted run resumes from the disk), then record it. `false`
+    /// when the disk failed: the journal is down here until a restart.
+    async fn provision(&mut self, journal: JournalIdentifier, config: Config) -> bool {
+        let mut store = self.store(journal, config);
+        match crate::provision_store(&mut store).await {
+            Ok(provisioned) => {
+                if provisioned == crate::Provisioned::Resumed {
+                    moonpool_assertions::reachable!(
+                        "machine: a created journal's provisioning resumed from the disk"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(journal = %journal, %error, "created_journal_unprovisioned");
+                return false;
+            }
+        }
+        // The record is the commit point: the line is written after the
+        // format, before the first boot.
+        let mut record = self.record.clone();
+        record.created.push(journal);
+        if let Err(error) = self.disk.write_record(&record.render()).await {
+            tracing::warn!(journal = %journal, %error, "created_journal_unrecorded");
+            return false;
+        }
+        self.record = record;
+        true
     }
 }
 
@@ -77,25 +135,43 @@ where
     }
 
     async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
-        let config = self.genesis.get(&journal)?.clone();
+        if let Some(config) = self.genesis.get(&journal).cloned() {
+            assert!(config.id == self.node, "a store is opened as its machine");
+            return Some((self.store(journal, config), BootKind::ExistingMember));
+        }
+        let config = self.created.get(&journal)?.clone();
         assert!(config.id == self.node, "a store is opened as its machine");
-        Some((
-            JournalStorage::new(
-                self.disk.provider().clone(),
-                self.disk.journal_dir(journal),
-                config,
-                self.disk.layout(),
-            ),
-            BootKind::ExistingMember,
-        ))
+        if !self.record.created.contains(&journal) && !self.provision(journal, config.clone()).await
+        {
+            return None;
+        }
+        assert!(
+            self.record.created.contains(&journal),
+            "a created journal is recorded before its first boot"
+        );
+        Some((self.store(journal, config), BootKind::ExistingMember))
     }
 
     fn audit(&self, journal: JournalIdentifier) -> A {
         assert!(
-            self.genesis.contains_key(&journal),
+            self.genesis.contains_key(&journal) || self.created.contains_key(&journal),
             "a machine audits only the journals it serves"
         );
         (self.audits)(AuditScope::Journal(journal))
+    }
+
+    /// A journal a control journal created naming this machine (#210),
+    /// under `config`. Idempotent: a restart re-folds and asks again.
+    fn create(&mut self, journal: JournalIdentifier, config: Config) -> bool {
+        assert!(
+            config.id == self.node,
+            "a created journal names its machine"
+        );
+        if self.genesis.contains_key(&journal) {
+            return false;
+        }
+        self.created.entry(journal).or_insert(config);
+        true
     }
 
     fn node_audit(&self) -> A {

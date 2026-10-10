@@ -72,6 +72,7 @@ use crate::shape::MachineLayout;
 mod admit;
 mod cell;
 mod election;
+mod journals;
 
 use cell::Cell;
 
@@ -129,6 +130,9 @@ pub(super) struct FleetOps {
     /// The machine whose admission this operator stopped after its
     /// registration (#216), to finish on its next `ADMIT`.
     admitting: Option<SocketAddr>,
+    /// A journal request no answer decided yet (#210): sent again, with the
+    /// same id, at this client's next journal step.
+    journal_pending: Option<paros::client::journals::JournalRequest>,
 }
 
 impl FleetOps {
@@ -166,6 +170,7 @@ impl FleetOps {
             killed: false,
             learned: super::system::Learned::default(),
             admitting: None,
+            journal_pending: None,
         })
     }
 

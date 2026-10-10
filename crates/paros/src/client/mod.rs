@@ -67,6 +67,7 @@ pub mod checkpoint;
 pub mod election;
 pub mod fleet;
 pub mod initialize;
+pub mod journals;
 pub mod multi;
 mod observer;
 pub mod outcome;

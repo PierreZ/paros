@@ -43,9 +43,9 @@
 //! address, and the journals they serve from formation — the cell tenant's
 //! control journal ([`CellPlan::control`]), the fleet tenant's control
 //! journal ([`CellPlan::fleet`]: the fleet's one cell hosts the fleet tenant
-//! in M9, #226) and the static assignment, every identifier drawn at
-//! `cell init` (no identifier is fixed, `docs/architecture.md` §3.8) that
-//! stands in for placement until M9 (#212). The plan also names the cell's
+//! in M9, #226), every identifier drawn at `cell init` (no identifier is
+//! fixed, `docs/architecture.md` §3.8). A tenant's journals are not in the
+//! plan: they live in its own control journal (#210). The plan also names the cell's
 //! first election journal ([`CellPlan::election`], #240): the founding
 //! members campaign over it for the cell coordinator, which installs itself
 //! as the control journal's leader (`coordinator.rs`).
@@ -64,6 +64,7 @@ mod formed;
 mod lifecycle;
 mod record;
 mod stores;
+mod tenants;
 mod wait;
 
 use std::collections::BTreeSet;
@@ -296,8 +297,7 @@ pub struct CellPlan {
     /// over which they campaign for the cell coordinator.
     pub election: JournalIdentifier,
     /// The journals every member serves from formation, in identifier order:
-    /// [`CellPlan::control`], [`CellPlan::election`], [`CellPlan::fleet`] and
-    /// the static assignment.
+    /// [`CellPlan::control`], [`CellPlan::election`] and [`CellPlan::fleet`].
     pub journals: Vec<JournalIdentifier>,
 }
 
@@ -352,17 +352,6 @@ impl CellPlan {
             fleet: self.fleet,
             election: Some(self.election),
         }
-    }
-
-    /// The static user journals: every journal the plan serves but the
-    /// control and election journals.
-    #[must_use]
-    pub fn users(&self) -> Vec<JournalIdentifier> {
-        self.journals
-            .iter()
-            .copied()
-            .filter(|j| *j != self.control && *j != self.election && Some(*j) != self.fleet)
-            .collect()
     }
 
     fn members_to_wire(&self) -> Vec<wire::Member> {
@@ -575,7 +564,6 @@ mod tests {
                 identifier(0x51, 0x52),
                 identifier(0x51, 0x53),
                 identifier(0x61, 0x62),
-                identifier(0x71, 0x72),
             ],
         }
     }
@@ -584,7 +572,6 @@ mod tests {
     fn a_plan_round_trips_normalized_and_names_its_election_journal() {
         let plan = plan();
         assert_eq!(plan.check(), Ok(()));
-        assert_eq!(plan.users(), vec![identifier(0x71, 0x72)]);
         let mut foreign = plan.clone();
         foreign.election = identifier(0x61, 0x62);
         assert!(

@@ -2,7 +2,9 @@
 # domains, every one the same `parosd` image configured by PAROS_* variables.
 #
 #   docker compose up -d --build
-#   docker compose run --rm init          # prints journals=T/J
+#   docker compose run --rm init
+#   docker compose run --rm parosctl tenant create acme
+#   docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
 #   docker compose run --rm parosctl write T/J hello world --leader 7
 #   docker compose run --rm parosctl read T/J
 #

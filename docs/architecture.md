@@ -292,10 +292,10 @@ other rule.
 
 A cell's machines and capacity are the control journal of the **cell tenant**, served by the
 same `parosd`s, the same Paxos and the same stores as every tenant's journals. Its coordinator is
-the **cell coordinator**. Today's system journals are dissolved into the four levels: the machine
-registry and the capacity bookings are the cell's control journal; the directory splits into
-the universe directory (tenant → cell, the universe level) and each tenant's own control journal; desired
-state moves into the tenant control journals. System journals are written with `Write` like any
+the **cell coordinator**. The control state has four levels: the machine registry and the
+capacity bookings are the cell's control journal; the universe directory maps tenant → cell (the
+universe level); each tenant's own control journal holds its description and its journals
+(#210, landed); desired state lives in the tenant control journals. System journals are written with `Write` like any
 journal; there is no special path.
 
 Every tenant gets a control journal when it is created. It is **self-describing**: it holds the
@@ -1505,8 +1505,8 @@ Simulation is the investment. Every milestone lands with its share of:
   injected state: the seed draws the layout (machine count, classes, capacities, which machine
   receives `init`), when and how often `init` and the commands after it are sent, and every
   fault stays on through setup. The harness's own setup holds only what an operator does offline,
-  outside paros (generating the Biscuit root key pair, #245). Until #190 and #210 make the main journal
-  and the directory plan data, the acceptors that serve them keep the per-seed harness draw
+  outside paros (generating the Biscuit root key pair, #245). Until #190 makes the main journal plan data
+  (the directory went with #210), the acceptors that serve them keep the per-seed harness draw
   (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
   too. A machine's disk can be wiped: the machines' attrition draws moonpool's `CrashAndWipe`,
   and a per-seed scenario aims it at a founding member in the middle of `init`. The machine at
@@ -1549,10 +1549,21 @@ AGENTS.md.
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow. The single-writer half (PR #281), the writer mode
   (PR #296), the batch limits and the read limits landed (#241 is done); `parosctl journal
-  create --mode` moves to #210.
-- The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
-  levels: tenant names and desired state move into each tenant's control journal, capacity is
-  owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).
+  create --mode` landed with #210.
+- Landed (#210): the directory is gone. Every hosted tenant has its own control journal: its
+  identifier is drawn with the tenant, recorded in the universe directory and in the cell's
+  `HostTenant` (with the tenant's name and `survives`), and it is born on the founding members,
+  plain Multi-Paxos, majority. It holds the tenant's description (no rendezvous name) and every
+  journal create and delete, each a request with an idempotency id judged at apply
+  (`paros::tenant`). Until #212 and #225 the elected cell coordinator is the tenant coordinator
+  of every hosted tenant: it fences each tenant control journal with its term uuid, answers
+  `JournalRequest` at its published interface, and places journals on the founding members.
+  Every machine follows the cell control journal and every hosted tenant's control journal
+  (`ControlPlan`), and provisions a created journal at its first open (the machine record's
+  `created` line is the commit point). `init` creates no hidden journal. Still to change: the
+  acceptors' harness registry in the simulation (a `ControlPlan` over the genesis pool) becomes
+  the machines' when placement lands (#211, #212), and capacity becomes the cell coordinator's
+  alone.
 - `parosd` stops running the plain deployment: every journal is born with its matchmaker set, and
   journal-tagged matchmaker planes replace "only the first journal of a process" (#190); proxy leaders
   and replicas follow (#193).

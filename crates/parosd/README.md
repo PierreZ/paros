@@ -22,7 +22,9 @@ the one build outside Nix):
 
 ```sh
 docker compose up -d --build        # five machines; each formats and waits
-docker compose run --rm init        # forms the cell; prints journals=T/J
+docker compose run --rm init        # forms the cell
+docker compose run --rm parosctl tenant create acme
+docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
 docker compose run --rm parosctl write T/J hello world --leader 7
 docker compose run --rm parosctl read T/J
 ```
@@ -67,11 +69,11 @@ Two concurrent `init`s form at most one cell, and an interrupted one leaves no
 lock: the next `init`, sent to any member, hears the accepted plan and finishes
 it. A formed member keeps answering the decree from its record. Every member
 then serves the **cell control journal**, **the fleet tenant's control journal**
-(the fleet directory: the fleet's one cell hosts it) and the toy's journal (the
-static assignment that stands in for placement until M9), plain Multi-Paxos
-over the founding members. **No
+(the fleet directory: the fleet's one cell hosts it), plain Multi-Paxos over
+the founding members. No user journal comes with the cell: a tenant creates
+its own (below). **No
 identifier is fixed**: `init` draws every one, records them in the cell plan, and
-prints them (`control=`, `election=`, `fleet_control=`, `journals=`); afterwards any machine's
+prints them (`control=`, `election=`, `fleet_control=`); afterwards any machine's
 node-only `Inspect` names the cell's control journals, which is how
 `parosctl tenant` finds them. Then the founding members elect the first cell coordinator
 over the cell's **election journal** (multi-writer, #240), and the winner installs
@@ -91,8 +93,25 @@ it, then removes it; `parosctl tenant list` prints the fleet directory. An inter
 delete is resumed by running it again. A tenant is created once: a second
 `create` of a name the fleet tenant holds is refused (`name_taken`), and an interrupted
 creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
-finish it). A tenant's footprint and its
-own control journal are not created yet (#210, #225).
+finish it). `--survives az|region` sets what the tenant's journals survive
+(#252). Every tenant has its own **control journal** (#210): the cell's
+founding members serve it, and it holds the tenant's description (its name,
+what it survives, its cell) and every journal it created. A tenant's
+footprint is not booked yet (#212).
+
+**Journals.** `parosctl journal create acme orders` sends a request to the
+**tenant coordinator** — until #212 and #225, the elected cell coordinator, at
+the interface its election renewals publish. The coordinator draws the
+journal's id, picks its members from the desired mode (`--desired
+single|double|triple|grid:RxC`, `double` by default; placed on the founding
+members until #212), and writes the request to the tenant's control journal.
+Every machine folds that journal, and each member starts the journal there.
+The request carries an idempotency id: `parosctl` sends the same id again
+until a coordinator decides it, so a request acts once, across a coordinator
+change too. A live name is refused (`name_taken`); `--mode multi` creates a
+multi-writer journal (#241). `parosctl journal delete acme orders` tombstones
+the journal: its id is never used again, and its name is free. `parosctl
+journal list acme` folds the tenant's control journal.
 
 **Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
 stands for every founding member, and each server's node id is learned from its own
@@ -145,7 +164,9 @@ for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=node$i parosd &
 done
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
-parosctl init --members "$PAROSCTL_SERVERS"   # prints journals=T/J
+parosctl init --members "$PAROSCTL_SERVERS"
+parosctl tenant create acme
+parosctl journal create acme orders   # prints journal=T/J
 parosctl write T/J hello world --leader 7
 parosctl read T/J
 ```
@@ -254,7 +275,8 @@ and both required: there is no default tenant and no fixed id (#235,
 | command | what it does |
 |---|---|
 | `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
-| `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
+| `parosctl tenant create <name> [--survives az\|region]`, `parosctl tenant delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
+| `parosctl journal create <tenant> <name> [--mode single\|multi] [--desired double\|…]`, `parosctl journal delete <tenant> <name>`, `parosctl journal list <tenant>` | creates or deletes a tenant's journal through the tenant coordinator, one idempotent request re-sent until decided (`created`, `deleted`, `name_taken`, `unknown_journal`, `unplaceable`); lists the tenant's control journal (#210) |
 | `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
 | `parosctl tail <journal> [--from N]` | follows the journal until interrupted |

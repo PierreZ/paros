@@ -63,6 +63,7 @@ fn register(tenant: u64, name: &[u8]) -> Vec<u8> {
         control: identifier(tenant, tenant + 1),
         name: name.to_vec(),
         cell_id: CELL,
+        survives: Survives::Az,
     })
 }
 
@@ -97,6 +98,7 @@ fn every_entry_round_trips() {
             control: identifier(0x9e37_79b9, 7),
             name: b"acme".to_vec(),
             cell_id: CELL,
+            survives: Survives::Region,
         },
         FleetCommand::MarkTenant {
             tenant: TenantId(300),
@@ -307,6 +309,7 @@ fn a_users_tenant_id_and_name_are_checked_at_registration() {
                 control: cell_control(),
                 name: b"acme".to_vec(),
                 cell_id: CELL,
+                survives: Survives::Az,
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {

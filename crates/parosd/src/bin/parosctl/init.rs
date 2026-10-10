@@ -99,13 +99,6 @@ pub async fn run(
     };
     match initialize::initialize(providers, rpc, members, connect, params).await {
         InitRun::Initialized(done) => {
-            if !done.users.is_empty() {
-                note(&format!(
-                    "formed cell {} over {} members",
-                    done.journals.cell_id,
-                    done.servers.len()
-                ));
-            }
             print_initialized(out, &done);
             Ending::Success
         }
@@ -164,17 +157,15 @@ fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
     }
 }
 
-/// Print an initialized fleet: every identifier, the only time the user
-/// journals are named.
+/// Print an initialized fleet: every control journal's identifier.
 fn print_initialized(out: &Printer, done: &Initialized) {
     let journals = done.journals;
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
     let election = journals.election.map(|e| e.to_string()).unwrap_or_default();
-    let users: Vec<String> = done.users.iter().map(ToString::to_string).collect();
     out.emit(
         || {
             format!(
-                "initialized fleet={} cell={} coordinator={} members={} control={} election={} fleet_control={} journals={} steps={}",
+                "initialized fleet={} cell={} coordinator={} members={} control={} election={} fleet_control={} steps={}",
                 done.fleet_id,
                 journals.cell_id,
                 done.coordinator.0,
@@ -182,7 +173,6 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                 journals.cell,
                 election,
                 fleet_control,
-                users.join(","),
                 steps(&done.steps).join(",")
             )
         },
@@ -196,7 +186,6 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                 "control": journals.cell.to_string(),
                 "election": election,
                 "fleet_control": fleet_control,
-                "journals": users,
                 "members": done
                     .servers
                     .iter()

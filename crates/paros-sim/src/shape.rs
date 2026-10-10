@@ -592,22 +592,19 @@ pub(crate) struct JournalPlan {
 }
 
 /// Every identifier the run names (`docs/architecture.md` §3.8: no identifier is
-/// fixed), drawn once per seed: the deployment's journal and the system
-/// journals (the directory — a user tenant's control journal — and the
-/// joiners' registry). Each a random tenant and a random journal, both set;
-/// no two share a tenant except the main journal and the directory, which
-/// belong to the one user tenant. The cell's id, its control journal and the
-/// fleet tenant's are not the harness's: `init` draws them on a machine
-/// (#246), and every process learns them.
+/// fixed), drawn once per seed: the deployment's journal and the joiners'
+/// registry. Each a random tenant and a random journal, both set; the two
+/// never share a tenant. The cell's id, its control journal, the fleet
+/// tenant's and every tenant's control journal are not the harness's:
+/// `init` and tenant creation draw them on a machine (#246, #210), and every
+/// process learns them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Identifiers {
     /// The deployment's journal.
     pub(crate) main: JournalIdentifier,
-    /// The directory: the main journal's tenant's control journal.
-    pub(crate) directory: JournalIdentifier,
     /// The node registry the joiners register in (#189): a harness journal
-    /// on the acceptors until #210 and #211 make it the cell control
-    /// journal the machines serve.
+    /// on the acceptors until #211 makes it the cell control journal the
+    /// machines serve.
     pub(crate) registry: JournalIdentifier,
 }
 
@@ -624,24 +621,12 @@ pub(crate) fn identifiers(state: &StateHandle) -> Identifiers {
     *guard.identifiers.get_or_insert_with(|| {
         let users = TenantId(draw_id());
         let main = JournalIdentifier::new(users, JournalId(draw_id()));
-        let mut directory = JournalIdentifier::new(users, JournalId(draw_id()));
-        while directory == main {
-            directory = JournalIdentifier::new(users, JournalId(draw_id()));
+        let mut tenant = TenantId(draw_id());
+        while tenant == users {
+            tenant = TenantId(draw_id());
         }
-        let mut tenants = vec![users];
-        let mut fresh = || loop {
-            let tenant = TenantId(draw_id());
-            if !tenants.contains(&tenant) {
-                tenants.push(tenant);
-                break JournalIdentifier::new(tenant, JournalId(draw_id()));
-            }
-        };
-        let registry = fresh();
-        Identifiers {
-            main,
-            directory,
-            registry,
-        }
+        let registry = JournalIdentifier::new(tenant, JournalId(draw_id()));
+        Identifiers { main, registry }
     })
 }
 
@@ -880,8 +865,8 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
     (0..pool.min(SEED_COUNT) as u64).collect()
 }
 
-/// Whether the run runs the **system journals** (#189) — the directory and
-/// the node registry on the seeds, every node following them, and the
+/// Whether the run runs the **system journals** (#189) — the node registry
+/// on the seeds, every node following them, and the
 /// joiners joining the pool through the registry — drawn once per seed: a
 /// seeded coin. Deployment shape: half the seeds keep #188's static
 /// deployment. On a
@@ -965,9 +950,6 @@ pub(crate) struct MachineLayout {
     pub(crate) founders: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
-    /// How many user journals a formed cell serves beside its control
-    /// journals (the static assignment, until #212).
-    pub(crate) assignment: usize,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
@@ -976,9 +958,8 @@ pub(crate) struct MachineLayout {
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
-/// floor 1, as a joiner's); the assignment one more (default 1, `parosd`'s;
-/// extreme 0..=2: a cell of control journals alone, or two user journals
-/// beside them).
+/// floor 1, as a joiner's). A formed cell serves its control journals and
+/// whatever its tenants create (#210).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     let registry = registry(state);
@@ -992,7 +973,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 moonpool_sim::sim_random_range(1..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
-            let assignment = buggify_knob!(1_usize, 0_usize..3_usize);
             let machines = (0..count)
                 .map(|rank| {
                     let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {
@@ -1016,11 +996,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 "machine: a layout's founding members are machines of it",
                 { "count" => count, "founders" => founders }
             );
-            MachineLayout {
-                founders,
-                machines,
-                assignment,
-            }
+            MachineLayout { founders, machines }
         })
         .clone()
 }

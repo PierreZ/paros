@@ -100,7 +100,6 @@ pub(super) async fn propose<P: Providers>(
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
     promised: Ballot,
-    assignment: usize,
     request: wire::CellInit,
     tunables: &DriverTunables,
 ) -> Result<CellPlan, &'static str> {
@@ -131,11 +130,7 @@ pub(super) async fn propose<P: Providers>(
             floor.is_none_or(|floor| ballot > floor),
             "a reopened decree opens above the promise that refused it"
         );
-        match attempt(
-            providers, rpc, facts, assignment, &members, ballot, tunables,
-        )
-        .await
-        {
+        match attempt(providers, rpc, facts, &members, ballot, tunables).await {
             Attempt::Chosen(plan) => {
                 assert!(
                     plan.addrs().into_iter().eq(members.iter().copied()),
@@ -182,7 +177,6 @@ async fn attempt<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
-    assignment: usize,
     members: &[SocketAddr],
     ballot: Ballot,
     tunables: &DriverTunables,
@@ -224,7 +218,7 @@ async fn attempt<P: Providers>(
         // One machine answering at two listed addresses.
         return Attempt::Failed("malformed");
     }
-    let Some(proposal) = draw_plan(providers, &identities, assignment) else {
+    let Some(proposal) = draw_plan(providers, &identities) else {
         return Attempt::Failed("malformed");
     };
     let n = members.len();
@@ -378,13 +372,13 @@ async fn attempt<P: Providers>(
 }
 
 /// A fresh plan over the machines that answered: the cell's id and every
-/// identifier drawn (§3.8) — the cell tenant's control journal, the fleet
-/// tenant's (this cell hosts it: the fleet's first), and the static user
-/// journals under one drawn user tenant.
+/// identifier drawn (§3.8) — the cell tenant's control and election
+/// journals, and the fleet tenant's (this cell hosts it: the fleet's first).
+/// No user journal: a tenant creates its journals through its coordinator
+/// (#210).
 fn draw_plan<P: Providers>(
     providers: &P,
     identities: &BTreeMap<SocketAddr, NodeId>,
-    assignment: usize,
 ) -> Option<CellPlan> {
     let mut members: Vec<(NodeId, SocketAddr)> =
         identities.iter().map(|(addr, id)| (*id, *addr)).collect();
@@ -392,15 +386,7 @@ fn draw_plan<P: Providers>(
     let control = draw_identifier(providers);
     let election = JournalIdentifier::new(control.tenant, draw_identifier(providers).journal);
     let fleet = draw_identifier(providers);
-    let users = draw_identifier(providers).tenant;
-    let mut journals: BTreeSet<JournalIdentifier> =
-        [control, election, fleet].into_iter().collect();
-    while journals.len() < 3 + assignment {
-        journals.insert(JournalIdentifier::new(
-            users,
-            draw_identifier(providers).journal,
-        ));
-    }
+    let journals: BTreeSet<JournalIdentifier> = [control, election, fleet].into_iter().collect();
     let plan = CellPlan {
         cell_id: draw_nonzero(providers),
         members,

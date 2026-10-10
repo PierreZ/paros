@@ -4,29 +4,27 @@ package paros.system.v1;
 
 import "common.proto";
 
-// The entries of the two system journals (#189). Each is one record of an
-// `Append`, and a system journal's slot holds exactly one: the slot is the
-// entry's identity. The core keeps them opaque like every user entry; only
-// `paros::system` reads them, and every node folds them the same way.
+// The entries of the cell control journal (#189), the node registry: the
+// cell tenant's control journal (#211, #235). Each is one record of a
+// `Write`, and a slot holds exactly one: the slot is the entry's identity.
+// The core keeps them opaque like every user entry; only `paros::system`
+// reads them, and every node folds them the same way. A tenant's journals
+// live in its own control journal (`tenant.proto`, #210).
 //
-// The **directory**, a tenant's control journal (#235): `CreateJournal` and
-// `DeleteJournal`. A created journal's id is random, drawn by its creator
-// and checked here at apply: an id already used is refused and the creator
-// redraws. An id is never reused. No id is fixed or reserved (§3.8).
-//
-// The **node registry**, the cell tenant's control journal (#211): keyed by
-// `node_id` (random, minted at format), `RegisterNode` (a first registration,
-// or a re-registration of the same node: a reboot), `DrainNode`,
-// `RetireNode`, and the capacity bookings `BookCapacity` / `ReleaseCapacity`
-// the cell coordinator writes, and the cell's side of the fleet (#229):
-// `JoinFleet`, `HostTenant` and `DropTenant`. The node pool is the genesis pool plus every
-// registered node not yet retired. The registry is checkpointed with
-// `paros::client::checkpoint` (#230): `RegistryState` is the checkpoint's
-// state, the latest entry per `node_id` and every live booking.
+// Keyed by `node_id` (random, minted at format): `RegisterNode` (a first
+// registration, or a re-registration of the same node: a reboot),
+// `DrainNode`, `RetireNode`, and the capacity bookings `BookCapacity` /
+// `ReleaseCapacity` the cell coordinator writes, and the cell's side of the
+// fleet (#229): `JoinFleet`, `HostTenant` and `DropTenant`. The node pool is
+// the founding members plus every registered node not yet retired. The
+// registry is checkpointed with `paros::client::checkpoint` (#230):
+// `RegistryState` is the checkpoint's state, the latest entry per `node_id`
+// and every live booking.
 message SystemEntry {
+  // 1 and 2 were the directory's `CreateJournal` and `DeleteJournal`,
+  // moved to each tenant's control journal (#210).
+  reserved 1, 2;
   oneof kind {
-    CreateJournal create_journal = 1;
-    DeleteJournal delete_journal = 2;
     RegisterNode register_node = 3;
     DrainNode drain_node = 4;
     RetireNode retire_node = 5;
@@ -36,22 +34,6 @@ message SystemEntry {
     HostTenant host_tenant = 9;
     DropTenant drop_tenant = 10;
   }
-}
-
-// Create journal `id` named `name` (opaque bytes) over `config`, its static
-// acceptor configuration. Of two creates with one name, or one id, the
-// lower slot wins.
-message CreateJournal {
-  bytes name = 1;
-  paros.common.v1.AcceptorConfig config = 2;
-  uint64 id = 3;
-  // Who may write the journal (#241), fixed for its life.
-  paros.common.v1.WriterMode mode = 4;
-}
-
-// Delete journal `id`: a tombstone, never a reuse.
-message DeleteJournal {
-  uint64 id = 1;
 }
 
 // Add node `id`, reachable at `addr`, to the pool, as a machine of `class`
@@ -105,11 +87,16 @@ message JoinFleet {
 }
 
 // Tenant creation's cell step: the cell hosts tenant `tenant` (#229). The
-// fleet named must be the one the cell joined. Booking the tenant's minimum
-// footprint and writing its control journal are #210 and #225.
+// fleet named must be the one the cell joined. It records the tenant's
+// control journal (#210), where the cell's machines learn its journals, and
+// the name and `survives` (1 az, 2 region) its first coordinator describes
+// it with. Booking the tenant's minimum footprint is #212.
 message HostTenant {
   uint64 fleet_id = 1;
   uint64 tenant = 2;
+  uint64 control_journal = 3;
+  bytes name = 4;
+  uint32 survives = 5;
 }
 
 // Tenant removal's cell step: the cell forgets tenant `tenant`, for good —
@@ -130,10 +117,19 @@ message RegistryState {
   uint64 fleet_id = 3;
   uint64 cell_id = 4;
   uint32 version = 5;
-  // The tenants the cell hosts, in id order.
-  repeated uint64 tenants = 6;
+  // 6 was the hosted tenants' ids, replaced by `hosted` (#210).
+  reserved 6;
   // The tenants the cell dropped, in id order: never hosted again.
   repeated uint64 dropped = 7;
+  // The tenants the cell hosts, in id order (#210).
+  repeated HostedTenantState hosted = 8;
+}
+
+message HostedTenantState {
+  uint64 tenant = 1;
+  uint64 control_journal = 2;
+  bytes name = 3;
+  uint32 survives = 4;
 }
 
 message RegisteredNodeState {

@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, NodeId};
+use paros_core::NodeId;
 
 use super::Client;
 use super::bootstrap::{self, InitOutcome};
@@ -68,9 +68,6 @@ pub struct Initialized {
     pub servers: Vec<(u64, SocketAddr)>,
     /// The control journals, learned from the plan or `Inspect`.
     pub journals: ControlJournals,
-    /// The static assignment's user journals, known only to the run that
-    /// formed the cell (the only time they are printed).
-    pub users: Vec<JournalIdentifier>,
     /// The fleet steps this run wrote, in order.
     pub steps: Vec<Stage>,
 }
@@ -121,15 +118,8 @@ pub struct InitParams {
     pub leader_seed: u128,
 }
 
-/// What a found cell is: its servers, its members, its control journals
-/// and its user journals (none: only the run that formed the cell knows
-/// them).
-type Found = (
-    Vec<(u64, SocketAddr)>,
-    Vec<u64>,
-    ControlJournals,
-    Vec<JournalIdentifier>,
-);
+/// What a found cell is: its servers, its members and its control journals.
+type Found = (Vec<(u64, SocketAddr)>, Vec<u64>, ControlJournals);
 
 /// A cell an earlier run formed, learned from its servers: their ids and
 /// its control journals from a node-only `Inspect` (no identifier is fixed,
@@ -165,7 +155,7 @@ async fn found<P: Providers>(
     if members.is_empty() {
         return Err(Unreachable::NoMembers);
     }
-    Ok((servers, members, journals, Vec::new()))
+    Ok((servers, members, journals))
 }
 
 /// Wait up to `patience` for the cell's coordinator: the cell control
@@ -235,7 +225,7 @@ pub async fn initialize<P: Providers>(
             InitOutcome::NotWaiting => {}
         }
     }
-    let (servers, members, journals, users) = match formation {
+    let (servers, members, journals) = match formation {
         Some(plan) => {
             let servers: Vec<(u64, SocketAddr)> = plan
                 .members
@@ -250,7 +240,7 @@ pub async fn initialize<P: Providers>(
                 plan.journals.contains(&fleet_control),
                 "the plan serves its fleet journal"
             );
-            (servers, ids, plan.control_journals(), plan.users())
+            (servers, ids, plan.control_journals())
         }
         // Every listed machine is formed (a re-run after its formation):
         // learn the cell from them.
@@ -284,7 +274,6 @@ pub async fn initialize<P: Providers>(
                 members,
                 servers,
                 journals,
-                users,
                 steps: run.steps,
             };
             assert_ne!(initialized.fleet_id, 0, "a recorded fleet id is set");

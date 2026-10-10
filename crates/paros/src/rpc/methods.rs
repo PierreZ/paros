@@ -150,3 +150,9 @@ well_known_method!(
     AdmitRpc, 0x5041_0306, machine::Admit => machine::AdmitAck,
     "paros.machine.Admit"
 );
+well_known_method!(
+    /// A tenant's journal create or delete, sent to the tenant coordinator
+    /// (#210).
+    JournalRequestRpc, 0x5041_0307, machine::JournalRequest => machine::JournalRequestAck,
+    "paros.machine.JournalRequest"
+);

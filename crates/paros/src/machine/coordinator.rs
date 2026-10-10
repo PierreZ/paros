@@ -19,33 +19,50 @@
 //! 4. **Stop at the first refused write**: a claim that loses ends the term,
 //!    and the coordinator resigns. Its writer sends nothing once superseded.
 //!
+//! For a term it served, the coordinator also acts as the **tenant
+//! coordinator** of every tenant its cell hosts (#210, until #212 and
+//! #225): it answers the journal requests sent to the interface it
+//! published, writing each tenant's control journal under its term uuid
+//! ([`super::tenants`]). A machine that serves no term answers
+//! `not_coordinator`.
+//!
 //! Until admin calls become requests to the coordinator (#212, #225), an
 //! admin session still claims the cell control journal and fences the
-//! coordinator. The coordinator does not fight back: it writes only when a
-//! term starts.
+//! coordinator. The coordinator does not fight back: it writes the cell
+//! control journal only when a term starts.
 //!
-//! The candidate draws no randomness of its own: its seed and its two
-//! BUGGIFY decisions (a stalled leader, a hand-off) are drawn on the node
-//! loop before the task starts, and the backoff jitter derives from the seed.
+//! The candidate draws no randomness of its own: its seed and its three
+//! BUGGIFY decisions (a stalled leader, a hand-off, a reused journal id) are
+//! drawn on the node loop before the task starts, and the backoff jitter and
+//! the journal ids derive from the seed.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
+use moonpool_core::{
+    Detach, Providers, RandomProvider, SimulationResult, TaskProvider, TimeProvider,
+};
 use moonpool_rpc::RpcHandle;
-use paros_core::NodeId;
+use paros_core::{LeaderUuid, NodeId};
 use tokio_util::sync::CancellationToken;
 
+use super::tenants::TenantDesk;
 use super::{CellPlan, ControlJournals, FormedCell};
 use crate::DriverTunables;
 use crate::client::cell::CellSession;
 use crate::client::checkpoint::CheckpointPolicy;
 use crate::client::election::{Candidate, Election, ElectionTunables, Leader, Step, hand_off};
 use crate::client::fleet::{Interrupted, Stage, Step as FleetStep};
+use crate::client::journals::{JournalAnswer, JournalRequest};
 use crate::client::{CallObserver, ClaimOutcome, Client, ClientTunables, Server};
-use crate::rpc::NodeClient;
+use crate::rpc::machine as wire;
+use crate::rpc::methods::JournalRequestRpc;
+use crate::rpc::{Inbound, NodeClient, serve_well_known};
 use crate::system::NodeStanding;
+
+/// The journal requests' endpoint (#210).
+type Requests = Inbound<JournalRequestRpc, wire::JournalRequest, wire::JournalRequestAck>;
 
 /// What serving one term's duties came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,12 +177,20 @@ struct Candidacy {
     /// The leader hands its first term on to another founding member after
     /// its duties (a BUGGIFY decision).
     hand_off: bool,
+    /// The tenant coordinator reuses a taken journal id at its first create
+    /// that can (a BUGGIFY decision): the fold must refuse it.
+    reuse: bool,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
-/// coordinator, in a task that stops with `shutdown`. Draws its seed and its
-/// BUGGIFY decisions here, on the node loop. Nothing starts when the plan
-/// names no election journal or the tunables are not a working election.
+/// coordinator, in a task that stops with `shutdown`, and serve the journal
+/// requests (#210) there. Draws its seed and its BUGGIFY decisions here, on
+/// the node loop. Nothing starts when the plan names no election journal or
+/// the tunables are not a working election.
+///
+/// # Errors
+///
+/// The requests' endpoint could not be registered.
 pub(crate) fn spawn<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -173,11 +198,12 @@ pub(crate) fn spawn<P: Providers>(
     tunables: &DriverTunables,
     observer: Option<Arc<dyn CallObserver>>,
     shutdown: CancellationToken,
-) {
+) -> SimulationResult<()> {
     let election = election_tunables(tunables);
     if !election.is_valid() || !formed.plan.election.is_set() {
-        return;
+        return Ok(());
     }
+    let requests = Inbound::plain(serve_well_known::<P, JournalRequestRpc>(rpc)?);
     let candidacy = Candidacy {
         me: formed.facts.node_id,
         addr: formed.facts.addr,
@@ -186,6 +212,7 @@ pub(crate) fn spawn<P: Providers>(
         tunables: election,
         stall: moonpool_buggify::buggify_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
+        reuse: moonpool_buggify::buggify_with_prob!(0.3),
     };
     let mut client = cell_client(providers, rpc, &formed.plan).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -197,9 +224,17 @@ pub(crate) fn spawn<P: Providers>(
         .task()
         .spawn_task(
             "paros-cell-coordinator",
-            campaign(providers.clone(), rpc, client, candidacy, shutdown),
+            campaign(
+                providers.clone(),
+                rpc,
+                client,
+                candidacy,
+                requests,
+                shutdown,
+            ),
         )
         .detach();
+    Ok(())
 }
 
 /// A jitter in `[0, lease / 2]` derived from `seed` and the step count.
@@ -233,14 +268,15 @@ fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
         })
 }
 
-/// The candidate's loop: step the election, serve every term it wins, and
-/// stop with `shutdown`.
+/// The candidate's loop: step the election, serve every term it wins,
+/// answer the journal requests between steps, and stop with `shutdown`.
 #[tracing::instrument(level = "debug", skip_all, fields(node = candidacy.me.0, cell = candidacy.plan.cell_id))]
 async fn campaign<P: Providers>(
     providers: P,
     rpc: RpcHandle<P>,
     client: Client<P>,
     candidacy: Candidacy,
+    mut requests: Requests,
     shutdown: CancellationToken,
 ) {
     let Candidacy {
@@ -251,7 +287,9 @@ async fn campaign<P: Providers>(
         tunables,
         mut stall,
         hand_off: mut handing,
+        mut reuse,
     } = candidacy;
+    let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
     let founders = plan.members.clone();
     let policy = client.tunables().checkpoint_policy();
@@ -268,6 +306,18 @@ async fn campaign<P: Providers>(
     );
     // The term whose duties are done.
     let mut served: Option<u64> = None;
+    // The tenant coordinator of the term served, while it leads it.
+    let mut desk: Option<(u64, TenantDesk)> = None;
+    let open_desk = |term: u64, uuid: LeaderUuid, reuse: &mut bool| {
+        let desk = TenantDesk::new(
+            uuid,
+            journals.cell,
+            &founder_ids,
+            (seed ^ u128::from(term), std::mem::take(reuse)),
+            policy,
+        );
+        (term, desk)
+    };
     let mut steps = 0_u64;
     while !shutdown.is_cancelled() {
         steps += 1;
@@ -285,9 +335,11 @@ async fn campaign<P: Providers>(
                 match duty {
                     TermDuty::Served { .. } => {
                         served = Some(leader.term);
+                        desk = Some(open_desk(leader.term, leader.uuid, &mut reuse));
                         election.publish(addr.to_string());
                     }
                     TermDuty::Refused => {
+                        desk = None;
                         election.resign(None).await;
                     }
                     TermDuty::Unavailable => {}
@@ -295,6 +347,7 @@ async fn campaign<P: Providers>(
             }
             Step::Leading { leader, .. } if handing => {
                 handing = false;
+                desk = None;
                 if let Some(next) = successor(&plan, me)
                     && let Some(uuid) = election.resign(Some(next)).await
                 {
@@ -316,13 +369,49 @@ async fn campaign<P: Providers>(
             }
             Step::Deposed { .. } => {
                 served = None;
+                desk = None;
                 moonpool_assertions::reachable!(
                     "coordinator: a deposed coordinator stopped acting"
                 );
             }
-            Step::Leading { .. } | Step::Following { .. } => {}
+            Step::Following { .. } => desk = None,
+            Step::Leading { .. } => {}
         }
-        let _ = providers.time().sleep(pace).await;
+        // Answer the journal requests until the next step is due.
+        let wake = providers.time().sleep(pace);
+        answer_requests(wake, &mut requests, &mut desk, &client, &shutdown).await;
+    }
+}
+
+/// Answer the journal requests on `requests` until `wake` fires: through
+/// `desk` while this member serves a term, `not_coordinator` otherwise.
+async fn answer_requests<P: Providers, F: std::future::Future>(
+    wake: F,
+    requests: &mut Requests,
+    desk: &mut Option<(u64, TenantDesk)>,
+    client: &Client<P>,
+    shutdown: &CancellationToken,
+) {
+    let mut wake = std::pin::pin!(wake);
+    loop {
+        moonpool_core::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            _ = &mut wake => return,
+            Some((request, reply)) = requests.recv() => {
+                let answer = match (JournalRequest::from_wire(&request), desk.as_mut()) {
+                    (Err(_), _) => JournalAnswer::Malformed,
+                    (Ok(request), Some((_, desk))) => desk.answer(client, &request).await,
+                    (Ok(_), None) => {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a request to a machine serving no term is refused"
+                        );
+                        JournalAnswer::NotCoordinator
+                    }
+                };
+                reply.send(answer.to_wire());
+            }
+        }
     }
 }
 

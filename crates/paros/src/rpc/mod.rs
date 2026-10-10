@@ -36,9 +36,9 @@ pub mod matchmaker {
     include!(concat!(env!("OUT_DIR"), "/paros.matchmaker.v1.rs"));
 }
 
-/// The system journals' entries (#189), generated from
-/// `proto/system.proto`: one record per slot of the directory or
-/// the node registry (two tenants' control journals, #235), read by `paros::system`.
+/// The cell control journal's entries (#189), generated from
+/// `proto/system.proto`: one record per slot of the node registry (the cell
+/// tenant's control journal, #235), read by `paros::system`.
 pub mod system {
     #![allow(missing_docs, clippy::pedantic)]
     include!(concat!(env!("OUT_DIR"), "/paros.system.v1.rs"));
@@ -69,6 +69,13 @@ pub mod checkpoint {
 pub mod election {
     #![allow(missing_docs, clippy::pedantic)]
     include!(concat!(env!("OUT_DIR"), "/paros.election.v1.rs"));
+}
+
+/// A tenant's control journal entries (#210), generated from
+/// `proto/tenant.proto`: read by `paros::tenant`.
+pub mod tenant {
+    #![allow(missing_docs, clippy::pedantic)]
+    include!(concat!(env!("OUT_DIR"), "/paros.tenant.v1.rs"));
 }
 
 mod client;

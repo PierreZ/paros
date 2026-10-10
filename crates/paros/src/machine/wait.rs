@@ -94,9 +94,6 @@ type Proposal<'a> = (
 /// machine forms — it accepted a `FormCell` and no `CellInit` it drives is
 /// still in flight — or a cell admits it, and return how it joined, or
 /// `None` on `shutdown`.
-/// `assignment` is how many user journals a cell this machine draws serves
-/// beside its control journals — the static assignment, until #212 — each
-/// under an identifier `cell init` draws.
 ///
 /// # Errors
 ///
@@ -110,7 +107,6 @@ type Proposal<'a> = (
 pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     providers: P,
     facts: &MachineFacts,
-    assignment: usize,
     ledger: &mut L,
     tunables: &DriverTunables,
     shutdown: CancellationToken,
@@ -189,7 +185,6 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
                         &rpc,
                         facts,
                         ledger.promised(),
-                        assignment,
                         request,
                         tunables,
                     );

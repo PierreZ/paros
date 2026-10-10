@@ -357,6 +357,7 @@ async fn run_machine_role(
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+                    .with_tenants(crate::audit::tenants::tenant_board(&state))
                     .with_calls(Arc::new(
                         crate::chain_workload::system::Announce::of_machine(
                             &state,
@@ -368,6 +369,7 @@ async fn run_machine_role(
             AuditScope::Journal(journal) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
                     .in_journal(journal, journal_board(&state))
+                    .with_tenants(crate::audit::tenants::tenant_board(&state))
             }
         }
     };
@@ -378,7 +380,6 @@ async fn run_machine_role(
             &audits,
             &settings,
             addr,
-            layout.assignment,
             tunables,
             ctx.shutdown().clone(),
         ))

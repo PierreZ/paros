@@ -43,7 +43,9 @@ A cell of five machines with Docker alone, from a fresh clone:
 
 ```sh
 docker compose up -d --build
-docker compose run --rm init        # prints journals=T/J
+docker compose run --rm init
+docker compose run --rm parosctl tenant create acme
+docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
 docker compose run --rm parosctl write T/J hello world --leader 7
 docker compose run --rm parosctl read T/J
 ```

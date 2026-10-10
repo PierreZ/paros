@@ -142,8 +142,7 @@ impl FleetOps {
         self.note_learned(
             [Some(journals.cell), journals.fleet, journals.election]
                 .into_iter()
-                .flatten()
-                .chain(initialized.users.iter().copied()),
+                .flatten(),
         );
         assert_always!(
             crate::machine::formed_cell(ctx.state()) == Some(journals),

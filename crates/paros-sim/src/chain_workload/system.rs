@@ -1,10 +1,10 @@
-//! The chain client's **system-journal operations** (#189): the directory's
-//! `CreateJournal` / `DeleteJournal` and the node registry's
-//! `RegisterNode` / `DrainNode` / `RetireNode`, each one record written to
-//! the directory or the registry (two tenants' control journals, #235) at a
-//! seed, and the read-back a creator does to learn what its request folded
-//! to. A create names the journal id it drew (#235) and redraws once when
-//! the directory refuses it as taken.
+//! The chain client's **system-journal operations** (#189): the node
+//! registry's `RegisterNode` / `DrainNode` / `RetireNode`, its capacity
+//! bookings and its checkpoint, each one record written to the registry (a
+//! harness tenant's control journal on the acceptors, #235) at a seed, and
+//! the read-back a writer does to learn what its request folded to. A
+//! tenant's journals are created and deleted on the machines, through the
+//! tenant coordinator (#210, `super::fleet::journals`).
 //!
 //! A system journal is written like any journal (#204): a writer claims it
 //! with `SetLeader` against the leader it read, then `Write`s at the
@@ -40,13 +40,9 @@ use paros::client::checkpoint::{
 };
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
-    Class, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, Registry, RegistryEvent,
-    SystemCommand, SystemEvent, registry_event,
+    Class, NodeStanding, Registry, RegistryEvent, SystemCommand, SystemEvent, registry_event,
 };
-use paros::{
-    AcceptorConfig, Command, Entry, JournalId, JournalIdentifier, LeaderUuid, NodeId, QuorumSystem,
-    Seq, Value,
-};
+use paros::{Command, Entry, JournalIdentifier, LeaderUuid, NodeId, Seq, Value};
 
 use paros::client::{ReadOutcome, SetLeaderOutcome, WriteOutcome};
 
@@ -57,19 +53,9 @@ use crate::chain::user_command_hash;
 use crate::client::ChainClient;
 use crate::shape::JoinerMachine;
 
-/// A journal id spread from one draw (#235: ids are random, never a log
-/// position; no range is reserved, §3.8): any set id.
-fn drawn_id(draw: u64) -> JournalId {
-    JournalId(crate::chain::splitmix(draw).max(1))
-}
-
 /// How many asks a system write spends before it calls the outcome
 /// ambiguous.
 const APPEND_ATTEMPTS: usize = 6;
-
-/// The names a created journal is drawn from: few, so two creates race for
-/// one often.
-const NAMES: [&[u8]; 4] = [b"alpha", b"beta", b"gamma", b"delta"];
 
 /// A read-back page's record budget.
 const READ_RECORDS: u64 = 256;
@@ -88,9 +74,8 @@ enum Appended {
 pub(super) struct SystemOps {
     /// The run runs the system journals.
     active: bool,
-    /// The directory's identifier (drawn per seed: no identifier is fixed, §3.8).
-    directory: JournalIdentifier,
-    /// The registry's identifier.
+    /// The registry's identifier (drawn per seed: no identifier is fixed,
+    /// §3.8).
     registry: JournalIdentifier,
     /// The deployment's journal.
     main: JournalIdentifier,
@@ -100,8 +85,6 @@ pub(super) struct SystemOps {
     pool: usize,
     /// The joiners, `(id, address, machine)`.
     joiners: Vec<(NodeId, String, JoinerMachine)>,
-    /// The genesis journals: identifiers the directory never allocates.
-    genesis: Vec<JournalIdentifier>,
     /// A registered joiner joins the default journal as a spare (a seed with
     /// matchmakers and neither proxies nor replicas, `process::spare_template`),
     /// so a reconfiguration may name one.
@@ -109,11 +92,6 @@ pub(super) struct SystemOps {
     client_id: u64,
     /// A fresh seed per claim and checkpointer (#241).
     leader_seeds: super::LeaderSeeds,
-    /// Journals this client created (ids in the directory's tenant) and has
-    /// not asked to delete.
-    created: Vec<JournalId>,
-    /// Every id this client ever had created: a deliberate reuse names one.
-    ever_created: Vec<JournalId>,
     /// The bookings this client made and has not released.
     booked: Vec<u64>,
     timeout: Duration,
@@ -352,13 +330,11 @@ impl CallObserver for Announce {
 
 impl SystemOps {
     /// The operations of client `client_id` on `deployment`: `active` when
-    /// the run runs the system journals, `genesis` the journals it booted
-    /// with.
+    /// the run runs the system journals.
     pub(super) fn new(
         deployment: &crate::roles::Deployment,
         identifiers: crate::shape::Identifiers,
         active: bool,
-        genesis: Vec<JournalIdentifier>,
         machines: &[JoinerMachine],
         (client_id, leader_seeds): (u64, super::LeaderSeeds),
         timeout: Duration,
@@ -367,7 +343,6 @@ impl SystemOps {
         let matchmakers = !deployment.matchmakers().is_empty();
         Self {
             active,
-            directory: identifiers.directory,
             registry: identifiers.registry,
             main: identifiers.main,
             seeds: crate::shape::seed_ranks(pool).len().max(1),
@@ -383,22 +358,14 @@ impl SystemOps {
                         .map(|addr| (crate::roles::joiner_node_id(rank), addr, *machine))
                 })
                 .collect(),
-            genesis,
             spares: matchmakers
                 && deployment.proxies().is_empty()
                 && deployment.replicas().is_empty(),
             client_id,
             leader_seeds,
-            created: Vec::new(),
-            ever_created: Vec::new(),
             booked: Vec::new(),
             timeout,
         }
-    }
-
-    /// Whether `journal` is one of the two system journals.
-    fn is_system(&self, journal: JournalIdentifier) -> bool {
-        journal == self.directory || journal == self.registry
     }
 
     /// The genesis pool's registry, empty.
@@ -442,9 +409,7 @@ impl SystemOps {
     /// `targets` names from the one `draw` picks: read the tail's state,
     /// `SetLeader` against its leader, then `Write` at the position the
     /// claim answered. A lost claim, a fenced write and a redirect are
-    /// retried within [`APPEND_ATTEMPTS`] asks. On a journal `created` at
-    /// runtime (every journal here but a system one) a member that has not
-    /// folded the create answers unknown, and the ask moves on.
+    /// retried within [`APPEND_ATTEMPTS`] asks.
     async fn claim_and_write(
         &mut self,
         ctx: &SimContext,
@@ -454,15 +419,9 @@ impl SystemOps {
         record: Vec<u8>,
         draw: u64,
     ) -> Appended {
-        let created = !self.is_system(journal);
         // A system journal's calls go through the seeds' client, which logs
-        // them to the control journal's history (#247); a created journal's
-        // are judged by its answers alone.
-        let caller = if created {
-            nodes.clone()
-        } else {
-            self.seed_client(ctx, nodes, journal)
-        };
+        // them to the control journal's history (#247).
+        let caller = self.seed_client(ctx, nodes, journal);
         let nodes = &caller;
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
@@ -480,21 +439,15 @@ impl SystemOps {
                 // Read where the journal stands, then claim it.
                 let read = read_once(nodes, node, journal, 0, 1, 0);
                 let answer = within(ctx, self.timeout, ReadOutcome::Ambiguous, read).await;
-                if answer == ReadOutcome::UnknownJournal && created {
-                    target += 1;
-                    continue;
-                }
                 if answer == ReadOutcome::UnknownJournal {
                     assert_always!(
-                        !self.active || !self.is_system(journal),
+                        !self.active,
                         "system: a seed serves the system journals",
                         { "journal" => journal.to_string(), "seed" => node }
                     );
-                    if self.is_system(journal) {
-                        assert_reachable!(
-                            "system: a system append on a seed without system journals is refused"
-                        );
-                    }
+                    assert_reachable!(
+                        "system: a system append on a seed without system journals is refused"
+                    );
                     return Appended::Unknown;
                 }
                 assert_always!(
@@ -506,7 +459,7 @@ impl SystemOps {
                     continue;
                 };
                 let uuid = paros::client::leader_uuid(self.leader_seeds.next(), 0);
-                let ask = set_leader_once(nodes, journal, node, (uuid, tail.leader), created);
+                let ask = set_leader_once(nodes, journal, node, (uuid, tail.leader), false);
                 match within(ctx, self.timeout, SetLeaderOutcome::Ambiguous, ask).await {
                     SetLeaderOutcome::Won { state } => {
                         claim = Some((uuid, state.next_seq.0));
@@ -530,7 +483,7 @@ impl SystemOps {
                 records: vec![Value(record.clone())],
             };
             audit.note_appended(paros::command_hash(&Command::Write(entry.clone())));
-            let write = write_once(nodes, journal, node, &entry, false, created);
+            let write = write_once(nodes, journal, node, &entry, false, false);
             match within(ctx, self.timeout, WriteOutcome::Ambiguous, write).await {
                 WriteOutcome::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
@@ -563,8 +516,8 @@ impl SystemOps {
         Appended::Ambiguous
     }
 
-    /// Read `journal` from position 0 to a seed's tail and fold it: every
-    /// event with its position, and the folds. The registry folds through a
+    /// Read the registry from position 0 to a seed's tail and fold it: every
+    /// event with its position, and the fold. It folds through a
     /// [`Folder`] (#230): a read below its floor jumps there and restarts
     /// from the checkpoint, and a checkpoint met with the whole prefix
     /// folded is verified against it. `None` when a page goes unserved, or
@@ -573,18 +526,12 @@ impl SystemOps {
         &self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        journal: JournalIdentifier,
         draw: u64,
-    ) -> Option<(Vec<(u64, SystemEvent)>, Directory, Registry)> {
+    ) -> Option<(Vec<(u64, SystemEvent)>, Registry)> {
+        let journal = self.registry;
         let seed = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
         let caller = self.seed_client(ctx, nodes, journal);
         let nodes = &caller;
-        let mut directory = Directory::new(
-            self.genesis
-                .iter()
-                .filter(|journal| journal.tenant == self.directory.tenant)
-                .map(|journal| journal.journal),
-        );
         let mut registry = Folder::new(self.empty_registry());
         let mut events = Vec::new();
         let mut from = 0;
@@ -595,9 +542,7 @@ impl SystemOps {
                     ReadOutcome::Page { records, state, .. } => (records, state),
                     // A truncation overtook the cursor: the registry's floor is
                     // its owner's checkpoint, where the fold restarts.
-                    ReadOutcome::Truncated { state }
-                        if journal == self.registry && state.first_seq.0 > from =>
-                    {
+                    ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
                         registry.jump(state.first_seq.0);
                         from = state.first_seq.0;
                         continue;
@@ -606,13 +551,6 @@ impl SystemOps {
                 };
             let next = from + records.len() as u64;
             for (position, record) in (from..).zip(&records) {
-                if journal == self.directory {
-                    events.push((
-                        position,
-                        SystemEvent::Directory(directory.fold(position, record)),
-                    ));
-                    continue;
-                }
                 let Some(folded) = registry.fold(position, record) else {
                     continue;
                 };
@@ -634,190 +572,9 @@ impl SystemOps {
                 if !registry.is_whole() {
                     return None;
                 }
-                return Some((events, directory, registry.state().clone()));
+                return Some((events, registry.state().clone()));
             }
             from = next;
-        }
-    }
-
-    /// `CREATE_JOURNAL`: create a journal named from a four-name alphabet
-    /// over three members of the pool — genesis nodes and joiners the
-    /// registry has in it — read back what the request folded to, and append
-    /// one record to a journal it created.
-    pub(super) async fn create(
-        &mut self,
-        ctx: &SimContext,
-        nodes: &ChainClient,
-        (class, payload): (u64, u64),
-    ) {
-        let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
-        let mut candidates: Vec<NodeId> = (0..self.pool as u64).map(NodeId).collect();
-        if self.active
-            && let Some((_, _, registry)) = self.read_back(ctx, nodes, self.registry, payload).await
-        {
-            // A stateless machine never takes acceptor work (#211).
-            candidates.extend(
-                registry
-                    .nodes()
-                    .filter(|(_, node)| {
-                        node.standing == NodeStanding::Registered && node.class == Class::Storage
-                    })
-                    .map(|(id, _)| id),
-            );
-        }
-        let size = candidates.len().min(3);
-        let start = usize::try_from(payload % candidates.len() as u64).unwrap_or(0);
-        let mut members: Vec<NodeId> = (0..size)
-            .map(|k| candidates[(start + k) % candidates.len()])
-            .collect();
-        // The operator who places a journal on a node before registering
-        // it — a valid order, and the one that makes a joiner speak to
-        // nodes whose registry fold has not admitted it yet: its own
-        // location. The joiner takes one seat beside two genesis nodes, so
-        // the journal elects without it.
-        if self.active && !self.joiners.is_empty() && self.pool >= 2 && buggify_with_prob!(0.25) {
-            assert_reachable!(
-                "system: a client creates a journal naming a joiner not yet registered"
-            );
-            let joiner =
-                self.joiners[usize::try_from(class % self.joiners.len() as u64).unwrap_or(0)].0;
-            // A stateless joiner named here never serves it (#211): the
-            // journal elects on its two genesis members.
-            members = vec![
-                joiner,
-                NodeId(start as u64 % self.pool as u64),
-                NodeId((start as u64 + 1) % self.pool as u64),
-            ];
-        }
-        let config = AcceptorConfig::new(members, QuorumSystem::Majority);
-        // The id is the creator's to draw (#235), off the step's draws. A
-        // deliberate reuse of an id this client had created — the collision a
-        // random u64 never makes on its own — is its own location: the
-        // directory must refuse it, and the creator redraws.
-        let reuse = !self.ever_created.is_empty() && buggify_with_prob!(0.2);
-        let mut id = if reuse {
-            assert_reachable!("system: a client creates a journal under an id it already used");
-            self.ever_created[usize::try_from(class % self.ever_created.len() as u64).unwrap_or(0)]
-        } else {
-            drawn_id(payload ^ class)
-        };
-        let mode = drawn_mode();
-        for attempt in 0..2_u64 {
-            let command = self.create_command(ctx, id, &name, &config, mode);
-            let Appended::At(position) = self
-                .append(ctx, nodes, self.directory, &command, payload)
-                .await
-            else {
-                return;
-            };
-            let Some((events, _, _)) = self.read_back(ctx, nodes, self.directory, payload).await
-            else {
-                return;
-            };
-            match events
-                .into_iter()
-                .find(|(at, _)| *at == position)
-                .map(|(_, e)| e)
-            {
-                Some(SystemEvent::Directory(DirectoryEvent::Created { id: created, .. })) => {
-                    assert_always!(
-                        created == id,
-                        "system: a created journal takes the id its creator drew",
-                        { "asked" => id.0, "created" => created.0 }
-                    );
-                    assert_reachable!("system: a client creates a journal and reads back its id");
-                    self.created.push(id);
-                    self.ever_created.push(id);
-                    let created = JournalIdentifier::new(self.directory.tenant, id);
-                    self.append_to_created(ctx, nodes, created, &config, payload)
-                        .await;
-                    return;
-                }
-                Some(SystemEvent::Directory(DirectoryEvent::Refused(
-                    DirectoryRefusal::IdTaken { .. },
-                ))) => {
-                    assert_reachable!(
-                        "system: a client redraws an id the directory refused as taken"
-                    );
-                    id = drawn_id(payload.rotate_left(17) ^ attempt ^ class.rotate_left(29));
-                }
-                Some(SystemEvent::Directory(DirectoryEvent::Refused(
-                    DirectoryRefusal::NameTaken { .. },
-                ))) => {
-                    assert_reachable!(
-                        "system: a client reads back its create refused for a taken name"
-                    );
-                    return;
-                }
-                _ => return,
-            }
-        }
-    }
-
-    /// The create of journal `id`, its mode first recorded for the audit
-    /// (#241).
-    fn create_command(
-        &self,
-        ctx: &SimContext,
-        id: JournalId,
-        name: &[u8],
-        config: &AcceptorConfig,
-        mode: paros::WriterMode,
-    ) -> SystemCommand {
-        let journal = JournalIdentifier::new(self.directory.tenant, id);
-        crate::audit::note_created_mode(ctx.state(), journal, mode);
-        SystemCommand::CreateJournal {
-            id,
-            name: name.to_vec(),
-            config: config.clone(),
-            mode,
-        }
-    }
-
-    /// One record written to a journal this client created, at a genesis
-    /// member (the client has no connection to a joiner).
-    async fn append_to_created(
-        &mut self,
-        ctx: &SimContext,
-        nodes: &ChainClient,
-        journal: JournalIdentifier,
-        config: &AcceptorConfig,
-        draw: u64,
-    ) {
-        let genesis: Vec<usize> = config
-            .members()
-            .iter()
-            .filter_map(|id| usize::try_from(id.0).ok().filter(|i| *i < self.pool))
-            .collect();
-        if genesis.is_empty() {
-            return;
-        }
-        let record = draw.to_le_bytes().to_vec();
-        if let Appended::At(_) = self
-            .claim_and_write(ctx, nodes, journal, &genesis, record, draw)
-            .await
-        {
-            assert_reachable!("system: a created journal commits an append");
-        }
-    }
-
-    /// `DELETE_JOURNAL`: tombstone a journal this client created, then ask a
-    /// genesis member for one more append to it.
-    pub(super) async fn delete(&mut self, ctx: &SimContext, nodes: &ChainClient, draw: u64) {
-        let id = if self.created.is_empty() {
-            // Nothing of its own: a delete of an id nobody created, which
-            // folds to a refusal.
-            drawn_id(draw ^ 0x00de_1e7e)
-        } else {
-            self.created
-                .remove(usize::try_from(draw % self.created.len() as u64).unwrap_or(0))
-        };
-        let command = SystemCommand::DeleteJournal { id };
-        if let Appended::At(_) = self
-            .append(ctx, nodes, self.directory, &command, draw)
-            .await
-        {
-            assert_reachable!("system: a client deletes a journal");
         }
     }
 
@@ -836,7 +593,7 @@ impl SystemOps {
         if !self.active || !self.spares || self.joiners.is_empty() {
             return Vec::new();
         }
-        let Some((_, _, registry)) = self.read_back(ctx, nodes, self.registry, draw).await else {
+        let Some((_, registry)) = self.read_back(ctx, nodes, draw).await else {
             return Vec::new();
         };
         let world = crate::world::storage_world(ctx.state());
@@ -882,15 +639,15 @@ impl SystemOps {
                 // machine lying about itself, which no registry can catch.
                 let mut class = machine.class;
                 if self.active && buggify_with_prob!(0.1) {
-                    let registered = self
-                        .read_back(ctx, nodes, self.registry, draw)
-                        .await
-                        .is_some_and(|(_, _, registry)| {
-                            registry.get(id).is_some_and(|node| {
-                                node.class == machine.class
-                                    && node.standing != NodeStanding::Retired
-                            })
-                        });
+                    let registered =
+                        self.read_back(ctx, nodes, draw)
+                            .await
+                            .is_some_and(|(_, registry)| {
+                                registry.get(id).is_some_and(|node| {
+                                    node.class == machine.class
+                                        && node.standing != NodeStanding::Retired
+                                })
+                            });
                     if registered {
                         assert_reachable!(
                             "registry: a client registers a joiner again under the other class"
@@ -911,9 +668,9 @@ impl SystemOps {
             }
             Some(standing) => {
                 let registry = if self.active {
-                    self.read_back(ctx, nodes, self.registry, draw)
+                    self.read_back(ctx, nodes, draw)
                         .await
-                        .map(|(_, _, registry)| registry)
+                        .map(|(_, registry)| registry)
                 } else {
                     None
                 };
@@ -1096,9 +853,7 @@ impl SystemOps {
         } else {
             machine.class
         };
-        let journal = self.created.first().map_or(self.main, |id| {
-            JournalIdentifier::new(self.directory.tenant, *id)
-        });
+        let journal = self.main;
         let booking = crate::chain::splitmix(draw ^ self.client_id.rotate_left(32));
         let command = SystemCommand::BookCapacity {
             booking,
@@ -1110,7 +865,7 @@ impl SystemOps {
         else {
             return;
         };
-        let Some((events, _, _)) = self.read_back(ctx, nodes, self.registry, draw).await else {
+        let Some((events, _)) = self.read_back(ctx, nodes, draw).await else {
             return;
         };
         // The class and capacity oracles judge every booking where the
@@ -1122,16 +877,6 @@ impl SystemOps {
         {
             self.booked.push(booking);
         }
-    }
-}
-
-/// The writer mode a create draws (#241): fixed for the journal's life.
-fn drawn_mode() -> paros::WriterMode {
-    if buggify_with_prob!(0.5) {
-        assert_reachable!("system: a client creates a multi-writer journal");
-        paros::WriterMode::Multi
-    } else {
-        paros::WriterMode::Single
     }
 }
 
