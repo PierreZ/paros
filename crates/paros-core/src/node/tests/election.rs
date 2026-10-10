@@ -850,3 +850,110 @@ fn campaign_above_an_overwrite_reads_both_values() {
         "P2c kept the higher ballot's value"
     );
 }
+
+/// #428 (paging livelock): while a campaign pages one peer's long suffix,
+/// every tick re-sends the campaign's `Prepare` to the peers that already
+/// answered completely, so their election clocks stay quiet; the repeated
+/// `Promise` folds as nothing. No paging, no keep-alive.
+#[test]
+fn a_paging_campaign_keeps_its_promisers_quiet() {
+    let mut nodes = cluster::<5>();
+    campaign(&mut nodes[0]);
+    nodes[0].set_election_timeout(1_000);
+    let _ = drain(&mut nodes[0]);
+    let camp = nodes[0].ballot();
+
+    // Node 1 answers at once, completely: no paging yet, so a tick sends
+    // no Prepare.
+    nodes[0].step(terminal_promise(NodeId(1), camp, BTreeMap::new()));
+    assert_eq!(nodes[0].role(), NodeRole::Candidate);
+    let _ = drain(&mut nodes[0]);
+    nodes[0].tick();
+    let quiet = drain(&mut nodes[0]);
+    assert!(
+        !quiet
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Prepare { .. })),
+        "a campaign that does not page sends no keep-alive: {quiet:?}"
+    );
+
+    // Node 2 answers one page of a longer suffix: the campaign pages it.
+    let page = BTreeMap::from([(Slot(0), (ballot(0, 2), ucmd(9, 0, 1)))]);
+    nodes[0].step(Message::Promise {
+        from: NodeId(2),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted: page,
+        faulty: BTreeMap::new(),
+        next_from_slot: Some(Slot(1)),
+    });
+    let continuation = drain(&mut nodes[0]);
+    assert!(matches!(
+        continuation.as_slice(),
+        [(
+            NodeId(2),
+            Message::Prepare {
+                from_slot: Slot(1),
+                ..
+            }
+        )]
+    ));
+
+    // A tick re-sends the campaign's Prepare to node 1 alone: the same
+    // ballot, from the campaign's first slot.
+    nodes[0].tick();
+    let keep_alive: Vec<_> = drain(&mut nodes[0])
+        .into_iter()
+        .filter(|(_, m)| matches!(m, Message::Prepare { .. }))
+        .collect();
+    assert_eq!(
+        keep_alive.len(),
+        1,
+        "one keep-alive, to node 1: {keep_alive:?}"
+    );
+    let (to, prepare) = keep_alive[0].clone();
+    assert_eq!(to, NodeId(1));
+    assert!(matches!(
+        prepare,
+        Message::Prepare { ballot, from_slot: Slot(0), .. } if ballot == camp
+    ));
+
+    // Node 1 already promised the ballot: the keep-alive resets its clock,
+    // writes nothing, and its repeated Promise counts for nothing.
+    nodes[1].step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: camp,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut nodes[1]);
+    nodes[1].tick();
+    nodes[1].tick();
+    assert_eq!(nodes[1].election_elapsed, 2);
+    nodes[1].step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: camp,
+        from_slot: Slot(0),
+        config: None,
+    });
+    assert_eq!(
+        nodes[1].election_elapsed, 0,
+        "a keep-alive resets the clock"
+    );
+    let (reply, writes) = drain_with(&mut nodes[1], |r| r.writes().len());
+    assert_eq!(writes, 0, "a re-affirmed promise writes nothing");
+    let [(NodeId(0), promise)] = reply.as_slice() else {
+        panic!("expected one Promise, got {reply:?}");
+    };
+    nodes[0].step(promise.clone());
+    assert_eq!(
+        nodes[0].role(),
+        NodeRole::Candidate,
+        "a repeat is no quorum"
+    );
+    assert_eq!(
+        nodes[0].proposer.election().map(|e| e.promised().len()),
+        Some(2),
+        "a repeated Promise counts once"
+    );
+}

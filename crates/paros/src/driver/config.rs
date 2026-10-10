@@ -69,7 +69,12 @@ pub struct DriverTunables {
     /// against its followers' election clocks every round; and, in wall-clock
     /// terms, `T × tick_interval` must exceed a Phase-1 round trip, or a
     /// candidate abandons its own round before its promises return and no
-    /// leader is ever elected.
+    /// leader is ever elected. One round trip is the floor, not the whole
+    /// Phase 1: a long suffix is paged (`promise_page` entries per round
+    /// trip), and that can take longer than `T`. Each page resets the
+    /// candidate's clock, and on every tick the candidate re-sends its
+    /// `Prepare` to the peers that answered, which resets theirs (#428
+    /// (paging livelock)).
     pub election_timeout_base: u64,
     /// Liveness ping interval on the RPC runtime's connections
     /// (`PeerPolicy::ping_interval`, provider time, so a half-open

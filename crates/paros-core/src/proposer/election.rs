@@ -202,6 +202,47 @@ impl<Id: Copy + Ord, V> Election<Id, V> {
         &self.promises.answered
     }
 
+    /// The first slot the campaign's `Prepare` covered: the cursor a first
+    /// `Promise` page carries.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn from_slot(&self) -> Slot {
+        // Every continuation cursor lies past the first slot.
+        assert!(
+            self.promises
+                .promise_next
+                .values()
+                .all(|next| *next > self.promises.from_slot),
+            "a continuation cursor lies past the first slot"
+        );
+        self.promises.from_slot
+    }
+
+    /// Whether some acceptor answered with a partial suffix and still owes
+    /// a `Promise` page: the campaign is paging (#428 (paging livelock)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn paging(&self) -> bool {
+        let paging = !self.promises.promise_next.is_empty();
+        // A sender that owes a page has not answered completely.
+        assert!(
+            self.promises
+                .promise_next
+                .keys()
+                .all(|id| !self.promises.answered.contains(id)),
+            "a paging sender has not answered completely"
+        );
+        paging
+    }
+
     /// What the promises counted so far reported, per slot: the
     /// highest-ballot accepted value each slot was seen with. Read-only —
     /// P2c runs over it when the election closes; observing it mid-campaign
