@@ -16,6 +16,7 @@ use moonpool_rpc::RpcHandle;
 use paros_core::{JournalIdentifier, TenantId};
 
 use super::{Shared, lock};
+use crate::audit::Audit;
 use crate::client::Client;
 use crate::client::bootstrap::majority_cell;
 use crate::client::fleet::read_directory;
@@ -103,6 +104,7 @@ impl<P: Providers> Routes<P> {
 async fn cell<P, A>(shared: &Shared<P, A>) -> Option<(JournalIdentifier, Client<P>)>
 where
     P: Providers,
+    A: Audit,
 {
     let rpc = {
         let routes = lock(&shared.routes);
@@ -126,7 +128,7 @@ where
     };
     assert!(!servers.is_empty(), "a majority holds at least one server");
     let count = servers.len();
-    let client = Client::connect_named(
+    let mut client = Client::connect_named(
         &shared.providers,
         &rpc,
         &settings.names,
@@ -134,6 +136,11 @@ where
         settings.client,
     )
     .rotating_over(count);
+    // A harness observes the calls the frontend forwards, as it observes
+    // its own clients' (`Audit::call_observer`); production observes none.
+    if let Some(observer) = shared.audit.call_observer() {
+        client = client.with_observer(observer);
+    }
     tracing::info!(
         cell = journals.cell_id,
         servers = count,
@@ -151,6 +158,7 @@ pub(super) async fn client_for<P, A>(
 ) -> Option<Client<P>>
 where
     P: Providers,
+    A: Audit,
 {
     let (_, client) = cell(shared).await?;
     let mut routes = lock(&shared.routes);
@@ -167,6 +175,7 @@ where
 pub(super) async fn resolve<P, A>(shared: &Shared<P, A>, name: &JournalName) -> Resolved
 where
     P: Providers,
+    A: Audit,
 {
     let Some((universe, client)) = cell(shared).await else {
         return Resolved::Unavailable;
@@ -229,6 +238,7 @@ async fn tenant<P, A>(
 ) -> Result<(TenantId, JournalIdentifier), Resolved>
 where
     P: Providers,
+    A: Audit,
 {
     if let Some(held) = lock(&shared.routes).tenants.get(name.tenant()).copied() {
         return Ok(held);

@@ -192,8 +192,8 @@ impl Process for FrontendProcess {
                 ProcessRole::Frontend(rank) => Some(rank),
                 _ => None,
             },
-            |deployment, _rank, my_ip| async move {
-                Box::pin(run_frontend_role(ctx, &deployment, &my_ip)).await
+            |deployment, rank, my_ip| async move {
+                Box::pin(run_frontend_role(ctx, &deployment, rank, &my_ip)).await
             },
         )
         .await
@@ -204,6 +204,7 @@ impl Process for FrontendProcess {
 async fn run_frontend_role(
     ctx: &SimContext,
     deployment: &crate::roles::Deployment,
+    rank: usize,
     my_ip: &str,
 ) -> SimulationResult<()> {
     let ip: std::net::IpAddr = my_ip
@@ -233,6 +234,11 @@ async fn run_frontend_role(
     };
     let audit = FrontendAudit {
         state: ctx.state().clone(),
+        calls: Arc::new(crate::chain_workload::system::Announce::of_machine(
+            ctx.state(),
+            ctx.time().clone(),
+            FRONTEND_CLIENT_BASE + rank as u64,
+        )),
     };
     tracing::info!(ip = %ip, at = ?ctx.time().now(), "frontend_booting");
     run_frontend(
@@ -245,14 +251,25 @@ async fn run_frontend_role(
     .await
 }
 
+/// The first client id a frontend's forwarded calls log under (#192 (the
+/// frontend)): above the machines' own clients (`1 << 32` on).
+const FRONTEND_CLIENT_BASE: u64 = 1 << 33;
+
 /// What a frontend reports: each resolution, judged against the tenant
-/// board (the control journal as the machines folded it).
+/// board (the control journal as the machines folded it), and each call it
+/// forwards, which joins its journal's appended set and history as any
+/// client's does.
 #[derive(Clone)]
 struct FrontendAudit {
     state: StateHandle,
+    calls: Arc<crate::chain_workload::system::Announce>,
 }
 
 impl Audit for FrontendAudit {
+    fn call_observer(&self) -> Option<Arc<dyn paros::client::CallObserver>> {
+        Some(self.calls.clone())
+    }
+
     fn frontend_resolved(
         &self,
         name: &JournalName,

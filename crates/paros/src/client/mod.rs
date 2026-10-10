@@ -420,6 +420,11 @@ impl<P: Providers> Client<P> {
         self
     }
 
+    /// The observer every attempt is reported to.
+    pub(crate) fn observer(&self) -> &Arc<dyn CallObserver> {
+        &self.observer
+    }
+
     /// Report every attempt to `observer`.
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn CallObserver>) -> Self {

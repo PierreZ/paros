@@ -9,7 +9,10 @@ use moonpool_rpc::{Execution, RpcError};
 use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::{Denial, Draws, Operation, Shared};
-use crate::client::Client;
+use crate::client::{
+    Answered, Attempted, CallObserver, Client, ReadOutcome, SetLeaderOutcome, TruncateOutcome,
+    WriteOutcome,
+};
 use crate::rpc::public::WriteOutcome as WireWriteOutcome;
 use crate::rpc::{
     FrontendVerdict, NodeClient, Read, ReadAck, SetLeader, SetLeaderAck, Truncate, TruncateAck,
@@ -58,6 +61,11 @@ pub(super) trait Forwarded: Clone + Send + Sync + 'static {
     fn unanswered() -> Self::Ack;
     /// Whether `ack` refuses the journal as unknown.
     fn is_unknown(ack: &Self::Ack) -> bool;
+    /// Report the attempt to `observer` as it leaves.
+    fn invoked(&self, observer: &dyn CallObserver) -> Option<u64>;
+    /// Report the attempt `token`'s answer to `observer`, judged as the
+    /// library judges it. An attempt with no answer is never reported.
+    fn answered(observer: &dyn CallObserver, token: u64, ack: &Self::Ack);
 }
 
 impl Forwarded for Write {
@@ -121,6 +129,14 @@ impl Forwarded for Write {
     fn is_unknown(ack: &WriteAck) -> bool {
         ack.unknown_journal && ack.frontend() == FrontendVerdict::None
     }
+
+    fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
+        observer.invoked(Attempted::Write(self))
+    }
+
+    fn answered(observer: &dyn CallObserver, token: u64, ack: &WriteAck) {
+        observer.answered(token, Answered::Write(&WriteOutcome::judge(&Ok(*ack))));
+    }
 }
 
 impl Forwarded for Read {
@@ -182,6 +198,14 @@ impl Forwarded for Read {
 
     fn is_unknown(ack: &ReadAck) -> bool {
         ack.unknown_journal && ack.frontend() == FrontendVerdict::None
+    }
+
+    fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
+        observer.invoked(Attempted::Read(self))
+    }
+
+    fn answered(observer: &dyn CallObserver, token: u64, ack: &ReadAck) {
+        observer.answered(token, Answered::Read(&ReadOutcome::judge(Ok(ack.clone()))));
     }
 }
 
@@ -246,6 +270,17 @@ impl Forwarded for Truncate {
     fn is_unknown(ack: &TruncateAck) -> bool {
         ack.unknown_journal && ack.frontend() == FrontendVerdict::None
     }
+
+    fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
+        observer.invoked(Attempted::Truncate(self))
+    }
+
+    fn answered(observer: &dyn CallObserver, token: u64, ack: &TruncateAck) {
+        observer.answered(
+            token,
+            Answered::Truncate(&TruncateOutcome::judge(&Ok(*ack))),
+        );
+    }
 }
 
 impl Forwarded for SetLeader {
@@ -309,6 +344,17 @@ impl Forwarded for SetLeader {
     fn is_unknown(ack: &SetLeaderAck) -> bool {
         ack.unknown_journal && ack.frontend() == FrontendVerdict::None
     }
+
+    fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
+        observer.invoked(Attempted::SetLeader(self))
+    }
+
+    fn answered(observer: &dyn CallObserver, token: u64, ack: &SetLeaderAck) {
+        observer.answered(
+            token,
+            Answered::SetLeader(&SetLeaderOutcome::judge(&Ok(*ack))),
+        );
+    }
 }
 
 /// Forward `call` through `client` (its journal's own leader hint): follow
@@ -346,9 +392,14 @@ where
     let mut last = None;
     let time = shared.providers.time();
     for _ in 0..budget {
+        let observer = client.observer();
+        let token = call.invoked(observer.as_ref());
         let attempt = time
             .timeout(tunables.request_timeout, C::send(client.node(target), call))
             .await;
+        if let (Some(token), Ok(Ok(ack))) = (token, &attempt) {
+            C::answered(observer.as_ref(), token, ack);
+        }
         let next = (target + 1) % count;
         match attempt {
             Ok(Ok(ack)) => match C::route(&ack) {
