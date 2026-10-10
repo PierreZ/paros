@@ -10,6 +10,9 @@
 //! leaves the request pending: the client's next journal step sends the
 //! same id again. On its own BUGGIFY location the client sends a decided
 //! request again, which must read back the first answer: a retry acts once.
+//! The one other answer it may read is `unknown_tenant`, once the tenant was
+//! removed in between; on its own location the client removes it itself
+//! before the retry (#395).
 //! A created single-writer journal takes one append, which proves it is
 //! served on the members the coordinator picked.
 //!
@@ -47,7 +50,7 @@ impl FleetOps {
     pub(in crate::chain_workload) async fn create_journal(
         &mut self,
         ctx: &SimContext,
-        _policy: CheckpointPolicy,
+        policy: CheckpointPolicy,
         (class, payload): (u64, u64),
     ) {
         let Some((cell, tenant, control)) = self.journal_tenant(ctx, payload).await else {
@@ -74,7 +77,7 @@ impl FleetOps {
                 },
             }
         };
-        self.send_journal_request(&cell, control, request, payload)
+        self.send_journal_request(&cell, control, request, (payload, policy))
             .await;
     }
 
@@ -84,7 +87,7 @@ impl FleetOps {
     pub(in crate::chain_workload) async fn delete_journal(
         &mut self,
         ctx: &SimContext,
-        _policy: CheckpointPolicy,
+        policy: CheckpointPolicy,
         payload: u64,
     ) {
         let Some((cell, tenant, control)) = self.journal_tenant(ctx, payload).await else {
@@ -102,7 +105,7 @@ impl FleetOps {
                 },
             },
         };
-        self.send_journal_request(&cell, control, request, payload)
+        self.send_journal_request(&cell, control, request, (payload, policy))
             .await;
     }
 
@@ -157,24 +160,12 @@ impl FleetOps {
         cell: &Cell,
         control: JournalIdentifier,
         request: JournalRequest,
-        draw: u64,
+        (draw, policy): (u64, CheckpointPolicy),
     ) {
         let Some(election) = cell.journals.election else {
             return;
         };
-        let providers = self.connector.providers().clone();
-        let rpc = self.connector.rpc().clone();
-        let names = self.connector.names().clone();
-        let answer = journals::request(
-            &providers,
-            &rpc,
-            &names,
-            &cell.client,
-            election,
-            &request,
-            self.patience,
-        )
-        .await;
+        let answer = self.ask_coordinator(cell, election, &request).await;
         if answer.is_retryable() {
             assert_reachable!("journals: a request is left pending, to send again");
             self.journal_pending = Some(request);
@@ -183,26 +174,104 @@ impl FleetOps {
         self.judge_answer(cell, control, &request, &answer, draw)
             .await;
         if buggify_with_prob!(0.2) {
-            // A retry of a decided request: the client lost the answer.
-            let again = journals::request(
-                &providers,
-                &rpc,
-                &names,
-                &cell.client,
-                election,
-                &request,
-                self.patience,
-            )
-            .await;
-            if !again.is_retryable() {
-                assert_always!(
-                    again == answer,
-                    "journals: a retried request reads back its first answer",
-                    { "tenant" => request.tenant.0, "first" => answer.as_str(), "again" => again.as_str() }
-                );
-                assert_reachable!("journals: a client retries a decided request");
+            // A retry of a decided request: the client lost the answer. On
+            // its own location an operator removes the request's tenant
+            // first (#395): the retry then meets a tenant the cell dropped.
+            if buggify_with_prob!(0.3) {
+                self.remove_before_retry(cell, request.tenant, draw, policy)
+                    .await;
             }
+            let again = self.ask_coordinator(cell, election, &request).await;
+            if again.is_retryable() {
+                return;
+            }
+            // A tenant removed since the first answer is dropped by its
+            // cell for good, and its control journal with it: the retry is
+            // refused `unknown_tenant`, and acts no more than the first
+            // send did. The directory, read after the retry, shows the
+            // removal (it marks the tenant `REMOVING` before the cell drops
+            // it, and never makes it `READY` again).
+            if again == JournalAnswer::UnknownTenant && again != answer {
+                let removed = read_directory(&cell.client, cell.first(draw), cell.fleet)
+                    .await
+                    .ok()
+                    .map(|directory| {
+                        directory
+                            .tenant(request.tenant)
+                            .is_none_or(|t| t.state != TenantState::Ready)
+                    });
+                if removed == Some(true) {
+                    assert_reachable!(
+                        "journals: a retry after its tenant's removal is refused unknown_tenant"
+                    );
+                    return;
+                }
+                if removed.is_none() {
+                    // The directory could not be read: nothing to judge by.
+                    return;
+                }
+            }
+            assert_always!(
+                again == answer,
+                "journals: a retried request reads back its first answer",
+                { "tenant" => request.tenant.0, "first" => answer.as_str(), "again" => again.as_str() }
+            );
+            assert_reachable!("journals: a client retries a decided request");
         }
+    }
+
+    /// One journal request through the library, to the coordinator the
+    /// election journal `election` publishes.
+    async fn ask_coordinator(
+        &self,
+        cell: &Cell,
+        election: JournalIdentifier,
+        request: &JournalRequest,
+    ) -> JournalAnswer {
+        journals::request(
+            self.connector.providers(),
+            self.connector.rpc(),
+            self.connector.names(),
+            &cell.client,
+            election,
+            request,
+            self.patience,
+        )
+        .await
+    }
+
+    /// Remove `tenant` through the fleet tenant and the cell, as `TENANT`
+    /// does, between a decided journal request and its retry (#395). A
+    /// removal that does not end stays this client's pending operation, and
+    /// its next `TENANT` resumes it.
+    async fn remove_before_retry(
+        &mut self,
+        cell: &Cell,
+        tenant: TenantId,
+        draw: u64,
+        policy: CheckpointPolicy,
+    ) {
+        if self.pending.is_some() {
+            return;
+        }
+        let first = cell.first(draw);
+        let Ok(directory) = read_directory(&cell.client, first, cell.fleet).await else {
+            return;
+        };
+        let Some(name) = directory
+            .tenant(tenant)
+            .filter(|t| t.state == TenantState::Ready && !t.name.is_empty())
+            .map(|t| t.name.clone())
+        else {
+            return;
+        };
+        let Some(mut session) = self.session(cell, cell.journals, policy) else {
+            return;
+        };
+        assert_reachable!("journals: an operator removes a tenant between a request and its retry");
+        let client = cell.client.clone();
+        let ended = self.remove(&client, &mut session, first, &name).await;
+        self.stopped(ended, false, super::Pending::Remove(name));
     }
 
     /// The client's oracles of a decided answer.

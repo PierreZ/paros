@@ -107,7 +107,7 @@ it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=1
 coordinator on the machines through `paros::client::journals`, in a `READY` tenant of the fleet
 directory: an idempotency id the client draws, a name from three, a writer mode and a desired
 mode; an undecided request is sent again with the same id at the next journal step, a decided one
-on a BUGGIFY location must read back its first answer; a created single-writer journal takes one
+on a BUGGIFY location must read back its first answer, or `unknown_tenant` once the tenant is removed (on its own location the client removes it before the retry, #395); a created single-writer journal takes one
 append) · `REGISTER_NODE=19`, `DRAIN_NODE=20`, `RETIRE_NODE=21` (a `Write` to the registry; refused
 `unknown_journal` without system journals; a register carries the joiner's drawn class and
 capacity, and a registered joiner registering again is a reboot, #211) · `SET_LEADER=22` (CAS on
