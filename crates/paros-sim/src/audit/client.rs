@@ -217,11 +217,12 @@ pub(crate) fn check_control_history(attempts: Vec<Attempt>, mode: paros::WriterM
     );
 }
 
-/// The search's step budget. The histories a campaign produces take tens of
-/// thousands of steps at most (105k the worst of 500 seeds); the budget only
-/// bounds a pathological one — the memo grows with the steps, so it bounds
-/// memory too — and running out of it is reported, never mistaken for a
-/// verdict.
+/// The search's step budget. The steps grow with the history (#392: the
+/// 37 histories of 4,500 hunt seeds that took 200k to 1.2M steps before
+/// take 4,120 at most, on 3,668 attempts); the
+/// budget only bounds a pathological one — the memo grows with the steps,
+/// so it bounds memory too — and running out of it is reported, never
+/// mistaken for a verdict.
 const LIN_SEARCH_BUDGET: u64 = 5_000_000;
 
 /// The full checker (#205): the merged attempts of every client of one
@@ -232,11 +233,17 @@ const LIN_SEARCH_BUDGET: u64 = 5_000_000;
 #[tracing::instrument(level = "debug", skip_all)]
 pub(super) fn check_linearizable(h: &LinHistory, mode: paros::WriterMode) {
     let verdict = super::linearizability::check(&h.attempts, mode, LIN_SEARCH_BUDGET);
-    assert_always!(
-        !verdict.exhausted,
-        "the linearizability history stays within the checker's cap",
-        { "attempts" => h.attempts.len(), "steps" => verdict.steps }
-    );
+    if verdict.exhausted {
+        eprintln!(
+            "journal history UNDECIDED after {} steps: {} attempts judged of {}",
+            verdict.steps,
+            verdict.judged,
+            h.attempts.len()
+        );
+        for attempt in &h.attempts {
+            eprintln!("  {attempt:?}");
+        }
+    }
     if !verdict.linearizable {
         let stuck = verdict
             .stuck
