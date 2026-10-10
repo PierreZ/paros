@@ -785,11 +785,11 @@ async fn register<P: Providers>(
     // Registered already: the registry holds this address and this name.
     // A founding member the registry never held registers once, for its
     // name (#399).
-    let named = session
+    let same_label = session
         .registry()
         .get(id)
         .is_some_and(|node| node.name == identity.name);
-    if *known == addr && named {
+    if *known == addr && same_label {
         return registered;
     }
     // The machine answers there as itself, and as the incarnation that

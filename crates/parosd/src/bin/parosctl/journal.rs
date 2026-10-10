@@ -18,14 +18,14 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
-use paros::name::full_hex;
 use paros::tenant::Desired;
 use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
 
 use crate::Ending;
 use crate::fleet::nonzero;
-use crate::output::{Printer, note, record_text};
+use crate::labels::Labels;
+use crate::output::{Printer, note, record_text, table};
 
 type ParosClient = Client<TokioProviders>;
 
@@ -89,6 +89,7 @@ pub async fn run(
     rpc: &RpcHandle<TokioProviders>,
     names: &Names,
     client: &ParosClient,
+    labels: &Labels,
     out: &Printer,
     args: JournalArgs,
 ) -> Ending {
@@ -129,8 +130,14 @@ pub async fn run(
         return Ending::Refused;
     }
     let control = entry.control;
+    let journal_name = match &args.command {
+        JournalCommand::Create { name, .. } | JournalCommand::Delete { name, .. } => name.clone(),
+        JournalCommand::List { .. } => String::new(),
+    };
     let op = match args.command {
-        JournalCommand::List { .. } => return list(client, tenant, control, out).await,
+        JournalCommand::List { .. } => {
+            return list(client, (&tenant_name, tenant, control), labels, out).await;
+        }
         JournalCommand::Create {
             name,
             mode,
@@ -160,11 +167,17 @@ pub async fn run(
         Duration::from_millis(args.patience_ms),
     )
     .await;
-    report(out, tenant, &answer)
+    let full_name = format!("{tenant_name}/{journal_name}");
+    report(out, (tenant, &full_name), labels, &answer)
 }
 
-/// Print what a request came to.
-fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
+/// Print what a request for the journal `named` came to.
+fn report(
+    out: &Printer,
+    (tenant, named): (TenantId, &str),
+    labels: &Labels,
+    answer: &JournalAnswer,
+) -> Ending {
     let label = answer.as_str();
     match answer {
         JournalAnswer::Created { id, config } => {
@@ -173,13 +186,8 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
             out.emit(
                 || {
                     format!(
-                        "created journal={} members={}",
-                        hex(journal),
-                        members
-                            .iter()
-                            .map(|m| full_hex(*m))
-                            .collect::<Vec<_>>()
-                            .join(",")
+                        "created journal={named} members={}",
+                        labels.machines(&members)
                     )
                 },
                 || json!({ "outcome": label, "journal": journal.to_string(), "members": members }),
@@ -189,7 +197,7 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
         JournalAnswer::Deleted { id } => {
             let journal = JournalIdentifier::new(tenant, *id);
             out.emit(
-                || format!("deleted journal={}", hex(journal)),
+                || format!("deleted journal={named}"),
                 || json!({ "outcome": label, "journal": journal.to_string() }),
             );
             Ending::Success
@@ -197,7 +205,7 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
         JournalAnswer::NameTaken { id } => {
             let journal = JournalIdentifier::new(tenant, *id);
             out.emit(
-                || format!("refused: name_taken by journal={}", hex(journal)),
+                || format!("refused: name_taken: a live journal is named {named}"),
                 || json!({ "outcome": label, "journal": journal.to_string() }),
             );
             Ending::Refused
@@ -224,8 +232,8 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
 /// tombstone.
 async fn list(
     client: &ParosClient,
-    tenant: TenantId,
-    control: paros::JournalId,
+    (name, tenant, control): (&str, TenantId, paros::JournalId),
+    labels: &Labels,
     out: &Printer,
 ) -> Ending {
     let Some(fold) = journals::list(client, tenant, control).await else {
@@ -234,33 +242,28 @@ async fn list(
     };
     out.emit(
         || {
-            let mut lines = vec![format!(
-                "tenant={} control={}",
-                full_hex(tenant.0),
-                hex(JournalIdentifier::new(tenant, control))
-            )];
-            for (id, journal) in fold.journals() {
-                lines.push(format!(
-                    "journal={} name={} mode={} desired={} members={} state={}",
-                    hex(JournalIdentifier::new(tenant, id)),
-                    record_text(&journal.name),
-                    mode_label(journal.writer),
-                    journal.desired.label(),
-                    journal
-                        .config
-                        .members()
-                        .iter()
-                        .map(|m| full_hex(m.0))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    if journal.deleted_at.is_some() {
-                        "deleted"
-                    } else {
-                        "live"
-                    }
-                ));
-            }
-            lines.join("\n")
+            let rows: Vec<[String; 5]> = fold
+                .journals()
+                .map(|(_, journal)| {
+                    let members: Vec<u64> = journal.config.members().iter().map(|m| m.0).collect();
+                    [
+                        format!("{name}/{}", record_text(&journal.name)),
+                        mode_label(journal.writer).to_string(),
+                        journal.desired.label(),
+                        labels.machines(&members),
+                        if journal.deleted_at.is_some() {
+                            "deleted"
+                        } else {
+                            "live"
+                        }
+                        .to_string(),
+                    ]
+                })
+                .collect();
+            table(
+                ["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS", "STATE"],
+                &rows,
+            )
         },
         || {
             json!({
@@ -278,16 +281,6 @@ async fn list(
         },
     );
     Ending::Success
-}
-
-/// A journal's ids, whole and in hex: `id:TENANT/JOURNAL` (#239 (names at
-/// the edge)), the form every journal argument takes.
-fn hex(journal: JournalIdentifier) -> String {
-    format!(
-        "id:{}/{}",
-        full_hex(journal.tenant.0),
-        full_hex(journal.journal.0)
-    )
 }
 
 /// A writer mode's label.

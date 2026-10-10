@@ -108,6 +108,7 @@ impl CellFacts<'_> {
             cell_id: self.cell_id,
             cell_name: directory.map_or_else(Vec::new, |d| d.cell_name(self.cell_id).to_vec()),
             universe_name: directory.map_or_else(Vec::new, |d| d.universe_name().to_vec()),
+            universe_id: directory.and_then(FleetDirectory::fleet).unwrap_or(0),
             cell_state: directory
                 .and_then(|d| d.cell(self.cell_id))
                 .map_or_else(String::new, |cell| cell.state.as_str().to_string()),
@@ -267,9 +268,11 @@ impl CellFacts<'_> {
 
     /// The hosted tenant named `name`, if this cell hosts one.
     fn hosted_named(&self, name: &[u8]) -> Option<TenantId> {
-        self.registry
-            .hosted()
-            .find(|t| self.registry.hosted_tenant(*t).is_some_and(|h| h.name == name))
+        self.registry.hosted().find(|t| {
+            self.registry
+                .hosted_tenant(*t)
+                .is_some_and(|h| h.name == name)
+        })
     }
 }
 
@@ -326,7 +329,9 @@ pub fn tenant_view(scope: &Scope, facts: &CellFacts<'_>, name: &[u8]) -> wire::V
     if let Scope::Tenant(own) = scope
         && own.as_slice() != name
     {
-        moonpool_assertions::reachable!("view: a view refused for a tenant the scope does not name");
+        moonpool_assertions::reachable!(
+            "view: a view refused for a tenant the scope does not name"
+        );
         return refusal("forbidden");
     }
     let Some(tenant) = facts.hosted_named(name) else {
@@ -384,6 +389,7 @@ fn narrow(reply: &mut wire::ViewReply) {
         };
     }
     reply.universe_name.clear();
+    reply.universe_id = 0;
     reply.cells.clear();
 }
 

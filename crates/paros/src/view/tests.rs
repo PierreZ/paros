@@ -119,7 +119,10 @@ fn a_tenant_scope_sees_only_its_own_spread() {
     // An admin asking the same view sees the addresses.
     let admin = tenant_view(&Scope::Admin, &facts, b"acme");
     assert!(!within_tenant_scope(&admin, b"acme"));
-    assert_eq!(tenant_view(&Scope::Admin, &facts, b"initech").refusal, "unknown_tenant");
+    assert_eq!(
+        tenant_view(&Scope::Admin, &facts, b"initech").refusal,
+        "unknown_tenant"
+    );
 }
 
 #[test]

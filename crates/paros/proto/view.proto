@@ -76,6 +76,8 @@ message ViewReply {
   repeated MachineView machines = 11;
   repeated TenantView tenants = 12;
   repeated CellView cells = 13;
+  // The universe's id (0: this cell does not host its directory).
+  uint64 universe_id = 14;
 }
 
 // One machine. A tenant scope sees only the machines its journals use, and

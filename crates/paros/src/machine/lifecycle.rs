@@ -296,17 +296,7 @@ where
     let MachineAddresses { listen, advertise } = addresses;
     let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
-    let facts = MachineFacts {
-        node_id: record.node_id,
-        class: record.class,
-        capacity: record.capacity,
-        failure_domain: record.failure_domain.clone(),
-        name: record.name.clone(),
-        addr: advertise.clone(),
-        listen,
-        names,
-        incarnation: 0,
-    };
+    let facts = facts_of(&record, (advertise.clone(), listen), names);
     tracing::info!(
         node = facts.node_id.0,
         addr = %advertise,
@@ -502,6 +492,26 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
         audit.machine_recorded(&record);
     }
     Ok(record)
+}
+
+/// The facts of the machine `record` names, advertising and binding
+/// `addresses`: no runtime serves it yet.
+fn facts_of(
+    record: &MachineRecord,
+    (addr, listen): (Address, SocketAddr),
+    names: Names,
+) -> MachineFacts {
+    MachineFacts {
+        node_id: record.node_id,
+        class: record.class,
+        capacity: record.capacity,
+        failure_domain: record.failure_domain.clone(),
+        name: record.name.clone(),
+        addr,
+        listen,
+        names,
+        incarnation: 0,
+    }
 }
 
 /// Serve the cell's journals until shutdown.
