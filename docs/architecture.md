@@ -966,6 +966,33 @@ caller's authorization: **role slots** per machine (class, total, booked, and wh
 slot), per tenant (its slots and footprint), per cell (free and booked per class) and for the
 universe (decided on 2026-10-04).
 
+**The first views** (#399, decided on 2026-10-10). Each view is a request to **one cell**, and the
+request chooses the cell: `parosctl` asks the servers it names, and a founding member of that
+cell answers. The member reads the cell's own journals: the registry, the universe directory
+when the cell hosts it, the election journal and the tenant control journals. A view changes
+nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three queries:
+
+- **Cell**: every machine (name, address, class, capacity, bookings, standing, up or down,
+  founding member), every hosted tenant with its journals and their acceptors, and the cell
+  coordinator. Admin only.
+- **Tenant**, by name: the tenant's journals and the machines they use. A tenant hosted by
+  another cell is refused `other_cell` with the name of that cell.
+- **Universe**: the cells and the tenants of the universe directory. Admin only. Only the cell
+  that hosts the universe tenant answers it.
+
+**The server filters by scope; the caller never filters.** An `admin` sees every detail. A
+`tenant` caller sees only its own tenant, and of each machine that the tenant uses only its name,
+its failure domain and whether it is up. Any other query from a `tenant` caller is refused
+`forbidden`. Until the frontend checks tokens (#192), the caller states its scope and
+`paros::view::authorize` takes it as given. That function is the seam where the Biscuit roles of
+section 3.5 (`admin`, `tenant`, `view.detail`) will decide the scope.
+
+`parosctl` shows the views as tables, and `--json` gives one document for scripts:
+`machine list|show`, `cell list|show`, `tenant list|show` and `roles` (who holds which role: the
+cell coordinator, the acceptors and matchmakers of each journal, and the capacity bookings).
+`--as-tenant NAME` asks in the scope of one tenant. `parosctl status` (above) stays the target
+that these views grow into.
+
 ### 3.7 The universe
 
 The universe runs from M9 with one cell (decided on 2026-10-02, #226).
@@ -1171,8 +1198,17 @@ id.
 names the universe, a cell, a tenant and a journal by its `u64` id only; a name never crosses the
 protocol below the entry roles. Each of them also has a **string label**, chosen when it is
 created (`universe init --name`, `cell init --name`, tenant and journal create) and shown by
-`parosctl` beside a short hex id. A label resolves to its id only at the edge (the resolver and
+`parosctl`. A label resolves to its id only at the edge (the resolver and
 the frontend, section 3.5, and `parosctl` for administration), and an id never becomes a label.
+
+**Hex ids are for local debugging only** (decided on 2026-10-10, #399). Every input and output
+for a person uses names: `parosctl` prints the name of each machine, cell, universe, tenant and
+journal, and takes a name wherever it takes an argument. A short hex id appears only when no
+name is known. A machine has a name too: `parosd --name` (`PAROS_NAME`), by default the host of
+its advertised address. The machine record and the registry keep it, and a new name registers
+the machine again. `parosctl init --universe-name --cell-name` names the universe and the first
+cell, and the universe directory keeps both names; a second cell with a name already in use is
+refused.
 
 - `node_id`, `cell_id`, `universe_id`: random, minted at format, `cell init` and `universe init`
   respectively, and

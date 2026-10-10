@@ -77,6 +77,7 @@ mod cell;
 mod election;
 mod journals;
 mod other_cell;
+mod view;
 
 use cell::Cell;
 
