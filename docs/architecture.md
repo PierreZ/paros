@@ -1140,12 +1140,13 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
   M9 writes `Inline` only. `Ref` removes the batch-size limit and never blocks the main journal.
   Readers handle both forms from the start.
 
-  **Every checkpoint becomes a `Ref`** (decided on 2026-10-10, #353): the state goes into a
-  second journal, the checkpoint journal, as many small records in many slots. The main journal
-  holds only the small pointer record, so no slot holds a large record. The writer stops emitting
-  `Inline`. This is no longer an M12 item. The detailed design (one long-lived checkpoint journal
-  per main journal, a main journal that does not stop while the chunks are written,
-  deterministic chunks by key range) is proposed in #353 and waits for Pierre's check.
+  **No checkpoint is one large record** (decided on 2026-10-10, #353). Pierre asked for the
+  simplest design that scales: a checkpoint becomes a run of records in the same journal,
+  `Begin { covers_up_to }`, many small `Chunk` records, then `End { chunks, checksum }`. `End` is
+  the commit point; a run with no valid `End` is ignored. The owner pauses its entries, writes
+  the run in pipelined batches, then truncates up to `Begin`. A small state still fits one batch.
+  `Inline` and `Ref` leave the format. A second checkpoint journal and a rolling sharded
+  checkpoint were considered and rejected as more complex (#353).
 
 ### 3.10 Recovery (deferred)
 
