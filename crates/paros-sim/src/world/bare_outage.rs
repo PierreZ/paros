@@ -18,7 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
 
-use super::outage::{LossShape, POLL, plan_losses, strike};
+use super::outage::{LossShape, POLL, may_strike, plan_losses, strike};
 
 /// The bare-quorum injector (see the module doc): a fresh one per timeline.
 pub(crate) struct BareOutage;
@@ -47,7 +47,10 @@ impl FaultInjector for BareOutage {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .holds_short_slot(&decided);
             if short {
-                break;
+                if may_strike(ctx) {
+                    break;
+                }
+                assert_reachable!("outage: a bare-quorum outage waits for a commit in flight");
             }
             if time.sleep(POLL).await.is_err() {
                 return Ok(());

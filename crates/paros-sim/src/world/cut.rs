@@ -16,11 +16,22 @@
 //! ([`InFlight`]). A hint kills the whole process, so the veto permits a
 //! kill only if every commit the process has in flight fits its budget,
 //! and then spends each budget: a yes is a kill.
+//!
+//! A correlated outage kills every acceptor and proxy leader at one instant
+//! (#332): moonpool's `Chaos::Outage` asks the published [`OutageVeto`],
+//! and the harness's own outages ask [`outage_permitted`] before they
+//! strike. An outage plans its own losses (`super::outage::plan_losses`)
+//! and the audit excuses only those, so it waits until no victim has a
+//! commit in flight whose cut would spend a budget. Each budget is
+//! judged one process at a time, so a set of cuts is never judged
+//! together. A commit a victim opens after the yes, before its kill one
+//! tick later, has no completed write yet, so the kill leaves it absent,
+//! never ambiguous.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{HintVeto, StateHandle, assert_reachable};
+use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 
 use super::StorageWorld;
 
@@ -55,6 +66,17 @@ pub(crate) enum Budget {
     },
 }
 
+impl Budget {
+    /// Whether a cut of this commit spends a budget.
+    fn spends(&self) -> bool {
+        match self {
+            Budget::Free => false,
+            Budget::Node { .. } => true,
+            Budget::Matchmaker { bootstrap, held } => bootstrap.is_some() || *held,
+        }
+    }
+}
+
 /// One commit in flight.
 struct Commit {
     ip: String,
@@ -84,10 +106,54 @@ fn commits(state: &StateHandle) -> Arc<Mutex<Commits>> {
             .permit_kill(ip)
     })
     .publish(state);
+    let veto = Arc::clone(&commits);
+    OutageVeto::new(move |victims| {
+        veto.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .permit_outage(victims)
+    })
+    .publish(state);
     commits
 }
 
+/// Whether an outage over `victims` may strike now (see the module doc).
+/// It spends nothing: a permitted outage cuts no budgeted commit.
+pub(crate) fn outage_permitted(state: &StateHandle, victims: &[String]) -> bool {
+    state
+        .get::<Arc<Mutex<Commits>>>(COMMITS_KEY)
+        .is_none_or(|commits| {
+            commits
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .permit_outage(victims)
+        })
+}
+
+/// Assert that an outage striking `victims` now cuts no budgeted commit:
+/// the pair of [`outage_permitted`], checked where the kills are decided.
+pub(crate) fn assert_outage_permitted(state: &StateHandle, victims: &[String]) {
+    assert_always!(
+        outage_permitted(state, victims),
+        "outage: no victim has a budgeted commit in flight"
+    );
+}
+
 impl Commits {
+    /// Whether every one of `victims` may die now with no budget spent: no
+    /// victim has a commit in flight whose cut a budget would have to pay.
+    fn permit_outage(&self, victims: &[String]) -> bool {
+        let blocked = self
+            .open
+            .values()
+            .filter(|commit| victims.contains(&commit.ip))
+            .filter(|commit| commit.world.strong_count() > 0)
+            .any(|commit| commit.budget.spends());
+        if blocked {
+            assert_reachable!("outage: a commit in flight holds an outage back");
+        }
+        !blocked
+    }
+
     /// Whether the process at `ip` may die now, spending the budget of every
     /// commit it has in flight if so.
     fn permit_kill(&self, ip: &str) -> bool {
