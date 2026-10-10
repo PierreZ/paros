@@ -37,13 +37,14 @@ pub(crate) enum Owner {
 }
 
 /// What a cut of one commit spends.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Budget {
     /// Nothing: an `Ordered` commit is torn or whole, never ambiguous.
     Free,
-    /// An acceptor's `Batched` commit: at most `tolerated` distinct cut
-    /// acceptors per journal.
-    Node { tolerated: usize },
+    /// An acceptor's `Batched` commit writing `slots`: at most `tolerated`
+    /// distinct cut acceptors per journal, and a lost copy of each slot
+    /// inside the per-record budget (#331).
+    Node { tolerated: usize, slots: Vec<u64> },
     /// A matchmaker's commit: on a `Batched` registry, over a bootstrap set
     /// of `bootstrap` members (`None` on an `Ordered` one, spending
     /// nothing); `held` is whether the registry held a registration, which
@@ -98,9 +99,9 @@ impl Commits {
             .collect();
         let fits = open.iter().all(|(commit, world)| {
             let world = world.lock().unwrap_or_else(PoisonError::into_inner);
-            match commit.budget {
+            match &commit.budget {
                 Budget::Free => true,
-                Budget::Node { tolerated } => world.may_cut_node(ip, tolerated),
+                Budget::Node { tolerated, slots } => world.may_cut_node(ip, *tolerated, slots),
                 Budget::Matchmaker { bootstrap, .. } => {
                     bootstrap.is_none_or(|bootstrap| world.may_cut_matchmaker(ip, bootstrap))
                 }
@@ -112,18 +113,18 @@ impl Commits {
         }
         for (commit, world) in &open {
             let mut world = world.lock().unwrap_or_else(PoisonError::into_inner);
-            match commit.budget {
+            match &commit.budget {
                 Budget::Free => {}
-                Budget::Node { tolerated } => {
-                    let spent = world.permit_power_cut(ip, tolerated);
+                Budget::Node { tolerated, slots } => {
+                    let spent = world.permit_power_cut(ip, *tolerated, slots);
                     assert!(spent, "a cut that fits the budget spends it");
                 }
                 Budget::Matchmaker { bootstrap, held } => {
-                    if let Some(bootstrap) = bootstrap {
+                    if let Some(bootstrap) = *bootstrap {
                         let spent = world.permit_matchmaker_power_cut(ip, bootstrap);
                         assert!(spent, "a cut that fits the budget spends it");
                     }
-                    if held {
+                    if *held {
                         world.note_registry_cut(ip);
                     }
                 }
