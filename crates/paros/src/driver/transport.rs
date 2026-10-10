@@ -264,18 +264,63 @@ impl PeerMailbox {
     /// instead of the back. Both are BUGGIFY perturbations drawn in
     /// [`Outbound::transmit`]; production passes `false` for both. Never
     /// blocks.
-    #[tracing::instrument(level = "trace", skip_all, fields(overtake, evict_across_kinds))]
+    ///
+    /// A **cumulative** message (`coalesce`, see [`is_cumulative`]) first
+    /// replaces the oldest queued message of its own kind in its lane, in
+    /// place, and returns it: a lane that always coalesces holds at most one
+    /// queued `heartbeat` and one `heartbeat_ack` (#386). Production passes `coalesce` for every
+    /// cumulative message; [`Outbound::transmit`] withholds it now and then
+    /// on a BUGGIFY decision.
+    #[tracing::instrument(
+        level = "trace",
+        skip_all,
+        fields(overtake, evict_across_kinds, coalesce)
+    )]
     fn push(
         &self,
         message: internal::ConsensusMessage,
         overtake: bool,
         evict_across_kinds: bool,
+        coalesce: bool,
     ) -> Option<internal::ConsensusMessage> {
         let evicted = {
             let mut lanes = self.lock();
             let journal = (message.tenant, message.journal);
             let lanes = &mut *lanes;
             let queue = lanes.by_journal.entry(journal).or_default();
+            if coalesce {
+                let kind = proto_message_kind(&message);
+                assert!(is_cumulative(kind), "only a cumulative message coalesces");
+                if let Some(at) = queue
+                    .iter()
+                    .position(|queued| proto_message_kind(queued) == kind)
+                {
+                    let len = queue.len();
+                    let stale = std::mem::replace(&mut queue[at], message);
+                    // The lane keeps its length: one message out, one in,
+                    // at the same place.
+                    assert!(
+                        queue.len() == len,
+                        "a coalesced beat keeps the lane's length"
+                    );
+                    assert!(
+                        proto_message_kind(&stale) == kind,
+                        "a beat replaces only its own kind"
+                    );
+                    // Negative space: no queued beat of the kind is older
+                    // than the replaced one's place.
+                    assert!(
+                        queue
+                            .iter()
+                            .take(at)
+                            .all(|queued| proto_message_kind(queued) != kind),
+                        "a beat replaces the oldest queued beat of its kind"
+                    );
+                    lanes.assert_invariants();
+                    self.wake.notify_one();
+                    return Some(stale);
+                }
+            }
             let evicted = if queue.len() >= self.capacity {
                 let kind = proto_message_kind(&message);
                 let victim = if evict_across_kinds {
@@ -356,6 +401,17 @@ impl PeerMailbox {
             self.wake.notified().await;
         }
     }
+}
+
+/// Whether a message of `kind` is **cumulative**: the newest one carries
+/// everything an older queued one does, so the older one is worth nothing
+/// once the newer one is queued (#386). A `heartbeat` carries the leader's
+/// current ballot, commit index and configuration; a `heartbeat_ack` echoes
+/// the newest beat's ballot and the follower's current chosen index. Neither
+/// carries a correlation token or a durable obligation. Every other kind
+/// names a slot, a round or a read, and stays queued.
+fn is_cumulative(kind: &str) -> bool {
+    matches!(kind, "heartbeat" | "heartbeat_ack")
 }
 
 /// The driver's outbound side: every peer's mailboxes, every proxy leader's
@@ -617,7 +673,17 @@ impl Outbound {
                 moonpool_assertions::reachable!("mailbox: a delivery batch is reversed");
                 queue.reverse_next.store(true, Ordering::Relaxed);
             }
-            if let Some(evicted) = queue.push(message, overtake, evict_across_kinds) {
+            // A cumulative beat replaces its queued predecessor (#386), so
+            // a slow link carries one beat per lane and kind, whatever the
+            // tick and however many journals share the link. Withheld now
+            // and then, so the uncoalesced lane (a duplicated beat on the
+            // wire, a lane full of beats) still runs.
+            let coalesce = is_cumulative(proto_message_kind(&message))
+                && !moonpool_buggify::buggify_fault_with_prob!(0.05);
+            if !coalesce && is_cumulative(proto_message_kind(&message)) {
+                moonpool_assertions::reachable!("mailbox: a beat is queued behind its predecessor");
+            }
+            if let Some(evicted) = queue.push(message, overtake, evict_across_kinds, coalesce) {
                 // Deliberately lossy (etcd-style bounded mailbox, keep-newest),
                 // but never silent: the audit sees the drop the moment it
                 // happens, naming the *evicted* message, not the one that
@@ -1179,9 +1245,9 @@ mod tests {
     #[test]
     fn a_busy_journal_never_evicts_another_journals_messages() {
         let mailbox = PeerMailbox::new(2);
-        assert!(mailbox.push(beat(129), false, false).is_none());
+        assert!(mailbox.push(beat(129), false, false, false).is_none());
         for _ in 0..10 {
-            let evicted = mailbox.push(beat(128), false, false);
+            let evicted = mailbox.push(beat(128), false, false, false);
             if let Some(evicted) = evicted {
                 assert_eq!(evicted.journal, 128, "only the busy journal's lane evicts");
             }
@@ -1208,10 +1274,10 @@ mod tests {
         let threshold = 4;
         let mailbox = PeerMailbox::new(16);
         for _ in 0..10 {
-            assert!(mailbox.push(beat(128), false, false).is_none());
-            assert!(mailbox.push(beat(130), false, false).is_none());
+            assert!(mailbox.push(beat(128), false, false, false).is_none());
+            assert!(mailbox.push(beat(130), false, false, false).is_none());
         }
-        assert!(mailbox.push(beat(129), false, false).is_none());
+        assert!(mailbox.push(beat(129), false, false, false).is_none());
         // The drain holds a message of a dense lane: it is the oldest there.
         let (shed, held_stale) = mailbox.shed_stale(threshold, (256, 128));
         assert!(held_stale, "the held message is the oldest of a dense lane");
@@ -1236,5 +1302,45 @@ mod tests {
             .collect();
         assert_eq!(order.iter().filter(|&&j| j == 129).count(), 1);
         assert_eq!(order.len(), 2 * (threshold - 1) + 1);
+    }
+
+    /// #386's coalescing, pinned at the mechanism: a lane holds one queued
+    /// beat of each kind, the newest, at the place of the first; another
+    /// kind and another lane keep theirs.
+    #[test]
+    fn a_new_beat_replaces_its_queued_predecessor() {
+        let mailbox = PeerMailbox::new(16);
+        let request = |journal: u64| {
+            let mut message = message_to_proto(&Message::CatchUpRequest {
+                from: NodeId(1),
+                from_slot: paros_core::Slot(0),
+            })
+            .expect("a catch-up request encodes");
+            message.tenant = 256;
+            message.journal = journal;
+            message
+        };
+        assert!(mailbox.push(beat(128), false, false, true).is_none());
+        assert!(mailbox.push(request(128), false, false, false).is_none());
+        assert!(mailbox.push(beat(129), false, false, true).is_none());
+        for _ in 0..10 {
+            let stale = mailbox
+                .push(beat(128), false, false, true)
+                .expect("the queued beat is replaced");
+            assert_eq!(stale.journal, 128, "a beat replaces only its own lane's");
+        }
+        assert_eq!(mailbox.len(), 3, "a lane holds one queued beat");
+        let order: Vec<&str> = std::iter::from_fn(|| mailbox.try_pop())
+            .map(|m| proto_message_kind(&m))
+            .collect();
+        assert_eq!(
+            order,
+            vec!["heartbeat_ack", "heartbeat_ack", "catchup_request"],
+            "the newest beat keeps the first one's place"
+        );
+        // Without coalescing (the BUGGIFY decision), beats queue up.
+        assert!(mailbox.push(beat(128), false, false, false).is_none());
+        assert!(mailbox.push(beat(128), false, false, false).is_none());
+        assert_eq!(mailbox.len(), 2);
     }
 }

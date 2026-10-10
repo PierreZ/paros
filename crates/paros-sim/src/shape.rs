@@ -98,7 +98,10 @@ impl NodeShape {
     /// prong 2): every default is production's constant, and an activated
     /// seed draws an extreme. One `buggify_knob!` location per knob, so a
     /// seed can be extreme in one dimension and ordinary in the next.
-    fn draw() -> Self {
+    ///
+    /// On a slow-link seed ([`slow_link`]) the node runs a fast tick and
+    /// the floor batch, never the production profile.
+    fn draw(slow_link: bool) -> Self {
         let defaults = DriverTunables::default();
         // A handful-sized peer queue makes mailbox overflow (the
         // `dropped_at_mailbox` audit path) likely — a leader recovery page
@@ -132,6 +135,7 @@ impl NodeShape {
         // Twenty-four to 32 still shrinks frames 2-2.7x against the
         // default 64.
         let delivery_batch = buggify_knob!(defaults.delivery_batch, 24_usize..33_usize);
+        let delivery_batch = if slow_link { 24 } else { delivery_batch };
         // Every duration that races the network has the same structural
         // floor, `ROUND_TRIP_FLOOR_MS`: moonpool's default cross-datacenter
         // link is 20-80 ms one way, so a Phase-1 round trip plus one delivery
@@ -158,6 +162,12 @@ impl NodeShape {
         // write). Its floor is two round trips.
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
+        // A slow-link seed beats fast: 10 to 17 ms (#386's witness ran 17).
+        let tick_ms = if slow_link {
+            tick_ms.clamp(10, 17)
+        } else {
+            tick_ms
+        };
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         let drawn = DriverTunables {
@@ -320,7 +330,7 @@ impl NodeShape {
         // clears the round-trip floor above in wall-clock terms.
         // The per-field pairings below judge `drawn`, and only when it is
         // what runs: under the production profile no drawn extreme does.
-        let production = buggify_knob!(0_u8, 1_u8..2_u8) == 1;
+        let production = !slow_link && buggify_knob!(0_u8, 1_u8..2_u8) == 1;
         let tunables = if production {
             assert_reachable!("a node runs the production driver tunables");
             DriverTunables::production()
@@ -573,6 +583,9 @@ struct Registry {
     /// Run-level: whether the run draws the moved-founder scenario (see
     /// [`moved_founder`]), fixed by the first caller.
     moved_founder: Option<bool>,
+    /// Run-level: whether the run draws the slow-link scenario (see
+    /// [`slow_link`]), fixed by the first caller.
+    slow_link: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -908,6 +921,31 @@ pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **slow-link scenario** (#386): drawn once per
+/// seed, its own BUGGIFY location. A peer link starves quorum reads only
+/// when its beat load fills its delivery batches: a fast tick, the floor
+/// batch, several journals on the link, and a read quorum that waits on
+/// the slowest link. Four knobs deep, the shape fired on 1 of 11,000 hunt
+/// seeds. On a scenario seed every node runs a 10 to 17 ms tick and a
+/// 24-message batch, never the production profile ([`NodeShape::draw`]),
+/// the run serves three journals ([`journals`]) and the system journals
+/// ([`system_journals`]), and a flexible split reads from every acceptor
+/// (`q2 = 1`, `q1 = n`, [`quorum_policy`]). Each ingredient keeps its own
+/// coin on the other seeds. Rare-but-valid: each ingredient is a knob
+/// extreme.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn slow_link(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.slow_link.get_or_insert_with(|| {
+        let slow = moonpool_sim::buggify_with_prob!(0.3);
+        if slow {
+            assert_reachable!("a run draws the slow-link scenario");
+        }
+        slow
+    })
+}
+
 /// The fewest blocks a segment's entry log may have (floor of
 /// [`journal_geometry`]): it must hold the largest single entry a node
 /// stores, the workload's largest write (`ChainConfig`'s
@@ -998,10 +1036,11 @@ pub(crate) fn seed_ranks(pool: usize) -> Vec<u64> {
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn system_journals(state: &StateHandle) -> bool {
     let lagging = lagging_fold(state);
+    let slow = slow_link(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.system.get_or_insert_with(|| {
-        if !lagging && !moonpool_sim::sim_random_bool(0.5) {
+        if !lagging && !slow && !moonpool_sim::sim_random_bool(0.5) {
             return false;
         }
         // BUGGIFY pairing: a seed genuinely runs the system journals (a
@@ -1163,12 +1202,15 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
     let main = identifiers(state).main;
+    let slow = slow_link(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .journals
         .get_or_insert_with(|| {
             let count = buggify_knob!(1_u64, 2_u64..4_u64);
+            // A slow-link seed loads every link with the most journals.
+            let count = if slow { 3 } else { count };
             // The first journal is the deployment's ([`Identifiers::main`]);
             // every other one's identifier is drawn (#235): a random journal id,
             // in the main journal's tenant or a random one — and, in another
@@ -1235,10 +1277,11 @@ fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
 /// it now if this *is* the first incarnation.
 #[tracing::instrument(level = "debug", skip(state), fields(ip = %ip))]
 pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
+    let slow = slow_link(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| Entry {
-        shape: NodeShape::draw(),
+        shape: NodeShape::draw(slow),
         incarnations: 0,
     });
     entry.incarnations += 1;
@@ -1272,6 +1315,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
 #[tracing::instrument(level = "debug", skip(state), fields(pool))]
 pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
     let stalled = stalled_proxy(state);
+    let slow = slow_link(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.quorum.get_or_insert_with(|| {
@@ -1289,6 +1333,9 @@ pub(crate) fn quorum_policy(state: &StateHandle, pool: usize) -> QuorumPolicy {
             return QuorumPolicy::Grid { rows, cols };
         }
         let q2 = buggify_knob!(majority, 1_usize..(pool / 2 + 1));
+        // A slow-link seed reads from every acceptor: `q1 = n` waits on the
+        // slowest link (#386).
+        let q2 = if slow { 1 } else { q2 };
         if q2 != majority {
             // BUGGIFY pairing: a seed genuinely runs a flexible split (a
             // cause, never a `sometimes`; the outcomes — a slot decided by
