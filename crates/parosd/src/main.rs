@@ -103,10 +103,18 @@ async fn run(settings: Settings) -> ExitCode {
         Ok(addresses) => addresses,
         Err(error) => return invalid(&error),
     };
+    let name = settings
+        .name
+        .clone()
+        .unwrap_or_else(|| host(&addresses.advertise));
+    if let Err(error) = paros::name::check_label(&name) {
+        return invalid(&format!("PAROS_NAME {name:?}: {error}"));
+    }
     let machine = MachineSettings {
         class: settings.class,
         capacity: settings.capacity,
         failure_domain: settings.failure_domain.clone(),
+        name,
     };
     let disk = ProviderDisk::new(
         TokioStorageProvider::new(),
@@ -155,6 +163,17 @@ fn addresses(settings: &Settings) -> Result<MachineAddresses, String> {
     let listen = patiently(|| resolve::resolve(&settings.listen))
         .map_err(|error| format!("PAROS_LISTEN: {error}"))?;
     MachineAddresses::new(listen, advertise)
+}
+
+/// The host part of `addr`, the default machine name (#399): `parosd-1`
+/// for `parosd-1:4500`.
+fn host(addr: &Address) -> String {
+    let text = addr.as_str();
+    text.rsplit_once(':')
+        .map_or(text, |(host, _)| host)
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string()
 }
 
 /// `resolve` until it answers or [`RESOLVE_PATIENCE`] runs out.

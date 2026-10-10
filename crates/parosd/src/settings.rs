@@ -23,7 +23,8 @@ use paros::JournalStoreConfig;
 use paros::machine::Class;
 
 /// The variables this module reads.
-const VARIABLES: [&str; 7] = [
+const VARIABLES: [&str; 8] = [
+    "PAROS_NAME",
     "PAROS_LISTEN",
     "PAROS_ADVERTISE",
     "PAROS_DATA_DIR",
@@ -78,6 +79,11 @@ pub struct Settings {
     /// Its failure domain label.
     #[arg(long, env = "PAROS_FAILURE_DOMAIN", default_value = "")]
     pub failure_domain: String,
+    /// Its name, for people (#399): what `parosctl` prints and takes. The
+    /// host of `PAROS_ADVERTISE` by default. A label, never its identity: it
+    /// may change across starts.
+    #[arg(long, env = "PAROS_NAME")]
+    pub name: Option<String>,
     /// The store layout.
     #[arg(
         long,

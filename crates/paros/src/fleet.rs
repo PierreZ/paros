@@ -307,6 +307,8 @@ pub enum FleetCommand {
         /// The fleet tenant's control journal: its tenant is the fleet
         /// tenant's id.
         control: JournalIdentifier,
+        /// The universe's name, for people (#252, #399; empty: unnamed).
+        name: Vec<u8>,
     },
     /// `init` (and adding a cell, M12): cell `cell_id` joins the directory,
     /// `REGISTERING`, and its cell tenant is registered (`{internal,
@@ -316,6 +318,8 @@ pub enum FleetCommand {
         cell_id: u64,
         /// The cell tenant's control journal.
         control: JournalIdentifier,
+        /// The cell's name, for people (#252, #399; empty: unnamed).
+        name: Vec<u8>,
     },
     /// Move cell `cell_id` to `state`.
     MarkCell {
@@ -384,14 +388,20 @@ impl FleetEntry {
     pub fn encode(&self) -> Vec<u8> {
         use wire::fleet_entry::Kind;
         let kind = match &self.command {
-            FleetCommand::FormFleet { control } => Kind::FormFleet(wire::FormFleet {
+            FleetCommand::FormFleet { control, name } => Kind::FormFleet(wire::FormFleet {
                 fleet_tenant: control.tenant.0,
                 fleet_journal: control.journal.0,
+                name: name.clone(),
             }),
-            FleetCommand::AddCell { cell_id, control } => Kind::AddCell(wire::AddCell {
+            FleetCommand::AddCell {
+                cell_id,
+                control,
+                name,
+            } => Kind::AddCell(wire::AddCell {
                 cell_id: *cell_id,
                 control_tenant: control.tenant.0,
                 control_journal: control.journal.0,
+                name: name.clone(),
             }),
             FleetCommand::MarkCell { cell_id, state } => Kind::MarkCell(wire::MarkCell {
                 cell_id: *cell_id,
@@ -437,10 +447,12 @@ impl FleetEntry {
         let command = match entry.kind.ok_or("a fleet entry names no kind")? {
             Kind::FormFleet(form) => FleetCommand::FormFleet {
                 control: identifier(form.fleet_tenant, form.fleet_journal),
+                name: form.name,
             },
             Kind::AddCell(add) => FleetCommand::AddCell {
                 cell_id: add.cell_id,
                 control: identifier(add.control_tenant, add.control_journal),
+                name: add.name,
             },
             Kind::MarkCell(mark) => FleetCommand::MarkCell {
                 cell_id: mark.cell_id,
@@ -493,8 +505,10 @@ pub enum TenantLabel<'a> {
 /// A tenant entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantEntry {
-    /// Its name (opaque bytes; empty for an `internal` tenant, which is
-    /// found by its identifier, never by name).
+    /// Its name (opaque bytes). An `internal` tenant is found by its
+    /// identifier, never by name: the fleet tenant's entry keeps the
+    /// universe's name and a cell tenant's its cell's (#252, #399), display
+    /// only (empty when unnamed).
     pub name: Vec<u8>,
     /// The cell it lives in (`0` for the fleet tenant until its hosting cell is added).
     pub cell_id: u64,
@@ -591,6 +605,11 @@ pub enum FleetDirectoryRefusal {
     OtherCellTenant {
         /// The cell named.
         cell_id: u64,
+    },
+    /// Another cell holds the name (#399).
+    CellNameTaken {
+        /// The cell holding it.
+        holder: u64,
     },
     /// A cell transition [`CellState::may_become`] forbids.
     CellTransition {
@@ -706,6 +725,34 @@ impl FleetDirectory {
         self.tenants.iter().map(|(id, t)| (*id, t))
     }
 
+    /// The universe's name (#252, #399): empty when unnamed or not formed.
+    #[must_use]
+    pub fn universe_name(&self) -> &[u8] {
+        self.fleet
+            .and_then(|fleet| self.tenants.get(&fleet.control.tenant))
+            .map_or(&[], |entry| entry.name.as_slice())
+    }
+
+    /// Cell `cell_id`'s name (#252, #399): empty when unnamed or unknown.
+    #[must_use]
+    pub fn cell_name(&self, cell_id: u64) -> &[u8] {
+        self.cells
+            .get(&cell_id)
+            .and_then(|cell| self.tenants.get(&cell.control_tenant))
+            .map_or(&[], |entry| entry.name.as_slice())
+    }
+
+    /// The cell named `name` (#399).
+    #[must_use]
+    pub fn cell_named(&self, name: &[u8]) -> Option<u64> {
+        if name.is_empty() {
+            return None;
+        }
+        self.cells()
+            .map(|(id, _)| id)
+            .find(|id| self.cell_name(*id) == name)
+    }
+
     /// Whether `tenant` was removed from the directory.
     #[must_use]
     pub fn is_removed(&self, tenant: TenantId) -> bool {
@@ -781,8 +828,8 @@ impl FleetDirectory {
                 version: entry.version,
             });
         }
-        if let FleetCommand::FormFleet { control } = entry.command {
-            return self.form_fleet(entry.fleet_id, entry.version, control);
+        if let FleetCommand::FormFleet { control, name } = &entry.command {
+            return self.form_fleet(entry.fleet_id, entry.version, *control, name);
         }
         match self.fleet {
             None => return Err(FleetDirectoryRefusal::NoFleet),
@@ -795,9 +842,11 @@ impl FleetDirectory {
         }
         match &entry.command {
             FleetCommand::FormFleet { .. } => unreachable!("judged above"),
-            FleetCommand::AddCell { cell_id, control } => {
-                self.add_cell(*cell_id, *control, entry.version)
-            }
+            FleetCommand::AddCell {
+                cell_id,
+                control,
+                name,
+            } => self.add_cell(*cell_id, *control, name, entry.version),
             FleetCommand::MarkCell { cell_id, state } => self.mark_cell(*cell_id, *state),
             FleetCommand::RegisterTenant {
                 control,
@@ -815,6 +864,7 @@ impl FleetDirectory {
         fleet_id: u64,
         version: u32,
         control: JournalIdentifier,
+        name: &[u8],
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         if !control.is_set() {
             return Err(FleetDirectoryRefusal::Malformed);
@@ -829,7 +879,7 @@ impl FleetDirectory {
                 self.tenants.insert(
                     control.tenant,
                     TenantEntry {
-                        name: Vec::new(),
+                        name: name.to_vec(),
                         cell_id: 0,
                         control: control.journal,
                         state: TenantState::Ready,
@@ -851,6 +901,7 @@ impl FleetDirectory {
         &mut self,
         cell_id: u64,
         control: JournalIdentifier,
+        name: &[u8],
         version: u32,
     ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         if cell_id == 0 || !control.is_set() {
@@ -873,6 +924,9 @@ impl FleetDirectory {
                 tenant: control.tenant,
             });
         }
+        if let Some(holder) = self.cell_named(name) {
+            return Err(FleetDirectoryRefusal::CellNameTaken { holder });
+        }
         self.cells.insert(
             cell_id,
             CellEntry {
@@ -884,7 +938,7 @@ impl FleetDirectory {
         self.tenants.insert(
             control.tenant,
             TenantEntry {
-                name: Vec::new(),
+                name: name.to_vec(),
                 cell_id,
                 control: control.journal,
                 state: TenantState::Ready,

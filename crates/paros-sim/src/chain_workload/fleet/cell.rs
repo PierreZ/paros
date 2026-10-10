@@ -220,6 +220,7 @@ impl FleetOps {
                 patience: self.patience,
                 fleet_id: draw | 1,
                 leader_seed: self.leader_seeds.next(),
+                names: ("universe".into(), format!("cell-{}", draw % 4)),
             },
         );
         let run = if founders > 1 && buggify_with_prob!(0.25) {

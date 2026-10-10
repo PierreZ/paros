@@ -809,6 +809,7 @@ async fn run_machine_role(
         class: draw.class,
         capacity: draw.capacity,
         failure_domain: draw.failure_domain,
+        name: format!("machine-{rank}"),
     };
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair.

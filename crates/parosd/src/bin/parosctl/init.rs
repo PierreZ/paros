@@ -51,6 +51,21 @@ pub struct InitArgs {
     /// its first leader, in milliseconds.
     #[arg(long, default_value = "30000")]
     patience_ms: u64,
+    /// The universe's name, for people (#252, #399). A re-run never
+    /// renames: the first name written stays.
+    #[arg(long, default_value = "universe", value_parser = label)]
+    universe_name: String,
+    /// The cell's name, for people (#252, #399): unique among the
+    /// universe's cells. A re-run never renames.
+    #[arg(long, default_value = "cell-1", value_parser = label)]
+    cell_name: String,
+}
+
+/// A name for people: no `/`, no space, no control character.
+fn label(text: &str) -> Result<String, String> {
+    paros::name::check_label(text)
+        .map(|()| text.to_string())
+        .map_err(|e| e.to_string())
 }
 
 impl InitArgs {
@@ -99,6 +114,7 @@ pub async fn run(
         patience: Duration::from_millis(args.patience_ms),
         fleet_id: nonzero(providers),
         leader_seed: leader_seed(providers),
+        names: (args.universe_name.clone(), args.cell_name.clone()),
     };
     match initialize::initialize(providers, rpc, names, members, connect, params).await {
         InitRun::Initialized(done) => {

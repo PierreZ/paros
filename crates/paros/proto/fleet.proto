@@ -35,6 +35,10 @@ message FleetEntry {
 message FormFleet {
   uint64 fleet_tenant = 1;
   uint64 fleet_journal = 2;
+  // The universe's name, for people (#252, #399): a label, never its
+  // identity. Kept on the fleet tenant's own entry. The first name written
+  // stays: a re-run never renames.
+  bytes name = 3;
 }
 
 // `init` (and adding a cell, M12): the cell `cell_id` joins the directory,
@@ -44,6 +48,10 @@ message AddCell {
   uint64 cell_id = 1;
   uint64 control_tenant = 2;
   uint64 control_journal = 3;
+  // The cell's name, for people (#252, #399): a label, never its identity,
+  // unique among the universe's cells. Kept on the cell tenant's entry. The
+  // first name written stays: a re-run never renames.
+  bytes name = 4;
 }
 
 // Move cell `cell_id` to `state` (see `CellState` for the transitions).

@@ -157,6 +157,8 @@ pub struct MachineFacts {
     pub capacity: u64,
     /// Its failure domain (opaque here).
     pub failure_domain: String,
+    /// Its name, for people (#399): a label, never its identity.
+    pub name: String,
     /// The address it advertises (`PAROS_ADVERTISE`, #257): what its peers
     /// and clients dial, a literal or a name resolved at dial time.
     pub addr: Address,
@@ -216,6 +218,7 @@ impl MachineFacts {
             capacity: self.capacity,
             failure_domain: self.failure_domain.clone(),
             addr: self.addr.to_string(),
+            name: self.name.clone(),
             cell_id,
             incarnation_high: incarnation_halves(self.incarnation).0,
             incarnation_low: incarnation_halves(self.incarnation).1,

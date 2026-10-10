@@ -299,6 +299,7 @@ impl Watch {
                     class,
                     capacity: ack.capacity,
                     failure_domain: ack.failure_domain.clone(),
+                    name: ack.name.clone(),
                     incarnation,
                 })
             }
@@ -777,7 +778,14 @@ async fn register<P: Providers>(
         registered: true,
         refusal: String::new(),
     };
-    if *known == addr {
+    // Registered already: the registry holds this address and this name.
+    // A founding member the registry never held registers once, for its
+    // name (#399).
+    let named = session
+        .registry()
+        .get(id)
+        .is_some_and(|node| node.name == identity.name);
+    if *known == addr && named {
         return registered;
     }
     // The machine answers there as itself, and as the incarnation that
@@ -805,6 +813,7 @@ async fn register<P: Providers>(
         class,
         capacity: identity.capacity,
         failure_domain: identity.failure_domain,
+        name: identity.name,
         incarnation,
     };
     if session.record(client, 0, &command).await.is_err() {
