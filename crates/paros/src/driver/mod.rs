@@ -70,10 +70,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::{Providers, RandomProvider, SimulationError, SimulationResult, TimeProvider};
 use paros_core::{
-    ColocatedNode, Control, Delegation, Entry, GcAck, JournalId, JournalIdentifier, MatchRefusal,
-    MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet, Message, NodeId,
-    NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply, ReconfigureRequest,
-    ReconfigurerPhase, ReconfigurerStep, Seq, TenantId, Value,
+    ColocatedNode, Control, Delegation, Entry, Fingerprint, GcAck, JournalId, JournalIdentifier,
+    MatchRefusal, MatchReply, MatchStep, MatchmakerGeneration, MatchmakerId, MatchmakerSet,
+    Message, NodeId, NodeRole, Party, ProposeResult, ProxyId, QuorumSystem, ReconfigureReply,
+    ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep, Seq, Slot, TenantId, Value,
 };
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -638,7 +638,20 @@ impl<P: Providers> Shared<'_, P> {
 /// A plain choice, not a disruptive one: it costs one election, and only
 /// when two values for one slot already exist, so it stays on in the
 /// recovery tail, where most of a run's Phase-2 traffic is.
-fn contest_overwrite(node: &mut ColocatedNode, msg: &Message, self_id: u64) {
+///
+/// One contest per `(slot, held value, incoming value)` (#396). Under a
+/// grid the campaign's Phase 1 closes on the contester's row, which need
+/// not hold the other column-mate's value: P2c then keeps the contester's
+/// own value, and the other column-mate contests back. Unbounded, two
+/// column-mates of a `Grid{2,2}` dueled from round 12 to round 1652 and the
+/// slot never chose (a liveness loss; safety held). The second overwriting
+/// `Accept` of the same pair is taken as plain Paxos takes it.
+fn contest_overwrite(
+    node: &mut ColocatedNode,
+    contested: &mut BTreeSet<(Slot, u64, u64)>,
+    msg: &Message,
+    self_id: u64,
+) {
     let Message::Accept {
         ballot,
         slot,
@@ -651,13 +664,34 @@ fn contest_overwrite(node: &mut ColocatedNode, msg: &Message, self_id: u64) {
     if node.role() == NodeRole::Leader {
         return;
     }
-    let overwrites = node
+    let Some(key) = node
         .acceptor()
         .record(*slot)
-        .is_some_and(|(held, value)| held < ballot && value != command);
-    if !overwrites || !moonpool_buggify::buggify_with_prob!(1.0) {
+        .filter(|(held, value)| held < ballot && value != command)
+        .map(|(_, value)| (*slot, value.fingerprint(), command.fingerprint()))
+    else {
+        return;
+    };
+    if contested.contains(&key) {
+        moonpool_assertions::reachable!("an acceptor declines a repeat contest of one overwrite");
+        tracing::info!(
+            node = self_id,
+            slot = slot.0,
+            round = ballot.round,
+            "overwrite_contest_declined"
+        );
         return;
     }
+    if !moonpool_buggify::buggify_with_prob!(1.0) {
+        return;
+    }
+    let floor = node.acceptor().first_slot();
+    contested.retain(|(contested_slot, _, _)| *contested_slot >= floor);
+    contested.insert(key);
+    assert!(
+        contested.contains(&key),
+        "a contest is recorded before it runs"
+    );
     moonpool_assertions::reachable!(
         "an acceptor campaigns before an Accept overwrites a different value"
     );
@@ -1536,7 +1570,7 @@ where
                         "prepare_below_floor"
                     );
                 }
-                contest_overwrite(&mut rt.node, &msg, self_id);
+                contest_overwrite(&mut rt.node, &mut rt.contested, &msg, self_id);
                 rt.node.step(msg);
                 let outcome = shared.settle(rt).await;
                 journals.fold(journal, outcome, ticks, self_id)?;

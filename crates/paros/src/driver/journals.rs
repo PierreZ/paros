@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_core::Providers;
-use paros_core::{ColocatedNode, JournalIdentifier, NodeId};
+use paros_core::{ColocatedNode, JournalIdentifier, NodeId, Slot};
 
 use crate::audit::Audit;
 use crate::storage::LogStorage;
@@ -170,6 +170,11 @@ pub(crate) struct JournalRt<S, A> {
     pub(crate) match_resend: Cadence,
     /// Ticks since the open GC request was last (re-)sent.
     pub(crate) gc_resend: Cadence,
+    /// The overwrites this acceptor already contested, as `(slot, held
+    /// value, incoming value)` fingerprints (#396): one contest each, so two
+    /// column-mates of a grid never duel forever over one slot. Volatile; a
+    /// key below the acceptor's floor is forgotten.
+    pub(crate) contested: BTreeSet<(Slot, u64, u64)>,
 }
 
 /// Boot `journal` from `storage`: the scan, the format marker (#147), the
@@ -228,6 +233,7 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         last,
         match_resend: Cadence::default(),
         gc_resend: Cadence::default(),
+        contested: BTreeSet::new(),
     })
 }
 

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use paros_core::{
     AcceptorWrite, Ballot, ColocatedNode, Command, GcRequest, MatchRequest, MatchmakerId, Message,
-    NodeId, NodeRole, Outcome, Party, ReadState, Slot, WriteOp,
+    NodeId, NodeRole, Outcome, Party, QuorumSystem, ReadState, Slot, WriteOp,
 };
 
 use crate::audit::{Audit, StorageFaultDecision};
@@ -171,8 +171,6 @@ where
         "a batch is drained by the node that queued it"
     );
     let chosen_before = node.hard_state().chosen_index;
-    // The journal every message of this batch belongs to (#188).
-    let journal = node.config().journal;
     // The replica tier serves one journal (#188): a journal with no replica
     // in its configuration never addresses one.
     let with_learners = node.config().replica_count > 0;
@@ -259,7 +257,7 @@ where
     let sent_prepare = messages.iter().any(|(_, msg)| {
         matches!(msg, Message::Prepare { config: Some(config), .. } if config != node.acceptors())
     });
-    send_messages(out, audit, journal, messages);
+    send_batch(node, out, audit, messages);
 
     // 3. Learn the entries the chosen prefix walked over (already durable, in
     //    contiguous order) — surface them and the journal state machine's
@@ -579,4 +577,82 @@ pub(crate) struct Outbox {
     pub(crate) gc_requests: Vec<(MatchmakerId, GcRequest)>,
     /// The election fence the GC requests were licensed by (audit context).
     pub(crate) gc_fence: Option<Slot>,
+}
+
+/// Send one batch's messages, maybe through a torn column (#396): a leader
+/// that tore its column resigns after the send, so the next leader's Phase 1
+/// decides what the lone copy becomes.
+fn send_batch<A: Audit>(
+    node: &mut ColocatedNode,
+    out: &Outbound,
+    audit: &A,
+    mut messages: Vec<(Party, Message)>,
+) {
+    let self_id = out.self_node().0;
+    let journal = node.config().journal;
+    let torn = tear_column(node, &mut messages, audit, self_id);
+    send_messages(out, audit, journal, messages);
+    if torn {
+        audit.stepped_down(NodeId(self_id));
+        tracing::info!(node = self_id, "leadership_resigned");
+        node.step_down();
+        assert!(
+            node.role() != NodeRole::Leader,
+            "a torn column's leader resigns"
+        );
+    }
+}
+
+/// Whether this leader tears one slot's Phase-2 column and resigns (#396):
+/// the first slot of the batch keeps its `Accept` to the first of its
+/// parties only (to none when it has one party: the leader's own copy is
+/// then the lone one), and the leader steps down after the send. Drawn only
+/// for a leader of a grid journal whose batch carries an `Accept`.
+///
+/// Always safe: the network could lose the same `Accept`s, and a leader may
+/// resign at any time (`step_down`). It makes the duel shape of #396 likely:
+/// one column-mate holds a value the other does not, the next leader's
+/// Phase 1 on a row may miss it, and the next leadership sends that
+/// column-mate a different value for the slot. Silent in the recovery tail.
+fn tear_column<A: Audit>(
+    node: &ColocatedNode,
+    messages: &mut Vec<(Party, Message)>,
+    audit: &A,
+    self_id: u64,
+) -> bool {
+    if node.role() != NodeRole::Leader
+        || !matches!(node.acceptors().quorum_system(), QuorumSystem::Grid { .. })
+    {
+        return false;
+    }
+    let mut fanout: BTreeMap<Slot, usize> = BTreeMap::new();
+    for (_, msg) in messages.iter() {
+        if let Message::Accept { slot, .. } = msg {
+            *fanout.entry(*slot).or_default() += 1;
+        }
+    }
+    let Some((&torn, &parties)) = fanout.iter().next() else {
+        return false;
+    };
+    if !moonpool_buggify::buggify_fault_with_prob!(0.50) {
+        return false;
+    }
+    moonpool_assertions::reachable!("grid: a leader tears one slot's column and resigns");
+    let before = messages.len();
+    let mut keep = usize::from(parties >= 2);
+    messages.retain(|(to, msg)| match msg {
+        Message::Accept { slot, .. } if *slot == torn => {
+            if keep > 0 {
+                keep -= 1;
+                return true;
+            }
+            audit.dropped_at_send(Party::Node(NodeId(self_id)), *to, msg);
+            false
+        }
+        _ => true,
+    });
+    tracing::info!(node = self_id, slot = torn.0, parties, "column_torn");
+    assert!(keep == 0, "a torn column keeps at most one Accept");
+    assert!(messages.len() < before, "a torn column drops an Accept");
+    true
 }
