@@ -24,9 +24,9 @@ the one build outside Nix):
 docker compose up -d --build        # five machines; each formats and waits
 docker compose run --rm init        # forms the cell
 docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
-docker compose run --rm parosctl write T/J hello world --leader 7
-docker compose run --rm parosctl read T/J
+docker compose run --rm parosctl journal create acme orders
+docker compose run --rm parosctl write acme/orders hello world --leader 7
+docker compose run --rm parosctl read acme/orders
 ```
 
 `docker-compose.yml` runs one cell of five `parosd` machines over three failure
@@ -113,6 +113,13 @@ multi-writer journal (#241). `parosctl journal delete acme orders` tombstones
 the journal: its id is never used again, and its name is free. `parosctl
 journal list acme` folds the tenant's control journal.
 
+**Names and ids.** A journal argument is a name, `TENANT/JOURNAL` or
+`paros://TENANT/JOURNAL`, which `parosctl` resolves through the fleet directory and the
+tenant's control journal (#239 (names at the edge)), or its ids, `id:TENANT/JOURNAL` in hex: a
+unique prefix of an id `parosctl` can list, or all 16 digits. Human output prints ids as short
+hex, widened when two ids of one listing share a prefix; `--json` prints ids whole. A node id given on the command line
+(`retire --node`, `reconfigure --members`, `ID=HOST:PORT`) is hex too.
+
 **Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
 stands for every founding member, and each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
@@ -124,7 +131,7 @@ keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
-**Supersede a writer.** `parosctl set-leader T/J --new 8` takes the journal;
+**Supersede a writer.** `parosctl set-leader acme/orders --new 8` takes the journal;
 the first leader's writes and truncations are refused from then on
 (`superseded`, exit 3), and the new leader's `truncate --up-to N --leader 8`
 applies.
@@ -166,9 +173,9 @@ done
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
 parosctl init --members "$PAROSCTL_SERVERS"
 parosctl tenant create acme
-parosctl journal create acme orders   # prints journal=T/J
-parosctl write T/J hello world --leader 7
-parosctl read T/J
+parosctl journal create acme orders
+parosctl write acme/orders hello world --leader 7
+parosctl read acme/orders
 ```
 
 ## Configuration
@@ -268,9 +275,10 @@ A refusal is one of:
 The servers come from `--servers HOST:PORT,…` (or `PAROSCTL_SERVERS`): a name
 that resolves to several machines stands for them all, and each server's node
 id — the one a leader hint names it by — is learned from its own `Inspect`
-(`ID=HOST:PORT` names it outright). A journal is `TENANT/JOURNAL`, both random
-and both required: there is no default tenant and no fixed id (#235,
-`docs/architecture.md` §3.8).
+(`ID=HOST:PORT` names it outright, in hex). A journal is a name, `TENANT/JOURNAL` or
+`paros://TENANT/JOURNAL`, or its ids, `id:TENANT/JOURNAL` in hex: both ids random and both
+required, with no default tenant and no fixed id (#235, #239, `docs/architecture.md` §3.5,
+§3.8).
 
 | command | what it does |
 |---|---|

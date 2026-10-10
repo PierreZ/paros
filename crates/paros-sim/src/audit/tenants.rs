@@ -26,13 +26,30 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use moonpool_sim::{StateHandle, assert_always, assert_sometimes};
+use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 use paros::tenant::{RequestOutcome, TenantEvent, TenantRefusal};
-use paros::{JournalIdentifier, NodeId, WriterMode};
+use paros::{JournalId, JournalIdentifier, NodeId, WriterMode};
 
 const TENANT_BOARD_KEY: &str = "paros-tenant-board";
 
+/// No machine reported some position of a tenant control journal yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unreported;
+
+/// What a position of a tenant control journal did to its names (#239).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Naming {
+    /// A journal took this name.
+    Created(JournalId, Vec<u8>),
+    /// A journal was tombstoned: its name is free.
+    Deleted(JournalId),
+    /// No name changed.
+    Other,
+}
+
 /// The run's tenant-control facts, shared by every machine's audit port.
+/// Its flags are independent gates, each fired once.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub(crate) struct TenantBoard {
     /// Per `(control journal, lsn)`: the digest of the event the first
@@ -53,6 +70,14 @@ pub(crate) struct TenantBoard {
     name_taken: bool,
     /// A create naming an id the tenant used before was refused.
     id_taken: bool,
+    /// Per `(control journal, lsn)`: what the position did to the names,
+    /// as first folded anywhere. A name resolved at a position must agree
+    /// with it (#239).
+    naming: BTreeMap<(JournalIdentifier, u64), Naming>,
+    /// Names a completed delete freed, by control journal.
+    freed: BTreeSet<(JournalIdentifier, Vec<u8>)>,
+    /// A name was created again after a completed delete freed it (#239).
+    name_reused: bool,
 }
 
 /// The run's [`TenantBoard`] (`crate::state::published`).
@@ -83,6 +108,7 @@ impl TenantBoard {
             "tenant: every machine folds a tenant control journal alike at every lsn",
             { "node" => node.0, "lsn" => lsn }
         );
+        self.name(control, lsn, event);
         match event {
             TenantEvent::Created {
                 request,
@@ -147,6 +173,55 @@ impl TenantBoard {
         }
     }
 
+    /// Record what position `lsn` of `control` did to its names, the first
+    /// time a machine folds it.
+    fn name(&mut self, control: JournalIdentifier, lsn: u64, event: &TenantEvent) {
+        if self.naming.contains_key(&(control, lsn)) {
+            return;
+        }
+        let naming = match event {
+            TenantEvent::Created { id, name, .. } => {
+                if self.freed.contains(&(control, name.clone())) {
+                    assert_reachable!("names: a journal name is reused after a completed delete");
+                    self.name_reused = true;
+                }
+                Naming::Created(*id, name.clone())
+            }
+            TenantEvent::Deleted { id, .. } => {
+                let freed = self.naming.values().find_map(|naming| match naming {
+                    Naming::Created(created, name) if created == id => Some(name.clone()),
+                    _ => None,
+                });
+                if let Some(name) = freed {
+                    self.freed.insert((control, name));
+                }
+                Naming::Deleted(*id)
+            }
+            _ => Naming::Other,
+        };
+        self.naming.insert((control, lsn), naming);
+    }
+
+    /// The live journal named `name` after the positions of `control` below
+    /// `at`, as the machines folded them (#239): `Err` while some position
+    /// below `at` was not reported yet.
+    pub(crate) fn named_at(
+        &self,
+        control: JournalIdentifier,
+        name: &[u8],
+        at: u64,
+    ) -> Result<Option<JournalId>, Unreported> {
+        let mut holder = None;
+        for lsn in 0..at {
+            match self.naming.get(&(control, lsn)).ok_or(Unreported)? {
+                Naming::Created(id, created) if created == name => holder = Some(*id),
+                Naming::Deleted(id) if holder == Some(*id) => holder = None,
+                _ => {}
+            }
+        }
+        Ok(holder)
+    }
+
     /// Request `request` of `control` folded to `outcome` at `lsn`: a
     /// request is answered once (a later answer is a `Repeated`).
     fn answered(
@@ -196,6 +271,10 @@ impl TenantBoard {
         assert_sometimes!(
             self.id_taken,
             "tenant: a create naming a used id is refused and redrawn"
+        );
+        assert_sometimes!(
+            self.name_reused,
+            "names: a journal name is created again after a completed delete"
         );
     }
 }

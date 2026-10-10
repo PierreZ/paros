@@ -295,6 +295,8 @@ where
         edge.handle(),
         tunables.peer_inbox_capacity,
         me,
+        // No cell plan reaches a proxy leader yet: it runs on no machine.
+        0,
         edge_reporter(audit, me),
         incarnation_shutdown.clone(),
     )?;
@@ -321,6 +323,8 @@ where
         shutdown: incarnation_shutdown.clone(),
         audit,
         from: me,
+        // No cell plan reaches this role yet: it runs on no machine.
+        cell_id: 0,
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

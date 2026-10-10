@@ -46,6 +46,11 @@ message RetireAck {
 
 message Deliver {
   repeated ConsensusMessage messages = 1;
+  // The sender's cell (#216): `docs/architecture.md` §3.2's session `Hello`
+  // id, carried on every batch. A receiver of another cell refuses the
+  // batch, so a machine never steps a peer of another cell. `0` is a
+  // deployment without a cell plan; it meets only another such node.
+  uint64 cell_id = 2;
 }
 
 message DeliverAck {}

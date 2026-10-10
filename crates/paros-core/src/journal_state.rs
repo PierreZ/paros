@@ -337,6 +337,10 @@ impl JournalState {
             return Outcome::Refused(self.view());
         }
         assert!(entry.count() > 0, "an accepted write carries records");
+        assert!(
+            entry.seq == self.next_seq,
+            "an accepted write takes the position it names"
+        );
         let seq = self.next_seq;
         self.next_seq = Seq(seq.0 + entry.count());
         assert!(
@@ -454,6 +458,17 @@ impl JournalState {
         if old != self.leader || !new.is_set() || Some(new) == self.leader {
             return Outcome::LeaderRefused(self.view());
         }
+        // Restated one leg at a time (#269): a won SetLeader replaces the
+        // leader it named with a different, set uuid.
+        assert!(
+            old == self.leader,
+            "a won SetLeader named the leader in force"
+        );
+        assert!(new.is_set(), "a won SetLeader installs a set uuid");
+        assert!(
+            Some(new) != self.leader,
+            "a won SetLeader installs a different uuid"
+        );
         let before = self.term;
         self.term += 1;
         self.leader = Some(new);

@@ -11,6 +11,7 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
+use paros::name::Abbreviations;
 use paros::wire::common::Ballot;
 use paros::{
     InspectReply, JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, RetireRequest, Seq,
@@ -19,6 +20,7 @@ use paros::{
 use serde_json::{Value as Json, json};
 
 use crate::Ending;
+use crate::names::{JournalRef, NodeRef, Resolved};
 use crate::output::{Printer, note, record_text, state_json, state_text};
 
 type ParosClient = Client<TokioProviders>;
@@ -58,8 +60,9 @@ fn leader_or_drawn(providers: &TokioProviders, given: Option<LeaderUuid>) -> Lea
 /// `parosctl write`.
 #[derive(Args, Debug)]
 pub struct WriteArgs {
-    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalIdentifier,
+    /// The journal: its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`,
+    /// or its ids, `id:TENANT/JOURNAL` in hex (a unique prefix of each).
+    journal: JournalRef,
     /// The records, in order, each one argument.
     #[arg(required = true)]
     records: Vec<String>,
@@ -88,7 +91,7 @@ async fn journal_state(client: &ParosClient, journal: JournalIdentifier) -> Opti
 /// Who a writing command acts as: the journal, the leader uuid, and the
 /// overrides of `parosctl write` (a truncation names no position).
 struct Identity {
-    journal: JournalIdentifier,
+    journal: Resolved,
     leader: LeaderUuid,
     claim: bool,
     seq: Option<u64>,
@@ -102,7 +105,8 @@ async fn become_writer(
     out: &Printer,
     args: &Identity,
 ) -> Result<Writer, Ending> {
-    let journal = args.journal;
+    let journal = args.journal.journal;
+    let label = &args.journal.label;
     let mut writer = Writer::with_uuid(journal, args.leader);
     let at = |next: u64| JournalView {
         leader: Some(args.leader),
@@ -123,17 +127,14 @@ async fn become_writer(
     }
     match writer.claim(client, start(client), false).await {
         ClaimOutcome::Won { state } => {
-            note(&format!(
-                "claimed journal {journal}: {}",
-                state_text(&state)
-            ));
+            note(&format!("claimed journal {label}: {}", state_text(&state)));
         }
         ClaimOutcome::Owned { .. } => {}
         ClaimOutcome::Lost { state } => return Err(refused(out, "claim lost", &state)),
         ClaimOutcome::WrongMode { state } => {
             return Err(refused(out, "multi-writer journal", &state));
         }
-        ClaimOutcome::UnknownJournal => return Err(unknown_journal(journal)),
+        ClaimOutcome::UnknownJournal => return Err(unknown_journal(label)),
         ClaimOutcome::Unread => {
             note("no server served the journal's state");
             return Err(Ending::Unreachable);
@@ -163,12 +164,15 @@ pub async fn write(
     out: &Printer,
     args: WriteArgs,
 ) -> Ending {
-    let journal = args.journal;
+    let journal = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal,
+        Err(ending) => return ending,
+    };
     if args.multi {
-        return append(client, out, journal, &args.records).await;
+        return append(client, out, &journal, &args.records).await;
     }
     let identity = Identity {
-        journal: args.journal,
+        journal: journal.clone(),
         leader: leader_or_drawn(providers, args.leader),
         claim: !args.no_claim,
         seq: args.seq,
@@ -232,22 +236,12 @@ pub async fn write(
                 note("this writer leads no term of the journal");
                 return Ending::Refused;
             }
-            WriterOutcome::UnknownJournal => return unknown_journal(journal),
+            WriterOutcome::UnknownJournal => return unknown_journal(&journal.label),
             WriterOutcome::TooLarge {
                 max_records,
                 max_bytes,
             } => {
-                out.emit(
-                    || format!("too large max_records={max_records} max_bytes={max_bytes}"),
-                    || {
-                        json!({
-                            "outcome": "too large",
-                            "max_records": max_records,
-                            "max_bytes": max_bytes,
-                        })
-                    },
-                );
-                return Ending::Refused;
+                return too_large(out, max_records, max_bytes);
             }
             WriterOutcome::Unavailable { leader } => {
                 note(&format!(
@@ -269,11 +263,11 @@ pub async fn write(
 async fn append(
     client: &ParosClient,
     out: &Printer,
-    journal: JournalIdentifier,
+    journal: &Resolved,
     records: &[String],
 ) -> Ending {
     let records = records.iter().map(|r| r.as_bytes().to_vec()).collect();
-    let request = paros::client::multi::append_request(journal, records);
+    let request = paros::client::multi::append_request(journal.journal, records);
     let report = client
         .write(&request, start(client), WriteOptions::default())
         .await;
@@ -292,20 +286,8 @@ async fn append(
         WriteOutcome::TooLarge {
             max_records,
             max_bytes,
-        } => {
-            out.emit(
-                || format!("too large max_records={max_records} max_bytes={max_bytes}"),
-                || {
-                    json!({
-                        "outcome": "too large",
-                        "max_records": max_records,
-                        "max_bytes": max_bytes,
-                    })
-                },
-            );
-            Ending::Refused
-        }
-        WriteOutcome::UnknownJournal => unknown_journal(journal),
+        } => too_large(out, max_records, max_bytes),
+        WriteOutcome::UnknownJournal => unknown_journal(&journal.label),
         WriteOutcome::Redirect { .. } => {
             note("no leader took the write");
             Ending::Unreachable
@@ -317,6 +299,21 @@ async fn append(
     }
 }
 
+/// A write over a node's limits.
+fn too_large(out: &Printer, max_records: u64, max_bytes: u64) -> Ending {
+    out.emit(
+        || format!("too large max_records={max_records} max_bytes={max_bytes}"),
+        || {
+            json!({
+                "outcome": "too large",
+                "max_records": max_records,
+                "max_bytes": max_bytes,
+            })
+        },
+    );
+    Ending::Refused
+}
+
 fn refused(out: &Printer, what: &str, state: &JournalView) -> Ending {
     out.emit(
         || format!("{what} {}", state_text(state)),
@@ -325,16 +322,17 @@ fn refused(out: &Printer, what: &str, state: &JournalView) -> Ending {
     Ending::Refused
 }
 
-fn unknown_journal(journal: JournalIdentifier) -> Ending {
-    note(&format!("no server serves journal {journal}"));
+fn unknown_journal(label: &str) -> Ending {
+    note(&format!("no server serves journal {label}"));
     Ending::Refused
 }
 
 /// `parosctl read`.
 #[derive(Args, Debug)]
 pub struct ReadArgs {
-    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalIdentifier,
+    /// The journal: its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`,
+    /// or its ids, `id:TENANT/JOURNAL` in hex (a unique prefix of each).
+    journal: JournalRef,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -349,7 +347,11 @@ pub struct ReadArgs {
 /// `parosctl read`: page from `--from` to the tail (or `--limit`), one line
 /// per record; a truncated range is reported and skipped, never hidden.
 pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending {
-    let journal = args.journal;
+    let resolved = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal,
+        Err(ending) => return ending,
+    };
+    let journal = resolved.journal;
     let mut reader = paros::client::Reader::new(journal, args.from);
     let mut records: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut gaps: Vec<(u64, u64)> = Vec::new();
@@ -386,7 +388,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
                 note("no server served the read");
                 return Ending::Unreachable;
             }
-            ReaderOutcome::UnknownJournal => return unknown_journal(journal),
+            ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
         }
     };
     out.emit(
@@ -401,6 +403,7 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
         || {
             json!({
                 "journal": journal.to_string(),
+                "name": args.journal.to_string(),
                 "records": records
                     .iter()
                     .map(|(seq, record)| json!({ "seq": seq, "data": record_text(record) }))
@@ -419,8 +422,9 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
 /// `parosctl tail`.
 #[derive(Args, Debug)]
 pub struct TailArgs {
-    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalIdentifier,
+    /// The journal: its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`,
+    /// or its ids, `id:TENANT/JOURNAL` in hex (a unique prefix of each).
+    journal: JournalRef,
     /// The first position to read.
     #[arg(long, default_value = "0")]
     from: u64,
@@ -433,7 +437,11 @@ pub struct TailArgs {
 /// document) per record as it lands; a truncation the reader falls behind
 /// is reported and skipped.
 pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending {
-    let journal = args.journal;
+    let resolved = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal,
+        Err(ending) => return ending,
+    };
+    let journal = resolved.journal;
     let mut reader = paros::client::Reader::new(journal, args.from);
     let backoff = client.tunables().retry_backoff;
     let follow = async {
@@ -464,7 +472,7 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
                     note("no server served the read; retrying");
                     tokio::time::sleep(backoff.max(Duration::from_millis(100))).await;
                 }
-                ReaderOutcome::UnknownJournal => return unknown_journal(journal),
+                ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
             }
         }
     };
@@ -477,8 +485,9 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
 /// `parosctl truncate`.
 #[derive(Args, Debug)]
 pub struct TruncateArgs {
-    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalIdentifier,
+    /// The journal: its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`,
+    /// or its ids, `id:TENANT/JOURNAL` in hex (a unique prefix of each).
+    journal: JournalRef,
     /// Drop every record below this position.
     #[arg(long)]
     up_to: u64,
@@ -504,13 +513,16 @@ pub async fn truncate(
     out: &Printer,
     args: TruncateArgs,
 ) -> Ending {
-    let journal = args.journal;
+    let resolved = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal,
+        Err(ending) => return ending,
+    };
     let (outcome, superseded) = if args.multi {
-        let request = paros::client::multi::open_truncate_request(journal, args.up_to);
+        let request = paros::client::multi::open_truncate_request(resolved.journal, args.up_to);
         (client.truncate(&request, start(client)).await, false)
     } else {
         let identity = Identity {
-            journal: args.journal,
+            journal: resolved.clone(),
             leader: leader_or_drawn(providers, args.leader),
             claim: !args.no_claim,
             seq: None,
@@ -537,7 +549,7 @@ pub async fn truncate(
         TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", &state),
         TruncateOutcome::Refused { state } => refused(out, "refused", &state),
         TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", &state),
-        TruncateOutcome::UnknownJournal => unknown_journal(journal),
+        TruncateOutcome::UnknownJournal => unknown_journal(&resolved.label),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");
             Ending::Unreachable
@@ -552,8 +564,9 @@ pub async fn truncate(
 /// `parosctl set-leader`.
 #[derive(Args, Debug)]
 pub struct SetLeaderArgs {
-    /// The journal, `TENANT/JOURNAL` (both random; no default tenant).
-    journal: JournalIdentifier,
+    /// The journal: its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`,
+    /// or its ids, `id:TENANT/JOURNAL` in hex (a unique prefix of each).
+    journal: JournalRef,
     /// The leader uuid to install (hex); drawn at random when absent.
     #[arg(long, value_parser = parse_uuid)]
     new: Option<LeaderUuid>,
@@ -583,7 +596,11 @@ pub async fn set_leader(
     out: &Printer,
     args: SetLeaderArgs,
 ) -> Ending {
-    let journal = args.journal;
+    let resolved = match crate::names::journal(client, &args.journal).await {
+        Ok(journal) => journal,
+        Err(ending) => return ending,
+    };
+    let journal = resolved.journal;
     let new = leader_or_drawn(providers, args.new);
     let outcome = match args.old {
         Some(Old(old)) => client
@@ -609,7 +626,7 @@ pub async fn set_leader(
         }
         ClaimOutcome::Lost { state } => refused(out, "lost", &state),
         ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", &state),
-        ClaimOutcome::UnknownJournal => unknown_journal(journal),
+        ClaimOutcome::UnknownJournal => unknown_journal(&resolved.label),
         ClaimOutcome::Unread | ClaimOutcome::Redirect { .. } => {
             note("no leader decided the swap");
             Ending::Unreachable
@@ -624,15 +641,31 @@ pub async fn set_leader(
 /// `parosctl inspect`.
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// The journal to inspect, `TENANT/JOURNAL`. Without it, each node is
-    /// asked for its own facts alone: its id, its cell and the control
-    /// journals (no identifier has a default, #243).
+    /// The journal to inspect: its name or its ids (`id:TENANT/JOURNAL`).
+    /// Without it, each node is asked for its own facts alone: its id, its
+    /// cell and the control journals (no identifier has a default, #243).
     #[arg(long)]
-    journal: Option<JournalIdentifier>,
+    journal: Option<JournalRef>,
 }
 
-fn ballot_text(ballot: Option<Ballot>) -> String {
-    ballot.map_or_else(|| "none".to_string(), |b| format!("{}.{}", b.round, b.node))
+fn ballot_text(ballot: Option<Ballot>, ids: Abbreviations) -> String {
+    ballot.map_or_else(
+        || "none".to_string(),
+        |b| format!("{}.{}", b.round, ids.id(b.node)),
+    )
+}
+
+/// Node ids, abbreviated.
+fn nodes_text(nodes: &[u64], ids: Abbreviations) -> String {
+    let nodes: Vec<String> = nodes.iter().map(|n| ids.id(*n)).collect();
+    format!("[{}]", nodes.join(","))
+}
+
+/// The servers' ids.
+fn server_ids(client: &ParosClient) -> Vec<u64> {
+    (0..client.server_count())
+        .map(|s| client.id_of(s))
+        .collect()
 }
 
 fn ballot_json(ballot: Option<Ballot>) -> Json {
@@ -661,12 +694,35 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
     let Some(journal) = args.journal else {
         return inspect_nodes(client, out).await;
     };
-    let mut answered = false;
+    let journal = match crate::names::journal(client, &journal).await {
+        Ok(journal) => journal.journal,
+        Err(ending) => return ending,
+    };
+    let mut replies = Vec::new();
     for server in 0..client.server_count() {
-        let id = client.id_of(server);
-        let Some(reply) = client.inspect(server, journal).await else {
+        replies.push((client.id_of(server), client.inspect(server, journal).await));
+    }
+    // One abbreviation for every node id the listing prints.
+    let ids = Abbreviations::new(
+        server_ids(client)
+            .into_iter()
+            .chain(replies.iter().flat_map(|(_, reply)| {
+                reply.iter().flat_map(|r| {
+                    r.members
+                        .iter()
+                        .chain(&r.retirable)
+                        .chain(&r.matchmakers)
+                        .copied()
+                        .chain(r.config_ballot.map(|b| b.node))
+                        .chain(r.gc_watermark.map(|b| b.node))
+                })
+            })),
+    );
+    let mut answered = false;
+    for (id, reply) in replies {
+        let Some(reply) = reply else {
             out.emit(
-                || format!("node {id}: no answer"),
+                || format!("node {}: no answer", ids.id(id)),
                 || json!({ "node": id, "answered": false }),
             );
             continue;
@@ -678,21 +734,22 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
         out.emit(
             || {
                 format!(
-                    "node {id}: leader={} ballot={} members={:?} quorum={} chosen_index={} \
-                     first_slot={} folded={} gc_watermark={} retirable={:?} \
-                     matchmakers={:?}@{}{}",
+                    "node {}: leader={} ballot={} members={} quorum={} chosen_index={} \
+                     first_slot={} folded={} gc_watermark={} retirable={} \
+                     matchmakers={}@{}{}",
+                    ids.id(id),
                     reply.leader,
-                    ballot_text(reply.config_ballot),
-                    reply.members,
+                    ballot_text(reply.config_ballot, ids),
+                    nodes_text(&reply.members, ids),
                     quorum_text(&reply),
                     reply
                         .chosen_index
                         .map_or_else(|| "none".to_string(), |c| c.to_string()),
                     reply.first_slot,
                     reply.folded,
-                    ballot_text(reply.gc_watermark),
-                    reply.retirable,
-                    reply.matchmakers,
+                    ballot_text(reply.gc_watermark, ids),
+                    nodes_text(&reply.retirable, ids),
+                    nodes_text(&reply.matchmakers, ids),
                     reply.matchmaker_generation,
                     state
                         .as_ref()
@@ -729,12 +786,32 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
 /// `parosctl inspect` without `--journal`: every server's own facts — its
 /// id, its cell and the control journals it names.
 async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
-    let mut answered = false;
+    let mut replies = Vec::new();
     for server in 0..client.server_count() {
-        let id = client.id_of(server);
-        let Some(reply) = client.inspect_node(server).await else {
+        replies.push((client.id_of(server), client.inspect_node(server).await));
+    }
+    // One abbreviation for every id the listing prints.
+    let ids = Abbreviations::new(
+        server_ids(client)
+            .into_iter()
+            .chain(replies.iter().flat_map(|(_, reply)| {
+                reply.iter().flat_map(|r| {
+                    let journals = control_journals_of(r);
+                    let cell = journals.map(|j| j.cell);
+                    let fleet = journals.and_then(|j| j.fleet);
+                    [r.node, r.cell_id].into_iter().chain(
+                        cell.into_iter()
+                            .chain(fleet)
+                            .flat_map(|j| [j.tenant.0, j.journal.0]),
+                    )
+                })
+            })),
+    );
+    let mut answered = false;
+    for (id, reply) in replies {
+        let Some(reply) = reply else {
             out.emit(
-                || format!("node {id}: no answer"),
+                || format!("node {}: no answer", ids.id(id)),
                 || json!({ "node": id, "answered": false }),
             );
             continue;
@@ -745,12 +822,19 @@ async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
         let fleet = journals.and_then(|j| j.fleet).map(|f| f.to_string());
         out.emit(
             || {
+                let short = |j: Option<JournalIdentifier>| {
+                    j.map_or_else(|| "none".to_string(), |j| format!("id:{}", ids.journal(j)))
+                };
                 format!(
-                    "node {}: cell={} control={} fleet={}",
-                    reply.node,
-                    reply.cell_id,
-                    cell.as_deref().unwrap_or("none"),
-                    fleet.as_deref().unwrap_or("none"),
+                    "node {}: cell={} control={} universe={}",
+                    ids.id(reply.node),
+                    if reply.cell_id == 0 {
+                        "none".to_string()
+                    } else {
+                        ids.id(reply.cell_id)
+                    },
+                    short(journals.map(|j| j.cell)),
+                    short(journals.and_then(|j| j.fleet)),
                 )
             },
             || {
@@ -774,9 +858,10 @@ async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
 /// `parosctl reconfigure`.
 #[derive(Args, Debug)]
 pub struct ReconfigureArgs {
-    /// The new acceptor set, comma-separated node ids.
+    /// The new acceptor set, comma-separated node ids (hex, a unique prefix
+    /// of a server's id each).
     #[arg(long, value_delimiter = ',', required = true)]
-    members: Vec<u64>,
+    members: Vec<NodeRef>,
     /// Its quorum system: `majority`, `flexible:Q1:Q2` or `grid:ROWSxCOLS`.
     #[arg(long, default_value = "majority", value_parser = parse_quorum)]
     quorum: QuorumSystem,
@@ -806,8 +891,17 @@ fn parse_quorum(s: &str) -> Result<QuorumSystem, String> {
 
 /// `parosctl reconfigure`: the operator's call to change the acceptor set.
 pub async fn reconfigure(client: &ParosClient, out: &Printer, args: ReconfigureArgs) -> Ending {
+    let servers = server_ids(client);
+    let mut members = Vec::new();
+    for member in &args.members {
+        match member.resolve(&servers) {
+            Ok(id) => members.push(id),
+            Err(ending) => return ending,
+        }
+    }
+    let ids = Abbreviations::new(servers.iter().copied());
     match client
-        .reconfigure(&args.members, args.quorum, start(client))
+        .reconfigure(&members, args.quorum, start(client))
         .await
     {
         ReconfigureOutcome::Started { round, leader } => {
@@ -815,7 +909,7 @@ pub async fn reconfigure(client: &ParosClient, out: &Printer, args: ReconfigureA
                 || {
                     format!(
                         "started round={round} leader={}",
-                        leader.map_or_else(|| "none".to_string(), |l| l.to_string())
+                        leader.map_or_else(|| "none".to_string(), |l| ids.id(l))
                     )
                 },
                 || json!({ "outcome": "started", "round": round, "leader": leader }),
@@ -843,28 +937,30 @@ pub async fn reconfigure(client: &ParosClient, out: &Printer, args: ReconfigureA
 /// `parosctl retire`.
 #[derive(Args, Debug)]
 pub struct RetireArgs {
-    /// The node to retire (its id, which must be in `--servers`).
+    /// The node to retire (hex, a unique prefix of a server's id: it must
+    /// be in `--servers`).
     #[arg(long)]
-    node: u64,
-    /// The GC watermark, `ROUND.NODE`; read from the leader's `inspect` of
-    /// `--journal` when absent.
-    #[arg(long, value_parser = parse_ballot)]
-    gc_watermark: Option<Ballot>,
-    /// The journal whose leader reports the GC watermark, `TENANT/JOURNAL`
+    node: NodeRef,
+    /// The GC watermark, `ROUND.NODE` (the node in hex, a unique prefix of
+    /// a server's id); read from the leader's `inspect` of `--journal` when
+    /// absent.
+    #[arg(long, value_parser = parse_watermark)]
+    gc_watermark: Option<(u64, NodeRef)>,
+    /// The journal whose leader reports the GC watermark, by name or ids
     /// (the journal the matchmakers serve); needed without
     /// `--gc-watermark`: no identifier has a default (#243).
     #[arg(long)]
-    journal: Option<JournalIdentifier>,
+    journal: Option<JournalRef>,
 }
 
-fn parse_ballot(s: &str) -> Result<Ballot, String> {
+fn parse_watermark(s: &str) -> Result<(u64, NodeRef), String> {
     let (round, node) = s
         .split_once('.')
         .ok_or_else(|| format!("expected ROUND.NODE, got {s:?}"))?;
-    Ok(Ballot {
-        round: round.parse().map_err(|e| format!("bad round: {e}"))?,
-        node: node.parse().map_err(|e| format!("bad node: {e}"))?,
-    })
+    Ok((
+        round.parse().map_err(|e| format!("bad round: {e}"))?,
+        node.parse().map_err(|e| format!("bad node: {e}"))?,
+    ))
 }
 
 /// The effective GC watermark `journal`'s leader reports, read from every
@@ -884,18 +980,31 @@ async fn leader_watermark(client: &ParosClient, journal: JournalIdentifier) -> O
 /// `parosctl retire`: retire a node, carrying the GC watermark that proves
 /// the cluster forgot every configuration naming it (the RPC's evidence).
 pub async fn retire(client: &ParosClient, out: &Printer, args: RetireArgs) -> Ending {
-    let Some(target) = client.index_of(args.node) else {
-        note(&format!("node {} is not in --servers", args.node));
+    let servers = server_ids(client);
+    let ids = Abbreviations::new(servers.iter().copied());
+    let node = match args.node.resolve(&servers) {
+        Ok(node) => node,
+        Err(ending) => return ending,
+    };
+    let Some(target) = client.index_of(node) else {
+        note(&format!("node {} is not in --servers", ids.id(node)));
         return Ending::Refused;
     };
-    let watermark = if let Some(watermark) = args.gc_watermark {
-        watermark
+    let watermark = if let Some((round, node)) = args.gc_watermark {
+        match node.resolve(&servers) {
+            Ok(node) => Ballot { round, node },
+            Err(ending) => return ending,
+        }
     } else {
         let Some(journal) = args.journal else {
             note(
                 "name the journal whose leader reports the watermark (--journal), or pass --gc-watermark",
             );
             return Ending::Refused;
+        };
+        let journal = match crate::names::journal(client, &journal).await {
+            Ok(journal) => journal.journal,
+            Err(ending) => return ending,
         };
         let Some(watermark) = leader_watermark(client, journal).await else {
             note("no leader reports an effective GC watermark: nothing is retirable yet");
@@ -909,8 +1018,8 @@ pub async fn retire(client: &ParosClient, out: &Printer, args: RetireArgs) -> En
     match client.retire(target, request).await {
         RetireOutcome::Retired => {
             out.emit(
-                || format!("retired node={}", args.node),
-                || json!({ "outcome": "retired", "node": args.node }),
+                || format!("retired node={}", ids.id(node)),
+                || json!({ "outcome": "retired", "node": node }),
             );
             Ending::Success
         }

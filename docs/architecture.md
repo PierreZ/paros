@@ -501,7 +501,13 @@ there it calls `Resolve` (below).
   answer, refusals included.
 - `cell_id` and `universe_id` are carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
-  cannot talk after a bad configuration.
+  cannot talk after a bad configuration. The `Hello` is the peer lane's `Deliver` batch (decided
+  on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
+  cell refuses the whole batch before it decodes a message. `universe_id` joins it when the cell
+  plan carries one. The simulation makes the shape: an operator founds another cell on the
+  machine that replaced a wiped member, and the first cell still sends to that address.
+  Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
+  members serve, and `cell init` never adopts a vote for another list's plan.
 - **Well-known endpoints** are the bootstrap set — `Identify`, `FormCell`, `Admit`, `Inspect` —
   and **`Resolve`**, keyed by tenant: "which references serve tenant T" (named on 2026-10-09).
   Everything else is a dynamic reference (amended on 2026-10-04:
@@ -761,6 +767,17 @@ tenant or journal draws a fresh id, so an old id never aliases a new name.
 full id, and a command that takes an id accepts a unique prefix. An internal tenant (section 3.7)
 shows a display label derived from its groups (`universe`, `cell` with its cell), display only,
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
+
+**Where names stand** (#239, landed on 2026-10-10). The library parses and prints
+`paros://<tenant>/<journal>` (`paros::name`) and resolves it in two hops
+(`paros::client::names`): the tenant name through the universe directory, where only a `READY`
+`users` tenant resolves; then the journal name through the tenant's control journal, the
+`TenantControl` fold (#210 (tenant control journal)), where only a live journal resolves. A client caches a resolution and drops it
+when a call is refused as naming an unknown journal; the next resolution reads the control journal
+again. `parosctl` resolves the names its journal commands take. An operator can name a journal by
+its ids, `id:<tenant>/<journal>` in hex, each half a unique prefix of an id that `parosctl` can
+list, or all 16 digits. Since #210 (tenant control journal), the machines serve every tenant's
+control journal, so a name resolves both hops on `parosd`, and `init` creates no user journal.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
@@ -1119,9 +1136,15 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
     records that ledger plus the compaction horizon. The next coordinator deletes unreferenced
     checkpoint journals; at most two exist at a time.
 
-  M9 writes `Inline` only. `Ref` removes the batch-size limit and never blocks the main journal;
-  it is needed when a journal's state outgrows one batch (the universe tenant in a large universe, M12). Readers
-  handle both forms from the start, so adopting `Ref` later changes only the writer.
+  M9 writes `Inline` only. `Ref` removes the batch-size limit and never blocks the main journal.
+  Readers handle both forms from the start.
+
+  **Every checkpoint becomes a `Ref`** (decided on 2026-10-10, #353): the state goes into a
+  second journal, the checkpoint journal, as many small records in many slots. The main journal
+  holds only the small pointer record, so no slot holds a large record. The writer stops emitting
+  `Inline`. This is no longer an M12 item. The detailed design (one long-lived checkpoint journal
+  per main journal, a main journal that does not stop while the chunks are written,
+  deterministic chunks by key range) is proposed in #353 and waits for Pierre's check.
 
 ### 3.10 Recovery (deferred)
 
@@ -1583,7 +1606,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M9 | The universe with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the `Ref` checkpoint writer, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
+| M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores

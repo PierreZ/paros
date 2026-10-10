@@ -22,9 +22,11 @@ use moonpool_sim::{
     RandomProvider, SimContext, assert_always, assert_reachable, assert_sometimes,
     buggify_with_prob,
 };
+use paros::client::ReadOutcome;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
+use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{Writer, WriterOutcome};
 use paros::fleet::{Groups, TenantState};
 use paros::tenant::Desired;
@@ -32,6 +34,7 @@ use paros::{JournalIdentifier, TenantId, Value, WriterMode};
 
 use super::FleetOps;
 use super::cell::Cell;
+use crate::audit::tenants;
 
 /// The journal names a request is drawn from: few, so two requests race for
 /// one often.
@@ -47,7 +50,7 @@ impl FleetOps {
         _policy: CheckpointPolicy,
         (class, payload): (u64, u64),
     ) {
-        let Some((cell, tenant, _)) = self.journal_tenant(ctx, payload).await else {
+        let Some((cell, tenant, control)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
         let request = if let Some(request) = self.journal_pending.take() {
@@ -56,6 +59,11 @@ impl FleetOps {
             let name = JOURNAL_NAMES
                 [usize::try_from(class % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
             .to_vec();
+            // A name this client resolved on an earlier step is read through
+            // its cached resolution first: the journal may be gone since.
+            if self.cached_name(tenant, &name).is_some() && buggify_with_prob!(0.5) {
+                self.read_through_name(&cell, control, &name, payload).await;
+            }
             JournalRequest {
                 request: ctx.random().random_range(1..u64::MAX),
                 tenant,
@@ -66,7 +74,8 @@ impl FleetOps {
                 },
             }
         };
-        self.send_journal_request(&cell, request, payload).await;
+        self.send_journal_request(&cell, control, request, payload)
+            .await;
     }
 
     /// `DELETE_JOURNAL`: delete a journal of a `READY` tenant by name, or
@@ -78,7 +87,7 @@ impl FleetOps {
         _policy: CheckpointPolicy,
         payload: u64,
     ) {
-        let Some((cell, tenant, _)) = self.journal_tenant(ctx, payload).await else {
+        let Some((cell, tenant, control)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
         let request = match self.journal_pending.take() {
@@ -93,7 +102,8 @@ impl FleetOps {
                 },
             },
         };
-        self.send_journal_request(&cell, request, payload).await;
+        self.send_journal_request(&cell, control, request, payload)
+            .await;
     }
 
     /// The cell and a `READY` served tenant of its fleet directory, with
@@ -142,7 +152,13 @@ impl FleetOps {
 
     /// Send `request` to the tenant coordinator until an answer decides it
     /// or patience runs out (then it stays pending), and judge the answer.
-    async fn send_journal_request(&mut self, cell: &Cell, request: JournalRequest, draw: u64) {
+    async fn send_journal_request(
+        &mut self,
+        cell: &Cell,
+        control: JournalIdentifier,
+        request: JournalRequest,
+        draw: u64,
+    ) {
         let Some(election) = cell.journals.election else {
             return;
         };
@@ -162,7 +178,8 @@ impl FleetOps {
             self.journal_pending = Some(request);
             return;
         }
-        self.judge_answer(cell, &request, &answer, draw).await;
+        self.judge_answer(cell, control, &request, &answer, draw)
+            .await;
         if buggify_with_prob!(0.2) {
             // A retry of a decided request: the client lost the answer.
             let again = journals::request(
@@ -189,6 +206,7 @@ impl FleetOps {
     async fn judge_answer(
         &mut self,
         cell: &Cell,
+        control: JournalIdentifier,
         request: &JournalRequest,
         answer: &JournalAnswer,
         draw: u64,
@@ -197,7 +215,9 @@ impl FleetOps {
             (
                 JournalAnswer::Created { id, config },
                 JournalOp::Create {
-                    writer, desired, ..
+                    name,
+                    writer,
+                    desired,
                 },
             ) => {
                 assert_sometimes!(
@@ -214,6 +234,14 @@ impl FleetOps {
                     { "tenant" => request.tenant.0, "members" => config.members().len() }
                 );
                 let journal = JournalIdentifier::new(request.tenant, *id);
+                let resolution = self.resolve_name(cell, control, name, draw).await;
+                assert_sometimes!(
+                    matches!(
+                        resolution,
+                        JournalResolution::Resolved { journal: resolved, .. } if resolved == journal
+                    ),
+                    "names: a journal name resolves to the journal its create made"
+                );
                 if *writer == WriterMode::Single {
                     self.note_journals([journal]);
                     self.append_to_created(cell, journal, draw).await;
@@ -241,6 +269,101 @@ impl FleetOps {
                     { "answer" => answer.as_str() }
                 );
             }
+        }
+    }
+
+    /// The journal `name` of `tenant` this client resolved on an earlier
+    /// step, if it still holds that resolution.
+    fn cached_name(&self, tenant: TenantId, name: &[u8]) -> Option<JournalIdentifier> {
+        self.journal_names
+            .get(&tenant)
+            .and_then(|names| names.cached(name))
+            .map(|(journal, _)| journal)
+    }
+
+    /// Resolve `name` afresh through the library (#239 (names at the
+    /// edge)), and hold what it came to against the tenant control journal
+    /// `control` as the machines folded it: a resolved name names the
+    /// journal the fold records at the position the resolution was read at,
+    /// so a recreated name never resolves to the deleted journal.
+    async fn resolve_name(
+        &mut self,
+        cell: &Cell,
+        control: JournalIdentifier,
+        name: &[u8],
+        draw: u64,
+    ) -> JournalResolution {
+        let first = cell.first(draw);
+        let resolution = self
+            .journal_names
+            .entry(control.tenant)
+            .or_insert_with(|| JournalNames::new(control))
+            .refresh(&cell.client, first, name)
+            .await;
+        let (resolved, at) = match resolution {
+            JournalResolution::Resolved { journal, at } => {
+                assert_always!(
+                    journal.tenant == control.tenant,
+                    "names: a journal name resolves inside its tenant",
+                    { "journal" => journal.to_string() }
+                );
+                (Some(journal.journal), at)
+            }
+            JournalResolution::Unknown { at } => (None, at),
+            JournalResolution::Unreadable(_) => return resolution,
+        };
+        let recorded =
+            tenants::lock(&tenants::tenant_board(&self.state)).named_at(control, name, at);
+        if let Ok(recorded) = recorded {
+            assert_always!(
+                recorded == resolved,
+                "names: a resolved name is the journal its directory records there",
+                {
+                    "at" => at,
+                    "resolved" => resolved.map_or(0, |j| j.0),
+                    "recorded" => recorded.map_or(0, |j| j.0)
+                }
+            );
+            assert_reachable!("names: a journal resolution is judged against the directory");
+        }
+        resolution
+    }
+
+    /// Read the journal `name` resolved to on an earlier step, through that
+    /// cached resolution (#239 (names at the edge)). When every server
+    /// refuses it as unknown, the resolution is stale: the client drops it
+    /// and resolves the name again.
+    async fn read_through_name(
+        &mut self,
+        cell: &Cell,
+        control: JournalIdentifier,
+        name: &[u8],
+        draw: u64,
+    ) {
+        let Some(cached) = self.cached_name(control.tenant, name) else {
+            return;
+        };
+        assert_reachable!("names: a client reads a journal through a cached resolution");
+        let request = paros::client::Reader::new(cached, 0).request(1, 0);
+        let report = cell.client.read_any(&request, 0).await;
+        let stale = report.outcome == ReadOutcome::UnknownJournal
+            && self
+                .journal_names
+                .get_mut(&control.tenant)
+                .is_some_and(|names| names.stale(name, cached));
+        if !stale {
+            return;
+        }
+        match self.resolve_name(cell, control, name, draw).await {
+            JournalResolution::Resolved { journal, .. } if journal != cached => {
+                assert_reachable!(
+                    "names: a stale resolution is refused and the name resolves to its new journal"
+                );
+            }
+            JournalResolution::Unknown { .. } => {
+                assert_reachable!("names: a stale resolution is refused and the name is gone");
+            }
+            _ => {}
         }
     }
 

@@ -5,8 +5,9 @@ test: nothing in CI runs it (CI only builds the image). The walkthrough that exp
 step does is [`crates/parosd/README.md`](crates/parosd/README.md).
 
 No id is fixed: `init` draws the cell's control journals at random, and the tenant coordinator
-draws a journal's id when it creates the journal. Every command below takes the journal from
-`journal create`'s output (`journal=TENANT/JOURNAL`).
+draws a journal's id when it creates the journal. A journal is named by its name,
+`TENANT/JOURNAL` or `paros://TENANT/JOURNAL`, or by its ids, `id:TENANT/JOURNAL` in hex.
+Human output prints ids as short hex, like git; `--json` prints them whole.
 
 ## With Docker Compose
 
@@ -17,15 +18,15 @@ Needs Docker with the Compose plugin; nothing else (the image is a plain Rust bu
 docker compose up -d --build
 
 # Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
-#   initialized fleet=… cell=… coordinator=… members=3 control=T/J election=T/J fleet_control=T/J steps=…
+#   initialized fleet=… cell=… coordinator=… members=3 control=id:T/J election=id:T/J fleet_control=id:T/J steps=…
 docker compose run --rm init
 
 # A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
 # picks its members from the desired mode (`--desired double` by default). Prints:
-#   created journal=T/J members=…
+#   created journal=id:T/J members=…
 docker compose run --rm parosctl tenant create acme
-docker compose run --rm parosctl journal create acme orders | tee create.out
-J=$(sed -n 's/.*journal=\([^ ]*\).*/\1/p' create.out)
+docker compose run --rm parosctl journal create acme orders
+J=acme/orders
 
 # Write and read the journal. `--leader 7` claims the journal under the leader
 # uuid 7 (a uuid is drawn when absent), then writes at the tail.

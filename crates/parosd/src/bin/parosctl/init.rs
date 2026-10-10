@@ -35,6 +35,7 @@ use serde_json::json;
 use crate::Ending;
 use crate::fleet::{interrupted, leader_seed, nonzero, refusal_text, steps};
 use crate::output::{Printer, note};
+use paros::name::Abbreviations;
 
 /// `parosctl init`.
 #[derive(Args, Debug)]
@@ -146,7 +147,10 @@ fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
             "cell init over {target} and the other members decided nothing in time: a member \
              is not up yet; run it again"
         ),
-        Unreachable::NothingAnswered => format!("nothing answered init or inspect at {target}"),
+        Unreachable::NothingAnswered => format!(
+            "nothing answered init at {target}, or no cell answered inspect from a majority of \
+             the members"
+        ),
         Unreachable::NoControlJournals => "no server named its cell's control journals".into(),
         Unreachable::NoMembers => "no server described the cell control journal's members".into(),
         Unreachable::NoCoordinator => {
@@ -157,22 +161,28 @@ fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
     }
 }
 
-/// Print an initialized fleet: every control journal's identifier.
+/// Print an initialized fleet: every control journal's identifier. Ids
+/// print abbreviated (#239 (names at the edge)); `--json` prints them whole.
 fn print_initialized(out: &Printer, done: &Initialized) {
     let journals = done.journals;
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
     let election = journals.election.map(|e| e.to_string()).unwrap_or_default();
     out.emit(
         || {
+            let ids = Abbreviations::new(
+                [done.fleet_id, journals.cell_id, done.coordinator.0]
+                    .into_iter()
+                    .chain(journals.fleet.into_iter().chain(journals.election).chain([journals.cell]).flat_map(|j| [j.tenant.0, j.journal.0])),
+            );
             format!(
-                "initialized fleet={} cell={} coordinator={} members={} control={} election={} fleet_control={} steps={}",
-                done.fleet_id,
-                journals.cell_id,
-                done.coordinator.0,
+                "initialized fleet={} cell={} coordinator={} members={} control=id:{} election={} fleet_control={} steps={}",
+                ids.id(done.fleet_id),
+                ids.id(journals.cell_id),
+                ids.id(done.coordinator.0),
                 done.servers.len(),
-                journals.cell,
-                election,
-                fleet_control,
+                ids.journal(journals.cell),
+                journals.election.map_or_else(|| "none".to_string(), |e| format!("id:{}", ids.journal(e))),
+                journals.fleet.map_or_else(|| "none".to_string(), |f| format!("id:{}", ids.journal(f))),
                 steps(&done.steps).join(",")
             )
         },

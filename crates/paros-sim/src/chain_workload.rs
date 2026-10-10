@@ -801,6 +801,24 @@ fn compose_reconfiguration(
 
 /// File a reconfiguration asking for `members` in the operators' ledger
 /// (#198) before it leaves; returns the id its answer is filed under.
+/// A quorum system `n` members do not admit, judged by the workload's own
+/// arithmetic, never the library's (#269), or `None` when `n` admits every
+/// shape below. `draw` picks one of three: the split `{1, 1}` (two quorums
+/// that need not meet once `n >= 2`), the boundary split `{1, n - 1}`
+/// (`q1 + q2 == n`: still no intersection), or a 2-row grid of `n` columns
+/// (it does not tile `n` members).
+fn malformed_system(n: usize, draw: u64) -> Option<QuorumSystem> {
+    if n < 2 {
+        return None;
+    }
+    let system = match draw % 3 {
+        0 => QuorumSystem::Flexible { q1: 1, q2: 1 },
+        1 => QuorumSystem::Flexible { q1: 1, q2: n - 1 },
+        _ => QuorumSystem::Grid { rows: 2, cols: n },
+    };
+    Some(system)
+}
+
 fn ledger_request(state: &moonpool_sim::StateHandle, members: &[u64]) -> u64 {
     crate::world::storage_world(state)
         .lock()
@@ -2797,13 +2815,17 @@ impl Workload for ChainWorkload {
                         }
                         // The adversarial half (R5's spirit): an operator who
                         // names a quorum system the membership does not admit
-                        // — `1 + 1 > n` fails for any two or more members —
                         // must be refused at the wire, never crash the node.
+                        // The workload judges "malformed" with its own
+                        // arithmetic, never the library's `admits` (#269: a
+                        // mutant of `admits` also silenced the request).
                         let malformed = buggify_with_prob!(0.05)
-                            && !QuorumSystem::Flexible { q1: 1, q2: 1 }.admits(next.len());
-                        if malformed {
-                            system = QuorumSystem::Flexible { q1: 1, q2: 1 };
+                            .then(|| malformed_system(next.len(), ctx.random().random::<u64>()))
+                            .flatten();
+                        if let Some(bad) = malformed {
+                            system = bad;
                         }
+                        let malformed = malformed.is_some();
                         tracing::info!(shape = name, members = ?next, ?system, "chain_reconfigure_request");
                         remove_next = false;
                         // The operators' ledger (#198): filed before the

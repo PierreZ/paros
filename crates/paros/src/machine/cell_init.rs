@@ -233,14 +233,24 @@ async fn attempt<P: Providers>(
         acceptors.quorum_system().phase2_quorum_size(n) == q2,
         "a majority of the listed machines chooses the plan"
     );
+    // A vote for a plan over another list is another cell's decree, never
+    // this one's (#216): a machine of another cell answers at an address a
+    // wiped member left. It voted once, there, so it never accepts here; its
+    // vote is not adopted and its ballot preempts nothing.
+    let ours = |plan: &CellPlan| plan.addrs().into_iter().eq(members.iter().copied());
     // Votes are wire input: two that disagree at one ballot would break the
     // decree's own agreement rule, so they are refused here as malformed.
     let mut seen: BTreeMap<Ballot, u64> = BTreeMap::new();
+    let mut foreign = 0_usize;
     for (_, ack) in &promises {
         let Some(vote) = &ack.vote else { continue };
         let (Ok(plan), Some(voted)) = (CellPlan::from_form(vote), vote_ballot(vote)) else {
             return Attempt::Failed("malformed");
         };
+        if !ours(&plan) {
+            foreign += 1;
+            continue;
+        }
         if *seen.entry(voted).or_insert(plan.fingerprint()) != plan.fingerprint() {
             return Attempt::Failed("malformed");
         }
@@ -261,17 +271,22 @@ async fn attempt<P: Providers>(
                 let (Ok(plan), Some(voted)) = (CellPlan::from_form(vote), vote_ballot(vote)) else {
                     return Attempt::Failed("malformed");
                 };
-                // A formed member answers every ballot with its vote, which
-                // may lie above this one: reopen above it.
-                if voted > ballot {
-                    decree.on_nack(voted);
-                    continue;
+                // Another cell's vote (see above): no vote in this decree.
+                if ours(&plan) {
+                    // A formed member answers every ballot with its vote,
+                    // which may lie above this one: reopen above it.
+                    if voted > ballot {
+                        decree.on_nack(voted);
+                        continue;
+                    }
+                    if voted == ballot {
+                        // This ballot is this receiver's alone, and fresh.
+                        return Attempt::Failed("malformed");
+                    }
+                    Some((voted, plan))
+                } else {
+                    None
                 }
-                if voted == ballot {
-                    // This ballot is this receiver's alone, and fresh.
-                    return Attempt::Failed("malformed");
-                }
-                Some((voted, plan))
             }
         };
         if let DecreePromise::Quorum(value) = decree.on_promise(id, vote) {
@@ -286,6 +301,16 @@ async fn attempt<P: Providers>(
     };
     if decree.adopted_prior_vote() {
         tracing::info!(cell = plan.cell_id, "cell_init_adopts_a_plan");
+    } else if foreign > 0 {
+        // No vote of this list's, and a listed machine is in another cell
+        // already: the list is not one cell's, and that machine never forms
+        // a fresh plan.
+        return Attempt::Failed("other_cell_init");
+    }
+    if foreign > 0 {
+        moonpool_assertions::reachable!(
+            "cell init: a decree passes over another cell's vote at a wiped member's address"
+        );
     }
     // Adopt or refuse (#277): another list's plan is another cell's.
     if !plan.addrs().into_iter().eq(members.iter().copied()) {

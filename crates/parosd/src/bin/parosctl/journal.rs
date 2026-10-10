@@ -18,6 +18,7 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::read_directory;
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
+use paros::name::full_hex;
 use paros::tenant::Desired;
 use paros::{JournalIdentifier, TenantId, WriterMode};
 use serde_json::json;
@@ -170,10 +171,11 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
             out.emit(
                 || {
                     format!(
-                        "created journal={journal} members={}",
+                        "created journal={} members={}",
+                        hex(journal),
                         members
                             .iter()
-                            .map(ToString::to_string)
+                            .map(|m| full_hex(*m))
                             .collect::<Vec<_>>()
                             .join(",")
                     )
@@ -185,7 +187,7 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
         JournalAnswer::Deleted { id } => {
             let journal = JournalIdentifier::new(tenant, *id);
             out.emit(
-                || format!("deleted journal={journal}"),
+                || format!("deleted journal={}", hex(journal)),
                 || json!({ "outcome": label, "journal": journal.to_string() }),
             );
             Ending::Success
@@ -193,7 +195,7 @@ fn report(out: &Printer, tenant: TenantId, answer: &JournalAnswer) -> Ending {
         JournalAnswer::NameTaken { id } => {
             let journal = JournalIdentifier::new(tenant, *id);
             out.emit(
-                || format!("refused: name_taken by journal={journal}"),
+                || format!("refused: name_taken by journal={}", hex(journal)),
                 || json!({ "outcome": label, "journal": journal.to_string() }),
             );
             Ending::Refused
@@ -232,13 +234,13 @@ async fn list(
         || {
             let mut lines = vec![format!(
                 "tenant={} control={}",
-                tenant.0,
-                JournalIdentifier::new(tenant, control)
+                full_hex(tenant.0),
+                hex(JournalIdentifier::new(tenant, control))
             )];
             for (id, journal) in fold.journals() {
                 lines.push(format!(
                     "journal={} name={} mode={} desired={} members={} state={}",
-                    JournalIdentifier::new(tenant, id),
+                    hex(JournalIdentifier::new(tenant, id)),
                     record_text(&journal.name),
                     mode_label(journal.writer),
                     journal.desired.label(),
@@ -246,7 +248,7 @@ async fn list(
                         .config
                         .members()
                         .iter()
-                        .map(|m| m.0.to_string())
+                        .map(|m| full_hex(m.0))
                         .collect::<Vec<_>>()
                         .join(","),
                     if journal.deleted_at.is_some() {
@@ -274,6 +276,16 @@ async fn list(
         },
     );
     Ending::Success
+}
+
+/// A journal's ids, whole and in hex: `id:TENANT/JOURNAL` (#239 (names at
+/// the edge)), the form every journal argument takes.
+fn hex(journal: JournalIdentifier) -> String {
+    format!(
+        "id:{}/{}",
+        full_hex(journal.tenant.0),
+        full_hex(journal.journal.0)
+    )
 }
 
 /// A writer mode's label.

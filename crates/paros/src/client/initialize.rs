@@ -92,7 +92,8 @@ pub enum Unreachable {
     Malformed,
     /// The formation decided nothing in time: a member is not up yet.
     Formation,
-    /// Nothing answered `CellInit` or `Inspect`.
+    /// Nothing answered `CellInit`, or no cell answered `Inspect` from a
+    /// majority of the founding members.
     NothingAnswered,
     /// No server named its cell's control journals.
     NoControlJournals,
@@ -121,13 +122,15 @@ pub struct InitParams {
 /// What a found cell is: its servers, its members and its control journals.
 type Found = (Vec<(u64, SocketAddr)>, Vec<u64>, ControlJournals);
 
-/// A cell an earlier run formed, learned from its servers: their ids and
-/// its control journals from a node-only `Inspect` (no identifier is fixed,
-/// §3.8), its members from the cell control journal's. The fleet steps fold
-/// the cell control journal over its genesis pool, the cell's members — the
-/// pool the run that formed the cell folds it over — never over whichever
-/// servers answered this time (not reproduced in the simulation: a fold's
-/// pool must not depend on who was up).
+/// A cell an earlier run formed, learned from its servers: the cell a
+/// majority of the founding members serve, with its control journals, from
+/// their node-only `Inspect` (no identifier is fixed, §3.8; an address a
+/// wiped member left may host another cell's machine, #216), and its
+/// members from the cell control journal's. The fleet steps fold the cell
+/// control journal over its genesis pool, the cell's members — the pool the
+/// run that formed the cell folds it over — never over whichever servers
+/// answered this time (not reproduced in the simulation: a fold's pool must
+/// not depend on who was up).
 async fn found<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -135,14 +138,13 @@ async fn found<P: Providers>(
     connect: &impl Fn(&[(u64, SocketAddr)]) -> Client<P>,
     patience: Duration,
 ) -> Result<Found, Unreachable> {
-    let servers = bootstrap::discover(providers, rpc, addrs, patience).await;
-    if servers.is_empty() {
-        return Err(Unreachable::NothingAnswered);
+    let (journals, servers) = bootstrap::majority_cell(providers, rpc, addrs, patience)
+        .await
+        .ok_or(Unreachable::NothingAnswered)?;
+    if journals.fleet.is_none() {
+        return Err(Unreachable::NoControlJournals);
     }
     let client = connect(&servers);
-    let journals = bootstrap::control_journals(&client)
-        .await
-        .ok_or(Unreachable::NoControlJournals)?;
     // The genesis pool is the cell's members, never only the servers that
     // answered: one of them may be down.
     let mut members = client

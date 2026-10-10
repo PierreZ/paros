@@ -69,6 +69,7 @@ pub mod fleet;
 pub mod initialize;
 pub mod journals;
 pub mod multi;
+pub mod names;
 mod observer;
 pub mod outcome;
 mod reader;

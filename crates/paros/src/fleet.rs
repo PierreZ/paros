@@ -479,6 +479,17 @@ pub struct CellEntry {
     pub control_tenant: TenantId,
 }
 
+/// How a person reads a tenant ([`FleetDirectory::label`], #239).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TenantLabel<'a> {
+    /// A `users` tenant: its name.
+    Named(&'a [u8]),
+    /// The fleet tenant (internal: it has no name).
+    Fleet,
+    /// The cell tenant of this cell (internal: it has no name).
+    Cell(u64),
+}
+
 /// A tenant entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TenantEntry {
@@ -699,6 +710,36 @@ impl FleetDirectory {
     #[must_use]
     pub fn is_removed(&self, tenant: TenantId) -> bool {
         self.removed.contains(&tenant)
+    }
+
+    /// How a person reads `tenant` (#239): a `users` tenant by its name, an
+    /// `internal` one by the group that makes it internal, `fleet` or `cell`
+    /// with its cell. A label is display only: never a name a caller can
+    /// resolve, and never an id (§3.8: no well-known names).
+    ///
+    /// # Panics
+    ///
+    /// If a tenant's groups are none of the three sets the wire admits.
+    #[must_use]
+    pub fn label(&self, tenant: TenantId) -> Option<TenantLabel<'_>> {
+        let entry = self.tenants.get(&tenant)?;
+        if !entry.groups.contains(Group::Internal) {
+            assert!(entry.groups.contains(Group::Users));
+            return Some(TenantLabel::Named(&entry.name));
+        }
+        if entry.groups.contains(Group::Fleet) {
+            return Some(TenantLabel::Fleet);
+        }
+        assert!(
+            entry.groups.contains(Group::Cell),
+            "an internal tenant is the fleet's or a cell's"
+        );
+        let cell = self
+            .cells
+            .iter()
+            .find(|(_, cell)| cell.control_tenant == tenant)
+            .map_or(entry.cell_id, |(id, _)| *id);
+        Some(TenantLabel::Cell(cell))
     }
 
     /// Whether `tenant` is held by an entry or was ever removed.

@@ -1726,8 +1726,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         );
     }
 
-    fn edge_rejected(&self, _at: Party, _kind: EdgeRejection) {
+    fn edge_rejected(&self, _at: Party, kind: EdgeRejection) {
         let mut st = self.state();
+        if kind == EdgeRejection::ForeignCell {
+            // Another cell's peer, not a corrupted request (#216): its gate
+            // is the edge's own inline reachable.
+            return;
+        }
         st.edge_rejections += 1;
         // The message predates the move to moonpool-rpc; it stays verbatim
         // because a message's hash is its assertion slot.

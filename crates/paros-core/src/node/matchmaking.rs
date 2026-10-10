@@ -157,6 +157,10 @@ pub enum MatchStep {
         watermark: Ballot,
         /// How many matchmakers answered before the quorum closed.
         registered_by: usize,
+        /// Ballots two matchmakers reported with different configurations
+        /// (the union keeps both). Carried here because the phase is closed
+        /// by the time the driver reports it (#269).
+        disagreements: u64,
     },
     /// A matchmaker refused the registration: the campaign is abandoned and
     /// this node is a follower again.
@@ -392,6 +396,14 @@ impl ColocatedNode {
             Ballot { round, node: me },
             self.acceptors.clone(),
         )));
+        // The tag that fences the probe's answers is its own fresh round
+        // (#269): an earlier probe's late answers never count toward it.
+        assert!(
+            self.probe
+                .as_ref()
+                .is_some_and(|p| p.ballot() == Ballot { round, node: me }),
+            "a probe is tagged by its own fresh round"
+        );
         self.queue_probe_requests();
         // Every later campaign opens strictly above the probe's tag.
         assert!(
@@ -675,6 +687,7 @@ impl ColocatedNode {
             // runs the leadership under what it registered.
             let prior = m.prior();
             let watermark = m.watermark();
+            let disagreements = m.disagreements();
             let config = m.config().clone();
             // The matchmaking → Phase 1 boundary. The registered
             // quorum is restated here, at the one place Phase 1
@@ -698,6 +711,7 @@ impl ColocatedNode {
                 prior,
                 watermark,
                 registered_by: registered,
+                disagreements,
             }
         }
     }
@@ -957,17 +971,6 @@ impl ColocatedNode {
             _ => MatchStep::Refused(refusal),
         }
     }
-    /// How many matchmaker disagreements (two configurations reported at one
-    /// ballot) the open matchmaking phase has unioned so far — 0 when none is
-    /// open. Observability only: the union keeps both, so safety never
-    /// depends on the count.
-    #[must_use]
-    pub fn matchmaking_disagreements(&self) -> u64 {
-        self.matchmaking
-            .as_ref()
-            .map_or(0, Matchmaking::disagreements)
-    }
-
     /// The matchmaker set this node believes authoritative (#125): the
     /// bootstrap set at generation 0 until a later one is learned. `None` on
     /// plain Multi-Paxos, which names no matchmakers at all.
