@@ -1208,6 +1208,25 @@ impl SystemOps {
                 assert_reachable!("registry: a client releases a booking");
                 self.released.push(booking);
             }
+            if !buggify_with_prob!(0.5) {
+                return;
+            }
+        }
+        if let Some(booking) = self.released.last().copied()
+            && draw.is_multiple_of(3)
+        {
+            // A booking under an id this client released: the registry
+            // must refuse it, whatever the node (ids are never reused).
+            assert_reachable!("registry: a client books again under an id it released");
+            let (node, _, machine) = self.joiners[0].clone();
+            let role = Role::of(machine.class).next().unwrap_or(Role::Acceptor);
+            let command = SystemCommand::BookCapacity {
+                booking,
+                node,
+                role,
+                target: BookingTarget::Journal(self.main),
+            };
+            self.append(ctx, nodes, self.registry, &command, draw).await;
             return;
         }
         let (node, _, machine) = self.joiners
@@ -1235,12 +1254,7 @@ impl SystemOps {
         } else {
             BookingTarget::Journal(journal)
         };
-        let booking = if !self.released.is_empty() && buggify_with_prob!(0.1) {
-            assert_reachable!("registry: a client books again under an id it released");
-            self.released[usize::try_from(draw % self.released.len() as u64).unwrap_or(0)]
-        } else {
-            crate::chain::splitmix(draw ^ self.client_id.rotate_left(32))
-        };
+        let booking = crate::chain::splitmix(draw ^ self.client_id.rotate_left(32));
         let command = SystemCommand::BookCapacity {
             booking,
             node,

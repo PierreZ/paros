@@ -306,6 +306,43 @@ pub(crate) fn wipe_target(
     }
 }
 
+/// The machine the silent-machine scenario crashes now
+/// (`crate::world::silent_machine`), once the cell formed: a live machine
+/// the cell admitted, else, on a cell of at least three founding members, a
+/// live founder that formed (the others keep a majority and one of them
+/// leads). `None` before that.
+pub(crate) fn silent_target(
+    state: &StateHandle,
+    dead: impl Fn(&str) -> bool,
+) -> Option<SocketAddr> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let live = |addr: &SocketAddr| !dead(&addr.ip().to_string());
+    let admitted = board
+        .nodes
+        .iter()
+        .find(|(addr, node)| board.admitted.contains_key(node) && live(addr))
+        .map(|(addr, _)| *addr);
+    if admitted.is_some() {
+        return admitted;
+    }
+    let formed: Vec<SocketAddr> = board
+        .founders
+        .iter()
+        .filter(|addr| {
+            board
+                .nodes
+                .get(addr)
+                .is_some_and(|n| board.formed.contains(n))
+        })
+        .copied()
+        .collect();
+    if board.founders.len() < 3 || formed.len() < board.founders.len() {
+        return None;
+    }
+    formed.into_iter().rev().find(live)
+}
+
 /// A machine in the simulation.
 pub(crate) struct MachineProcess;
 
