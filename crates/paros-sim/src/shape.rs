@@ -968,6 +968,12 @@ pub(crate) struct MachineLayout {
     /// How many user journals a formed cell serves beside its control
     /// journals (the static assignment, until #212).
     pub(crate) assignment: usize,
+    /// The machines advertise names, not literal addresses (#257): every
+    /// dialer resolves them through the run's name table.
+    pub(crate) named: bool,
+    /// On a seed whose machines advertise names, the percent of reboots that
+    /// land at a new address (#257).
+    pub(crate) move_pct: u32,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
@@ -978,7 +984,9 @@ pub(crate) struct MachineLayout {
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
 /// floor 1, as a joiner's); the assignment one more (default 1, `parosd`'s;
 /// extreme 0..=2: a cell of control journals alone, or two user journals
-/// beside them).
+/// beside them). The machines advertise names on a coin (#257); on such a
+/// seed a reboot lands at a new address with the `move_pct` knob (default
+/// 0; extreme 20..=80, floor 0: a machine that never moves).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     let registry = registry(state);
@@ -993,6 +1001,8 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
             let assignment = buggify_knob!(1_usize, 0_usize..3_usize);
+            let named = moonpool_sim::sim_random_bool(0.5);
+            let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let machines = (0..count)
                 .map(|rank| {
                     let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {
@@ -1020,6 +1030,8 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 founders,
                 machines,
                 assignment,
+                named,
+                move_pct,
             }
         })
         .clone()

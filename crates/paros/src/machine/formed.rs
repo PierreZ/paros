@@ -49,7 +49,7 @@ impl FormedCell {
         assert!(
             self.plan
                 .members
-                .contains(&(self.facts.node_id, self.facts.addr)),
+                .contains(&(self.facts.node_id, self.facts.addr.clone())),
             "a formed member is a member of its plan"
         );
         wire::PrepareCellAck {

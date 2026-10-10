@@ -74,11 +74,13 @@ use paros_core::{Ballot, Fingerprint, JournalId, JournalIdentifier, NodeId, Tena
 pub use admitted::AdmittedMachine;
 pub use disk::ProviderDisk;
 pub use formed::FormedCell;
-pub use lifecycle::{MachineError, MachineSettings, run_machine};
+pub use lifecycle::{MachineAddresses, MachineError, MachineSettings, run_machine};
 pub use record::{MachineRecord, journal_config};
 pub use stores::AuditScope;
 pub use wait::{CellLedger, Joined, wait_for_cell};
 
+use crate::Address;
+use crate::Names;
 use crate::rpc::machine as wire;
 
 /// The fleet's **control journals** as one cell knows them (§3.2, §3.8):
@@ -147,8 +149,14 @@ pub struct MachineFacts {
     pub capacity: u64,
     /// Its failure domain (opaque here).
     pub failure_domain: String,
-    /// The address it serves at, which its peers dial.
-    pub addr: SocketAddr,
+    /// The address it advertises (`PAROS_ADVERTISE`, #257): what its peers
+    /// and clients dial, a literal or a name resolved at dial time.
+    pub addr: Address,
+    /// The address it binds (`PAROS_LISTEN`, #257), never one read from the
+    /// cell plan or the registry.
+    pub listen: SocketAddr,
+    /// How it resolves the addresses it dials.
+    pub names: Names,
 }
 
 impl MachineFacts {
@@ -175,8 +183,9 @@ impl MachineFacts {
 pub struct Admission {
     /// The cell and its control journals.
     pub cell: ControlJournals,
-    /// The cell's machines known at admission, in id order.
-    pub members: Vec<(NodeId, SocketAddr)>,
+    /// The cell's machines known at admission, by advertised address, in
+    /// id order.
+    pub members: Vec<(NodeId, Address)>,
 }
 
 impl Admission {
@@ -201,7 +210,7 @@ impl Admission {
             return Err("an admission names a machine of the cell");
         }
         let ids: BTreeSet<NodeId> = self.members.iter().map(|(id, _)| *id).collect();
-        let addrs: BTreeSet<SocketAddr> = self.members.iter().map(|(_, a)| *a).collect();
+        let addrs: BTreeSet<&Address> = self.members.iter().map(|(_, a)| a).collect();
         if ids.len() != self.members.len() || addrs.len() != self.members.len() {
             return Err("a cell's machines are unique by id and by address");
         }
@@ -225,10 +234,9 @@ impl Admission {
             .members
             .iter()
             .map(|m| {
-                m.addr
-                    .parse()
+                Address::parse(&m.addr)
                     .map(|addr| (NodeId(m.node_id), addr))
-                    .map_err(|_| "a member's address is HOST:PORT, resolved")
+                    .map_err(|_| "a member's address is HOST:PORT")
             })
             .collect::<Result<Vec<_>, _>>()?;
         members.sort_unstable();
@@ -283,8 +291,9 @@ pub struct CellPlan {
     /// The cell's id, random, minted at `cell init` (#226).
     pub cell_id: u64,
     /// The founding members — every machine `cell init` listed — by id and
-    /// address, in id order.
-    pub members: Vec<(NodeId, SocketAddr)>,
+    /// the address it was listed at (its advertised address, a literal or a
+    /// name, #257), in id order.
+    pub members: Vec<(NodeId, Address)>,
     /// The cell tenant's control journal, its identifier drawn at `init`.
     pub control: JournalIdentifier,
     /// The fleet tenant's control journal when this cell hosts the fleet
@@ -317,7 +326,7 @@ impl CellPlan {
             return Err("a cell has at least one member");
         }
         let ids: BTreeSet<NodeId> = self.members.iter().map(|(id, _)| *id).collect();
-        let addrs: BTreeSet<SocketAddr> = self.members.iter().map(|(_, a)| *a).collect();
+        let addrs: BTreeSet<&Address> = self.members.iter().map(|(_, a)| a).collect();
         if ids.len() != self.members.len() || addrs.len() != self.members.len() {
             return Err("a cell's members are unique by id and by address");
         }
@@ -435,10 +444,9 @@ impl CellPlan {
         let mut members = members
             .iter()
             .map(|m| {
-                m.addr
-                    .parse()
+                Address::parse(&m.addr)
                     .map(|addr| (NodeId(m.node_id), addr))
-                    .map_err(|_| "a member's address is HOST:PORT, resolved")
+                    .map_err(|_| "a member's address is HOST:PORT")
             })
             .collect::<Result<Vec<_>, _>>()?;
         members.sort_unstable();
@@ -468,8 +476,8 @@ impl CellPlan {
 
     /// The member addresses, as a set: what two `cell init`s compare.
     #[must_use]
-    pub fn addrs(&self) -> BTreeSet<SocketAddr> {
-        self.members.iter().map(|(_, addr)| *addr).collect()
+    pub fn addrs(&self) -> BTreeSet<Address> {
+        self.members.iter().map(|(_, addr)| addr.clone()).collect()
     }
 
     fn form_request(&self, ballot: Ballot) -> wire::FormCell {
@@ -556,8 +564,8 @@ fn ballot_from_wire(ballot: Option<&crate::rpc::common::Ballot>) -> Option<Ballo
 mod tests {
     use super::*;
 
-    fn addr(port: u16) -> SocketAddr {
-        SocketAddr::from(([10, 0, 0, 1], port))
+    fn addr(port: u16) -> Address {
+        Address::from(SocketAddr::from(([10, 0, 0, 1], port)))
     }
 
     fn identifier(tenant: u64, journal: u64) -> JournalIdentifier {

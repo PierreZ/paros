@@ -36,15 +36,17 @@ domains, every one the same image configured by `PAROS_*` variables alone:
 | `storage4` | `storage` | `zone-a` | waits for placement (M9, #211, #212) |
 | `stateless1` | `stateless` | `zone-b` | waits for placement (M9) |
 
-**Start and wait.** A machine starts with its listen address, its data
+**Start and wait.** A machine starts with its listen address (every
+interface), its advertised address (its service name), its data
 directory (a named volume), its class, capacity and failure domain. It is
 configured with **no peer**: no seed, no join list. On its first start it
 **mints its `node_id`** at random and records it in its data directory (there
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
 
-**Init.** `parosctl --servers members:4500 init` runs `cell init` over the
-**founding members** (`--members`, by default the servers: here the three the
-`members` alias resolves to). It sends `CellInit` to the first member still
+**Init.** `parosctl --servers members:4500 init --members
+node1:4500,node2:4500,node3:4500` runs `cell init` over the **founding
+members** (`--members`, by default the servers), each named by its advertised
+address (#257). It sends `CellInit` to the first member still
 idle, and that machine drives a single-decree Paxos on the cell plan, every
 founding member an acceptor and every one needed:
 
@@ -165,7 +167,8 @@ error (exit 2), so a typo never silently keeps a default.
 
 | variable | meaning |
 |---|---|
-| `PAROS_LISTEN` | `HOST:PORT` the machine serves at, which its peers dial |
+| `PAROS_LISTEN` | `HOST:PORT` the machine binds; may be a wildcard (`0.0.0.0:4500`) |
+| `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; may be a name (default: `PAROS_LISTEN`, which must then not be a wildcard) |
 | `PAROS_DATA_DIR` | its identity (`machine`) and its stores |
 | `PAROS_CLASS` | `storage` (default) or `stateless`; fixed at format |
 | `PAROS_CAPACITY` | its capacity, in placement units (default 1) |
@@ -175,11 +178,19 @@ error (exit 2), so a typo never silently keeps a default.
 | `RUST_LOG` | the log filter (default `warn,parosd=info`) |
 
 Every address is `HOST:PORT` with an explicit port; the host is an IP or a
-name — a Compose service name, say. A machine resolves its listen address
-**once, at startup**, asking again for up to 30 seconds while the name does
-not resolve yet, and exits 2 if it never does. `parosctl --servers` and
-`init --members` take names too: a name that resolves to several machines (a
-Compose alias) stands for them all.
+name — a Compose service name, say. A machine binds `PAROS_LISTEN` and
+advertises `PAROS_ADVERTISE` (#257). It resolves its listen address **once,
+at startup**, asking again for up to 30 seconds while the name does not
+resolve yet, and exits 2 if it never does. An advertised name stays a name:
+the cell plan keeps it, and each peer resolves it when it dials, and again
+after a failed delivery. So a machine that comes back at a new IP behind the
+same name is reached again with no write. A wildcard `PAROS_LISTEN` with no
+`PAROS_ADVERTISE` is refused (exit 2): nobody can dial a wildcard.
+
+`parosctl --servers` and `init --members` take names too. List the founding
+members by their advertised addresses: a machine takes part in `cell init`
+only when the list names its own advertised address. A name that resolves to
+several machines (a Compose alias) stands for them all, as their IPs.
 
 ## Driver tunables
 

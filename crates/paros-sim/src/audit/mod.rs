@@ -89,10 +89,7 @@ pub(crate) struct NodeAudit<T> {
     /// system journals.
     system: Option<Arc<Mutex<system::SystemBoard>>>,
     /// The run's machine board (#246), on a machine's own port.
-    machines: Option<(
-        Arc<Mutex<crate::machine::MachineBoard>>,
-        std::net::SocketAddr,
-    )>,
+    machines: Option<(Arc<Mutex<crate::machine::MachineBoard>>, paros::Address)>,
     /// The observer of the node's own client's calls (the cell
     /// coordinator's, #240), handed to `paros` through
     /// [`Audit::call_observer`].
@@ -155,7 +152,7 @@ impl<T: TimeProvider> NodeAudit<T> {
     pub(crate) fn on_machines(
         mut self,
         board: Arc<Mutex<crate::machine::MachineBoard>>,
-        addr: std::net::SocketAddr,
+        addr: paros::Address,
     ) -> Self {
         self.machines = Some((board, addr));
         self
@@ -1517,7 +1514,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn machine_booted(
         &self,
-        addr: std::net::SocketAddr,
+        addr: &paros::Address,
         record: Option<&paros::machine::MachineRecord>,
     ) {
         if let Some((board, _)) = &self.machines {
@@ -1527,13 +1524,13 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     fn machine_recorded(&self, record: &paros::machine::MachineRecord) {
         if let Some((board, addr)) = &self.machines {
-            crate::machine::recorded(board, *addr, record);
+            crate::machine::recorded(board, addr, record);
         }
     }
 
     fn cell_formatting(
         &self,
-        addr: std::net::SocketAddr,
+        addr: &paros::Address,
         node: NodeId,
         plan: &paros::machine::CellPlan,
         _leftovers: bool,

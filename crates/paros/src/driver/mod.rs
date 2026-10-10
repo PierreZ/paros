@@ -101,7 +101,7 @@ use ready::{ClientWaiters, drain_ready, fold_head};
 use reply::maybe_duplicate;
 use report::{Deltas, HandoffContext, handoff_context, maintain};
 use system::{Followed, SystemFollower, follow_local};
-use transport::{LaneOpener, Outbound, peer_address};
+use transport::{LaneOpener, Outbound, peer_address, peer_target};
 
 /// The node loop's fixed context: the handles every arm's **settle tail** needs
 /// and none of them change across an incarnation. Bundled so the tail is one
@@ -1127,7 +1127,11 @@ where
     };
     let rpc_handle = edge.handle().clone();
     // A machine's vote is final: it answers the cell decree from its record
-    // while it serves its cell (#277).
+    // while it serves its cell (#277). A machine dials its peers by their
+    // advertised addresses, names resolved at dial time (#257).
+    let names = formed
+        .as_ref()
+        .map_or_else(crate::Names::literal, |formed| formed.facts.names.clone());
     if let Some(formed) = formed {
         // Every founding member campaigns for the cell coordinator (#240).
         crate::machine::coordinator::spawn(
@@ -1152,6 +1156,7 @@ where
         audit: &node_audit,
         from: me,
         cell_id,
+        names: names.clone(),
     };
     let peer_queues = lanes.open_all(
         edge.handle(),
@@ -1853,7 +1858,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
         // This node's own registration joins spares; it is never a peer.
         assert!(id != me, "a node never admits itself as a peer");
         if !self.out.has_peer(id) {
-            match peer_address(addr) {
+            match peer_target(addr) {
                 Ok(addr) => {
                     let lane =
                         self.lanes

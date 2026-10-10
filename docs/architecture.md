@@ -464,6 +464,19 @@ with no registry write (amends #209's "names resolved once at startup" for peer 
 listen side still resolves once). A changed `PAROS_ADVERTISE` across a restart is the
 machine-moved case above: same `node_id`, new `addr`.
 
+Landed on 2026-10-10 (#257). `paros::Address` is the advertised `HOST:PORT`, kept as written.
+`paros::Names` is the one resolver all dialers of a machine share. A peer lane resolves its
+peer's name before each batch and forgets the result after a failed delivery (FDB's
+`removeCachedDNS`). The client and `parosctl` resolve per call. `MachineAddresses` refuses a
+wildcard listen address with no advertised one, and a wildcard advertised one. A machine takes
+part in `cell init` only when the member list names its own advertised address, so
+`parosctl init --members` lists the advertised addresses. The simulation advertises a name on
+half the seeds, and a rebooted machine on such a seed comes back at a new IP behind its name
+(`move_pct`). Deferred to #349 (registry address books): the peer book is still built from the
+plan's member strings, because a machine has no request path yet to re-register a changed
+advertised string (#212, #225). Until #349, a changed `PAROS_ADVERTISE` across a restart is not
+supported; a changed IP behind the same name is.
+
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
 `Up`), so control writes stay rare (section 3.9) and the registry's "seen alive" is a fold, not a

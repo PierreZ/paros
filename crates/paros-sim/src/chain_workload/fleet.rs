@@ -50,9 +50,9 @@
 //! mid-operation, a started `init` `READY`, every live node's registry fold
 //! at the tail.
 
+use paros::Address;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_sim::{
@@ -121,7 +121,7 @@ pub(super) struct FleetOps {
     /// Builds a client over the machines this operator learns.
     connector: Connector,
     /// Every machine's address, in rank order.
-    machines: Vec<SocketAddr>,
+    machines: Vec<Address>,
     /// The machines' layout: the founding members `cell init` lists.
     layout: MachineLayout,
     /// The cell, once this operator learned it.
@@ -150,7 +150,7 @@ pub(super) struct FleetOps {
     learned: super::system::Learned,
     /// The machine whose admission this operator stopped after its
     /// registration (#216), to finish on its next `ADMIT`.
-    admitting: Option<SocketAddr>,
+    admitting: Option<Address>,
     /// The run's shared state: the completed removals (#239).
     state: StateHandle,
 }
@@ -166,7 +166,7 @@ impl FleetOps {
         leader_seeds: super::LeaderSeeds,
         kill_ms: (u64, u64),
     ) -> moonpool_sim::SimulationResult<Self> {
-        let machines = crate::machine::machine_addrs(deployment)?;
+        let machines = crate::machine::machine_addrs(ctx.state(), deployment)?;
         let layout = crate::shape::machine_layout(ctx.state(), machines.len());
         let registry = crate::shape::system_journals(ctx.state()).then(|| {
             (
@@ -305,7 +305,7 @@ impl FleetOps {
         cell: &Cell,
         first: usize,
     ) -> impl Future<Output = bool> + use<'a> {
-        let ip = cell.ip(first).filter(|_| buggify_with_prob!(0.1));
+        let ip = cell.ip(ctx, first).filter(|_| buggify_with_prob!(0.1));
         let (delay, down) = self.kill_ms;
         async move {
             let Some(ip) = ip else {
