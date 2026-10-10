@@ -32,6 +32,7 @@
 //! class storage
 //! capacity 1
 //! failure_domain zone-a
+//! name parosd-1
 //! promised 4417/6150928431937019931
 //! plan 912873 4417/6150928431937019931
 //! member 6150928431937019931 10.0.0.2:4500
@@ -116,6 +117,10 @@ pub struct MachineRecord {
     pub capacity: u64,
     /// Its failure domain.
     pub failure_domain: String,
+    /// Its name, for people (#399): a label, never its identity; may change
+    /// across starts. A record written before names has none (empty) until
+    /// its next start writes the configured one.
+    pub name: String,
     /// Its promise in the cell decree: no plan under a lower ballot is
     /// accepted. The zero ballot while it promised nothing.
     pub promised: Ballot,
@@ -156,6 +161,9 @@ impl MachineRecord {
             self.capacity,
             self.failure_domain,
         );
+        if !self.name.is_empty() {
+            let _ = writeln!(text, "name {}", self.name);
+        }
         if self.promised != Ballot::default() {
             let p = self.promised;
             let _ = writeln!(text, "promised {}/{}", p.round, p.node.0);
@@ -220,7 +228,7 @@ impl MachineRecord {
             let identifier =
                 || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
             match key {
-                "node_id" | "class" | "capacity" | "failure_domain" => {
+                "node_id" | "class" | "capacity" | "failure_domain" | "name" => {
                     fields.insert(key, value);
                 }
                 "promised" => {
@@ -296,6 +304,7 @@ impl MachineRecord {
                 .parse()
                 .map_err(|e| format!("bad capacity: {e}"))?,
             failure_domain: field("failure_domain")?.to_string(),
+            name: fields.get("name").copied().unwrap_or_default().to_string(),
             promised,
             plan,
             admitted,
@@ -342,6 +351,7 @@ mod tests {
             class: Class::Storage,
             capacity: 4,
             failure_domain: "zone-a".into(),
+            name: "m-1".into(),
             promised,
             plan,
             admitted: None,

@@ -107,7 +107,7 @@ pub enum Unreachable {
 /// The caller's half of `init`: how long a step may take, the fleet id a
 /// first run records and the seed of the run's leader uuids (both drawn by
 /// the caller: `paros::client` draws no randomness).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct InitParams {
     /// How long the decree may take to form the cell, the cell to elect its
     /// first leader, and an interrupted fleet step to be taken again.
@@ -117,6 +117,9 @@ pub struct InitParams {
     /// The seed of this run's leader uuids ([`super::Writer::new`]): every
     /// run draws its own.
     pub leader_seed: u128,
+    /// The universe's name and the cell's, for people (#252, #399): kept
+    /// by the first run that writes them.
+    pub names: (String, String),
 }
 
 /// What a found cell is: its servers, its members and its control journals.
@@ -260,7 +263,7 @@ pub async fn initialize<P: Providers>(
         Ok(node) => node,
         Err(unreachable) => return InitRun::Unreachable(unreachable),
     };
-    let Some(mut fleet) = FleetSession::new(
+    let Some(fleet) = FleetSession::new(
         journals,
         params.leader_seed,
         Registry::new(members.iter().copied().map(NodeId)),
@@ -268,6 +271,7 @@ pub async fn initialize<P: Providers>(
     ) else {
         return InitRun::Refused(InitRefusal::NoFleet);
     };
+    let mut fleet = fleet.with_names(params.names.0.as_bytes(), params.names.1.as_bytes());
     let run = fleet.init(&client, 0, params.fleet_id, patience).await;
     match run.outcome {
         Step::Done {

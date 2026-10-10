@@ -256,6 +256,9 @@ pub struct FleetSession {
     diverged: Option<(JournalIdentifier, u64)>,
     /// What a tenant this session registers survives (#252).
     survives: Survives,
+    /// The names `init` gives the universe and the cell (#252, #399):
+    /// empty is unnamed.
+    names: (Vec<u8>, Vec<u8>),
 }
 
 impl FleetSession {
@@ -283,7 +286,17 @@ impl FleetSession {
             cell_open: false,
             diverged: None,
             survives: Survives::Az,
+            names: (Vec::new(), Vec::new()),
         })
+    }
+
+    /// Name the universe `universe` and the cell `cell` when `init` forms
+    /// them (#252, #399). A re-run never renames: the first name written
+    /// stays.
+    #[must_use]
+    pub fn with_names(mut self, universe: &[u8], cell: &[u8]) -> Self {
+        self.names = (universe.to_vec(), cell.to_vec());
+        self
     }
 
     /// Register every tenant this session creates as surviving `survives`
@@ -368,6 +381,7 @@ impl FleetSession {
             }
             let form = FleetCommand::FormFleet {
                 control: fleet_control,
+                name: self.names.0.clone(),
             };
             return self
                 .write_directory(client, first, fleet, form, Stage::FormFleet)
@@ -382,7 +396,11 @@ impl FleetSession {
                     found: None,
                 });
             }
-            let add = FleetCommand::AddCell { cell_id, control };
+            let add = FleetCommand::AddCell {
+                cell_id,
+                control,
+                name: self.names.1.clone(),
+            };
             return self
                 .write_directory(client, first, fleet, add, Stage::AddCell)
                 .await;

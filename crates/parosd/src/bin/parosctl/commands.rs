@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use crate::labels::Labels;
 use clap::Args;
 use moonpool_core::{Providers, RandomProvider, TokioProviders};
 use paros::client::bootstrap::control_journals_of;
@@ -11,7 +12,6 @@ use paros::client::{
     ClaimOutcome, Client, ReaderOutcome, ReconfigureOutcome, RetireOutcome, TruncateOutcome,
     WriteOptions, WriteOutcome, Writer, WriterOutcome,
 };
-use paros::name::Abbreviations;
 use paros::wire::common::Ballot;
 use paros::{
     InspectReply, JournalIdentifier, JournalView, LeaderUuid, QuorumSystem, RetireRequest, Seq,
@@ -648,17 +648,11 @@ pub struct InspectArgs {
     journal: Option<JournalRef>,
 }
 
-fn ballot_text(ballot: Option<Ballot>, ids: Abbreviations) -> String {
+fn ballot_text(ballot: Option<Ballot>, labels: &Labels) -> String {
     ballot.map_or_else(
         || "none".to_string(),
-        |b| format!("{}.{}", b.round, ids.id(b.node)),
+        |b| format!("{}.{}", b.round, labels.machine(b.node)),
     )
-}
-
-/// Node ids, abbreviated.
-fn nodes_text(nodes: &[u64], ids: Abbreviations) -> String {
-    let nodes: Vec<String> = nodes.iter().map(|n| ids.id(*n)).collect();
-    format!("[{}]", nodes.join(","))
 }
 
 /// The servers' ids.
@@ -690,9 +684,14 @@ fn quorum_text(reply: &InspectReply) -> String {
 
 /// `parosctl inspect`: every server's view, in server order — of the
 /// journal named, or of the node alone.
-pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> Ending {
+pub async fn inspect(
+    client: &ParosClient,
+    labels: &Labels,
+    out: &Printer,
+    args: InspectArgs,
+) -> Ending {
     let Some(journal) = args.journal else {
-        return inspect_nodes(client, out).await;
+        return inspect_nodes(client, labels, out).await;
     };
     let journal = match crate::names::journal(client, &journal).await {
         Ok(journal) => journal.journal,
@@ -702,27 +701,11 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
     for server in 0..client.server_count() {
         replies.push((client.id_of(server), client.inspect(server, journal).await));
     }
-    // One abbreviation for every node id the listing prints.
-    let ids = Abbreviations::new(
-        server_ids(client)
-            .into_iter()
-            .chain(replies.iter().flat_map(|(_, reply)| {
-                reply.iter().flat_map(|r| {
-                    r.members
-                        .iter()
-                        .chain(&r.retirable)
-                        .chain(&r.matchmakers)
-                        .copied()
-                        .chain(r.config_ballot.map(|b| b.node))
-                        .chain(r.gc_watermark.map(|b| b.node))
-                })
-            })),
-    );
     let mut answered = false;
     for (id, reply) in replies {
         let Some(reply) = reply else {
             out.emit(
-                || format!("node {}: no answer", ids.id(id)),
+                || format!("machine {}: no answer", labels.machine(id)),
                 || json!({ "node": id, "answered": false }),
             );
             continue;
@@ -734,22 +717,22 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
         out.emit(
             || {
                 format!(
-                    "node {}: leader={} ballot={} members={} quorum={} chosen_index={} \
+                    "machine {}: leader={} ballot={} members={} quorum={} chosen_index={} \
                      first_slot={} folded={} gc_watermark={} retirable={} \
                      matchmakers={}@{}{}",
-                    ids.id(id),
+                    labels.machine(id),
                     reply.leader,
-                    ballot_text(reply.config_ballot, ids),
-                    nodes_text(&reply.members, ids),
+                    ballot_text(reply.config_ballot, labels),
+                    labels.machines(&reply.members),
                     quorum_text(&reply),
                     reply
                         .chosen_index
                         .map_or_else(|| "none".to_string(), |c| c.to_string()),
                     reply.first_slot,
                     reply.folded,
-                    ballot_text(reply.gc_watermark, ids),
-                    nodes_text(&reply.retirable, ids),
-                    nodes_text(&reply.matchmakers, ids),
+                    ballot_text(reply.gc_watermark, labels),
+                    labels.machines(&reply.retirable),
+                    labels.machines(&reply.matchmakers),
                     reply.matchmaker_generation,
                     state
                         .as_ref()
@@ -785,33 +768,16 @@ pub async fn inspect(client: &ParosClient, out: &Printer, args: InspectArgs) -> 
 
 /// `parosctl inspect` without `--journal`: every server's own facts — its
 /// id, its cell and the control journals it names.
-async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
+async fn inspect_nodes(client: &ParosClient, labels: &Labels, out: &Printer) -> Ending {
     let mut replies = Vec::new();
     for server in 0..client.server_count() {
         replies.push((client.id_of(server), client.inspect_node(server).await));
     }
-    // One abbreviation for every id the listing prints.
-    let ids = Abbreviations::new(
-        server_ids(client)
-            .into_iter()
-            .chain(replies.iter().flat_map(|(_, reply)| {
-                reply.iter().flat_map(|r| {
-                    let journals = control_journals_of(r);
-                    let cell = journals.map(|j| j.cell);
-                    let fleet = journals.and_then(|j| j.fleet);
-                    [r.node, r.cell_id].into_iter().chain(
-                        cell.into_iter()
-                            .chain(fleet)
-                            .flat_map(|j| [j.tenant.0, j.journal.0]),
-                    )
-                })
-            })),
-    );
     let mut answered = false;
     for (id, reply) in replies {
         let Some(reply) = reply else {
             out.emit(
-                || format!("node {}: no answer", ids.id(id)),
+                || format!("machine {}: no answer", labels.machine(id)),
                 || json!({ "node": id, "answered": false }),
             );
             continue;
@@ -822,19 +788,15 @@ async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
         let fleet = journals.and_then(|j| j.fleet).map(|f| f.to_string());
         out.emit(
             || {
-                let short = |j: Option<JournalIdentifier>| {
-                    j.map_or_else(|| "none".to_string(), |j| format!("id:{}", ids.journal(j)))
+                let journal = |j: Option<JournalIdentifier>| {
+                    j.map_or_else(|| "none".to_string(), |j| labels.journal(j))
                 };
                 format!(
-                    "node {}: cell={} control={} universe={}",
-                    ids.id(reply.node),
-                    if reply.cell_id == 0 {
-                        "none".to_string()
-                    } else {
-                        ids.id(reply.cell_id)
-                    },
-                    short(journals.map(|j| j.cell)),
-                    short(journals.and_then(|j| j.fleet)),
+                    "machine {}: cell={} control={} universe={}",
+                    labels.machine(reply.node),
+                    labels.cell(reply.cell_id),
+                    journal(journals.map(|j| j.cell)),
+                    journal(journals.and_then(|j| j.fleet)),
                 )
             },
             || {
@@ -858,8 +820,8 @@ async fn inspect_nodes(client: &ParosClient, out: &Printer) -> Ending {
 /// `parosctl reconfigure`.
 #[derive(Args, Debug)]
 pub struct ReconfigureArgs {
-    /// The new acceptor set, comma-separated node ids (hex, a unique prefix
-    /// of a server's id each).
+    /// The new acceptor set, comma-separated machine names (or, for local
+    /// debugging, a unique hex prefix of a server's id each).
     #[arg(long, value_delimiter = ',', required = true)]
     members: Vec<NodeRef>,
     /// Its quorum system: `majority`, `flexible:Q1:Q2` or `grid:ROWSxCOLS`.
@@ -890,16 +852,20 @@ fn parse_quorum(s: &str) -> Result<QuorumSystem, String> {
 }
 
 /// `parosctl reconfigure`: the operator's call to change the acceptor set.
-pub async fn reconfigure(client: &ParosClient, out: &Printer, args: ReconfigureArgs) -> Ending {
+pub async fn reconfigure(
+    client: &ParosClient,
+    labels: &Labels,
+    out: &Printer,
+    args: ReconfigureArgs,
+) -> Ending {
     let servers = server_ids(client);
     let mut members = Vec::new();
     for member in &args.members {
-        match member.resolve(&servers) {
+        match member.resolve(&servers, labels) {
             Ok(id) => members.push(id),
             Err(ending) => return ending,
         }
     }
-    let ids = Abbreviations::new(servers.iter().copied());
     match client
         .reconfigure(&members, args.quorum, start(client))
         .await
@@ -909,7 +875,7 @@ pub async fn reconfigure(client: &ParosClient, out: &Printer, args: ReconfigureA
                 || {
                     format!(
                         "started round={round} leader={}",
-                        leader.map_or_else(|| "none".to_string(), |l| ids.id(l))
+                        leader.map_or_else(|| "none".to_string(), |l| labels.machine(l))
                     )
                 },
                 || json!({ "outcome": "started", "round": round, "leader": leader }),
@@ -937,12 +903,12 @@ pub async fn reconfigure(client: &ParosClient, out: &Printer, args: ReconfigureA
 /// `parosctl retire`.
 #[derive(Args, Debug)]
 pub struct RetireArgs {
-    /// The node to retire (hex, a unique prefix of a server's id: it must
-    /// be in `--servers`).
+    /// The machine to retire, by name (or a unique hex prefix of a
+    /// server's id): it must be in `--servers`.
     #[arg(long)]
     node: NodeRef,
-    /// The GC watermark, `ROUND.NODE` (the node in hex, a unique prefix of
-    /// a server's id); read from the leader's `inspect` of `--journal` when
+    /// The GC watermark, `ROUND.MACHINE` (the machine by name, or a unique
+    /// hex prefix of a server's id); read from the leader's `inspect` of `--journal` when
     /// absent.
     #[arg(long, value_parser = parse_watermark)]
     gc_watermark: Option<(u64, NodeRef)>,
@@ -979,19 +945,26 @@ async fn leader_watermark(client: &ParosClient, journal: JournalIdentifier) -> O
 
 /// `parosctl retire`: retire a node, carrying the GC watermark that proves
 /// the cluster forgot every configuration naming it (the RPC's evidence).
-pub async fn retire(client: &ParosClient, out: &Printer, args: RetireArgs) -> Ending {
+pub async fn retire(
+    client: &ParosClient,
+    labels: &Labels,
+    out: &Printer,
+    args: RetireArgs,
+) -> Ending {
     let servers = server_ids(client);
-    let ids = Abbreviations::new(servers.iter().copied());
-    let node = match args.node.resolve(&servers) {
+    let node = match args.node.resolve(&servers, labels) {
         Ok(node) => node,
         Err(ending) => return ending,
     };
     let Some(target) = client.index_of(node) else {
-        note(&format!("node {} is not in --servers", ids.id(node)));
+        note(&format!(
+            "machine {} is not in --servers",
+            labels.machine(node)
+        ));
         return Ending::Refused;
     };
     let watermark = if let Some((round, node)) = args.gc_watermark {
-        match node.resolve(&servers) {
+        match node.resolve(&servers, labels) {
             Ok(node) => Ballot { round, node },
             Err(ending) => return ending,
         }
@@ -1018,7 +991,7 @@ pub async fn retire(client: &ParosClient, out: &Printer, args: RetireArgs) -> En
     match client.retire(target, request).await {
         RetireOutcome::Retired => {
             out.emit(
-                || format!("retired node={}", ids.id(node)),
+                || format!("retired machine={}", labels.machine(node)),
                 || json!({ "outcome": "retired", "node": node }),
             );
             Ending::Success

@@ -90,6 +90,8 @@ pub enum SystemCommand {
         capacity: u64,
         /// Its failure domain (opaque; placement reads it).
         failure_domain: String,
+        /// Its name, for people (#399): a label, never its identity.
+        name: String,
         /// Its RPC incarnation (`0` unknown): with `addr`, its
         /// `InterfaceRef` identity.
         incarnation: u128,
@@ -179,11 +181,13 @@ impl SystemCommand {
                 class,
                 capacity,
                 failure_domain,
+                name,
                 incarnation,
             } => Kind::RegisterNode(wire::RegisterNode {
                 id: id.0,
                 addr: addr.clone(),
                 failure_domain: failure_domain.clone(),
+                name: name.clone(),
                 class: class.as_str().into(),
                 capacity: *capacity,
                 incarnation_high: incarnation_halves(*incarnation).0,
@@ -270,6 +274,7 @@ impl SystemCommand {
                 class: register.class.parse()?,
                 capacity: register.capacity,
                 failure_domain: register.failure_domain,
+                name: register.name,
                 incarnation: incarnation_from_halves(
                     register.incarnation_high,
                     register.incarnation_low,
@@ -496,6 +501,9 @@ pub struct RegisteredNode {
     pub addr: String,
     /// Its failure domain.
     pub failure_domain: String,
+    /// Its name, for people (#399; the latest registration's): a label,
+    /// never its identity.
+    pub name: String,
     /// Its class, fixed by its first registration.
     pub class: Class,
     /// The role slots of its class it advertises (the latest registration's).
@@ -824,8 +832,15 @@ impl Registry {
                 class,
                 capacity,
                 failure_domain,
+                name,
                 incarnation,
-            }) => self.register(id, addr, class, (capacity, incarnation), failure_domain),
+            }) => self.register(
+                id,
+                addr,
+                class,
+                (capacity, incarnation),
+                (failure_domain, name),
+            ),
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
                 // A genesis node is never drained, registered or not.
                 Some(node)
@@ -889,7 +904,7 @@ impl Registry {
         addr: String,
         class: Class,
         (capacity, incarnation): (u64, u128),
-        failure_domain: String,
+        (failure_domain, name): (String, String),
     ) -> RegistryEvent {
         // A genesis node (a founding member) registers too (#349): its
         // entry is the address peers dial, which may change across its
@@ -905,6 +920,7 @@ impl Registry {
                 node.addr.clone_from(&addr);
                 node.capacity = capacity;
                 node.failure_domain = failure_domain;
+                node.name = name;
                 node.registrations += 1;
                 node.incarnation = incarnation;
                 // A registration is a machine that answered: up, as the
@@ -924,6 +940,7 @@ impl Registry {
                     RegisteredNode {
                         addr: addr.clone(),
                         failure_domain,
+                        name,
                         class,
                         capacity,
                         standing: NodeStanding::Registered,
@@ -1254,6 +1271,7 @@ impl Registry {
                     id: id.0,
                     addr: n.addr.clone(),
                     failure_domain: n.failure_domain.clone(),
+                    name: n.name.clone(),
                     class: n.class.as_str().into(),
                     capacity: n.capacity,
                     standing: n.standing.to_wire(),
@@ -1330,6 +1348,7 @@ impl Checkpointable for Registry {
                 RegisteredNode {
                     addr: n.addr,
                     failure_domain: n.failure_domain,
+                    name: n.name,
                     class: n.class.parse()?,
                     capacity: n.capacity,
                     standing: NodeStanding::from_wire(n.standing)?,
@@ -1453,6 +1472,7 @@ mod tests {
                 class: Class::Storage,
                 capacity: 3,
                 failure_domain: "rack-a".into(),
+                name: "storage-7".into(),
                 incarnation: (7_u128 << 64) | 9,
             },
             SystemCommand::DrainNode { id: NodeId(100) },
@@ -1561,6 +1581,7 @@ mod tests {
             class,
             capacity,
             failure_domain: String::new(),
+            name: format!("m{id}"),
             incarnation: u128::from(id),
         })
     }

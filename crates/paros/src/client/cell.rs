@@ -229,6 +229,7 @@ impl CellSession {
                     class,
                     capacity: identity.capacity,
                     failure_domain: identity.failure_domain,
+                    name: identity.name,
                     incarnation: crate::machine::incarnation_from_halves(
                         identity.incarnation_high,
                         identity.incarnation_low,

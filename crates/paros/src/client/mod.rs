@@ -75,6 +75,7 @@ pub mod outcome;
 mod reader;
 #[cfg(test)]
 mod tests;
+pub mod views;
 mod writer;
 
 use std::future::Future;

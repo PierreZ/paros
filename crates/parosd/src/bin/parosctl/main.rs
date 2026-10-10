@@ -23,11 +23,13 @@ mod fleet;
 mod init;
 mod journal;
 mod key;
+mod labels;
 mod names;
 mod output;
 #[path = "../../resolve.rs"]
 mod resolve;
 mod token;
+mod views;
 
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -68,6 +70,11 @@ struct Global {
     /// How long one call waits for its answer, in milliseconds.
     #[arg(long, default_value = "5000", global = true)]
     timeout_ms: u64,
+    /// Ask a view as tenant `NAME`, not as an admin (#399): the cell shows
+    /// that tenant's own spread only. Until tokens (#245), every caller is
+    /// an admin and may narrow itself so.
+    #[arg(long, value_name = "NAME", global = true)]
+    as_tenant: Option<String>,
 }
 
 /// One server entry: an explicit node id, or the addresses a name stands
@@ -125,8 +132,9 @@ enum Command {
     /// leader uuid of its own, and the fleet steps register the cell in the fleet directory
     /// (#229). Refused on an initialized fleet; a re-run resumes.
     Init(init::InitArgs),
-    /// Cell administration (#216): `cell add-machine <addr>` admits an idle
-    /// machine into the cell of the servers.
+    /// Cells (#216, #399): `cell list`, `cell show [<cell>]`, and `cell
+    /// add-machine <addr>`, which admits an idle machine into the cell of
+    /// the servers.
     #[command(name = "cell")]
     CellAdmin(cell::CellArgs),
     /// Root key pairs for Biscuit tokens, offline (#400): `key generate`,
@@ -135,6 +143,12 @@ enum Command {
     /// Biscuit tokens, offline (#400): `token mint` with a root key,
     /// `token derive` (narrower, macaroon style, no key), `token inspect`.
     Token(token::TokenArgs),
+    /// The cell's machines (#399): `machine list`, `machine show <name>`.
+    Machine(views::MachineArgs),
+    /// Who holds which role now (#399): the coordinators, every journal's
+    /// acceptors and matchmakers, and the bookings; of the cell, a tenant
+    /// or a machine.
+    Roles(views::RolesArgs),
     /// A call to a formed cell.
     #[command(flatten)]
     Cell(CellCommand),
@@ -160,7 +174,8 @@ enum CellCommand {
     Reconfigure(commands::ReconfigureArgs),
     /// Retire a node the GC floor released.
     Retire(commands::RetireArgs),
-    /// Create, delete and list tenants through the fleet directory (#229).
+    /// Tenants (#229, #399): `tenant list`, `tenant show <tenant>`, and
+    /// `tenant create|delete` through the universe directory.
     Tenant(fleet::TenantArgs),
     /// Create, delete and list a tenant's journals through its control
     /// journal and the tenant coordinator (#210).
@@ -291,6 +306,70 @@ fn main() -> ExitCode {
     }
 }
 
+/// Whether `command` is a view (#399): one request to the servers' cell,
+/// no node ids.
+fn is_view(command: &Command) -> bool {
+    match command {
+        Command::Machine(_) | Command::Roles(_) => true,
+        Command::CellAdmin(args) => {
+            !matches!(args.command, cell::CellAdminCommand::AddMachine { .. })
+        }
+        Command::Cell(CellCommand::Tenant(args)) => matches!(
+            args.command,
+            fleet::TenantCommand::List | fleet::TenantCommand::Show { .. }
+        ),
+        _ => false,
+    }
+}
+
+/// Whether `command` prints machines, cells, tenants or journals: it
+/// names them from one admin view first (#399).
+fn prints_names(command: &CellCommand) -> bool {
+    matches!(
+        command,
+        CellCommand::Inspect(_)
+            | CellCommand::Reconfigure(_)
+            | CellCommand::Retire(_)
+            | CellCommand::Tenant(_)
+            | CellCommand::Journal(_)
+    )
+}
+
+/// A view (#399): one request to the servers' cell.
+async fn run_view(asker: &views::Asker<'_>, out: &Printer, command: Command) -> Ending {
+    match command {
+        Command::Machine(args) => views::machine(asker, out, args).await,
+        Command::Roles(args) => views::roles_cmd(asker, out, args).await,
+        Command::CellAdmin(args) => match args.command {
+            cell::CellAdminCommand::List => views::cell_list(asker, out).await,
+            cell::CellAdminCommand::Show { cell } => {
+                views::cell_show(asker, out, cell.as_deref()).await
+            }
+            cell::CellAdminCommand::AddMachine { .. } => unreachable!("not a view"),
+        },
+        Command::Cell(CellCommand::Tenant(args)) => match args.command {
+            fleet::TenantCommand::Show { name } => views::tenant_show(asker, out, &name).await,
+            _ => views::tenant_list(asker, out).await,
+        },
+        _ => unreachable!("only the views"),
+    }
+}
+
+/// The view asker over `global`'s servers, in its `--as-tenant` scope.
+fn asker<'a>(runtime: &'a Runtime, global: &Global) -> views::Asker<'a> {
+    views::Asker {
+        providers: &runtime.providers,
+        rpc: &runtime.rpc,
+        names: &runtime.names,
+        servers: global.addrs(),
+        scope: match &global.as_tenant {
+            Some(tenant) => paros::view::Scope::Tenant(tenant.as_bytes().to_vec()),
+            None => paros::view::Scope::Admin,
+        },
+        timeout: global.timeout(),
+    }
+}
+
 /// The commands that talk to servers.
 async fn online(global: Global, command: Command) -> ExitCode {
     let cli = Cli { global, command };
@@ -306,6 +385,10 @@ async fn online(global: Global, command: Command) -> ExitCode {
         }
     };
     let out = Printer::new(cli.global.json);
+    let asker = asker(&runtime, &cli.global);
+    if is_view(&cli.command) {
+        return run_view(&asker, &out, cli.command).await.into();
+    }
     let command = match cli.command {
         Command::Init(args) => {
             let timeout = cli.global.timeout();
@@ -317,17 +400,9 @@ async fn online(global: Global, command: Command) -> ExitCode {
                 }
             };
             let connect = |servers: &[(u64, Address)]| client(&runtime, servers, timeout);
-            return init::run(
-                &runtime.providers,
-                &runtime.rpc,
-                &runtime.names,
-                &members,
-                connect,
-                &out,
-                &args,
-            )
-            .await
-            .into();
+            return init::run(&members, connect, &out, &asker, &args)
+                .await
+                .into();
         }
         Command::CellAdmin(args) => {
             let servers = servers(&runtime, &cli.global).await;
@@ -336,20 +411,14 @@ async fn online(global: Global, command: Command) -> ExitCode {
                 return Ending::Unreachable.into();
             }
             let client = client(&runtime, &servers, cli.global.timeout());
-            return cell::run(
-                &runtime.providers,
-                &runtime.rpc,
-                &runtime.names,
-                &client,
-                &servers,
-                &out,
-                args,
-            )
-            .await
-            .into();
+            let labels = labels::Labels::fetch(&asker).await;
+            return cell::run(&asker, &client, &servers, &labels, &out, args)
+                .await
+                .into();
         }
         Command::Cell(command) => command,
         Command::Key(_) | Command::Token(_) => unreachable!("offline, handled in main"),
+        Command::Machine(_) | Command::Roles(_) => unreachable!("views, handled above"),
     };
     let servers = servers(&runtime, &cli.global).await;
     if servers.is_empty() {
@@ -357,6 +426,12 @@ async fn online(global: Global, command: Command) -> ExitCode {
         return Ending::Unreachable.into();
     }
     let client = client(&runtime, &servers, cli.global.timeout());
+    // Names for what the command prints (#399): one admin view.
+    let labels = if prints_names(&command) {
+        labels::Labels::fetch(&asker).await
+    } else {
+        labels::Labels::default()
+    };
     let ending = match command {
         CellCommand::Write(args) => commands::write(&runtime.providers, &client, &out, args).await,
         CellCommand::Read(args) => commands::read(&client, &out, args).await,
@@ -367,12 +442,12 @@ async fn online(global: Global, command: Command) -> ExitCode {
         CellCommand::SetLeader(args) => {
             commands::set_leader(&runtime.providers, &client, &out, args).await
         }
-        CellCommand::Inspect(args) => commands::inspect(&client, &out, args).await,
-        CellCommand::Reconfigure(args) => commands::reconfigure(&client, &out, args).await,
-        CellCommand::Retire(args) => commands::retire(&client, &out, args).await,
+        CellCommand::Inspect(args) => commands::inspect(&client, &labels, &out, args).await,
+        CellCommand::Reconfigure(args) => commands::reconfigure(&client, &labels, &out, args).await,
+        CellCommand::Retire(args) => commands::retire(&client, &labels, &out, args).await,
         CellCommand::Tenant(args) => {
             let ids: Vec<u64> = servers.iter().map(|(id, _)| *id).collect();
-            fleet::run(&runtime.providers, &client, &ids, &out, args).await
+            fleet::run(&runtime.providers, &client, &ids, &labels, &out, args).await
         }
         CellCommand::Journal(args) => {
             journal::run(
@@ -380,6 +455,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
                 &runtime.rpc,
                 &runtime.names,
                 &client,
+                &labels,
                 &out,
                 args,
             )

@@ -62,3 +62,49 @@ pub fn record_text(record: &[u8]) -> String {
 pub fn short(id: u64) -> String {
     paros::name::Abbreviations::new([id]).id(id)
 }
+
+/// Rows as an aligned table under `headers`, two spaces between columns
+/// (the last column is not padded).
+pub fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]]) -> String {
+    let mut widths = headers.map(str::len);
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let line = |cells: [&str; N]| {
+        let mut text = String::new();
+        for (i, (cell, width)) in cells.iter().zip(widths).enumerate() {
+            if i + 1 == N {
+                text.push_str(cell);
+            } else {
+                text.push_str(cell);
+                text.push_str(&" ".repeat(width - cell.chars().count() + 2));
+            }
+        }
+        text.trim_end().to_string()
+    };
+    let mut lines = vec![line(headers)];
+    lines.extend(
+        rows.iter()
+            .map(|row| line(row.each_ref().map(String::as_str))),
+    );
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::table;
+
+    #[test]
+    fn a_table_aligns_its_columns() {
+        let rows = [
+            ["parosd-1".to_string(), "up".to_string()],
+            ["b".to_string(), "down".to_string()],
+        ];
+        assert_eq!(
+            table(["NAME", "STATE"], &rows),
+            "NAME      STATE\nparosd-1  up\nb         down"
+        );
+    }
+}

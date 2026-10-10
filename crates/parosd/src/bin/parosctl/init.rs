@@ -26,16 +26,16 @@ use std::time::Duration;
 
 use clap::Args;
 use moonpool_core::TokioProviders;
-use moonpool_rpc::RpcHandle;
+use paros::Address;
 use paros::client::Client;
 use paros::client::initialize::{self, InitParams, InitRefusal, InitRun, Initialized, Unreachable};
-use paros::{Address, Names};
 use serde_json::json;
 
 use crate::Ending;
 use crate::fleet::{interrupted, leader_seed, nonzero, refusal_text, steps};
+use crate::labels::Labels;
 use crate::output::{Printer, note};
-use paros::name::Abbreviations;
+use crate::views::Asker;
 
 /// `parosctl init`.
 #[derive(Args, Debug)]
@@ -51,6 +51,21 @@ pub struct InitArgs {
     /// its first leader, in milliseconds.
     #[arg(long, default_value = "30000")]
     patience_ms: u64,
+    /// The universe's name, for people (#252, #399). A re-run never
+    /// renames: the first name written stays.
+    #[arg(long, default_value = "universe", value_parser = label)]
+    universe_name: String,
+    /// The cell's name, for people (#252, #399): unique among the
+    /// universe's cells. A re-run never renames.
+    #[arg(long, default_value = "cell-1", value_parser = label)]
+    cell_name: String,
+}
+
+/// A name for people: no `/`, no space, no control character.
+fn label(text: &str) -> Result<String, String> {
+    paros::name::check_label(text)
+        .map(|()| text.to_string())
+        .map_err(|e| e.to_string())
 }
 
 impl InitArgs {
@@ -87,22 +102,23 @@ impl InitArgs {
 /// and run the fleet steps, through a client `connect` builds over its
 /// members (`paros::client::initialize`).
 pub async fn run(
-    providers: &TokioProviders,
-    rpc: &RpcHandle<TokioProviders>,
-    names: &Names,
     members: &[Address],
     connect: impl Fn(&[(u64, Address)]) -> Client<TokioProviders>,
     out: &Printer,
+    asker: &Asker<'_>,
     args: &InitArgs,
 ) -> Ending {
     let params = InitParams {
         patience: Duration::from_millis(args.patience_ms),
-        fleet_id: nonzero(providers),
-        leader_seed: leader_seed(providers),
+        fleet_id: nonzero(asker.providers),
+        leader_seed: leader_seed(asker.providers),
+        names: (args.universe_name.clone(), args.cell_name.clone()),
     };
+    let (providers, rpc, names) = (asker.providers, asker.rpc, asker.names);
     match initialize::initialize(providers, rpc, names, members, connect, params).await {
         InitRun::Initialized(done) => {
-            print_initialized(out, &done);
+            let labels = Labels::fetch(asker).await;
+            print_initialized(out, &done, &labels);
             Ending::Success
         }
         InitRun::AlreadyInitialized(_) => {
@@ -124,7 +140,7 @@ pub async fn run(
             Ending::Refused
         }
         InitRun::Refused(InitRefusal::Fleet(refusal)) => {
-            let text = refusal_text(&refusal);
+            let text = refusal_text(&refusal, &Labels::default());
             out.emit(
                 || format!("init refused: {text}"),
                 || json!({ "outcome": "refused", "refusal": text }),
@@ -163,28 +179,21 @@ fn unreachable_text(why: Unreachable, target: Option<&Address>) -> String {
     }
 }
 
-/// Print an initialized fleet: every control journal's identifier. Ids
-/// print abbreviated (#239 (names at the edge)); `--json` prints them whole.
-fn print_initialized(out: &Printer, done: &Initialized) {
+/// Print an initialized universe by name (#399): the universe, the cell,
+/// its coordinator and its members; `--json` prints every id whole.
+fn print_initialized(out: &Printer, done: &Initialized, labels: &Labels) {
     let journals = done.journals;
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
     let election = journals.election.map(|e| e.to_string()).unwrap_or_default();
     out.emit(
         || {
-            let ids = Abbreviations::new(
-                [done.fleet_id, journals.cell_id, done.coordinator.0]
-                    .into_iter()
-                    .chain(journals.fleet.into_iter().chain(journals.election).chain([journals.cell]).flat_map(|j| [j.tenant.0, j.journal.0])),
-            );
+            let members: Vec<u64> = done.servers.iter().map(|(id, _)| *id).collect();
             format!(
-                "initialized fleet={} cell={} coordinator={} members={} control=id:{} election={} fleet_control={} steps={}",
-                ids.id(done.fleet_id),
-                ids.id(journals.cell_id),
-                ids.id(done.coordinator.0),
-                done.servers.len(),
-                ids.journal(journals.cell),
-                journals.election.map_or_else(|| "none".to_string(), |e| format!("id:{}", ids.journal(e))),
-                journals.fleet.map_or_else(|| "none".to_string(), |f| format!("id:{}", ids.journal(f))),
+                "initialized universe={} cell={} coordinator={} members={} steps={}",
+                labels.universe(done.fleet_id),
+                labels.cell(journals.cell_id),
+                labels.machine(done.coordinator.0),
+                labels.machines(&members),
                 steps(&done.steps).join(",")
             )
         },

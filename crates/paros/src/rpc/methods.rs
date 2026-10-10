@@ -21,7 +21,7 @@
 
 use moonpool_rpc::{MethodId, RpcMethod, SchemaVersion, WellKnownId};
 
-use super::{internal, machine, matchmaker, public};
+use super::{internal, machine, matchmaker, public, view};
 
 /// A method served at a fixed [`WellKnownId`] on every process that serves
 /// it: callers address it by `ip:port` alone, and it answers whichever
@@ -161,4 +161,10 @@ well_known_method!(
     /// (#210).
     JournalRequestRpc, 0x5041_0308, machine::JournalRequest => machine::JournalRequestAck,
     "paros.machine.JournalRequest"
+);
+well_known_method!(
+    /// An administrative view of the cell (#399): answered by a founding
+    /// member from the cell's journals, filtered by the caller's scope.
+    ViewRpc, 0x5041_0309, view::ViewRequest => view::ViewReply,
+    "paros.view.View"
 );

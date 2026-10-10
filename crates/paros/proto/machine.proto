@@ -73,6 +73,8 @@ message IdentifyAck {
   // coordinator tells a reboot (#211). 0 is unknown.
   fixed64 incarnation_high = 8;
   fixed64 incarnation_low = 9;
+  // The machine's name, for people (#399): a label, never its identity.
+  string name = 10;
 }
 
 // One member of a cell's bootstrap: its identity and address.

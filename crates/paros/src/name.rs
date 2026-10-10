@@ -64,6 +64,17 @@ impl fmt::Display for NameError {
 
 impl std::error::Error for NameError {}
 
+/// Check a label for people: one half of a journal name, a machine's,
+/// a cell's or the universe's name (#399).
+///
+/// # Errors
+///
+/// The label is empty, too long, or holds a `/`, a space or a control
+/// character.
+pub fn check_label(half: &str) -> Result<(), NameError> {
+    check(half)
+}
+
 /// Check one half of a name.
 fn check(half: &str) -> Result<(), NameError> {
     if half.is_empty() {

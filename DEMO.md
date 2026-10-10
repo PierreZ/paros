@@ -58,6 +58,16 @@ docker compose run --rm parosctl journal list acme
 docker compose run --rm parosctl cell add-machine storage4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
 
+# The cell, as tables (#399): its machines, its tenants, who holds which role.
+docker compose run --rm parosctl machine list
+docker compose run --rm parosctl cell show
+docker compose run --rm parosctl tenant show acme
+docker compose run --rm parosctl roles --tenant acme
+
+# The same tenant in its own scope: only its spread over the cell. Any other view is refused.
+docker compose run --rm parosctl --as-tenant acme tenant show acme
+docker compose run --rm parosctl --as-tenant acme cell show
+
 # What each machine is (node id, cell, control journals), then its view of the journal.
 docker compose run --rm parosctl inspect
 docker compose run --rm parosctl inspect --journal "$J"

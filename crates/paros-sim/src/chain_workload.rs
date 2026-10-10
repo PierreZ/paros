@@ -160,7 +160,11 @@ const ADMIT: u8 = 27;
 /// campaign, serve a won term with the coordinator's duties, then hand it
 /// on, resign or abandon it.
 const ELECTION: u8 = 28;
-const OP_COUNT: u8 = 29;
+/// Ask the cell one administrative view (#399 (admin CLI views)) through
+/// `paros::client::views`, under the admin's scope or a tenant's: the
+/// answers `parosctl machine|cell|tenant|roles` print, filtered by the cell.
+const VIEW: u8 = 29;
+const OP_COUNT: u8 = 30;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -483,7 +487,7 @@ impl ChainConfig {
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
             // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
-            // TENANT, ADMIT, ELECTION
+            // TENANT, ADMIT, ELECTION, VIEW
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -550,6 +554,9 @@ impl ChainConfig {
                 // A candidacy is a few election steps; a won term claims
                 // the cell control journal once. The ceiling is an operator
                 // contending with the coordinators all run long.
+                buggify_knob!(3_u64, 0_u64..21_u64),
+                // A view reads the cell's journals at one member and writes
+                // nothing; the ceiling is an operator that mostly watches.
                 buggify_knob!(3_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
@@ -3322,6 +3329,7 @@ impl Workload for ChainWorkload {
                         )
                         .await;
                 }
+                VIEW => fleet_ops.view(ctx, raw_payload).await,
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }
