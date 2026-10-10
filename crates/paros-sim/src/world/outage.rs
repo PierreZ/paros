@@ -87,7 +87,9 @@ pub(crate) fn regime() -> Chaos {
 }
 
 /// How a seed's outage loses copies (see the module doc).
+/// Its bools are a flag set, one coin per ingredient.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct LossShape {
     /// The most recent slot the ledger holds, rather than a uniform one.
     pub(crate) recent: bool,
@@ -103,6 +105,13 @@ pub(crate) struct LossShape {
     /// every holder's copy settled: the bare quorum, whose Phase-1 tally
     /// can then read `faulty, faulty, none` once every copy is lost.
     pub(crate) short: bool,
+    /// With [`Self::prefer_removed`], also leave clean every copy on a
+    /// spare: a holder neither the last installed configuration nor the
+    /// deciding one names. A spare that took a re-proposal holds the slot
+    /// above the straggler's ballot, and no Phase 1 asks it, so the
+    /// straggler sets the CTRL threshold alone and the lost copies above it
+    /// wait (#375).
+    pub(crate) spare_kept: bool,
 }
 
 impl LossShape {
@@ -113,6 +122,7 @@ impl LossShape {
         keep: Some(0),
         prefer_removed: false,
         short: true,
+        spare_kept: false,
     };
 
     /// The departed-straggler scenario's loss
@@ -123,7 +133,19 @@ impl LossShape {
         keep: None,
         prefer_removed: true,
         short: false,
+        spare_kept: false,
     };
+
+    /// The shape with its spares' copies kept clean on a coin, its own
+    /// BUGGIFY location: a spare's copy above the straggler's ballot is one
+    /// ingredient of #375's shape, which a 3,000-seed hunt met once.
+    pub(crate) fn with_spares_kept(self) -> Self {
+        let spare_kept = self.prefer_removed && buggify_with_prob!(0.5);
+        if spare_kept {
+            assert_reachable!("storage: an outage draws a loss that keeps the spares' copies");
+        }
+        Self { spare_kept, ..self }
+    }
 
     /// How many slots of one journal may lose their clean quorum: zero
     /// under the usual budget. Floor `0`: the budget a quorum of clean
@@ -167,7 +189,7 @@ impl FaultInjector for OutageLosses {
                         assert_reachable!(
                             "storage: an outage lands on a seed drawing the departed-straggler scenario"
                         );
-                        LossShape::DEPARTED_STRAGGLER
+                        LossShape::DEPARTED_STRAGGLER.with_spares_kept()
                     } else if crate::shape::bare_quorum(ctx.state()) {
                         assert_reachable!(
                             "storage: an outage lands on a seed drawing the bare-quorum scenario"
@@ -203,7 +225,9 @@ fn draw_loss() -> LossShape {
         keep: lossy.then(|| usize::from(moonpool_sim::sim_random_bool(0.5))),
         prefer_removed: buggify_with_prob!(1.0),
         short: false,
+        spare_kept: false,
     }
+    .with_spares_kept()
 }
 
 /// Plan the outage's losses in every genesis journal (see the module doc).

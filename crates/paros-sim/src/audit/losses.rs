@@ -168,12 +168,41 @@ impl AuditState {
         }) {
             return false;
         }
-        let Threshold::Best(threshold) = self.clean_threshold(slot, &clean) else {
+        // Only a clean copy some asked configuration names sets the
+        // threshold: the core's repair probe hears asked members alone, so
+        // a spare's copy no Phase 1 asks never qualifies a lost one (#375,
+        // witness from a 2,000-seed hunt on #347: slot 3 decided at
+        // `(3, 2)` by `{0, 1, 2}`, re-proposed at `(4, 1)` onto 0, 1, 4 and
+        // the spare 3, lost on 0, 1 and 4; the leaders asking `[0, 1, 2]`
+        // and `[0, 1, 4]` hear only node 2's clean copy at `(3, 2)` and
+        // wait, while the threshold over every holder took the spare's
+        // `(4, 1)` and called the slot unblocked, red on "an unavailable
+        // run is explained by injected storage faults"). `stranded` and the
+        // injector's `departed` predicate follow the same rule.
+        let asked = self.asked_configurations();
+        let (reachable, spares): (Vec<u64>, Vec<u64>) = clean.into_iter().partition(|node| {
+            asked
+                .iter()
+                .any(|config| config.members().contains(&NodeId(*node)))
+        });
+        let Threshold::Best(threshold) = self.clean_threshold(slot, &reachable) else {
             return false;
         };
-        self.asked_configurations().iter().any(|config| {
+        let blocked = asked.iter().any(|config| {
             !config.has_phase1_quorum(&self.qualifying(config, slot, planned, &down, threshold))
-        })
+        });
+        if blocked
+            && !spares.is_empty()
+            && matches!(
+                self.clean_threshold(slot, &[reachable.as_slice(), &spares].concat()),
+                Threshold::Best(all) if all > threshold
+            )
+        {
+            assert_reachable!(
+                "storage: a clean copy on a node no asked configuration names sets no threshold"
+            );
+        }
+        blocked
     }
 
     /// Whether the decided `slot` an outage hit is frozen because its every
