@@ -79,6 +79,10 @@ impl ChainWorkload {
                 assert_reachable!("chain: a fenced write meets a multi-writer journal");
                 fenced_write_refused(step).await;
             }
+            _ if buggify_with_prob!(0.05) => {
+                assert_reachable!("chain: a fenced truncate meets a multi-writer journal");
+                fenced_truncate_refused(step).await;
+            }
             _ => {
                 let submission = self.submit_append(step, next_op);
                 match op {
