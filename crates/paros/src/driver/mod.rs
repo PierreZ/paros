@@ -1731,6 +1731,18 @@ where
                 let due = journals.due(ticks, tunables.quarantine_ticks);
                 for &journal in &due {
                     open_journal(&providers, &mut stores, &mut journals, journal, ticks, &tunables).await;
+                    if journals.live.contains_key(&journal) {
+                        // A re-open after a storage fault boots on what the
+                        // failed sync left in the file image, durable or
+                        // not, until the journal's next sync (#348).
+                        let hinted = moonpool_buggify::hint!("journal re-opened, not synced", 0.5);
+                        if hinted.strike() == moonpool_buggify::hint::Strike::Killed {
+                            moonpool_assertions::reachable!(
+                                "the driver crashes right after a journal re-opens"
+                            );
+                        }
+                        hinted.await;
+                    }
                 }
                 // A re-opened journal booted from `Config::pool`: it admits
                 // the registry's pool again (#189).

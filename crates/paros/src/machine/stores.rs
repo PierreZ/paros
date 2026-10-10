@@ -101,6 +101,15 @@ impl<S: StorageProvider + Clone + 'static, F> MachineStores<S, F> {
                     moonpool_assertions::reachable!(
                         "machine: a created journal's provisioning resumed from the disk"
                     );
+                    // The marker may be one a failed format sync left staged
+                    // in this process's file image (#348): make it durable
+                    // before the record names the journal, or a power loss
+                    // after the record would boot it as amnesia.
+                    let dir = self.disk.journal_dir(journal);
+                    if let Err(error) = crate::journal::settle(self.disk.provider(), &dir).await {
+                        tracing::warn!(journal = %journal, %error, "created_journal_unsettled");
+                        return false;
+                    }
                 }
             }
             Err(error) => {
