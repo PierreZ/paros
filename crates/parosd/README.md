@@ -22,9 +22,9 @@ the one build outside Nix):
 
 ```sh
 docker compose up -d --build        # five machines; each formats and waits
-docker compose run --rm init        # forms the cell; prints journals=T/J
-docker compose run --rm parosctl write T/J hello world --leader 7
-docker compose run --rm parosctl read T/J
+docker compose run --rm init        # forms the cell; prints journals=id:T/J
+docker compose run --rm parosctl write id:T/J hello world --leader 7
+docker compose run --rm parosctl read id:T/J
 ```
 
 `docker-compose.yml` runs one cell of five `parosd` machines over three failure
@@ -71,7 +71,7 @@ then serves the **cell control journal**, **the fleet tenant's control journal**
 static assignment that stands in for placement until M9), plain Multi-Paxos
 over the founding members. **No
 identifier is fixed**: `init` draws every one, records them in the cell plan, and
-prints them (`control=`, `election=`, `fleet_control=`, `journals=`); afterwards any machine's
+prints them (`control=`, `election=`, `universe_control=`, `journals=`); afterwards any machine's
 node-only `Inspect` names the cell's control journals, which is how
 `parosctl tenant` finds them. Then the founding members elect the first cell coordinator
 over the cell's **election journal** (multi-writer, #240), and the winner installs
@@ -94,6 +94,14 @@ creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
 finish it). A tenant's footprint and its
 own control journal are not created yet (#210, #225).
 
+**Names and ids.** A journal argument is a name, `TENANT/JOURNAL` or
+`paros://TENANT/JOURNAL`, which `parosctl` resolves through the universe directory and the
+tenant's control journal (#239), or its ids, `id:TENANT/JOURNAL` in hex: a unique prefix of an
+id `parosctl` can list, or all 16 digits. The journal `init` creates has no name yet (#210), so
+`init` prints its ids in full. Human output prints every other id as short hex, widened when two
+ids of one listing share a prefix; `--json` prints ids whole. A node id given on the command line
+(`retire --node`, `reconfigure --members`, `ID=HOST:PORT`) is hex too.
+
 **Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
 stands for every founding member, and each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
@@ -105,7 +113,7 @@ keeps taking writes. `docker compose start node2` brings the machine back as an
 existing member: same `node_id`, same stores. There is no restart policy on
 purpose: exit 78 means an operator must act.
 
-**Supersede a writer.** `parosctl set-leader T/J --new 8` takes the journal;
+**Supersede a writer.** `parosctl set-leader id:T/J --new 8` takes the journal;
 the first leader's writes and truncations are refused from then on
 (`superseded`, exit 3), and the new leader's `truncate --up-to N --leader 8`
 applies.
@@ -145,9 +153,9 @@ for i in 1 2 3; do
   PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=node$i parosd &
 done
 export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
-parosctl init --members "$PAROSCTL_SERVERS"   # prints journals=T/J
-parosctl write T/J hello world --leader 7
-parosctl read T/J
+parosctl init --members "$PAROSCTL_SERVERS"   # prints journals=id:T/J
+parosctl write id:T/J hello world --leader 7
+parosctl read id:T/J
 ```
 
 ## Configuration
@@ -247,9 +255,10 @@ A refusal is one of:
 The servers come from `--servers HOST:PORT,…` (or `PAROSCTL_SERVERS`): a name
 that resolves to several machines stands for them all, and each server's node
 id — the one a leader hint names it by — is learned from its own `Inspect`
-(`ID=HOST:PORT` names it outright). A journal is `TENANT/JOURNAL`, both random
-and both required: there is no default tenant and no fixed id (#235,
-`docs/architecture.md` §3.8).
+(`ID=HOST:PORT` names it outright, in hex). A journal is a name, `TENANT/JOURNAL` or
+`paros://TENANT/JOURNAL`, or its ids, `id:TENANT/JOURNAL` in hex: both ids random and both
+required, with no default tenant and no fixed id (#235, #239, `docs/architecture.md` §3.5,
+§3.8).
 
 | command | what it does |
 |---|---|

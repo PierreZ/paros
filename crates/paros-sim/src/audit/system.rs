@@ -43,6 +43,10 @@ use paros::{JournalId, JournalIdentifier, NodeId};
 
 const SYSTEM_BOARD_KEY: &str = "paros-system-board";
 
+/// No node reported some position of the directory yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unreported;
+
 /// The run's system-journal facts, shared by every node's audit port.
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)] // sticky, independent gate facts
@@ -72,6 +76,15 @@ pub(crate) struct SystemBoard {
     refused: BTreeSet<(u64, u64)>,
     /// A name race was decided by slot order.
     name_race: bool,
+    /// The directory's events, as first folded anywhere, by position: what
+    /// a name resolved at a position must agree with (#239).
+    directory_events: BTreeMap<u64, DirectoryEvent>,
+    /// Each created journal's name.
+    created_names: BTreeMap<JournalId, Vec<u8>>,
+    /// Names a completed delete freed.
+    freed_names: BTreeSet<Vec<u8>>,
+    /// A name was created again after a completed delete freed it (#239).
+    name_reused: bool,
     /// A create naming an id the directory already created was refused.
     id_taken: bool,
     /// A joiner folded a system entry before any node had it in its pool.
@@ -185,8 +198,19 @@ impl SystemBoard {
                 self.model_registry(lsn, event);
             }
         }
+        if let SystemEvent::Directory(event) = event {
+            self.directory_events
+                .entry(lsn)
+                .or_insert_with(|| event.clone());
+        }
         match event {
-            SystemEvent::Directory(DirectoryEvent::Created { id, .. }) => {
+            SystemEvent::Directory(DirectoryEvent::Created { id, name, .. }) => {
+                if self.created_names.insert(*id, name.clone()).is_none()
+                    && self.freed_names.contains(name)
+                {
+                    assert_reachable!("names: a journal name is reused after a completed delete");
+                    self.name_reused = true;
+                }
                 let at = *self.created.entry(*id).or_insert(lsn);
                 assert_always!(
                     id.is_set()
@@ -197,6 +221,9 @@ impl SystemBoard {
                 );
             }
             SystemEvent::Directory(DirectoryEvent::Deleted { id }) => {
+                if let Some(name) = self.created_names.get(id) {
+                    self.freed_names.insert(name.clone());
+                }
                 self.tombstoned
                     .insert((node.0, JournalIdentifier::new(journal.tenant, *id)));
             }
@@ -215,6 +242,25 @@ impl SystemBoard {
             }
             _ => {}
         }
+    }
+
+    /// The live journal named `name` after the directory's positions below
+    /// `at`, as the nodes folded them (#239): `Err` while some position
+    /// below `at` was not reported yet.
+    pub(crate) fn named_at(&self, name: &[u8], at: u64) -> Result<Option<JournalId>, Unreported> {
+        let mut holder = None;
+        for lsn in 0..at {
+            match self.directory_events.get(&lsn).ok_or(Unreported)? {
+                DirectoryEvent::Created {
+                    id, name: created, ..
+                } if created == name => {
+                    holder = Some(*id);
+                }
+                DirectoryEvent::Deleted { id } if holder == Some(*id) => holder = None,
+                _ => {}
+            }
+        }
+        Ok(holder)
     }
 
     /// Advance the registry model by the event first folded at `lsn` (#211).
@@ -438,6 +484,10 @@ impl SystemBoard {
         assert_sometimes!(
             self.id_taken,
             "system: a create naming a taken id is refused"
+        );
+        assert_sometimes!(
+            self.name_reused,
+            "names: a journal name is created again after a completed delete"
         );
         if self.truncated {
             assert_sometimes!(

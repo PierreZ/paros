@@ -5,7 +5,10 @@ test: nothing in CI runs it (CI only builds the image). The walkthrough that exp
 step does is [`crates/parosd/README.md`](crates/parosd/README.md).
 
 No id is fixed: `init` draws the cell's journals at random and prints them, so every command
-below takes the journal from `init`'s output (`journals=TENANT/JOURNAL`).
+below takes the journal from `init`'s output (`journals=id:TENANT/JOURNAL`, both ids in hex).
+A journal is named by its name, `TENANT/JOURNAL` or `paros://TENANT/JOURNAL`, or by its ids,
+`id:TENANT/JOURNAL`. The journal `init` creates has no name yet (#210), so the demo uses its ids.
+Human output prints ids as short hex, like git; `--json` prints them whole.
 
 ## With Docker Compose
 
@@ -16,7 +19,7 @@ Needs Docker with the Compose plugin; nothing else (the image is a plain Rust bu
 docker compose up -d --build
 
 # Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
-#   initialized fleet=… cell=… coordinator=… members=3 control=T/J election=T/J fleet_control=T/J journals=T/J steps=…
+#   initialized universe=… cell=… coordinator=… members=3 control=id:T/J election=id:T/J universe_control=id:T/J journals=id:T/J steps=…
 docker compose run --rm init | tee init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
 

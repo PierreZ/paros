@@ -56,3 +56,9 @@ pub fn state_json(state: &JournalView) -> Value {
 pub fn record_text(record: &[u8]) -> String {
     String::from_utf8_lossy(record).into_owned()
 }
+
+/// One id alone, abbreviated (#239): a line that names a single id has no
+/// listing to widen against.
+pub fn short(id: u64) -> String {
+    paros::name::Abbreviations::new([id]).id(id)
+}
