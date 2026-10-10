@@ -1,43 +1,44 @@
-//! Checkpoint and truncate (#227, #230): how any journal owner keeps its
-//! journal bounded by live state rather than history, over the four calls
-//! alone — paros-core never learns to compact.
+//! Checkpoint and truncate (#227, #230, #353): how any journal owner keeps
+//! its journal bounded by live state rather than history, over the four
+//! calls alone — paros-core never learns to compact.
 //!
 //! A journal owner folds its journal into some state. Once the log since its
 //! last checkpoint has grown past a multiple of that state's size (or a time
 //! bound passed), the owner:
 //!
-//! 1. writes the state as one **checkpoint record**, an ordinary fenced
-//!    `Write` at the journal's next position `s` — the record says it covers
-//!    every position below `s`;
-//! 2. runs the fenced `Truncate(up_to = s)` (#228): the checkpoint becomes
-//!    the journal's first record.
+//! 1. writes the state as a **checkpoint run** at the journal's next
+//!    position `s`: a `Begin`, the state cut into small `Chunk` records, and
+//!    an `End`, in ordinary fenced `Write` batches. `Begin` says the run
+//!    covers every position below `s`;
+//! 2. once `End` is written, runs the fenced `Truncate(up_to = s)` (#228):
+//!    `Begin` becomes the journal's first record.
 //!
 //! The owner's own writes pause in between because one [`Checkpointer`]
-//! holds the writer (`&mut self`). A reader loads by reading from the
-//! journal's floor: the first record there is a checkpoint, which it
-//! restores, and it folds forward from it.
+//! holds the writer (`&mut self`): no entry is ever inside a run. A small
+//! state fits one batch, so one slot; a large one takes as many small
+//! batches as it needs, so no checkpoint is one large record (#353). A
+//! reader loads by reading from the journal's floor: the run there is a
+//! checkpoint, which it restores, and it folds forward from it.
 //!
-//! **The record format.** A checkpoint record is the 8-byte [`MAGIC`]
-//! followed by a `paros.checkpoint.v1.CheckpointRecord` (`proto/checkpoint.proto`).
-//! Every other record is the owner's own entry, untouched: paros still
-//! decides nothing about it, and [`Checkpointer::append`] refuses an entry
-//! that would read as a checkpoint. Both forms are read from day one:
+//! **The record format.** A run record is the 8-byte [`MAGIC`] followed by a
+//! `paros.checkpoint.v1.CheckpointRecord` (`proto/checkpoint.proto`). Every
+//! other record is the owner's own entry, untouched: paros still decides
+//! nothing about it, and [`Checkpointer::append`] refuses an entry that
+//! would read as a run record. `End` is the **commit point**: it names the
+//! count of the run's chunks and the CRC-32C of the chunks concatenated. A
+//! run with no `End`, or with a wrong count or checksum, is no checkpoint.
+//! The retired `Inline` and `Ref` forms (#230) decode to no form and are
+//! refused: no cell ever wrote `Ref`, and no cell outlives the change.
 //!
-//! - `Inline { chunks }`: the state, chunked by key range (one chunk in M9);
-//! - `Ref { journal_id, covers_up_to, end_seq, checksum }`: the chunks live
-//!   in a separate checkpoint journal of the same tenant (Pulsar PIP-14's
-//!   compacted ledger), checked by the CRC-32C of their concatenation.
-//!
-//! The writer emits `Inline` only (M9); writing `Ref` is #232's.
-//!
-//! **Crash handling.** A crash between the write and the truncate leaves a
+//! **Crash handling.** A crash inside a run leaves it with no `End`: the
+//! next record is another owner's entry or `Begin`, and every fold drops the
+//! run it was collecting. A crash between `End` and the truncate leaves a
 //! checkpoint in the middle of the log: every fold **resets on it** (a fold
 //! that held the full prefix verifies it first — [`Folded::Checkpoint`]'s
 //! `verified`), and the next checkpoint truncates past it. A reader racing a
 //! truncate is answered `truncated` naming the floor: it jumps there
-//! ([`Folder::jump`]), where the checkpoint is, and restarts its fold from
-//! it. A truncate from an owner superseded in between is refused (#228):
-//! the checkpoint stays mid-log, harmless.
+//! ([`Folder::jump`]), where a run begins, and restarts its fold from it. A
+//! write or truncate from an owner superseded in between is refused (#228).
 //!
 //! The pure part, [`Folder`], is what every reader runs — the system
 //! journals' node follower too; [`Checkpointer`] is the owner's async loop
@@ -47,7 +48,7 @@
 use std::time::Duration;
 
 use moonpool_core::Providers;
-use paros_core::{JournalId, JournalIdentifier, LeaderUuid, Value};
+use paros_core::{JournalIdentifier, LeaderUuid, Value};
 use prost::Message as _;
 
 use super::reader::{Reader, ReaderOutcome};
@@ -55,8 +56,8 @@ use super::writer::{Writer, WriterOutcome};
 use super::{ClaimOutcome, Client, TruncateOutcome};
 use crate::rpc::checkpoint as wire;
 
-/// The prefix that marks a checkpoint record. A record that does not start
-/// with it is an entry.
+/// The prefix that marks a checkpoint run record. A record that does not
+/// start with it is an entry.
 pub const MAGIC: &[u8; 8] = b"\x00PRSCKP\x01";
 
 /// A state a journal owner folds, and can write down and read back.
@@ -75,8 +76,8 @@ pub trait Checkpointable {
     fn checkpoint(&self) -> Vec<u8>;
 
     /// Replace the state with `state`, a checkpoint covering every position
-    /// below `covers_up_to` and written at `covers_up_to`: the next entry
-    /// folded is past it.
+    /// below `covers_up_to`, whose run begins at `covers_up_to`: the next
+    /// entry folded is past it.
     ///
     /// # Errors
     ///
@@ -84,83 +85,51 @@ pub trait Checkpointable {
     fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str>;
 }
 
-/// Where a `Ref` checkpoint's state lives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CheckpointRef {
-    /// The checkpoint journal, in the same tenant.
-    pub journal: JournalId,
-    /// The horizon it was built for.
-    pub covers_up_to: u64,
-    /// Its records `[0, end_seq)` are the chunks.
-    pub end_seq: u64,
-    /// The CRC-32C of the chunks concatenated.
-    pub checksum: u32,
-}
-
-/// A checkpoint record, decoded.
+/// One record of a checkpoint run, decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckpointRecord {
-    /// The state inline: its chunks, in order.
-    Inline {
+    /// The start of a run, at position `covers_up_to`.
+    Begin {
         /// Every position below this one is covered.
         covers_up_to: u64,
-        /// The state's chunks.
-        chunks: Vec<Vec<u8>>,
     },
-    /// The state in a checkpoint journal.
-    Ref {
-        /// Every position below this one is covered.
-        covers_up_to: u64,
-        /// Where the chunks are.
-        at: CheckpointRef,
+    /// One piece of the state, in position order.
+    Chunk(Vec<u8>),
+    /// The commit point: the run's chunk count and checksum.
+    End {
+        /// The count of the run's chunks.
+        chunks: u64,
+        /// The CRC-32C of the chunks concatenated ([`chunks_checksum`]).
+        checksum: u32,
     },
 }
 
 impl CheckpointRecord {
-    /// The position the record covers up to (exclusive).
-    #[must_use]
-    pub fn covers_up_to(&self) -> u64 {
-        match self {
-            CheckpointRecord::Inline { covers_up_to, .. }
-            | CheckpointRecord::Ref { covers_up_to, .. } => *covers_up_to,
-        }
-    }
-
-    /// The record's bytes: [`MAGIC`] and the encoded checkpoint.
+    /// The record's bytes: [`MAGIC`] and the encoded record.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let (covers_up_to, form) = match self {
-            CheckpointRecord::Inline {
-                covers_up_to,
-                chunks,
-            } => (
-                *covers_up_to,
-                wire::checkpoint_record::Form::Inline(wire::Inline {
-                    chunks: chunks.clone(),
-                }),
-            ),
-            CheckpointRecord::Ref { covers_up_to, at } => (
-                *covers_up_to,
-                wire::checkpoint_record::Form::Ref(wire::Ref {
-                    journal_id: at.journal.0,
-                    covers_up_to: at.covers_up_to,
-                    end_seq: at.end_seq,
-                    checksum: at.checksum,
-                }),
-            ),
+        let form = match self {
+            CheckpointRecord::Begin { covers_up_to } => {
+                wire::checkpoint_record::Form::Begin(wire::Begin {
+                    covers_up_to: *covers_up_to,
+                })
+            }
+            CheckpointRecord::Chunk(bytes) => wire::checkpoint_record::Form::Chunk(wire::Chunk {
+                bytes: bytes.clone(),
+            }),
+            CheckpointRecord::End { chunks, checksum } => {
+                wire::checkpoint_record::Form::End(wire::End {
+                    chunks: *chunks,
+                    checksum: *checksum,
+                })
+            }
         };
         let mut record = MAGIC.to_vec();
-        record.extend(
-            wire::CheckpointRecord {
-                covers_up_to,
-                form: Some(form),
-            }
-            .encode_to_vec(),
-        );
+        record.extend(wire::CheckpointRecord { form: Some(form) }.encode_to_vec());
         record
     }
 
-    /// Read `record` back: `None` when it is not a checkpoint record (no
+    /// Read `record` back: `None` when it is not a run record (no
     /// [`MAGIC`]), `Some(Err)` when it carries the magic but does not decode.
     #[must_use]
     pub fn decode(record: &[u8]) -> Option<Result<Self, &'static str>> {
@@ -171,37 +140,28 @@ impl CheckpointRecord {
     fn decode_body(body: &[u8]) -> Result<Self, &'static str> {
         let checkpoint = wire::CheckpointRecord::decode(body)
             .map_err(|_| "a checkpoint record does not decode")?;
-        let covers_up_to = checkpoint.covers_up_to;
-        match checkpoint.form.ok_or("a checkpoint names no form")? {
-            wire::checkpoint_record::Form::Inline(inline) => Ok(CheckpointRecord::Inline {
-                covers_up_to,
-                chunks: inline.chunks,
-            }),
-            wire::checkpoint_record::Form::Ref(r) => {
-                if r.covers_up_to != covers_up_to {
-                    return Err("a checkpoint journal built for another horizon");
-                }
-                Ok(CheckpointRecord::Ref {
-                    covers_up_to,
-                    at: CheckpointRef {
-                        journal: JournalId(r.journal_id),
-                        covers_up_to: r.covers_up_to,
-                        end_seq: r.end_seq,
-                        checksum: r.checksum,
-                    },
-                })
-            }
-        }
+        Ok(
+            match checkpoint.form.ok_or("a checkpoint record names no form")? {
+                wire::checkpoint_record::Form::Begin(begin) => CheckpointRecord::Begin {
+                    covers_up_to: begin.covers_up_to,
+                },
+                wire::checkpoint_record::Form::Chunk(chunk) => CheckpointRecord::Chunk(chunk.bytes),
+                wire::checkpoint_record::Form::End(end) => CheckpointRecord::End {
+                    chunks: end.chunks,
+                    checksum: end.checksum,
+                },
+            },
+        )
     }
 }
 
-/// Whether `record` would read as a checkpoint.
+/// Whether `record` would read as a checkpoint run record.
 #[must_use]
 pub fn is_checkpoint(record: &[u8]) -> bool {
     record.starts_with(MAGIC)
 }
 
-/// The CRC-32C a `Ref` names: of the chunks concatenated, in order.
+/// The CRC-32C an `End` names: of the chunks concatenated, in order.
 #[must_use]
 pub fn chunks_checksum(chunks: &[Vec<u8>]) -> u32 {
     chunks
@@ -209,38 +169,86 @@ pub fn chunks_checksum(chunks: &[Vec<u8>]) -> u32 {
         .fold(0, |crc, chunk| crc32c::crc32c_append(crc, chunk))
 }
 
+/// The run that checkpoints `state` at position `covers_up_to`, encoded: a
+/// `Begin`, `state` cut into chunks of at most `chunk_bytes` bytes (floor
+/// 1), and the `End` that commits them. An empty state has no chunk.
+///
+/// # Panics
+///
+/// Never: the run's shape is asserted.
+#[must_use]
+pub fn run(covers_up_to: u64, state: &[u8], chunk_bytes: usize) -> Vec<Vec<u8>> {
+    let chunks: Vec<Vec<u8>> = state
+        .chunks(chunk_bytes.max(1))
+        .map(<[u8]>::to_vec)
+        .collect();
+    let end = CheckpointRecord::End {
+        chunks: chunks.len() as u64,
+        checksum: chunks_checksum(&chunks),
+    };
+    let mut records = Vec::with_capacity(chunks.len() + 2);
+    records.push(CheckpointRecord::Begin { covers_up_to }.encode());
+    records.extend(
+        chunks
+            .into_iter()
+            .map(|c| CheckpointRecord::Chunk(c).encode()),
+    );
+    records.push(end.encode());
+    assert!(records.len() >= 2, "a run holds its Begin and its End");
+    assert!(
+        records.iter().all(|r| is_checkpoint(r)),
+        "every record of a run reads as one"
+    );
+    records
+}
+
 /// What one record folded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Folded<E> {
     /// An entry, applied to a state that holds every position below it.
     Entry(E),
-    /// A checkpoint covering every position below `covers_up_to`; the fold
-    /// now holds its state. `verified` is `Some` when the fold already held
-    /// every position below it and compared the checkpoint with its own
-    /// state (`true`: equal), `None` when it restored from it.
+    /// A run's `End`, valid: the fold now holds the checkpoint's state,
+    /// which covers every position below `covers_up_to` (its `Begin`).
+    /// `verified` is `Some` when the fold already held every position below
+    /// it and compared the checkpoint with its own state (`true`: equal),
+    /// `None` when it restored from it.
     Checkpoint {
-        /// The checkpoint's horizon (its own position).
+        /// The checkpoint's horizon (the position of its `Begin`).
         covers_up_to: u64,
         /// The comparison, when the fold could make it.
         verified: Option<bool>,
     },
-    /// A `Ref` checkpoint a fold missing part of its prefix needs: read the
-    /// chunks and hand them to [`Folder::restore_ref`] (or give up on it
-    /// with [`Folder::skip`]). The fold does not move past it until then.
-    NeedsRef(CheckpointRef),
+    /// A run's `Begin` or `Chunk`, collected (or a chunk of no run,
+    /// dropped). The state is unchanged until the run's `End`.
+    Run,
     /// An entry above a gap: the fold cannot apply it, and waits for the
     /// next checkpoint.
     Skipped,
     /// A record carrying the magic that is no checkpoint this fold can use
-    /// (it does not decode, its horizon is not its own position, or its
-    /// state does not restore). Nothing changed.
+    /// (it does not decode, a `Begin` not at its own position, an `End`
+    /// with no run or a wrong count or checksum, or a state that does not
+    /// restore). The run it ends is dropped; nothing else changed.
     Unreadable(&'static str),
 }
 
+/// A run a fold is collecting: from its `Begin`, the chunks so far.
+#[derive(Clone, Debug)]
+struct OpenRun {
+    /// The position of its `Begin`.
+    begin: u64,
+    /// The chunks concatenated.
+    state: Vec<u8>,
+    /// The chunks collected.
+    chunks: u64,
+    /// Their CRC-32C so far.
+    checksum: u32,
+}
+
 /// A reader's fold of one journal over a [`Checkpointable`] state: entries
-/// applied in position order, checkpoints restored or verified, a gap jumped
-/// and healed by the next checkpoint. Pure: every node and every client
-/// folding the same records folds them the same way.
+/// applied in position order, checkpoint runs collected and, at their
+/// `End`, restored or verified, a gap jumped and healed by the next
+/// checkpoint. Pure: every node and every client folding the same records
+/// folds them the same way.
 #[derive(Clone, Debug)]
 pub struct Folder<S> {
     state: S,
@@ -248,6 +256,9 @@ pub struct Folder<S> {
     /// Every position below `next` is in the state (from position 0, or
     /// from a checkpoint restored).
     whole: bool,
+    /// The run being collected, if any: every position from its `Begin` up
+    /// to `next` is one of its records.
+    run: Option<OpenRun>,
     /// Entries folded since the last checkpoint (or the log's start), and
     /// their bytes: the log a checkpoint would cover.
     since_entries: u64,
@@ -262,6 +273,7 @@ impl<S: Checkpointable> Folder<S> {
             state,
             next: 0,
             whole: true,
+            run: None,
             since_entries: 0,
             since_bytes: 0,
         }
@@ -293,27 +305,44 @@ impl<S: Checkpointable> Folder<S> {
         self.whole
     }
 
+    /// Whether the fold is inside a run with no `End` yet.
+    #[must_use]
+    pub fn in_run(&self) -> bool {
+        self.run.is_some()
+    }
+
     /// The positions below `floor` are gone (a `truncated` answer, a page
     /// that starts past the cursor): move past them. The state no longer
     /// holds them, so the fold waits for a checkpoint — the one at the floor,
-    /// when the floor is a checkpoint's.
+    /// when the floor is a run's `Begin`. A run being collected lost records:
+    /// it is dropped.
     pub fn jump(&mut self, floor: u64) {
         if floor > self.next {
             self.next = floor;
             self.whole = false;
+            self.run = None;
         }
     }
 
     /// Fold the record at position `seq`. `None` for a position already
     /// folded (pages may overlap); a position past the next one is a gap
     /// ([`Folder::jump`]) first.
+    ///
+    /// # Panics
+    ///
+    /// When the fold's own bookkeeping breaks (a run with a hole): never on
+    /// a record's content.
     pub fn fold(&mut self, seq: u64, record: &[u8]) -> Option<Folded<S::Event>> {
         if seq < self.next {
             return None;
         }
         self.jump(seq);
+        assert!(seq == self.next, "a fold takes the next position");
+        self.next = seq + 1;
         let Some(decoded) = CheckpointRecord::decode(record) else {
-            self.next = seq + 1;
+            // An entry: the owner that wrote a run before it stopped inside
+            // it, and the run has no `End`.
+            self.drop_run();
             if !self.whole {
                 return Some(Folded::Skipped);
             }
@@ -321,78 +350,92 @@ impl<S: Checkpointable> Folder<S> {
             self.since_bytes += record.len() as u64;
             return Some(Folded::Entry(self.state.apply(seq, record)));
         };
-        let checkpoint = match decoded {
-            Ok(checkpoint) if checkpoint.covers_up_to() == seq => checkpoint,
-            Ok(_) => {
-                self.next = seq + 1;
-                return Some(Folded::Unreadable("a checkpoint not at its own horizon"));
-            }
+        let decoded = match decoded {
+            Ok(decoded) => decoded,
             Err(reason) => {
-                self.next = seq + 1;
+                self.drop_run();
                 return Some(Folded::Unreadable(reason));
             }
         };
-        match checkpoint {
-            CheckpointRecord::Inline { chunks, .. } => Some(self.restore(seq, &chunks.concat())),
-            // A whole fold holds the state already: it has nothing to read.
-            CheckpointRecord::Ref { .. } if self.whole => {
-                self.next = seq + 1;
-                self.since_entries = 0;
-                self.since_bytes = 0;
-                Some(Folded::Checkpoint {
-                    covers_up_to: seq,
-                    verified: None,
-                })
+        Some(match decoded {
+            CheckpointRecord::Begin { covers_up_to } if covers_up_to != seq => {
+                self.drop_run();
+                Folded::Unreadable("a checkpoint run not at its own horizon")
             }
-            CheckpointRecord::Ref { at, .. } => Some(Folded::NeedsRef(at)),
+            CheckpointRecord::Begin { .. } => {
+                // A new owner's run after one that stopped inside its own.
+                self.drop_run();
+                self.run = Some(OpenRun {
+                    begin: seq,
+                    state: Vec::new(),
+                    chunks: 0,
+                    checksum: 0,
+                });
+                Folded::Run
+            }
+            CheckpointRecord::Chunk(bytes) => {
+                if let Some(run) = &mut self.run {
+                    assert!(
+                        run.begin + 1 + run.chunks == seq,
+                        "a run's chunks follow its Begin with no hole"
+                    );
+                    run.checksum = crc32c::crc32c_append(run.checksum, &bytes);
+                    run.state.extend_from_slice(&bytes);
+                    run.chunks += 1;
+                }
+                Folded::Run
+            }
+            CheckpointRecord::End { chunks, checksum } => {
+                let Some(run) = self.run.take() else {
+                    return Some(Folded::Unreadable("a checkpoint end with no run"));
+                };
+                if run.chunks != chunks {
+                    return Some(Folded::Unreadable(
+                        "a checkpoint run with a wrong chunk count",
+                    ));
+                }
+                if run.checksum != checksum {
+                    return Some(Folded::Unreadable(
+                        "a checkpoint run that fails its checksum",
+                    ));
+                }
+                assert!(
+                    run.begin + 1 + run.chunks == seq,
+                    "a run's End follows its last chunk"
+                );
+                self.restore(run.begin, &run.state)
+            }
+        })
+    }
+
+    /// Drop the run being collected: it has no `End`, and never will.
+    fn drop_run(&mut self) {
+        if self.run.take().is_some() {
+            moonpool_assertions::reachable!("checkpoint: a run with no end is ignored");
         }
     }
 
-    /// Restore from the chunks a [`Folded::NeedsRef`] at `seq` named, read
-    /// from its checkpoint journal; refused (unreadable) when their checksum
-    /// is not the one the reference names.
-    pub fn restore_ref(
-        &mut self,
-        seq: u64,
-        at: &CheckpointRef,
-        chunks: &[Vec<u8>],
-    ) -> Folded<S::Event> {
-        if seq < self.next {
-            return Folded::Unreadable("a checkpoint already folded");
-        }
-        if chunks_checksum(chunks) != at.checksum {
-            self.next = seq + 1;
-            return Folded::Unreadable("a checkpoint journal that fails its checksum");
-        }
-        self.restore(seq, &chunks.concat())
-    }
-
-    /// Give up on the record at `seq` (a `Ref` whose journal could not be
-    /// read): move past it, still waiting for a checkpoint.
-    pub fn skip(&mut self, seq: u64) {
-        if seq >= self.next {
-            self.next = seq + 1;
-        }
-    }
-
-    fn restore(&mut self, seq: u64, state: &[u8]) -> Folded<S::Event> {
+    /// Restore (or verify) from a valid run that began at `begin`; the fold
+    /// already stands past its `End`.
+    fn restore(&mut self, begin: u64, state: &[u8]) -> Folded<S::Event> {
+        assert!(self.run.is_none(), "a run is restored once, at its End");
+        assert!(begin < self.next, "a run's Begin is below its End");
         let verified = self.whole.then(|| self.state.checkpoint() == state);
-        self.next = seq + 1;
         if verified == Some(true) {
             self.since_entries = 0;
             self.since_bytes = 0;
             return Folded::Checkpoint {
-                covers_up_to: seq,
+                covers_up_to: begin,
                 verified,
             };
         }
-        match self.state.restore(seq, state) {
+        match self.state.restore(begin, state) {
             Ok(()) => {
                 self.whole = true;
                 self.since_entries = 0;
                 self.since_bytes = 0;
                 Folded::Checkpoint {
-                    covers_up_to: seq,
+                    covers_up_to: begin,
                     verified,
                 }
             }
@@ -411,6 +454,36 @@ pub struct CheckpointPolicy {
     /// Checkpoint once this long has passed since the last one, with any
     /// entry since. Floor 0: after every entry.
     pub interval: Duration,
+    /// The most state bytes in one `Chunk` record. Floor 1: a chunk per
+    /// byte, many records but a valid run. Keep it well under the server's
+    /// batch bytes, or no batch holds a chunk.
+    pub chunk_bytes: usize,
+    /// The most run records in one `Write`. Floor 1: a batch per record.
+    /// A node that answers `TooLarge` lowers it for the rest of the run.
+    pub batch_records: usize,
+    /// The most run record bytes in one `Write` (a batch always takes one
+    /// record). Floor 1. A node that answers `TooLarge` lowers it for the
+    /// rest of the run.
+    pub batch_bytes: usize,
+}
+
+impl CheckpointPolicy {
+    /// How many of `records` the next batch takes under `limits` (records,
+    /// bytes): at least one, then as many as fit.
+    fn batch_len(records: &[Vec<u8>], (max_records, max_bytes): (usize, usize)) -> usize {
+        assert!(!records.is_empty(), "a batch takes a record");
+        let mut bytes = 0;
+        let mut taken = 0;
+        for record in records.iter().take(max_records.max(1)) {
+            if taken > 0 && bytes + record.len() > max_bytes {
+                break;
+            }
+            bytes += record.len();
+            taken += 1;
+        }
+        assert!(taken >= 1, "a batch always takes one record");
+        taken
+    }
 }
 
 /// What [`Checkpointer::open`] came back with.
@@ -577,8 +650,7 @@ impl<S: Checkpointable> Checkpointer<S> {
 
     /// Fold the journal from where the fold stands up to `tail` (at least),
     /// from server `first` on: a `truncated` answer jumps to the floor and
-    /// restarts from the checkpoint there; a `Ref` checkpoint is read from
-    /// its checkpoint journal.
+    /// restarts from the checkpoint run there.
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal(), tail))]
     pub async fn load<P: Providers>(
         &mut self,
@@ -646,42 +718,146 @@ impl<S: Checkpointable> Checkpointer<S> {
         }
     }
 
-    /// The first step alone: write the fold's state as an `Inline`
-    /// checkpoint at the owner's next position. On its own (a harness's
-    /// crash between the two steps) it leaves the checkpoint mid-log.
+    /// The first step alone: write the fold's state as a checkpoint run
+    /// at the owner's next position, `End` included. On its own (a
+    /// harness's crash between the two steps) it leaves the checkpoint
+    /// mid-log. `Ok` names the run's `Begin`.
     ///
     /// # Errors
     ///
     /// [`CheckpointOutcome::NotFolded`] when the fold is not at the owner's
-    /// next position; [`CheckpointOutcome::NotWritten`] when the write is not
-    /// known written (an ambiguous one may still land).
+    /// next position; [`CheckpointOutcome::NotWritten`] when a batch is not
+    /// known written (an ambiguous one may still land): the run has no
+    /// `End`, and every fold ignores it.
+    ///
+    /// # Panics
+    ///
+    /// When a written run does not fold as one (the owner's own records).
     #[tracing::instrument(level = "debug", skip_all, fields(journal = %self.writer.journal(), seq = self.writer.next_seq()))]
     pub async fn write_checkpoint<P: Providers>(
         &mut self,
         client: &Client<P>,
         first: usize,
     ) -> Result<u64, CheckpointOutcome> {
+        let seq = self.run_start()?;
+        let records = run(
+            seq,
+            &self.folder.state().checkpoint(),
+            self.policy.chunk_bytes,
+        );
+        self.write_run(client, first, &records).await?;
+        assert!(!self.folder.in_run(), "a written End closes the run");
+        self.last = client.now();
+        Ok(seq)
+    }
+
+    /// The explicit misbehaviour of an owner that stops inside its run
+    /// (#353): write every record of the run but its `End`, then stop. No
+    /// fold restores from it; the next owner's entry or run supersedes it.
+    /// `Ok` names the run's `Begin`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Checkpointer::write_checkpoint`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Checkpointer::write_checkpoint`].
+    pub async fn write_run_without_end<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<u64, CheckpointOutcome> {
+        let seq = self.run_start()?;
+        let mut records = run(
+            seq,
+            &self.folder.state().checkpoint(),
+            self.policy.chunk_bytes,
+        );
+        records.pop();
+        self.write_run(client, first, &records).await?;
+        assert!(self.folder.in_run(), "a run with no End stays open");
+        Ok(seq)
+    }
+
+    /// Where a run starts: the owner's next position, which the fold must
+    /// stand at, whole.
+    fn run_start(&self) -> Result<u64, CheckpointOutcome> {
         let seq = self.writer.next_seq();
         if !self.folder.is_whole() || self.folder.next_seq() != seq {
             return Err(CheckpointOutcome::NotFolded);
         }
-        let record = CheckpointRecord::Inline {
-            covers_up_to: seq,
-            chunks: vec![self.folder.state().checkpoint()],
-        }
-        .encode();
-        match self
-            .writer
-            .write(client, vec![Value(record.clone())], first)
-            .await
-        {
-            WriterOutcome::Written { seq: at, .. } if at == seq => {
-                self.folder.fold(seq, &record);
-                self.last = client.now();
-                Ok(seq)
+        Ok(seq)
+    }
+
+    /// Write `records` (a run, or its prefix) at the owner's next position
+    /// in batches under the policy's limits, folding each batch once
+    /// written there; a node's `TooLarge` lowers the limits to its own.
+    async fn write_run<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        records: &[Vec<u8>],
+    ) -> Result<(), CheckpointOutcome> {
+        let mut limits = (
+            self.policy.batch_records.max(1),
+            self.policy.batch_bytes.max(1),
+        );
+        let mut at = 0;
+        let mut batches = 0_u32;
+        while at < records.len() {
+            let rest = &records[at..];
+            let take = CheckpointPolicy::batch_len(rest, limits);
+            let expected = self.writer.next_seq();
+            assert!(
+                self.folder.next_seq() == expected,
+                "the fold stands at the owner's next position"
+            );
+            let batch = rest[..take].iter().cloned().map(Value).collect();
+            match self.writer.write(client, batch, first).await {
+                WriterOutcome::Written { seq, count, .. }
+                    if seq == expected && count == take as u64 =>
+                {
+                    for (position, record) in (seq..).zip(&rest[..take]) {
+                        let folded = self.folder.fold(position, record);
+                        assert!(
+                            matches!(folded, Some(Folded::Run | Folded::Checkpoint { .. })),
+                            "an owner's own run folds as a run"
+                        );
+                    }
+                    at += take;
+                    batches += 1;
+                }
+                WriterOutcome::TooLarge {
+                    max_records,
+                    max_bytes,
+                } => {
+                    let lowered = (
+                        limits
+                            .0
+                            .min(usize::try_from(max_records).unwrap_or(usize::MAX)),
+                        limits
+                            .1
+                            .min(usize::try_from(max_bytes).unwrap_or(usize::MAX)),
+                    );
+                    if CheckpointPolicy::batch_len(rest, lowered) >= take {
+                        // One record is over the node's bytes: no batch
+                        // holds it.
+                        return Err(CheckpointOutcome::NotWritten(WriterOutcome::TooLarge {
+                            max_records,
+                            max_bytes,
+                        }));
+                    }
+                    moonpool_assertions::reachable!("checkpoint: a node's limits split a run");
+                    limits = lowered;
+                }
+                outcome => return Err(CheckpointOutcome::NotWritten(outcome)),
             }
-            outcome => Err(CheckpointOutcome::NotWritten(outcome)),
         }
+        if batches > 1 {
+            moonpool_assertions::reachable!("checkpoint: a run over several batches");
+        }
+        Ok(())
     }
 
     /// The second step alone: the fenced `Truncate(up_to = seq)` (#228),
@@ -719,34 +895,14 @@ pub async fn load<P: Providers, S: Checkpointable>(
                 records,
                 state,
             } => {
-                let mut pending = None;
                 for (seq, record) in (from..).zip(&records) {
-                    match folder.fold(seq, record) {
-                        Some(Folded::NeedsRef(at)) => {
-                            pending = Some((seq, at));
-                            break;
-                        }
-                        Some(Folded::Checkpoint {
-                            verified: Some(false),
-                            ..
-                        }) => diverged = diverged.or(Some(seq)),
-                        _ => {}
+                    if let Some(Folded::Checkpoint {
+                        verified: Some(false),
+                        ..
+                    }) = folder.fold(seq, record)
+                    {
+                        diverged = diverged.or(Some(seq));
                     }
-                }
-                if let Some((seq, at)) = pending {
-                    match read_chunks(client, journal, &at, first).await {
-                        Some(chunks) => {
-                            if matches!(
-                                folder.restore_ref(seq, &at, &chunks),
-                                Folded::Checkpoint { .. }
-                            ) {
-                                restarted = true;
-                            }
-                        }
-                        None => folder.skip(seq),
-                    }
-                    reader = Reader::new(journal, folder.next_seq());
-                    continue;
                 }
                 let end = state.next_seq.0.max(tail);
                 if records.is_empty() || folder.next_seq() >= end {
@@ -770,29 +926,6 @@ pub async fn load<P: Providers, S: Checkpointable>(
             ReaderOutcome::UnknownJournal => return LoadOutcome::UnknownJournal,
         }
     }
-}
-
-/// Read a `Ref` checkpoint's chunks: records `[0, end_seq)` of its
-/// checkpoint journal, in the same tenant. `None` when they cannot all be
-/// read.
-async fn read_chunks<P: Providers>(
-    client: &Client<P>,
-    journal: JournalIdentifier,
-    at: &CheckpointRef,
-    first: usize,
-) -> Option<Vec<Vec<u8>>> {
-    let mut reader = Reader::new(JournalIdentifier::new(journal.tenant, at.journal), 0);
-    let mut chunks = Vec::new();
-    while reader.cursor() < at.end_seq {
-        match reader.next(client, first).await {
-            ReaderOutcome::Records { records, .. } if !records.is_empty() => {
-                chunks.extend(records);
-            }
-            _ => return None,
-        }
-    }
-    chunks.truncate(usize::try_from(at.end_seq).ok()?);
-    Some(chunks)
 }
 
 #[cfg(test)]
@@ -824,33 +957,34 @@ mod tests {
         }
     }
 
-    fn inline(at: u64, state: &[u8]) -> Vec<u8> {
-        CheckpointRecord::Inline {
-            covers_up_to: at,
-            chunks: vec![state.to_vec()],
+    /// Fold the run checkpointing `state` at `at`, in chunks of
+    /// `chunk_bytes`: what its `End` folded to.
+    fn fold_run(
+        fold: &mut Folder<Log>,
+        at: u64,
+        state: &[u8],
+        chunk_bytes: usize,
+    ) -> Option<Folded<u64>> {
+        let records = run(at, state, chunk_bytes);
+        let (end, body) = records.split_last().unwrap();
+        for (seq, record) in (at..).zip(body) {
+            assert_eq!(fold.fold(seq, record), Some(Folded::Run));
         }
-        .encode()
+        fold.fold(at + body.len() as u64, end)
     }
 
     #[test]
-    fn both_forms_round_trip_and_an_entry_is_never_a_checkpoint() {
-        let forms = [
-            CheckpointRecord::Inline {
-                covers_up_to: 9,
-                chunks: vec![b"ab".to_vec(), b"c".to_vec()],
-            },
-            CheckpointRecord::Ref {
-                covers_up_to: 9,
-                at: CheckpointRef {
-                    journal: JournalId(400),
-                    covers_up_to: 9,
-                    end_seq: 2,
-                    checksum: chunks_checksum(&[b"ab".to_vec(), b"c".to_vec()]),
-                },
+    fn every_record_round_trips_and_an_entry_is_never_a_checkpoint() {
+        let records = [
+            CheckpointRecord::Begin { covers_up_to: 9 },
+            CheckpointRecord::Chunk(b"ab".to_vec()),
+            CheckpointRecord::End {
+                chunks: 2,
+                checksum: chunks_checksum(&[b"ab".to_vec(), b"c".to_vec()]),
             },
         ];
-        for form in forms {
-            assert_eq!(CheckpointRecord::decode(&form.encode()), Some(Ok(form)));
+        for record in records {
+            assert_eq!(CheckpointRecord::decode(&record.encode()), Some(Ok(record)));
         }
         assert_eq!(CheckpointRecord::decode(b"an entry"), None);
         assert!(matches!(CheckpointRecord::decode(MAGIC), Some(Err(_))));
@@ -858,6 +992,28 @@ mod tests {
             chunks_checksum(&[b"ab".to_vec(), b"c".to_vec()]),
             crc32c::crc32c(b"abc")
         );
+        // A run cuts the state into chunks and commits them.
+        let records = run(4, b"abcde", 2);
+        assert_eq!(records.len(), 5, "Begin, three chunks, End");
+        assert_eq!(
+            CheckpointRecord::decode(&records[4]),
+            Some(Ok(CheckpointRecord::End {
+                chunks: 3,
+                checksum: crc32c::crc32c(b"abcde")
+            }))
+        );
+        assert_eq!(run(4, b"", 2).len(), 2, "an empty state has no chunk");
+    }
+
+    #[test]
+    fn the_retired_forms_are_refused() {
+        // `CheckpointRecord { covers_up_to: 3, inline: { chunks: ["a"] } }`,
+        // as #230 wrote it: fields 1 and 2.
+        let mut old = MAGIC.to_vec();
+        old.extend_from_slice(&[0x08, 0x03, 0x12, 0x03, 0x0a, 0x01, b'a']);
+        assert!(matches!(CheckpointRecord::decode(&old), Some(Err(_))));
+        let mut fold = Folder::new(Log::default());
+        assert!(matches!(fold.fold(0, &old), Some(Folded::Unreadable(_))));
     }
 
     #[test]
@@ -871,14 +1027,15 @@ mod tests {
         assert_eq!(fold.fold(5, b"x"), Some(Folded::Skipped));
         // A checkpoint mid-log (a crash before its truncate) heals it.
         assert_eq!(
-            fold.fold(6, &inline(6, b"abcdex")),
+            fold_run(&mut fold, 6, b"abcdex", 4),
             Some(Folded::Checkpoint {
                 covers_up_to: 6,
                 verified: None
             })
         );
         assert!(fold.is_whole());
-        assert_eq!(fold.fold(7, b"y"), Some(Folded::Entry(7)));
+        assert_eq!(fold.next_seq(), 10, "past the run's End");
+        assert_eq!(fold.fold(10, b"y"), Some(Folded::Entry(10)));
         assert_eq!(fold.state(), &Log(b"abcdexy".to_vec()));
     }
 
@@ -887,20 +1044,84 @@ mod tests {
         let mut fold = Folder::new(Log::default());
         fold.fold(0, b"a");
         assert_eq!(
-            fold.fold(1, &inline(1, b"a")),
+            fold_run(&mut fold, 1, b"a", 1),
             Some(Folded::Checkpoint {
                 covers_up_to: 1,
                 verified: Some(true)
             })
         );
         assert_eq!(
-            fold.fold(2, &inline(2, b"zz")),
+            fold_run(&mut fold, 4, b"zz", 1),
             Some(Folded::Checkpoint {
-                covers_up_to: 2,
+                covers_up_to: 4,
                 verified: Some(false)
             })
         );
         assert_eq!(fold.state(), &Log(b"zz".to_vec()), "the fold resets on it");
+    }
+
+    #[test]
+    fn a_run_with_no_valid_end_is_never_restored() {
+        let mut fold = Folder::new(Log::default());
+        fold.jump(2);
+        // A run its owner stopped inside: the next owner's entry drops it.
+        let records = run(2, b"abc", 1);
+        for (seq, record) in (2..).zip(&records[..3]) {
+            assert_eq!(fold.fold(seq, record), Some(Folded::Run));
+        }
+        assert!(fold.in_run());
+        assert_eq!(fold.fold(5, b"x"), Some(Folded::Skipped));
+        assert!(!fold.in_run() && !fold.is_whole());
+        // Its `End`, landing late, ends no run.
+        assert!(matches!(
+            fold.fold(6, &records[4]),
+            Some(Folded::Unreadable(_))
+        ));
+        // A new `Begin` supersedes an open run.
+        let again = run(7, b"abc", 1);
+        for (seq, record) in (7..).zip(&again[..2]) {
+            assert_eq!(fold.fold(seq, record), Some(Folded::Run));
+        }
+        assert_eq!(
+            fold_run(&mut fold, 9, b"q", 1),
+            Some(Folded::Checkpoint {
+                covers_up_to: 9,
+                verified: None
+            })
+        );
+        // A wrong count, then a wrong checksum.
+        let mut fold = Folder::new(Log::default());
+        fold.jump(1);
+        let records = run(1, b"ab", 1);
+        let short = CheckpointRecord::End {
+            chunks: 1,
+            checksum: crc32c::crc32c(b"ab"),
+        }
+        .encode();
+        for (seq, record) in (1..).zip(&records[..3]) {
+            fold.fold(seq, record);
+        }
+        assert!(matches!(fold.fold(4, &short), Some(Folded::Unreadable(_))));
+        let records = run(5, b"ab", 1);
+        let wrong = CheckpointRecord::End {
+            chunks: 2,
+            checksum: crc32c::crc32c(b"ba"),
+        }
+        .encode();
+        for (seq, record) in (5..).zip(&records[..3]) {
+            fold.fold(seq, record);
+        }
+        assert!(matches!(fold.fold(8, &wrong), Some(Folded::Unreadable(_))));
+        assert!(!fold.is_whole(), "nothing restored");
+        // A gap inside a run drops it.
+        let records = run(9, b"ab", 1);
+        fold.fold(9, &records[0]);
+        fold.jump(11);
+        assert!(!fold.in_run());
+        assert!(matches!(
+            fold.fold(11, &records[3]),
+            Some(Folded::Unreadable(_))
+        ));
     }
 
     #[test]
@@ -909,7 +1130,7 @@ mod tests {
         fold.fold(0, b"a");
         // Not at its own horizon.
         assert!(matches!(
-            fold.fold(1, &inline(0, b"")),
+            fold.fold(1, &CheckpointRecord::Begin { covers_up_to: 0 }.encode()),
             Some(Folded::Unreadable(_))
         ));
         // Carries the magic, decodes to nothing.
@@ -919,54 +1140,21 @@ mod tests {
         // A state that does not restore.
         fold.jump(4);
         assert!(matches!(
-            fold.fold(4, &inline(4, b"\xff")),
+            fold_run(&mut fold, 4, b"\xff", 1),
             Some(Folded::Unreadable(_))
         ));
         assert!(!fold.is_whole());
-        assert_eq!(fold.next_seq(), 5);
+        assert_eq!(fold.next_seq(), 7);
     }
 
     #[test]
-    fn a_ref_is_read_only_by_a_fold_that_needs_it() {
-        let chunks = vec![b"ab".to_vec(), b"c".to_vec()];
-        let at = CheckpointRef {
-            journal: JournalId(400),
-            covers_up_to: 3,
-            end_seq: 2,
-            checksum: chunks_checksum(&chunks),
-        };
-        let record = CheckpointRecord::Ref {
-            covers_up_to: 3,
-            at,
-        }
-        .encode();
-        let mut whole = Folder::new(Log::default());
-        for (seq, entry) in (0..).zip([b"a", b"b", b"c"]) {
-            whole.fold(seq, entry);
-        }
-        assert_eq!(
-            whole.fold(3, &record),
-            Some(Folded::Checkpoint {
-                covers_up_to: 3,
-                verified: None
-            })
-        );
-        let mut jumped = Folder::new(Log::default());
-        jumped.jump(3);
-        assert_eq!(jumped.fold(3, &record), Some(Folded::NeedsRef(at)));
-        assert_eq!(jumped.next_seq(), 3, "it waits on the reference");
-        assert!(matches!(
-            jumped.clone().restore_ref(3, &at, &[b"abd".to_vec()]),
-            Folded::Unreadable(_)
-        ));
-        assert_eq!(
-            jumped.restore_ref(3, &at, &chunks),
-            Folded::Checkpoint {
-                covers_up_to: 3,
-                verified: None
-            }
-        );
-        assert_eq!(jumped.state(), whole.state());
+    fn a_batch_takes_one_record_then_what_fits() {
+        let records = vec![vec![0; 4], vec![0; 4], vec![0; 4]];
+        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 100)), 3);
+        assert_eq!(CheckpointPolicy::batch_len(&records, (2, 100)), 2);
+        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 8)), 2);
+        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 1)), 1);
+        assert_eq!(CheckpointPolicy::batch_len(&records, (0, 0)), 1);
     }
 
     #[test]
@@ -974,6 +1162,9 @@ mod tests {
         let policy = |factor| CheckpointPolicy {
             factor,
             interval: Duration::from_secs(10),
+            chunk_bytes: 2,
+            batch_records: 8,
+            batch_bytes: 1 << 10,
         };
         // The toy state is every entry's bytes, so the log since the start
         // is exactly the state's size.
@@ -996,7 +1187,7 @@ mod tests {
         eager.folder.fold(0, b"abcd");
         assert!(eager.due(Duration::from_secs(1)), "4 bytes against 1 × 4");
         // A checkpoint resets the count.
-        eager.folder.fold(1, &inline(1, b"abcd"));
+        fold_run(&mut eager.folder, 1, b"abcd", 2);
         assert_eq!(eager.folder.since_checkpoint(), (0, 0));
         assert!(!eager.due(Duration::from_secs(100)));
     }

@@ -22,7 +22,7 @@ linearizability checker judge is the client an operator runs. The module doc
 | the writer session: claim with `SetLeader` against the leader read, under a uuid per term derived from the caller's seed (`leader_uuid`), track the uuid and next position, stop when superseded | `writer.rs` (`Writer`, `WriterOutcome`, `Learned`, `write_request`) |
 | the reader: a cursor, paged `Read`s with a long-poll, a `truncated` answer resumed at the floor and reported as `ReaderOutcome::Gap` | `reader.rs` (`Reader`, `ReaderOutcome`) |
 | observation of every attempt and answer at the four journal calls | `observer.rs` (`CallObserver`, `NoObserver`, `Attempted`, `Answered`) |
-| checkpoint and truncate (#230): the record format (`MAGIC`, `Inline` / `Ref`), the pure `Folder` every reader runs (the registry's node follower too), the owner's `Checkpointer` (`open`, `append`, `due`, `checkpoint` = `write_checkpoint` + `truncate_to`) | `checkpoint.rs` (`Checkpointable`, `Folder`, `Folded`, `Checkpointer`, `CheckpointPolicy` from `checkpoint_factor` / `checkpoint_interval`) |
+| checkpoint and truncate (#230): the record format (`MAGIC`, a run of `Begin` / `Chunk` / `End`, committed by its `End`, #353), the pure `Folder` every reader runs (the registry's node follower too), the owner's `Checkpointer` (`open`, `append`, `due`, `checkpoint` = `write_checkpoint` + `truncate_to`) | `checkpoint.rs` (`Checkpointable`, `Folder`, `Folded`, `Checkpointer`, `CheckpointPolicy` from `checkpoint_factor` / `checkpoint_interval` / `checkpoint_chunk_bytes` / `checkpoint_batch_records` / `checkpoint_batch_bytes`) |
 | the pure parts pinned by unit tests | `tests.rs` |
 
 ## Rules

@@ -262,8 +262,8 @@ documented floor and a `buggify_knob!` in simulation; the toy's values are today
 only** (decided on 2026-10-09, #241): the node caps it at the maximum and raises a non-zero one
 to the minimum (the maximum wins when the two cross; 0 still answers at once). #241 builds no
 new long-poll: the tail wait of #185 stays as it was, a confirmed read at or past `next_seq`
-re-served after every batch until its capped wait runs out, then answered empty. An `Inline`
-checkpoint (section 3.9) must fit one batch. Every id, `seq` and the term counter are `u64`; the
+re-served after every batch until its capped wait runs out, then answered empty. A checkpoint
+(section 3.9) is a run of small records, so no state must fit one batch. Every id, `seq` and the term counter are `u64`; the
 leader uuid is 128 bits.
 
 The batch limits are `DriverTunables::max_batch_records` (1,024 by default) and
@@ -1007,7 +1007,8 @@ metadata version lets a reader refuse a format it does not understand.
   its control journal (decided on 2026-10-07, #252), so a universe that mixes cell kinds is entries,
   never a new field.
 - Every peer and client message carries its `JournalIdentifier` `(TenantId, JournalId)` (section 3.8).
-- The checkpoint record format has both its `Inline` and `Ref` forms (section 3.9).
+- A checkpoint is a run of small records in the journal it checkpoints (section 3.9), so no
+  state is bounded by one batch.
 - No component assumes there is only one cell: every lookup goes through the universe directory.
 
 **Tenant groups** (decided on 2026-10-04). A tenant belongs to a **set of groups**, recorded in
@@ -1161,13 +1162,15 @@ for the control plane first and offered to users as a recipe, never a guarantee 
 
 1. The coordinator pauses its own control writes (it is the single writer, and control writes are
    rare).
-2. It writes a checkpoint of the folded state as an ordinary fenced `Write`.
-3. It calls the fenced `Truncate` up to the checkpoint's `seq`.
-4. Readers start at `first_seq`, which is always a checkpoint, and fold forward.
+2. It writes a checkpoint of the folded state as a run of ordinary fenced `Write` batches.
+3. It calls the fenced `Truncate` up to the run's first record.
+4. Readers start at `first_seq`, which is always the first record of a complete run, and fold
+   forward.
 
 A checkpoint replaces the state entirely, so a crash between the write and the truncate is
 harmless: the next fold meets a checkpoint in the middle of the log and resets on it. `Truncate`
-only ever targets a checkpoint. A reader that gets `Truncated` restarts from `first_seq`.
+only ever targets the first record of a complete run. A reader that gets `Truncated` restarts
+from `first_seq`.
 
 - **Control state is bounded by live entities, never by history**: the latest entry per
   `node_id`, current assignments only. That is what keeps checkpoints small. The one exception is
@@ -1181,26 +1184,27 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
   memory, a machine's cached registry. That is why the checkpoint lives in the journal and not in
   a local snapshot file per replica, as Kafka and Redpanda do it: coordinators are `stateless`,
   so a newly elected coordinator has no local file to start from.
-- **The record format is fixed from day one**, as one of two forms:
-  - `Inline { chunks }`: the state inside the journal, chunked by key range. Always one chunk in
-    M9.
-  - `Ref { journal_id, covers_up_to, end_seq, checksum }`: the state written in many small
-    batches into a separate checkpoint journal of the same tenant, never written again once
-    referenced; the main journal holds only this pointer. This is Pulsar's topic compaction
-    (PIP-14): the compacted data goes to a separate, closed ledger, and the topic's metadata
-    records that ledger plus the compaction horizon. The next coordinator deletes unreferenced
-    checkpoint journals; at most two exist at a time.
+- **No checkpoint is one large record** (decided on 2026-10-10, #353). Pierre asked for the
+  simplest design that scales. A checkpoint is a run of records in the journal it checkpoints,
+  each record the 8-byte magic and a `paros.checkpoint.v1.CheckpointRecord`
+  (`proto/checkpoint.proto`):
+  - `Begin { covers_up_to }`, at position `covers_up_to`: the state covers every position below.
+  - `Chunk { bytes }` records: the state cut into pieces of at most
+    `ClientTunables::checkpoint_chunk_bytes` (8 KiB by default).
+  - `End { chunks, checksum }`, the **commit point**: the chunk count and the CRC-32C of the
+    chunks concatenated.
 
-  M9 writes `Inline` only. `Ref` removes the batch-size limit and never blocks the main journal.
-  Readers handle both forms from the start.
-
-  **No checkpoint is one large record** (decided on 2026-10-10, #353). Pierre asked for the
-  simplest design that scales: a checkpoint becomes a run of records in the same journal,
-  `Begin { covers_up_to }`, many small `Chunk` records, then `End { chunks, checksum }`. `End` is
-  the commit point; a run with no valid `End` is ignored. The owner pauses its entries, writes
-  the run in pipelined batches, then truncates up to `Begin`. A small state still fits one batch.
-  `Inline` and `Ref` leave the format. A second checkpoint journal and a rolling sharded
-  checkpoint were considered and rejected as more complex (#353).
+  The owner writes the run in batches under `checkpoint_batch_records` and
+  `checkpoint_batch_bytes`; a node's `TooLarge` lowers both for the rest of the run. A small state
+  fits one batch, so one slot. A large one takes as many small batches as it needs. Batches go
+  one at a time; pipelining them waits until a pause is too long. No entry is ever inside a
+  run, because the owner holds the writer. A reader collects a run from `Begin` and restores (or
+  verifies) at a valid `End`. An entry, a new `Begin` or a gap inside a run drops it. A run with
+  no `End`, or with a wrong count or checksum, is never restored. A crash inside a run is
+  harmless for the same reason. The retired `Inline` and `Ref` forms (#230) decode to no form
+  and are refused: no cell wrote `Ref`, and no cell outlives the change. A second checkpoint
+  journal (`Ref`, Pulsar PIP-14) and a rolling sharded checkpoint were considered and rejected as
+  more complex (#353).
 
 ### 3.10 Recovery (deferred)
 
@@ -1538,8 +1542,8 @@ Simulation is the investment. Every milestone lands with its share of:
   timeout shorter than the ack so a retry crosses an ownership change, a `Truncate` racing a
   reader's cursor.
 - Control-plane shapes: one cell hosting the universe tenant, now; a crash at each step of `init` and of tenant
-  creation, each step with its own reachable; a crash between a checkpoint's write and its
-  truncate, for the registry and for the universe tenant; a truncate refused from a stale leader; the universe tenant
+  creation, each step with its own reachable; a crash inside a checkpoint run and between its
+  `End` and its truncate, for the registry and for the universe tenant; a truncate refused from a stale leader; the universe tenant
   unavailable while tenants serve; a coordinator killed mid-operation and its successor finishing
   it. In M12: a second cell, a tenant move and a move of the universe tenant (a crash at each phase, then
   a cell with a stale universe pointer still reaches it). With recovery (deferred): a lost cell
