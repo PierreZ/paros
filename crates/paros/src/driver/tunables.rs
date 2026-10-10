@@ -82,6 +82,8 @@ impl DriverTunables {
     /// | re-send cadences | one election base | a lost reply costs a round trip before the retry |
     /// | `reconfigure_backoff_max_ticks` | two election bases | |
     /// | `proxy_take_back_resends`, `proxy_round_resends` | 20, 40 beats | two and four seconds |
+    /// | `election_lease`, `election_renew` | 3 s, 1 s | a cell coordinator renews three times per lease (#240) |
+    /// | `election_compact_after` | 64 | the election journal's log stays a few kilobytes |
     ///
     /// # Panics
     ///
@@ -108,6 +110,9 @@ impl DriverTunables {
             reconfigure_backoff_max_ticks: 2 * ELECTION_BASE,
             proxy_take_back_resends: 2 * ELECTION_BASE,
             proxy_round_resends: 4 * ELECTION_BASE,
+            election_lease: Duration::from_secs(3),
+            election_renew: Duration::from_secs(1),
+            election_compact_after: 64,
             ..defaults
         };
         // What `parosd` ships is a profile the simulation could have drawn:
@@ -143,7 +148,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 27] = [
+        let fields: [(&'static str, u64, u64); 30] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -196,6 +201,14 @@ impl DriverTunables {
             ("proxy_round_resends", self.proxy_round_resends, 1),
             ("max_batch_records", self.max_batch_records, 1),
             ("max_batch_bytes", self.max_batch_bytes, 1),
+            ("election_renew", ms(self.election_renew), 1),
+            // The lease outlasts a renewal period (#240).
+            (
+                "election_lease",
+                ms(self.election_lease),
+                ms(self.election_renew).saturating_add(1),
+            ),
+            ("election_compact_after", self.election_compact_after, 1),
             ("recovery_page", count(self.recovery_page), 1),
         ];
         assert!(

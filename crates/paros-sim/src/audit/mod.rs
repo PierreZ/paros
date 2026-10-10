@@ -93,6 +93,10 @@ pub(crate) struct NodeAudit<T> {
         Arc<Mutex<crate::machine::MachineBoard>>,
         std::net::SocketAddr,
     )>,
+    /// The observer of the node's own client's calls (the cell
+    /// coordinator's, #240), handed to `paros` through
+    /// [`Audit::call_observer`].
+    calls: Option<Arc<dyn paros::client::CallObserver>>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -137,7 +141,14 @@ impl<T: TimeProvider> NodeAudit<T> {
             journal: None,
             system: None,
             machines: None,
+            calls: None,
         }
+    }
+
+    /// This port also hands `observer` to the node's own client (#240).
+    pub(crate) fn with_calls(mut self, observer: Arc<dyn paros::client::CallObserver>) -> Self {
+        self.calls = Some(observer);
+        self
     }
 
     /// This port also reports a machine's lifecycle to `board` (#246).
@@ -293,6 +304,10 @@ impl<T: TimeProvider> NodeAudit<T> {
 }
 
 impl<T: TimeProvider> Audit for NodeAudit<T> {
+    fn call_observer(&self) -> Option<Arc<dyn paros::client::CallObserver>> {
+        self.calls.clone()
+    }
+
     fn promised(&self, node: NodeId, ballot: Ballot) {
         self.state().observe_promise(node.0, ballot);
     }

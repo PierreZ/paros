@@ -64,6 +64,7 @@
 pub mod bootstrap;
 pub mod cell;
 pub mod checkpoint;
+pub mod election;
 pub mod fleet;
 pub mod initialize;
 pub mod multi;

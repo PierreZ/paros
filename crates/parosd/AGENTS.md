@@ -21,12 +21,13 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `init`'s members, where a name such as a Compose alias yields every address); shared with
   `parosctl` by `#[path]` (#209).
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
-  `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209).
+  `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
+  `PAROS_ELECTION_LEASE_MS`, `PAROS_ELECTION_RENEW_MS`, `PAROS_ELECTION_COMPACT_AFTER` (#240).
 - `src/bin/parosctl/main.rs` → `parosctl` → global options, server ids discovered from
   `Inspect`, `init` vs the cell commands, exit codes.
 - `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N]`: resolves the
   founding members (default: the servers), runs `paros::client::initialize` over them and prints
-  what it came to (`cell init`, the claim, the fleet steps; #229, #246, #277).
+  what it came to (`cell init`, the elected coordinator, the fleet steps; #229, #240, #246, #277).
 - `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete|list` over
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
@@ -61,8 +62,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 - **Interim (M8 → M9)**: the cell's journals are the cell control journal, the fleet tenant's, plus one
   static user journal (every identifier drawn at `init` and printed), plain Multi-Paxos over the founding members; any other
-  machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #212); the first cell coordinator
-  is the lowest founding member id (#225). Do not build on these as final; the machine record, the boot rule and
+  machine idles until `parosctl cell add-machine` admits it, and then, like every `stateless` one, waits for placement (#211, #212). The founding members
+  elect the cell coordinator over the cell's election journal (#240); admin sessions still claim the cell control journal until
+  admin calls become requests to it (#212, #225). Do not build on these as final; the machine record, the boot rule and
   `init`'s resumability stay.
 - `parosctl` holds **no client policy**: redirects, retries, claims, ambiguity, reader resume
   and `init`'s patience are `paros::client`'s; a command only parses, calls the library,

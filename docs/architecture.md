@@ -552,6 +552,40 @@ born `double` (section 3.1). The cell and universe coordinators run on the found
 `stateless` machine registers, then move there; the cell coordinator places tenant coordinators on
 `stateless` machines.
 
+*Landed* (#240, 2026-10-10). The library is `paros::client::election`, and the cell
+coordinator is `paros::machine::coordinator`:
+
+- **The election journal.** The cell plan names it (`CellPlan::election`): a journal of the
+  cell tenant, multi-writer, over the founding members. Machines learn it from the plan,
+  `Inspect` and `Admit`, like the other control journals.
+- **Records.** A record is a campaign, a renewal or a resignation, each with its term. The
+  first campaign for the next term wins. A renewal counts only from the term's leader. A
+  resignation can name a successor and the successor's uuid; the successor then leads the
+  next term.
+- **The lease.** A candidate campaigns when it saw no renewal for `lease` plus the
+  caller's jitter, on its own clock. The library draws no randomness. A caller that campaigns
+  earlier deposes a live leader: that costs availability, never safety.
+- **Uuids.** A candidate derives a fresh uuid per term from the caller's seed. A
+  restarted leader does not take back its old term: it waits a lease and takes the next term.
+- **Log space.** Each renewal describes the whole leadership, so the leader truncates the
+  election journal to its own latest renewal once `compact_after` records lie below it. A
+  renewal is its own checkpoint. A reader that starts at the floor anchors on the leader's
+  record there. Nothing else may truncate an election journal.
+- **The interface.** Records carry the candidate's `InterfaceRef` (its address). The
+  coordinator publishes it with its first renewal after its term's duties; until then the
+  interface is empty.
+- **The coordinator.** Every founding member runs a candidate in a task beside its node loop.
+  When it wins a term, it installs the term's uuid on the cell control journal with
+  `SetLeader(uuid, current)`, folds that journal to its tail, and admits again every registered
+  machine that is not a founding member and not retired (`Admit` is idempotent). Then it
+  publishes its interface. A lost install ends the term, and the coordinator resigns.
+- **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
+  admin session still claims the cell control journal and fences the coordinator. The
+  coordinator writes only when a term starts, so the two do not fight. `parosctl init` claims
+  nothing: it waits until the coordinator installed its uuid, then runs the fleet steps.
+- **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
+  each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
+
 **Requests to a leader** (decided on 2026-10-04). Every control journal has one writer, so
 anyone else — a tenant coordinator asking for capacity, an operator changing desired state or
 draining a machine, a user creating a journal — sends a **request RPC to the elected
@@ -1522,8 +1556,9 @@ AGENTS.md.
 - `parosd` stops running the plain deployment: every journal is born with its matchmaker set, and
   journal-tagged matchmaker planes replace "only the first journal of a process" (#190); proxy leaders
   and replicas follow (#193).
-- The coordinators replace the operator's client: `parosctl` stops writing as the lowest founding member's
-  node id (#240, #212).
+- The coordinators replace the operator's client (#212): admin calls become requests to the
+  elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
+  elected cell coordinator installs its uuid there.
 
 ## 8. Milestones
 

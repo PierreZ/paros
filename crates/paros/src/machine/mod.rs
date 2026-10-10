@@ -45,9 +45,10 @@
 //! journal ([`CellPlan::fleet`]: the fleet's one cell hosts the fleet tenant
 //! in M9, #226) and the static assignment, every identifier drawn at
 //! `cell init` (no identifier is fixed, `docs/architecture.md` §3.8) that
-//! stands in for placement until M9 (#212). Its first coordinator, the one
-//! that claims the cell control journal, is the lowest member id
-//! ([`CellPlan::coordinator`]) until the cell coordinator of #225.
+//! stands in for placement until M9 (#212). The plan also names the cell's
+//! first election journal ([`CellPlan::election`], #240): the founding
+//! members campaign over it for the cell coordinator, which installs itself
+//! as the control journal's leader (`coordinator.rs`).
 //!
 //! Provider-generic like every driver here: `parosd` runs it on a data
 //! directory and the simulation on its simulated disk, each machine formed by
@@ -57,6 +58,7 @@
 
 mod admitted;
 mod cell_init;
+pub mod coordinator;
 mod disk;
 mod formed;
 mod lifecycle;
@@ -97,6 +99,9 @@ pub struct ControlJournals {
     /// The fleet tenant's control journal (the fleet directory), when this
     /// cell hosts the fleet tenant.
     pub fleet: Option<JournalIdentifier>,
+    /// The cell's election journal (#240): the multi-writer journal its
+    /// coordinator is elected over, when known.
+    pub election: Option<JournalIdentifier>,
 }
 
 /// A machine's class (FDB's process classes, `docs/architecture.md` §3.2).
@@ -239,6 +244,11 @@ impl Admission {
                     .as_ref()
                     .map(identifier)
                     .filter(|fleet| fleet.is_set()),
+                election: admit
+                    .election
+                    .as_ref()
+                    .map(identifier)
+                    .filter(|election| election.is_set()),
             },
             members,
         };
@@ -253,6 +263,7 @@ impl Admission {
             cell_id: self.cell.cell_id,
             control: Some(CellPlan::identifier_to_wire(self.cell.cell)),
             fleet: self.cell.fleet.map(CellPlan::identifier_to_wire),
+            election: self.cell.election.map(CellPlan::identifier_to_wire),
             members: self
                 .members
                 .iter()
@@ -280,27 +291,17 @@ pub struct CellPlan {
     /// tenant (the fleet's first cell does, #226), its identifier drawn at
     /// `init`.
     pub fleet: Option<JournalIdentifier>,
+    /// The cell's first election journal (#240, decided on 2026-10-09): a
+    /// multi-writer journal of the cell tenant, born on the founding members,
+    /// over which they campaign for the cell coordinator.
+    pub election: JournalIdentifier,
     /// The journals every member serves from formation, in identifier order:
-    /// [`CellPlan::control`], [`CellPlan::fleet`] and the static assignment.
+    /// [`CellPlan::control`], [`CellPlan::election`], [`CellPlan::fleet`] and
+    /// the static assignment.
     pub journals: Vec<JournalIdentifier>,
 }
 
 impl CellPlan {
-    /// The first cell coordinator: the lowest member id (until #225's
-    /// coordinator election).
-    ///
-    /// # Panics
-    ///
-    /// On a plan with no member (a [`CellPlan::check`]ed plan has one).
-    #[must_use]
-    pub fn coordinator(&self) -> NodeId {
-        self.members
-            .iter()
-            .map(|(id, _)| *id)
-            .min()
-            .expect("a checked plan names a member")
-    }
-
     /// Whether the plan is one a machine may form: a set cell id, at least
     /// one member, member ids and addresses unique, every journal identifier set
     /// and unique, the cell control journal among them.
@@ -327,6 +328,12 @@ impl CellPlan {
         if !self.control.is_set() || !served.contains(&self.control) {
             return Err("a cell serves its control journal");
         }
+        if !served.contains(&self.election)
+            || self.election == self.control
+            || self.election.tenant != self.control.tenant
+        {
+            return Err("a cell serves its election journal, in the cell tenant");
+        }
         if let Some(fleet) = self.fleet
             && (!served.contains(&fleet) || fleet.tenant == self.control.tenant)
         {
@@ -343,7 +350,19 @@ impl CellPlan {
             cell_id: self.cell_id,
             cell: self.control,
             fleet: self.fleet,
+            election: Some(self.election),
         }
+    }
+
+    /// The static user journals: every journal the plan serves but the
+    /// control and election journals.
+    #[must_use]
+    pub fn users(&self) -> Vec<JournalIdentifier> {
+        self.journals
+            .iter()
+            .copied()
+            .filter(|j| *j != self.control && *j != self.election && Some(*j) != self.fleet)
+            .collect()
     }
 
     fn members_to_wire(&self) -> Vec<wire::Member> {
@@ -374,6 +393,7 @@ impl CellPlan {
             &form.members,
             form.control.as_ref(),
             form.fleet.as_ref(),
+            form.election.as_ref(),
             &form.journals,
         )
     }
@@ -389,6 +409,7 @@ impl CellPlan {
             &ack.members,
             ack.control.as_ref(),
             ack.fleet.as_ref(),
+            ack.election.as_ref(),
             &ack.journals,
         )
     }
@@ -405,6 +426,7 @@ impl CellPlan {
         members: &[wire::Member],
         control: Option<&wire::JournalIdentifier>,
         fleet: Option<&wire::JournalIdentifier>,
+        election: Option<&wire::JournalIdentifier>,
         journals: &[wire::JournalIdentifier],
     ) -> Result<Self, &'static str> {
         let identifier = |f: &wire::JournalIdentifier| {
@@ -430,6 +452,7 @@ impl CellPlan {
             members,
             control: control.map_or(JournalIdentifier::UNSET, identifier),
             fleet: fleet.map(identifier).filter(|fleet| fleet.is_set()),
+            election: election.map_or(JournalIdentifier::UNSET, identifier),
             journals,
         };
         plan.check()?;
@@ -456,6 +479,7 @@ impl CellPlan {
             journals: self.journals_to_wire(),
             control: Some(Self::identifier_to_wire(self.control)),
             fleet: self.fleet.map(Self::identifier_to_wire),
+            election: Some(Self::identifier_to_wire(self.election)),
             init: Some(ballot_to_wire(ballot)),
         }
     }
@@ -467,9 +491,9 @@ impl CellPlan {
             cell_id: self.cell_id,
             members: self.members_to_wire(),
             journals: self.journals_to_wire(),
-            coordinator: self.coordinator().0,
             control: Some(Self::identifier_to_wire(self.control)),
             fleet: self.fleet.map(Self::identifier_to_wire),
+            election: Some(Self::identifier_to_wire(self.election)),
         }
     }
 }
@@ -502,6 +526,7 @@ impl Fingerprint for CellPlan {
             fold(hash, &[u8::from(self.fleet.is_some())]),
             self.fleet.unwrap_or(JournalIdentifier::UNSET),
         );
+        hash = identifier(hash, self.election);
         for journal in &self.journals {
             hash = identifier(hash, *journal);
         }
@@ -545,8 +570,10 @@ mod tests {
             members: vec![(NodeId(9), addr(1)), (NodeId(3), addr(2))],
             control: identifier(0x51, 0x52),
             fleet: Some(identifier(0x61, 0x62)),
+            election: identifier(0x51, 0x53),
             journals: vec![
                 identifier(0x51, 0x52),
+                identifier(0x51, 0x53),
                 identifier(0x61, 0x62),
                 identifier(0x71, 0x72),
             ],
@@ -554,10 +581,16 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_round_trips_normalized_and_names_its_coordinator() {
+    fn a_plan_round_trips_normalized_and_names_its_election_journal() {
         let plan = plan();
         assert_eq!(plan.check(), Ok(()));
-        assert_eq!(plan.coordinator(), NodeId(3));
+        assert_eq!(plan.users(), vec![identifier(0x71, 0x72)]);
+        let mut foreign = plan.clone();
+        foreign.election = identifier(0x61, 0x62);
+        assert!(
+            foreign.check().is_err(),
+            "the election journal is the cell tenant's"
+        );
         let ballot = Ballot {
             round: 5,
             node: NodeId(3),

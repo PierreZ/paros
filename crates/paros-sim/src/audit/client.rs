@@ -203,7 +203,7 @@ impl LinHistory {
 /// journal). Run once, after every
 /// client's run: every one of them writes these journals.
 #[tracing::instrument(level = "debug", skip_all, fields(attempts = attempts.len()))]
-pub(crate) fn check_control_history(attempts: Vec<Attempt>) {
+pub(crate) fn check_control_history(attempts: Vec<Attempt>, mode: paros::WriterMode) {
     if attempts.is_empty() {
         return;
     }
@@ -213,7 +213,7 @@ pub(crate) fn check_control_history(attempts: Vec<Attempt>) {
             attempts,
             ..LinHistory::default()
         },
-        paros::WriterMode::Single,
+        mode,
     );
 }
 

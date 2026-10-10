@@ -1011,7 +1011,11 @@ where
     // `SystemPlan` follows — and every other journal is a user's.
     let control: BTreeSet<JournalIdentifier> = cell
         .iter()
-        .flat_map(|cell| std::iter::once(cell.cell).chain(cell.fleet))
+        .flat_map(|cell| {
+            std::iter::once(cell.cell)
+                .chain(cell.fleet)
+                .chain(cell.election)
+        })
         .chain(
             system
                 .iter()
@@ -1120,6 +1124,15 @@ where
     // A machine's vote is final: it answers the cell decree from its record
     // while it serves its cell (#277).
     if let Some(formed) = formed {
+        // Every founding member campaigns for the cell coordinator (#240).
+        crate::machine::coordinator::spawn(
+            &providers,
+            &rpc_handle,
+            &formed,
+            &tunables,
+            node_audit.call_observer(),
+            incarnation_shutdown.clone(),
+        );
         formed.serve(&providers, &rpc_handle, incarnation_shutdown.clone())?;
     }
 

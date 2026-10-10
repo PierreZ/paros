@@ -242,6 +242,21 @@ pub struct DriverTunables {
     /// contract, never a wrong answer. The default leaves room under the RPC
     /// frame (`MAX_FRAME_BYTES`) for the request's other fields.
     pub max_batch_bytes: u64,
+    /// The cell election's lease (#240): how long a founding member, having
+    /// seen no renewal of the cell coordinator, waits before it campaigns.
+    /// A liveness hint on the member's own clock, never a fence. Floor:
+    /// above `election_renew` (refused at or below it). It must also
+    /// outlast one renewal's round trip, a wall-clock floor the operator
+    /// keeps: below it members take over from a live coordinator, which
+    /// costs availability, never safety.
+    pub election_lease: Duration,
+    /// How often the cell coordinator renews its leadership in the election
+    /// journal (#240). Floor 1 ms; it stays under `election_lease`.
+    pub election_renew: Duration,
+    /// The records the cell coordinator lets lie below its latest renewal
+    /// before it truncates the election journal to it (#240): the bound on
+    /// the journal's log. Floor 1: a truncation per renewal.
+    pub election_compact_after: u64,
     /// The most rounds one page of a leader's recovery visits (#330,
     /// `ColocatedNode::set_recovery_page`) before the driver advances the
     /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
@@ -280,6 +295,9 @@ impl Default for DriverTunables {
             proxy_round_resends: PROXY_ROUND_RESENDS,
             max_batch_records: MAX_BATCH_RECORDS,
             max_batch_bytes: MAX_BATCH_BYTES,
+            election_lease: ELECTION_LEASE,
+            election_renew: ELECTION_RENEW,
+            election_compact_after: ELECTION_COMPACT_AFTER,
             recovery_page: paros_core::LEADER_RECOVERY_BATCH,
         };
         // The simulation's baseline is itself a winnable profile.
@@ -333,6 +351,19 @@ const _: () = assert!(MAX_READ_RECORDS >= 1);
 const _: () = assert!(MAX_READ_BYTES >= 1);
 const _: () = assert!(MAX_READ_BYTES < crate::rpc::MAX_FRAME_BYTES as u64);
 const _: () = assert!(MAX_BATCH_BYTES < crate::rpc::MAX_FRAME_BYTES as u64);
+/// Default [`DriverTunables::election_lease`]: four renewals, and well past
+/// the simulated client's one-second deadline.
+const ELECTION_LEASE: Duration = Duration::from_secs(2);
+
+/// Default [`DriverTunables::election_renew`].
+const ELECTION_RENEW: Duration = Duration::from_millis(500);
+
+/// Default [`DriverTunables::election_compact_after`].
+const ELECTION_COMPACT_AFTER: u64 = 16;
+
+const _: () = assert!(ELECTION_RENEW.as_millis() > 0);
+const _: () = assert!(ELECTION_LEASE.as_millis() > ELECTION_RENEW.as_millis());
+
 /// Default [`DriverTunables::quarantine_ticks`]: eight election timeouts —
 /// long enough that a journal's re-open is not a restart loop against a
 /// still-faulty device, short enough that the node rejoins the journal well

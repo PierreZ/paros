@@ -99,6 +99,9 @@ message FormCell {
   JournalIdentifier fleet = 5;
   // The decree's ballot this plan is proposed (or was accepted) at.
   .paros.common.v1.Ballot init = 6;
+  // The cell's first election journal (#240): a multi-writer journal of the
+  // cell tenant, over which the founding members elect the cell coordinator.
+  JournalIdentifier election = 7;
 }
 
 message FormCellAck {
@@ -125,12 +128,14 @@ message CellInitAck {
   uint64 cell_id = 3;
   repeated Member members = 4;
   repeated JournalIdentifier journals = 5;
-  // The first cell coordinator (#225), which claims the cell control
-  // journal with `SetLeader(its fresh uuid, unset)`.
-  uint64 coordinator = 6;
-  // The cell tenant's control journal, and the fleet tenant's (see `FormCell`).
+  // Retired (#240): the lowest member id, once named the first coordinator.
+  // The founding members elect it over the election journal now.
+  reserved 6;
+  // The cell tenant's control journal, the fleet tenant's and the cell's
+  // election journal (see `FormCell`).
   JournalIdentifier control = 7;
   JournalIdentifier fleet = 8;
+  JournalIdentifier election = 9;
 }
 
 message Admit {
@@ -143,6 +148,8 @@ message Admit {
   // members and the registered machines. The admitted machine caches them
   // (its cached registry fold, `docs/architecture.md` §3.2).
   repeated Member members = 4;
+  // The cell's election journal (#240), when the caller knows it.
+  JournalIdentifier election = 5;
 }
 
 message AdmitAck {

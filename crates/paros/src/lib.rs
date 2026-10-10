@@ -67,7 +67,7 @@ pub use rpc::{
 pub mod wire {
     pub use crate::rpc::methods;
     pub use crate::rpc::{
-        checkpoint, common, fleet, internal, machine, matchmaker, public, system,
+        checkpoint, common, election, fleet, internal, machine, matchmaker, public, system,
     };
 }
 pub use journal::{JournalBootFacts, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig};

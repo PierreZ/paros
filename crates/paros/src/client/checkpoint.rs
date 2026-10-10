@@ -47,7 +47,7 @@
 use std::time::Duration;
 
 use moonpool_core::Providers;
-use paros_core::{JournalId, JournalIdentifier, Value};
+use paros_core::{JournalId, JournalIdentifier, LeaderUuid, Value};
 use prost::Message as _;
 
 use super::reader::{Reader, ReaderOutcome};
@@ -511,6 +511,24 @@ impl<S: Checkpointable> Checkpointer<S> {
     pub fn new(journal: JournalIdentifier, seed: u128, state: S, policy: CheckpointPolicy) -> Self {
         Self {
             writer: Writer::new(journal, seed),
+            folder: Folder::new(state),
+            policy,
+            last: Duration::ZERO,
+        }
+    }
+
+    /// An owner of `journal` over the empty `state`, leading under the one
+    /// `uuid` it is given ([`Writer::with_uuid`]): an elected actor's term
+    /// uuid (#240).
+    #[must_use]
+    pub fn with_uuid(
+        journal: JournalIdentifier,
+        uuid: LeaderUuid,
+        state: S,
+        policy: CheckpointPolicy,
+    ) -> Self {
+        Self {
+            writer: Writer::with_uuid(journal, uuid),
             folder: Folder::new(state),
             policy,
             last: Duration::ZERO,

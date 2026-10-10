@@ -390,10 +390,12 @@ fn draw_plan<P: Providers>(
         identities.iter().map(|(addr, id)| (*id, *addr)).collect();
     members.sort_unstable();
     let control = draw_identifier(providers);
+    let election = JournalIdentifier::new(control.tenant, draw_identifier(providers).journal);
     let fleet = draw_identifier(providers);
     let users = draw_identifier(providers).tenant;
-    let mut journals: BTreeSet<JournalIdentifier> = [control, fleet].into_iter().collect();
-    while journals.len() < 2 + assignment {
+    let mut journals: BTreeSet<JournalIdentifier> =
+        [control, election, fleet].into_iter().collect();
+    while journals.len() < 3 + assignment {
         journals.insert(JournalIdentifier::new(
             users,
             draw_identifier(providers).journal,
@@ -404,6 +406,7 @@ fn draw_plan<P: Providers>(
         members,
         control,
         fleet: Some(fleet),
+        election,
         journals: journals.into_iter().collect(),
     };
     plan.check().ok().map(|()| plan)

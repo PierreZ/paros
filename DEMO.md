@@ -16,7 +16,7 @@ Needs Docker with the Compose plugin; nothing else (the image is a plain Rust bu
 docker compose up -d --build
 
 # Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
-#   initialized fleet=… cell=… coordinator=… members=3 control=T/J fleet_control=T/J journals=T/J steps=…
+#   initialized fleet=… cell=… coordinator=… members=3 control=T/J election=T/J fleet_control=T/J journals=T/J steps=…
 docker compose run --rm init | tee init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
 
