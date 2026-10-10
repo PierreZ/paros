@@ -338,9 +338,18 @@ impl ChainWorkload {
                 // committed write is all but never sent.
                 let resent = if crate::shape::lost_verdict(ctx.state()) || buggify_with_prob!(0.5) {
                     assert_reachable!("client: an ambiguous write is re-sent before any read-back");
-                    let again = nodes
-                        .write_attempt(retry_target, request.clone(), None)
-                        .await;
+                    // Bounded like every other call: an attempt held
+                    // at a leader whose slot cannot fold would stall
+                    // this step, and with it a static-stability hold
+                    // only the next step releases (the seed could
+                    // then never come back to choose the slot).
+                    let again = within(
+                        ctx,
+                        Duration::from_millis(config.request_timeout_ms),
+                        WriteOutcome::Ambiguous,
+                        nodes.write_attempt(retry_target, request.clone(), None),
+                    )
+                    .await;
                     match judged_write(again, false, nodes.id_of(retry_target), writer.journal()) {
                         WriteOutcome::Written { seq, count, .. } => {
                             Some(Resolution::Written { seq, count })
