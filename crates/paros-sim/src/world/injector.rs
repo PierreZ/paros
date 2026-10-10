@@ -30,6 +30,14 @@
 //! store (both copies written by a completed commit), and a double fault
 //! never touches the last batch, where the journal reads a doubly damaged
 //! slot as a torn, unacknowledged write and would drop an acknowledged vote.
+//!
+//! **A double fault's park is reserved, then judged** (#351). The plan
+//! reserves the park against the dead-node budget before any byte changes.
+//! An apply that fails, or a process that dies during it, may leave the
+//! damage whole, in part or absent, so the next verdict decides: a refused
+//! open makes the park terminal, any other releases it
+//! ([`StorageWorld::judged`]). A BUGGIFY location stops an apply halfway
+//! ([`apply`]) so that path is common, not a one-in-thousands seed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,8 +48,8 @@ use moonpool_sim::{
 use paros::journal::{Layout, LayoutRegion};
 use paros::{JournalBootFacts, StorageError};
 
+use super::StorageWorld;
 use super::outage::{LossShape, PlannedLoss};
-use super::{ParkReason, StorageWorld};
 
 /// Per-boot firing probabilities of the injector's families, each its own
 /// BUGGIFY location (per-seed activation x per-boot firing).
@@ -127,6 +135,14 @@ pub(crate) struct Injection {
 }
 
 impl Injection {
+    /// The slot a double fault damages, if this is one.
+    pub(crate) fn double_fault(&self) -> Option<u64> {
+        match self.family {
+            Family::DoubleFault(slot) => Some(slot),
+            _ => None,
+        }
+    }
+
     /// The slot whose copy an outage's plan lost, if this is one.
     pub(crate) fn outage_loss(&self) -> Option<u64> {
         match self.family {
@@ -591,6 +607,15 @@ impl StorageWorld {
                 pick(held)
             }
         };
+        // The double fault rolled first (#351), its own BUGGIFY location:
+        // last in the order, it fired on 1 of 2,000 hunt seeds, too rare
+        // to reach a reserved park whose apply never landed whole.
+        if buggify_with_prob!(0.5)
+            && let Some(injection) = self.plan_double_fault(key, node, &custody, &whole)
+        {
+            assert_reachable!("journal store: a boot rolls the double fault first");
+            return Some(injection);
+        }
         if buggify_with_prob!(P_ENTRY_ROT)
             && let Some(slot) = aim(&whole)
             && self.may_corrupt_record(key, slot)
@@ -619,22 +644,10 @@ impl StorageWorld {
                 outage: false,
             });
         }
-        let settled: Vec<u64> = whole
-            .iter()
-            .copied()
-            .filter(|slot| !custody.last_batch.contains(slot))
-            .collect();
         if buggify_with_prob!(P_DOUBLE_FAULT)
-            && let Some(slot) = pick(&settled)
-            && self.may_park(key)
+            && let Some(injection) = self.plan_double_fault(key, node, &custody, &whole)
         {
-            self.park_as(key, node, ParkReason::Corruption);
-            let layout = &custody.records[&slot];
-            return Some(Injection {
-                family: Family::DoubleFault(slot),
-                regions: vec![layout.record.clone(), layout.entry.clone()],
-                outage: false,
-            });
+            return Some(injection);
         }
         if buggify_with_prob!(P_META_ROT) && custody.meta.len() == 2 {
             let copy = usize::from(moonpool_sim::sim_random_bool(0.5));
@@ -657,12 +670,64 @@ impl StorageWorld {
     }
 }
 
+impl StorageWorld {
+    /// A double fault on a `whole` slot of `custody` outside its last
+    /// batch, when the dead-node budget permits a park: the plan reserves
+    /// it (#351), since the damage may never land whole and only the
+    /// journal's refusal makes it terminal.
+    fn plan_double_fault(
+        &mut self,
+        key: &str,
+        node: u64,
+        custody: &Custody,
+        whole: &[u64],
+    ) -> Option<Injection> {
+        let settled: Vec<u64> = whole
+            .iter()
+            .copied()
+            .filter(|slot| !custody.last_batch.contains(slot))
+            .collect();
+        if settled.is_empty() || !self.may_park(key) {
+            return None;
+        }
+        let at = moonpool_sim::sim_random_range(0..settled.len() as u64);
+        let slot = settled[usize::try_from(at).unwrap_or(0)];
+        let layout = &custody.records[&slot];
+        let injection = Injection {
+            family: Family::DoubleFault(slot),
+            regions: vec![layout.record.clone(), layout.entry.clone()],
+            outage: false,
+        };
+        self.reserve_park(key, node, injection.clone());
+        Some(injection)
+    }
+}
+
 /// Flip [`FLIPPED`] bytes near the start of every region of `injection`,
 /// through the node's own provider, and sync them. Whether every write and
 /// sync confirmed: an unconfirmed injection may or may not have landed.
 #[tracing::instrument(level = "debug", skip_all, fields(family = ?injection.family))]
 pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) -> bool {
-    for region in &injection.regions {
+    // A double fault's apply that stops halfway (#351): one region flipped,
+    // the other never, the apply unconfirmed. The reserved park then waits
+    // for a journal that opens, a lost copy or a rebuilt record, never a
+    // refusal. Its own BUGGIFY location makes the shape common.
+    if injection.regions.len() == 2 && buggify_with_prob!(0.25) {
+        let half = usize::from(moonpool_sim::sim_random_bool(0.5));
+        flip(provider, &injection.regions[half]).await;
+        assert_reachable!("journal store: a double fault's apply stops halfway");
+        return false;
+    }
+    for (at, region) in injection.regions.iter().enumerate() {
+        if at > 0 {
+            // Between two regions: a kill here leaves the first flipped and
+            // the second whole, judged at the next boot.
+            let hinted = moonpool_sim::hint!("injection half applied", 0.25);
+            if hinted.strike() == moonpool_sim::hint::Strike::Killed {
+                assert_reachable!("journal store: a kill lands inside an injection");
+            }
+            hinted.await;
+        }
         if !flip(provider, region).await {
             return false;
         }

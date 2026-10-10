@@ -77,6 +77,16 @@ pub(crate) enum ParkReason {
     Retired,
 }
 
+/// A double fault's reserved corruption park (#351, see
+/// [`StorageWorld::reserve_park`]): the injection, and whether its every
+/// write and sync confirmed. Only a confirmed one is judged strictly; any
+/// other may have landed whole, in part or not at all.
+#[derive(Clone, Debug)]
+pub(crate) struct Reserved {
+    pub(crate) injection: injector::Injection,
+    pub(crate) landed: bool,
+}
+
 /// One entry of the operators' reconfiguration ledger (#198).
 struct RequestedConfiguration {
     /// The acceptor set asked for.
@@ -125,12 +135,14 @@ pub(crate) struct StorageWorld {
     /// first reason wins — a corruption park on an identity already wiped
     /// or retired changes nothing.
     parked: BTreeMap<String, ParkReason>,
-    /// Double faults a boot applied, by identity, whose journal gave no
-    /// verdict yet: the process died between the damage and the scan's
-    /// answer. The next boot judges the same injection, never a second one,
-    /// and until then a corruption park is not honored: the park is
-    /// terminal only once the journal reported the damage once.
-    unjudged: BTreeMap<String, injector::Injection>,
+    /// Double faults a boot planned, by identity, whose journal gave no
+    /// verdict yet (#351): the plan reserved a corruption park against the
+    /// dead-node budget, and the damage may not have landed (the apply
+    /// failed, or the process died during it or before the scan's answer).
+    /// The next boot judges the same injection, never a second one, and
+    /// until then the park is not honored: it is terminal only once the
+    /// journal refused to open ([`StorageWorld::judged`]).
+    unjudged: BTreeMap<String, Reserved>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -218,24 +230,57 @@ impl StorageWorld {
         }
     }
 
-    /// The injection `ip`'s last boot applied and never judged, if any.
-    pub(crate) fn unjudged(&self, ip: &str) -> Option<injector::Injection> {
+    /// The double fault `ip`'s boot planned and its journal never judged,
+    /// if any.
+    pub(crate) fn unjudged(&self, ip: &str) -> Option<Reserved> {
         self.unjudged.get(ip).cloned()
     }
 
-    /// `ip`'s boot applied `injection`: when its plan parked `ip` for
-    /// corruption (a double fault, which no open repairs), it stays to
-    /// judge until [`StorageWorld::judged`]. Any other family may be
-    /// repaired by the killed open itself, so it is never carried.
-    pub(crate) fn note_applied(&mut self, ip: &str, injection: injector::Injection) {
-        if self.parked.get(ip) == Some(&ParkReason::Corruption) {
-            self.unjudged.insert(ip.to_owned(), injection);
+    /// Reserve a corruption park for the double fault `injection` a boot of
+    /// `key` plans (#351): the dead-node budget counts it from now on, but
+    /// the process honors it only once the journal refuses to open.
+    pub(super) fn reserve_park(&mut self, key: &str, node: u64, injection: injector::Injection) {
+        self.park_as(key, node, ParkReason::Corruption);
+        self.unjudged.insert(
+            key.to_owned(),
+            Reserved {
+                injection,
+                landed: false,
+            },
+        );
+    }
+
+    /// `ip`'s boot applied its planned injection, every write and sync
+    /// confirmed: a reserved double fault is then judged strictly.
+    pub(crate) fn note_applied(&mut self, ip: &str) {
+        if let Some(reserved) = self.unjudged.get_mut(ip) {
+            reserved.landed = true;
         }
     }
 
-    /// `ip`'s journal gave its verdict on the applied injection.
-    pub(crate) fn judged(&mut self, ip: &str) {
-        self.unjudged.remove(ip);
+    /// `ip`'s journal gave its verdict on the reserved double fault (#351):
+    /// `refused` when the open returned `StorageError::Corruption`. A refusal
+    /// makes the park terminal. Any other verdict releases it: the damage
+    /// never landed whole. `slot` is the double fault's slot; an entry the
+    /// open reported faulty there (`entry_lost`) is a lost copy, inside the
+    /// budget the park reserved, and the slot stays rotted until a rewrite.
+    pub(crate) fn judged(&mut self, ip: &str, refused: bool, slot: u64, entry_lost: bool) {
+        if self.unjudged.remove(ip).is_none() {
+            return;
+        }
+        if !refused && self.parked.get(ip) == Some(&ParkReason::Corruption) {
+            self.parked.remove(ip);
+            self.rotted.entry(ip.to_owned()).or_default().insert(slot);
+            if entry_lost {
+                self.marks.entry(ip.to_owned()).or_default().insert(slot);
+            }
+            assert_reachable!("storage: a double fault that never landed whole releases its park");
+        }
+        // The park's own claim: a corruption park follows a refused open.
+        assert_always!(
+            self.parked.get(ip) != Some(&ParkReason::Corruption) || refused,
+            "storage: a corruption park follows a refused open"
+        );
     }
 
     /// Whether `ip`'s disk was wiped (a wiped node is also parked).
