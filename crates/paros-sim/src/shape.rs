@@ -632,6 +632,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
+    /// Run-level: whether the run draws the lagging-acceptor scenario (see
+    /// [`lagging_acceptor`]), fixed by the first caller.
+    lagging_acceptor: Option<bool>,
     /// Run-level: whether the run runs the system journals (see
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
@@ -862,8 +865,19 @@ pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
 /// journals ([`system_journals`]), and a client that registers a joiner
 /// reconfigures onto it next whatever the swarm mask (`ChainWorkload`):
 /// the gate fired on 0 of 417 checks (600 hunt seeds) before these
-/// ingredients came together and 7 of 637 (600) after. Rare-but-valid: a
-/// slow follower is, and each ingredient keeps its own coin on the other
+/// ingredients came together and 7 of 637 (600) after. Those were checks:
+/// the gate fired on 3 to 4 seeds in 1,000, too few for the sweep's 1,024
+/// to saturate. A refusal needs a member whose fold is behind a joiner
+/// that speaks to it, and the joiner speaks once a configuration takes it
+/// in. So on a scenario seed a client also registers at the ceiling weight
+/// whatever the swarm mask, asks again a reconfiguration onto the joiner
+/// that no leader took (`NotLeader`, `UnknownMember`), and reboots every
+/// member of one that started, so each member's fold restarts behind the
+/// joiner (`ChainWorkload`). The gate then fired on 35 of 3,000 hunt seeds
+/// (51 of 2,126 checks on 1,800), from 5 of 1,600 (12 of 1,859) before.
+/// Most seeds stay out of reach: a joiner joins the default journal only
+/// with matchmakers, no proxy and no replica. Rare-but-valid: a slow
+/// follower is, and each ingredient keeps its own coin on the other
 /// seeds.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
@@ -990,6 +1004,31 @@ pub(crate) fn slow_link(state: &StateHandle) -> bool {
         }
         slow
     })
+}
+
+/// Whether the run draws the **lagging-acceptor scenario** (#340): drawn
+/// once per seed, its own BUGGIFY location, never on a departed-straggler
+/// or bare-quorum seed (their outages need every acceptor up when they
+/// strike). A trim-point jump (`Message::TrimmedTo`) needs a node behind
+/// its peers' floors: a node down while the others truncate past what it
+/// holds. The journal truncates little in the chaos window and the
+/// attrition brings a node back fast: the mutation hunt's 300 seeds met 4
+/// jumps. On a scenario seed `crate::world::lagging_acceptor` holds one
+/// acceptor down until a peer's floor passes its chosen prefix, and every
+/// client compacts at every truncation step (`ChainWorkload`): 7 jumps in
+/// the same 300 seeds (35 scenario seeds). The node comes back below the
+/// floor and jumps, its allocator frontier far below the point. Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// slow node is, and so is a client that compacts often.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
+    let straggler = departed_straggler(state);
+    let bare = bare_quorum(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .lagging_acceptor
+        .get_or_insert_with(|| !straggler && !bare && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// The fewest blocks a segment's entry log may have (floor of

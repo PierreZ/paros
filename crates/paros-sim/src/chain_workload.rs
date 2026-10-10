@@ -47,9 +47,9 @@ use crate::{CHAOS_DURATION_MS, DigestSink};
 use config::{
     ADMIT, BOOK_CAPACITY, CHECK_TAIL, CHECKPOINT, CREATE_JOURNAL, ChainConfig, DELETE_JOURNAL,
     DRAIN_NODE, DUAL_SUBMIT, DUP_WRITE, ELECTION, FLEET_INIT, LOAD, MATCH_GC, MATCHMAKE, OP_COUNT,
-    PAUSE, QUORUM_READ, READ, READ_INDEX, READ_STATE, RECONFIGURE, RECONFIGURE_MATCHMAKERS,
-    REGISTER_NODE, RETIRE, RETIRE_NODE, SET_LEADER, TENANT, TRUNCATE, TRUNCATE_STORM, VIEW, WRITE,
-    WRITE_TO_NON_LEADER, weighted_index,
+    OP_WEIGHT_CEILING, PAUSE, QUORUM_READ, READ, READ_INDEX, READ_STATE, RECONFIGURE,
+    RECONFIGURE_MATCHMAKERS, REGISTER_NODE, RETIRE, RETIRE_NODE, SET_LEADER, TENANT, TRUNCATE,
+    TRUNCATE_STORM, VIEW, WRITE, WRITE_TO_NON_LEADER, weighted_index,
 };
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
 use reads::{SETTLE, judge_read, tail};
@@ -341,7 +341,23 @@ impl Workload for ChainWorkload {
             ));
         }
 
-        let config = ChainConfig::for_timeline();
+        let mut config = ChainConfig::for_timeline();
+        if crate::shape::lagging_acceptor(ctx.state()) {
+            // The lagging-acceptor scenario (#340): the peers' floors must
+            // pass what the held acceptor holds, so every client compacts
+            // at every truncation step, and truncates as often as the
+            // weight family allows.
+            config.compaction = true;
+            config.compact_every = 1;
+            config.weights[usize::from(TRUNCATE)] = OP_WEIGHT_CEILING;
+        }
+        let lagging_fold = crate::shape::lagging_fold(ctx.state());
+        if lagging_fold {
+            // The lagging-fold scenario (#189): its gate waits on a joiner
+            // registered at runtime, so every client registers as often as
+            // the weight family allows.
+            config.weights[usize::from(REGISTER_NODE)] = OP_WEIGHT_CEILING;
+        }
         // Membership as protocol data (#122): whether this seed deploys
         // matchmakers (the opt-in for reconfiguration), and the floor no
         // configuration this client asks for goes below. On a plain seed
@@ -444,7 +460,12 @@ impl Workload for ChainWorkload {
             )?
             .with_observer(observer);
 
-        let operations = Self::enabled_operations();
+        let mut operations = Self::enabled_operations();
+        // On a lagging-fold seed the registration runs whatever the swarm
+        // mask: the scenario's ingredients come together.
+        if lagging_fold && !operations.contains(&REGISTER_NODE) {
+            operations.push(REGISTER_NODE);
+        }
         tracing::info!(?config, "chain_config");
         let time = ctx.time().clone();
         let shutdown = ctx.shutdown().clone();
@@ -1274,8 +1295,13 @@ impl Workload for ChainWorkload {
                 // alphabet stable.
                 MATCHMAKE | MATCH_GC | READ_INDEX | QUORUM_READ | CHECK_TAIL => {}
                 RECONFIGURE => {
-                    self.reconfigure_step(&step, &mut remove_next, &mut system_ops)
-                        .await;
+                    self.reconfigure_step(
+                        &step,
+                        &mut remove_next,
+                        &mut reconfigure_next,
+                        &mut system_ops,
+                    )
+                    .await;
                 }
                 RECONFIGURE_MATCHMAKERS => self.reconfigure_matchmakers_step(&step).await,
                 RETIRE => self.retire_step(&step).await,

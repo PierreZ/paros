@@ -201,6 +201,31 @@ seeds:
   accepts a page that an honest matchmaker never sends: a matchmaker
   asserts the shape of its own page. They are wire hygiene, #344.
 
+## Trim-point jumps (#340)
+
+Three survivors of the first run need a trim-point jump (`Message::TrimmedTo`)
+onto a node whose allocator frontier is below the point, or onto a leader with
+an open repair probe. On the current harness, each mutant applied by hand, at
+the weekly 300 seeds:
+
+- `RepairProbe::blocked -> {0}`: caught in seeds 181..=200 ("a slot learned
+  chosen leaves the repair probe": a leader learns slot 0 while its probe
+  waits on a later slot). The harness changed since the first run.
+- `Proposer::raise_next_slot -> ()`: caught in seeds 1..=20 ("a trim-point
+  jump carries the allocator past the dropped prefix"). Without the scenario
+  below, the catch hung on one of only 4 jumps in the 300 seeds.
+- `Proposer::probe_retain_from -> ()`: survives. No seed meets a leader whose
+  probe is blocked below a trim point. Follow-up: #409.
+
+The lagging-acceptor scenario (`shape::lagging_acceptor`) amplifies the
+jumps. It holds one acceptor down until a peer's floor passes the chosen
+prefix it holds, at most `LATE_WINDOW` into the tail, and every client
+compacts at every truncation step. The jumps in the 300 seeds went from 4 to
+7 (35 scenario seeds). The limit is the journal itself: it decides almost
+nothing in the chaos window, and most truncations land after the window. With
+the scenario on every seed, 600 seeds met 91 jumps, 4 of them at a leader,
+none with an open probe.
+
 ## Equivalent edits a regex cannot isolate
 
 These stay in the rolling report. Each one is equivalent; a regex that names
