@@ -470,6 +470,20 @@ transport's failure detector and writes only the *changes* into the cell control
 heartbeat log. A machine `Down` past the re-placement bound has its roles re-placed. A machine
 never heartbeats into a journal.
 
+Landed in #211: the cell coordinator's `Watch` (`paros::machine::coordinator`) sends `Identify` to
+every founding member and every registered machine at each renewal period. The detector's timeout
+is `machine_down_after` (a driver tunable, floor above `election_renew`): a machine silent that
+long is written `MachineDown`, one held down or seen as another incarnation `MachineUp`, and a new
+incarnation of a registered machine registers again. The registry refuses a liveness entry that
+changes nothing (`LivenessUnchanged`), and the simulation asserts that none is ever written. The
+watch writes only while its term's session holds the cell control journal; its first write that
+does not land ends the watch for the term. `RegisterNode` and `IdentifyAck` carry the machine's RPC
+incarnation: with the address, it is the machine's `InterfaceRef` identity, since a machine serves
+well-known endpoints only. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
+the role names the class, and a booking id is never booked twice, across checkpoints (the
+registry keeps the spent ids). The re-placement bound and the re-placement itself are #212. The
+durable cached registry fold is not built yet.
+
 **Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
 A machine's configuration names no cell and no peer: it learns its cell when it is admitted
 (`FormCell` or `Admit`, section 3.1) and caches it durably. On every later start it finds the cell

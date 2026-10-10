@@ -44,6 +44,7 @@ mod client;
 mod journal_model;
 pub(crate) mod journals;
 mod linearizability;
+pub(crate) mod liveness;
 mod losses;
 mod matchmaker;
 mod state;

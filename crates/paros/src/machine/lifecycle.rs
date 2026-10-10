@@ -250,6 +250,7 @@ where
         capacity: record.capacity,
         failure_domain: record.failure_domain.clone(),
         addr,
+        incarnation: 0,
     };
     tracing::info!(
         node = facts.node_id.0,

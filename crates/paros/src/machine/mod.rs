@@ -149,9 +149,49 @@ pub struct MachineFacts {
     pub failure_domain: String,
     /// The address it serves at, which its peers dial.
     pub addr: SocketAddr,
+    /// The RPC incarnation of the runtime that serves it now (moonpool-rpc's
+    /// `Incarnation`, new at every start): `0` until a runtime serves it
+    /// ([`MachineFacts::serving`]). The registry records it, and the cell
+    /// coordinator tells a reboot by it (#211).
+    pub incarnation: u128,
+}
+
+/// The incarnation of the RPC runtime `rpc`, or `0` once it stopped.
+pub(crate) fn incarnation_of<P: moonpool_core::Providers>(
+    rpc: &moonpool_rpc::RpcHandle<P>,
+) -> u128 {
+    rpc.incarnation().map_or(0, moonpool_rpc::Incarnation::get)
+}
+
+/// A 128-bit incarnation's two wire halves, high then low.
+#[must_use]
+pub fn incarnation_halves(incarnation: u128) -> (u64, u64) {
+    let high = u64::try_from(incarnation >> 64).unwrap_or(u64::MAX);
+    let low = u64::try_from(incarnation & u128::from(u64::MAX)).unwrap_or(0);
+    (high, low)
+}
+
+/// A 128-bit incarnation from its two wire halves.
+#[must_use]
+pub fn incarnation_from_halves(high: u64, low: u64) -> u128 {
+    (u128::from(high) << 64) | u128::from(low)
 }
 
 impl MachineFacts {
+    /// These facts as the runtime `rpc` serves them: its incarnation set.
+    #[must_use]
+    pub(crate) fn serving<P: moonpool_core::Providers>(
+        &self,
+        rpc: &moonpool_rpc::RpcHandle<P>,
+    ) -> Self {
+        let facts = Self {
+            incarnation: incarnation_of(rpc),
+            ..self.clone()
+        };
+        assert_eq!(facts.node_id, self.node_id, "serving keeps the identity");
+        facts
+    }
+
     /// Who this machine is, in cell `cell_id` (0 while it is idle).
     fn identify_ack(&self, cell_id: u64) -> wire::IdentifyAck {
         wire::IdentifyAck {
@@ -161,6 +201,8 @@ impl MachineFacts {
             failure_domain: self.failure_domain.clone(),
             addr: self.addr.to_string(),
             cell_id,
+            incarnation_high: incarnation_halves(self.incarnation).0,
+            incarnation_low: incarnation_halves(self.incarnation).1,
         }
     }
 }

@@ -45,6 +45,7 @@ fault world, the one client workload and the audit. Stack: `paros-core` ←
 - `audit/client.rs` → `ClientHistory`, `check_control_history` (the registry, the directory, and the control journals of the cell the machines formed, #247, #246; the cell's election journal multi-writer, #240) · `audit/linearizability.rs` → Wing & Gong search over every attempt (#205), its own journal model.
 - `audit/journal_model.rs` → the §6 invariants over every node's `applied` reports (one verdict per slot, dense positions, the leader chain — every verdict names the leader in force, a write accepted only under a uuid won in the log — monotone `first_seq`; a reinstated uuid is reachable, never a violation, #241).
 - `audit/journals.rs`, `audit/system.rs` → the journal board (#188) and system board (#189), below.
+- `audit/liveness.rs` → `JudgedRegistry` → the cell control journal's fold with an observer (#211): the final fleet check reads the cell through it, and every liveness refusal in the log (`LivenessUnchanged`, `StaleIncarnation`) is a coordinator that wrote a non-change; gates for a machine marked down, one back up without re-placement, and a rebooted machine registered again.
 
 ## Harness shape
 
@@ -102,7 +103,7 @@ it arrives) · `CHECK_TAIL=16` retired · `CREATE_JOURNAL=17`, `DELETE_JOURNAL=1
 capacity, and a registered joiner registering again is a reboot, #211) · `SET_LEADER=22` (CAS on
 the leader uuid; a superseded writer reinstates the uuid it last led with, `reinstate_pct`, the misbehaviour the journal does not refuse, #241) · `CHECKPOINT=23` (the registry's owner, through `paros::client::checkpoint`:
 claim, fold to the tail, checkpoint and truncate when the policy finds it due, #230) ·
-`BOOK_CAPACITY=24` (book or release a joiner's slot; a booking of the other class must be refused,
+`BOOK_CAPACITY=24` (book or release a joiner's slot for a role of a journal or matchmaker set; a role of the other class must be refused, and so must a booking under an id the client released,
 #211) · `FLEET_INIT=25` (`init` whole through `paros::client::initialize` while the cell is unknown or on a coin, else `init`'s fleet half through `paros::client::fleet`, #229, #246) · `TENANT=26`
 (create or remove a tenant through the fleet tenant and the cell; either may stop after one step, a BUGGIFY
 crash, and is resumed by the client's next fleet step) · `ADMIT=27` (`cell add-machine` through
@@ -135,10 +136,10 @@ then admitted; it may stop after the registration and is resumed by the client's
   created journal takes its creator's drawn user id, never reused (`IdTaken` only for an id
   created before); no append acked after its tombstone; a checkpoint a node (or a client) meets
   with the whole prefix folded is that prefix's state (#230); a `stateless` joiner never serves
-  a journal, a booking takes a slot of its node's class and never past its capacity, and a live
-  booking id is never booked again (#211, on the registry's events in LSN order; the model
-  crosses a truncation at the checkpoint a restoring node meets and equals every checkpoint it
-  reaches, #247); no genesis node's message waits on the registry fold; every live node's
+  a journal, a booking takes a slot of its node's class and never past its capacity, and a
+  booking id is booked at most once, across checkpoints (#211, on the registry's events in LSN
+  order; the model crosses a truncation at the checkpoint a restoring node meets, resuming its
+  bookings and spent ids, and equals every checkpoint it reaches, #247); no genesis node's message waits on the registry fold; every live node's
   registry fold reaches the tail after chaos; gates for name races,
   joiners learning before admission, refused-then-accepted joiner messages, a re-registration,
   and a fold restarting from a checkpoint once one truncated.

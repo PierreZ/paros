@@ -303,6 +303,14 @@ impl NodeShape {
             ),
             // Floor 1: the coordinator truncates at every renewal.
             election_compact_after: buggify_knob!(16_u64, 1_u64..65_u64),
+            // The cell coordinator's failure detector (#211). Floor: one
+            // renewal period and a round trip past it, so one missed probe
+            // never marks a machine down. The range crosses a machine's
+            // reboot in both directions: a short one marks a rebooting
+            // machine down, then up again.
+            machine_down_after: ms(
+                election_renew_ms + buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)
+            ),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together

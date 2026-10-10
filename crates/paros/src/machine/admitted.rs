@@ -90,7 +90,7 @@ impl AdmittedMachine {
     /// [`RunError::Infra`].
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.facts.node_id.0, cell = self.admission.cell.cell_id))]
     pub async fn serve<P: Providers>(
-        self,
+        mut self,
         providers: &P,
         tunables: &DriverTunables,
         shutdown: CancellationToken,
@@ -108,6 +108,7 @@ impl AdmittedMachine {
             .await
             .map_err(RunError::Infra)?;
         let rpc = edge.handle().clone();
+        self.facts = self.facts.serving(&rpc);
         let served = RunError::Infra;
         let mut identify =
             Inbound::plain(serve_well_known::<P, IdentifyRpc>(&rpc).map_err(served)?);

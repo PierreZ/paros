@@ -218,6 +218,10 @@ impl CellSession {
                     class,
                     capacity: identity.capacity,
                     failure_domain: identity.failure_domain,
+                    incarnation: crate::machine::incarnation_from_halves(
+                        identity.incarnation_high,
+                        identity.incarnation_low,
+                    ),
                 };
                 return match append(&mut self.cell, client, first, register.encode()).await {
                     Ok(_) => {
@@ -254,6 +258,47 @@ impl CellSession {
                 Step::Interrupted(Interrupted::MachineUnreachable { addr: target })
             }
         }
+    }
+
+    /// Append `command` to the cell control journal as this session's
+    /// writer and fold it, from server `first` on: the cell coordinator's
+    /// own entries (liveness and re-registrations, #211). The session must
+    /// be open; an interrupted write closes it.
+    ///
+    /// # Errors
+    ///
+    /// The write did not land (see [`Interrupted`]).
+    ///
+    /// # Panics
+    ///
+    /// If the session is not open (a programmer error).
+    pub async fn record<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        command: &SystemCommand,
+    ) -> Result<(), Interrupted> {
+        assert!(self.cell_open, "a session records only once open");
+        let before = self.cell.folder().next_seq();
+        match append(&mut self.cell, client, first, command.encode()).await {
+            Ok(_) => {
+                assert!(
+                    self.cell.folder().next_seq() > before,
+                    "a recorded entry is in the fold"
+                );
+                Ok(())
+            }
+            Err(stop) => {
+                self.cell_open = false;
+                Err(stop)
+            }
+        }
+    }
+
+    /// Whether the session holds the cell control journal open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.cell_open
     }
 
     /// Admit the machine at `target` to its end (see
