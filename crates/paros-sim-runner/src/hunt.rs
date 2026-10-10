@@ -80,6 +80,9 @@ fn main() {
     // a starved `sometimes` looks like in the CI sweep, and finding it here is
     // far cheaper than re-running the full coverage campaign to see it.
     print_never_fired(&report, "");
+    if let Some(filter) = arg::<String>(3) {
+        print_gates(&report, &filter);
+    }
     if is_clean(&report) {
         println!("no violations — the hunt came back empty");
         return;
@@ -88,4 +91,19 @@ fn main() {
     println!("VIOLATIONS: {:#?}", report.assertion_violations);
     println!("FAILING SEEDS: {:?}", report.seeds_failing);
     std::process::exit(1);
+}
+
+/// Every gate whose name contains `filter`, with its successes and checks: a
+/// gate's rate, measured before and after a change (AGENTS.md, *Amplify the
+/// worst states*).
+fn print_gates(report: &SimulationReport, filter: &str) {
+    println!("gates matching {filter:?}:");
+    for (gate, stats) in &report.assertion_results {
+        if gate.contains(filter) {
+            println!(
+                "  - {gate}: {} of {} checks",
+                stats.successes, stats.total_checks
+            );
+        }
+    }
 }

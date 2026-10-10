@@ -623,6 +623,8 @@ pub(crate) struct LaneOpener<'a, P: Providers, A: Audit> {
     pub(crate) shutdown: CancellationToken,
     pub(crate) audit: &'a A,
     pub(crate) from: Party,
+    /// The sender's cell, stamped on every batch (`0` without a cell plan).
+    pub(crate) cell_id: u64,
 }
 
 impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A> {
@@ -651,6 +653,7 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
                     self.tunables,
                     self.audit.clone(),
                     self.from,
+                    self.cell_id,
                     to,
                 ),
             )
@@ -684,8 +687,9 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 /// `delivery_timeout` below races the connection and the peer's inbox
 /// capacity — never the peer's persist-and-step time.
 // The parameters are one delivery lane's complete wiring (client, clocks,
-// lifecycle, queue, batch shape, and the audit identity for drop reports);
-// a bundle would only rename the same eight things.
+// lifecycle, queue, batch shape, and the sender's identity: its party for
+// drop reports and its cell for the batch); a bundle would only rename the
+// same nine things.
 // The lane is a task of its own: it owns its copy of the tunables.
 #[allow(clippy::too_many_arguments, clippy::large_types_passed_by_value)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
@@ -697,6 +701,7 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
     tunables: DriverTunables,
     audit: A,
     from: Party,
+    cell_id: u64,
     to: Party,
 ) {
     let batch_limit = tunables.delivery_batch;
@@ -728,8 +733,10 @@ async fn run_peer_delivery<P: Providers, A: Audit>(
                 _ = time.sleep(tunables.tick_interval) => {}
             }
         }
-        let (batch, next) = delivery_batch(first, &messages, batch_limit, &audit, from, to);
+        let (mut batch, next) = delivery_batch(first, &messages, batch_limit, &audit, from, to);
         carried = next;
+        assert_eq!(batch.cell_id, 0, "a batch is stamped once, here");
+        batch.cell_id = cell_id;
         let outcome = moonpool_core::select! {
             biased;
             () = shutdown.cancelled() => return,
@@ -841,7 +848,13 @@ fn delivery_batch<A: Audit>(
             "a message is carried only for bytes"
         );
     }
-    (internal::Deliver { messages: batch }, carried)
+    (
+        internal::Deliver {
+            messages: batch,
+            cell_id: 0,
+        },
+        carried,
+    )
 }
 
 /// Whether to drop this one outbound protocol message after it is durable

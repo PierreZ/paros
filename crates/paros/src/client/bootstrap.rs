@@ -8,6 +8,7 @@
 //! per call, every outcome typed, no randomness (the machine that drives
 //! `cell init` draws the cell's ballot and its plan).
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -170,6 +171,58 @@ pub async fn discover<P: Providers>(
         }
     }
     found
+}
+
+/// The cell a majority of `addrs` serve (#216), and its servers among them:
+/// each machine's node-only `Inspect`, asked once within `timeout`, names
+/// its node and its cell. An address may host a machine of another cell (a
+/// wiped member's address that another cell took), so the first answer is
+/// not the cell. A cell keeps a majority of its listed members while it is
+/// not lost, and two majorities of one list meet, so at most one cell is
+/// named. `None` while no cell is served by a majority of `addrs`: a member
+/// is down, or the list is not one cell's.
+///
+/// # Panics
+///
+/// If two cells each answer from a majority of `addrs`, which no list
+/// allows: each address is asked once, so two majorities share an address.
+pub async fn majority_cell<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    addrs: &[SocketAddr],
+    timeout: Duration,
+) -> Option<(ControlJournals, Vec<(u64, SocketAddr)>)> {
+    let mut cells: BTreeMap<u64, (ControlJournals, Vec<(u64, SocketAddr)>)> = BTreeMap::new();
+    for &addr in addrs {
+        let client = well_known::<P, InspectRpc>(rpc, addr);
+        let request = InspectRequest::node_only();
+        if let Ok(Ok(reply)) = providers
+            .time()
+            .timeout(timeout, client.try_get_reply(&request))
+            .await
+            && reply.node != 0
+            && let Some(journals) = control_journals_of(&reply)
+        {
+            let (held, servers) = cells
+                .entry(journals.cell_id)
+                .or_insert_with(|| (journals, Vec::new()));
+            // One cell names one set of control journals: another answer is
+            // wire input from a broken server, never this cell's.
+            if *held == journals {
+                servers.push((reply.node, addr));
+            }
+        }
+    }
+    let majority = addrs.len() / 2 + 1;
+    let mut named = cells
+        .into_values()
+        .filter(|(_, servers)| servers.len() >= majority);
+    let cell = named.next()?;
+    assert!(
+        named.next().is_none(),
+        "two majorities of one list name one cell"
+    );
+    Some(cell)
 }
 
 /// The control journals a server's `Inspect` reports for its cell (§3.2):

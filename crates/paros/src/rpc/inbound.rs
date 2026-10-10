@@ -128,6 +128,9 @@ pub enum EdgeRejection {
     /// A peer message whose envelope names no journal: an unset tenant or
     /// journal (`0`, #188, #235).
     UnsetJournal,
+    /// A peer batch from another cell (#216): its `cell_id` is not the
+    /// receiver's. The whole batch is refused.
+    ForeignCell,
 }
 
 /// The edge's observation callback: the driver installs one that forwards to
@@ -144,7 +147,9 @@ pub(crate) type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
 /// connection and this queue, never the time the loop takes to persist and
 /// step the batch. A message that decodes from the wire but not into a
 /// [`Message`] is refused — reported through `on_reject`, the batch's reply
-/// dropped — after the messages before it were enqueued.
+/// dropped — after the messages before it were enqueued. A batch from
+/// another cell than `cell_id` is refused whole, before any of its messages
+/// is decoded (#216): a machine never steps a peer of another cell.
 ///
 /// The task draws no randomness and consults no hook (a hook answer is a
 /// randomness draw, and a detached task is not where the simulation steps
@@ -155,6 +160,7 @@ pub(crate) fn serve_deliveries<P: Providers>(
     rpc: &RpcHandle<P>,
     capacity: usize,
     me: Party,
+    cell_id: u64,
     on_reject: OnReject,
     shutdown: CancellationToken,
 ) -> SimulationResult<mpsc::Receiver<(JournalIdentifier, Message)>> {
@@ -180,7 +186,7 @@ pub(crate) fn serve_deliveries<P: Providers>(
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
-                () = deliver_all(&mut stream, &inbox, me, &on_reject) => {}
+                () = deliver_all(&mut stream, &inbox, me, cell_id, &on_reject) => {}
             }
         })
         .detach();
@@ -188,14 +194,24 @@ pub(crate) fn serve_deliveries<P: Providers>(
 }
 
 /// The `Deliver` edge task's body: one batch at a time, acked on enqueue.
-#[tracing::instrument(level = "debug", skip_all, fields(at = %me))]
+#[tracing::instrument(level = "debug", skip_all, fields(at = %me, cell = cell_id))]
 async fn deliver_all(
     stream: &mut RequestStream<DeliverRpc>,
     inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
     me: Party,
+    cell_id: u64,
     on_reject: &OnReject,
 ) {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
+        if request.cell_id != cell_id {
+            // Another cell's peer (#216, ScyllaDB's cluster id in gossip):
+            // after a bad configuration, or at an address a wiped machine
+            // left and another cell took. Refused whole, never acked.
+            on_reject(EdgeRejection::ForeignCell);
+            moonpool_assertions::reachable!("edge: a peer batch from another cell is refused");
+            tracing::warn!(from = request.cell_id, "a peer batch names another cell");
+            continue;
+        }
         if enqueue_batch(request, inbox, me, on_reject).await {
             reply.send(&internal::DeliverAck {});
         }

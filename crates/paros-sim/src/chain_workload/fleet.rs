@@ -72,6 +72,7 @@ use crate::shape::MachineLayout;
 mod admit;
 mod cell;
 mod election;
+mod other_cell;
 
 use cell::Cell;
 

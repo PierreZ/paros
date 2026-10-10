@@ -96,6 +96,11 @@ pub(crate) struct MachineBoard {
     /// Every election journal a formatting plan named (#240): multi-writer
     /// journals, which the audit models as such.
     elections: BTreeSet<paros::JournalIdentifier>,
+    /// The address an operator founded another cell on (#216): a machine
+    /// that replaced a wiped member of the run's cell, alone in its own.
+    other_founder: Option<SocketAddr>,
+    /// The votes for that other cell still on a disk, by minted id.
+    others: BTreeMap<u64, CellPlan>,
 }
 
 impl MachineBoard {
@@ -198,6 +203,49 @@ pub(crate) fn is_founder(state: &StateHandle, addr: SocketAddr) -> bool {
 /// another cell than the operator's.
 pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
     !lock(&machine_board(state)).wiped.is_empty()
+}
+
+/// The machine an operator may found another cell on (#216), if the run
+/// has one: once per run (again until it forms), a machine at the address
+/// of a wiped member of the run's cell, whose old id a vote still names (so
+/// the cell's members keep sending it their peer traffic), and which holds
+/// no vote and no admission of its own: it is idle.
+pub(crate) fn other_cell_target(state: &StateHandle) -> Option<SocketAddr> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    if let Some(addr) = board.other_founder {
+        return board.others.is_empty().then_some(addr);
+    }
+    let plan = board.voters.values().next()?;
+    plan.members
+        .iter()
+        .filter(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
+        .map(|(_, addr)| *addr)
+        .find(|addr| {
+            board.nodes.get(addr).is_some_and(|node| {
+                !board.voters.contains_key(node) && !board.admitted.contains_key(node)
+            })
+        })
+}
+
+/// An operator is about to found another cell on the machine at `addr`
+/// (#216), alone.
+pub(crate) fn note_other_cell(state: &StateHandle, addr: SocketAddr) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    assert_always!(
+        board.other_founder.is_none_or(|held| held == addr),
+        "machine: an operator founds at most one other cell"
+    );
+    board.other_founder = Some(addr);
+}
+
+/// Whether `plan` is the other cell an operator founded at `addr` (#216): a
+/// plan over that address alone, when it is not the run's founding list.
+fn is_other_cell(board: &MachineBoard, addr: SocketAddr, plan: &CellPlan) -> bool {
+    board.other_founder == Some(addr)
+        && plan.addrs().into_iter().eq(std::iter::once(addr))
+        && plan.addrs() != board.founders
 }
 
 /// Whether the run's cell is lost (#246): a vote named a plan that lost a
@@ -433,6 +481,9 @@ pub(crate) fn booted(
         let founder = board.founders.contains(&addr);
         let unformed = board.voters.len() < board.founders.len();
         board.wiped.insert((addr, old));
+        if board.others.remove(&old).is_some() {
+            assert_reachable!("machine: a wipe takes the other cell's vote with its disk");
+        }
         if board.voters.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's vote with its disk");
         }
@@ -498,6 +549,24 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
             assert_reachable!("machine: a machine is admitted into the cell");
         }
     }
+    if let Some((ballot, plan)) = &record.plan
+        && is_other_cell(&board, addr, plan)
+    {
+        // The other cell an operator founded (#216): never the run's.
+        let cell = board.voters.values().next().map(|plan| plan.cell_id);
+        assert_always!(
+            cell != Some(plan.cell_id),
+            "machine: the other cell is never the run's cell",
+            { "node" => node, "cell" => plan.cell_id }
+        );
+        if board.others.insert(node, plan.clone()).is_none() {
+            assert_reachable!(
+                "machine: an operator founds another cell on a wiped member's address"
+            );
+        }
+        board.votes.entry(plan.cell_id).or_default().insert(*ballot);
+        return;
+    }
     if let Some((ballot, plan)) = &record.plan {
         // The vote is the commit point, never the format before it: a
         // machine that crashed between the two never accepted that plan, and
@@ -552,6 +621,9 @@ pub(crate) fn formatting(
 ) {
     let mut board = lock(board);
     board.elections.insert(plan.election);
+    if is_other_cell(&board, addr, plan) {
+        return;
+    }
     assert_always!(
         board.init_sent,
         "machine: no cell forms without init",

@@ -21,9 +21,11 @@ the `mutants` test reads `PAROS_MUTANT_SEEDS`.
   saturated-vs-cap, saturation signal, exploration stats and bug recipes, guidance watermarks
   and the gates that never fired. Exits 1 on any assertion violation, failed run, coverage violation or
   convergence timeout.
-- `sim-paros-hunt [main|canary] [iterations]` (default 2000, the normal evidence budget;
-  root *Simulation rules*): prints seed counts, assertion slots used and dropped, and gates
-  that never fired; exits 1 on a violation, 2 on an unknown axis. Coverage never decides it.
+- `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
+  budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
+  that never fired, and with a filter every gate whose name contains it, with its successes and
+  checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
+  axis. Coverage never decides it.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
   (`EXPLORATION_TIMELINES_PER_SEED` timelines): prints GREEN or RED with the violations, exits
   1 on red (`replay_for`, `hunt.rs:25`). There is one campaign: the CTRL corpus is folded into
