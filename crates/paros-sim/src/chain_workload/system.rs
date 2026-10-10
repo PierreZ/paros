@@ -133,7 +133,7 @@ pub(super) struct SystemOps {
 /// [`Announce::learned_only`], every attempt names a journal its operator
 /// learned from `init`'s reply or through `Inspect`, never one the harness
 /// knows (§3.8: no identifier is fixed).
-pub(super) struct Announce {
+pub(crate) struct Announce {
     /// The journals announced; `None` announces every journal the client
     /// calls — a client over the machines (#246), whose control journals
     /// are learned at runtime.
@@ -146,6 +146,24 @@ pub(super) struct Announce {
     journals: Mutex<Vec<(JournalIdentifier, Arc<crate::audit::AuditWorld>, CallLog)>>,
     /// The journals its operator learned, when every call must name one.
     learned: Option<Learned>,
+    /// The fenced call each pending token carries: its journal and uuid,
+    /// for the deposed-actor oracle (#240).
+    fenced: Mutex<std::collections::BTreeMap<u64, (JournalIdentifier, LeaderUuid)>>,
+}
+
+const DEPOSED_KEY: &str = "paros-deposed-uuids";
+
+/// The uuids a fenced call to `journal` was refused under because another
+/// leads (#240), shared by every client of the run.
+fn deposed(
+    state: &moonpool_sim::StateHandle,
+    journal: JournalIdentifier,
+) -> Arc<Mutex<std::collections::BTreeSet<LeaderUuid>>> {
+    crate::state::published_arc(
+        state,
+        &crate::state::journal_key(DEPOSED_KEY, journal),
+        || Mutex::new(std::collections::BTreeSet::new()),
+    )
 }
 
 /// The journal identifiers one operator learned (#246): from `init`'s reply
@@ -176,6 +194,26 @@ impl Announce {
             client: u64::try_from(ctx.client_id()).unwrap_or(0),
             journals: Mutex::new(Vec::new()),
             learned: None,
+            fenced: Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// An observer announcing every journal a founding member's own client
+    /// calls (the cell coordinator's, #240), as client `client` of the
+    /// control journals' histories.
+    pub(crate) fn of_machine(
+        state: &moonpool_sim::StateHandle,
+        time: moonpool_sim::SimTimeProvider,
+        client: u64,
+    ) -> Self {
+        Self {
+            only: None,
+            state: state.clone(),
+            time,
+            client,
+            journals: Mutex::new(Vec::new()),
+            learned: None,
+            fenced: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -236,6 +274,25 @@ impl CallObserver for Announce {
             );
         }
         let (index, audit, log) = self.entry(attempt.journal())?;
+        // An actor's writer stops at its first refusal (#240): no fenced
+        // call leaves under a uuid a refusal already named deposed.
+        let fence = match attempt {
+            Attempted::Write(write) => Some(paros::leader_uuid_from_proto(write.leader)),
+            Attempted::Truncate(truncate) => Some(paros::leader_uuid_from_proto(truncate.leader)),
+            Attempted::SetLeader(_) | Attempted::Read(_) => None,
+        }
+        .filter(|uuid| uuid.is_set());
+        if let Some(uuid) = fence {
+            let journal = attempt.journal();
+            assert_always!(
+                !deposed(&self.state, journal)
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&uuid),
+                "election: a deposed actor writes nothing after its first refusal",
+                { "client" => self.client, "journal" => journal.to_string() }
+            );
+        }
         if let Attempted::Write(write) = attempt {
             for record in &write.records {
                 audit.note_submitted(user_command_hash(record));
@@ -248,10 +305,38 @@ impl CallObserver for Announce {
             audit.note_appended(paros::command_hash(&Command::Write(entry)));
         }
         let token = log.invoked(attempt)?;
-        Some((index as u64) << TOKEN_JOURNAL_SHIFT | token)
+        let token = (index as u64) << TOKEN_JOURNAL_SHIFT | token;
+        if let Some(uuid) = fence {
+            self.fenced
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(token, (attempt.journal(), uuid));
+        }
+        Some(token)
     }
 
     fn answered(&self, token: u64, answer: Answered<'_>) {
+        let fenced = self
+            .fenced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&token);
+        if let Some((journal, uuid)) = fenced {
+            let leader = match answer {
+                Answered::Write(WriteOutcome::Refused { state })
+                | Answered::Truncate(TruncateOutcome::Refused { state }) => Some(state.leader),
+                _ => None,
+            };
+            if let Some(leader) = leader
+                && leader != Some(uuid)
+            {
+                deposed(&self.state, journal)
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(uuid);
+                assert_reachable!("election: a fenced call is refused because another leads");
+            }
+        }
         let index = usize::try_from(token >> TOKEN_JOURNAL_SHIFT).unwrap_or(usize::MAX);
         let log = self
             .journals

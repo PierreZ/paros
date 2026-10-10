@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
-use paros_core::NodeId;
+use paros_core::{LeaderUuid, NodeId};
 
 use super::Client;
 use super::bootstrap::{self, AdmitOutcome};
@@ -74,6 +74,49 @@ impl CellSession {
             cell: Checkpointer::new(journals.cell, seed, genesis, policy),
             cell_open: false,
         }
+    }
+
+    /// A session like [`CellSession::new`] that writes the cell control
+    /// journal under the one leader uuid `uuid`: the cell coordinator's term
+    /// uuid (#240), installed by its first claim.
+    #[must_use]
+    pub fn with_leader(
+        journals: ControlJournals,
+        founders: Vec<(NodeId, SocketAddr)>,
+        uuid: LeaderUuid,
+        policy: CheckpointPolicy,
+    ) -> Self {
+        let genesis = Registry::new(founders.iter().map(|(id, _)| *id));
+        Self {
+            journals,
+            founders,
+            cell: Checkpointer::with_uuid(journals.cell, uuid, genesis, policy),
+            cell_open: false,
+        }
+    }
+
+    /// Claim the cell control journal under this session's uuid and fold it
+    /// to its tail, unless this session holds it already.
+    ///
+    /// # Errors
+    ///
+    /// The claim or the fold did not end (see [`Interrupted`]).
+    pub async fn open<P: Providers>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        if !self.cell_open {
+            open(&mut self.cell, client, first).await?;
+            self.cell_open = true;
+        }
+        Ok(())
+    }
+
+    /// The founding members this session knows, with their addresses.
+    #[must_use]
+    pub fn founders(&self) -> &[(NodeId, SocketAddr)] {
+        &self.founders
     }
 
     /// The cell's control journal as this session last folded it.

@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use paros_core::{
     AcceptorConfig, Ballot, Command, GcAck, GcStep, Handoff, JournalIdentifier, JournalView,
@@ -28,6 +29,7 @@ use paros_core::{
     Slot, Value,
 };
 
+use crate::client::CallObserver;
 use crate::driver::BootRefusal;
 use crate::machine::{CellPlan, MachineRecord};
 use crate::rpc::{EdgeRejection, MatchmakersRefusal, RetireRefusal};
@@ -165,6 +167,14 @@ pub struct HistoryPage<'a> {
 /// runs inline on the node loop.
 #[allow(unused_variables)]
 pub trait Audit {
+    /// The observer of the library calls this node's own client makes (the
+    /// cell coordinator's, #240), so a harness checks them with the rest of
+    /// each journal's history. Asked once, when the client is built; `None`
+    /// (production) observes nothing.
+    fn call_observer(&self) -> Option<Arc<dyn CallObserver>> {
+        None
+    }
+
     /// This node durably raised its promised ballot (after the fsync).
     fn promised(&self, node: NodeId, ballot: Ballot) {}
 

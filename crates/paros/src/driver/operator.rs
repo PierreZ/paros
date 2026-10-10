@@ -192,6 +192,9 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
     let (fleet_tenant, fleet_journal) = cell
         .and_then(|cell| cell.fleet)
         .map_or((0, 0), |fleet| (fleet.tenant.0, fleet.journal.0));
+    let (election_tenant, election_journal) = cell
+        .and_then(|cell| cell.election)
+        .map_or((0, 0), |election| (election.tenant.0, election.journal.0));
     // A node-only answer names the cell's control journals or none at all.
     if cell.is_none() {
         assert!(
@@ -210,6 +213,8 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
         control_journal,
         fleet_tenant,
         fleet_journal,
+        election_tenant,
+        election_journal,
         ..InspectReply::default()
     }
 }

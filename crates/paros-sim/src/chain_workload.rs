@@ -40,7 +40,7 @@ mod foreign;
 mod multi;
 mod races;
 mod rpc;
-mod system;
+pub(crate) mod system;
 
 use crate::{CHAOS_DURATION_MS, DigestSink};
 use rpc::{CallLog, judged_truncate, judged_write, read_once, within};
@@ -153,7 +153,12 @@ const TENANT: u8 = 26;
 /// control journal, then `Admit` it — or resume an admission this client
 /// stopped after its registration.
 const ADMIT: u8 = 27;
-const OP_COUNT: u8 = 28;
+/// Stand as a candidate in the cell's election (#240) through
+/// `paros::client::election`, beside the founding members' coordinators:
+/// campaign, serve a won term with the coordinator's duties, then hand it
+/// on, resign or abandon it.
+const ELECTION: u8 = 28;
+const OP_COUNT: u8 = 29;
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 const RECONFIGURE_SHAPES: [&str; 5] = ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -375,8 +380,7 @@ struct ChainConfig {
     parent_hold_ms: u64,
     /// How long an owner keeps re-asking its opening claim while the
     /// cluster leaves it unresolved (unread, ambiguous, a redirect to
-    /// nobody), `retry_backoff_ms` apart — the patience
-    /// `paros::client::claim_cell` gives a cell's claim. Floor 0: the one
+    /// nobody), `retry_backoff_ms` apart. Floor 0: the one
     /// attempt, after which every write is fenced until a later `SET_LEADER`
     /// claims again, a valid (slow) owner; ceiling 6 s, past the chaos
     /// window, an owner that keeps asking through it.
@@ -388,6 +392,12 @@ struct ChainConfig {
     /// decided under the configuration the removal supersedes). Drawn per
     /// seed, its own BUGGIFY location; either value is a valid operator.
     reconfigure_after_claim: bool,
+    /// The harness candidate's renewal period (#240). Floor 100 ms, as the
+    /// machines' (`NodeShape`'s `election_renew`).
+    election_renew_ms: u64,
+    /// What the harness candidate's lease adds to its renewal period.
+    /// Floor two round trips (500 ms): a renewal written, then read.
+    election_lease_extra_ms: u64,
     /// Per-operation weights of the swarm alphabet, one knob each so a seed
     /// can be storm-heavy and read-starved at once. Floor 0 for any single
     /// weight (the alphabet's total is guarded, and an all-zero draw falls
@@ -452,13 +462,15 @@ impl ChainConfig {
             parent_hold_ms: buggify_knob!(1_500_u64, 200_u64..3_001_u64),
             claim_patience_ms: buggify_knob!(3_000_u64, 0_u64..6_001_u64),
             reconfigure_after_claim: buggify_with_prob!(1.0),
+            election_renew_ms: buggify_knob!(500_u64, 100_u64..1001_u64),
+            election_lease_extra_ms: buggify_knob!(1500_u64, 500_u64..4001_u64),
             // WRITE, NON_LEADER, TRUNCATE, READ_STATE, PAUSE, DUP, DUAL,
             // STORM, READ_INDEX (retired), MATCHMAKE (retired), MATCH_GC
             // (retired), RECONFIGURE, RECONFIGURE_MATCHMAKERS, RETIRE,
             // QUORUM_READ (retired), READ, CHECK_TAIL (retired),
             // CREATE_JOURNAL, DELETE_JOURNAL, REGISTER_NODE, DRAIN_NODE,
             // RETIRE_NODE, SET_LEADER, CHECKPOINT, BOOK_CAPACITY, FLEET_INIT,
-            // TENANT, ADMIT
+            // TENANT, ADMIT, ELECTION
             weights: [
                 buggify_knob!(20_u64, 0_u64..41_u64),
                 buggify_knob!(10_u64, 0_u64..41_u64),
@@ -521,6 +533,10 @@ impl ChainConfig {
                 // then nothing to do; the ceiling is an operator admitting
                 // machines all run long, fencing the fleet operators.
                 buggify_knob!(3_u64, 0_u64..21_u64),
+                // A candidacy is a few election steps; a won term claims
+                // the cell control journal once. The ceiling is an operator
+                // contending with the coordinators all run long.
+                buggify_knob!(3_u64, 0_u64..21_u64),
             ],
             // grow, shrink, replace, remove-leader, rotate
             reconfigure_shape_weights: [
@@ -554,6 +570,15 @@ impl ChainConfig {
             wait_ms: self.read_wait_ms,
             checkpoint_factor: self.checkpoint_factor,
             checkpoint_interval: Duration::from_millis(self.checkpoint_interval_ms),
+        }
+    }
+
+    /// The harness candidate's election timing (#240).
+    fn election_tunables(&self) -> paros::client::election::ElectionTunables {
+        paros::client::election::ElectionTunables {
+            lease: Duration::from_millis(self.election_renew_ms + self.election_lease_extra_ms),
+            renew_every: Duration::from_millis(self.election_renew_ms),
+            compact_after: 16,
         }
     }
 
@@ -3197,6 +3222,16 @@ impl Workload for ChainWorkload {
                         .admit(ctx, config.tunables().checkpoint_policy(), raw_payload)
                         .await;
                 }
+                ELECTION => {
+                    fleet_ops
+                        .elect(
+                            ctx,
+                            config.tunables().checkpoint_policy(),
+                            config.election_tunables(),
+                            raw_payload,
+                        )
+                        .await;
+                }
                 _ => unreachable!("operation IDs are bounded by OP_COUNT"),
             }
         }
@@ -3960,18 +3995,26 @@ impl Workload for ChainWorkload {
                 .then_some([identifiers.registry, identifiers.directory])
                 .into_iter()
                 .flatten();
-            let cell = crate::machine::formed_cell(ctx.state())
+            let formed = crate::machine::formed_cell(ctx.state());
+            let cell = formed
                 .map(|cell| [Some(cell.cell), cell.fleet])
                 .into_iter()
                 .flatten()
                 .flatten();
-            for journal in system.chain(cell) {
-                let attempts = std::mem::take(
+            let take = |journal| {
+                std::mem::take(
                     &mut *rpc::control_attempts(ctx.state(), journal)
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner),
-                );
-                crate::audit::check_control_history(attempts);
+                )
+            };
+            for journal in system.chain(cell) {
+                crate::audit::check_control_history(take(journal), paros::WriterMode::Single);
+            }
+            // The cell's election journal (#240): every candidate's
+            // campaigns, renewals, resignations and truncations, unfenced.
+            if let Some(election) = formed.and_then(|cell| cell.election) {
+                crate::audit::check_control_history(take(election), paros::WriterMode::Multi);
             }
         }
         if let Some(sink) = &self.digest {

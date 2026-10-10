@@ -5,12 +5,13 @@
 //! The cell step is `cell init` over the founding members: sent to the
 //! first listed machine still idle, which drives the cell decree over every
 //! listed machine ([`crate::machine`]); a formed one has no `CellInit` and
-//! the next is asked. Then `init` claims the cell control journal with
-//! `SetLeader(new, old = none)`, under a leader uuid drawn from the caller's
-//! seed ([`super::bootstrap::claim_cell`]). A re-run resumes: an interrupted
-//! decree is finished by whichever listed machine is asked, a cell every
-//! member formed is learned from the members, and the claim is made if it
-//! is still missing.
+//! the next is asked. Then `init` waits for the cell's first coordinator:
+//! the founding members campaign in the cell's election journal, and the
+//! winner installs its uuid on the cell control journal with
+//! `SetLeader(uuid, unset)` (#240, [`crate::machine`]'s coordinator). `init`
+//! claims nothing itself. A re-run resumes: an interrupted decree is
+//! finished by whichever listed machine is asked, and a cell every member
+//! formed is learned from the members.
 //!
 //! Then the fleet steps ([`super::fleet`]): the fleet tenant (served by the
 //! cell's members) records the fleet's id — drawn by the caller, kept on a
@@ -18,8 +19,9 @@
 //! fleet on its side, and the fleet tenant marks the cell `READY`. No
 //! identifier is fixed (§3.8): a first run takes them from the plan it
 //! formed, a re-run learns them from the members' `Inspect`. Both journals are
-//! written under the run's leader uuids: a re-run, with a seed of its own,
-//! takes them over (#241). Every step is idempotent: `init` is
+//! written under the run's leader uuids: the run takes them over (#241),
+//! fencing the coordinator too until admin calls become requests to it
+//! (#212, #225; the coordinator stops at its first refused write). Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
 
 use std::net::SocketAddr;
@@ -27,10 +29,11 @@ use std::time::Duration;
 
 use moonpool_core::Providers;
 use moonpool_rpc::RpcHandle;
-use paros_core::{JournalIdentifier, LeaderUuid, NodeId};
+use paros_core::{JournalIdentifier, NodeId};
 
 use super::Client;
-use super::bootstrap::{self, ClaimCellOutcome, InitOutcome};
+use super::bootstrap::{self, InitOutcome};
+use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
 use crate::machine::ControlJournals;
 use crate::system::Registry;
@@ -46,8 +49,6 @@ pub enum InitRun {
     Refused(InitRefusal),
     /// Nothing decided in time: run it again, it resumes.
     Unreachable(Unreachable),
-    /// The claim's answer never came: it may have won; run it again.
-    Ambiguous,
     /// A fleet step's write did not land: run it again, it resumes.
     Interrupted(Interrupted),
 }
@@ -57,7 +58,8 @@ pub enum InitRun {
 pub struct Initialized {
     /// The fleet's id.
     pub fleet_id: u64,
-    /// The cell coordinator: the lowest member id.
+    /// The cell coordinator: the candidate the election journal named
+    /// leader once the cell control journal had one.
     pub coordinator: NodeId,
     /// The cell's members by id, in id order: the cell control journal's
     /// genesis pool, whether or not each answered this run.
@@ -69,9 +71,6 @@ pub struct Initialized {
     /// The static assignment's user journals, known only to the run that
     /// formed the cell (the only time they are printed).
     pub users: Vec<JournalIdentifier>,
-    /// The leader uuid this run claimed the cell control journal under, if
-    /// it did.
-    pub claimed: Option<LeaderUuid>,
     /// The fleet steps this run wrote, in order.
     pub steps: Vec<Stage>,
 }
@@ -101,9 +100,10 @@ pub enum Unreachable {
     /// No server named its cell's control journals.
     NoControlJournals,
     /// No server described the cell control journal, or it names no member.
+    NoMembers,
+    /// The cell named no election journal, or elected no coordinator in
+    /// time.
     NoCoordinator,
-    /// The cell did not confirm its control journal in time.
-    Claim,
 }
 
 /// The caller's half of `init`: how long a step may take, the fleet id a
@@ -121,13 +121,12 @@ pub struct InitParams {
     pub leader_seed: u128,
 }
 
-/// What a found cell is: its servers, its members, its coordinator, its
-/// control journals and its user journals (none: only the run that formed
-/// the cell knows them).
+/// What a found cell is: its servers, its members, its control journals
+/// and its user journals (none: only the run that formed the cell knows
+/// them).
 type Found = (
     Vec<(u64, SocketAddr)>,
     Vec<u64>,
-    NodeId,
     ControlJournals,
     Vec<JournalIdentifier>,
 );
@@ -163,12 +162,43 @@ async fn found<P: Providers>(
         .unwrap_or_default();
     members.sort_unstable();
     members.dedup();
-    let coordinator = *members.first().ok_or(Unreachable::NoCoordinator)?;
-    Ok((servers, members, NodeId(coordinator), journals, Vec::new()))
+    if members.is_empty() {
+        return Err(Unreachable::NoMembers);
+    }
+    Ok((servers, members, journals, Vec::new()))
+}
+
+/// Wait up to `patience` for the cell's coordinator: the cell control
+/// journal has a leader, and the election journal names one. The
+/// coordinator installs the cell control journal's first leader (#240), so
+/// a fleet step never claims an unset journal.
+async fn coordinator<P: Providers>(
+    client: &Client<P>,
+    journals: &ControlJournals,
+    patience: Duration,
+) -> Result<NodeId, Unreachable> {
+    let election = journals.election.ok_or(Unreachable::NoCoordinator)?;
+    let deadline = client.now() + patience;
+    loop {
+        let installed = client
+            .journal_state(journals.cell, 0)
+            .await
+            .is_some_and(|state| state.leader.is_some());
+        if installed
+            && let Some(fold) = read_election(client, election, 0).await
+            && let Some(leader) = fold.leader()
+        {
+            assert_ne!(leader.candidate.id, 0, "a candidate id is never zero");
+            return Ok(NodeId(leader.candidate.id));
+        }
+        if client.now() >= deadline || !client.pause(client.tunables().retry_backoff).await {
+            return Err(Unreachable::NoCoordinator);
+        }
+    }
 }
 
 /// Run `init` whole: form the cell over the founding `members` (or learn it,
-/// when every member already serves it), claim its control journal, then
+/// when every member already serves it), wait for its coordinator, then
 /// run the fleet steps, through a client `connect` builds over the cell's
 /// servers.
 ///
@@ -205,7 +235,7 @@ pub async fn initialize<P: Providers>(
             InitOutcome::NotWaiting => {}
         }
     }
-    let (servers, members, coordinator, journals, users) = match formation {
+    let (servers, members, journals, users) = match formation {
         Some(plan) => {
             let servers: Vec<(u64, SocketAddr)> = plan
                 .members
@@ -216,19 +246,11 @@ pub async fn initialize<P: Providers>(
             let Some(fleet_control) = plan.fleet else {
                 return InitRun::Refused(InitRefusal::NoFleet);
             };
-            let users: Vec<JournalIdentifier> = plan
-                .journals
-                .iter()
-                .copied()
-                .filter(|j| *j != plan.control && *j != fleet_control)
-                .collect();
-            (
-                servers,
-                ids,
-                plan.coordinator(),
-                plan.control_journals(),
-                users,
-            )
+            assert!(
+                plan.journals.contains(&fleet_control),
+                "the plan serves its fleet journal"
+            );
+            (servers, ids, plan.control_journals(), plan.users())
         }
         // Every listed machine is formed (a re-run after its formation):
         // learn the cell from them.
@@ -238,11 +260,11 @@ pub async fn initialize<P: Providers>(
         },
     };
     assert!(!servers.is_empty(), "a formed or found cell has servers");
-    assert!(
-        members.contains(&coordinator.0),
-        "the coordinator is a member of its cell"
-    );
     let client = connect(&servers);
+    let coordinator = match coordinator(&client, &journals, patience).await {
+        Ok(node) => node,
+        Err(unreachable) => return InitRun::Unreachable(unreachable),
+    };
     let Some(mut fleet) = FleetSession::new(
         journals,
         params.leader_seed,
@@ -250,15 +272,6 @@ pub async fn initialize<P: Providers>(
         client.tunables().checkpoint_policy(),
     ) else {
         return InitRun::Refused(InitRefusal::NoFleet);
-    };
-    let leader = fleet.writers().1.uuid();
-    let claimed = match bootstrap::claim_cell(&client, journals.cell, leader, patience).await {
-        ClaimCellOutcome::Claimed { leader } => Some(leader),
-        // Claimed by an earlier run: the fleet steps resume, and decide
-        // whether anything was left to do.
-        ClaimCellOutcome::AlreadyInitialized { .. } => None,
-        ClaimCellOutcome::Unavailable => return InitRun::Unreachable(Unreachable::Claim),
-        ClaimCellOutcome::Ambiguous => return InitRun::Ambiguous,
     };
     let run = fleet.init(&client, 0, params.fleet_id, patience).await;
     match run.outcome {
@@ -272,11 +285,10 @@ pub async fn initialize<P: Providers>(
                 servers,
                 journals,
                 users,
-                claimed,
                 steps: run.steps,
             };
             assert_ne!(initialized.fleet_id, 0, "a recorded fleet id is set");
-            if initialized.claimed.is_none() && initialized.steps.is_empty() {
+            if initialized.steps.is_empty() {
                 InitRun::AlreadyInitialized(initialized)
             } else {
                 InitRun::Initialized(initialized)

@@ -159,6 +159,7 @@ impl NodeShape {
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
+        let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         let drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
@@ -282,6 +283,17 @@ impl NodeShape {
             // runs build still fit; the extreme refuses a batch of several
             // large commands.
             max_batch_bytes: buggify_knob!(1_u64 << 20, 16_384_u64..131_073_u64),
+            // The cell election (#240). The renewal period's floor is 100 ms
+            // (a renewal a few round trips apart); the lease outlasts it by
+            // at least two round trips (a renewal written, then read), its
+            // documented floor, so a live coordinator keeps the lease in the
+            // recovery tail. Shorter is a partition, not a knob.
+            election_renew: ms(election_renew_ms),
+            election_lease: ms(
+                election_renew_ms + buggify_knob!(1500_u64, 2 * ROUND_TRIP_FLOOR_MS..4001_u64)
+            ),
+            // Floor 1: the coordinator truncates at every renewal.
+            election_compact_after: buggify_knob!(16_u64, 1_u64..65_u64),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together

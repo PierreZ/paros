@@ -95,7 +95,11 @@ impl FleetOps {
         let Some(journals) = bootstrap::control_journals(&client).await else {
             return self.cell.clone();
         };
-        self.note_learned([Some(journals.cell), journals.fleet].into_iter().flatten());
+        self.note_learned(
+            [Some(journals.cell), journals.fleet, journals.election]
+                .into_iter()
+                .flatten(),
+        );
         let Some(fleet) = journals.fleet else {
             assert_always!(
                 false,
@@ -136,7 +140,7 @@ impl FleetOps {
     fn adopt(&mut self, ctx: &SimContext, initialized: &Initialized) {
         let journals = initialized.journals;
         self.note_learned(
-            [Some(journals.cell), journals.fleet]
+            [Some(journals.cell), journals.fleet, journals.election]
                 .into_iter()
                 .flatten()
                 .chain(initialized.users.iter().copied()),
@@ -238,10 +242,7 @@ impl FleetOps {
                     );
                 }
                 assert_sometimes!(finished, "fleet: an init registers the cell READY");
-                if initialized.claimed.is_some() {
-                    assert_reachable!("init: a run claims the cell control journal");
-                }
-                if initialized.steps.is_empty() && initialized.claimed.is_none() {
+                if initialized.steps.is_empty() {
                     assert_reachable!("init: a re-run finds nothing left to do");
                 } else {
                     assert_reachable!("init: a run initializes the fleet");
@@ -276,7 +277,7 @@ impl FleetOps {
                 );
                 true
             }
-            InitRun::Unreachable(_) | InitRun::Ambiguous | InitRun::Interrupted(_) => {
+            InitRun::Unreachable(_) | InitRun::Interrupted(_) => {
                 assert_reachable!("init: a run that decided nothing in time is run again");
                 false
             }

@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package paros.election.v1;
+
+import "common.proto";
+
+// One record of an election journal (#240, `docs/architecture.md` §3.3): a
+// multi-writer journal that candidates append to and every watcher folds
+// with the same rule (`paros::client::election::ElectionFold`). The record
+// follows a magic prefix (`paros::client::election::MAGIC`), so a watcher
+// ignores any other record in the journal.
+//
+// Every record names the term it is about and the candidate that wrote it.
+// A campaign and a renewal also carry the leader uuid the candidate leads
+// that term under and its interface (the address a request to the leader
+// goes to), so each one describes the whole leadership: a watcher that
+// starts at a renewal (the journal truncated below it) knows who leads.
+message ElectionRecord {
+  uint64 term = 1;
+  uint64 candidate = 2;
+  oneof kind {
+    Leadership campaign = 3;
+    Leadership renew = 4;
+    Resign resign = 5;
+  }
+}
+
+// What a campaign or a renewal says: "I lead `term` under `uuid`".
+message Leadership {
+  paros.common.v1.LeaderUuid uuid = 1;
+  string interface = 2;
+}
+
+// The leader of `term` steps down. With a successor, the successor leads the
+// next term under `uuid` (a hand-off, no campaign); without one, the next
+// term goes to the first campaign.
+message Resign {
+  uint64 successor = 1;
+  paros.common.v1.LeaderUuid uuid = 2;
+  string interface = 3;
+}

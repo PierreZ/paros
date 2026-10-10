@@ -100,6 +100,8 @@ impl InspectReply {
             control_journal: self.control_journal,
             fleet_tenant: self.fleet_tenant,
             fleet_journal: self.fleet_journal,
+            election_tenant: self.election_tenant,
+            election_journal: self.election_journal,
             ..Self::default()
         }
     }

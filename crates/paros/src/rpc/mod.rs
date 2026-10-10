@@ -64,6 +64,13 @@ pub mod checkpoint {
     include!(concat!(env!("OUT_DIR"), "/paros.checkpoint.v1.rs"));
 }
 
+/// The election record (#240), generated from `proto/election.proto`: read
+/// and written by `paros::client::election`.
+pub mod election {
+    #![allow(missing_docs, clippy::pedantic)]
+    include!(concat!(env!("OUT_DIR"), "/paros.election.v1.rs"));
+}
+
 mod client;
 mod codec;
 mod consensus;

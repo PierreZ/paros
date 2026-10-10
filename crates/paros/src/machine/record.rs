@@ -17,7 +17,8 @@
 //!
 //! A machine that `cell add-machine` admitted (#216) has no vote: its record
 //! holds the **admission** instead — the cell, its control journals and the
-//! cell's machines it knew then (`admitted`, `control`, `fleet`, `peer`).
+//! cell's machines it knew then (`admitted`, `control`, `fleet`, `election`,
+//! `peer`).
 //! A record holds a vote or an admission, never both.
 //!
 //! ```text
@@ -30,6 +31,8 @@
 //! member 6150928431937019931 10.0.0.2:4500
 //! control 11986532017395081213/5302873011246751929
 //! fleet 7240096361733624127/14183513009914637262
+//! election 11986532017395081213/1735003470911288215
+//! journal 11986532017395081213/1735003470911288215
 //! journal 11986532017395081213/5302873011246751929
 //! journal 7240096361733624127/14183513009914637262
 //! journal 2965734451981346203/9861377130450924019
@@ -39,7 +42,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 
-use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem};
+use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem, WriterMode};
 
 use super::{Admission, CellPlan, Class, ControlJournals};
 
@@ -57,12 +60,13 @@ fn parse_ballot(text: &str) -> Option<Ballot> {
     })
 }
 
-/// The admission an `admitted` line and its `control`, `fleet` and `peer`
-/// lines name, checked; `None` with no `admitted` line (and no peer).
+/// The admission an `admitted` line and its `control`, `fleet`, `election`
+/// and `peer` lines name, checked; `None` with no `admitted` line (and no
+/// peer).
 fn admission(
     admitted: Option<u64>,
     control: Option<JournalIdentifier>,
-    fleet: Option<JournalIdentifier>,
+    (fleet, election): (Option<JournalIdentifier>, Option<JournalIdentifier>),
     peers: Vec<(NodeId, SocketAddr)>,
 ) -> Result<Option<Admission>, String> {
     let Some(cell_id) = admitted else {
@@ -76,6 +80,7 @@ fn admission(
             cell_id,
             cell: control.ok_or("the machine record's admission names no control journal")?,
             fleet,
+            election,
         },
         members: peers,
     };
@@ -161,6 +166,7 @@ impl MachineRecord {
             if let Some(fleet) = plan.fleet {
                 let _ = writeln!(text, "fleet {fleet}");
             }
+            let _ = writeln!(text, "election {}", plan.election);
             for journal in &plan.journals {
                 let _ = writeln!(text, "journal {journal}");
             }
@@ -170,6 +176,9 @@ impl MachineRecord {
             let _ = writeln!(text, "control {}", admission.cell.cell);
             if let Some(fleet) = admission.cell.fleet {
                 let _ = writeln!(text, "fleet {fleet}");
+            }
+            if let Some(election) = admission.cell.election {
+                let _ = writeln!(text, "election {election}");
             }
             for (id, addr) in &admission.members {
                 let _ = writeln!(text, "peer {} {addr}", id.0);
@@ -194,6 +203,7 @@ impl MachineRecord {
         let mut journals = Vec::new();
         let mut control = None;
         let mut fleet = None;
+        let mut election = None;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             let identifier =
@@ -227,6 +237,7 @@ impl MachineRecord {
                 "journal" => journals.push(identifier()?),
                 "control" => control = Some(identifier()?),
                 "fleet" => fleet = Some(identifier()?),
+                "election" => election = Some(identifier()?),
                 _ => return Err(format!("unknown machine record key {key:?}")),
             }
         }
@@ -239,7 +250,7 @@ impl MachineRecord {
         if plan.is_some() && admitted.is_some() {
             return Err("the machine record holds a vote and an admission".into());
         }
-        let admitted = admission(admitted, control, fleet, peers)?;
+        let admitted = admission(admitted, control, (fleet, election), peers)?;
         let plan = match plan {
             Some((ballot, cell_id)) => {
                 let plan = CellPlan {
@@ -247,6 +258,8 @@ impl MachineRecord {
                     members,
                     control: control.ok_or("the machine record's plan names no control journal")?,
                     fleet,
+                    election: election
+                        .ok_or("the machine record's plan names no election journal")?,
                     journals,
                 };
                 plan.check()?;
@@ -285,6 +298,12 @@ pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifi
         peers: members.clone(),
         nodes: members,
         quorum_system: QuorumSystem::Majority,
+        // The election journal takes campaigns from every candidate (#240).
+        writer_mode: if journal == plan.election {
+            WriterMode::Multi
+        } else {
+            WriterMode::Single
+        },
         ..Config::new(node_id, journal)
     }
 }
@@ -325,9 +344,11 @@ mod tests {
             cell_id: 912_873,
             members: vec![(NodeId(5), "10.0.0.2:4500".parse().expect("an address"))],
             control: identifier(0x51, 0x52),
+            election: identifier(0x51, 0x53),
             fleet: Some(identifier(0x61, 0x62)),
             journals: vec![
                 identifier(0x51, 0x52),
+                identifier(0x51, 0x53),
                 identifier(0x61, 0x62),
                 identifier(0x71, 0x72),
             ],
@@ -351,6 +372,7 @@ mod tests {
             cell: ControlJournals {
                 cell_id: 912_873,
                 cell: identifier(0x51, 0x52),
+                election: Some(identifier(0x51, 0x53)),
                 fleet: None,
             },
             members: vec![
@@ -370,8 +392,9 @@ mod tests {
             cell_id: 912_873,
             members: vec![(NodeId(5), "10.0.0.2:4500".parse().expect("an address"))],
             control: identifier(0x51, 0x52),
+            election: identifier(0x51, 0x53),
             fleet: None,
-            journals: vec![identifier(0x51, 0x52)],
+            journals: vec![identifier(0x51, 0x52), identifier(0x51, 0x53)],
         };
         let both = MachineRecord {
             admitted: Some(admission),

@@ -287,7 +287,7 @@ where
     let out = acceptor_lanes(
         &providers,
         &edge,
-        tunables,
+        &tunables,
         &incarnation_shutdown,
         audit,
         me,
@@ -375,7 +375,7 @@ where
 fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
     providers: &P,
     edge: &RpcEdge<P>,
-    tunables: DriverTunables,
+    tunables: &DriverTunables,
     shutdown: &CancellationToken,
     audit: &A,
     me: Party,
@@ -383,7 +383,7 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
 ) -> SimulationResult<Outbound> {
     let lanes = LaneOpener {
         providers,
-        tunables,
+        tunables: *tunables,
         shutdown: shutdown.clone(),
         audit,
         from: me,
