@@ -263,6 +263,11 @@ impl NodeShape {
             // wraps, an apply walk that yields mid-burst, a matchmaker
             // history over several pages. Floor 1 for each: a one-entry page
             // still makes progress, one round trip or one `Ready` per entry.
+            // A one-entry promise page makes a long suffix take more round
+            // trips than an election timeout; it stays winnable because a
+            // paging candidate re-sends its `Prepare` to the peers that
+            // answered on every tick, which keeps their election clocks
+            // quiet (#428 (paging livelock)).
             promise_page: buggify_knob!(paros::PROMISE_BATCH, 1_usize..5_usize),
             resend_page: buggify_knob!(paros::RESEND_BATCH, 1_usize..5_usize),
             apply_page: buggify_knob!(paros::APPLY_BATCH, 1_usize..5_usize),

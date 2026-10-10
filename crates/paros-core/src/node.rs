@@ -919,6 +919,10 @@ impl ColocatedNode {
                     self.assert_invariants();
                 }
             }
+            // A campaign that pages a long `Promise` suffix keeps the peers
+            // that already answered from campaigning over it (#428 (paging
+            // livelock)), on the leader's beat cadence.
+            self.keep_paging_promisers();
         }
         self.tick_handoff_fence();
         self.tick_repair();
