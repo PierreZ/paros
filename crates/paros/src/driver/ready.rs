@@ -604,14 +604,15 @@ fn send_batch<A: Audit>(
 }
 
 /// Whether this leader tears one slot's Phase-2 column and resigns (#396):
-/// the `Accept` of one slot reaches the first of its parties only, and the
-/// leader steps down after the send. Drawn only for a leader of a grid
-/// journal whose batch fans one slot's `Accept` out to two parties or more.
+/// the first slot of the batch keeps its `Accept` to the first of its
+/// parties only (to none when it has one party: the leader's own copy is
+/// then the lone one), and the leader steps down after the send. Drawn only
+/// for a leader of a grid journal whose batch carries an `Accept`.
 ///
 /// Always safe: the network could lose the same `Accept`s, and a leader may
 /// resign at any time (`step_down`). It makes the duel shape of #396 likely:
-/// the lone column-mate holds a value the other does not, and the next
-/// leader's Phase 1 on a row may miss it, so the next leadership sends that
+/// one column-mate holds a value the other does not, the next leader's
+/// Phase 1 on a row may miss it, and the next leadership sends that
 /// column-mate a different value for the slot. Silent in the recovery tail.
 fn tear_column<A: Audit>(
     node: &ColocatedNode,
@@ -630,32 +631,28 @@ fn tear_column<A: Audit>(
             *fanout.entry(*slot).or_default() += 1;
         }
     }
-    let Some(torn) = fanout
-        .iter()
-        .find(|(_, parties)| **parties >= 2)
-        .map(|(slot, _)| *slot)
-    else {
+    let Some((&torn, &parties)) = fanout.iter().next() else {
         return false;
     };
-    if !moonpool_buggify::buggify_fault_with_prob!(0.02) {
+    if !moonpool_buggify::buggify_fault_with_prob!(0.50) {
         return false;
     }
     moonpool_assertions::reachable!("grid: a leader tears one slot's column and resigns");
     let before = messages.len();
-    let mut kept = false;
-    messages.retain(|(to, msg)| {
-        let Message::Accept { slot, .. } = msg else {
-            return true;
-        };
-        if *slot != torn || !kept {
-            kept |= *slot == torn;
-            return true;
+    let mut keep = usize::from(parties >= 2);
+    messages.retain(|(to, msg)| match msg {
+        Message::Accept { slot, .. } if *slot == torn => {
+            if keep > 0 {
+                keep -= 1;
+                return true;
+            }
+            audit.dropped_at_send(Party::Node(NodeId(self_id)), *to, msg);
+            false
         }
-        audit.dropped_at_send(Party::Node(NodeId(self_id)), *to, msg);
-        false
+        _ => true,
     });
-    tracing::info!(node = self_id, slot = torn.0, "column_torn");
-    assert!(kept, "a torn column keeps one Accept");
+    tracing::info!(node = self_id, slot = torn.0, parties, "column_torn");
+    assert!(keep == 0, "a torn column keeps at most one Accept");
     assert!(messages.len() < before, "a torn column drops an Accept");
     true
 }
