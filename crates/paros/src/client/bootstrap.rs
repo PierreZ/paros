@@ -18,7 +18,9 @@ use paros_core::{JournalId, JournalIdentifier, TenantId};
 use super::Client;
 use crate::machine::{Admission, CellPlan, ControlJournals};
 use crate::rpc::machine as wire;
-use crate::rpc::methods::{AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc, WellKnownMethod};
+use crate::rpc::methods::{
+    AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc, RegisterRpc, WellKnownMethod,
+};
 use crate::rpc::{InspectReply, InspectRequest, well_known};
 use crate::{Address, Names};
 
@@ -167,6 +169,39 @@ pub async fn admit<P: Providers>(
         Some(Ok(ack)) if ack.admitted => AdmitOutcome::Admitted,
         Some(Ok(ack)) => AdmitOutcome::Refused(ack.refusal),
         _ => AdmitOutcome::Unreachable,
+    }
+}
+
+/// What one `Register` sent to the cell coordinator came back with (#349).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegisterOutcome {
+    /// The cell's registry holds the machine at the address it asked for.
+    Registered,
+    /// The coordinator answered, and refused: its label (`not_coordinator`,
+    /// `other_cell`, `unknown_machine`, `unreachable`, `unavailable`,
+    /// `malformed`).
+    Refused(String),
+    /// No answer within the timeout: ask again.
+    Unreachable,
+}
+
+/// Ask the cell coordinator at `target` to register the machine `identity`
+/// names at the address it advertises (#349), once, within `timeout`.
+pub async fn register<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    target: &Address,
+    identity: wire::IdentifyAck,
+    timeout: Duration,
+) -> RegisterOutcome {
+    let request = wire::Register {
+        identity: Some(identity),
+    };
+    match call_once::<P, RegisterRpc>(providers, rpc, names, target, &request, timeout).await {
+        Some(Ok(ack)) if ack.registered => RegisterOutcome::Registered,
+        Some(Ok(ack)) => RegisterOutcome::Refused(ack.refusal),
+        _ => RegisterOutcome::Unreachable,
     }
 }
 

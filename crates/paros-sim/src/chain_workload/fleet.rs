@@ -951,6 +951,8 @@ impl FleetOps {
             && let Some(cell) = self.learn(ctx).await
         {
             election::election_settles(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
+            self.renamed_registered(ctx, &cell, ctx.time().now() + FLEET_SETTLE)
+                .await;
         }
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
@@ -1064,6 +1066,49 @@ impl FleetOps {
             }
         }
         directory_equals_cell(&directory, cell);
+    }
+
+    /// The cell heals around a renamed founding member (#349): once chaos
+    /// ends, the cell's registry holds every founding member that came back
+    /// under a new name at that name, so its peers dial it there. The
+    /// machine asks the coordinator, which writes it; the registry is read
+    /// again until it holds every one, or until `deadline`.
+    async fn renamed_registered(&self, ctx: &SimContext, known: &Cell, deadline: Duration) {
+        let renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
+        if renamed.is_empty() {
+            return;
+        }
+        let mut attempt = 0_u64;
+        let mut held = false;
+        while !held && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let first = known.first(attempt);
+            attempt += 1;
+            let mut cell = judged_cell(&known.members);
+            let loaded = paros::client::checkpoint::load(
+                &mut cell,
+                known.journals.cell,
+                &known.client,
+                first,
+                0,
+            )
+            .await;
+            held = matches!(loaded, LoadOutcome::Loaded { .. })
+                && renamed.iter().all(|(node, name)| {
+                    cell.state().registry().address(NodeId(*node)) == Some(name.as_str())
+                });
+            if !held && ctx.time().sleep(Duration::from_millis(100)).await.is_err() {
+                return;
+            }
+        }
+        if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        assert_always!(
+            held,
+            "machine: a renamed founding member is registered under its new name after chaos",
+            { "renamed" => renamed.len() }
+        );
+        assert_reachable!("machine: the cell heals around a renamed founding member");
     }
 
     /// [`FleetOps::final_check`]'s registry half (#189), on a seed that runs

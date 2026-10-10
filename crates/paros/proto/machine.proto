@@ -36,6 +36,13 @@ service Machine {
   // from that record on every later start. Idempotent for the same cell;
   // refused by a machine of another cell, or one promised in a `cell init`.
   rpc Admit(.paros.machine.v1.Admit) returns (.paros.machine.v1.AdmitAck);
+  // A machine of a cell asks the cell coordinator to register the address it
+  // advertises now (#349): a request to a leader (`docs/architecture.md`
+  // §3.3), sent to the coordinator the election journal names. The
+  // coordinator checks the machine answers there as itself, then writes
+  // `RegisterNode` into the cell control journal when the address changed.
+  // Idempotent: the registry holding the address is the answer.
+  rpc Register(.paros.machine.v1.Register) returns (.paros.machine.v1.RegisterAck);
   // A tenant's journal create or delete (#210), sent to the tenant
   // coordinator: until #212 and #225, the elected cell coordinator, at the
   // interface its election renewals publish. The coordinator writes the
@@ -170,6 +177,22 @@ message AdmitAck {
   // Why not, when not: "malformed", "other_cell" (the machine belongs to
   // another cell), "in_cell_init" (it promised in a `cell init` and has no
   // cell: admitting it could put it in two cells), "storage".
+  string refusal = 2;
+}
+
+message Register {
+  // The machine, as it identifies itself: its id, class, capacity, failure
+  // domain, cell, incarnation, and the address it advertises now.
+  IdentifyAck identity = 1;
+}
+
+message RegisterAck {
+  // The cell's registry holds the machine at the address it asked for.
+  bool registered = 1;
+  // Why not, when not: "not_coordinator" (ask the coordinator the election
+  // names now), "other_cell", "unknown_machine" (not a member of the cell,
+  // or retired), "unreachable" (it does not answer as itself at the
+  // address), "unavailable" (the write did not land), "malformed".
   string refusal = 2;
 }
 

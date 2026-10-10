@@ -109,6 +109,11 @@ pub(crate) struct MachineBoard {
     listens: BTreeMap<usize, std::net::IpAddr>,
     /// How many times each machine moved, by rank.
     moves: BTreeMap<usize, u8>,
+    /// The name each renamed machine advertises now, by rank (#349): a
+    /// machine absent here advertises its rank's address.
+    renamed: BTreeMap<usize, Address>,
+    /// How many times each machine was renamed, by rank.
+    renames: BTreeMap<usize, u8>,
 }
 
 impl MachineBoard {
@@ -120,7 +125,8 @@ impl MachineBoard {
             .values()
             .filter(|plan| {
                 let n = plan.members.len();
-                n - wiped_members(self, plan) < n / 2 + 1
+                n.saturating_sub(wiped_members(self, plan) + renamed_members(self, plan))
+                    < n / 2 + 1
             })
             .map(|plan| plan.cell_id)
             .collect();
@@ -164,11 +170,30 @@ pub(crate) fn is_election(state: &StateHandle, journal: paros::JournalIdentifier
     lock(&machine_board(state)).elections.contains(&journal)
 }
 
+/// How many of `plan`'s members came back under a new name (#349): a
+/// renamed member its peers cannot reach until the registry holds its new
+/// name. Counted with the wiped ones when a later wipe could leave the
+/// others no majority to write that name with.
+fn renamed_members(board: &MachineBoard, plan: &CellPlan) -> usize {
+    if board.wiped.is_empty() {
+        return 0;
+    }
+    board
+        .renamed
+        .keys()
+        .filter_map(|rank| {
+            let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
+            board.nodes.get(&addr).copied()
+        })
+        .filter(|node| plan.members.iter().any(|(id, _)| id.0 == *node))
+        .count()
+}
+
 /// How many of `plan`'s members the board saw wiped.
 fn wiped_members(board: &MachineBoard, plan: &CellPlan) -> usize {
     plan.members
         .iter()
-        .filter(|(id, addr)| board.wiped.contains(&(addr.clone(), id.0)))
+        .filter(|(id, _)| board.wiped.iter().any(|(_, old)| *old == id.0))
         .count()
 }
 
@@ -408,24 +433,54 @@ const MACHINE_PORT: u16 = 4500;
 
 const NAMES_KEY: &str = "paros-machine-names";
 
-/// The run's name table (#257): moonpool's `ScriptedResolver`, which the
-/// machines and the workload's clients resolve the machines' advertised
-/// names through, and which a machine that moves repoints.
+const OPERATOR_NAMES_KEY: &str = "paros-operator-names";
+
+/// The machines' name table (#257): moonpool's `ScriptedResolver`, which
+/// the machines resolve each other's advertised names through, and which a
+/// machine that moves repoints. A name a renamed machine left keeps the IP
+/// it had, where nobody listens now (#349): its peers reach it only at the
+/// name the registry holds.
 fn name_table(state: &StateHandle) -> ScriptedResolver {
     crate::state::published_arc(state, NAMES_KEY, ScriptedResolver::new)
         .as_ref()
         .clone()
 }
 
-/// How every process of the run resolves the machines' addresses (#257).
+/// The operators' name table (#349): the entry endpoints the workload's
+/// clients dial. A rank's name follows its machine wherever it is, renamed
+/// or not, as an operator who renames a machine updates its own entry.
+fn operator_table(state: &StateHandle) -> ScriptedResolver {
+    crate::state::published_arc(state, OPERATOR_NAMES_KEY, ScriptedResolver::new)
+        .as_ref()
+        .clone()
+}
+
+/// How the workload's clients resolve the machines' addresses (#257).
 pub(crate) fn names(state: &StateHandle) -> paros::Names {
+    paros::Names::new(operator_table(state))
+}
+
+/// How the machines resolve each other's addresses (#257, #349).
+fn machine_names(state: &StateHandle) -> paros::Names {
     paros::Names::new(name_table(state))
+}
+
+/// Point `host` at `ip` in both tables.
+fn point(state: &StateHandle, host: &str, ip: std::net::IpAddr) {
+    name_table(state).set(host, vec![ip]);
+    operator_table(state).set(host, vec![ip]);
 }
 
 /// The host a machine of rank `rank` advertises on a seed whose machines
 /// advertise names (#257).
 fn machine_host(rank: usize) -> String {
     format!("machine-{rank}.paros")
+}
+
+/// The host the machine of rank `rank` advertises after its `count`-th
+/// rename (#349).
+fn renamed_host(rank: usize, count: u8) -> String {
+    format!("machine-{rank}-{count}.paros")
 }
 
 /// The address the machine of rank `rank` at `ip` advertises: its name on
@@ -461,6 +516,7 @@ pub(crate) fn machine_addrs(
                 && let Ok(ip) = ip.parse::<std::net::IpAddr>()
             {
                 table.set(&machine_host(rank), vec![ip]);
+                operator_table(state).set(&machine_host(rank), vec![ip]);
             }
         }
     }
@@ -472,31 +528,122 @@ pub(crate) fn machine_addrs(
         .collect()
 }
 
-/// Where the machine of rank `rank` binds at this boot (#257): its process
-/// IP at its first boot; on a seed whose machines advertise names, a reboot
-/// may land at a new address (the run's `move_pct`), as a container that
-/// Docker restarts gets a new IP. The name follows the machine: the table
-/// is repointed before the machine binds, and its peers resolve the name
-/// again after a failed dial. Moonpool routes a connection by the address
-/// a listener bound, so a moved machine binds an address of its own outside
-/// the topology (`10.250.<rank>.<move>`); the network faults that strike by
-/// process IP pass it by while it is there.
+/// What a machine's disk holds at its boot, as the harness reads it before
+/// the machine starts (#349): it decides whether the machine may come back
+/// under a new name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnDisk {
+    /// No record: a new machine (a first boot, or a wipe took the old one).
+    Empty,
+    /// A record of a machine in a cell, formed or admitted.
+    InCell,
+    /// A record of an idle machine, or a read that failed.
+    Other,
+}
+
+/// What the harness reads on the machine's disk before it boots, on a seed
+/// whose machines advertise names (`named`); nothing is read on another.
+async fn on_disk<S: moonpool_sim::StorageProvider + Clone>(
+    disk: &ProviderDisk<S>,
+    named: bool,
+) -> OnDisk {
+    if !named {
+        return OnDisk::Other;
+    }
+    match disk.read_record().await {
+        Ok(None) => OnDisk::Empty,
+        Ok(Some(text)) => match MachineRecord::parse(&text) {
+            Ok(record) if record.formed().is_some() || record.admitted.is_some() => OnDisk::InCell,
+            _ => OnDisk::Other,
+        },
+        Err(_) => OnDisk::Other,
+    }
+}
+
+/// Whether the machine of rank `rank` may come back under a new name
+/// (#349). Until the registry holds the new name, nobody can send to it, so
+/// a founding member renamed is a member its peers cannot reach, and the
+/// registry's write needs a majority of the others. So: no founding member
+/// was wiped, no other one was renamed, and the cell is not of two (each
+/// member is the other's majority). A machine outside the founders is in
+/// no quorum; it is renamed only while every founding member keeps its
+/// name, so the founders its admission names still answer.
+fn may_rename(board: &MachineBoard, layout: &crate::shape::MachineLayout, rank: usize) -> bool {
+    let founder_renamed = board.renamed.keys().any(|r| *r < layout.founders);
+    if rank >= layout.founders {
+        return !founder_renamed;
+    }
+    layout.founders != 2
+        && board.wiped.is_empty()
+        && board
+            .renamed
+            .keys()
+            .all(|r| *r == rank || *r >= layout.founders)
+}
+
+/// The founding members renamed this run and still on their disks (#349):
+/// each one's id and the name it advertises now.
+pub(crate) fn renamed_founders(state: &StateHandle, founders: usize) -> Vec<(u64, Address)> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .renamed
+        .iter()
+        .filter(|(rank, _)| **rank < founders)
+        .filter_map(|(rank, name)| {
+            let rank_addr =
+                Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
+            let node = *board.nodes.get(&rank_addr)?;
+            board
+                .voters
+                .contains_key(&node)
+                .then(|| (node, name.clone()))
+        })
+        .collect()
+}
+
+/// Where the machine of rank `rank` binds at this boot (#257), and the
+/// address it advertises (#349): its process IP at its first boot; on a
+/// seed whose machines advertise names, a reboot may land at a new address
+/// (the run's `move_pct`), as a container that Docker restarts gets a new
+/// IP. The name follows the machine: the table is repointed before the
+/// machine binds, and its peers resolve the name again after a failed dial.
+/// Moonpool routes a connection by the address a listener bound, so a moved
+/// machine binds an address of its own outside the topology
+/// (`10.250.<rank>.<move>`); the network faults that strike by process IP
+/// pass it by while it is there.
+///
+/// A machine in a cell may also come back under a new name (the run's
+/// `rename_pct`, #349): `machine-<rank>-<n>.paros`, at a new address. Its
+/// old name keeps the old address, where nobody listens, so its peers reach
+/// it only once the cell's registry holds the new name. A machine whose
+/// disk is empty is a new one: it advertises its rank's name again.
 fn boot_listen(
     state: &StateHandle,
     layout: &crate::shape::MachineLayout,
     rank: usize,
     my_ip: &str,
-) -> SimulationResult<std::net::SocketAddr> {
+    disk: OnDisk,
+) -> SimulationResult<(std::net::SocketAddr, Address)> {
     let own: std::net::IpAddr = my_ip
         .parse()
         .map_err(|e| SimulationError::InvalidState(format!("bad machine ip {my_ip}: {e}")))?;
+    let original = advertised(layout, rank, my_ip)?;
     if !layout.named {
-        return Ok(std::net::SocketAddr::new(own, MACHINE_PORT));
+        return Ok((std::net::SocketAddr::new(own, MACHINE_PORT), original));
     }
     let board = machine_board(state);
     let mut board = lock(&board);
     let rebooted = board.listens.contains_key(&rank);
-    let moves = rebooted && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.move_pct;
+    if disk == OnDisk::Empty && board.renamed.remove(&rank).is_some() {
+        assert_reachable!("machine: a wiped renamed machine advertises its rank's name again");
+    }
+    let renames = rebooted
+        && disk == OnDisk::InCell
+        && may_rename(&board, layout, rank)
+        && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct;
+    let moves =
+        renames || (rebooted && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.move_pct);
     let ip = if moves {
         let count = board.moves.entry(rank).or_default();
         *count = count.wrapping_add(1).max(1);
@@ -509,8 +656,26 @@ fn boot_listen(
         board.listens.get(&rank).copied().unwrap_or(own)
     };
     board.listens.insert(rank, ip);
-    name_table(state).set(&machine_host(rank), vec![ip]);
-    Ok(std::net::SocketAddr::new(ip, MACHINE_PORT))
+    if renames {
+        let count = board.renames.entry(rank).or_default();
+        *count = count.wrapping_add(1).max(1);
+        let host = renamed_host(rank, *count);
+        let new_name = Address::parse(&format!("{host}:{MACHINE_PORT}"))
+            .map_err(SimulationError::InvalidState)?;
+        assert_reachable!("machine: a machine comes back under a new name");
+        tracing::info!(rank, %new_name, "machine_renamed");
+        board.renamed.insert(rank, new_name);
+        point(state, &host, ip);
+    } else if board.renamed.contains_key(&rank) {
+        let count = board.renames.get(&rank).copied().unwrap_or(1);
+        point(state, &renamed_host(rank, count), ip);
+    } else {
+        name_table(state).set(&machine_host(rank), vec![ip]);
+    }
+    // The operator's entry for the rank follows the machine (#349).
+    operator_table(state).set(&machine_host(rank), vec![ip]);
+    let advertise = board.renamed.get(&rank).cloned().unwrap_or(original);
+    Ok((std::net::SocketAddr::new(ip, MACHINE_PORT), advertise))
 }
 
 /// An operator's slip now and then (#257): a wildcard listen address and no
@@ -558,7 +723,6 @@ async fn run_machine_role(
         board.founders = addrs[..layout.founders].iter().cloned().collect();
         board.ips.insert(addr.clone(), my_ip.to_string());
     }
-    let listen = boot_listen(ctx.state(), &layout, rank, my_ip)?;
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
@@ -571,6 +735,8 @@ async fn run_machine_role(
         ..crate::shape::journal_layout(ctx.state())
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
+    let held = on_disk(&disk(), layout.named).await;
+    let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
     let time = ctx.time().clone();
@@ -602,8 +768,8 @@ async fn run_machine_role(
     };
     operator_slip();
     let addresses =
-        MachineAddresses::new(listen, Some(addr.clone())).map_err(SimulationError::InvalidState)?;
-    let names = names(ctx.state());
+        MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;
+    let names = machine_names(ctx.state());
     loop {
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),

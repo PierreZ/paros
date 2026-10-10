@@ -23,7 +23,10 @@
 //!   (`storage` or `stateless`) and its capacity (role slots of its class);
 //!   a reboot registers the same id again, updating address and capacity,
 //!   never class, and records the machine's RPC incarnation (with the
-//!   address, its `InterfaceRef` identity). It is drained, then retired — an
+//!   address, its `InterfaceRef` identity). A genesis node registers too
+//!   (#349): its entry is the address its peers dial, in place of the one
+//!   its deployment was booted with ([`Registry::address`]); it stays in the
+//!   pool and is never drained. A registered node is drained, then retired — an
 //!   id is never reused, a retired one included. Capacity **bookings**
 //!   (`BookCapacity`, written by the cell coordinator) are keyed by role:
 //!   one slot holds one [`Role`] of one journal or matchmaker set
@@ -640,7 +643,7 @@ pub enum RegistryRefusal {
     /// Not exactly one decodable registry entry (or a checkpoint this fold
     /// cannot use).
     Malformed,
-    /// The id is a genesis node or a retired one (ids are never reused).
+    /// The id is a retired one (ids are never reused).
     AlreadyKnown {
         /// The node named.
         id: NodeId,
@@ -820,7 +823,10 @@ impl Registry {
                 incarnation,
             }) => self.register(id, addr, class, (capacity, incarnation), failure_domain),
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
-                Some(node) if node.standing == NodeStanding::Registered => {
+                // A genesis node is never drained, registered or not.
+                Some(node)
+                    if node.standing == NodeStanding::Registered && !self.genesis.contains(&id) =>
+                {
                     node.standing = NodeStanding::Draining;
                     RegistryEvent::Draining { id }
                 }
@@ -881,9 +887,9 @@ impl Registry {
         (capacity, incarnation): (u64, u128),
         failure_domain: String,
     ) -> RegistryEvent {
-        if self.genesis.contains(&id) {
-            return RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id });
-        }
+        // A genesis node (a founding member) registers too (#349): its
+        // entry is the address peers dial, which may change across its
+        // restarts. It stays in the pool whatever the registry says.
         match self.nodes.get_mut(&id) {
             Some(node) if node.standing == NodeStanding::Retired => {
                 RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id })
@@ -1191,6 +1197,17 @@ impl Registry {
         self.nodes.get(&id)
     }
 
+    /// The address node `id` registered last (#349): what its peers dial.
+    /// `None` for a node that never registered (a genesis node keeps the
+    /// address its cell plan names) or a retired one.
+    #[must_use]
+    pub fn address(&self, id: NodeId) -> Option<&str> {
+        self.nodes
+            .get(&id)
+            .filter(|n| n.standing != NodeStanding::Retired)
+            .map(|n| n.addr.as_str())
+    }
+
     /// Every node registered at runtime, in id order.
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &RegisteredNode)> {
         self.nodes.iter().map(|(id, n)| (*id, n))
@@ -1488,10 +1505,14 @@ mod tests {
     fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
         let mut reg = Registry::new([NodeId(0), NodeId(1)]);
         let register = |id: u64| register(id, Class::Storage, 1);
-        assert_eq!(
+        // A genesis node registers its address (#349), and stays in the
+        // pool once.
+        assert!(matches!(
             reg.fold(0, &register(0)),
-            RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id: NodeId(0) })
-        );
+            RegistryEvent::Registered { .. }
+        ));
+        assert_eq!(reg.address(NodeId(0)), Some("n0"));
+        assert_eq!(reg.address(NodeId(1)), None);
         assert!(matches!(
             reg.fold(1, &register(100)),
             RegistryEvent::Registered { .. }
