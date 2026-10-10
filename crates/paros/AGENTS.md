@@ -123,7 +123,7 @@ checkpoint, common, fleet, public, internal, matchmaker, system, machine, view}`
 
 - `paros-core` with `tracing` + `serde` (`:17`); `prost` (`:34`), `postcard` (`:37`), `serde`
   (`:38`), `crc32c` (`:39`), `tracing` (`:42`), `tokio` `sync` (`:45`), `tokio-util` (`:48`).
-- moonpool, rev `0b6ca9a` (moonpool#323 (system provider): `SystemProvider` and the simulated disk's counters, after moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
+- moonpool, rev `50ec6b1` (moonpool#323 (system provider): `SystemProvider` and the simulated disk's counters, after moonpool#318's `buggify_named!` and `set_activation`): `moonpool-core` (`select`, `:26`), `moonpool-rpc` (`prost`, `:28`),
   `moonpool-journal` (`:32`), `moonpool-buggify` (`:36`), `moonpool-assertions` (`:37`), dev `moonpool-sim` (`:61`).
 - Dev: `futures` executor (`:53`), `tokio` `rt`+`macros` (`:57`). Build: `prost-build` (`:60`).
 - The pin is **eleven lines**: six here, `crates/paros-core/Cargo.toml` (`moonpool-assertions`),

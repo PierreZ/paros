@@ -926,6 +926,7 @@ pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option
         if founder && board.init_sent && unformed {
             assert_reachable!("machine: a founding member is wiped during init");
         }
+        eprintln!("DBG wiped addr={addr} old={old} founder={founder} unformed={unformed} voters={:?} lost={:?}", board.voters.keys().collect::<Vec<_>>(), board.lost);
         tracing::info!(%addr, node = old, "machine_wiped");
         return;
     };
@@ -1054,6 +1055,7 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
             "machine: an admitted machine holds no vote and no promise",
             { "node" => node }
         );
+        eprintln!("DBG admitted-boot addr={addr} node={node} founder={}", board.founders.contains(addr));
         if board.admitted.insert(node, admission.cell).is_none() {
             assert_reachable!("machine: a machine is admitted into the cell");
         }
@@ -1107,6 +1109,7 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
         if wiped_members(&board, plan) > 0 {
             assert_reachable!("machine: a cell forms around a wiped founder's old id");
         }
+        eprintln!("DBG vote addr={addr} node={node} ballot={ballot:?} cell={} members={:?}", plan.cell_id, plan.members);
         board.voters.insert(node, plan.clone());
         board.note_lost();
         if board.formed.insert(node) && board.formed.len() > 1 {

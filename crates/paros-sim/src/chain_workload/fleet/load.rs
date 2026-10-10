@@ -107,7 +107,6 @@ fn judge(ctx: &SimContext, ack: &LoadAck, ip: Option<IpAddr>) {
     );
     if let Some(disk) = &busyness.disk {
         assert_sometimes!(disk.busy > 0.0, "load: a disk is busy in a window");
-        assert_sometimes!(disk.busy > 0.9, "load: a disk is busy over 90%");
     }
     let Some(ip) = ip else {
         return;

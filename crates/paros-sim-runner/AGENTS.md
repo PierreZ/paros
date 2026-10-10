@@ -28,7 +28,7 @@ the `mutants` test reads `PAROS_MUTANT_SEEDS`.
   axis. Coverage never decides it.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
   (`EXPLORATION_TIMELINES_PER_SEED` timelines): prints GREEN or RED with the violations, exits
-  1 on red (`replay_for`, `hunt.rs:25`). There is one campaign: the CTRL corpus is folded into
+  1 on red (`replay_for`, `hunt.rs:25`). `sim-paros-hunt replay-recipe <seed> <count>:<reseed>,..` replays one explored timeline from a bug recipe the sweep printed (`paros_sim::replay_chain_timeline`). There is one campaign: the CTRL corpus is folded into
   it (#263).
 
 ## Local rules
