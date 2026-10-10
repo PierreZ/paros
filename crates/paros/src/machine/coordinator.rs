@@ -383,6 +383,10 @@ struct Candidacy {
     /// The tenant coordinator reuses a taken journal id at the first draw of
     /// every create (a BUGGIFY decision): the fold must refuse it.
     reuse: bool,
+    /// The first fenced term steps down without a `Resign` record, as if
+    /// the record were lost (a BUGGIFY decision): the fold still names the
+    /// term's leader, and the term must not come back.
+    lose_resign: bool,
     /// The machines' `Register` requests (#349).
     registers: Inbound<RegisterRpc, wire::Register, wire::RegisterAck>,
 }
@@ -422,6 +426,7 @@ pub(crate) fn spawn<P: Providers>(
         stall: moonpool_buggify::buggify_with_prob!(0.3),
         hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
+        lose_resign: moonpool_buggify::buggify_with_prob!(0.5),
         registers: Inbound::plain(serve_well_known::<P, RegisterRpc>(rpc)?),
     };
     let mut client = cell_client(providers, rpc, formed).with_shutdown(shutdown.clone());
@@ -503,6 +508,7 @@ async fn campaign<P: Providers>(
         mut stall,
         hand_off: mut handing,
         reuse,
+        mut lose_resign,
         mut registers,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
@@ -583,7 +589,16 @@ async fn campaign<P: Providers>(
                 // give the term to the next campaign, which installs itself
                 // under a fresh uuid (#349).
                 moonpool_assertions::reachable!("coordinator: a fenced term resigned");
-                election.resign(None).await;
+                if lose_resign {
+                    lose_resign = false;
+                    moonpool_assertions::reachable!(
+                        "coordinator: a fenced term's resignation was lost"
+                    );
+                    election.step_down();
+                } else {
+                    election.resign(None).await;
+                }
+                assert!(election.leading().is_none(), "a resigned term is not led");
                 served = None;
                 desk = None;
                 assert!(watching.is_none(), "a resigned term holds no session");

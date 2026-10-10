@@ -142,6 +142,12 @@ pub struct Election<P: Providers> {
     /// The term it leads, as this incarnation (never one an earlier
     /// incarnation led: it campaigns past that).
     leading: Option<u64>,
+    /// The highest term it gave up ([`Election::resign`],
+    /// [`Election::step_down`]). It never leads that term or an earlier one
+    /// again, even while the fold still names it: a resignation whose record
+    /// was lost or not read yet must not bring the term back, or the term's
+    /// uuid would claim the journal again from the session that fenced it.
+    resigned: Option<u64>,
     /// When it last saw the current leadership alive (a campaign, a
     /// hand-off, a renewal), on its own clock — or started watching.
     heard: Duration,
@@ -185,6 +191,7 @@ impl<P: Providers> Election<P> {
             minted: 0,
             handed: None,
             leading: None,
+            resigned: None,
             heard,
             renewed: None,
             caught_up: false,
@@ -266,6 +273,22 @@ impl<P: Providers> Election<P> {
     fn mine(&self, leader: &Leader) -> bool {
         leader.candidate.id == self.me.id
             && (self.minted(leader.uuid) || self.handed == Some(leader.uuid))
+    }
+
+    /// The term this candidate leads by what the fold says now: the fold's
+    /// leader is it, in a term it did not give up.
+    fn held(&self) -> Option<u64> {
+        let leader = self.fold.leader().filter(|leader| self.mine(leader))?;
+        if self
+            .resigned
+            .is_some_and(|resigned| leader.term <= resigned)
+        {
+            // The resignation is not in the fold (lost, or not read yet):
+            // the term stays given up, and the lease runs out on it.
+            moonpool_assertions::reachable!("election: a resigned term is not led again");
+            return None;
+        }
+        Some(leader.term)
     }
 
     /// Read the election journal from the fold's position to its tail (at
@@ -412,17 +435,17 @@ impl<P: Providers> Election<P> {
     /// half renewal period), then renew when this candidate leads and a
     /// renewal is due, or campaign when it deems the leader gone (`jitter`
     /// is the caller's draw, added to the lease).
+    ///
+    /// # Panics
+    ///
+    /// If it would lead a term it gave up (a programmer error).
     pub async fn step(&mut self, jitter: Duration) -> Step {
         let wait_ms = u64::try_from(self.tunables.renew_every.as_millis() / 2).unwrap_or(u64::MAX);
         self.watch(wait_ms).await;
         let held = self.leading;
-        let current = self.fold.leader().cloned();
         // What the fold says now: this incarnation leads iff the fold's
-        // leader is it.
-        self.leading = current
-            .as_ref()
-            .filter(|leader| self.mine(leader))
-            .map(|leader| leader.term);
+        // leader is it, in a term it did not give up.
+        self.leading = self.held();
         if let Some(term) = held
             && self.leading != Some(term)
             && self.leading.is_none()
@@ -432,12 +455,13 @@ impl<P: Providers> Election<P> {
         }
         if self.leading.is_none() && self.caught_up && self.expired(jitter) {
             self.campaign(wait_ms).await;
-            let current = self.fold.leader().cloned();
-            self.leading = current
-                .as_ref()
-                .filter(|leader| self.mine(leader))
-                .map(|leader| leader.term);
+            self.leading = self.held();
         }
+        assert!(
+            self.leading
+                .is_none_or(|term| self.resigned.is_none_or(|resigned| term > resigned)),
+            "a given-up term is never led again"
+        );
         let Some(leader) = self.leading().cloned() else {
             return Step::Following {
                 leader: self.fold.leader().cloned(),
@@ -498,10 +522,28 @@ impl<P: Providers> Election<P> {
             candidate: self.me.id,
             successor: next.clone(),
         };
-        self.leading = None;
-        self.renewed = None;
+        self.give_up(leader.term);
         self.append(&record).await;
         next.map(|(_, uuid)| uuid)
+    }
+
+    /// Stop leading the term this candidate leads without a record: the
+    /// other candidates take over once its lease runs out. A resignation
+    /// whose record is lost is this. The term it gave up, `None` when it
+    /// leads nothing.
+    pub fn step_down(&mut self) -> Option<u64> {
+        let term = self.leading()?.term;
+        self.give_up(term);
+        Some(term)
+    }
+
+    /// Forget leading `term` for good (see `resigned`).
+    fn give_up(&mut self, term: u64) {
+        self.resigned = Some(self.resigned.map_or(term, |resigned| resigned.max(term)));
+        self.leading = None;
+        self.renewed = None;
+        assert!(self.resigned >= Some(term), "a given-up term is remembered");
+        assert!(self.leading().is_none(), "a given-up term is not led");
     }
 }
 
