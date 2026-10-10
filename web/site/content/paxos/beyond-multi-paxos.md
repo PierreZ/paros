@@ -220,7 +220,7 @@ hole. The rule that closes both is in the next section.
 `Config::proxy_count` (`state.rs`); the model checker `proxy_model.rs`; the
 example `paros-core/examples/proxy_leader.rs`; the driver `paros::run_proxy`
 (`paros/src/proxy/mod.rs`), the harness's `ProxyProcess` and `PROXY_GROUP`
-(`paros-sim/src/process.rs`, `roles.rs`), the audit's
+(`paros-sim/src/process/`, `roles.rs`), the audit's
 `observe_proxy_decision` (`paros-sim/src/audit/state.rs`). Paper: Whittaker et
 al., *Compartmentalized Paxos* §3.1. No level yet.
 
@@ -317,7 +317,7 @@ Phase 1 reads.
 `ReplicaId` (`membership.rs`); `WriteOp::Learned` (`write.rs`); the example
 `paros-core/examples/replica_tier.rs`; the driver `paros::run_replica`
 (`paros/src/replica_tier/mod.rs`), the harness's `ReplicaProcess` and
-`REPLICA_GROUP` (`paros-sim/src/process.rs`, `roles.rs`); the replica's quorum
+`REPLICA_GROUP` (`paros-sim/src/process/`, `roles.rs`); the replica's quorum
 read `ReplicaNode::quorum_read_in` and its journal read `ReplicaNode::read_log`;
 the jump below the floor `ReplicaNode::trim_to`. Paper: Whittaker et al., *Compartmentalized
 Paxos* §2.3, §3.3 and §3.4. No level yet.

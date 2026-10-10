@@ -58,7 +58,7 @@ became effective.
 
 **Verification.** By reading and by the harness's oracle, not by a model claim: the model
 has no node reboot of `ColocatedNode` state. The harness aims one retirement in ten at a
-*member* rather than at a retirable acceptor (`chain_workload.rs`, the `aim_at_member`
+*member* rather than at a retirable acceptor (`chain_workload/reconfigure.rs`, the `aim_at_member`
 coin, with the watermark it just read), and the audit's "gc: a node retires only after an
 effective floor named it retirable" (`crates/paros-sim/src/audit/matchmaker.rs`) is an
 always-assertion on the retired node against the set the effective floor released.
