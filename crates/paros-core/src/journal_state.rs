@@ -300,6 +300,12 @@ impl JournalState {
         outcome
     }
 
+    /// A single-writer write: accepted only under the current leader uuid,
+    /// at `next_seq`; a retry of the accepted write is a duplicate.
+    ///
+    /// Proved in simulation (#241): with the uuid check dropped, 172 of the
+    /// mutation hunt's 300 seeds go red on "a write is accepted only under a
+    /// uuid won in the log" and the linearizability check.
     fn apply_write<'a>(
         &mut self,
         entry: &Entry,
@@ -344,6 +350,12 @@ impl JournalState {
     }
 
     /// The verdict on `command` under `mode`, the state moved accordingly.
+    ///
+    /// Proved in simulation (#241): a single-writer journal that takes an
+    /// unfenced write goes red on "an unfenced write to a single-writer
+    /// journal is refused" (5 of 300 seeds), and a multi-writer journal that
+    /// appends a fenced write on "a multi-writer write is accepted unfenced"
+    /// (2 of 300).
     fn judge<'a>(
         &mut self,
         mode: WriterMode,
@@ -408,6 +420,10 @@ impl JournalState {
 
     /// A multi-writer write: accepted at the next position whenever it
     /// carries records, whatever position it names (#241, §2.4).
+    ///
+    /// Proved in simulation (#241): refusing a write whose position is not
+    /// `next_seq` goes red on "a multi-writer journal accepts every unfenced
+    /// write" (11 of 300 seeds).
     fn apply_append(&mut self, entry: &Entry) -> Outcome {
         assert!(
             !entry.leader.is_set(),
@@ -428,6 +444,10 @@ impl JournalState {
         }
     }
 
+    /// `SetLeader(new, old)`: a compare-and-set on the leader uuid.
+    ///
+    /// Proved in simulation (#241): without the compare on `old`, 83 of 300
+    /// seeds go red on the linearizability check.
     fn apply_set_leader(&mut self, new: LeaderUuid, old: Option<LeaderUuid>) -> Outcome {
         // The unset uuid never leads, and the current leader cannot win its
         // own term again.
@@ -445,6 +465,10 @@ impl JournalState {
         Outcome::Leader(self.view())
     }
 
+    /// A single-writer `Truncate`: fenced by the leader uuid like a write.
+    ///
+    /// Proved in simulation (#228, #241): unfenced, 81 of 300 seeds go red
+    /// on "a Truncate is accepted only from the writer in force".
     fn apply_truncate(&mut self, leader: LeaderUuid, up_to: Seq) -> Outcome {
         if !self.is_current(leader) {
             return Outcome::TruncateRefused(self.view());

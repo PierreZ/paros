@@ -20,9 +20,19 @@ docker compose up -d --build
 docker compose run --rm init | tee init.out
 J=$(sed -n 's/.* journals=\([^ ,]*\).*/\1/p' init.out)
 
-# Write and read the cell's user journal.
+# Write and read the cell's user journal. `--leader 7` claims the journal under the leader
+# uuid 7 (a uuid is drawn when absent), then writes at the tail.
 docker compose run --rm parosctl write "$J" hello world --leader 7
 docker compose run --rm parosctl read "$J"
+# A page of at most one record; at the tail, wait up to 2 s for a new one (each node caps
+# the wait at its PAROS_MAX_WAIT_MS, 1 s by default).
+docker compose run --rm parosctl read "$J" --limit 1
+docker compose run --rm parosctl read "$J" --from 2 --wait-ms 2000
+
+# Supersede the writer: uuid 8 takes the journal, and uuid 7 is refused from now on (exit 3).
+docker compose run --rm parosctl set-leader "$J" --new 8
+docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
+docker compose run --rm parosctl write "$J" fresh --leader 8
 
 # Tenants: created once (a second create of a name is refused).
 docker compose run --rm parosctl tenant create acme
@@ -41,7 +51,7 @@ docker compose run --rm parosctl inspect --journal "$J"
 
 # Kill a machine and keep writing (a majority is left), then bring it back.
 docker compose kill node2
-docker compose run --rm parosctl write "$J" still here --leader 7
+docker compose run --rm parosctl write "$J" still here --leader 8
 docker compose start node2
 
 # Logs, and tear everything down (volumes included).
@@ -51,6 +61,10 @@ docker compose down -v
 
 Add `--json` after `parosctl` for machine-readable output, e.g.
 `docker compose run --rm parosctl --json tenant list`.
+
+The journal `init` creates is single-writer: a writer must hold the current leader uuid. The
+four calls, the two writer modes and the limits are on the site's journal API page
+(`web/site/content/parosd/journal-api.md`).
 
 ## Locally, without Docker
 

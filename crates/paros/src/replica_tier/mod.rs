@@ -49,7 +49,7 @@ use paros_core::{
     ReadState, ReplicaNode, Slot, TenantId, WriteOp,
 };
 
-use crate::driver::log_reads::{JournalReads, refuse_journal, wait_ticks};
+use crate::driver::log_reads::{JournalReads, ReadLimits, refuse_journal};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::Audit;
@@ -199,16 +199,11 @@ fn open_read<A: Audit>(
     });
     let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
     let opened = fold_head(replica);
-    let wait = wait_ticks(
-        req.wait_ms,
-        tunables.tick_interval,
-        tunables.read_poll_ticks,
-    );
     if basis.is_some() {
         audit.quorum_read_opened(replica.config().id, ctx);
     }
     replica.quorum_read_in(ctx, row);
-    reads.park(req, reply, wait, row, opened);
+    reads.park(req, reply, ReadLimits::of(tunables), row, opened);
 }
 
 /// Drive a paros replica to completion over the given providers.

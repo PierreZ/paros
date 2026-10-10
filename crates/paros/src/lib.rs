@@ -50,8 +50,9 @@ pub use audit::{
 pub use corruption::{CorruptionVerdict, IntegrityFault};
 pub use driver::reply::Reply;
 pub use driver::{
-    BelowFloor, BootKind, BootRefusal, DriverTunables, JournalStores, RunError, SystemPlan,
-    command_hash, message_kind, parse_addr, registration_history_hash, run_journals, run_node,
+    BelowFloor, BootKind, BootRefusal, DriverTunables, JournalStores, MAX_READ_RECORDS, RunError,
+    SystemPlan, command_hash, message_kind, parse_addr, registration_history_hash, run_journals,
+    run_node,
 };
 pub use rpc::{
     EdgeRejection, InspectRefusal, InspectReply, InspectRequest, InspectTarget, MAX_FRAME_BYTES,

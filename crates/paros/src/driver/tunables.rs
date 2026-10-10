@@ -72,7 +72,9 @@ impl DriverTunables {
     /// | `connection_timeout` | 3 s | a connect and its handshake across zones, a lost SYN included (retransmitted at 1 s) |
     /// | `delivery_timeout` | 2 s | an enqueue on the peer, never its processing |
     /// | `read_retry_ticks` | 20 (2 s) | a quorum read's confirmation, inside `parosctl`'s 5 s deadline |
-    /// | `read_poll_ticks` | 10 (1 s) | a tail long-poll, inside the client's read deadline |
+    /// | `max_wait_ms` | 1 s | a tail wait, inside the client's read deadline |
+    /// | `min_wait_ms` | 0 | a client may ask to answer at once |
+    /// | `max_read_records`, `max_read_bytes`, `max_batch_*` | the defaults | bounded by bytes, not by time |
     /// | `quarantine_ticks` | 80 (8 s) | eight election timeouts before a faulty device is retried |
     /// | `election_backoff_doublings` | 3 | up to `8 × T` (8–16 s) after failed campaigns |
     /// | inbox and queue capacities, `delivery_batch` | the defaults | bounded by bytes, not by time |
@@ -95,7 +97,7 @@ impl DriverTunables {
             connection_timeout: Duration::from_secs(3),
             delivery_timeout: Duration::from_secs(2),
             read_retry_ticks: 2 * ELECTION_BASE,
-            read_poll_ticks: ELECTION_BASE,
+            max_wait_ms: 1000,
             quarantine_ticks: 8 * ELECTION_BASE,
             election_backoff_doublings: 3,
             match_resend_ticks: ELECTION_BASE,
@@ -140,7 +142,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 23] = [
+        let fields: [(&'static str, u64, u64); 26] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -152,7 +154,10 @@ impl DriverTunables {
             ("connection_timeout", ms(self.connection_timeout), 1),
             ("delivery_timeout", ms(self.delivery_timeout), 1),
             ("read_retry_ticks", self.read_retry_ticks, 1),
-            ("read_poll_ticks", self.read_poll_ticks, 0),
+            ("max_wait_ms", self.max_wait_ms, 0),
+            ("min_wait_ms", self.min_wait_ms, 0),
+            ("max_read_records", self.max_read_records, 1),
+            ("max_read_bytes", self.max_read_bytes, 1),
             ("quarantine_ticks", self.quarantine_ticks, 1),
             (
                 "election_backoff_doublings",

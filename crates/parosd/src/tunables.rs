@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 23] = [
+const FIELDS: [Field; 26] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -27,7 +27,10 @@ const FIELDS: [Field; 23] = [
     Field::Millis("connection_timeout", |t, v| t.connection_timeout = v),
     Field::Millis("delivery_timeout", |t, v| t.delivery_timeout = v),
     Field::Count("read_retry_ticks", |t, v| t.read_retry_ticks = v),
-    Field::Count("read_poll_ticks", |t, v| t.read_poll_ticks = v),
+    Field::Count("max_wait_ms", |t, v| t.max_wait_ms = v),
+    Field::Count("min_wait_ms", |t, v| t.min_wait_ms = v),
+    Field::Count("max_read_records", |t, v| t.max_read_records = v),
+    Field::Count("max_read_bytes", |t, v| t.max_read_bytes = v),
     Field::Count("quarantine_ticks", |t, v| t.quarantine_ticks = v),
     Field::Count("election_backoff_doublings", |t, v| {
         t.election_backoff_doublings = u32::try_from(v).unwrap_or(u32::MAX);
@@ -187,7 +190,10 @@ mod tests {
             connection_timeout: _,
             delivery_timeout: _,
             read_retry_ticks: _,
-            read_poll_ticks: _,
+            max_wait_ms: _,
+            min_wait_ms: _,
+            max_read_records: _,
+            max_read_bytes: _,
             quarantine_ticks: _,
             election_backoff_doublings: _,
             client_inbox_capacity: _,
