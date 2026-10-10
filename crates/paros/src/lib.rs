@@ -27,6 +27,7 @@
 //! `Config::replica_count` is zero runs none, and the node driver's learner
 //! traffic reaches the pool alone.
 
+mod address;
 mod audit;
 pub mod client;
 mod corruption;
@@ -45,6 +46,7 @@ mod storage;
 pub mod system;
 pub mod tenant;
 
+pub use address::{Address, Names};
 pub use audit::{
     Audit, DelegationOutcome, Deployment, HistoryPage, LogReadAnswer, LogReadReport, NoAudit,
     StorageFaultDecision,

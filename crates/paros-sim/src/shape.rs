@@ -974,6 +974,12 @@ pub(crate) struct MachineLayout {
     pub(crate) founders: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
+    /// The machines advertise names, not literal addresses (#257): every
+    /// dialer resolves them through the run's name table.
+    pub(crate) named: bool,
+    /// On a seed whose machines advertise names, the percent of reboots that
+    /// land at a new address (#257).
+    pub(crate) move_pct: u32,
 }
 
 /// The run's machine layout (#246), drawn once per seed by whoever asks
@@ -983,7 +989,10 @@ pub(crate) struct MachineLayout {
 /// `stateless` on a coin, idle, waiting for a placement that is #212's. The
 /// capacity is one `buggify_knob!` for the run (default 2, extreme 1..=4;
 /// floor 1, as a joiner's). A formed cell serves its control journals and
-/// whatever its tenants create (#210).
+/// whatever its tenants create (#210). The machines advertise names on a
+/// coin (#257); on such a seed a reboot lands at a new address with the
+/// `move_pct` knob (default 0; extreme 20..=80, floor 0: a machine that
+/// never moves).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     let registry = registry(state);
@@ -997,6 +1006,8 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 moonpool_sim::sim_random_range(1..count + 1)
             };
             let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
+            let named = moonpool_sim::sim_random_bool(0.5);
+            let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let machines = (0..count)
                 .map(|rank| {
                     let class = if rank >= founders && moonpool_sim::sim_random_bool(0.5) {
@@ -1020,7 +1031,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 "machine: a layout's founding members are machines of it",
                 { "count" => count, "founders" => founders }
             );
-            MachineLayout { founders, machines }
+            MachineLayout {
+                founders,
+                machines,
+                named,
+                move_pct,
+            }
         })
         .clone()
 }

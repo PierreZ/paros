@@ -464,6 +464,19 @@ with no registry write (amends #209's "names resolved once at startup" for peer 
 listen side still resolves once). A changed `PAROS_ADVERTISE` across a restart is the
 machine-moved case above: same `node_id`, new `addr`.
 
+Landed on 2026-10-10 (#257). `paros::Address` is the advertised `HOST:PORT`, kept as written.
+`paros::Names` is the one resolver all dialers of a machine share. A peer lane resolves its
+peer's name before each batch and forgets the result after a failed delivery (FDB's
+`removeCachedDNS`). The client and `parosctl` resolve per call. `MachineAddresses` refuses a
+wildcard listen address with no advertised one, and a wildcard advertised one. A machine takes
+part in `cell init` only when the member list names its own advertised address, so
+`parosctl init --members` lists the advertised addresses. The simulation advertises a name on
+half the seeds, and a rebooted machine on such a seed comes back at a new IP behind its name
+(`move_pct`). Deferred to #349 (registry address books): the peer book is still built from the
+plan's member strings, because a machine has no request path yet to re-register a changed
+advertised string (#212, #225). Until #349, a changed `PAROS_ADVERTISE` across a restart is not
+supported; a changed IP behind the same name is.
+
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
 transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
 `Up`), so control writes stay rare (section 3.9) and the registry's "seen alive" is a fold, not a
@@ -1139,12 +1152,13 @@ only ever targets a checkpoint. A reader that gets `Truncated` restarts from `fi
   M9 writes `Inline` only. `Ref` removes the batch-size limit and never blocks the main journal.
   Readers handle both forms from the start.
 
-  **Every checkpoint becomes a `Ref`** (decided on 2026-10-10, #353): the state goes into a
-  second journal, the checkpoint journal, as many small records in many slots. The main journal
-  holds only the small pointer record, so no slot holds a large record. The writer stops emitting
-  `Inline`. This is no longer an M12 item. The detailed design (one long-lived checkpoint journal
-  per main journal, a main journal that does not stop while the chunks are written,
-  deterministic chunks by key range) is proposed in #353 and waits for Pierre's check.
+  **No checkpoint is one large record** (decided on 2026-10-10, #353). Pierre asked for the
+  simplest design that scales: a checkpoint becomes a run of records in the same journal,
+  `Begin { covers_up_to }`, many small `Chunk` records, then `End { chunks, checksum }`. `End` is
+  the commit point; a run with no valid `End` is ignored. The owner pauses its entries, writes
+  the run in pipelined batches, then truncates up to `Begin`. A small state still fits one batch.
+  `Inline` and `Ref` leave the format. A second checkpoint journal and a rolling sharded
+  checkpoint were considered and rejected as more complex (#353).
 
 ### 3.10 Recovery (deferred)
 
@@ -1607,6 +1621,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
+| M13 | Upgrades and network compatibility (#363) | decided on 2026-10-10: a very late milestone. A wire version in the RPC handshake, a cell-wide active version in the cell control journal, features that turn on only when every machine supports them, rolling upgrades one machine at a time, a downgrade by one version, mixed-version cells in the simulation. This M13 is new: the earlier M13 (multi-region cells) went into M12 on 2026-10-09 |
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores

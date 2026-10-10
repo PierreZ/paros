@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 use moonpool_core::Providers;
 use moonpool_rpc::{
-    AccessClass, BootstrapAddress, RpcError, RpcHandle, ServiceClient, WellKnownRef,
+    AccessClass, BootstrapAddress, ErrorReason, RpcError, RpcHandle, ServiceClient, WellKnownRef,
 };
 
 use super::methods::{
@@ -18,6 +18,7 @@ use super::{
     ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, SetLeader,
     SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
+use crate::{Address, Names};
 use paros_core::JournalIdentifier;
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
@@ -31,55 +32,66 @@ pub(crate) fn well_known<P: Providers, M: WellKnownMethod>(
         .bind(rpc)
 }
 
-/// A client of one paros node (or replica) at a fixed address, over the
-/// caller's own moonpool-rpc runtime.
+/// A client of one paros node (or replica) at one address, over the
+/// caller's own moonpool-rpc runtime. The address is a literal or a name
+/// (#257): a name is resolved through the caller's [`Names`] as each call
+/// dials it, so a node whose IP changed behind its name is reached again.
 ///
 /// Every call is **one attempt** (`try_get_reply`): executed by the node zero
 /// or one times, never retransmitted behind the caller's back. A failure's
 /// [`RpcError`] says what it proves; a caller that cannot tell (a timeout, a
-/// lost session) must treat the outcome as ambiguous. Cancelling a call —
+/// lost session) must treat the outcome as ambiguous. A name that does not
+/// resolve fails the call unexecuted (`LookupFailed`). Cancelling a call —
 /// dropping its future — releases the reply route; the node may still run
 /// it.
 pub struct NodeClient<P: Providers> {
-    write: ServiceClient<P, WriteRpc>,
-    read: ServiceClient<P, ReadRpc>,
-    truncate: ServiceClient<P, TruncateRpc>,
-    set_leader: ServiceClient<P, SetLeaderRpc>,
-    reconfigure: ServiceClient<P, ReconfigureRpc>,
-    reconfigure_matchmakers: ServiceClient<P, ReconfigureMatchmakersRpc>,
-    inspect: ServiceClient<P, InspectRpc>,
-    retire: ServiceClient<P, RetireRpc>,
+    rpc: RpcHandle<P>,
+    address: Address,
+    names: Names,
 }
 
 impl<P: Providers> Clone for NodeClient<P> {
     fn clone(&self) -> Self {
         Self {
-            write: self.write.clone(),
-            read: self.read.clone(),
-            truncate: self.truncate.clone(),
-            set_leader: self.set_leader.clone(),
-            reconfigure: self.reconfigure.clone(),
-            reconfigure_matchmakers: self.reconfigure_matchmakers.clone(),
-            inspect: self.inspect.clone(),
-            retire: self.retire.clone(),
+            rpc: self.rpc.clone(),
+            address: self.address.clone(),
+            names: self.names.clone(),
         }
     }
 }
 
 impl<P: Providers> NodeClient<P> {
-    /// The node serving at `addr`, called through `rpc`.
+    /// The node serving at the literal `addr`, called through `rpc`.
     #[must_use]
     pub fn new(rpc: &RpcHandle<P>, addr: SocketAddr) -> Self {
+        Self::named(rpc, Names::literal(), Address::from(addr))
+    }
+
+    /// The node serving at `address`, resolved through `names` at each
+    /// call, called through `rpc`.
+    #[must_use]
+    pub fn named(rpc: &RpcHandle<P>, names: Names, address: Address) -> Self {
         Self {
-            write: well_known(rpc, addr),
-            read: well_known(rpc, addr),
-            truncate: well_known(rpc, addr),
-            set_leader: well_known(rpc, addr),
-            reconfigure: well_known(rpc, addr),
-            reconfigure_matchmakers: well_known(rpc, addr),
-            inspect: well_known(rpc, addr),
-            retire: well_known(rpc, addr),
+            rpc: rpc.clone(),
+            address,
+            names,
         }
+    }
+
+    /// The address this client dials.
+    #[must_use]
+    pub fn address(&self) -> &Address {
+        &self.address
+    }
+
+    /// One attempt of `M` at the node, its address resolved now.
+    async fn call<M: WellKnownMethod>(&self, request: &M::Request) -> Result<M::Reply, RpcError> {
+        let addr = self.names.resolve(&self.address).await.map_err(|error| {
+            RpcError::not_admitted(ErrorReason::LookupFailed(error.to_string()))
+        })?;
+        well_known::<P, M>(&self.rpc, addr)
+            .try_get_reply(request)
+            .await
     }
 
     /// Write a batch to a journal (#204); answered with the journal state
@@ -89,7 +101,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn write(&self, request: &Write) -> Result<WriteAck, RpcError> {
-        self.write.try_get_reply(request).await
+        self.call::<WriteRpc>(request).await
     }
 
     /// Read a journal's records from a position up (#204): a leaderless
@@ -99,7 +111,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn read(&self, request: &Read) -> Result<ReadAck, RpcError> {
-        self.read.try_get_reply(request).await
+        self.call::<ReadRpc>(request).await
     }
 
     /// Ask the leader to truncate a journal below a position (#204).
@@ -108,7 +120,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn truncate(&self, request: &Truncate) -> Result<TruncateAck, RpcError> {
-        self.truncate.try_get_reply(request).await
+        self.call::<TruncateRpc>(request).await
     }
 
     /// Compare-and-swap a journal's writer (#204).
@@ -117,7 +129,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn set_leader(&self, request: &SetLeader) -> Result<SetLeaderAck, RpcError> {
-        self.set_leader.try_get_reply(request).await
+        self.call::<SetLeaderRpc>(request).await
     }
 
     /// Ask the leader to reconfigure the acceptor set.
@@ -126,7 +138,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn reconfigure(&self, request: &Reconfigure) -> Result<ReconfigureAck, RpcError> {
-        self.reconfigure.try_get_reply(request).await
+        self.call::<ReconfigureRpc>(request).await
     }
 
     /// Ask this node to drive a matchmaker-set handover (#125).
@@ -138,7 +150,7 @@ impl<P: Providers> NodeClient<P> {
         &self,
         request: &ReconfigureMatchmakers,
     ) -> Result<ReconfigureMatchmakersAck, RpcError> {
-        self.reconfigure_matchmakers.try_get_reply(request).await
+        self.call::<ReconfigureMatchmakersRpc>(request).await
     }
 
     /// Inspect the node alone (#243): its id, its cell and the control
@@ -148,9 +160,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn inspect_node(&self) -> Result<InspectReply, RpcError> {
-        self.inspect
-            .try_get_reply(&InspectRequest::node_only())
-            .await
+        self.call::<InspectRpc>(&InspectRequest::node_only()).await
     }
 
     /// Inspect `journal` on the node (#188, #235). An answer whose
@@ -163,13 +173,12 @@ impl<P: Providers> NodeClient<P> {
         &self,
         journal: JournalIdentifier,
     ) -> Result<InspectReply, RpcError> {
-        self.inspect
-            .try_get_reply(&InspectRequest {
-                journal: journal.journal.0,
-                tenant: journal.tenant.0,
-                node_only: false,
-            })
-            .await
+        self.call::<InspectRpc>(&InspectRequest {
+            journal: journal.journal.0,
+            tenant: journal.tenant.0,
+            node_only: false,
+        })
+        .await
     }
 
     /// Decommission the node (#123).
@@ -178,7 +187,7 @@ impl<P: Providers> NodeClient<P> {
     ///
     /// The attempt's [`RpcError`].
     pub async fn retire(&self, request: &RetireRequest) -> Result<RetireAck, RpcError> {
-        self.retire.try_get_reply(request).await
+        self.call::<RetireRpc>(request).await
     }
 }
 

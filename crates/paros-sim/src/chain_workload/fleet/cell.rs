@@ -3,7 +3,7 @@
 //! cell learned from the run that formed it or through `Inspect` at the
 //! machines — never from the harness (§3.8: no identifier is fixed).
 
-use std::net::SocketAddr;
+use paros::Address;
 use std::sync::Arc;
 
 use moonpool_sim::{
@@ -31,7 +31,7 @@ pub(super) struct Cell {
     pub(super) members: Vec<u64>,
     /// The members this operator reached, with their addresses: the
     /// servers a fleet step talks to.
-    pub(super) servers: Vec<(u64, SocketAddr)>,
+    pub(super) servers: Vec<(u64, Address)>,
     /// A client over `servers`, announcing every call to the audit.
     pub(super) client: ChainClient,
 }
@@ -42,18 +42,19 @@ impl Cell {
         usize::try_from(draw % self.servers.len().max(1) as u64).unwrap_or(0)
     }
 
-    /// The machine a server index names, as the topology names it.
-    pub(super) fn ip(&self, server: usize) -> Option<String> {
+    /// The process IP of the machine a server index names, as the topology
+    /// names it (#257: not its advertised address).
+    pub(super) fn ip(&self, ctx: &SimContext, server: usize) -> Option<String> {
         self.servers
             .get(server)
-            .map(|(_, addr)| addr.ip().to_string())
+            .and_then(|(_, addr)| crate::machine::process_ip(ctx.state(), addr))
     }
 }
 
 impl FleetOps {
     /// A client over `servers`, announcing every call at the cell's
     /// journals to the audit and their shared history.
-    pub(super) fn connect(&self, ctx: &SimContext, servers: &[(u64, SocketAddr)]) -> ChainClient {
+    pub(super) fn connect(&self, ctx: &SimContext, servers: &[(u64, Address)]) -> ChainClient {
         self.connector
             .client(servers)
             .with_observer(Arc::new(
@@ -87,6 +88,7 @@ impl FleetOps {
         let Some((journals, _)) = bootstrap::majority_cell(
             self.connector.providers(),
             self.connector.rpc(),
+            self.connector.names(),
             &self.machines[..self.layout.founders],
             self.patience,
         )
@@ -97,6 +99,7 @@ impl FleetOps {
         let servers = bootstrap::discover(
             self.connector.providers(),
             self.connector.rpc(),
+            self.connector.names(),
             &self.machines,
             self.patience,
         )
@@ -129,7 +132,7 @@ impl FleetOps {
             { "cell" => journals.cell_id }
         );
         assert_reachable!("fleet: an operator learns the cell's control journals through Inspect");
-        let servers: Vec<(u64, SocketAddr)> = servers
+        let servers: Vec<(u64, Address)> = servers
             .into_iter()
             .filter(|(id, _)| members.contains(id))
             .collect();
@@ -186,13 +189,14 @@ impl FleetOps {
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn initialize(&mut self, ctx: &SimContext, draw: u64) -> bool {
         let founders = self.layout.founders;
-        let mut members: Vec<SocketAddr> = self.machines[..founders].to_vec();
+        let mut members: Vec<Address> = self.machines[..founders].to_vec();
         crate::machine::note_init_sent(ctx.state());
         let outside = founders..self.machines.len();
         if !outside.is_empty() && buggify_with_prob!(0.05) {
             assert_reachable!("init: an operator sends init to a machine outside the seeds");
             let span = (outside.end - outside.start) as u64;
-            let target = self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)];
+            let target =
+                self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)].clone();
             return self.misdirected(ctx, target, &members).await;
         }
         if founders > 1 && buggify_with_prob!(0.25) {
@@ -204,6 +208,7 @@ impl FleetOps {
         let whole = paros::client::initialize::initialize(
             connector.providers(),
             connector.rpc(),
+            connector.names(),
             &members,
             |servers| {
                 connector
@@ -221,11 +226,13 @@ impl FleetOps {
             // A second `cell init` at once, at another founder: the two
             // decrees converge on one cell (#277).
             assert_reachable!("init: a second cell init runs at another founder");
-            let other = members[1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0)];
+            let other =
+                members[1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0)].clone();
             let second = bootstrap::cell_init(
                 connector.providers(),
                 connector.rpc(),
-                other,
+                connector.names(),
+                &other,
                 &members,
                 self.patience,
             );
@@ -308,16 +315,12 @@ impl FleetOps {
     /// A `cell init` sent to a machine outside the founders: refused as not a
     /// member, or as `cell_exists` once `cell add-machine` admitted it (#216),
     /// and nothing forms. Whether it ended.
-    async fn misdirected(
-        &self,
-        ctx: &SimContext,
-        target: SocketAddr,
-        members: &[SocketAddr],
-    ) -> bool {
+    async fn misdirected(&self, ctx: &SimContext, target: Address, members: &[Address]) -> bool {
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),
-            target,
+            self.connector.names(),
+            &target,
             members,
             self.patience,
         )
@@ -325,8 +328,8 @@ impl FleetOps {
         match outcome {
             InitOutcome::Refused(label) if label == "cell_exists" => {
                 assert_always!(
-                    crate::machine::is_admitted(ctx.state(), target)
-                        || crate::machine::was_wiped(ctx.state(), target),
+                    crate::machine::is_admitted(ctx.state(), &target)
+                        || crate::machine::was_wiped(ctx.state(), &target),
                     "init: a machine outside the seeds refuses init as not a seed",
                     { "refusal" => label.as_str() }
                 );

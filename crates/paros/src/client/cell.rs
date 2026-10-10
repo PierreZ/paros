@@ -23,7 +23,6 @@
 //! these steps over once it exists). It draws no randomness.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::Providers;
@@ -38,6 +37,7 @@ use super::fleet::{
 };
 use crate::machine::{Admission, Class, ControlJournals};
 use crate::system::{NodeStanding, Registry, SystemCommand};
+use crate::{Address, Names};
 
 /// The most steps one admission takes: a registration and an `Admit`, each
 /// decided afresh, so a run that needs more is going round.
@@ -50,7 +50,7 @@ pub struct CellSession {
     journals: ControlJournals,
     /// The founding members the caller knows, with their addresses: the
     /// registry's genesis pool holds their ids only.
-    founders: Vec<(NodeId, SocketAddr)>,
+    founders: Vec<(NodeId, Address)>,
     cell: Checkpointer<Registry>,
     cell_open: bool,
 }
@@ -63,7 +63,7 @@ impl CellSession {
     #[must_use]
     pub fn new(
         journals: ControlJournals,
-        founders: Vec<(NodeId, SocketAddr)>,
+        founders: Vec<(NodeId, Address)>,
         seed: u128,
         policy: CheckpointPolicy,
     ) -> Self {
@@ -82,7 +82,7 @@ impl CellSession {
     #[must_use]
     pub fn with_leader(
         journals: ControlJournals,
-        founders: Vec<(NodeId, SocketAddr)>,
+        founders: Vec<(NodeId, Address)>,
         uuid: LeaderUuid,
         policy: CheckpointPolicy,
     ) -> Self {
@@ -115,7 +115,7 @@ impl CellSession {
 
     /// The founding members this session knows, with their addresses.
     #[must_use]
-    pub fn founders(&self) -> &[(NodeId, SocketAddr)] {
+    pub fn founders(&self) -> &[(NodeId, Address)] {
         &self.founders
     }
 
@@ -138,20 +138,20 @@ impl CellSession {
     pub fn admission(&self, node: NodeId) -> Admission {
         let founder = |id: NodeId| self.founders.iter().any(|(f, _)| *f == id);
         let rank = |id: NodeId| (id != node, !founder(id), id);
-        let mut by_addr: BTreeMap<SocketAddr, NodeId> = BTreeMap::new();
+        let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
         let registered = self
             .cell
             .state()
             .nodes()
             .filter(|(_, n)| n.standing != NodeStanding::Retired)
-            .filter_map(|(id, n)| n.addr.parse().ok().map(|addr| (id, addr)));
-        for (id, addr) in self.founders.iter().copied().chain(registered) {
+            .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr)));
+        for (id, addr) in self.founders.iter().cloned().chain(registered) {
             let held = by_addr.entry(addr).or_insert(id);
             if rank(id) < rank(*held) {
                 *held = id;
             }
         }
-        let mut members: Vec<(NodeId, SocketAddr)> =
+        let mut members: Vec<(NodeId, Address)> =
             by_addr.into_iter().map(|(addr, id)| (id, addr)).collect();
         members.sort_unstable();
         members.dedup_by_key(|(id, _)| *id);
@@ -161,8 +161,10 @@ impl CellSession {
         }
     }
 
-    /// One step of admitting the machine at `target` (#216). Ends with the
-    /// machine's id once it answers `Identify` with this cell.
+    /// One step of admitting the machine at `target` (#216), dialed through
+    /// `names`. Ends with the machine's id once it answers `Identify` with
+    /// this cell. The registration carries the address the machine
+    /// advertises (#257), which may differ from `target`.
     ///
     /// # Panics
     ///
@@ -175,16 +177,20 @@ impl CellSession {
         providers: &P,
         rpc: &RpcHandle<P>,
         client: &Client<P>,
+        names: &Names,
         first: usize,
-        target: SocketAddr,
+        target: &Address,
     ) -> Step<NodeId> {
         let ControlJournals { cell_id, cell, .. } = self.journals;
         if cell_id == 0 || !cell.is_set() {
             return Step::Refused(FleetRefusal::Unset);
         }
         let timeout = client.tunables().request_timeout;
-        let Some(identity) = bootstrap::identify(providers, rpc, target, timeout).await else {
-            return Step::Interrupted(Interrupted::MachineUnreachable { addr: target });
+        let Some(identity) = bootstrap::identify(providers, rpc, names, target, timeout).await
+        else {
+            return Step::Interrupted(Interrupted::MachineUnreachable {
+                addr: target.clone(),
+            });
         };
         let node = NodeId(identity.node_id);
         if identity.cell_id == cell_id {
@@ -202,6 +208,9 @@ impl CellSession {
         let Ok(class) = identity.class.parse::<Class>() else {
             return Step::Refused(FleetRefusal::Unset);
         };
+        let Ok(advertised) = Address::parse(&identity.addr) else {
+            return Step::Refused(FleetRefusal::Unset);
+        };
         if !self.cell_open {
             if let Err(stop) = open(&mut self.cell, client, first).await {
                 return Step::Interrupted(stop);
@@ -214,7 +223,7 @@ impl CellSession {
             None => {
                 let register = SystemCommand::RegisterNode {
                     id: node,
-                    addr: target.to_string(),
+                    addr: advertised.to_string(),
                     class,
                     capacity: identity.capacity,
                     failure_domain: identity.failure_domain,
@@ -239,7 +248,7 @@ impl CellSession {
             admission.members.iter().any(|(id, _)| *id == node),
             "an admission names the machine it admits"
         );
-        match bootstrap::admit(providers, rpc, target, &admission, timeout).await {
+        match bootstrap::admit(providers, rpc, names, target, &admission, timeout).await {
             AdmitOutcome::Admitted => Step::Done {
                 result: node,
                 last: Some(Stage::Admit),
@@ -248,31 +257,39 @@ impl CellSession {
                 "other_cell" => Step::Refused(FleetRefusal::OtherCell { node, cell_id: 0 }),
                 "in_cell_init" => Step::Refused(FleetRefusal::InCellInit { node }),
                 "malformed" => Step::Refused(FleetRefusal::Unset),
-                _ => Step::Interrupted(Interrupted::MachineUnreachable { addr: target }),
+                _ => Step::Interrupted(Interrupted::MachineUnreachable {
+                    addr: target.clone(),
+                }),
             },
-            AdmitOutcome::Unreachable => {
-                Step::Interrupted(Interrupted::MachineUnreachable { addr: target })
-            }
+            AdmitOutcome::Unreachable => Step::Interrupted(Interrupted::MachineUnreachable {
+                addr: target.clone(),
+            }),
         }
     }
 
-    /// Admit the machine at `target` to its end (see
+    /// Admit the machine at `target`, dialed through `names`, to its end (see
     /// [`CellSession::admit_step`]), taking an interrupted step again for up
     /// to `patience`.
+    // The session, the RPC runtime, the cell's client, the resolver, where
+    // to start, the machine and the patience: each is the caller's.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(level = "debug", skip_all, fields(cell = self.journals.cell_id, %target))]
     pub async fn add_machine<P: Providers>(
         &mut self,
         providers: &P,
         rpc: &RpcHandle<P>,
         client: &Client<P>,
+        names: &Names,
         first: usize,
-        target: SocketAddr,
+        target: &Address,
         patience: Duration,
     ) -> Run<NodeId> {
         let deadline = client.now() + patience;
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
-            let step = self.admit_step(providers, rpc, client, first, target).await;
+            let step = self
+                .admit_step(providers, rpc, client, names, first, target)
+                .await;
             if retry(client, &step, deadline).await {
                 continue;
             }

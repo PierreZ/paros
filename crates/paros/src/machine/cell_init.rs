@@ -26,7 +26,6 @@
 //! runs.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{Detach, Providers, RandomProvider, TaskProvider, TimeProvider};
@@ -44,6 +43,7 @@ use crate::driver::DriverTunables;
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{FormCellRpc, PrepareCellRpc, WellKnownMethod};
 use crate::rpc::well_known;
+use crate::{Address, Names};
 
 /// A random identifier: a random tenant and a random journal, both set (no id
 /// is fixed, `docs/architecture.md` §3.8).
@@ -103,10 +103,10 @@ pub(super) async fn propose<P: Providers>(
     request: wire::CellInit,
     tunables: &DriverTunables,
 ) -> Result<CellPlan, &'static str> {
-    let members: BTreeSet<SocketAddr> = request
+    let members: BTreeSet<Address> = request
         .members
         .iter()
-        .map(|addr| addr.parse())
+        .map(|addr| Address::parse(addr))
         .collect::<Result<_, _>>()
         .map_err(|_| "malformed")?;
     if members.is_empty() {
@@ -118,7 +118,7 @@ pub(super) async fn propose<P: Providers>(
     if facts.class != Class::Storage {
         return Err("stateless_member");
     }
-    let members: Vec<SocketAddr> = members.into_iter().collect();
+    let members: Vec<Address> = members.into_iter().collect();
     // Above every ballot this machine ever opened that got as far as a
     // `FormCell`: each was promised here first.
     let mut floor: Option<Ballot> = (promised != Ballot::default()).then_some(promised);
@@ -133,7 +133,7 @@ pub(super) async fn propose<P: Providers>(
         match attempt(providers, rpc, facts, &members, ballot, tunables).await {
             Attempt::Chosen(plan) => {
                 assert!(
-                    plan.addrs().into_iter().eq(members.iter().copied()),
+                    plan.addrs().into_iter().eq(members.iter().cloned()),
                     "the chosen plan is over the listed machines"
                 );
                 return Ok(plan);
@@ -177,7 +177,7 @@ async fn attempt<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
     facts: &MachineFacts,
-    members: &[SocketAddr],
+    members: &[Address],
     ballot: Ballot,
     tunables: &DriverTunables,
 ) -> Attempt {
@@ -185,9 +185,10 @@ async fn attempt<P: Providers>(
     let ask = wire::PrepareCell {
         init: Some(ballot_to_wire(ballot)),
     };
-    let answers = fan_out::<P, PrepareCellRpc>(providers, rpc, members, &ask, patience).await;
+    let answers =
+        fan_out::<P, PrepareCellRpc>(providers, rpc, &facts.names, members, &ask, patience).await;
     // Who answered where: a listed address and the machine there now.
-    let mut identities: BTreeMap<SocketAddr, NodeId> = BTreeMap::new();
+    let mut identities: BTreeMap<Address, NodeId> = BTreeMap::new();
     let mut promises = Vec::with_capacity(answers.len());
     for (addr, answer) in answers {
         let Some(ack) = answer else {
@@ -237,7 +238,7 @@ async fn attempt<P: Providers>(
     // this one's (#216): a machine of another cell answers at an address a
     // wiped member left. It voted once, there, so it never accepts here; its
     // vote is not adopted and its ballot preempts nothing.
-    let ours = |plan: &CellPlan| plan.addrs().into_iter().eq(members.iter().copied());
+    let ours = |plan: &CellPlan| plan.addrs().into_iter().eq(members.iter().cloned());
     // Votes are wire input: two that disagree at one ballot would break the
     // decree's own agreement rule, so they are refused here as malformed.
     let mut seen: BTreeMap<Ballot, u64> = BTreeMap::new();
@@ -313,17 +314,17 @@ async fn attempt<P: Providers>(
         );
     }
     // Adopt or refuse (#277): another list's plan is another cell's.
-    if !plan.addrs().into_iter().eq(members.iter().copied()) {
+    if !plan.addrs().into_iter().eq(members.iter().cloned()) {
         return Attempt::Failed("other_cell_init");
     }
     // A listed address that now hosts another machine than the plan names
     // is a wiped member (#246): a new machine, which never accepts the plan
     // as the old one. The others choose it while they are a quorum.
-    let intact: BTreeSet<SocketAddr> = plan
+    let intact: BTreeSet<Address> = plan
         .members
         .iter()
         .filter(|(id, addr)| identities.get(addr) == Some(id))
-        .map(|(_, addr)| *addr)
+        .map(|(_, addr)| addr.clone())
         .collect();
     if intact.len() < q2 {
         return Attempt::Failed("cell_lost");
@@ -340,15 +341,15 @@ async fn attempt<P: Providers>(
     // receiver the plan does not name (it replaced a wiped member) never
     // accepts it.
     let form = plan.form_request(ballot);
-    let others: Vec<SocketAddr> = members
+    let others: Vec<Address> = members
         .iter()
-        .copied()
-        .filter(|addr| *addr != facts.addr && intact.contains(addr))
+        .filter(|addr| **addr != facts.addr && intact.contains(*addr))
+        .cloned()
         .collect();
     let mut accepted = 0_usize;
     let mut chosen = None;
-    for batch in [others, vec![facts.addr]] {
-        if batch == [facts.addr] {
+    for batch in [others, vec![facts.addr.clone()]] {
+        if batch == [facts.addr.clone()] {
             // This receiver votes only for a plan the others can still
             // choose with it: a vote is final, and a lone vote for a plan
             // that names a wiped member would keep it for good.
@@ -356,7 +357,8 @@ async fn attempt<P: Providers>(
                 break;
             }
         }
-        let answers = fan_out::<P, FormCellRpc>(providers, rpc, &batch, &form, patience).await;
+        let answers =
+            fan_out::<P, FormCellRpc>(providers, rpc, &facts.names, &batch, &form, patience).await;
         for (addr, answer) in answers {
             let Some(ack) = answer else {
                 return Attempt::Failed("member_unreachable");
@@ -403,10 +405,12 @@ async fn attempt<P: Providers>(
 /// (#210).
 fn draw_plan<P: Providers>(
     providers: &P,
-    identities: &BTreeMap<SocketAddr, NodeId>,
+    identities: &BTreeMap<Address, NodeId>,
 ) -> Option<CellPlan> {
-    let mut members: Vec<(NodeId, SocketAddr)> =
-        identities.iter().map(|(addr, id)| (*id, *addr)).collect();
+    let mut members: Vec<(NodeId, Address)> = identities
+        .iter()
+        .map(|(addr, id)| (*id, addr.clone()))
+        .collect();
     members.sort_unstable();
     let control = draw_identifier(providers);
     let election = JournalIdentifier::new(control.tenant, draw_identifier(providers).journal);
@@ -425,39 +429,46 @@ fn draw_plan<P: Providers>(
 
 /// Send `request` to every address at once, one at-most-once attempt each
 /// within `patience`, and collect every answer in address order: `None`
-/// where nothing came back.
+/// where nothing came back. Each address is resolved as it is dialed
+/// (#257): a name that does not resolve is an address that did not answer.
 async fn fan_out<P: Providers, M: WellKnownMethod>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    addrs: &[SocketAddr],
+    names: &Names,
+    addrs: &[Address],
     request: &M::Request,
     patience: Duration,
-) -> Vec<(SocketAddr, Option<M::Reply>)>
+) -> Vec<(Address, Option<M::Reply>)>
 where
     M::Request: Clone + Send + Sync + 'static,
     M::Reply: Send + 'static,
 {
     let (sender, mut answers) = mpsc::channel(addrs.len().max(1));
-    for (index, &addr) in addrs.iter().enumerate() {
-        let client = well_known::<P, M>(rpc, addr);
+    for (index, addr) in addrs.iter().enumerate() {
+        let rpc = rpc.clone();
+        let names = names.clone();
+        let addr = addr.clone();
         let time = providers.time().clone();
         let request = request.clone();
         let sender = sender.clone();
         providers
             .task()
             .spawn_task("paros-cell-decree", async move {
-                let answer = time
-                    .timeout(patience, client.try_get_reply(&request))
-                    .await
-                    .ok()
-                    .and_then(Result::ok);
+                let call = async {
+                    let resolved = names.resolve(&addr).await.ok()?;
+                    well_known::<P, M>(&rpc, resolved)
+                        .try_get_reply(&request)
+                        .await
+                        .ok()
+                };
+                let answer = time.timeout(patience, call).await.ok().flatten();
                 let _ = sender.send((index, answer)).await;
             })
             .detach();
     }
     drop(sender);
-    let mut collected: Vec<(SocketAddr, Option<M::Reply>)> =
-        addrs.iter().map(|addr| (*addr, None)).collect();
+    let mut collected: Vec<(Address, Option<M::Reply>)> =
+        addrs.iter().map(|addr| (addr.clone(), None)).collect();
     while let Some((index, answer)) = answers.recv().await {
         collected[index].1 = answer;
     }

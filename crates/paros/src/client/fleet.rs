@@ -57,7 +57,6 @@
 //! caller's draws, and [`FleetSession::create_tenant`] moves to the next one
 //! when the fleet tenant holds a draw already.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::Providers;
@@ -196,7 +195,7 @@ pub enum Interrupted {
     /// admission (#216). Its admission may have landed.
     MachineUnreachable {
         /// The machine's address.
-        addr: SocketAddr,
+        addr: crate::Address,
     },
     /// The run took its step budget without ending: other operators keep
     /// moving the journals under it.

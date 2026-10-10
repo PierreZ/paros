@@ -46,11 +46,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::net::SocketAddr;
 
 use paros_core::{Ballot, Config, JournalIdentifier, NodeId, QuorumSystem, WriterMode};
 
 use super::{Admission, CellPlan, Class, ControlJournals};
+use crate::Address;
 
 /// Parse a journal identifier written `<tenant>/<journal>` (#235).
 fn parse_identifier(text: &str) -> Option<JournalIdentifier> {
@@ -73,7 +73,7 @@ fn admission(
     admitted: Option<u64>,
     control: Option<JournalIdentifier>,
     (fleet, election): (Option<JournalIdentifier>, Option<JournalIdentifier>),
-    peers: Vec<(NodeId, SocketAddr)>,
+    peers: Vec<(NodeId, Address)>,
 ) -> Result<Option<Admission>, String> {
     let Some(cell_id) = admitted else {
         if !peers.is_empty() {
@@ -95,14 +95,13 @@ fn admission(
 }
 
 /// Parse a `member` or `peer` line's value, `<node_id> <addr>`.
-fn parse_member(value: &str) -> Result<(NodeId, SocketAddr), String> {
+fn parse_member(value: &str) -> Result<(NodeId, Address), String> {
     let (id, addr) = value
         .split_once(' ')
         .ok_or_else(|| format!("bad member line {value:?}"))?;
     Ok((
         NodeId(id.parse().map_err(|e| format!("bad member id: {e}"))?),
-        addr.parse::<SocketAddr>()
-            .map_err(|e| format!("bad member address: {e}"))?,
+        Address::parse(addr).map_err(|e| format!("bad member address: {e}"))?,
     ))
 }
 

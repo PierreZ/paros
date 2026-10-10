@@ -90,7 +90,7 @@ type Proposal<'a> = (
     ReplySender<wire::CellInitAck>,
 );
 
-/// Wait for a cell: serve the machine contract at `facts.addr` until this
+/// Wait for a cell: serve the machine contract at `facts.listen` until this
 /// machine forms — it accepted a `FormCell` and no `CellInit` it drives is
 /// still in flight — or a cell admits it, and return how it joined, or
 /// `None` on `shutdown`.
@@ -112,7 +112,7 @@ pub async fn wait_for_cell<P: Providers, L: CellLedger>(
     shutdown: CancellationToken,
 ) -> Result<Option<Joined>, RunError> {
     assert!(ledger.vote().is_none(), "a formed machine does not wait");
-    let addr = facts.addr.to_string();
+    let addr = facts.listen.to_string();
     let mut edge = RpcEdge::listen(&providers, &addr, "machine", tunables)
         .await
         .map_err(RunError::Infra)?;
@@ -345,7 +345,7 @@ async fn answer_form<L: CellLedger>(
     let (Ok(plan), Some(ballot)) = (CellPlan::from_form(request), vote_ballot(request)) else {
         return refuse("malformed");
     };
-    if !plan.members.contains(&(facts.node_id, facts.addr)) {
+    if !plan.members.contains(&(facts.node_id, facts.addr.clone())) {
         return refuse("not_a_member");
     }
     if let Some((voted, held)) = ledger.vote() {

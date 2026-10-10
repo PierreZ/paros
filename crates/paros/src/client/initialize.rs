@@ -24,7 +24,6 @@
 //! (#212, #225; the coordinator stops at its first refused write). Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::Providers;
@@ -37,6 +36,7 @@ use super::election::read_election;
 use super::fleet::{FleetRefusal, FleetSession, Interrupted, Stage, Step};
 use crate::machine::ControlJournals;
 use crate::system::Registry;
+use crate::{Address, Names};
 
 /// What a whole `init` came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +65,7 @@ pub struct Initialized {
     /// genesis pool, whether or not each answered this run.
     pub members: Vec<u64>,
     /// The cell's servers this run reached: `(node id, address)`.
-    pub servers: Vec<(u64, SocketAddr)>,
+    pub servers: Vec<(u64, Address)>,
     /// The control journals, learned from the plan or `Inspect`.
     pub journals: ControlJournals,
     /// The fleet steps this run wrote, in order.
@@ -120,7 +120,7 @@ pub struct InitParams {
 }
 
 /// What a found cell is: its servers, its members and its control journals.
-type Found = (Vec<(u64, SocketAddr)>, Vec<u64>, ControlJournals);
+type Found = (Vec<(u64, Address)>, Vec<u64>, ControlJournals);
 
 /// A cell an earlier run formed, learned from its servers: the cell a
 /// majority of the founding members serve, with its control journals, from
@@ -134,11 +134,12 @@ type Found = (Vec<(u64, SocketAddr)>, Vec<u64>, ControlJournals);
 async fn found<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    addrs: &[SocketAddr],
-    connect: &impl Fn(&[(u64, SocketAddr)]) -> Client<P>,
+    names: &Names,
+    addrs: &[Address],
+    connect: &impl Fn(&[(u64, Address)]) -> Client<P>,
     patience: Duration,
 ) -> Result<Found, Unreachable> {
-    let (journals, servers) = bootstrap::majority_cell(providers, rpc, addrs, patience)
+    let (journals, servers) = bootstrap::majority_cell(providers, rpc, names, addrs, patience)
         .await
         .ok_or(Unreachable::NothingAnswered)?;
     if journals.fleet.is_none() {
@@ -192,7 +193,8 @@ async fn coordinator<P: Providers>(
 /// Run `init` whole: form the cell over the founding `members` (or learn it,
 /// when every member already serves it), wait for its coordinator, then
 /// run the fleet steps, through a client `connect` builds over the cell's
-/// servers.
+/// servers. `members` are the machines' advertised addresses (#257), each
+/// resolved through `names` as it is dialed.
 ///
 /// # Panics
 ///
@@ -202,8 +204,9 @@ async fn coordinator<P: Providers>(
 pub async fn initialize<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    members: &[SocketAddr],
-    connect: impl Fn(&[(u64, SocketAddr)]) -> Client<P>,
+    names: &Names,
+    members: &[Address],
+    connect: impl Fn(&[(u64, Address)]) -> Client<P>,
     params: InitParams,
 ) -> InitRun {
     assert_ne!(params.fleet_id, 0, "a fleet id is never unset");
@@ -212,8 +215,8 @@ pub async fn initialize<P: Providers>(
     }
     let patience = params.patience;
     let mut formation = None;
-    for &target in members {
-        match bootstrap::cell_init(providers, rpc, target, members, patience).await {
+    for target in members {
+        match bootstrap::cell_init(providers, rpc, names, target, members, patience).await {
             InitOutcome::Formed(plan) => {
                 formation = Some(plan);
                 break;
@@ -229,10 +232,10 @@ pub async fn initialize<P: Providers>(
     }
     let (servers, members, journals) = match formation {
         Some(plan) => {
-            let servers: Vec<(u64, SocketAddr)> = plan
+            let servers: Vec<(u64, Address)> = plan
                 .members
                 .iter()
-                .map(|(id, addr)| (id.0, *addr))
+                .map(|(id, addr)| (id.0, addr.clone()))
                 .collect();
             let ids = servers.iter().map(|(id, _)| *id).collect();
             let Some(fleet_control) = plan.fleet else {
@@ -246,7 +249,7 @@ pub async fn initialize<P: Providers>(
         }
         // Every listed machine is formed (a re-run after its formation):
         // learn the cell from them.
-        None => match found(providers, rpc, members, &connect, patience).await {
+        None => match found(providers, rpc, names, members, &connect, patience).await {
             Ok(cell) => cell,
             Err(unreachable) => return InitRun::Unreachable(unreachable),
         },

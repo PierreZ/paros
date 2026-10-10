@@ -17,8 +17,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   at the data directory: the record `<data-dir>/machine` and the stores
   `<data-dir>/journals/<tenant>/<journal>/` (#235). No disk or store type lives here (#294).
 - `src/resolve.rs` → `check_shape`, `resolve`, `resolve_all` → `HOST:PORT` (port required),
-  names resolved once at startup (`parosd` its listen address; `parosctl` its servers and
-  `init`'s members, where a name such as a Compose alias yields every address); shared with
+  the listen address resolved once at startup; an advertised address and `init`'s members kept as names and resolved at dial time (#257), except a name for several machines (a Compose alias), which `expand` turns into their IPs; shared with
   `parosctl` by `#[path]` (#209).
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
   `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
@@ -42,7 +41,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Entry points
 
-- `parosd` with `PAROS_LISTEN`, `PAROS_DATA_DIR`, `PAROS_CLASS`, `PAROS_CAPACITY`,
+- `parosd` with `PAROS_LISTEN`, `PAROS_ADVERTISE` (#257), `PAROS_DATA_DIR`, `PAROS_CLASS`, `PAROS_CAPACITY`,
   `PAROS_FAILURE_DOMAIN`, `PAROS_STORE_LAYOUT` and the tunable overrides (`settings.rs`). No
   role, no id, no peer: a machine is configured with no other machine (`PAROS_ID`,
   `PAROS_SEEDS` and `PAROS_RENDEZVOUS` are gone, #277).
@@ -76,8 +75,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   only a cell's formation formats a store (through `paros::provision_store`), and only a
   created journal's first open is `FirstBoot`. The library refuses amnesia, a re-format and an
   edited `Config`.
-- Names are resolved in this crate's configuration layer, never in a driver: the library sees
-  socket addresses only.
+- The listen address is resolved in this crate's configuration layer. Peer and server names are
+  resolved at dial time through `paros::Names` over `TokioResolver` (#257).
 
 ## Tests & gates
 

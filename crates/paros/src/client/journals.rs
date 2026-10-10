@@ -14,7 +14,6 @@
 //!
 //! The library draws no randomness: the request id is the caller's.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
@@ -31,6 +30,7 @@ use crate::rpc::{
     config_from_proto, config_to_proto, writer_mode_from_proto, writer_mode_to_proto,
 };
 use crate::tenant::{Desired, DesiredMode, Redundancy, TenantControl};
+use crate::{Address, Names};
 
 /// What a request asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,24 +240,30 @@ impl JournalAnswer {
 const RETRY_PAUSE: Duration = Duration::from_millis(200);
 
 /// The tenant coordinator's address: the interface the election journal's
-/// leader publishes. `None` while no leader published one.
+/// leader publishes, a literal or a name (#257). `None` while no leader
+/// published one.
 pub async fn coordinator<P: Providers>(
     client: &Client<P>,
     election: JournalIdentifier,
-) -> Option<SocketAddr> {
+) -> Option<Address> {
     let fold = read_election(client, election, 0).await?;
-    fold.leader()?.candidate.interface.parse().ok()
+    Address::parse(&fold.leader()?.candidate.interface).ok()
 }
 
-/// Send `request` to the machine at `target`, once, within `timeout`.
+/// Send `request` to the machine at `target`, its address resolved through
+/// `names` now, once, within `timeout`.
 pub async fn send<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    target: SocketAddr,
+    names: &Names,
+    target: &Address,
     request: &JournalRequest,
     timeout: Duration,
 ) -> JournalAnswer {
-    let client = well_known::<P, JournalRequestRpc>(rpc, target);
+    let Ok(addr) = names.resolve(target).await else {
+        return JournalAnswer::Unavailable;
+    };
+    let client = well_known::<P, JournalRequestRpc>(rpc, addr);
     match providers
         .time()
         .timeout(timeout, client.try_get_reply(&request.to_wire()))
@@ -270,11 +276,13 @@ pub async fn send<P: Providers>(
 
 /// Send `request` to the tenant coordinator of the cell whose election
 /// journal is `election`, the same id again until an answer decides it or
-/// `patience` runs out (then the last answer, retryable).
+/// `patience` runs out (then the last answer, retryable). The coordinator's
+/// address is resolved through `names`.
 #[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0))]
 pub async fn request<P: Providers>(
     providers: &P,
     rpc: &RpcHandle<P>,
+    names: &Names,
     client: &Client<P>,
     election: JournalIdentifier,
     request: &JournalRequest,
@@ -286,7 +294,7 @@ pub async fn request<P: Providers>(
     loop {
         attempts += 1;
         let answer = match coordinator(client, election).await {
-            Some(target) => send(providers, rpc, target, request, timeout).await,
+            Some(target) => send(providers, rpc, names, &target, request, timeout).await,
             None => JournalAnswer::NotCoordinator,
         };
         if !answer.is_retryable() || providers.time().now() >= deadline {

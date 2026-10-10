@@ -62,7 +62,7 @@ pub(crate) type FoldedCheckpoint = (u64, Option<bool>, Registry);
 
 use super::config::DriverTunables;
 use super::journals::Journals;
-use super::transport::peer_address;
+use super::transport::peer_target;
 
 /// The records one follow read asks for: enough that a control journal's
 /// history arrives in a few pages (the server's byte budget keeps the page
@@ -154,6 +154,7 @@ impl<P: Providers> ControlFollower<P> {
     pub(crate) fn new(
         plan: &ControlPlan,
         rpc: &RpcHandle<P>,
+        names: &crate::Names,
         fixed: impl IntoIterator<Item = NodeId>,
         tunables: &DriverTunables,
         shutdown: CancellationToken,
@@ -161,7 +162,7 @@ impl<P: Providers> ControlFollower<P> {
         let seeds = plan
             .seeds
             .iter()
-            .map(|(_, addr)| Ok(NodeClient::new(rpc, peer_address(addr)?)))
+            .map(|(_, addr)| Ok(NodeClient::named(rpc, names.clone(), peer_target(addr)?)))
             .collect::<SimulationResult<Vec<_>>>()?;
         if seeds.is_empty() {
             return Err(SimulationError::InvalidState(

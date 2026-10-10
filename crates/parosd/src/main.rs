@@ -3,9 +3,13 @@
 //! filesystem. `parosd` serves; the client is `parosctl` (#220), over
 //! `paros::client`.
 //!
-//! A machine starts with its listen address, its data directory, its class,
-//! capacity and failure domain — environment variables, validated at
-//! startup ([`settings`]). There is no role to pick, no identity to pass and
+//! A machine starts with its listen and advertised addresses, its data
+//! directory, its class, capacity and failure domain — environment
+//! variables, validated at startup ([`settings`]). It binds its listen
+//! address and publishes its advertised one (#257): the cell plan and the
+//! registry hold what it advertises, and its peers resolve that name each
+//! time they dial it, so a machine whose IP changes across a restart is
+//! reached again. There is no role to pick, no identity to pass and
 //! no peer to name:
 //!
 //! 1. **Format, once.** On an empty data directory the machine mints its
@@ -45,9 +49,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use moonpool_core::{TokioProviders, TokioStorageProvider};
-use paros::machine::{MachineError, MachineSettings, ProviderDisk};
-use paros::{BootRefusal, NoAudit, RunError};
+use moonpool_core::{TokioProviders, TokioResolver, TokioStorageProvider};
+use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
+use paros::{Address, BootRefusal, Names, NoAudit, RunError};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -95,8 +99,8 @@ async fn run(settings: Settings) -> ExitCode {
         Ok(tunables) => tunables,
         Err(error) => return invalid(&error),
     };
-    let addr = match patiently(|| resolve::resolve(&settings.listen)) {
-        Ok(addr) => addr,
+    let addresses = match addresses(&settings) {
+        Ok(addresses) => addresses,
         Err(error) => return invalid(&error),
     };
     let machine = MachineSettings {
@@ -109,15 +113,16 @@ async fn run(settings: Settings) -> ExitCode {
         settings.data_dir.to_string_lossy(),
         settings.layout.config(),
     );
-    let ran = paros::machine::run_machine(
+    let ran = Box::pin(paros::machine::run_machine(
         TokioProviders::new(),
         disk,
         |_| NoAudit,
         &machine,
-        addr,
+        addresses,
+        Names::new(TokioResolver::new()),
         tunables,
         shutdown_on_signal(),
-    )
+    ))
     .await;
     match ran {
         Ok(()) => {
@@ -135,6 +140,21 @@ async fn run(settings: Settings) -> ExitCode {
         }
         Err(MachineError::Run(error)) => exit(&error),
     }
+}
+
+/// The machine's two addresses (#257): `PAROS_LISTEN` resolved once (it
+/// binds where it is), `PAROS_ADVERTISE` checked and kept as written.
+fn addresses(settings: &Settings) -> Result<MachineAddresses, String> {
+    let advertise = settings
+        .advertise
+        .as_deref()
+        .map(|advertise| {
+            Address::parse(advertise).map_err(|error| format!("PAROS_ADVERTISE: {error}"))
+        })
+        .transpose()?;
+    let listen = patiently(|| resolve::resolve(&settings.listen))
+        .map_err(|error| format!("PAROS_LISTEN: {error}"))?;
+    MachineAddresses::new(listen, advertise)
 }
 
 /// `resolve` until it answers or [`RESOLVE_PATIENCE`] runs out.
@@ -218,4 +238,47 @@ async fn wait_for_signal() {
 #[cfg(not(unix))]
 async fn wait_for_signal() {
     tokio::signal::ctrl_c().await.ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(args: &[&str]) -> Settings {
+        let mut command = vec!["parosd", "--data-dir", "/tmp/unused"];
+        command.extend_from_slice(args);
+        Settings::try_parse_from(command).expect("valid arguments")
+    }
+
+    #[test]
+    fn the_advertised_address_defaults_to_a_listen_address_that_is_not_a_wildcard() {
+        let plain = addresses(&settings(&["--listen", "127.0.0.1:4500"])).expect("valid");
+        assert_eq!(plain.listen, "127.0.0.1:4500".parse().expect("literal"));
+        assert_eq!(plain.advertise.to_string(), "127.0.0.1:4500");
+        let named = addresses(&settings(&[
+            "--listen",
+            "0.0.0.0:4500",
+            "--advertise",
+            "Node1:4500",
+        ]))
+        .expect("valid");
+        assert!(named.listen.ip().is_unspecified());
+        assert_eq!(named.advertise.to_string(), "node1:4500", "kept as a name");
+        let refused = addresses(&settings(&["--listen", "0.0.0.0:4500"]));
+        assert!(refused.is_err_and(|e| e.contains("PAROS_ADVERTISE")));
+        let malformed = addresses(&settings(&[
+            "--listen",
+            "0.0.0.0:4500",
+            "--advertise",
+            "node1",
+        ]));
+        assert!(malformed.is_err_and(|e| e.contains("PAROS_ADVERTISE")));
+        let wildcard = addresses(&settings(&[
+            "--listen",
+            "0.0.0.0:4500",
+            "--advertise",
+            "0.0.0.0:4500",
+        ]));
+        assert!(wildcard.is_err_and(|e| e.contains("PAROS_ADVERTISE")));
+    }
 }

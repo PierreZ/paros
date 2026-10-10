@@ -164,9 +164,11 @@ impl FleetOps {
         };
         let providers = self.connector.providers().clone();
         let rpc = self.connector.rpc().clone();
+        let names = self.connector.names().clone();
         let answer = journals::request(
             &providers,
             &rpc,
+            &names,
             &cell.client,
             election,
             &request,
@@ -185,6 +187,7 @@ impl FleetOps {
             let again = journals::request(
                 &providers,
                 &rpc,
+                &names,
                 &cell.client,
                 election,
                 &request,

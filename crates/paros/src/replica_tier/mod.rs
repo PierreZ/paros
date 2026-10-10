@@ -391,6 +391,7 @@ fn acceptor_lanes<P: Providers, A: Audit + Clone + Send + Sync + 'static>(
         from: me,
         // No cell plan reaches this role yet: it runs on no machine.
         cell_id: 0,
+        names: crate::Names::literal(),
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

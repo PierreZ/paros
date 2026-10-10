@@ -20,7 +20,7 @@ use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::fleet::TenantState;
 use paros::name::full_hex;
 use paros::tenant::Desired;
-use paros::{JournalIdentifier, TenantId, WriterMode};
+use paros::{JournalIdentifier, Names, TenantId, WriterMode};
 use serde_json::json;
 
 use crate::Ending;
@@ -87,6 +87,7 @@ fn parse_mode(text: &str) -> Result<WriterMode, String> {
 pub async fn run(
     providers: &TokioProviders,
     rpc: &RpcHandle<TokioProviders>,
+    names: &Names,
     client: &ParosClient,
     out: &Printer,
     args: JournalArgs,
@@ -152,6 +153,7 @@ pub async fn run(
     let answer = journals::request(
         providers,
         rpc,
+        names,
         client,
         election,
         &request,

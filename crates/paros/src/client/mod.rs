@@ -100,6 +100,7 @@ use crate::rpc::{
     InspectReply, NodeClient, Read, Reconfigure, ReconfigureMatchmakers, RetireRequest, SetLeader,
     Truncate, Write, leader_uuid_from_proto, leader_uuid_to_proto, quorum_system_to_proto,
 };
+use crate::{Address, Names};
 
 /// The client's tunables, one plain field each so a harness can push any
 /// one of them to an extreme on its own (prong 2 of the turbulence
@@ -361,6 +362,31 @@ impl<P: Providers> Client<P> {
             .map(|(id, addr)| Server {
                 id: *id,
                 node: NodeClient::new(rpc, *addr),
+            })
+            .collect();
+        Self::new(providers, servers, tunables)
+    }
+
+    /// A client of the servers at `addrs` (`(node id, advertised address)`
+    /// pairs, #257), each resolved through `names` at every call, called
+    /// through the caller's RPC runtime `rpc`.
+    ///
+    /// # Panics
+    ///
+    /// If `addrs` is empty.
+    #[must_use]
+    pub fn connect_named(
+        providers: &P,
+        rpc: &RpcHandle<P>,
+        names: &Names,
+        addrs: &[(u64, Address)],
+        tunables: ClientTunables,
+    ) -> Self {
+        let servers = addrs
+            .iter()
+            .map(|(id, addr)| Server {
+                id: *id,
+                node: NodeClient::named(rpc, names.clone(), addr.clone()),
             })
             .collect();
         Self::new(providers, servers, tunables)

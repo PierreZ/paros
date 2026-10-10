@@ -41,19 +41,18 @@
 //! liveness is excused ([`cell_lost`]).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, StateHandle,
-    assert_always, assert_reachable,
+    Process, ScriptedResolver, SimContext, SimTimeProvider, SimulationError, SimulationResult,
+    StateHandle, assert_always, assert_reachable,
 };
 use paros::machine::{
-    AuditScope, CellPlan, ControlJournals, MachineError, MachineRecord, MachineSettings,
-    ProviderDisk,
+    AuditScope, CellPlan, ControlJournals, MachineAddresses, MachineError, MachineRecord,
+    MachineSettings, ProviderDisk,
 };
-use paros::{Ballot, NodeId, RunError};
+use paros::{Address, Ballot, NodeId, RunError};
 
 use crate::audit::NodeAudit;
 use crate::audit::journals::journal_board;
@@ -68,17 +67,21 @@ const ROOT: &str = "paros/machine";
 pub(crate) struct MachineBoard {
     /// An operator sent `init` to a machine.
     init_sent: bool,
-    /// The founding members the run's `cell init` lists (the layout's).
-    founders: BTreeSet<SocketAddr>,
+    /// The founding members the run's `cell init` lists (the layout's), by
+    /// advertised address (#257).
+    founders: BTreeSet<Address>,
+    /// Each machine's process IP, by advertised address: what a fault
+    /// strikes.
+    ips: BTreeMap<Address, String>,
     /// Every durable vote of a machine still on its disk, by minted id: all
     /// of them name one cell. A wiped machine's vote is gone with its disk.
     voters: BTreeMap<u64, CellPlan>,
     /// The machines that formed, by minted id.
     formed: BTreeSet<u64>,
     /// Each machine's minted id, by address: the record on its disk now.
-    nodes: BTreeMap<SocketAddr, u64>,
+    nodes: BTreeMap<Address, u64>,
     /// The machines a wipe replaced: the address and the id it held.
-    wiped: BTreeSet<(SocketAddr, u64)>,
+    wiped: BTreeSet<(Address, u64)>,
     /// Each machine's last recorded promise in the cell decree, by minted id.
     promises: BTreeMap<u64, Ballot>,
     /// The first machine to record a promise: `cell init`'s receiver, which
@@ -98,9 +101,14 @@ pub(crate) struct MachineBoard {
     elections: BTreeSet<paros::JournalIdentifier>,
     /// The address an operator founded another cell on (#216): a machine
     /// that replaced a wiped member of the run's cell, alone in its own.
-    other_founder: Option<SocketAddr>,
+    other_founder: Option<Address>,
     /// The votes for that other cell still on a disk, by minted id.
     others: BTreeMap<u64, CellPlan>,
+    /// The IP each machine binds now, by rank (#257): its process IP, or the
+    /// address it moved to.
+    listens: BTreeMap<usize, std::net::IpAddr>,
+    /// How many times each machine moved, by rank.
+    moves: BTreeMap<usize, u8>,
 }
 
 impl MachineBoard {
@@ -160,7 +168,7 @@ pub(crate) fn is_election(state: &StateHandle, journal: paros::JournalIdentifier
 fn wiped_members(board: &MachineBoard, plan: &CellPlan) -> usize {
     plan.members
         .iter()
-        .filter(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
+        .filter(|(id, addr)| board.wiped.contains(&(addr.clone(), id.0)))
         .count()
 }
 
@@ -176,27 +184,27 @@ pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
 }
 
 /// Whether the machine at `addr` holds an admission on its disk now (#216).
-pub(crate) fn is_admitted(state: &StateHandle, addr: SocketAddr) -> bool {
+pub(crate) fn is_admitted(state: &StateHandle, addr: &Address) -> bool {
     let board = machine_board(state);
     let board = lock(&board);
     board
         .nodes
-        .get(&addr)
+        .get(addr)
         .is_some_and(|node| board.admitted.contains_key(node))
 }
 
 /// Whether a wipe replaced the machine at `addr` this run: an answer it sent
 /// before the wipe may name a disk that is gone.
-pub(crate) fn was_wiped(state: &StateHandle, addr: SocketAddr) -> bool {
+pub(crate) fn was_wiped(state: &StateHandle, addr: &Address) -> bool {
     lock(&machine_board(state))
         .wiped
         .iter()
-        .any(|(wiped, _)| *wiped == addr)
+        .any(|(wiped, _)| wiped == addr)
 }
 
 /// Whether the machine at `addr` is a founding member `init` lists.
-pub(crate) fn is_founder(state: &StateHandle, addr: SocketAddr) -> bool {
-    lock(&machine_board(state)).founders.contains(&addr)
+pub(crate) fn is_founder(state: &StateHandle, addr: &Address) -> bool {
+    lock(&machine_board(state)).founders.contains(addr)
 }
 
 /// Whether any machine was wiped this run: the one way a machine can hold
@@ -210,17 +218,17 @@ pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
 /// of a wiped member of the run's cell, whose old id a vote still names (so
 /// the cell's members keep sending it their peer traffic), and which holds
 /// no vote and no admission of its own: it is idle.
-pub(crate) fn other_cell_target(state: &StateHandle) -> Option<SocketAddr> {
+pub(crate) fn other_cell_target(state: &StateHandle) -> Option<Address> {
     let board = machine_board(state);
     let board = lock(&board);
-    if let Some(addr) = board.other_founder {
-        return board.others.is_empty().then_some(addr);
+    if let Some(addr) = &board.other_founder {
+        return board.others.is_empty().then(|| addr.clone());
     }
     let plan = board.voters.values().next()?;
     plan.members
         .iter()
-        .filter(|(id, addr)| board.wiped.contains(&(*addr, id.0)))
-        .map(|(_, addr)| *addr)
+        .filter(|(id, addr)| board.wiped.contains(&(addr.clone(), id.0)))
+        .map(|(_, addr)| addr.clone())
         .find(|addr| {
             board.nodes.get(addr).is_some_and(|node| {
                 !board.voters.contains_key(node) && !board.admitted.contains_key(node)
@@ -230,21 +238,21 @@ pub(crate) fn other_cell_target(state: &StateHandle) -> Option<SocketAddr> {
 
 /// An operator is about to found another cell on the machine at `addr`
 /// (#216), alone.
-pub(crate) fn note_other_cell(state: &StateHandle, addr: SocketAddr) {
+pub(crate) fn note_other_cell(state: &StateHandle, addr: &Address) {
     let board = machine_board(state);
     let mut board = lock(&board);
     assert_always!(
-        board.other_founder.is_none_or(|held| held == addr),
+        board.other_founder.as_ref().is_none_or(|held| held == addr),
         "machine: an operator founds at most one other cell"
     );
-    board.other_founder = Some(addr);
+    board.other_founder = Some(addr.clone());
 }
 
 /// Whether `plan` is the other cell an operator founded at `addr` (#216): a
 /// plan over that address alone, when it is not the run's founding list.
-fn is_other_cell(board: &MachineBoard, addr: SocketAddr, plan: &CellPlan) -> bool {
-    board.other_founder == Some(addr)
-        && plan.addrs().into_iter().eq(std::iter::once(addr))
+fn is_other_cell(board: &MachineBoard, addr: &Address, plan: &CellPlan) -> bool {
+    board.other_founder.as_ref() == Some(addr)
+        && plan.addrs().iter().eq(std::iter::once(addr))
         && plan.addrs() != board.founders
 }
 
@@ -257,7 +265,8 @@ pub(crate) fn founder_in_other_cell(state: &StateHandle) -> bool {
     let board = lock(&board);
     board
         .other_founder
-        .is_some_and(|addr| board.founders.contains(&addr))
+        .as_ref()
+        .is_some_and(|addr| board.founders.contains(addr))
         && !board.others.is_empty()
 }
 
@@ -272,17 +281,25 @@ pub(crate) fn cell_lost(state: &StateHandle) -> bool {
     !lock(&machine_board(state)).lost.is_empty()
 }
 
+/// The process IP of the machine that advertises `addr` (#257): a named
+/// address, or one a moved machine left, is not the IP a kill strikes.
+pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> {
+    let board = machine_board(state);
+    lock(&board).ips.get(addr).cloned()
+}
+
 /// The founding member the wiped-founder scenario wipes now
 /// (`crate::world::wiped_founder`), if the run is at its moment: an operator
 /// sent `init`, and either every founder promised and none voted
 /// (`after_vote` false: a founder other than `cell init`'s receiver), or a
 /// founder voted and another did not (`after_vote` true: that one). Only a
-/// live founder whose minted id the board knows.
+/// live founder whose minted id the board knows. The answer is the founder's
+/// process IP, what the wipe strikes.
 pub(crate) fn wipe_target(
     state: &StateHandle,
     after_vote: bool,
     dead: impl Fn(&str) -> bool,
-) -> Option<SocketAddr> {
+) -> Option<String> {
     let board = machine_board(state);
     let board = lock(&board);
     if !board.init_sent || !board.wiped.is_empty() {
@@ -290,14 +307,15 @@ pub(crate) fn wipe_target(
     }
     let mut live = board.founders.iter().filter_map(|addr| {
         let node = *board.nodes.get(addr)?;
-        (!dead(&addr.ip().to_string())).then_some((*addr, node))
+        let ip = board.ips.get(addr)?;
+        (!dead(ip)).then(|| (ip.clone(), node))
     });
     if after_vote {
         if board.voters.is_empty() {
             return None;
         }
         live.find(|(_, node)| !board.voters.contains_key(node))
-            .map(|(addr, _)| addr)
+            .map(|(ip, _)| ip)
     } else {
         if !board.voters.is_empty() {
             return None;
@@ -305,7 +323,7 @@ pub(crate) fn wipe_target(
         // Once every founder promised, a founder other than the receiver:
         // the receiver's decree goes on and forms the others, so the old
         // machine's vote outlives it (on a one-founder cell, the founder).
-        let promised: Vec<(SocketAddr, u64)> = live
+        let promised: Vec<(String, u64)> = live
             .filter(|(_, node)| board.promises.contains_key(node))
             .collect();
         if promised.len() < board.founders.len() {
@@ -315,7 +333,7 @@ pub(crate) fn wipe_target(
             .iter()
             .rev()
             .find(|(_, node)| board.founders.len() == 1 || board.first_promiser != Some(*node))
-            .map(|(addr, _)| *addr)
+            .map(|(ip, _)| ip.clone())
     }
 }
 
@@ -352,20 +370,129 @@ impl Process for MachineProcess {
     }
 }
 
-/// Parse `ip` (the topology's, port-less) into the address a machine serves.
-fn machine_addr(ip: &str) -> SimulationResult<SocketAddr> {
-    paros::parse_addr(ip)?
-        .parse()
-        .map_err(|e| SimulationError::InvalidState(format!("bad address: {e}")))
+/// The port every simulated machine binds and advertises.
+const MACHINE_PORT: u16 = 4500;
+
+const NAMES_KEY: &str = "paros-machine-names";
+
+/// The run's name table (#257): moonpool's `ScriptedResolver`, which the
+/// machines and the workload's clients resolve the machines' advertised
+/// names through, and which a machine that moves repoints.
+fn name_table(state: &StateHandle) -> ScriptedResolver {
+    crate::state::published_arc(state, NAMES_KEY, ScriptedResolver::new)
+        .as_ref()
+        .clone()
 }
 
-/// The machines' addresses, in rank order.
-pub(crate) fn machine_addrs(deployment: &Deployment) -> SimulationResult<Vec<SocketAddr>> {
+/// How every process of the run resolves the machines' addresses (#257).
+pub(crate) fn names(state: &StateHandle) -> paros::Names {
+    paros::Names::new(name_table(state))
+}
+
+/// The host a machine of rank `rank` advertises on a seed whose machines
+/// advertise names (#257).
+fn machine_host(rank: usize) -> String {
+    format!("machine-{rank}.paros")
+}
+
+/// The address the machine of rank `rank` at `ip` advertises: its name on
+/// a seed whose machines advertise names, else its literal address.
+fn advertised(
+    layout: &crate::shape::MachineLayout,
+    rank: usize,
+    ip: &str,
+) -> SimulationResult<Address> {
+    let text = if layout.named {
+        format!("{}:{MACHINE_PORT}", machine_host(rank))
+    } else {
+        format!("{ip}:{MACHINE_PORT}")
+    };
+    Address::parse(&text).map_err(SimulationError::InvalidState)
+}
+
+/// The machines' advertised addresses (#257), in rank order: what an
+/// operator lists and dials.
+pub(crate) fn machine_addrs(
+    state: &StateHandle,
+    deployment: &Deployment,
+) -> SimulationResult<Vec<Address>> {
+    let layout = crate::shape::machine_layout(state, deployment.machines().len());
+    if layout.named {
+        // A name resolves from the start, to the machine's process IP until
+        // it boots elsewhere.
+        let board = machine_board(state);
+        let board = lock(&board);
+        let table = name_table(state);
+        for (rank, ip) in deployment.machines().iter().enumerate() {
+            if !board.listens.contains_key(&rank)
+                && let Ok(ip) = ip.parse::<std::net::IpAddr>()
+            {
+                table.set(&machine_host(rank), vec![ip]);
+            }
+        }
+    }
     deployment
         .machines()
         .iter()
-        .map(|ip| machine_addr(ip))
+        .enumerate()
+        .map(|(rank, ip)| advertised(&layout, rank, ip))
         .collect()
+}
+
+/// Where the machine of rank `rank` binds at this boot (#257): its process
+/// IP at its first boot; on a seed whose machines advertise names, a reboot
+/// may land at a new address (the run's `move_pct`), as a container that
+/// Docker restarts gets a new IP. The name follows the machine: the table
+/// is repointed before the machine binds, and its peers resolve the name
+/// again after a failed dial. Moonpool routes a connection by the address
+/// a listener bound, so a moved machine binds an address of its own outside
+/// the topology (`10.250.<rank>.<move>`); the network faults that strike by
+/// process IP pass it by while it is there.
+fn boot_listen(
+    state: &StateHandle,
+    layout: &crate::shape::MachineLayout,
+    rank: usize,
+    my_ip: &str,
+) -> SimulationResult<std::net::SocketAddr> {
+    let own: std::net::IpAddr = my_ip
+        .parse()
+        .map_err(|e| SimulationError::InvalidState(format!("bad machine ip {my_ip}: {e}")))?;
+    if !layout.named {
+        return Ok(std::net::SocketAddr::new(own, MACHINE_PORT));
+    }
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let rebooted = board.listens.contains_key(&rank);
+    let moves = rebooted && moonpool_sim::sim_random_range(0_u32..100_u32) < layout.move_pct;
+    let ip = if moves {
+        let count = board.moves.entry(rank).or_default();
+        *count = count.wrapping_add(1).max(1);
+        let rank_octet = u8::try_from(rank).unwrap_or(u8::MAX);
+        let new_ip = std::net::IpAddr::from([10, 250, rank_octet, *count]);
+        assert_reachable!("machine: a machine comes back at a new address");
+        tracing::info!(rank, from = %board.listens[&rank], to = %new_ip, "machine_moved");
+        new_ip
+    } else {
+        board.listens.get(&rank).copied().unwrap_or(own)
+    };
+    board.listens.insert(rank, ip);
+    name_table(state).set(&machine_host(rank), vec![ip]);
+    Ok(std::net::SocketAddr::new(ip, MACHINE_PORT))
+}
+
+/// An operator's slip now and then (#257): a wildcard listen address and no
+/// advertised one, which the start refuses. The operator then sets both; a
+/// simulated machine binds its own address, never a wildcard (moonpool
+/// routes a connection by the address a listener bound).
+fn operator_slip() {
+    if moonpool_sim::buggify_with_prob!(0.05) {
+        let wildcard = std::net::SocketAddr::from(([0, 0, 0, 0], MACHINE_PORT));
+        let refused = MachineAddresses::new(wildcard, None);
+        assert_always!(
+            refused.is_err(),
+            "machine: a wildcard listen address with no advertised one is refused"
+        );
+    }
 }
 
 /// The first client id a machine's own client logs under in the control
@@ -390,15 +517,20 @@ async fn run_machine_role(
             "machine {rank} is outside the layout"
         )));
     };
-    let addrs = machine_addrs(deployment)?;
+    let addrs = machine_addrs(ctx.state(), deployment)?;
     let board = machine_board(ctx.state());
-    lock(&board).founders = addrs[..layout.founders].iter().copied().collect();
+    let addr = addrs[rank].clone();
+    {
+        let mut board = lock(&board);
+        board.founders = addrs[..layout.founders].iter().cloned().collect();
+        board.ips.insert(addr.clone(), my_ip.to_string());
+    }
+    let listen = boot_listen(ctx.state(), &layout, rank, my_ip)?;
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
         failure_domain: draw.failure_domain,
     };
-    let addr = machine_addr(my_ip)?;
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair.
     let store_layout = paros::JournalStoreConfig {
@@ -410,10 +542,11 @@ async fn run_machine_role(
     let tunables = incarnation.shape.tunables;
     let time = ctx.time().clone();
     let state = ctx.state().clone();
+    let audit_addr = addr.clone();
     let audits = move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
-                .on_machines(machine_board(&state), addr),
+                .on_machines(machine_board(&state), audit_addr.clone()),
             // The coordinator's calls join the control journals' histories
             // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
@@ -434,13 +567,18 @@ async fn run_machine_role(
             }
         }
     };
+    operator_slip();
+    let addresses =
+        MachineAddresses::new(listen, Some(addr.clone())).map_err(SimulationError::InvalidState)?;
+    let names = names(ctx.state());
     loop {
         let ran = Box::pin(paros::machine::run_machine(
             ctx.providers().clone(),
             disk(),
             &audits,
             &settings,
-            addr,
+            addresses.clone(),
+            names.clone(),
             tunables,
             ctx.shutdown().clone(),
         ))
@@ -482,19 +620,15 @@ async fn run_machine_role(
 /// the boot facts that need the run's layout. An empty disk where a record
 /// was is a wipe (moonpool's `CrashAndWipe`): the machine there is a new
 /// one, and the old one's vote is gone with its disk.
-pub(crate) fn booted(
-    board: &Mutex<MachineBoard>,
-    addr: SocketAddr,
-    record: Option<&MachineRecord>,
-) {
+pub(crate) fn booted(board: &Mutex<MachineBoard>, addr: &Address, record: Option<&MachineRecord>) {
     let mut board = lock(board);
     let Some(record) = record else {
-        let Some(old) = board.nodes.remove(&addr) else {
+        let Some(old) = board.nodes.remove(addr) else {
             return;
         };
-        let founder = board.founders.contains(&addr);
+        let founder = board.founders.contains(addr);
         let unformed = board.voters.len() < board.founders.len();
-        board.wiped.insert((addr, old));
+        board.wiped.insert((addr.clone(), old));
         // Judge the loss while the wiped machine's vote still names its
         // plan: a wipe of a plan's last voter loses its cell too.
         board.note_lost();
@@ -514,11 +648,11 @@ pub(crate) fn booted(
         return;
     };
     assert_always!(
-        board.nodes.get(&addr).is_none_or(|node| *node == record.node_id.0),
+        board.nodes.get(addr).is_none_or(|node| *node == record.node_id.0),
         "machine: a machine boots with the id it minted",
         { "node" => record.node_id.0 }
     );
-    if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(&addr) {
+    if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(addr) {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
 }
@@ -528,10 +662,10 @@ pub(crate) fn booted(
 /// ballots met at one machine (a promise raised over another machine's),
 /// and a plan was accepted at a second ballot — a later `cell init`
 /// finished what an earlier one proposed (P2c).
-pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &MachineRecord) {
+pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &MachineRecord) {
     let mut board = lock(board);
     let node = record.node_id.0;
-    board.nodes.insert(addr, node);
+    board.nodes.insert(addr.clone(), node);
     if record.promised != Ballot::default() {
         board.first_promiser.get_or_insert(node);
         let before = board.promises.insert(node, record.promised);
@@ -631,7 +765,7 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: SocketAddr, record: &M
 /// only on a founding member, and over exactly the founders.
 pub(crate) fn formatting(
     board: &Mutex<MachineBoard>,
-    addr: SocketAddr,
+    addr: &Address,
     node: NodeId,
     plan: &CellPlan,
 ) {
@@ -646,7 +780,7 @@ pub(crate) fn formatting(
         { "node" => node.0, "cell" => plan.cell_id }
     );
     assert_always!(
-        board.founders.contains(&addr),
+        board.founders.contains(addr),
         "machine: only a founding member forms",
         { "node" => node.0, "cell" => plan.cell_id }
     );
