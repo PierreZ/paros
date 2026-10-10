@@ -58,6 +58,10 @@ pub struct MachineSettings {
     pub capacity: u64,
     /// Its failure domain; may change across starts.
     pub failure_domain: String,
+    /// Its name, for people (#399): a label, never its identity; may change
+    /// across starts. `parosd` defaults it to the host of its advertised
+    /// address.
+    pub name: String,
 }
 
 /// A machine's two addresses (#257, `docs/architecture.md` §3.2): what it
@@ -292,16 +296,7 @@ where
     let MachineAddresses { listen, advertise } = addresses;
     let record = identity(&providers, &disk, &audit, &advertise, settings).await?;
     assert_eq!(record.class, settings.class, "the class is fixed at format");
-    let facts = MachineFacts {
-        node_id: record.node_id,
-        class: record.class,
-        capacity: record.capacity,
-        failure_domain: record.failure_domain.clone(),
-        addr: advertise.clone(),
-        listen,
-        names,
-        incarnation: 0,
-    };
+    let facts = facts_of(&record, (advertise.clone(), listen), names);
     tracing::info!(
         node = facts.node_id.0,
         addr = %advertise,
@@ -453,6 +448,7 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
             class: settings.class,
             capacity: settings.capacity,
             failure_domain: settings.failure_domain.clone(),
+            name: settings.name.clone(),
             promised: Ballot::default(),
             plan: None,
             admitted: None,
@@ -485,15 +481,37 @@ async fn identity<P: Providers, S: StorageProvider + Clone, A: Audit>(
             settings.class.as_str()
         )));
     }
-    let changed =
-        record.capacity != settings.capacity || record.failure_domain != settings.failure_domain;
+    let changed = record.capacity != settings.capacity
+        || record.failure_domain != settings.failure_domain
+        || record.name != settings.name;
     record.capacity = settings.capacity;
     record.failure_domain.clone_from(&settings.failure_domain);
+    record.name.clone_from(&settings.name);
     if changed {
         disk.write_record(&record.render()).await.map_err(failed)?;
         audit.machine_recorded(&record);
     }
     Ok(record)
+}
+
+/// The facts of the machine `record` names, advertising and binding
+/// `addresses`: no runtime serves it yet.
+fn facts_of(
+    record: &MachineRecord,
+    (addr, listen): (Address, SocketAddr),
+    names: Names,
+) -> MachineFacts {
+    MachineFacts {
+        node_id: record.node_id,
+        class: record.class,
+        capacity: record.capacity,
+        failure_domain: record.failure_domain.clone(),
+        name: record.name.clone(),
+        addr,
+        listen,
+        names,
+        incarnation: 0,
+    }
 }
 
 /// Serve the cell's journals until shutdown.

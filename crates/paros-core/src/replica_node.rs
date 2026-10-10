@@ -178,6 +178,10 @@ pub struct ReplicaNode {
     /// The open quorum reads (§3.4): a row's watermarks, then this
     /// replica's own applied prefix.
     quorum_reads: QuorumReads<NodeId>,
+    /// How many ticks an open quorum read may wait (#386): at least
+    /// `READ_TTL_TICKS` (20 ticks) and the driver's window
+    /// ([`ReplicaNode::set_read_window`]).
+    read_window: u64,
     /// Logical time, for the reads' TTL.
     tick_count: u64,
     pending_writes: Vec<WriteOp>,
@@ -258,6 +262,7 @@ impl ReplicaNode {
             acceptors_since: Ballot::zero(),
             read_basis: None,
             quorum_reads: QuorumReads::new(),
+            read_window: READ_TTL_TICKS,
             tick_count: 0,
             pending_writes: Vec::new(),
             pending_messages: Vec::new(),
@@ -350,6 +355,40 @@ impl ReplicaNode {
         self.assert_invariants();
     }
 
+    /// The driver hands the replica its own read window (#386): the replica
+    /// keeps an open quorum read at least that long, never less than
+    /// `READ_TTL_TICKS` (20 ticks) (see `ColocatedNode::set_read_window`).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, ticks)))]
+    pub fn set_read_window(&mut self, ticks: u64) {
+        self.read_window = ticks.max(READ_TTL_TICKS);
+        assert!(
+            self.read_window >= ticks,
+            "the core keeps a read as long as its driver waits"
+        );
+        assert!(
+            self.read_window >= READ_TTL_TICKS,
+            "a read window is never shorter than its floor"
+        );
+    }
+
+    /// The driver sets the apply page size (#338): the most chosen slots
+    /// one apply walk folds before it yields (see
+    /// `ColocatedNode::set_apply_page`).
+    ///
+    /// # Panics
+    ///
+    /// If `page` is zero or above [`crate::APPLY_BATCH`]: a programmer
+    /// error, never an operating condition.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, page)))]
+    pub fn set_apply_page(&mut self, page: usize) {
+        self.replica.set_apply_page(page);
+        assert!(
+            self.replica.apply_page() == page,
+            "the driver's apply page is in force"
+        );
+        self.assert_invariants();
+    }
+
     /// Advance logical time by one tick: while a faulty record is open, pull the decided range from its first missing
     /// slot — from the leader heard last, or from every bootstrap acceptor
     /// when none was. The same once-per-tick cadence a node's repair pull
@@ -363,7 +402,11 @@ impl ReplicaNode {
         let marks = self.marks();
         let ticks = self.tick_count;
         self.tick_count += 1;
-        self.quorum_reads.expire(self.tick_count, READ_TTL_TICKS);
+        assert!(
+            self.read_window >= READ_TTL_TICKS,
+            "a read window keeps its floor"
+        );
+        self.quorum_reads.expire(self.tick_count, self.read_window);
         self.serve_quorum_reads();
         let first_faulty = self.faulty.first().copied();
         if let Some(from_slot) = first_faulty {

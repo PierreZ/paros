@@ -451,6 +451,15 @@ request, refused with `StaleIncarnation`. That pull model is sufficient: Delos c
 their cached view only when an append fails on a sealed loglet. No push detection is asked of
 moonpool.
 
+`StaleIncarnation` needs dynamic references (amended on 2026-10-10, #216). moonpool-rpc refuses a
+stale reference only on a dynamic endpoint. A well-known endpoint answers every incarnation. Today
+every paros method is well known, so no call can be refused as stale. A restart at the same
+address rejoins in place, and that is the decided behaviour. A machine that moved is found
+through the registry fold (#349, #211). So `StaleIncarnation` and the `InterfaceRef` in
+`RegisterNode` move to #404 (static endpoints for bootstrap only), which makes the machine,
+coordinator and data-plane interfaces dynamic. #216 does not add an application-level copy of
+the check.
+
 **Listen and advertised addresses** (decided on 2026-10-07, #257). A machine's configuration
 carries two addresses, as FDB's `listen_address` / `public_address` and CockroachDB's
 `--listen-addr` / `--advertise-addr` do: `PAROS_LISTEN`, what it binds (may be a wildcard), and
@@ -584,22 +593,27 @@ there it calls `Resolve` (below).
   refused (`unset`), never read as "the node's first journal", and one naming a journal the
   machine does not serve is refused (`unknown_journal`). The machine's own facts ride every
   answer, refusals included.
-- `cell_id` and `universe_id` are carried in the session `Hello`; a peer with another id is refused.
+- `cell_id` is carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad configuration. The `Hello` is the peer lane's `Deliver` batch (decided
   on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
-  cell refuses the whole batch before it decodes a message. `universe_id` joins it when the cell
-  plan carries one. The simulation makes the shape: an operator founds another cell on the
+  cell refuses the whole batch before it decodes a message. The simulation makes the shape: an operator founds another cell on the
   machine that replaced a wiped member, and the first cell still sends to that address.
   Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
   members serve, and `cell init` never adopts a vote for another list's plan.
+  **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays
+  inside one cell, and a cell joins one universe once (`JoinFleet`), so two machines with the
+  same `cell_id` always share a universe: a check on the batch could never fire. The
+  `universe_id` rides the `Resolve` answer, and it joins the peer batch with the first call
+  that crosses cells (M12). It is minted at `universe init`, after the cell plan, so the cell
+  holds it in its registry fold (`JoinFleet`), not in the plan.
 - **Well-known endpoints** are the bootstrap set — `Identify`, `FormCell`, `Admit`, `Inspect` —
   and **`Resolve`**, keyed by tenant: "which references serve tenant T" (named on 2026-10-09).
   Everything else is a dynamic reference (amended on 2026-10-04:
   the bootstrap calls were well known already). One call, two answerers (decided on 2026-10-07,
   #233): a resolver answers the cell half (the tenant's cell and that cell's entry references),
   any machine of that cell the frontend half (the tenant's frontends, from its registry fold),
-  section 3.5.
+  section 3.5. `Resolve` landed on 2026-10-10 (#216, `0x5041_030A`), section 3.5.
 
 The decision and its alternatives are #216. Classes are FDB's:
 
@@ -833,6 +847,28 @@ refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: i
 machines answer and the frontend forwards, so forward-not-redirect stands and nodes still do no
 authorization.
 
+**Where `Resolve` stands** (#216, landed on 2026-10-10). There is no resolver (M12) and no frontend
+(#192) yet, so every machine of a cell, founding or admitted, answers both hops in one answer
+(`paros::machine::resolve`). It reads two folds through the cell's machines, as a client does, and
+keeps them between requests:
+
+- The universe directory, when the cell serves it. A `READY` `users` tenant resolves to its
+  `TenantId`, its control `JournalIdentifier` and its cell, with the `universe_id`. Refusals:
+  `unknown_tenant`, `not_ready`, `internal` (no user name), `other_cell` (the answer names the
+  tenant's cell, for M12), `no_universe` (the cell serves no universe directory yet) and
+  `unavailable` (a fold could not be read to its tail, so ask another machine).
+- The registry. The answer lists the cell's machines at the addresses the registry holds
+  (`cell_book`). A client calls them until the frontend exists. Then the same answer carries the
+  tenant's frontends, and with #404 each reference is an `InterfaceRef`.
+
+`paros::client::resolve` asks the entry endpoint's addresses in turn and passes over a machine
+that does not answer or answers `unavailable`. `parosctl resolve <tenant>` prints the answer. An
+answer is a hint from a fold: a stale one costs the client a refused call, and it resolves again.
+The simulation resolves every created tenant at the entry endpoint (every machine, from a drawn
+one on) beside the library's own resolution. Its oracles: a removed, internal or never-created
+name never resolves, and a resolved tenant is served by the operator's cell. Machines do no
+authorization: the Biscuit check is the resolver's and the frontend's (#245).
+
 ```
  client ──Resolve(T)──► resolver (its region: universe directory fold, Biscuit sig + scope)
         ◄── cell X, X's entry refs ──┘
@@ -885,9 +921,9 @@ token, the tenant name and the journal name). The frontend does these steps for 
 
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
 `admin` token reaches it. Until placement (#212 (placement)), a frontend fronts the cell's
-founding members, which it learns from a majority of their addresses. Until `Resolve` (#216
-(finish bootstrap)), a client gets its frontends' addresses from its configuration
-(`parosctl --frontends`, `PAROS_TOKEN`). The simulation runs zero to two frontends per seed, the
+founding members, which it learns from a majority of their addresses. `Resolve` (#216 (finish bootstrap))
+names no frontend until frontends are booked slots (#212 (placement)), so a client gets its
+frontends' addresses from its configuration (`parosctl --frontends`, `PAROS_TOKEN`). The simulation runs zero to two frontends per seed, the
 same code, with root keys drawn per seed and a second key rotated in. The workload calls the
 tenants' journals through them by name, with the tenant's own token, and with tokens that must
 be denied: another tenant's token, an expired token, a key that no ring holds, bytes that are not
@@ -992,6 +1028,33 @@ caller's authorization: **role slots** per machine (class, total, booked, and wh
 slot), per tenant (its slots and footprint), per cell (free and booked per class) and for the
 universe (decided on 2026-10-04).
 
+**The first views** (#399, decided on 2026-10-10). Each view is a request to **one cell**, and the
+request chooses the cell: `parosctl` asks the servers it names, and a founding member of that
+cell answers. The member reads the cell's own journals: the registry, the universe directory
+when the cell hosts it, the election journal and the tenant control journals. A view changes
+nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three queries:
+
+- **Cell**: every machine (name, address, class, capacity, bookings, standing, up or down,
+  founding member), every hosted tenant with its journals and their acceptors, and the cell
+  coordinator. Admin only.
+- **Tenant**, by name: the tenant's journals and the machines they use. A tenant hosted by
+  another cell is refused `other_cell` with the name of that cell.
+- **Universe**: the cells and the tenants of the universe directory. Admin only. Only the cell
+  that hosts the universe tenant answers it.
+
+**The server filters by scope; the caller never filters.** An `admin` sees every detail. A
+`tenant` caller sees only its own tenant, and of each machine that the tenant uses only its name,
+its failure domain and whether it is up. Any other query from a `tenant` caller is refused
+`forbidden`. Until the frontend checks tokens (#192), the caller states its scope and
+`paros::view::authorize` takes it as given. That function is the seam where the Biscuit roles of
+section 3.5 (`admin`, `tenant`, `view.detail`) will decide the scope.
+
+`parosctl` shows the views as tables, and `--json` gives one document for scripts:
+`machine list|show`, `cell list|show`, `tenant list|show` and `roles` (who holds which role: the
+cell coordinator, the acceptors and matchmakers of each journal, and the capacity bookings).
+`--as-tenant NAME` asks in the scope of one tenant. `parosctl status` (above) stays the target
+that these views grow into.
+
 ### 3.7 The universe
 
 The universe runs from M9 with one cell (decided on 2026-10-02, #226).
@@ -1076,9 +1139,12 @@ metadata version lets a reader refuse a format it does not understand.
 
 **What M9 carries so that M12 adds no protocol or data-model change:**
 
-- The machine record carries `node_id`; the durable cell plan carries `cell_id`, `universe_id` and
-  the metadata version (amended on 2026-10-04: the code keeps them in the cell plan, not `Config`).
-- `Hello` carries `cell_id` and `universe_id`.
+- The machine record carries `node_id`; the durable cell plan carries `cell_id` (amended on
+  2026-10-04: the code keeps it in the cell plan, not `Config`). `universe_id` and the metadata
+  version are minted after the plan, so the cell control journal holds them (`JoinFleet`,
+  amended on 2026-10-10, #216).
+- `Hello` carries `cell_id`; `universe_id` joins it with the first call that crosses cells (amended
+  on 2026-10-10, #216, section 3.2).
 - `Resolve` is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state, `survives`, the name and kind
   of the tenant's cell, #210).
@@ -1197,12 +1263,22 @@ id.
 names the universe, a cell, a tenant and a journal by its `u64` id only; a name never crosses the
 protocol below the entry roles. Each of them also has a **string label**, chosen when it is
 created (`universe init --name`, `cell init --name`, tenant and journal create) and shown by
-`parosctl` beside a short hex id. A label resolves to its id only at the edge (the resolver and
+`parosctl`. A label resolves to its id only at the edge (the resolver and
 the frontend, section 3.5, and `parosctl` for administration), and an id never becomes a label.
+
+**Hex ids are for local debugging only** (decided on 2026-10-10, #399). Every input and output
+for a person uses names: `parosctl` prints the name of each machine, cell, universe, tenant and
+journal, and takes a name wherever it takes an argument. A short hex id appears only when no
+name is known. A machine has a name too: `parosd --name` (`PAROS_NAME`), by default the host of
+its advertised address. The machine record and the registry keep it, and a new name registers
+the machine again. `parosctl init --universe-name --cell-name` names the universe and the first
+cell, and the universe directory keeps both names; a second cell with a name already in use is
+refused.
 
 - `node_id`, `cell_id`, `universe_id`: random, minted at format, `cell init` and `universe init`
   respectively, and
-  stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `universe_id`). They
+  stored in the machine record (`node_id`), the durable cell plan (`cell_id`) and the cell control
+  journal (`universe_id`, `JoinFleet`, amended on 2026-10-10, #216). They
   are written once, unset → set, and a later mismatch is refused at boot like any `Config`
   mismatch.
 - The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the
@@ -1748,7 +1824,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 |---|---|---|
 | M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
 | M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 and #216 first; landed: #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
+| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #228, #235, #229, #230, #211's core, and #176, #261, #263, #264 (PR #266), #267; sim first: #202, #213, #246, #247, #248; then #241, #243, #244, #240, #210, #239, #190, #212, #192, #245, #191, #211, #213, #252, #257) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
 | M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (redundancy, grid, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
 | M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `single` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
 | M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, pools per `(tenant, region)`, the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |

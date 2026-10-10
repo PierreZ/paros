@@ -24,6 +24,7 @@ must carry it. `SetLeader(new, old)` replaces the uuid only if the current one i
 For example, `cell init` is a single-decree Paxos over the founding members.
 
 [The journal API](@/parosd/journal-api.md) describes the four calls, the two writer modes and
-the limits. `parosd` is a work in progress. Later pages of this part will describe the control
+the limits. [Admin views](@/parosd/admin-views.md) shows the machines, tenants and roles of a
+cell with `parosctl`. `parosd` is a work in progress. Later pages of this part will describe the control
 hierarchy, the bootstrap, multi-tenancy, the cell design and how to run the Compose demo
 (`DEMO.md` in the repository).

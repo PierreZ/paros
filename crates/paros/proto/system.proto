@@ -55,6 +55,8 @@ message RegisterNode {
   uint64 capacity = 5;
   fixed64 incarnation_high = 6;
   fixed64 incarnation_low = 7;
+  // The machine's name, for people (#399): a label, never its identity.
+  string name = 8;
 }
 
 // Stop placing new work on node `id` (it stays in the pool).
@@ -189,6 +191,8 @@ message RegisteredNodeState {
   uint64 registrations = 7;
   fixed64 incarnation_high = 8;
   fixed64 incarnation_low = 9;
+  // The machine's name (#399).
+  string name = 10;
 }
 
 message BookingState {

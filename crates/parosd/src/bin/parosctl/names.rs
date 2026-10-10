@@ -27,6 +27,7 @@ use paros::name::{
 use paros::{JournalId, JournalIdentifier, TenantId};
 
 use crate::Ending;
+use crate::labels::Labels;
 use crate::output::note;
 
 type ParosClient = Client<TokioProviders>;
@@ -267,7 +268,8 @@ async fn by_ids(client: &ParosClient, tenant: &str, journal: &str) -> Result<Res
     })
 }
 
-/// A node id as typed: a hex prefix of one of the servers' ids.
+/// A machine as typed: its name (#399), or, for local debugging, a hex
+/// prefix of one of the servers' ids.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeRef(String);
 
@@ -275,14 +277,25 @@ impl FromStr for NodeRef {
     type Err = String;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        parse_prefix(text).map(Self).map_err(|e| e.to_string())
+        if text.is_empty() {
+            return Err("a machine is named".to_string());
+        }
+        Ok(Self(text.to_string()))
     }
 }
 
 impl NodeRef {
-    /// The server id this prefix names among `servers`.
-    pub fn resolve(&self, servers: &[u64]) -> Result<u64, Ending> {
-        one("node", &self.0, servers.iter().copied())
+    /// The server this reference names among `servers`: the one `labels`
+    /// names so, else the one whose id starts with it in hex.
+    pub fn resolve(&self, servers: &[u64], labels: &Labels) -> Result<u64, Ending> {
+        if let Some(id) = labels.machine_named(&self.0, servers) {
+            return Ok(id);
+        }
+        let Ok(prefix) = parse_prefix(&self.0) else {
+            note(&format!("no server is the machine named {}", self.0));
+            return Err(Ending::Refused);
+        };
+        one("node", &prefix, servers.iter().copied())
     }
 }
 

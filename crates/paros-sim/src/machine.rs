@@ -799,16 +799,16 @@ async fn run_machine_role(
     };
     let addrs = machine_addrs(ctx.state(), deployment)?;
     let board = machine_board(ctx.state());
-    let addr = addrs[rank].clone();
     {
         let mut board = lock(&board);
         board.founders = addrs[..layout.founders].iter().cloned().collect();
-        board.ips.insert(addr.clone(), my_ip.to_string());
+        board.ips.insert(addrs[rank].clone(), my_ip.to_string());
     }
     let settings = MachineSettings {
         class: draw.class,
         capacity: draw.capacity,
         failure_domain: draw.failure_domain,
+        name: format!("machine-{rank}"),
     };
     // Ordered: a crash never leaves a batch ambiguous, which a one-member
     // cell could never repair.
@@ -823,7 +823,7 @@ async fn run_machine_role(
     let tunables = incarnation.shape.tunables;
     let time = ctx.time().clone();
     let state = ctx.state().clone();
-    let audit_addr = addr.clone();
+    let audit_addr = addrs[rank].clone();
     let audits = move |scope: AuditScope| -> NodeAudit<SimTimeProvider> {
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))

@@ -78,6 +78,12 @@ pub mod tenant {
     include!(concat!(env!("OUT_DIR"), "/paros.tenant.v1.rs"));
 }
 
+/// The administrative views (#399), generated from `proto/view.proto`.
+pub mod view {
+    #![allow(missing_docs, clippy::pedantic)]
+    include!(concat!(env!("OUT_DIR"), "/paros.view.v1.rs"));
+}
+
 mod client;
 mod codec;
 mod consensus;

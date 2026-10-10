@@ -29,24 +29,27 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 - `src/bin/parosctl/init.rs` → `parosctl init [--members a,b,c] [--patience-ms N]`: resolves the
   founding members (default: the servers), runs `paros::client::initialize` over them and prints
   what it came to (`cell init`, the elected coordinator, the fleet steps; #229, #240, #246, #277).
-- `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete|list` over
+- `src/bin/parosctl/fleet.rs` → `parosctl tenant create|delete` over
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/journal.rs` → `parosctl journal create|delete|list` over `paros::client::journals` (#210): the tenant named, found in the fleet directory; one request id per run, re-sent by the library until decided.
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
+- `src/bin/parosctl/entry.rs` → `parosctl resolve <tenant>` over `paros::client::resolve` (#216): the servers are the entry endpoint; prints the tenant's cell and the cell's machines.
 - `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; `<label>.private` (mode 0600) and `<label>.public`, written once; outputs name a key by its label, never its id.
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
+- `src/bin/parosctl/views.rs` → `Asker`, `parosctl machine list|show`, `cell list|show`, `tenant list|show`, `roles [--cell|--tenant|--machine]` (#399): one `View` to the servers' cell, printed as a table (`output::table`) or JSON; the global `--as-tenant NAME` asks in one tenant's scope.
+- `src/bin/parosctl/labels.rs` → `Labels` → the names every command prints (#399): one admin cell view per command; short hex only when no view names an entity.
 - `src/bin/parosctl/commands.rs` → one fn per cell command: `write`, `read`, `tail`, `truncate`,
   `set-leader`, `inspect`, `reconfigure`, `retire`.
-- `src/bin/parosctl/names.rs` → `JournalRef`, `NodeRef` → a journal argument as a name (`TENANT/JOURNAL`, `paros://…`, resolved through `paros::client::names` with operator rights, or sent as it is to a frontend, #192 (the frontend)) or as ids (`id:TENANT/JOURNAL`, hex prefixes matched among the journals `parosctl` can list); a node id as a hex prefix of a server's id (#239).
+- `src/bin/parosctl/names.rs` → `JournalRef`, `NodeRef` (a machine name first, then a hex prefix, #399) → a journal argument as a name (`TENANT/JOURNAL`, `paros://…`, resolved through `paros::client::names` with operator rights, or sent as it is to a frontend, #192 (the frontend)) or as ids (`id:TENANT/JOURNAL`, hex prefixes matched among the journals `parosctl` can list); a node id as a hex prefix of a server's id (#239).
 - `src/bin/parosctl/output.rs` → `Printer`, `short` → text or one JSON document per answer (`--json`);
-  diagnostics to stderr; ids in text as short hex (#239), whole in JSON.
+  diagnostics to stderr; `table` for the views; text names every entity (#399), JSON carries names and whole ids; short hex only when no name is known.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
   reopens with every acked write; the machine record on a real disk.
 
 ## Entry points
 
 - `parosd` with `PAROS_LISTEN`, `PAROS_ADVERTISE` (#257), `PAROS_DATA_DIR`, `PAROS_CLASS`, `PAROS_CAPACITY`,
-  `PAROS_FAILURE_DOMAIN`, `PAROS_STORE_LAYOUT` and the tunable overrides (`settings.rs`). No
+  `PAROS_FAILURE_DOMAIN`, `PAROS_NAME` (the machine's name, default the advertised host, #399), `PAROS_STORE_LAYOUT` and the tunable overrides (`settings.rs`). No
   role, no id, no peer: a machine is configured with no other machine (`PAROS_ID`,
   `PAROS_SEEDS` and `PAROS_RENDEZVOUS` are gone, #277).
 - `parosctl [--servers HOST:PORT|ID=HOST:PORT,…] [--json] [--timeout-ms N] <command>`; servers

@@ -679,6 +679,7 @@ impl SystemOps {
                     class,
                     capacity: machine.capacity,
                     failure_domain: format!("zone-{}", id.0 % 2),
+                    name: format!("joiner-{}", id.0 % 100),
                     // A joiner's registration names a fresh incarnation:
                     // each one is a (re)boot.
                     incarnation: u128::from(crate::chain::splitmix(draw)) | 1,

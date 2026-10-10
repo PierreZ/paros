@@ -28,8 +28,9 @@
 //! and no state that survives it; nodes do no authorization.
 //!
 //! Until placement (#212) the frontend fronts the cell's founding members,
-//! which serve every journal; until the resolver (#233, M12) and `Resolve`
-//! (#216), a client is configured with its frontends' addresses. The
+//! which serve every journal; and since `Resolve` (#216) names no frontend
+//! until frontends are booked slots, a client is configured with its
+//! frontends' addresses. The
 //! administration calls that are journal calls on internal journals (the
 //! universe tenant's, the cell's) go through a frontend with an `admin`
 //! token.

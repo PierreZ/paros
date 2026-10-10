@@ -51,6 +51,13 @@ service Machine {
   // reads that outcome back, so it acts once, across a coordinator change
   // too.
   rpc JournalRequest(.paros.machine.v1.JournalRequest) returns (.paros.machine.v1.JournalRequestAck);
+  // Which references serve tenant `tenant` (#216, `docs/architecture.md`
+  // §3.5): the client's first call, sent to its entry endpoint. Any machine
+  // of a cell answers it from its folds: the tenant's cell, id and control
+  // journal from the universe directory, and the cell's machines from the
+  // registry. Until the resolver (M12) and the frontend (#192) exist, a
+  // machine answers both hops in one answer.
+  rpc Resolve(.paros.machine.v1.Resolve) returns (.paros.machine.v1.ResolveAck);
 }
 
 message Identify {}
@@ -73,6 +80,8 @@ message IdentifyAck {
   // coordinator tells a reboot (#211). 0 is unknown.
   fixed64 incarnation_high = 8;
   fixed64 incarnation_low = 9;
+  // The machine's name, for people (#399): a label, never its identity.
+  string name = 10;
 }
 
 // One member of a cell's bootstrap: its identity and address.
@@ -238,4 +247,36 @@ message JournalRequestAck {
   uint64 journal = 2;
   // Its members, on "created".
   paros.common.v1.AcceptorConfig config = 3;
+}
+
+message Resolve {
+  // The tenant's name, as a user types it.
+  bytes tenant = 1;
+}
+
+message ResolveAck {
+  // "" when the tenant resolved. Else: "unknown_tenant" (no tenant holds the
+  // name), "not_ready" (the tenant is being created or removed: `tenant` is
+  // its id), "internal" (the name is not a user's tenant), "other_cell"
+  // (another cell hosts the tenant: `tenant_cell` names it, M12),
+  // "no_universe" (this cell serves no universe directory yet),
+  // "unavailable" (a fold could not be read to its tail: ask again or ask
+  // another machine).
+  string refusal = 1;
+  // The universe the directory names; 0 when unknown.
+  uint64 universe_id = 2;
+  // The answering machine's cell.
+  uint64 cell_id = 3;
+  // The tenant's id, on "" and "not_ready".
+  uint64 tenant = 4;
+  // The tenant's control journal, on "".
+  JournalIdentifier control = 5;
+  // The cell that hosts the tenant, on "" and "other_cell".
+  uint64 tenant_cell = 6;
+  // The cell's machines, at the addresses its registry holds, on "". A
+  // client sends its calls to them until the frontend exists (#192); then
+  // this answer carries the tenant's frontends too.
+  repeated Member machines = 7;
+  // The universe directory's position the answer was read at.
+  uint64 at = 8;
 }

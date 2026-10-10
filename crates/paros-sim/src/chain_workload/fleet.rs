@@ -77,6 +77,8 @@ mod cell;
 mod election;
 mod journals;
 mod other_cell;
+mod resolve;
+mod view;
 
 use cell::Cell;
 
@@ -618,10 +620,12 @@ impl FleetOps {
                 self.check_directory(client, session, first).await;
                 self.resolve_tenant_name(client, first, &name, Some(result))
                     .await;
+                self.resolve_at_entry(first, &name, Some(result)).await;
                 // An internal tenant has no name: the user path never
                 // resolves one.
                 if buggify_with_prob!(0.2) {
                     self.resolve_tenant_name(client, first, b"", None).await;
+                    self.resolve_at_entry(first, b"", None).await;
                 }
                 true
             }

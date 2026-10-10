@@ -93,6 +93,7 @@ mod tests {
             class: Class::Storage,
             capacity: 1,
             failure_domain: String::new(),
+            name: format!("m{id}"),
             incarnation: 1,
         }
         .encode();

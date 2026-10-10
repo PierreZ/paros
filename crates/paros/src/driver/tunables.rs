@@ -76,6 +76,7 @@ impl DriverTunables {
     /// | `min_wait_ms` | 0 | a client may ask to answer at once |
     /// | `max_read_records`, `max_read_bytes`, `max_batch_*` | the defaults | bounded by bytes, not by time |
     /// | `recovery_page` | the default (64) | the ceiling; a page bounds one `Ready`'s burst |
+    /// | `promise_page`, `resend_page`, `apply_page`, `registry_page` | the defaults (64) | the ceilings; a page bounds one message or one `Ready` (#338) |
     /// | `quarantine_ticks` | 80 (8 s) | eight election timeouts before a faulty device is retried |
     /// | `election_backoff_doublings` | 3 | up to `8 × T` (8–16 s) after failed campaigns |
     /// | inbox and queue capacities, `delivery_batch` | the defaults | bounded by bytes, not by time |
@@ -150,7 +151,7 @@ impl DriverTunables {
     pub fn check_floors(&self) -> Result<(), BelowFloor> {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let fields: [(&'static str, u64, u64); 31] = [
+        let fields: [(&'static str, u64, u64); 35] = [
             ("tick_interval", ms(self.tick_interval), 1),
             (
                 "election_timeout_base",
@@ -218,6 +219,10 @@ impl DriverTunables {
                 ms(self.election_renew).saturating_add(1),
             ),
             ("recovery_page", count(self.recovery_page), 1),
+            ("promise_page", count(self.promise_page), 1),
+            ("resend_page", count(self.resend_page), 1),
+            ("apply_page", count(self.apply_page), 1),
+            ("registry_page", count(self.registry_page), 1),
         ];
         assert!(
             fields.iter().all(|(field, _, _)| !field.is_empty()),

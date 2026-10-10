@@ -42,6 +42,10 @@ docker compose run --rm parosctl set-leader "$J" --new 8
 docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
 docker compose run --rm parosctl write "$J" fresh --leader 8
 
+# Ask any machine which references serve a tenant (#216): the client's first call. Prints:
+#   tenant=acme cell=… machines=node1:4500,node2:4500,node3:4500
+docker compose run --rm parosctl resolve acme
+
 # Tenants: created once (a second create of a name is refused).
 docker compose run --rm parosctl tenant create globex --survives region
 docker compose run --rm parosctl tenant list
@@ -57,6 +61,16 @@ docker compose run --rm parosctl journal list acme
 # control journal, then records its cell. A re-run prints `unchanged`.
 docker compose run --rm parosctl cell add-machine storage4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
+
+# The cell, as tables (#399): its machines, its tenants, who holds which role.
+docker compose run --rm parosctl machine list
+docker compose run --rm parosctl cell show
+docker compose run --rm parosctl tenant show acme
+docker compose run --rm parosctl roles --tenant acme
+
+# The same tenant in its own scope: only its spread over the cell. Any other view is refused.
+docker compose run --rm parosctl --as-tenant acme tenant show acme
+docker compose run --rm parosctl --as-tenant acme cell show
 
 # What each machine is (node id, cell, control journals), then its view of the journal.
 docker compose run --rm parosctl inspect

@@ -316,7 +316,10 @@ fn slot_decidable<Id: Copy + Ord>(
 
 /// A `Promise` page is useful only at the exact requested cursor, carries at
 /// most the advertised bound across both tri-state maps, keeps them disjoint,
-/// and advances its continuation past everything it reported.
+/// and advances its continuation past everything it reported. A page with a
+/// cursor carries at least one entry: the sender's own page size
+/// (`ColocatedNode::set_promise_page`, #338) is a per-node tunable under
+/// [`PROMISE_BATCH`], so the receiver cannot ask for an exactly full page.
 fn promise_page_shape_valid<V>(
     expected: Slot,
     accepted: &BTreeMap<Slot, (Ballot, V)>,
@@ -332,7 +335,7 @@ fn promise_page_shape_valid<V>(
             .keys()
             .all(|slot| *slot >= from_slot && !accepted.contains_key(slot))
         && next_from_slot.is_none_or(|next| {
-            len == PROMISE_BATCH
+            len > 0
                 && next > from_slot
                 && accepted.keys().next_back().is_none_or(|last| next > *last)
                 && faulty.keys().next_back().is_none_or(|last| next > *last)

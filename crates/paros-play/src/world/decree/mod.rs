@@ -618,7 +618,9 @@ impl DecreeWorld {
             let acceptor = &mut self.acceptors[index];
             match acceptor.role.prepare(ballot, DECREE, &mut acceptor.disk) {
                 PrepareOutcome::Promised { .. } => {
-                    let page = acceptor.role.promise_page(DECREE);
+                    let page = acceptor
+                        .role
+                        .promise_page(DECREE, paros_core::PROMISE_BATCH);
                     Message::Promise {
                         from: to,
                         ballot,

@@ -287,8 +287,9 @@ fn surface_registry_writes<A: Audit>(writes: &[MatchmakerWriteOp], id: Matchmake
     }
 }
 
-/// Report one reply at the instant it leaves.
-fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
+/// Report one reply at the instant it leaves, from a matchmaker whose pages
+/// carry at most `page_limit` registrations (#338).
+fn report_reply<A: Audit>(audit: &A, reply: &MatchReply, page_limit: usize) {
     let id = reply.matchmaker;
     match &reply.outcome {
         MatchOutcome::Registered {
@@ -309,6 +310,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply) {
                     next_from_ballot: *next_from_ballot,
                     gc_watermark: *gc_watermark,
                     effective: effective.as_ref(),
+                    page_limit,
                 },
             );
             tracing::info!(
@@ -424,6 +426,14 @@ where
     // read-only port (scalars once, then record by record); re-report the
     // recovered registry so the oracles see this incarnation's belief.
     let mut matchmaker = Matchmaker::new(&config, &storage);
+    // The registry page size (#338): the tunable, capped at the core's
+    // ceiling (an operator's override is external input, never a panic).
+    let page = tunables.registry_page.clamp(1, paros_core::REGISTRY_PAGE);
+    matchmaker.set_registry_page(page);
+    assert!(
+        matchmaker.registry_page() == page,
+        "a booted matchmaker runs the driver's registry page"
+    );
     let watermark = matchmaker.hard_state().gc_watermark;
     let phase = matchmaker.phase();
     audit.matchmaker_recovered(
@@ -457,7 +467,7 @@ where
                     "one matchmaking request yields exactly one reply"
                 );
                 if let Some(answer) = answer {
-                    report_reply(audit, &answer);
+                    report_reply(audit, &answer, matchmaker.registry_page());
                     // A lost reply is a legal outcome: the registration stands
                     // and the requester's retry is the same request again,
                     // answered from the retained history.

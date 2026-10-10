@@ -299,6 +299,7 @@ impl Watch {
                     class,
                     capacity: ack.capacity,
                     failure_domain: ack.failure_domain.clone(),
+                    name: ack.name.clone(),
                     incarnation,
                 })
             }
@@ -346,7 +347,11 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
 
 /// The library client of the cell's members, each dialed by its advertised
 /// address, resolved at each call (#257).
-fn cell_client<P: Providers>(providers: &P, rpc: &RpcHandle<P>, formed: &FormedCell) -> Client<P> {
+pub(crate) fn cell_client<P: Providers>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    formed: &FormedCell,
+) -> Client<P> {
     // This member at the address it advertises now (#349), the others where
     // its cached registry fold dials them, else at the plan's (#211).
     let book = super::with_own(&formed.founders(), formed.facts.node_id, &formed.facts.addr);
@@ -777,7 +782,14 @@ async fn register<P: Providers>(
         registered: true,
         refusal: String::new(),
     };
-    if *known == addr {
+    // Registered already: the registry holds this address and this name.
+    // A founding member the registry never held registers once, for its
+    // name (#399).
+    let same_label = session
+        .registry()
+        .get(id)
+        .is_some_and(|node| node.name == identity.name);
+    if *known == addr && same_label {
         return registered;
     }
     // The machine answers there as itself, and as the incarnation that
@@ -805,6 +817,7 @@ async fn register<P: Providers>(
         class,
         capacity: identity.capacity,
         failure_domain: identity.failure_domain,
+        name: identity.name,
         incarnation,
     };
     if session.record(client, 0, &command).await.is_err() {

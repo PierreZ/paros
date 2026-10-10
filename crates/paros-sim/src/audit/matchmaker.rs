@@ -88,10 +88,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
 use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
+
+use super::state::AuditState;
+use paros::client::{MatchmakersRefusal, RetireRefusal};
 use paros::{
-    AcceptorConfig, Ballot, GcAck, GcStep, HistoryPage, MatchRefusal, MatchmakerHardState,
-    MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap, REGISTRY_PAGE,
-    ReconfigureReply, ReconfigurerStep, Registration, RegistrationKind, Slot, StorageFaultDecision,
+    AcceptorConfig, Ballot, BootRefusal, GcAck, GcStep, HistoryPage, MatchRefusal,
+    MatchmakerHardState, MatchmakerId, MatchmakerPhase, MatchmakerSet, NodeId, PendingBootstrap,
+    REGISTRY_PAGE, ReconfigureReply, ReconfigureResult, ReconfigurerStep, Registration,
+    RegistrationKind, Slot, StorageFaultDecision,
 };
 
 /// One write a journal registry's commit carries (#176), reported before
@@ -413,7 +417,8 @@ fn check_folded_union(
 }
 
 /// Invariant 4, per page (#P9): the page is the folded window
-/// `[from_ballot, ballot)` truncated to one [`REGISTRY_PAGE`] — nothing
+/// `[from_ballot, ballot)` truncated to the matchmaker's own page size
+/// (`page_limit`, at most [`REGISTRY_PAGE`], #338) — nothing
 /// missing (under-reporting), nothing foreign — it starts at or above the
 /// durable watermark, and the continuation cursor is set exactly when the
 /// window did not fit.
@@ -432,10 +437,15 @@ fn check_page_window(
             "folded_round" => entry.watermark.round
         }
     );
+    assert_always!(
+        page.page_limit > 0 && page.page_limit <= REGISTRY_PAGE,
+        "matchmaker: a page size lies under the registry page ceiling",
+        { "matchmaker" => matchmaker.0, "limit" => page.page_limit }
+    );
     let mut window = entry.registered.range(page.from_ballot..ballot);
     let expected: BTreeMap<Ballot, Registration> = window
         .by_ref()
-        .take(REGISTRY_PAGE)
+        .take(page.page_limit)
         .map(|(b, c)| (*b, c.clone()))
         .collect();
     let expected_next = window.next().map(|(b, _)| *b);
@@ -2704,5 +2714,195 @@ impl MatchmakerAudit {
             self.effective_floor.round,
             self.effective_floor.node.0
         )
+    }
+}
+
+/// The bodies of the matchmaker callbacks of `NodeAudit`'s `Audit` impl
+/// (#417) that read more of the shared state than [`MatchmakerAudit`]: the
+/// impl delegates each one here under the state's lock.
+impl AuditState {
+    pub(super) fn match_registered(
+        &mut self,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        registration: &Registration,
+    ) {
+        self.matchmaker.registered(matchmaker, ballot, registration);
+        let config = &registration.config;
+        // The per-ballot configuration the quorum oracles count over: bound
+        // at its durable registration, before any leader could exercise it.
+        self.bind_config(ballot, config);
+    }
+
+    pub(super) fn gc_request_sent(&mut self, node: NodeId, watermark: Ballot, fence: Option<Slot>) {
+        // The leader re-sends its request every beat and the licence is judged
+        // once per `(node, watermark)`, so ask before deriving: everything
+        // below is an O(fence x members) walk whose answer would be dropped.
+        if !self.matchmaker.gc_needs_licence(node, watermark) {
+            self.matchmaker
+                .gc_requested(node, watermark, fence, None, "");
+            return;
+        }
+        // GC invariant 1, re-derived from the audit's own durable fold: a
+        // Phase-2 quorum of the configuration bound to the leader's ballot
+        // holds every slot up to the fence — a durable record carrying the
+        // decided value where the audit knows one (any record otherwise), or
+        // a compaction floor above the slot (the below-floor `Nack` is the
+        // acceptor's "already chosen"). `None` when the configuration is not
+        // known yet (then nothing is judged).
+        let mut uncovered: Vec<String> = Vec::new();
+        let covered = self.config_of(watermark).cloned().map(|config| {
+            let holders: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .filter(|m| {
+                    let m = m.0;
+                    match fence {
+                        None => true,
+                        Some(fence) => {
+                            let gap = (0..=fence.0).find(|slot| {
+                                let floor = self.floor.get(&m).map_or(0, |f| f.now);
+                                if floor > *slot {
+                                    return false;
+                                }
+                                match (self.persisted.get(&(m, *slot)), self.chosen.get(slot)) {
+                                    (Some(held), Some(decided)) => held != decided,
+                                    (Some(_), None) => false,
+                                    (None, _) => true,
+                                }
+                            });
+                            if let Some(slot) = gap {
+                                let why = match self.persisted.get(&(m, slot)) {
+                                    Some(_) => "mismatch",
+                                    None => "missing",
+                                };
+                                uncovered.push(format!("{m}@{slot}:{why}"));
+                            }
+                            gap.is_none()
+                        }
+                    }
+                })
+                .copied()
+                .collect();
+            // Judged by the configuration's own quorum system, never by a
+            // count: the custody claim the leader's GC rests on is the same
+            // Phase-2 quorum question `Collector::covered` asks in the core.
+            config.has_phase2_quorum(&holders)
+        });
+        self.matchmaker
+            .gc_requested(node, watermark, fence, covered, &uncovered.join(","));
+    }
+
+    pub(super) fn gc_step(&mut self, node: NodeId, ack: &GcAck, step: &GcStep) {
+        let config = self.config_of(ack.watermark).cloned();
+        self.matchmaker.gc_step(node, ack, step, config.as_ref());
+    }
+
+    pub(super) fn reconfigure_matchmakers_acked(&mut self, refusal: Option<MatchmakersRefusal>) {
+        if refusal.is_none() {
+            reach_once!(
+                self.reconfigure_matchmakers_started,
+                "generation: a client's matchmaker reconfiguration is started"
+            );
+        } else {
+            reach_once!(
+                self.reconfigure_matchmakers_refused,
+                "generation: a client's matchmaker reconfiguration is refused"
+            );
+        }
+    }
+
+    pub(super) fn retire_acked(&mut self, refusal: Option<RetireRefusal>) {
+        // The refusal legs the shared gate cannot tell apart. `not_collected`
+        // is the one #123's rule turns from a workload discipline into a
+        // protocol answer: the node is outside the configuration it believes
+        // in force, and still refuses, because nothing proves the cluster is
+        // done with the configurations it *was* in.
+        match refusal {
+            Some(RetireRefusal::NotCollected) => reach_once!(
+                self.retire_not_collected,
+                "gc: a retirement is refused for want of an effective floor"
+            ),
+            // The freshness leg (#165): outside the configuration it
+            // believes in force, but that belief predates the floor, so
+            // the node cannot tell whether the configuration the floor
+            // kept names it.
+            Some(RetireRefusal::Stale) => reach_once!(
+                self.retire_stale,
+                "gc: a retirement is refused on a belief older than the floor"
+            ),
+            Some(RetireRefusal::Leader) => reach_once!(
+                self.retire_leader,
+                "gc: a retirement is refused by the sitting leader"
+            ),
+            _ => {}
+        }
+        self.matchmaker.retire_acked(refusal.is_none());
+    }
+
+    pub(super) fn retired(&mut self, node: NodeId) {
+        self.matchmaker.retired(node);
+        self.retired.insert(node.0);
+    }
+
+    pub(super) fn matchmaking_completed(
+        &mut self,
+        node: NodeId,
+        ballot: Ballot,
+        prior: &[AcceptorConfig],
+        watermark: Ballot,
+        registered_by: usize,
+        disagreements: u64,
+    ) {
+        self.matchmaker
+            .completed(node, ballot, prior, watermark, registered_by, disagreements);
+        self.note_prior(node.0, ballot, prior);
+    }
+
+    pub(super) fn reconfigure_acked(&mut self, node: NodeId, result: ReconfigureResult) {
+        match result {
+            ReconfigureResult::Started(_) => {
+                assert_always!(
+                    self.matchmaker.has_matchmakers(),
+                    "reconfiguration: a deployment without matchmakers never starts one",
+                    { "node" => node.0 }
+                );
+                reach_once!(
+                    self.reconfigure_started,
+                    "reconfiguration: a reconfiguration request is started"
+                );
+            }
+            ReconfigureResult::Refused(_) | ReconfigureResult::NotLeader(_) => {
+                reach_once!(
+                    self.reconfigure_refused,
+                    "reconfiguration: a reconfiguration request is refused or redirected"
+                );
+            }
+        }
+    }
+
+    pub(super) fn matchmaker_boot_refused(
+        &mut self,
+        matchmaker: MatchmakerId,
+        refusal: BootRefusal,
+    ) {
+        match refusal {
+            // #183: the library, not the harness, keeps a wiped registry out.
+            BootRefusal::Amnesia => self.matchmaker.boot_refused(matchmaker.0),
+            BootRefusal::AlreadyFormatted => {
+                assert_always!(
+                    false,
+                    "matchmaker: a first boot never meets a formatted registry",
+                    { "matchmaker" => matchmaker.0 }
+                );
+            }
+            // #207: an edited configuration is refused, then restored.
+            BootRefusal::ConfigMismatch => {
+                reach_once!(
+                    self.matchmaker_config_mismatch_refused,
+                    "matchmaker: the library refuses a restart under an edited configuration"
+                );
+            }
+        }
     }
 }

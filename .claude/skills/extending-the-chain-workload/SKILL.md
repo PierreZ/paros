@@ -1,11 +1,12 @@
 ---
 name: extending-the-chain-workload
-description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (WRITE=0 through ADMIT=27, OP_COUNT=28, retired ids 8, 9, 10, 14, 16 reserved as no-ops), the per-op weight knobs in ChainConfig, swarm_op_enabled, every call driven through the library client paros::client (Client, Writer, Reader) with CallLog as its CallObserver and retry-identity oracle, ClientTunables drawn from ChainConfig knobs, deliberate misbehaviours as explicit calls, and the reachable gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, a system-journal operation, or when changing how the client retries or judges a reply.
+description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (WRITE=0 through VIEW=29, OP_COUNT=30, retired ids 8, 9, 10, 14, 16 reserved as no-ops), the per-op weight knobs in ChainConfig, swarm_op_enabled, every call driven through the library client paros::client (Client, Writer, Reader) with CallLog as its CallObserver and retry-identity oracle, ClientTunables drawn from ChainConfig knobs, deliberate misbehaviours as explicit calls, and the reachable gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, a system-journal operation, or when changing how the client retries or judges a reply.
 ---
 
 # Extending the chain workload
 
-`ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`) is the only
+`ChainWorkload` (`crates/paros-sim/src/chain_workload.rs`; the op ids and
+`ChainConfig` in `chain_workload/config.rs`) is the only
 main-campaign workload: one to three factory-created clients driving a
 chaotic pool through the journal API of #204 (`Write`, `Read`, `Truncate`,
 `SetLeader`). paros runs no application (#186): each client *is* the
@@ -40,7 +41,7 @@ RECONFIGURE_MATCHMAKERS=12  RETIRE=13  QUORUM_READ=14 (retired)  READ=15
 CHECK_TAIL=16 (retired)  CREATE_JOURNAL=17  DELETE_JOURNAL=18
 REGISTER_NODE=19  DRAIN_NODE=20  RETIRE_NODE=21  SET_LEADER=22
 CHECKPOINT=23  BOOK_CAPACITY=24  FLEET_INIT=25  TENANT=26
-ADMIT=27  OP_COUNT=28
+ADMIT=27  ELECTION=28  VIEW=29  OP_COUNT=30
 ```
 
 moonpool's operation swarm decides per seed which ids are on as a pure

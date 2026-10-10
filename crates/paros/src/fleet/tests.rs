@@ -27,7 +27,8 @@ fn formed() -> FleetDirectory {
         directory.fold(
             0,
             &entry(FleetCommand::FormFleet {
-                control: fleet_control()
+                control: fleet_control(),
+                name: Vec::new()
             })
         ),
         FleetEvent::FleetFormed { fleet_id: FLEET }
@@ -37,7 +38,8 @@ fn formed() -> FleetDirectory {
             1,
             &entry(FleetCommand::AddCell {
                 cell_id: CELL,
-                control: cell_control()
+                control: cell_control(),
+                name: Vec::new()
             })
         ),
         FleetEvent::CellAdded { cell_id: CELL }
@@ -85,10 +87,12 @@ fn every_entry_round_trips() {
     let commands = [
         FleetCommand::FormFleet {
             control: fleet_control(),
+            name: Vec::new(),
         },
         FleetCommand::AddCell {
             cell_id: CELL,
             control: cell_control(),
+            name: Vec::new(),
         },
         FleetCommand::MarkCell {
             cell_id: CELL,
@@ -121,6 +125,7 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
     let add = entry(FleetCommand::AddCell {
         cell_id: CELL,
         control: cell_control(),
+        name: Vec::new(),
     });
     // Nothing before the fleet; the fleet tenant's control journal must be named.
     assert_eq!(
@@ -131,7 +136,8 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         directory.fold(
             1,
             &entry(FleetCommand::FormFleet {
-                control: JournalIdentifier::UNSET
+                control: JournalIdentifier::UNSET,
+                name: Vec::new()
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::Malformed)
@@ -140,7 +146,8 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         directory.fold(
             2,
             &entry(FleetCommand::FormFleet {
-                control: fleet_control()
+                control: fleet_control(),
+                name: Vec::new()
             })
         ),
         FleetEvent::FleetFormed { fleet_id: FLEET }
@@ -159,7 +166,8 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         directory.fold(
             3,
             &entry(FleetCommand::FormFleet {
-                control: fleet_control()
+                control: fleet_control(),
+                name: Vec::new()
             })
         ),
         FleetEvent::Unchanged
@@ -168,7 +176,8 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         directory.fold(
             4,
             &entry(FleetCommand::FormFleet {
-                control: identifier(1, 1)
+                control: identifier(1, 1),
+                name: Vec::new()
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::OtherFleet { fleet_id: FLEET })
@@ -178,6 +187,7 @@ fn the_fleet_is_formed_once_with_the_fleet_tenant_as_its_first_internal_tenant()
         FleetCommand::AddCell {
             cell_id: CELL,
             control: cell_control(),
+            name: Vec::new(),
         },
     )
     .encode();
@@ -218,11 +228,13 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
         0,
         &entry(FleetCommand::FormFleet {
             control: fleet_control(),
+            name: Vec::new(),
         }),
     );
     let add = entry(FleetCommand::AddCell {
         cell_id: CELL,
         control: cell_control(),
+        name: Vec::new(),
     });
     assert_eq!(
         directory.fold(1, &add),
@@ -246,7 +258,8 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
             3,
             &entry(FleetCommand::AddCell {
                 cell_id: CELL,
-                control: identifier(0xbad, 1)
+                control: identifier(0xbad, 1),
+                name: Vec::new()
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::OtherCellTenant { cell_id: CELL })
@@ -257,7 +270,8 @@ fn a_cell_brings_its_cell_tenant_and_only_a_ready_cell_takes_tenants() {
             4,
             &entry(FleetCommand::AddCell {
                 cell_id: CELL + 1,
-                control: fleet_control()
+                control: fleet_control(),
+                name: Vec::new()
             })
         ),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantIdTaken {
