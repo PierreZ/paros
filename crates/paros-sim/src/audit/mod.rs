@@ -1962,12 +1962,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         ballot: Ballot,
         registration: &Registration,
     ) {
-        let mut st = self.state();
-        st.matchmaker.registered(matchmaker, ballot, registration);
-        let config = &registration.config;
-        // The per-ballot configuration the quorum oracles count over: bound
-        // at its durable registration, before any leader could exercise it.
-        st.bind_config(ballot, config);
+        self.state()
+            .match_registered(matchmaker, ballot, registration);
     }
 
     fn gc_watermark_raised(&self, matchmaker: MatchmakerId, watermark: Ballot) {
@@ -2014,68 +2010,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         watermark: Ballot,
         fence: Option<Slot>,
     ) {
-        let mut st = self.state();
-        // The leader re-sends its request every beat and the licence is judged
-        // once per `(node, watermark)`, so ask before deriving: everything
-        // below is an O(fence x members) walk whose answer would be dropped.
-        if !st.matchmaker.gc_needs_licence(node, watermark) {
-            st.matchmaker.gc_requested(node, watermark, fence, None, "");
-            return;
-        }
-        // GC invariant 1, re-derived from the audit's own durable fold: a
-        // Phase-2 quorum of the configuration bound to the leader's ballot
-        // holds every slot up to the fence — a durable record carrying the
-        // decided value where the audit knows one (any record otherwise), or
-        // a compaction floor above the slot (the below-floor `Nack` is the
-        // acceptor's "already chosen"). `None` when the configuration is not
-        // known yet (then nothing is judged).
-        let mut uncovered: Vec<String> = Vec::new();
-        let covered = st.config_of(watermark).cloned().map(|config| {
-            let holders: BTreeSet<NodeId> = config
-                .members()
-                .iter()
-                .filter(|m| {
-                    let m = m.0;
-                    match fence {
-                        None => true,
-                        Some(fence) => {
-                            let gap = (0..=fence.0).find(|slot| {
-                                let floor = st.floor.get(&m).map_or(0, |f| f.now);
-                                if floor > *slot {
-                                    return false;
-                                }
-                                match (st.persisted.get(&(m, *slot)), st.chosen.get(slot)) {
-                                    (Some(held), Some(decided)) => held != decided,
-                                    (Some(_), None) => false,
-                                    (None, _) => true,
-                                }
-                            });
-                            if let Some(slot) = gap {
-                                let why = match st.persisted.get(&(m, slot)) {
-                                    Some(_) => "mismatch",
-                                    None => "missing",
-                                };
-                                uncovered.push(format!("{m}@{slot}:{why}"));
-                            }
-                            gap.is_none()
-                        }
-                    }
-                })
-                .copied()
-                .collect();
-            // Judged by the configuration's own quorum system, never by a
-            // count: the custody claim the leader's GC rests on is the same
-            // Phase-2 quorum question `Collector::covered` asks in the core.
-            config.has_phase2_quorum(&holders)
-        });
-        st.matchmaker
-            .gc_requested(node, watermark, fence, covered, &uncovered.join(","));
+        self.state().gc_request_sent(node, watermark, fence);
     }
 
     fn gc_step(&self, node: NodeId, _matchmaker: MatchmakerId, ack: &GcAck, step: &GcStep) {
-        let mut st = self.state();
-        let config = st.config_of(ack.watermark).cloned();
-        st.matchmaker.gc_step(node, ack, step, config.as_ref());
+        self.state().gc_step(node, ack, step);
     }
 
     // ---- the matchmaker set and its reconfiguration (#125) ------------------
@@ -2099,18 +2038,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn reconfigure_matchmakers_acked(&self, _node: NodeId, refusal: Option<MatchmakersRefusal>) {
-        let mut st = self.state();
-        if refusal.is_none() {
-            reach_once!(
-                st.reconfigure_matchmakers_started,
-                "generation: a client's matchmaker reconfiguration is started"
-            );
-        } else {
-            reach_once!(
-                st.reconfigure_matchmakers_refused,
-                "generation: a client's matchmaker reconfiguration is refused"
-            );
-        }
+        self.state().reconfigure_matchmakers_acked(refusal);
     }
 
     fn reconfigurer_step(
@@ -2137,38 +2065,11 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn retire_acked(&self, _node: NodeId, refusal: Option<RetireRefusal>) {
-        let mut st = self.state();
-        // The refusal legs the shared gate cannot tell apart. `not_collected`
-        // is the one #123's rule turns from a workload discipline into a
-        // protocol answer: the node is outside the configuration it believes
-        // in force, and still refuses, because nothing proves the cluster is
-        // done with the configurations it *was* in.
-        match refusal {
-            Some(RetireRefusal::NotCollected) => reach_once!(
-                st.retire_not_collected,
-                "gc: a retirement is refused for want of an effective floor"
-            ),
-            // The freshness leg (#165): outside the configuration it
-            // believes in force, but that belief predates the floor, so
-            // the node cannot tell whether the configuration the floor
-            // kept names it.
-            Some(RetireRefusal::Stale) => reach_once!(
-                st.retire_stale,
-                "gc: a retirement is refused on a belief older than the floor"
-            ),
-            Some(RetireRefusal::Leader) => reach_once!(
-                st.retire_leader,
-                "gc: a retirement is refused by the sitting leader"
-            ),
-            _ => {}
-        }
-        st.matchmaker.retire_acked(refusal.is_none());
+        self.state().retire_acked(refusal);
     }
 
     fn retired(&self, node: NodeId) {
-        let mut st = self.state();
-        st.matchmaker.retired(node);
-        st.retired.insert(node.0);
+        self.state().retired(node);
     }
 
     fn membership_probe_opened(
@@ -2262,10 +2163,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         registered_by: usize,
         disagreements: u64,
     ) {
-        let mut st = self.state();
-        st.matchmaker
-            .completed(node, ballot, prior, watermark, registered_by, disagreements);
-        st.note_prior(node.0, ballot, prior);
+        self.state().matchmaking_completed(
+            node,
+            ballot,
+            prior,
+            watermark,
+            registered_by,
+            disagreements,
+        );
     }
 
     fn matchmaking_refused(
@@ -2281,26 +2186,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
     }
 
     fn reconfigure_acked(&self, node: NodeId, _members: &[NodeId], result: ReconfigureResult) {
-        let mut st = self.state();
-        match result {
-            ReconfigureResult::Started(_) => {
-                assert_always!(
-                    st.matchmaker.has_matchmakers(),
-                    "reconfiguration: a deployment without matchmakers never starts one",
-                    { "node" => node.0 }
-                );
-                reach_once!(
-                    st.reconfigure_started,
-                    "reconfiguration: a reconfiguration request is started"
-                );
-            }
-            ReconfigureResult::Refused(_) | ReconfigureResult::NotLeader(_) => {
-                reach_once!(
-                    st.reconfigure_refused,
-                    "reconfiguration: a reconfiguration request is refused or redirected"
-                );
-            }
-        }
+        self.state().reconfigure_acked(node, result);
     }
 
     fn match_refused(
@@ -2315,25 +2201,7 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
 
     #[tracing::instrument(level = "trace", skip_all, fields(matchmaker = matchmaker.0, refusal = ?refusal))]
     fn matchmaker_boot_refused(&self, matchmaker: MatchmakerId, refusal: BootRefusal) {
-        match refusal {
-            // #183: the library, not the harness, keeps a wiped registry out.
-            BootRefusal::Amnesia => self.state().matchmaker.boot_refused(matchmaker.0),
-            BootRefusal::AlreadyFormatted => {
-                assert_always!(
-                    false,
-                    "matchmaker: a first boot never meets a formatted registry",
-                    { "matchmaker" => matchmaker.0 }
-                );
-            }
-            // #207: an edited configuration is refused, then restored.
-            BootRefusal::ConfigMismatch => {
-                let mut st = self.state();
-                reach_once!(
-                    st.matchmaker_config_mismatch_refused,
-                    "matchmaker: the library refuses a restart under an edited configuration"
-                );
-            }
-        }
+        self.state().matchmaker_boot_refused(matchmaker, refusal);
     }
 
     fn matchmaker_storage_fault(
