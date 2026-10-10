@@ -257,6 +257,13 @@ pub struct DriverTunables {
     /// before it truncates the election journal to it (#240): the bound on
     /// the journal's log. Floor 1: a truncation per renewal.
     pub election_compact_after: u64,
+    /// The most rounds one page of a leader's recovery visits (#330,
+    /// `ColocatedNode::set_recovery_page`) before the driver advances the
+    /// batch. A per-node size, never on the wire. Floor 1: a one-slot page
+    /// still drains the recovery, one `Ready` per slot. The ceiling is
+    /// [`paros_core::LEADER_RECOVERY_BATCH`], the default; a larger value
+    /// runs the ceiling.
+    pub recovery_page: usize,
 }
 
 impl Default for DriverTunables {
@@ -291,6 +298,7 @@ impl Default for DriverTunables {
             election_lease: ELECTION_LEASE,
             election_renew: ELECTION_RENEW,
             election_compact_after: ELECTION_COMPACT_AFTER,
+            recovery_page: paros_core::LEADER_RECOVERY_BATCH,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(

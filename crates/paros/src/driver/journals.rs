@@ -201,6 +201,16 @@ pub(crate) async fn boot_journal<P: Providers, S: LogStorage, A: Audit>(
         "a booted journal has its first timeout"
     );
     audit.election_timeout_set(NodeId(self_id), first_timeout);
+    // The recovery page size (#330): the tunable, capped at the core's
+    // ceiling (an operator's override is external input, never a panic).
+    let page = tunables
+        .recovery_page
+        .clamp(1, paros_core::LEADER_RECOVERY_BATCH);
+    node.set_recovery_page(page);
+    assert!(
+        node.recovery_page() == page,
+        "a booted journal runs the driver's recovery page"
+    );
     let last = Deltas::new(&node);
     Ok(JournalRt {
         node,

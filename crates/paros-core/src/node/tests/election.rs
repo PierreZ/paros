@@ -371,9 +371,11 @@ fn a_same_ballot_continuation_closes_a_different_stale_campaign() {
     assert!(matches!(out.as_slice(), [(_, Message::Promise { .. })]));
 }
 
-#[test]
-fn leader_recovery_is_split_across_ready_batches() {
+/// A leader that won over a promise quorum reporting `2 * PROMISE_BATCH + 2`
+/// accepted slots, with `page` as its recovery page size (#330).
+fn recovering_leader(page: usize) -> ColocatedNode {
     let mut n = node(0, &[0, 1, 2]);
+    n.set_recovery_page(page);
     campaign(&mut n);
     let _ = drain(&mut n);
     let camp = n.ballot();
@@ -412,6 +414,12 @@ fn leader_recovery_is_split_across_ready_batches() {
     }
 
     assert_eq!(n.role(), NodeRole::Leader);
+    n
+}
+
+#[test]
+fn leader_recovery_is_split_across_ready_batches() {
+    let mut n = recovering_leader(LEADER_RECOVERY_BATCH);
     let ready = n.ready();
     assert_eq!(ready.recovery_batch(), Some((LEADER_RECOVERY_BATCH, 0, 66)));
     ready.advance();
@@ -424,6 +432,48 @@ fn leader_recovery_is_split_across_ready_batches() {
     assert_eq!(ready.recovery_batch(), Some((2, 0, 0)));
     ready.advance();
     assert!(n.proposer.recovery().is_none());
+}
+
+#[test]
+fn a_small_recovery_page_spans_more_pages() {
+    // 130 recovered slots at seven per page: eighteen full pages and a
+    // last page of four, every one bounded by the node's own page size.
+    let mut n = recovering_leader(7);
+    assert_eq!(n.recovery_page(), 7);
+    let mut pages = 0_usize;
+    let mut total = 0_usize;
+    loop {
+        let ready = n.ready();
+        let (started, gap_fills, remaining) = ready
+            .recovery_batch()
+            .expect("a recovering leader reports a page");
+        ready.advance();
+        assert!(started <= 7);
+        assert_eq!(gap_fills, 0);
+        pages += 1;
+        total += started;
+        if remaining == 0 {
+            break;
+        }
+        n.advance_recovery();
+    }
+    assert_eq!(total, 130);
+    assert_eq!(pages, 19);
+    assert!(n.proposer.recovery().is_none());
+}
+
+#[test]
+#[should_panic(expected = "a recovery page visits at least one slot")]
+fn a_zero_recovery_page_is_refused() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_recovery_page(0);
+}
+
+#[test]
+#[should_panic(expected = "a recovery page never exceeds its ceiling")]
+fn a_recovery_page_above_its_ceiling_is_refused() {
+    let mut n = node(0, &[0, 1, 2]);
+    n.set_recovery_page(LEADER_RECOVERY_BATCH + 1);
 }
 
 #[test]

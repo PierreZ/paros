@@ -237,6 +237,15 @@ impl NodeShape {
             // each other — a liveness cost the stall budget ends, never a
             // safety one.
             reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The recovery page size (#330). Floor 1: a one-slot page still
+            // drains the recovery, one `Ready` per slot. The ceiling is the
+            // core's constant, the default. A small page makes a leader's
+            // recovery span several pages, the window `advance_recovery`
+            // paces; the campaign rarely opens 64 rounds at once.
+            recovery_page: buggify_knob!(
+                paros::LEADER_RECOVERY_BATCH,
+                1_usize..paros::LEADER_RECOVERY_BATCH + 1
+            ),
             // The delegated round's take-back budget (#142), in
             // re-delegations (one per beat). Floor 1: a round taken back
             // after a single re-delegation runs colocated while its proxy
@@ -333,6 +342,10 @@ impl NodeShape {
         if !production && drawn.reconfigure_timeout_elections != 4 {
             // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover stall budget");
+        }
+        if !production && drawn.recovery_page != paros::LEADER_RECOVERY_BATCH {
+            // BUGGIFY pairing: the recovery page extreme genuinely runs.
+            assert_reachable!("a node runs with a small recovery page");
         }
         if !production && drawn.reconfigure_backoff_max_ticks != 10 {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.

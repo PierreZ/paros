@@ -1807,11 +1807,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn recovery_batch(&self, _node: NodeId, started: u64, gap_fills: u64, remaining: u64) {
+    fn recovery_batch(
+        &self,
+        _node: NodeId,
+        started: u64,
+        gap_fills: u64,
+        remaining: u64,
+        page: u64,
+    ) {
         assert_always!(
-            started <= LEADER_RECOVERY_BATCH as u64,
+            started <= page,
             "a leader starts at most one bounded recovery chunk per Ready",
-            { "started" => started, "remaining" => remaining }
+            { "started" => started, "remaining" => remaining, "page" => page }
+        );
+        assert_always!(
+            (1..=LEADER_RECOVERY_BATCH as u64).contains(&page),
+            "a recovery page size lies within its tunable range",
+            { "page" => page }
         );
         assert_always!(
             gap_fills <= started,

@@ -485,7 +485,17 @@ pub trait Audit {
 
     /// This Ready batch started `started` inherited or gap-fill accept rounds,
     /// including `gap_fills` fresh no-ops; `remaining` slots are deferred.
-    fn recovery_batch(&self, node: NodeId, started: u64, gap_fills: u64, remaining: u64) {}
+    /// `page` is the node's recovery page size, the bound `started` stays
+    /// under ([`crate::DriverTunables::recovery_page`], #330).
+    fn recovery_batch(
+        &self,
+        node: NodeId,
+        started: u64,
+        gap_fills: u64,
+        remaining: u64,
+        page: u64,
+    ) {
+    }
 
     /// This node's election timeout base was doubled `doublings` times: its
     /// previous campaigns expired with no leader known (the election
