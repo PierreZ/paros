@@ -690,7 +690,8 @@ impl<P: Providers, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_, P, A
 // lifecycle, queue, batch shape, and the sender's identity: its party for
 // drop reports and its cell for the batch); a bundle would only rename the
 // same nine things.
-#[allow(clippy::too_many_arguments)]
+// The lane is a task of its own: it owns its copy of the tunables.
+#[allow(clippy::too_many_arguments, clippy::large_types_passed_by_value)]
 #[tracing::instrument(level = "debug", skip_all, fields(from = %from, to = %to))]
 async fn run_peer_delivery<P: Providers, A: Audit>(
     client: ServiceClient<P, DeliverRpc>,

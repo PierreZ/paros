@@ -71,6 +71,7 @@ use crate::shape::MachineLayout;
 
 mod admit;
 mod cell;
+mod election;
 mod other_cell;
 
 use cell::Cell;
@@ -832,6 +833,13 @@ impl FleetOps {
         expected: &[u64],
     ) {
         self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
+        // The cell's election settles too (#240), on its own deadline.
+        if crate::machine::formed_cell(ctx.state()).is_some()
+            && !crate::machine::cell_lost(ctx.state())
+            && let Some(cell) = self.learn(ctx).await
+        {
+            election::election_settles(ctx, &cell, ctx.time().now() + FLEET_SETTLE).await;
+        }
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)

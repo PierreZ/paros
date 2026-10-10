@@ -65,6 +65,12 @@ impl ColocatedNode {
         self.acceptor.assert_invariants();
         self.replica.assert_invariants(self.acceptor.first_slot());
         self.proposer.assert_invariants();
+        // The recovery page size stays inside its tunable range (#330).
+        assert!(self.recovery_page > 0, "a recovery page is never empty");
+        assert!(
+            self.recovery_page <= crate::proposer::RECOVERY_BATCH,
+            "a recovery page never exceeds its ceiling"
+        );
         // The repair clock lives inside the probe it times, so closing a
         // probe — by a decision, a commit, a trim-point jump or an
         // abandoned leadership — takes the clock with it and no path has to

@@ -5,11 +5,10 @@
 //! servers by default): sent to the first listed machine still idle, which
 //! drives the cell decree — a single-decree Paxos on the cell plan, every
 //! listed machine an acceptor and all of them the quorum (`paros::machine`);
-//! then `init` claims the cell control journal with
-//! `SetLeader(new, old = none)` under a leader uuid of its own
-//! (`paros::client::bootstrap::claim_cell`). A re-run resumes: an
-//! interrupted decree is finished by whichever listed machine is asked, and
-//! the claim is made if it is still missing.
+//! then `init` waits for the cell's first coordinator: the founding members
+//! campaign in the cell's election journal, and the winner installs its uuid
+//! on the cell control journal (#240). A re-run resumes: an interrupted
+//! decree is finished by whichever listed machine is asked.
 //!
 //! The whole operation is `paros::client::initialize` (#246), which the
 //! simulation runs too; this command prints what it came to.
@@ -82,7 +81,7 @@ impl InitArgs {
     }
 }
 
-/// `parosctl init`: form the cell over `members`, claim its control journal
+/// `parosctl init`: form the cell over `members`, wait for its coordinator
 /// and run the fleet steps, through a client `connect` builds over its
 /// members (`paros::client::initialize`).
 pub async fn run(
@@ -140,10 +139,6 @@ pub async fn run(
             note(&unreachable_text(why, members.first()));
             Ending::Unreachable
         }
-        InitRun::Ambiguous => {
-            note("the claim's answer never came: it may have won; run init again");
-            Ending::Ambiguous
-        }
         InitRun::Interrupted(stop) => interrupted(&stop),
     }
 }
@@ -163,11 +158,11 @@ fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
              the members"
         ),
         Unreachable::NoControlJournals => "no server named its cell's control journals".into(),
+        Unreachable::NoMembers => "no server described the cell control journal's members".into(),
         Unreachable::NoCoordinator => {
-            "no server described the cell control journal's members".into()
-        }
-        Unreachable::Claim => {
-            "the cell did not confirm its control journal in time: run init again".into()
+            "the cell elected no coordinator in time: a founding member is not up yet; run init \
+             again"
+                .into()
         }
     }
 }
@@ -177,16 +172,18 @@ fn unreachable_text(why: Unreachable, target: Option<&SocketAddr>) -> String {
 fn print_initialized(out: &Printer, done: &Initialized) {
     let journals = done.journals;
     let fleet_control = journals.fleet.map(|f| f.to_string()).unwrap_or_default();
+    let election = journals.election.map(|e| e.to_string()).unwrap_or_default();
     let users: Vec<String> = done.users.iter().map(ToString::to_string).collect();
     out.emit(
         || {
             format!(
-                "initialized fleet={} cell={} coordinator={} members={} control={} fleet_control={} journals={} steps={}",
+                "initialized fleet={} cell={} coordinator={} members={} control={} election={} fleet_control={} journals={} steps={}",
                 done.fleet_id,
                 journals.cell_id,
                 done.coordinator.0,
                 done.servers.len(),
                 journals.cell,
+                election,
                 fleet_control,
                 users.join(","),
                 steps(&done.steps).join(",")
@@ -198,9 +195,9 @@ fn print_initialized(out: &Printer, done: &Initialized) {
                 "fleet": done.fleet_id,
                 "cell": journals.cell_id,
                 "coordinator": done.coordinator.0,
-                "leader": done.claimed.map(|leader| leader.to_string()),
                 "steps": steps(&done.steps),
                 "control": journals.cell.to_string(),
+                "election": election,
                 "fleet_control": fleet_control,
                 "journals": users,
                 "members": done

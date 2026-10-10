@@ -82,6 +82,45 @@ impl FleetOps {
         self.judge_admission(ctx, &session, target, run);
     }
 
+    /// One admission step at a machine outside the founding members, kept
+    /// only when it stops after the registration: the admission is then in
+    /// flight, for this operator's next `ADMIT` or for the next term's
+    /// coordinator (#240). Whether one is in flight now.
+    pub(in crate::chain_workload) async fn register_only(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) -> bool {
+        let outside = self.layout.founders..self.machines.len();
+        if outside.is_empty() {
+            return false;
+        }
+        let span = (outside.end - outside.start) as u64;
+        let target = self.machines[outside.start + usize::try_from(draw % span).unwrap_or(0)];
+        let Some(cell) = self.learn(ctx).await else {
+            return false;
+        };
+        let founders: Vec<(NodeId, SocketAddr)> = cell
+            .servers
+            .iter()
+            .map(|(id, addr)| (NodeId(*id), *addr))
+            .collect();
+        let mut session =
+            CellSession::new(cell.journals, founders, self.leader_seeds.next(), policy);
+        let providers = self.connector.providers().clone();
+        let rpc = self.connector.rpc().clone();
+        let step = session
+            .admit_step(&providers, &rpc, &cell.client, cell.first(draw), target)
+            .await;
+        if let Step::Advanced(stage) = step {
+            assert_reachable!("admit: an admission stops after its registration");
+            reach(stage);
+            self.admitting = Some(target);
+        }
+        self.admitting.is_some()
+    }
+
     /// What an admission came to, judged.
     fn judge_admission(
         &mut self,

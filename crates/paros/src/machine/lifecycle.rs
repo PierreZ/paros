@@ -303,7 +303,7 @@ where
         joined
     };
     match joined {
-        Joined::Founded(cell) => serve(providers, disk, audits, cell, tunables, shutdown).await,
+        Joined::Founded(cell) => serve(providers, disk, audits, cell, &tunables, shutdown).await,
         Joined::Admitted(admitted) => admitted
             .serve(&providers, &tunables, shutdown)
             .await
@@ -395,7 +395,7 @@ async fn serve<P, S, A, F>(
     disk: ProviderDisk<S>,
     audits: F,
     cell: FormedCell,
-    tunables: DriverTunables,
+    tunables: &DriverTunables,
     shutdown: CancellationToken,
 ) -> Result<(), MachineError>
 where
@@ -438,7 +438,7 @@ where
         Vec::new(),
         None,
         Some(cell.clone()),
-        tunables,
+        *tunables,
         shutdown,
     )
     .await

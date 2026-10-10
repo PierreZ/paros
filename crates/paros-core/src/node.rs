@@ -286,6 +286,11 @@ pub struct ColocatedNode {
     /// [`Ready::advance`] clears it and [`ColocatedNode::advance_recovery`]
     /// schedules the next.
     pending_recovery_batch: Option<(usize, usize, usize)>,
+    /// The most rounds one recovery page visits (#330): a node tunable in
+    /// `1..=LEADER_RECOVERY_BATCH`, the constant by default. The driver
+    /// sets it once at boot ([`ColocatedNode::set_recovery_page`]); a small
+    /// page makes a leader's recovery span several pages.
+    recovery_page: usize,
 
     /// Logical clock, advanced by [`ColocatedNode::tick`].
     tick_count: u64,
@@ -1243,6 +1248,33 @@ impl ColocatedNode {
         );
     }
 
+    /// The driver sets the recovery page size (#330): the most rounds one
+    /// page of a leader's recovery visits before the driver advances the
+    /// batch. A per-node size, never on the wire, so a mixed cell is legal.
+    /// Set it at boot, before the node can lead.
+    ///
+    /// # Panics
+    ///
+    /// If `page` is zero or above [`LEADER_RECOVERY_BATCH`], or a recovery
+    /// page is pending: a programmer error, never an operating condition.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, page)))]
+    pub fn set_recovery_page(&mut self, page: usize) {
+        assert!(page > 0, "a recovery page visits at least one slot");
+        assert!(
+            page <= LEADER_RECOVERY_BATCH,
+            "a recovery page never exceeds its ceiling"
+        );
+        assert!(
+            self.pending_recovery_batch.is_none(),
+            "the page size never changes under a pending page"
+        );
+        self.recovery_page = page;
+        assert!(
+            self.recovery_page == page,
+            "the driver's page size is in force"
+        );
+    }
+
     /// The election timeout in force (in ticks; zero until the driver set
     /// one) — the unit the driver paces its other timeouts in.
     #[must_use]
@@ -2035,12 +2067,26 @@ impl ColocatedNode {
                 gap_fills <= started,
                 "a recovery page fills only rounds it started"
             );
-            assert!(
-                started <= LEADER_RECOVERY_BATCH,
-                "a recovery page is bounded"
-            );
+            assert!(started <= self.recovery_page, "a recovery page is bounded");
         }
         self.pending_recovery_batch
+    }
+
+    /// The most rounds one recovery page visits (#330), in
+    /// `1..=LEADER_RECOVERY_BATCH`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn recovery_page(&self) -> usize {
+        assert!(self.recovery_page > 0, "a recovery page is never empty");
+        assert!(
+            self.recovery_page <= LEADER_RECOVERY_BATCH,
+            "a recovery page never exceeds its ceiling"
+        );
+        self.recovery_page
     }
 
     pub(crate) fn clear_pending(&mut self) {

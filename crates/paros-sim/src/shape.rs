@@ -159,6 +159,7 @@ impl NodeShape {
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..201_u64);
         let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
+        let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         let drawn = DriverTunables {
             tick_interval: ms(tick_ms),
             election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
@@ -169,9 +170,24 @@ impl NodeShape {
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64).max(2 * floor_ticks),
             // Floor 0: a zero wait answers every journal read at the end at
             // once, empty, and the client re-asks; the ceiling crosses the
-            // client's deadline, where a long-poll the client stops waiting
-            // for is an ambiguous read, never a wrong one (#185).
-            read_poll_ticks: buggify_knob!(8_u64, 0_u64..41_u64),
+            // client's deadline, where a tail wait the client stops waiting
+            // for is an ambiguous read, never a wrong one (#185, #241).
+            max_wait_ms: buggify_knob!(400_u64, 0_u64..2001_u64),
+            // Floor 0: no minimum. The extreme raises a client's short wait
+            // well past it, still inside the client's read deadline (its
+            // floor is 1 s), and a crossed maximum caps it (#241).
+            min_wait_ms: buggify_knob!(0_u64, 0_u64..301_u64),
+            // Floor 1: a one-record page still moves every reader. The
+            // ceiling is the default, the cap the linearizability model
+            // knows (`MAX_READ_RECORDS`), so a shorter page than the client
+            // asked is the server's limit, never a lost record (#241).
+            max_read_records: buggify_knob!(
+                paros::MAX_READ_RECORDS,
+                1_u64..paros::MAX_READ_RECORDS + 1
+            ),
+            // Floor 1: a page that can hold a record always holds one, so a
+            // tiny budget serves one record per page (#241).
+            max_read_bytes: buggify_knob!(64 * 1024_u64, 1_u64..65_537_u64),
             // Floor 1: the client inboxes are the RPC runtime's per-endpoint
             // queues, which refuse a request beyond capacity as `Overloaded`
             // (never admitted, so never a lost *executed* request); the loop
@@ -221,6 +237,15 @@ impl NodeShape {
             // each other — a liveness cost the stall budget ends, never a
             // safety one.
             reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
+            // The recovery page size (#330). Floor 1: a one-slot page still
+            // drains the recovery, one `Ready` per slot. The ceiling is the
+            // core's constant, the default. A small page makes a leader's
+            // recovery span several pages, the window `advance_recovery`
+            // paces; the campaign rarely opens 64 rounds at once.
+            recovery_page: buggify_knob!(
+                paros::LEADER_RECOVERY_BATCH,
+                1_usize..paros::LEADER_RECOVERY_BATCH + 1
+            ),
             // The delegated round's take-back budget (#142), in
             // re-delegations (one per beat). Floor 1: a round taken back
             // after a single re-delegation runs colocated while its proxy
@@ -267,6 +292,17 @@ impl NodeShape {
             // runs build still fit; the extreme refuses a batch of several
             // large commands.
             max_batch_bytes: buggify_knob!(1_u64 << 20, 16_384_u64..131_073_u64),
+            // The cell election (#240). The renewal period's floor is 100 ms
+            // (a renewal a few round trips apart); the lease outlasts it by
+            // at least two round trips (a renewal written, then read), its
+            // documented floor, so a live coordinator keeps the lease in the
+            // recovery tail. Shorter is a partition, not a knob.
+            election_renew: ms(election_renew_ms),
+            election_lease: ms(
+                election_renew_ms + buggify_knob!(1500_u64, 2 * ROUND_TRIP_FLOOR_MS..4001_u64)
+            ),
+            // Floor 1: the coordinator truncates at every renewal.
+            election_compact_after: buggify_knob!(16_u64, 1_u64..65_u64),
         };
         // The production profile `parosd` ships (#209), whole: every field
         // at once, which the per-field locations above would draw together
@@ -306,6 +342,10 @@ impl NodeShape {
         if !production && drawn.reconfigure_timeout_elections != 4 {
             // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
             assert_reachable!("a node runs with an extreme handover stall budget");
+        }
+        if !production && drawn.recovery_page != paros::LEADER_RECOVERY_BATCH {
+            // BUGGIFY pairing: the recovery page extreme genuinely runs.
+            assert_reachable!("a node runs with a small recovery page");
         }
         if !production && drawn.reconfigure_backoff_max_ticks != 10 {
             // BUGGIFY pairing: the decree backoff extreme genuinely runs.

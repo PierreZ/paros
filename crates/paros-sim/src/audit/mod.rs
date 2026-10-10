@@ -93,6 +93,10 @@ pub(crate) struct NodeAudit<T> {
         Arc<Mutex<crate::machine::MachineBoard>>,
         std::net::SocketAddr,
     )>,
+    /// The observer of the node's own client's calls (the cell
+    /// coordinator's, #240), handed to `paros` through
+    /// [`Audit::call_observer`].
+    calls: Option<Arc<dyn paros::client::CallObserver>>,
 }
 
 impl<T: TimeProvider> NodeAudit<T> {
@@ -137,7 +141,14 @@ impl<T: TimeProvider> NodeAudit<T> {
             journal: None,
             system: None,
             machines: None,
+            calls: None,
         }
+    }
+
+    /// This port also hands `observer` to the node's own client (#240).
+    pub(crate) fn with_calls(mut self, observer: Arc<dyn paros::client::CallObserver>) -> Self {
+        self.calls = Some(observer);
+        self
     }
 
     /// This port also reports a machine's lifecycle to `board` (#246).
@@ -293,6 +304,10 @@ impl<T: TimeProvider> NodeAudit<T> {
 }
 
 impl<T: TimeProvider> Audit for NodeAudit<T> {
+    fn call_observer(&self) -> Option<Arc<dyn paros::client::CallObserver>> {
+        self.calls.clone()
+    }
+
     fn promised(&self, node: NodeId, ballot: Ballot) {
         self.state().observe_promise(node.0, ballot);
     }
@@ -1797,11 +1812,23 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         }
     }
 
-    fn recovery_batch(&self, _node: NodeId, started: u64, gap_fills: u64, remaining: u64) {
+    fn recovery_batch(
+        &self,
+        _node: NodeId,
+        started: u64,
+        gap_fills: u64,
+        remaining: u64,
+        page: u64,
+    ) {
         assert_always!(
-            started <= LEADER_RECOVERY_BATCH as u64,
+            started <= page,
             "a leader starts at most one bounded recovery chunk per Ready",
-            { "started" => started, "remaining" => remaining }
+            { "started" => started, "remaining" => remaining, "page" => page }
+        );
+        assert_always!(
+            (1..=LEADER_RECOVERY_BATCH as u64).contains(&page),
+            "a recovery page size lies within its tunable range",
+            { "page" => page }
         );
         assert_always!(
             gap_fills <= started,

@@ -328,7 +328,12 @@ async fn truncate_open(step: &Step<'_>) {
 }
 
 /// A write under a leader uuid to a journal that has none: refused as of
-/// the wrong mode, or no verdict. One attempt, no redirect followed.
+/// the wrong mode, or no verdict. Sent to the leader the client believes
+/// in, and once more to the leader a redirect names, so the write reaches
+/// a node that proposes it: a write the first node only redirects is never
+/// judged, and a journal that took it would go unseen (a mutated core that
+/// appends a fenced write survived 300 seeds when the write went to a
+/// random node, #241).
 #[tracing::instrument(level = "debug", skip_all, fields(journal = %step.journal))]
 async fn fenced_write_refused(step: &Step<'_>) {
     let entry = Entry {
@@ -339,14 +344,25 @@ async fn fenced_write_refused(step: &Step<'_>) {
     // Sent to this journal: a slot of it may hold the write (refused).
     step.audit
         .note_appended(command_hash(&Command::Write(entry.clone())));
-    let attempt = write_once(step.nodes, step.journal, step.target, &entry, false, false);
-    let outcome = within(
-        step.ctx,
-        Duration::from_millis(step.config.request_timeout_ms),
-        WriteOutcome::Ambiguous,
-        attempt,
-    )
-    .await;
+    let send = |target: usize| {
+        within(
+            step.ctx,
+            Duration::from_millis(step.config.request_timeout_ms),
+            WriteOutcome::Ambiguous,
+            write_once(step.nodes, step.journal, target, &entry, false, false),
+        )
+    };
+    let mut outcome = send(step.nodes.leader().unwrap_or(step.target)).await;
+    if let WriteOutcome::Redirect {
+        leader: Some(leader),
+    } = outcome
+        && let Some(target) = step.nodes.index_of(leader)
+    {
+        outcome = send(target).await;
+    }
+    if matches!(outcome, WriteOutcome::WrongMode { .. }) {
+        assert_reachable!("chain: a multi-writer journal refuses a fenced write");
+    }
     assert_always!(
         !matches!(
             outcome,

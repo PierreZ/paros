@@ -367,7 +367,10 @@ impl LogStorage for LedgeredJournal {
         let in_flight = writes.then(|| {
             let budget = self
                 .cut_budget
-                .map_or(Budget::Free, |tolerated| Budget::Node { tolerated });
+                .map_or(Budget::Free, |tolerated| Budget::Node {
+                    tolerated,
+                    slots: slots.iter().map(|slot| slot.0).collect(),
+                });
             InFlight::open(
                 &self.state,
                 &self.ip,

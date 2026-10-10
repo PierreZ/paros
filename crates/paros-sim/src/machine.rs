@@ -93,6 +93,9 @@ pub(crate) struct MachineBoard {
     /// id: lost for the rest of the run, even once a later wipe takes the
     /// last such vote.
     lost: BTreeSet<u64>,
+    /// Every election journal a formatting plan named (#240): multi-writer
+    /// journals, which the audit models as such.
+    elections: BTreeSet<paros::JournalIdentifier>,
     /// The address an operator founded another cell on (#216): a machine
     /// that replaced a wiped member of the run's cell, alone in its own.
     other_founder: Option<SocketAddr>,
@@ -146,6 +149,11 @@ pub(crate) fn formed_cell(state: &StateHandle) -> Option<ControlJournals> {
         .values()
         .next()
         .map(CellPlan::control_journals)
+}
+
+/// Whether `journal` is a cell's election journal (#240): multi-writer.
+pub(crate) fn is_election(state: &StateHandle, journal: paros::JournalIdentifier) -> bool {
+    lock(&machine_board(state)).elections.contains(&journal)
 }
 
 /// How many of `plan`'s members the board saw wiped.
@@ -347,6 +355,10 @@ pub(crate) fn machine_addrs(deployment: &Deployment) -> SimulationResult<Vec<Soc
         .collect()
 }
 
+/// The first client id a machine's own client logs under in the control
+/// journals' histories (#240): far above the workload's clients.
+const MACHINE_CLIENT_BASE: u64 = 1 << 32;
+
 /// One machine: the shipped lifecycle on this process's simulated disk. A
 /// process kill aborts it; the next incarnation reads its record back. The
 /// one loop here is `parosd`'s supervisor: a run that ended on a storage
@@ -389,8 +401,17 @@ async fn run_machine_role(
         match scope {
             AuditScope::Machine => NodeAudit::new(time.clone(), crate::audit::audit_world(&state))
                 .on_machines(machine_board(&state), addr),
+            // The coordinator's calls join the control journals' histories
+            // (#240), as client `MACHINE_CLIENT_BASE + rank`.
             AuditScope::Node(home) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, home))
+                    .with_calls(Arc::new(
+                        crate::chain_workload::system::Announce::of_machine(
+                            &state,
+                            time.clone(),
+                            MACHINE_CLIENT_BASE + rank as u64,
+                        ),
+                    ))
             }
             AuditScope::Journal(journal) => {
                 NodeAudit::new(time.clone(), crate::audit::audit_world_for(&state, journal))
@@ -598,7 +619,8 @@ pub(crate) fn formatting(
     node: NodeId,
     plan: &CellPlan,
 ) {
-    let board = lock(board);
+    let mut board = lock(board);
+    board.elections.insert(plan.election);
     if is_other_cell(&board, addr, plan) {
         return;
     }

@@ -248,6 +248,7 @@ impl StorageWorld {
             custody.last_batch = last_batch;
         }
         let damaged: Vec<u64> = faulty.iter().copied().filter(|s| *s >= first).collect();
+        self.settle_cut_marks(key, faulty);
         if !damaged.is_empty() {
             self.rotted
                 .entry(key.to_string())

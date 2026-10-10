@@ -109,6 +109,7 @@ impl ColocatedNode {
             pending_read_states: Vec::new(),
             quorum_reads: QuorumReads::new(),
             pending_recovery_batch: None,
+            recovery_page: crate::proposer::RECOVERY_BATCH,
             tick_count: 0,
             role: NodeRole::Follower,
             leader: None,

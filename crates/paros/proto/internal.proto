@@ -395,4 +395,7 @@ message InspectReply {
   // `cell_id` and the identifiers) are answered either way; every journal field
   // is empty on a refusal.
   string refusal = 24;
+  // The cell's election journal (#240), unset when unknown.
+  uint64 election_tenant = 25;
+  uint64 election_journal = 26;
 }

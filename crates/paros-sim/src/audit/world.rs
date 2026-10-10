@@ -72,12 +72,16 @@ pub(crate) fn note_created_mode(
 }
 
 /// The writer mode `journal` runs in (#241): the plan's for a journal of the
-/// run, the creator's for a journal created through the directory, and
+/// run, the creator's for a journal created through the directory,
+/// multi-writer for a cell's election journal (#240), and
 /// single-writer for every other one (a system journal, a control journal).
 fn writer_mode(state: &StateHandle, journal: paros::JournalIdentifier) -> paros::WriterMode {
     let plan = crate::shape::journals(state);
     if plan.ids.contains(&journal) {
         return plan.mode(journal);
+    }
+    if crate::machine::is_election(state, journal) {
+        return paros::WriterMode::Multi;
     }
     let modes = crate::state::published(
         state,

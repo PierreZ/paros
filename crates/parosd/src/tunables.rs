@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 23] = [
+const FIELDS: [Field; 30] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -27,7 +27,10 @@ const FIELDS: [Field; 23] = [
     Field::Millis("connection_timeout", |t, v| t.connection_timeout = v),
     Field::Millis("delivery_timeout", |t, v| t.delivery_timeout = v),
     Field::Count("read_retry_ticks", |t, v| t.read_retry_ticks = v),
-    Field::Count("read_poll_ticks", |t, v| t.read_poll_ticks = v),
+    Field::Count("max_wait_ms", |t, v| t.max_wait_ms = v),
+    Field::Count("min_wait_ms", |t, v| t.min_wait_ms = v),
+    Field::Count("max_read_records", |t, v| t.max_read_records = v),
+    Field::Count("max_read_bytes", |t, v| t.max_read_bytes = v),
     Field::Count("quarantine_ticks", |t, v| t.quarantine_ticks = v),
     Field::Count("election_backoff_doublings", |t, v| {
         t.election_backoff_doublings = u32::try_from(v).unwrap_or(u32::MAX);
@@ -61,6 +64,14 @@ const FIELDS: [Field; 23] = [
     Field::Count("proxy_round_resends", |t, v| t.proxy_round_resends = v),
     Field::Count("max_batch_records", |t, v| t.max_batch_records = v),
     Field::Count("max_batch_bytes", |t, v| t.max_batch_bytes = v),
+    Field::Millis("election_lease", |t, v| t.election_lease = v),
+    Field::Millis("election_renew", |t, v| t.election_renew = v),
+    Field::Count("election_compact_after", |t, v| {
+        t.election_compact_after = v;
+    }),
+    Field::Count("recovery_page", |t, v| {
+        t.recovery_page = usize::try_from(v).unwrap_or(usize::MAX);
+    }),
 ];
 
 /// The environment variable that overrides `field`.
@@ -187,7 +198,10 @@ mod tests {
             connection_timeout: _,
             delivery_timeout: _,
             read_retry_ticks: _,
-            read_poll_ticks: _,
+            max_wait_ms: _,
+            min_wait_ms: _,
+            max_read_records: _,
+            max_read_bytes: _,
             quarantine_ticks: _,
             election_backoff_doublings: _,
             client_inbox_capacity: _,
@@ -203,6 +217,10 @@ mod tests {
             proxy_round_resends: _,
             max_batch_records: _,
             max_batch_bytes: _,
+            election_lease: _,
+            election_renew: _,
+            election_compact_after: _,
+            recovery_page: _,
         } = DriverTunables::production();
         let mut names: Vec<String> = FIELDS
             .iter()

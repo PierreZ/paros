@@ -14,10 +14,9 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, TimeProvider};
 use moonpool_rpc::{ErrorReason, RpcHandle};
-use paros_core::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
+use paros_core::{JournalId, JournalIdentifier, TenantId};
 
 use super::Client;
-use super::outcome::SetLeaderOutcome;
 use crate::machine::{Admission, CellPlan, ControlJournals};
 use crate::rpc::machine as wire;
 use crate::rpc::methods::{AdmitRpc, CellInitRpc, IdentifyRpc, InspectRpc};
@@ -226,26 +225,6 @@ pub async fn majority_cell<P: Providers>(
     Some(cell)
 }
 
-/// What claiming a formed cell's control journal came to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClaimCellOutcome {
-    /// The claim won: `init` is done.
-    Claimed {
-        /// The uuid that now leads the cell control journal.
-        leader: LeaderUuid,
-    },
-    /// The cell control journal already has a leader: the cell was
-    /// initialized before.
-    AlreadyInitialized {
-        /// Its leader.
-        leader: Option<LeaderUuid>,
-    },
-    /// No server confirmed the journal's state or decided the claim.
-    Unavailable,
-    /// The claim's answer never came: it may have won. Re-run `init`.
-    Ambiguous,
-}
-
 /// The control journals a server's `Inspect` reports for its cell (§3.2):
 /// `None` unless it names a cell and the cell tenant's control journal; the
 /// fleet's only when it names that one too.
@@ -257,10 +236,15 @@ pub fn control_journals_of(reply: &InspectReply) -> Option<ControlJournals> {
     );
     let fleet =
         JournalIdentifier::new(TenantId(reply.fleet_tenant), JournalId(reply.fleet_journal));
+    let election = JournalIdentifier::new(
+        TenantId(reply.election_tenant),
+        JournalId(reply.election_journal),
+    );
     (reply.cell_id != 0 && cell.is_set()).then_some(ControlJournals {
         cell_id: reply.cell_id,
         cell,
         fleet: fleet.is_set().then_some(fleet),
+        election: election.is_set().then_some(election),
     })
 }
 
@@ -303,64 +287,4 @@ pub async fn cell_members<P: Providers>(
         }
     }
     None
-}
-
-/// The cell step's last move (`docs/architecture.md` §3.1): `init` claims
-/// the cell control journal `control` for `leader` with
-/// `SetLeader(new = leader, old = none)`, through `client` (the cell's
-/// members). A journal that already has a leader was initialized before. A freshly
-/// formed cell is still electing its first leader, so an attempt that finds
-/// no server to confirm the state is retried, `retry_backoff` apart, for up
-/// to `patience`.
-pub async fn claim_cell<P: Providers>(
-    client: &Client<P>,
-    control: JournalIdentifier,
-    leader: LeaderUuid,
-    patience: Duration,
-) -> ClaimCellOutcome {
-    let deadline = client.time.now() + patience;
-    loop {
-        let outcome = claim_cell_once(client, control, leader).await;
-        if outcome != ClaimCellOutcome::Unavailable
-            || client.time.now() >= deadline
-            || !client.pause(client.tunables.retry_backoff).await
-        {
-            return outcome;
-        }
-    }
-}
-
-async fn claim_cell_once<P: Providers>(
-    client: &Client<P>,
-    control: JournalIdentifier,
-    leader: LeaderUuid,
-) -> ClaimCellOutcome {
-    let report = client
-        .read_any(&super::state_read(control), client.leader().unwrap_or(0))
-        .await;
-    let Some(state) = report.outcome.state() else {
-        return ClaimCellOutcome::Unavailable;
-    };
-    if state.leader.is_some() {
-        return ClaimCellOutcome::AlreadyInitialized {
-            leader: state.leader,
-        };
-    }
-    // Asked of the leader the read named, else of the server that served
-    // the read, the one just proven reachable: a member wiped during `init`
-    // is a dead member of the cell (#246), and a `SetLeader` sent down its
-    // dead link comes back ambiguous every time.
-    let first = client.leader().unwrap_or(report.server);
-    match client.set_leader(control, leader, None, first).await {
-        SetLeaderOutcome::Won { .. } => ClaimCellOutcome::Claimed { leader },
-        SetLeaderOutcome::Lost { state } => ClaimCellOutcome::AlreadyInitialized {
-            leader: state.leader,
-        },
-        SetLeaderOutcome::Ambiguous | SetLeaderOutcome::Malformed => ClaimCellOutcome::Ambiguous,
-        // A cell control journal is single-writer: a wrong-mode refusal is
-        // a journal this call cannot claim.
-        SetLeaderOutcome::Redirect { .. }
-        | SetLeaderOutcome::UnknownJournal
-        | SetLeaderOutcome::WrongMode { .. } => ClaimCellOutcome::Unavailable,
-    }
 }

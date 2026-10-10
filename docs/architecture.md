@@ -94,7 +94,7 @@ walk.
 | Call | Single-writer | Multi-writer |
 |---|---|---|
 | `Write` | `Write(leader_uuid, expected_seq, batch) -> seq`: fenced by the leader uuid, contiguous by `expected_seq`, idempotent on retry, pipelineable. | `Write(batch) -> seq`: unfenced; the journal orders writes and assigns `seq` at apply. At-least-once on an ambiguous retry. |
-| `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. `wait_ms` is a field only, capped and floored (section 2.7); the long-poll at the tail comes later. | The same. |
+| `Read(from_seq, limit, wait_ms?)` | The committed records from `from_seq`, plus `first_seq`, `next_seq` and the current leader uuid, or `Truncated` when `from_seq < first_seq`. `wait_ms` is capped and floored (section 2.7); a read at the tail waits up to it. | The same. |
 | `Truncate` | `Truncate(leader_uuid, up_to_seq)`: fenced like `Write`. | `Truncate(up_to_seq)`: anyone may truncate. |
 | `SetLeader(new_uuid, old_uuid)` | Compare-and-set the leader. Returns the journal's view after it: the leader uuid, `next_seq`, `first_seq`. | Refused: a multi-writer journal has no leader. |
 
@@ -205,7 +205,7 @@ A read costs one Phase-1 round of watermarks (decided on 2026-10-07, #253). In a
 `QuorumRead` asks three of five acceptors, so a page costs one cross-region round trip (the 2025
 Journal reconstruction says the same: reads are performed from at least two regions, section 10).
 There is no lease read, because paros enforces no lease (section 2.3). The page size (section 2.7)
-is the mitigation already in the API; the long-poll on `wait_ms` comes later.
+is the mitigation already in the API, with the tail wait on `wait_ms`.
 
 A server answers only from records it holds (decided on 2026-10-06). A server whose floor rose
 ahead of its fold — it jumped to a peer's trim point, and the `Truncate` that let the peer's
@@ -258,9 +258,11 @@ The limits are part of the API, not a driver detail (decided on 2026-10-04): a m
 (bytes and records) refused at the edge before it reaches consensus, a maximum `Read` page
 (records and bytes), and a maximum and a minimum `wait_ms`. Each value is a tunable with a
 documented floor and a `buggify_knob!` in simulation; the toy's values are today's (a 256-record,
-64 KiB page, a batch well under the 4 MiB RPC frame). **`wait_ms` is a field only** (decided on
-2026-10-09, #241): the node caps it at the maximum and raises it to the minimum, and does not
-wait at the tail yet. The long-poll comes later. An `Inline`
+64 KiB page, a batch well under the 4 MiB RPC frame). **`wait_ms` is a capped and floored field
+only** (decided on 2026-10-09, #241): the node caps it at the maximum and raises a non-zero one
+to the minimum (the maximum wins when the two cross; 0 still answers at once). #241 builds no
+new long-poll: the tail wait of #185 stays as it was, a confirmed read at or past `next_seq`
+re-served after every batch until its capped wait runs out, then answered empty. An `Inline`
 checkpoint (section 3.9) must fit one batch. Every id, `seq` and the term counter are `u64`; the
 leader uuid is 128 bits.
 
@@ -269,6 +271,13 @@ The batch limits are `DriverTunables::max_batch_records` (1,024 by default) and
 `Write` checks them before it proposes anything. A batch over either limit gets the answer
 `TooLarge`, which names the two limits. That write is in no slot. Different nodes can have
 different limits, so a retry to another node can get a different answer (#241).
+
+The read limits are `DriverTunables::max_read_records` (256 by default, floor 1: a `limit` of 0
+or above it is cut to it), `max_read_bytes` (64 KiB, floor 1: a page always holds one record,
+whatever its size), `max_wait_ms` (400 ms in the simulation's baseline, 1 s in `parosd`, floor 0)
+and `min_wait_ms` (0, floor 0). They are `PAROS_*` overrides in `parosd`. The node applies them
+when it parks the read (`paros::driver::log_reads::ReadLimits`); a page shorter than the
+client's `limit` is the server's limit, and the client reads on from the page's end.
 
 ### 2.8 Underneath
 
@@ -548,6 +557,40 @@ campaign for the first cell coordinator over the election journal `cell init` cr
 born `double` (section 3.1). The cell and universe coordinators run on the founding members until a
 `stateless` machine registers, then move there; the cell coordinator places tenant coordinators on
 `stateless` machines.
+
+*Landed* (#240, 2026-10-10). The library is `paros::client::election`, and the cell
+coordinator is `paros::machine::coordinator`:
+
+- **The election journal.** The cell plan names it (`CellPlan::election`): a journal of the
+  cell tenant, multi-writer, over the founding members. Machines learn it from the plan,
+  `Inspect` and `Admit`, like the other control journals.
+- **Records.** A record is a campaign, a renewal or a resignation, each with its term. The
+  first campaign for the next term wins. A renewal counts only from the term's leader. A
+  resignation can name a successor and the successor's uuid; the successor then leads the
+  next term.
+- **The lease.** A candidate campaigns when it saw no renewal for `lease` plus the
+  caller's jitter, on its own clock. The library draws no randomness. A caller that campaigns
+  earlier deposes a live leader: that costs availability, never safety.
+- **Uuids.** A candidate derives a fresh uuid per term from the caller's seed. A
+  restarted leader does not take back its old term: it waits a lease and takes the next term.
+- **Log space.** Each renewal describes the whole leadership, so the leader truncates the
+  election journal to its own latest renewal once `compact_after` records lie below it. A
+  renewal is its own checkpoint. A reader that starts at the floor anchors on the leader's
+  record there. Nothing else may truncate an election journal.
+- **The interface.** Records carry the candidate's `InterfaceRef` (its address). The
+  coordinator publishes it with its first renewal after its term's duties; until then the
+  interface is empty.
+- **The coordinator.** Every founding member runs a candidate in a task beside its node loop.
+  When it wins a term, it installs the term's uuid on the cell control journal with
+  `SetLeader(uuid, current)`, folds that journal to its tail, and admits again every registered
+  machine that is not a founding member and not retired (`Admit` is idempotent). Then it
+  publishes its interface. A lost install ends the term, and the coordinator resigns.
+- **Interim.** The admin calls are not yet requests to the coordinator (#212, #225). An
+  admin session still claims the cell control journal and fences the coordinator. The
+  coordinator writes only when a term starts, so the two do not fight. `parosctl init` claims
+  nothing: it waits until the coordinator installed its uuid, then runs the fleet steps.
+- **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
+  each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
 
 **Requests to a leader** (decided on 2026-10-04). Every control journal has one writer, so
 anyone else — a tenant coordinator asking for capacity, an operator changing desired state or
@@ -1511,16 +1554,17 @@ AGENTS.md.
   `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
   layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
   linearizability model and the audit follow. The single-writer half (PR #281), the writer mode
-  (PR #296) and the batch limits landed; the `Read` page and the capped and floored `wait_ms`
-  remain, and `parosctl journal create --mode` moves to #210.
+  (PR #296), the batch limits and the read limits landed (#241 is done); `parosctl journal
+  create --mode` moves to #210.
 - The system journals (`SystemPlan`, the directory, the genesis pool) dissolve into the four
   levels: tenant names and desired state move into each tenant's control journal, capacity is
   owned by the cell coordinator alone, and `init` stops creating a hidden journal (#210).
 - `parosd` stops running the plain deployment: every journal is born with its matchmaker set, and
   journal-tagged matchmaker planes replace "only the first journal of a process" (#190); proxy leaders
   and replicas follow (#193).
-- The coordinators replace the operator's client: `parosctl` stops writing as the lowest founding member's
-  node id (#240, #212).
+- The coordinators replace the operator's client (#212): admin calls become requests to the
+  elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
+  elected cell coordinator installs its uuid there.
 
 ## 8. Milestones
 

@@ -71,11 +71,12 @@ then serves the **cell control journal**, **the fleet tenant's control journal**
 static assignment that stands in for placement until M9), plain Multi-Paxos
 over the founding members. **No
 identifier is fixed**: `init` draws every one, records them in the cell plan, and
-prints them (`control=`, `fleet_control=`, `journals=`); afterwards any machine's
-node-only `Inspect` names the cell's control journal and the fleet tenant's, which is how
-`parosctl tenant` finds them. Then the first cell coordinator — the lowest
-founding member id, until the coordinator election of #225 — claims the cell control journal
-with `SetLeader(new, old = none)`, under a leader uuid `init` draws (#241). Last come the **fleet steps** (#229): the
+prints them (`control=`, `election=`, `fleet_control=`, `journals=`); afterwards any machine's
+node-only `Inspect` names the cell's control journals, which is how
+`parosctl tenant` finds them. Then the founding members elect the first cell coordinator
+over the cell's **election journal** (multi-writer, #240), and the winner installs
+its uuid on the cell control journal with `SetLeader(uuid, unset)`. `init` waits for it
+and prints it (`coordinator=`). Last come the **fleet steps** (#229): the
 cell records the fleet's id (minted by `init`) on its side, and the fleet tenant records
 the fleet and adds the cell, `READY`. Every step is idempotent: re-running
 `init` resumes an interrupted one, and on an initialized fleet it is refused
@@ -193,7 +194,10 @@ Each field has an environment override named after it, `_MS` for a duration:
 | `PAROS_CONNECTION_TIMEOUT_MS` | 3000 | 1 |
 | `PAROS_DELIVERY_TIMEOUT_MS` | 2000 | 1 |
 | `PAROS_READ_RETRY_TICKS` | 20 | 1 |
-| `PAROS_READ_POLL_TICKS` | 10 | 0 |
+| `PAROS_MAX_WAIT_MS` (the longest tail wait of a `Read`) | 1000 | 0 |
+| `PAROS_MIN_WAIT_MS` (the shortest non-zero tail wait) | 0 | 0 |
+| `PAROS_MAX_READ_RECORDS` (records per `Read` page) | 256 | 1 |
+| `PAROS_MAX_READ_BYTES` (record bytes per `Read` page) | 65536 | 1 |
 | `PAROS_QUARANTINE_TICKS` | 80 | 1 |
 | `PAROS_CLIENT_INBOX_CAPACITY` | 256 | 1 |
 | `PAROS_PEER_INBOX_CAPACITY` | 1024 | 1 |
@@ -249,7 +253,7 @@ and both required: there is no default tenant and no fixed id (#235,
 
 | command | what it does |
 |---|---|
-| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; claims the cell control journal, then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
+| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
 | `parosctl tenant create\|delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
 | `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |

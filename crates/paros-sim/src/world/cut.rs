@@ -16,11 +16,22 @@
 //! ([`InFlight`]). A hint kills the whole process, so the veto permits a
 //! kill only if every commit the process has in flight fits its budget,
 //! and then spends each budget: a yes is a kill.
+//!
+//! A correlated outage kills every acceptor and proxy leader at one instant
+//! (#332): moonpool's `Chaos::Outage` asks the published [`OutageVeto`],
+//! and the harness's own outages ask [`outage_permitted`] before they
+//! strike. An outage plans its own losses (`super::outage::plan_losses`)
+//! and the audit excuses only those, so it waits until no victim has a
+//! commit in flight whose cut would spend a budget. Each budget is
+//! judged one process at a time, so a set of cuts is never judged
+//! together. A commit a victim opens after the yes, before its kill one
+//! tick later, has no completed write yet, so the kill leaves it absent,
+//! never ambiguous.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{HintVeto, StateHandle, assert_reachable};
+use moonpool_sim::{HintVeto, OutageVeto, StateHandle, assert_always, assert_reachable};
 
 use super::StorageWorld;
 
@@ -37,13 +48,14 @@ pub(crate) enum Owner {
 }
 
 /// What a cut of one commit spends.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Budget {
     /// Nothing: an `Ordered` commit is torn or whole, never ambiguous.
     Free,
-    /// An acceptor's `Batched` commit: at most `tolerated` distinct cut
-    /// acceptors per journal.
-    Node { tolerated: usize },
+    /// An acceptor's `Batched` commit writing `slots`: at most `tolerated`
+    /// distinct cut acceptors per journal, and a lost copy of each slot
+    /// inside the per-record budget (#331).
+    Node { tolerated: usize, slots: Vec<u64> },
     /// A matchmaker's commit: on a `Batched` registry, over a bootstrap set
     /// of `bootstrap` members (`None` on an `Ordered` one, spending
     /// nothing); `held` is whether the registry held a registration, which
@@ -52,6 +64,17 @@ pub(crate) enum Budget {
         bootstrap: Option<usize>,
         held: bool,
     },
+}
+
+impl Budget {
+    /// Whether a cut of this commit spends a budget.
+    fn spends(&self) -> bool {
+        match self {
+            Budget::Free => false,
+            Budget::Node { .. } => true,
+            Budget::Matchmaker { bootstrap, held } => bootstrap.is_some() || *held,
+        }
+    }
 }
 
 /// One commit in flight.
@@ -83,10 +106,54 @@ fn commits(state: &StateHandle) -> Arc<Mutex<Commits>> {
             .permit_kill(ip)
     })
     .publish(state);
+    let veto = Arc::clone(&commits);
+    OutageVeto::new(move |victims| {
+        veto.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .permit_outage(victims)
+    })
+    .publish(state);
     commits
 }
 
+/// Whether an outage over `victims` may strike now (see the module doc).
+/// It spends nothing: a permitted outage cuts no budgeted commit.
+pub(crate) fn outage_permitted(state: &StateHandle, victims: &[String]) -> bool {
+    state
+        .get::<Arc<Mutex<Commits>>>(COMMITS_KEY)
+        .is_none_or(|commits| {
+            commits
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .permit_outage(victims)
+        })
+}
+
+/// Assert that an outage striking `victims` now cuts no budgeted commit:
+/// the pair of [`outage_permitted`], checked where the kills are decided.
+pub(crate) fn assert_outage_permitted(state: &StateHandle, victims: &[String]) {
+    assert_always!(
+        outage_permitted(state, victims),
+        "outage: no victim has a budgeted commit in flight"
+    );
+}
+
 impl Commits {
+    /// Whether every one of `victims` may die now with no budget spent: no
+    /// victim has a commit in flight whose cut a budget would have to pay.
+    fn permit_outage(&self, victims: &[String]) -> bool {
+        let blocked = self
+            .open
+            .values()
+            .filter(|commit| victims.contains(&commit.ip))
+            .filter(|commit| commit.world.strong_count() > 0)
+            .any(|commit| commit.budget.spends());
+        if blocked {
+            assert_reachable!("outage: a commit in flight holds an outage back");
+        }
+        !blocked
+    }
+
     /// Whether the process at `ip` may die now, spending the budget of every
     /// commit it has in flight if so.
     fn permit_kill(&self, ip: &str) -> bool {
@@ -98,9 +165,9 @@ impl Commits {
             .collect();
         let fits = open.iter().all(|(commit, world)| {
             let world = world.lock().unwrap_or_else(PoisonError::into_inner);
-            match commit.budget {
+            match &commit.budget {
                 Budget::Free => true,
-                Budget::Node { tolerated } => world.may_cut_node(ip, tolerated),
+                Budget::Node { tolerated, slots } => world.may_cut_node(ip, *tolerated, slots),
                 Budget::Matchmaker { bootstrap, .. } => {
                     bootstrap.is_none_or(|bootstrap| world.may_cut_matchmaker(ip, bootstrap))
                 }
@@ -112,18 +179,18 @@ impl Commits {
         }
         for (commit, world) in &open {
             let mut world = world.lock().unwrap_or_else(PoisonError::into_inner);
-            match commit.budget {
+            match &commit.budget {
                 Budget::Free => {}
-                Budget::Node { tolerated } => {
-                    let spent = world.permit_power_cut(ip, tolerated);
+                Budget::Node { tolerated, slots } => {
+                    let spent = world.permit_power_cut(ip, *tolerated, slots);
                     assert!(spent, "a cut that fits the budget spends it");
                 }
                 Budget::Matchmaker { bootstrap, held } => {
-                    if let Some(bootstrap) = bootstrap {
+                    if let Some(bootstrap) = *bootstrap {
                         let spent = world.permit_matchmaker_power_cut(ip, bootstrap);
                         assert!(spent, "a cut that fits the budget spends it");
                     }
-                    if held {
+                    if *held {
                         world.note_registry_cut(ip);
                     }
                 }
