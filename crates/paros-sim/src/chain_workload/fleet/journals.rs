@@ -307,6 +307,9 @@ impl FleetOps {
                     "names: a journal name resolves inside its tenant",
                     { "journal" => journal.to_string() }
                 );
+                // The operator learned the journal from its tenant's control
+                // journal (§3.8).
+                self.note_journals([journal]);
                 (Some(journal.journal), at)
             }
             JournalResolution::Unknown { at } => (None, at),
