@@ -454,6 +454,24 @@ impl Directory {
             .is_some_and(|c| c.deleted_at.is_some())
     }
 
+    /// The live journal named `name` (#239): names are reusable once a
+    /// delete completes, so a recreated name names its new id.
+    ///
+    /// # Panics
+    ///
+    /// If the fold's name index disagrees with its journals.
+    #[must_use]
+    pub fn named(&self, name: &[u8]) -> Option<JournalId> {
+        let id = *self.names.get(name)?;
+        assert!(
+            self.journals
+                .get(&id)
+                .is_some_and(|c| c.deleted_at.is_none() && c.name == name),
+            "a live name names a live journal of that name"
+        );
+        Some(id)
+    }
+
     /// Every journal created so far, deleted ones included, in id order.
     pub fn journals(&self) -> impl Iterator<Item = (JournalId, &CreatedJournal)> {
         self.journals.iter().map(|(id, c)| (*id, c))

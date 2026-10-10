@@ -34,10 +34,13 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+};
 use paros::client::checkpoint::{
     CheckpointOutcome, CheckpointPolicy, Checkpointer, Folded, Folder, OpenOutcome,
 };
+use paros::client::names::{JournalNames, JournalResolution};
 use paros::client::{Answered, Attempted, CallObserver, ClaimOutcome, TruncateOutcome, Writer};
 use paros::system::{
     Class, Directory, DirectoryEvent, DirectoryRefusal, NodeStanding, Registry, RegistryEvent,
@@ -116,6 +119,10 @@ pub(super) struct SystemOps {
     ever_created: Vec<JournalId>,
     /// The bookings this client made and has not released.
     booked: Vec<u64>,
+    /// The directory's journal names, as this client resolved them through
+    /// the library (#239): a cached resolution goes stale when its journal
+    /// is deleted and the name created again.
+    names: JournalNames,
     timeout: Duration,
 }
 
@@ -392,6 +399,7 @@ impl SystemOps {
             created: Vec::new(),
             ever_created: Vec::new(),
             booked: Vec::new(),
+            names: JournalNames::new(identifiers.directory),
             timeout,
         }
     }
@@ -651,6 +659,11 @@ impl SystemOps {
         (class, payload): (u64, u64),
     ) {
         let name = NAMES[usize::try_from(class % NAMES.len() as u64).unwrap_or(0)].to_vec();
+        // A name this client resolved on an earlier step is read through
+        // its cached resolution first: the journal may be gone since.
+        if self.active && self.names.cached(&name).is_some() && buggify_with_prob!(0.5) {
+            self.read_through_name(ctx, nodes, &name, payload).await;
+        }
         let mut candidates: Vec<NodeId> = (0..self.pool as u64).map(NodeId).collect();
         if self.active
             && let Some((_, _, registry)) = self.read_back(ctx, nodes, self.registry, payload).await
@@ -728,8 +741,7 @@ impl SystemOps {
                     assert_reachable!("system: a client creates a journal and reads back its id");
                     self.created.push(id);
                     self.ever_created.push(id);
-                    let created = JournalIdentifier::new(self.directory.tenant, id);
-                    self.append_to_created(ctx, nodes, created, &config, payload)
+                    self.address_created(ctx, nodes, (id, &name), &config, payload)
                         .await;
                     return;
                 }
@@ -751,6 +763,110 @@ impl SystemOps {
                 }
                 _ => return,
             }
+        }
+    }
+
+    /// Address the journal `id` this client just created by its name
+    /// (#239): the library resolves the name through the directory, and the
+    /// client appends one record to what it resolved to.
+    async fn address_created(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        (id, name): (JournalId, &[u8]),
+        config: &AcceptorConfig,
+        draw: u64,
+    ) {
+        let created = JournalIdentifier::new(self.directory.tenant, id);
+        let resolution = self.resolve_name(ctx, nodes, name, draw).await;
+        assert_sometimes!(
+            matches!(
+                resolution,
+                JournalResolution::Resolved { journal, .. } if journal == created
+            ),
+            "names: a journal name resolves to the journal its create made"
+        );
+        if let JournalResolution::Resolved { journal, .. } = resolution
+            && journal == created
+        {
+            self.append_to_created(ctx, nodes, journal, config, draw)
+                .await;
+        }
+    }
+
+    /// Resolve `name` afresh through the library (#239), and hold what it
+    /// came to against the directory as the nodes folded it: a resolved
+    /// name names the journal its directory records at the position the
+    /// resolution was read at, so a recreated name never resolves to the
+    /// deleted journal.
+    async fn resolve_name(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        name: &[u8],
+        draw: u64,
+    ) -> JournalResolution {
+        let first = usize::try_from(draw % self.seeds as u64).unwrap_or(0);
+        let caller = self.seed_client(ctx, nodes, self.directory);
+        let resolution = self.names.refresh(&caller, first, name).await;
+        let (resolved, at) = match resolution {
+            JournalResolution::Resolved { journal, at } => {
+                assert_always!(
+                    journal.tenant == self.directory.tenant,
+                    "names: a journal name resolves inside its tenant",
+                    { "journal" => journal.to_string() }
+                );
+                (Some(journal.journal), at)
+            }
+            JournalResolution::Unknown { at } => (None, at),
+            JournalResolution::Unreadable(_) => return resolution,
+        };
+        let recorded = board_lock(&system_board(ctx.state())).named_at(name, at);
+        if let Ok(recorded) = recorded {
+            assert_always!(
+                recorded == resolved,
+                "names: a resolved name is the journal its directory records there",
+                {
+                    "at" => at,
+                    "resolved" => resolved.map_or(0, |j| j.0),
+                    "recorded" => recorded.map_or(0, |j| j.0)
+                }
+            );
+            assert_reachable!("names: a journal resolution is judged against the directory");
+        }
+        resolution
+    }
+
+    /// Read the journal `name` resolved to on an earlier step, through that
+    /// cached resolution (#239). When every server refuses it as unknown,
+    /// the resolution is stale: the client drops it and resolves the name
+    /// again.
+    async fn read_through_name(
+        &mut self,
+        ctx: &SimContext,
+        nodes: &ChainClient,
+        name: &[u8],
+        draw: u64,
+    ) {
+        let Some((cached, _)) = self.names.cached(name) else {
+            return;
+        };
+        assert_reachable!("names: a client reads a journal through a cached resolution");
+        let request = paros::client::Reader::new(cached, 0).request(1, 0);
+        let report = nodes.read_any(&request, 0).await;
+        if report.outcome != ReadOutcome::UnknownJournal || !self.names.stale(name, cached) {
+            return;
+        }
+        match self.resolve_name(ctx, nodes, name, draw).await {
+            JournalResolution::Resolved { journal, .. } if journal != cached => {
+                assert_reachable!(
+                    "names: a stale resolution is refused and the name resolves to its new journal"
+                );
+            }
+            JournalResolution::Unknown { .. } => {
+                assert_reachable!("names: a stale resolution is refused and the name is gone");
+            }
+            _ => {}
         }
     }
 

@@ -24,14 +24,37 @@ use paros::client::bootstrap::control_journals;
 use paros::client::fleet::{
     FleetRefusal, FleetSession, Interrupted, Run, Stage, Step, read_directory,
 };
-use paros::fleet::TenantState;
+use paros::fleet::{TenantLabel, TenantState};
 use paros::machine::ControlJournals;
+use paros::name::Abbreviations;
 use paros::system::Registry;
 use paros::{JournalId, JournalIdentifier, NodeId, TenantId};
 use serde_json::json;
 
 use crate::Ending;
-use crate::output::{Printer, note, record_text};
+use crate::output::{Printer, note, record_text, short};
+
+/// A tenant's label in text (#239): `name=` for a `users` tenant,
+/// `label=universe` or `label=cell:<cell>` for an internal one, which has no
+/// name.
+fn label_text(label: Option<TenantLabel<'_>>, ids: Abbreviations) -> String {
+    match label {
+        Some(TenantLabel::Named(name)) => format!("name={}", record_text(name)),
+        Some(TenantLabel::Fleet) => "label=universe".to_string(),
+        Some(TenantLabel::Cell(cell)) => format!("label=cell:{}", ids.id(cell)),
+        None => "label=none".to_string(),
+    }
+}
+
+/// A tenant's label in JSON.
+fn label_json(label: Option<TenantLabel<'_>>) -> serde_json::Value {
+    match label {
+        Some(TenantLabel::Named(name)) => json!(record_text(name)),
+        Some(TenantLabel::Fleet) => json!("universe"),
+        Some(TenantLabel::Cell(cell)) => json!(format!("cell:{cell}")),
+        None => serde_json::Value::Null,
+    }
+}
 
 type ParosClient = Client<TokioProviders>;
 
@@ -114,19 +137,19 @@ pub fn refusal_text(refusal: &FleetRefusal) -> String {
         FleetRefusal::Unset => "unset: an id or an identifier of 0".into(),
         FleetRefusal::NotInitialized => "not_initialized: run parosctl init first".into(),
         FleetRefusal::CellMismatch { expected, found } => format!(
-            "cell_mismatch: expected fleet={} cell={}, the cell records {}",
-            expected.0,
-            expected.1,
+            "cell_mismatch: expected universe={} cell={}, the cell records {}",
+            short(expected.0),
+            short(expected.1),
             found.map_or_else(
                 || "nothing".to_string(),
-                |f| format!("fleet={} cell={}", f.fleet_id, f.cell_id)
+                |f| format!("universe={} cell={}", short(f.fleet_id), short(f.cell_id))
             )
         ),
         FleetRefusal::CellRemoving => "cell_removing".into(),
         FleetRefusal::IdTaken => "id_taken".into(),
         FleetRefusal::NameTaken { tenant, state } => format!(
             "name_taken: tenant {} is {}{}",
-            tenant.0,
+            short(tenant.0),
             state.as_str(),
             if *state == TenantState::Registering {
                 " (an interrupted creation: delete it to create the name again)"
@@ -136,25 +159,28 @@ pub fn refusal_text(refusal: &FleetRefusal) -> String {
         ),
         FleetRefusal::OtherCell { node, cell_id } => format!(
             "other_cell: machine {} belongs to {}",
-            node.0,
+            short(node.0),
             if *cell_id == 0 {
                 "another cell".to_string()
             } else {
-                format!("cell {cell_id}")
+                format!("cell {}", short(*cell_id))
             }
         ),
         FleetRefusal::InCellInit { node } => format!(
             "in_cell_init: machine {} promised in a cell init and has no cell: \
              finish that cell init, or wipe the machine",
-            node.0
+            short(node.0)
         ),
         FleetRefusal::Retired { node } => {
-            format!("retired: machine {} was retired from this cell", node.0)
+            format!(
+                "retired: machine {} was retired from this cell",
+                short(node.0)
+            )
         }
         FleetRefusal::Removed { tenant } => {
             format!(
                 "removed: tenant {} was removed while being created",
-                tenant.0
+                short(tenant.0)
             )
         }
     }
@@ -287,7 +313,7 @@ fn report(out: &Printer, done: &str, name: &str, run: Run<TenantId>) -> Ending {
                     format!(
                         "{} tenant={} name={name}{}",
                         if already { "unchanged" } else { done },
-                        result.0,
+                        short(result.0),
                         if already {
                             String::new()
                         } else {
@@ -324,26 +350,55 @@ async fn list(client: &ParosClient, fleet: JournalIdentifier, out: &Printer) -> 
             return Ending::Unreachable;
         }
     };
+    // One abbreviation for every id the listing prints.
+    let ids = Abbreviations::new(
+        directory
+            .fleet()
+            .into_iter()
+            .chain([fleet.tenant.0, fleet.journal.0])
+            .chain(
+                directory
+                    .cells()
+                    .flat_map(|(cell, entry)| [cell, entry.control_tenant.0]),
+            )
+            .chain(
+                directory
+                    .tenants()
+                    .flat_map(|(tenant, entry)| [tenant.0, entry.control.0, entry.cell_id]),
+            )
+            .filter(|id| *id != 0),
+    );
+    let short = |id: u64| {
+        if id == 0 {
+            "none".to_string()
+        } else {
+            ids.id(id)
+        }
+    };
     out.emit(
         || {
             let mut text = format!(
-                "fleet={} fleet_control={}",
-                directory.fleet()
-                    .map_or_else(|| "none".to_string(), |f| f.to_string()),
-                fleet
+                "universe={} universe_control=id:{}",
+                directory.fleet().map_or_else(|| "none".to_string(), short),
+                ids.journal(fleet)
             );
             for (cell, entry) in directory.cells() {
-                let _ = write!(text, "\ncell={cell} state={}", entry.state.as_str());
+                let _ = write!(
+                    text,
+                    "\ncell={} state={}",
+                    short(cell),
+                    entry.state.as_str()
+                );
             }
             for (tenant, entry) in directory.tenants() {
                 let _ = write!(
                     text,
-                    "\ntenant={} control={} name={} groups={} cell={} state={}",
-                    tenant.0,
-                    JournalIdentifier::new(tenant, entry.control),
-                    record_text(&entry.name),
+                    "\ntenant={} {} control=id:{} groups={} cell={} state={}",
+                    short(tenant.0),
+                    label_text(directory.label(tenant), ids),
+                    ids.journal(JournalIdentifier::new(tenant, entry.control)),
                     entry.groups.label(),
-                    entry.cell_id,
+                    short(entry.cell_id),
                     entry.state.as_str()
                 );
             }
@@ -362,6 +417,7 @@ async fn list(client: &ParosClient, fleet: JournalIdentifier, out: &Printer) -> 
                     "tenant": tenant.0,
                     "control": JournalIdentifier::new(tenant, entry.control).to_string(),
                     "name": record_text(&entry.name),
+                    "label": label_json(directory.label(tenant)),
                     "groups": entry.groups.iter().map(paros::fleet::Group::as_str).collect::<Vec<_>>(),
                     "cell": entry.cell_id,
                     "state": entry.state.as_str(),

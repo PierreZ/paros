@@ -768,6 +768,18 @@ full id, and a command that takes an id accepts a unique prefix. An internal ten
 shows a display label derived from its groups (`universe`, `cell` with its cell), display only,
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
 
+**Where names stand** (#239, landed on 2026-10-10). The library parses and prints
+`paros://<tenant>/<journal>` (`paros::name`) and resolves it in two hops
+(`paros::client::names`): the tenant name through the universe directory, where only a `READY`
+`users` tenant resolves; then the journal name through the tenant's control journal, the
+`Directory` fold, where only a live journal resolves. A client caches a resolution and drops it
+when a call is refused as naming an unknown journal; the next resolution reads the control journal
+again. `parosctl` resolves the names its journal commands take. An operator can name a journal by
+its ids, `id:<tenant>/<journal>` in hex, each half a unique prefix of an id that `parosctl` can
+list, or all 16 digits. Interim until #210: the machines do not serve a tenant's control journal
+yet, so on `parosd` a name resolves only its tenant hop, and `init` prints its user journal in
+full, `id:<16 hex>/<16 hex>`, because no later listing knows that journal.
+
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
 well-known `Resolve` call, section 3.2), and nodes do no authorization.
