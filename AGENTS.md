@@ -454,7 +454,7 @@ Procedure: the `simulation-driven-fix` skill.
 ## Layout
 
 Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` ← `paros` ←
-`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`. Each crate's `AGENTS.md` is its map.
+`paros-sim` ← `paros-sim-runner`, and `paros` ← `parosd`; `paros-authz-biscuit` ← `parosd`. Each crate's `AGENTS.md` is its map.
 
 - `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
@@ -465,6 +465,9 @@ Cargo workspace, every package under `crates/`. Dependency stack: `paros-core` �
   `node_id` minted at format, waits for `parosctl init`, #196) and `parosctl`
   (`src/bin/parosctl/`), the CLI over `paros::client` (`publish = false`). The image and the
   Compose toy are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it.
+- `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
+  seal, the verifier and its one policy. No `paros` dependency; Biscuit never enters `paros` or
+  `paros-core`. `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
 - `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
 - `paros-play` — the interactive Paxos game's engine and wasm glue; the app is `web/play/`.

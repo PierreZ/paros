@@ -10,6 +10,8 @@ publish = false
 
 [dependencies]
 paros = { path = "../paros", version = "0.2.0" }
+# `parosctl key` and `parosctl token` (#400): Biscuit keys and tokens, offline.
+paros-authz-biscuit = { path = "../paros-authz-biscuit" }
 
 # The production providers (#206): the first build of paros that links
 # `TokioProviders`. The `paros` library pulls moonpool without them so it
