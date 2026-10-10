@@ -140,7 +140,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   survivors land in one rolling issue (label `mutation-survivors`); triage each as an
   equivalent mutant (excluded in `.cargo/mutants.toml` with a reason), a missing oracle, an
   unreachable state, or a mechanism to pin once proven. Hand-made mutation proofs it cannot
-  generate (#263, #267) stay documented next to the rule they prove.
+  generate (#263, #267) stay documented next to the rule they prove. The first run's triage,
+  and the equivalent edits a regex cannot exclude, are in
+  `docs/analysis/simulation/mutation-triage.md`.
 - **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use

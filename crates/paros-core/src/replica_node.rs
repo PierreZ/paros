@@ -114,7 +114,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ReadState;
 use crate::journal_state::JournalState;
-use crate::membership::{AcceptorConfig, ReplicaId};
+use crate::membership::{AcceptorConfig, QuorumSystem, ReplicaId};
 use crate::message::{Audience, Message};
 use crate::node::READ_TTL_TICKS;
 use crate::quorum_read::{QuorumReads, ReadBasis};
@@ -415,6 +415,10 @@ impl ReplicaNode {
             return;
         };
         let row = basis.config.read_row(ctx, row);
+        assert!(
+            row.is_some() == matches!(basis.config.quorum_system(), QuorumSystem::Grid { .. }),
+            "a read names a row exactly under a grid"
+        );
         let addressees = self
             .quorum_reads
             .open(ctx, row, basis, self.tick_count, None);

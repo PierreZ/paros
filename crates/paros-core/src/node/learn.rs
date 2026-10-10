@@ -109,6 +109,12 @@ impl ColocatedNode {
         // A decision at a probe-blocked slot resolves it (Case 1 arriving
         // through the commit path rather than a straggler's Promise).
         self.proposer.probe_resolved_elsewhere(slot);
+        assert!(
+            self.proposer
+                .probe()
+                .is_none_or(|p| !p.blocked().contains(&slot)),
+            "a slot learned chosen leaves the repair probe"
+        );
         // The chosen/accepted coupling: a chosen slot always holds its
         // authoritative accepted record, at the same command (`serve_catchup`
         // and election recovery both read one map and trust the other).

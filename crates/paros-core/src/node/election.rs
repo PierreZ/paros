@@ -730,6 +730,19 @@ impl ColocatedNode {
             // closes once its cursor swept the whole inherited range, leaving
             // nothing at or past the cursor unvisited.
             self.proposer.close_drained_recovery();
+            // A leadership with a recovery open never settles: no
+            // reconfiguration, GC, handoff or delegation runs (#269).
+            assert!(
+                self.proposer.recovery().is_none(),
+                "a drained recovery closes in the page that drains it"
+            );
+        } else {
+            assert!(
+                self.proposer
+                    .recovery()
+                    .is_some_and(|r| r.cursor() < r.end()),
+                "an open recovery still has slots to sweep"
+            );
         }
         if processed > 0 {
             self.pending_recovery_batch = Some((started, gap_fills, remaining));
@@ -747,6 +760,15 @@ impl ColocatedNode {
         if !self.in_pool(from) {
             return;
         }
+        // The work in flight the Nack answers, restated apart from
+        // `supersedes` (#269): a campaign at its ballot, or a round at its
+        // slot and ballot.
+        let in_flight = self
+            .proposer
+            .election()
+            .is_some_and(|e| e.ballot() == ballot)
+            || self.proposer.is_round_open_at(slot, ballot);
+        let role_before = self.role;
         if self.proposer.supersedes(ballot, slot) {
             self.become_follower(None);
             // A superseded leadership or campaign dies whole.
@@ -757,6 +779,17 @@ impl ColocatedNode {
             assert!(
                 self.proposer.rounds().is_empty(),
                 "a Nack abandons every round"
+            );
+        }
+        if in_flight {
+            assert!(
+                self.role == NodeRole::Follower,
+                "a Nack at the work in flight deposes it"
+            );
+        } else {
+            assert!(
+                self.role == role_before,
+                "a Nack at no work in flight leaves the role alone"
             );
         }
     }

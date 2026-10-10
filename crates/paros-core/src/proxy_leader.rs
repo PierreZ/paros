@@ -548,6 +548,16 @@ impl ProxyLeader {
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(proxy = self.id.0)))]
     pub fn expire_stale(&mut self, after: u64) -> Vec<Slot> {
         let stale = self.rounds.stalled(after);
+        // Read from the rounds, apart from `stalled` (#269): only a round
+        // that reached the budget is evicted.
+        assert!(
+            stale.iter().all(|slot| self
+                .rounds
+                .by_slot()
+                .get(slot)
+                .is_some_and(|r| r.resends() >= after)),
+            "an evicted round reached the retention budget"
+        );
         for slot in &stale {
             self.rounds.close(*slot);
             self.delegators.remove(slot);
@@ -556,6 +566,10 @@ impl ProxyLeader {
         assert!(
             stale.iter().all(|slot| self.rounds.column(*slot).is_none()),
             "an evicted round is gone"
+        );
+        assert!(
+            self.rounds.by_slot().values().all(|r| r.resends() < after),
+            "no round past the retention budget survives"
         );
         self.assert_invariants();
         stale

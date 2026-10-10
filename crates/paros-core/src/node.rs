@@ -1098,6 +1098,15 @@ impl ColocatedNode {
                 .all(|(_, proxy)| proxy.is_in(self.config.proxy_count)),
             "a round was delegated only to a deployed proxy"
         );
+        // Read from the rounds, apart from `stalled_delegations` (#269): no
+        // delegation past the budget stays with its proxy.
+        assert!(
+            self.proposer
+                .rounds()
+                .values()
+                .all(|r| r.proxy().is_none() || r.resends() < after_resends),
+            "no delegation past the take-back budget stays delegated"
+        );
         self.assert_invariants();
         taken
     }

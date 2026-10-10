@@ -1,0 +1,100 @@
+# Mutation hunt: triage of the first run (#269)
+
+This note records the first full `cargo xtask mutants` run over the
+safety-critical `paros-core` modules (`.cargo/mutants.toml`), and what was done
+with every surviving mutant. The weekly workflow writes later runs into the
+rolling `mutation-survivors` issue; this note is the baseline those runs start
+from.
+
+## The run (2026-10-10)
+
+- Scope: the eleven modules of `.cargo/mutants.toml`, 726 mutants.
+- Test: `paros_sim::chain_mutants`, seeds 1..=100 of the main campaign, in
+  release, 4 jobs on 4 cores, about 3 hours.
+- Result: 402 caught, 26 timeouts (a timeout counts as caught), 100 unviable,
+  198 survived.
+
+## Classes
+
+The 198 survivors split into the four classes of #269:
+
+| Class | Count | What happened |
+|---|---:|---|
+| Equivalent | about 70 | Excluded in `.cargo/mutants.toml` with a reason, or listed below when a regex cannot isolate the edit. |
+| Missing oracle | about 45 | An assertion or an audit check added in PR #334 (next section). |
+| Unreachable state | about 65 | Issues #338 to #343: the oracle exists, but no seed reaches the shape. |
+| Wire hygiene | about 15 | Issue #344: malformed input that honest peers never send; a unit test pins it. |
+
+## Oracles added
+
+Each line names the rule and the mutants it kills.
+
+- `serve_catchup`: a catch-up page stops only at its bound, at the end of the
+  prefix, or at a hole (the `+` edits of the expected slot).
+- `Replica::fold_one`: a folded verdict reads back through `outcome_at`
+  (`outcome_at -> None`, the `Noop` filter inverted).
+- `Replica::fold_hole`: a hole lies below the first unchosen slot (the `<=`
+  and `==` edits).
+- `Replica::truncate`: the dropped prefix holds no record at or past
+  `first_seq`, checked apart from `compaction_target`.
+- `Acceptor::record_accepted`: a repair is counted once.
+- `ColocatedNode` recovery pump: a drained recovery closes in the page that
+  drains it, and an open one still has slots to sweep
+  (`Recovery::remaining -> 1`, `recovery_remaining -> 1`,
+  `close_drained_recovery`).
+- `start_accept_round_in`: a delegated round is tracked by its opener
+  (`open_delegated_round -> ()`); auto delegation delegates exactly on a proxy
+  deployment (`ProxyId::of -> None`); a slot names a column exactly under a
+  grid (`column_of -> None`).
+- `own_vote`, `Rounds::fold_accepted_in`: a vote counts only from the round's
+  column, read from the addressee list (`is_phase2_addressee`'s `&&`).
+- Quorum reads (node and replica): a read names a row exactly under a grid,
+  and a reader answers itself only from inside its row (`read_row`, `row_of`,
+  `is_phase1_addressee`).
+- `take_back_delegated`, `ProxyLeader::expire_stale`: no round past its budget
+  stays delegated or retained (`stalled`, `stalled_delegations`).
+- `on_nack`: a Nack at the work in flight deposes it, and a Nack at no work in
+  flight leaves the role alone (the four `supersedes` mutants).
+- `learn`: a slot learned chosen leaves the repair probe
+  (`probe_resolved_elsewhere -> ()`).
+- `probe_membership`: a probe is tagged by its own fresh round
+  (`MembershipProbe::ballot -> Default`).
+- `Matchmaking::assert_invariants`: the disagreement count equals the extra
+  configurations; `MatchStep::Completed` now carries the count, so the audit's
+  "no two matchmakers disagree" sees it. Before, the driver read it after the
+  phase closed and always got zero.
+- `JournalState`: a won `SetLeader` names the leader in force and installs a
+  different, set uuid; an accepted write takes the position it names. Both
+  need a call the workload never sends (#339).
+- The workload's malformed reconfiguration: "malformed" is now the workload's
+  own arithmetic, with three shapes (`{1, 1}`, the boundary `{1, n - 1}`, a
+  2-row grid that does not tile). It used the library's own `admits`, so a
+  mutant of `admits` also stopped the request (`cross_intersects`, `admits`).
+
+## Equivalent edits a regex cannot isolate
+
+These stay in the rolling report. Each one is equivalent; a regex that names
+it would also hide a real mutant of the same function.
+
+- `acceptor.rs` `promise_page`: `<` to `<=` in the merge order (the readable
+  and faulty keys are disjoint).
+- `matchmaking.rs` `heard_anyone`: `delete !` on the page cursor leg (at the
+  only call, `registered_by` is not empty).
+- `membership.rs`: `<` to `<=` in `QuorumSystem::is_phase1_quorum_in` and
+  `is_phase2_quorum_in` (the row and the column are always in range);
+  `read_row`'s guard to `false`.
+- `replica.rs`: the `assert_invariants` guard `<` to `>`; `Replica::read` `<`
+  to `<=` (two of three sites) and `>` to `<`; `refold`'s guard `<` to `>`;
+  `trim_to` `<` to `<=`; `compaction_target` `<` to `<=` on the position test.
+- `proposer/probe.rs`: `RepairProbe::blocked -> empty` (read only in
+  assertions); `stragglers` `&&` to `||` (extra traffic only).
+- `proposer/rounds.rs`: `close_below` and `resend_page` `<` to `<=` (the
+  boundary cannot occur).
+
+## Hand-made proofs
+
+#267's mutation ("only the newest prior configuration is consulted":
+`slot_decidable` checks `prior.last()` instead of every configuration) is not
+an edit cargo-mutants generates. It stays documented next to the rule, on
+`slot_decidable` in `proposer.rs`, with its red witness. `proposer.rs` itself
+is outside the first pass's scope; the next pass can add it.
