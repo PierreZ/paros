@@ -1240,6 +1240,7 @@ mod tests {
         assert_eq!(restored.state(), whole.state());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         let fleet = 0xf1ee7;

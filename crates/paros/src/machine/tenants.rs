@@ -72,8 +72,9 @@ pub(crate) struct TenantDesk {
     /// The seed ids derive from, and how many were drawn.
     seed: u128,
     draws: u64,
-    /// Reuse a taken id at the next create that can (a BUGGIFY decision of
-    /// the node loop): the `IdTaken` redraw's way in.
+    /// Reuse a taken id at the first draw of every create in a tenant that
+    /// has one (a BUGGIFY decision of the node loop): the `IdTaken`
+    /// redraw's way in.
     reuse: bool,
     policy: CheckpointPolicy,
 }
@@ -120,6 +121,7 @@ impl TenantDesk {
         answer
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn decide<P: Providers>(
         &mut self,
         client: &Client<P>,
@@ -174,8 +176,8 @@ impl TenantDesk {
                     moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
                     return JournalAnswer::Unplaceable;
                 };
-                for _ in 0..ID_DRAWS {
-                    let id = self.draw(request.tenant);
+                for attempt in 0..ID_DRAWS {
+                    let id = self.draw(request.tenant, attempt == 0);
                     let start = usize::try_from(id.0 % members.len() as u64).unwrap_or(0);
                     let mut chosen: Vec<NodeId> = members
                         .iter()
@@ -365,9 +367,9 @@ impl TenantDesk {
     }
 
     /// The next journal id of `tenant`: derived from the seed and the draw
-    /// count, set. Once per desk, the BUGGIFY decision reuses an id the
+    /// count, set. On a `first` draw, the BUGGIFY decision reuses an id the
     /// tenant took, which the fold must refuse.
-    fn draw(&mut self, tenant: TenantId) -> JournalId {
+    fn draw(&mut self, tenant: TenantId, first: bool) -> JournalId {
         let taken = self
             .desk(tenant)
             .state()
@@ -375,9 +377,9 @@ impl TenantDesk {
             .next()
             .map(|(id, _)| id);
         if self.reuse
+            && first
             && let Some(taken) = taken
         {
-            self.reuse = false;
             moonpool_assertions::reachable!("tenant coordinator: a create reuses a taken id");
             return taken;
         }

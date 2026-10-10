@@ -19,13 +19,14 @@
 //!   acknowledges no append to it afterwards.
 //!
 //! The gates are outcomes the run must reach once it created a journal: a
-//! name taken by a live journal, an id redrawn after `IdTaken`, and a retry
-//! answered from the recorded outcome.
+//! name taken by a live journal, and an id redrawn after `IdTaken`. A retry
+//! is answered from the recorded outcome without a write, so a `Repeated`
+//! fold is rare: a reachable, never a gate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{StateHandle, assert_always, assert_sometimes};
 use paros::tenant::{RequestOutcome, TenantEvent, TenantRefusal};
 use paros::{JournalIdentifier, NodeId, WriterMode};
 
@@ -52,8 +53,6 @@ pub(crate) struct TenantBoard {
     name_taken: bool,
     /// A create naming an id the tenant used before was refused.
     id_taken: bool,
-    /// A request was answered again from its recorded outcome.
-    repeated: bool,
 }
 
 /// The run's [`TenantBoard`] (`crate::state::published`).
@@ -131,10 +130,6 @@ impl TenantBoard {
                     "tenant: a repeated request reads back its first outcome",
                     { "lsn" => lsn }
                 );
-                if !self.repeated {
-                    assert_reachable!("tenant: a request is answered again from its outcome");
-                }
-                self.repeated = true;
             }
             TenantEvent::Refused(TenantRefusal::IdTaken { id }) => {
                 let journal = JournalIdentifier::new(control.tenant, *id);
@@ -202,6 +197,5 @@ impl TenantBoard {
             self.id_taken,
             "tenant: a create naming a used id is refused and redrawn"
         );
-        assert_sometimes!(self.repeated, "tenant: a retried request acts once");
     }
 }

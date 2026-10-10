@@ -50,21 +50,20 @@ impl FleetOps {
         let Some((cell, tenant, _)) = self.journal_tenant(ctx, payload).await else {
             return;
         };
-        let request = match self.journal_pending.take() {
-            Some(request) => request,
-            None => {
-                let name = JOURNAL_NAMES
-                    [usize::try_from(class % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
-                .to_vec();
-                JournalRequest {
-                    request: ctx.random().random_range(1..u64::MAX),
-                    tenant,
-                    op: JournalOp::Create {
-                        name,
-                        writer: drawn_mode(),
-                        desired: drawn_desired(payload),
-                    },
-                }
+        let request = if let Some(request) = self.journal_pending.take() {
+            request
+        } else {
+            let name = JOURNAL_NAMES
+                [usize::try_from(class % JOURNAL_NAMES.len() as u64).unwrap_or(0)]
+            .to_vec();
+            JournalRequest {
+                request: ctx.random().random_range(1..u64::MAX),
+                tenant,
+                op: JournalOp::Create {
+                    name,
+                    writer: drawn_mode(),
+                    desired: drawn_desired(payload),
+                },
             }
         };
         self.send_journal_request(&cell, request, payload).await;
@@ -181,7 +180,7 @@ impl FleetOps {
                     "journals: a retried request reads back its first answer",
                     { "tenant" => request.tenant.0, "first" => answer.as_str(), "again" => again.as_str() }
                 );
-                assert_reachable!("journals: a retried request reads back its first answer");
+                assert_reachable!("journals: a client retries a decided request");
             }
         }
     }

@@ -177,8 +177,8 @@ struct Candidacy {
     /// The leader hands its first term on to another founding member after
     /// its duties (a BUGGIFY decision).
     hand_off: bool,
-    /// The tenant coordinator reuses a taken journal id at its first create
-    /// that can (a BUGGIFY decision): the fold must refuse it.
+    /// The tenant coordinator reuses a taken journal id at the first draw of
+    /// every create (a BUGGIFY decision): the fold must refuse it.
     reuse: bool,
 }
 
@@ -287,7 +287,7 @@ async fn campaign<P: Providers>(
         tunables,
         mut stall,
         hand_off: mut handing,
-        mut reuse,
+        reuse,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -308,12 +308,12 @@ async fn campaign<P: Providers>(
     let mut served: Option<u64> = None;
     // The tenant coordinator of the term served, while it leads it.
     let mut desk: Option<(u64, TenantDesk)> = None;
-    let open_desk = |term: u64, uuid: LeaderUuid, reuse: &mut bool| {
+    let open_desk = |term: u64, uuid: LeaderUuid, reuse: bool| {
         let desk = TenantDesk::new(
             uuid,
             journals.cell,
             &founder_ids,
-            (seed ^ u128::from(term), std::mem::take(reuse)),
+            (seed ^ u128::from(term), reuse),
             policy,
         );
         (term, desk)
@@ -335,7 +335,7 @@ async fn campaign<P: Providers>(
                 match duty {
                     TermDuty::Served { .. } => {
                         served = Some(leader.term);
-                        desk = Some(open_desk(leader.term, leader.uuid, &mut reuse));
+                        desk = Some(open_desk(leader.term, leader.uuid, reuse));
                         election.publish(addr.to_string());
                     }
                     TermDuty::Refused => {

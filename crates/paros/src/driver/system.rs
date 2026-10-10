@@ -333,7 +333,7 @@ impl<P: Providers> ControlFollower<P> {
         }
         self.tenants
             .get(&journal.tenant)
-            .map_or(0, |fold| fold.next_seq())
+            .map_or(0, Folder::next_seq)
     }
 
     /// `journal`'s positions below `floor` are gone (a read answered

@@ -1708,6 +1708,7 @@ impl<P: Providers, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// journal naming this node, stop a tombstoned one, open a lane to an
     /// admitted node, and stop every user journal on this node's own
     /// retirement. Each event is reported first, once.
+    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all, fields(node = follower.self_id().0, journal = %journal, events = events.len()))]
     async fn apply(
         &mut self,
