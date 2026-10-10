@@ -67,6 +67,7 @@ mod formed;
 mod lifecycle;
 mod record;
 pub(crate) mod register;
+mod resolve;
 mod stores;
 mod tenants;
 pub(crate) mod views;

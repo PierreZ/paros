@@ -13,7 +13,9 @@
 //! - `Admit` into its own cell, acked with no change (the caller's retry
 //!   after a lost answer), and into any other cell, refused;
 //! - the cell decree, refused: it is in a cell, so a `cell init` that lists
-//!   it is refused as `cell_exists`, and it accepts no plan.
+//!   it is refused as `cell_exists`, and it accepts no plan;
+//! - `Resolve`, from its folds of the registry and the universe directory
+//!   (`super::resolve`).
 //!
 //! On every start it asks the cell coordinator to register the address it
 //! advertises now (`super::register`, #349), so a machine that moved is
@@ -180,6 +182,21 @@ impl AdmittedMachine {
         let mut inspect = Inbound::plain(serve_well_known::<P, InspectRpc>(&rpc).map_err(served)?);
         let cell = self.admission.cell;
         self.follow_and_register(providers, &rpc, cache, tunables, &shutdown);
+        // Any machine of the cell answers `Resolve` (#216): an admitted one
+        // learns the genesis pool from the control journal's membership.
+        super::resolve::spawn(
+            providers,
+            &rpc,
+            super::resolve::Resolver {
+                facts: self.facts.clone(),
+                cell,
+                founders: None,
+                book: self.book(),
+                serves: false,
+            },
+            shutdown.clone(),
+        )
+        .map_err(served)?;
         tracing::info!(
             node = self.facts.node_id.0,
             cell = cell.cell_id,

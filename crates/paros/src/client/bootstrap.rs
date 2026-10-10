@@ -27,7 +27,7 @@ use crate::{Address, Names};
 /// One attempt of `M` at `target`, its address resolved now through `names`
 /// (#257), within `timeout`: `None` when the name does not resolve or
 /// nothing came back.
-async fn call_once<P: Providers, M: WellKnownMethod>(
+pub(crate) async fn call_once<P: Providers, M: WellKnownMethod>(
     providers: &P,
     rpc: &RpcHandle<P>,
     names: &Names,

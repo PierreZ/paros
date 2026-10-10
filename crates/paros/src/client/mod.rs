@@ -73,6 +73,7 @@ pub mod names;
 mod observer;
 pub mod outcome;
 mod reader;
+pub mod resolve;
 #[cfg(test)]
 mod tests;
 pub mod views;

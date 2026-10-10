@@ -451,6 +451,15 @@ request, refused with `StaleIncarnation`. That pull model is sufficient: Delos c
 their cached view only when an append fails on a sealed loglet. No push detection is asked of
 moonpool.
 
+`StaleIncarnation` needs dynamic references (amended on 2026-10-10, #216). moonpool-rpc refuses a
+stale reference only on a dynamic endpoint. A well-known endpoint answers every incarnation. Today
+every paros method is well known, so no call can be refused as stale. A restart at the same
+address rejoins in place, and that is the decided behaviour. A machine that moved is found
+through the registry fold (#349, #211). So `StaleIncarnation` and the `InterfaceRef` in
+`RegisterNode` move to #404 (static endpoints for bootstrap only), which makes the machine,
+coordinator and data-plane interfaces dynamic. #216 does not add an application-level copy of
+the check.
+
 **Listen and advertised addresses** (decided on 2026-10-07, #257). A machine's configuration
 carries two addresses, as FDB's `listen_address` / `public_address` and CockroachDB's
 `--listen-addr` / `--advertise-addr` do: `PAROS_LISTEN`, what it binds (may be a wildcard), and
@@ -584,22 +593,27 @@ there it calls `Resolve` (below).
   refused (`unset`), never read as "the node's first journal", and one naming a journal the
   machine does not serve is refused (`unknown_journal`). The machine's own facts ride every
   answer, refusals included.
-- `cell_id` and `universe_id` are carried in the session `Hello`; a peer with another id is refused.
+- `cell_id` is carried in the session `Hello`; a peer with another id is refused.
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad configuration. The `Hello` is the peer lane's `Deliver` batch (decided
   on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
-  cell refuses the whole batch before it decodes a message. `universe_id` joins it when the cell
-  plan carries one. The simulation makes the shape: an operator founds another cell on the
+  cell refuses the whole batch before it decodes a message. The simulation makes the shape: an operator founds another cell on the
   machine that replaced a wiped member, and the first cell still sends to that address.
   Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
   members serve, and `cell init` never adopts a vote for another list's plan.
+  **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays
+  inside one cell, and a cell joins one universe once (`JoinFleet`), so two machines with the
+  same `cell_id` always share a universe: a check on the batch could never fire. The
+  `universe_id` rides the `Resolve` answer, and it joins the peer batch with the first call
+  that crosses cells (M12). It is minted at `universe init`, after the cell plan, so the cell
+  holds it in its registry fold (`JoinFleet`), not in the plan.
 - **Well-known endpoints** are the bootstrap set — `Identify`, `FormCell`, `Admit`, `Inspect` —
   and **`Resolve`**, keyed by tenant: "which references serve tenant T" (named on 2026-10-09).
   Everything else is a dynamic reference (amended on 2026-10-04:
   the bootstrap calls were well known already). One call, two answerers (decided on 2026-10-07,
   #233): a resolver answers the cell half (the tenant's cell and that cell's entry references),
   any machine of that cell the frontend half (the tenant's frontends, from its registry fold),
-  section 3.5.
+  section 3.5. `Resolve` landed on 2026-10-10 (#216, `0x5041_030A`), section 3.5.
 
 The decision and its alternatives are #216. Classes are FDB's:
 
@@ -832,6 +846,28 @@ registry fold, and it prefers a frontend in its own region and zone. Both answer
 refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: inside it, the cell's
 machines answer and the frontend forwards, so forward-not-redirect stands and nodes still do no
 authorization.
+
+**Where `Resolve` stands** (#216, landed on 2026-10-10). There is no resolver (M12) and no frontend
+(#192) yet, so every machine of a cell, founding or admitted, answers both hops in one answer
+(`paros::machine::resolve`). It reads two folds through the cell's machines, as a client does, and
+keeps them between requests:
+
+- The universe directory, when the cell serves it. A `READY` `users` tenant resolves to its
+  `TenantId`, its control `JournalIdentifier` and its cell, with the `universe_id`. Refusals:
+  `unknown_tenant`, `not_ready`, `internal` (no user name), `other_cell` (the answer names the
+  tenant's cell, for M12), `no_universe` (the cell serves no universe directory yet) and
+  `unavailable` (a fold could not be read to its tail, so ask another machine).
+- The registry. The answer lists the cell's machines at the addresses the registry holds
+  (`cell_book`). A client calls them until the frontend exists. Then the same answer carries the
+  tenant's frontends, and with #404 each reference is an `InterfaceRef`.
+
+`paros::client::resolve` asks the entry endpoint's addresses in turn and passes over a machine
+that does not answer or answers `unavailable`. `parosctl resolve <tenant>` prints the answer. An
+answer is a hint from a fold: a stale one costs the client a refused call, and it resolves again.
+The simulation resolves every created tenant at the entry endpoint (every machine, from a drawn
+one on) beside the library's own resolution. Its oracles: a removed, internal or never-created
+name never resolves, and a resolved tenant is served by the operator's cell. Machines do no
+authorization: the Biscuit check is the resolver's and the frontend's (#245).
 
 ```
  client ──Resolve(T)──► resolver (its region: universe directory fold, Biscuit sig + scope)
@@ -1077,9 +1113,12 @@ metadata version lets a reader refuse a format it does not understand.
 
 **What M9 carries so that M12 adds no protocol or data-model change:**
 
-- The machine record carries `node_id`; the durable cell plan carries `cell_id`, `universe_id` and
-  the metadata version (amended on 2026-10-04: the code keeps them in the cell plan, not `Config`).
-- `Hello` carries `cell_id` and `universe_id`.
+- The machine record carries `node_id`; the durable cell plan carries `cell_id` (amended on
+  2026-10-04: the code keeps it in the cell plan, not `Config`). `universe_id` and the metadata
+  version are minted after the plan, so the cell control journal holds them (`JoinFleet`,
+  amended on 2026-10-10, #216).
+- `Hello` carries `cell_id`; `universe_id` joins it with the first call that crosses cells (amended
+  on 2026-10-10, #216, section 3.2).
 - `Resolve` is keyed by tenant.
 - Tenant control journals are self-describing (name, desired state, `survives`, the name and kind
   of the tenant's cell, #210).
@@ -1212,7 +1251,8 @@ refused.
 
 - `node_id`, `cell_id`, `universe_id`: random, minted at format, `cell init` and `universe init`
   respectively, and
-  stored in the machine record (`node_id`) and the durable cell plan (`cell_id`, `universe_id`). They
+  stored in the machine record (`node_id`), the durable cell plan (`cell_id`) and the cell control
+  journal (`universe_id`, `JoinFleet`, amended on 2026-10-10, #216). They
   are written once, unset → set, and a later mismatch is refused at boot like any `Config`
   mismatch.
 - The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the

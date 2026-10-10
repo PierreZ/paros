@@ -32,6 +32,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   `paros::client::fleet`; the session, refusal labels and endings `init` shares.
 - `src/bin/parosctl/journal.rs` → `parosctl journal create|delete|list` over `paros::client::journals` (#210): the tenant named, found in the fleet directory; one request id per run, re-sent by the library until decided.
 - `src/bin/parosctl/cell.rs` → `parosctl cell add-machine <addr>` over `paros::client::cell` (#216): registers an idle machine in the cell control journal, then admits it.
+- `src/bin/parosctl/entry.rs` → `parosctl resolve <tenant>` over `paros::client::resolve` (#216): the servers are the entry endpoint; prints the tenant's cell and the cell's machines.
 - `src/bin/parosctl/key.rs` → `parosctl key generate|show` (#400): root key pairs, offline, entropy from the provider's random source; `<label>.private` (mode 0600) and `<label>.public`, written once; outputs name a key by its label, never its id.
 - `src/bin/parosctl/token.rs` → `parosctl token mint|derive|inspect` (#400): Biscuit tokens over `paros-authz-biscuit`, offline; a token from the argument, `--token-file` or `PAROS_TOKEN`.
 - `src/bin/parosctl/views.rs` → `Asker`, `parosctl machine list|show`, `cell list|show`, `tenant list|show`, `roles [--cell|--tenant|--machine]` (#399): one `View` to the servers' cell, printed as a table (`output::table`) or JSON; the global `--as-tenant NAME` asks in one tenant's scope.

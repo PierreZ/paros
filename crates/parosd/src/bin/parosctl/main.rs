@@ -19,6 +19,7 @@
 
 mod cell;
 mod commands;
+mod entry;
 mod fleet;
 mod init;
 mod journal;
@@ -137,6 +138,9 @@ enum Command {
     /// the servers.
     #[command(name = "cell")]
     CellAdmin(cell::CellArgs),
+    /// Which references serve a tenant (#216): the cell, and its machines
+    /// where the registry places them. Any machine of a cell answers.
+    Resolve(entry::ResolveArgs),
     /// Root key pairs for Biscuit tokens, offline (#400): `key generate`,
     /// `key show`.
     Key(key::KeyArgs),
@@ -370,6 +374,27 @@ fn asker<'a>(runtime: &'a Runtime, global: &Global) -> views::Asker<'a> {
     }
 }
 
+/// `parosctl resolve`: the servers are the entry endpoint.
+async fn resolve_tenant(
+    runtime: &Runtime,
+    global: &Global,
+    out: &Printer,
+    args: entry::ResolveArgs,
+) -> ExitCode {
+    let entry = global.addrs();
+    entry::run(
+        &runtime.providers,
+        &runtime.rpc,
+        &runtime.names,
+        &entry,
+        global.timeout(),
+        out,
+        args,
+    )
+    .await
+    .into()
+}
+
 /// The commands that talk to servers.
 async fn online(global: Global, command: Command) -> ExitCode {
     let cli = Cli { global, command };
@@ -416,6 +441,7 @@ async fn online(global: Global, command: Command) -> ExitCode {
                 .await
                 .into();
         }
+        Command::Resolve(args) => return resolve_tenant(&runtime, &cli.global, &out, args).await,
         Command::Cell(command) => command,
         Command::Key(_) | Command::Token(_) => unreachable!("offline, handled in main"),
         Command::Machine(_) | Command::Roles(_) => unreachable!("views, handled above"),
