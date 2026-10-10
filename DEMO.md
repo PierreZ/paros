@@ -42,6 +42,10 @@ docker compose run --rm parosctl set-leader "$J" --new 8
 docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
 docker compose run --rm parosctl write "$J" fresh --leader 8
 
+# Ask any machine which references serve a tenant (#216): the client's first call. Prints:
+#   tenant=acme cell=… machines=node1:4500,node2:4500,node3:4500
+docker compose run --rm parosctl resolve acme
+
 # Tenants: created once (a second create of a name is refused).
 docker compose run --rm parosctl tenant create globex --survives region
 docker compose run --rm parosctl tenant list

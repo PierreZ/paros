@@ -138,7 +138,7 @@ impl FormedCell {
         }
     }
 
-    /// Answer the decree's calls (and `Identify`, `Admit`) on `rpc` until `shutdown`,
+    /// Answer the decree's calls (and `Identify`, `Admit`, `Resolve`) on `rpc` until `shutdown`,
     /// in a task of its own: every answer is a pure function of the record,
     /// so nothing here touches the node loop.
     ///
@@ -157,6 +157,19 @@ impl FormedCell {
         let mut prepare = Inbound::plain(serve_well_known::<P, PrepareCellRpc>(rpc)?);
         let mut form = Inbound::plain(serve_well_known::<P, FormCellRpc>(rpc)?);
         let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(rpc)?);
+        // Any machine of the cell answers `Resolve` (#216).
+        super::resolve::spawn(
+            providers,
+            rpc,
+            super::resolve::Resolver {
+                facts: self.facts.clone(),
+                cell: self.control_journals(),
+                founders: Some(self.plan.members.iter().map(|(id, _)| *id).collect()),
+                book: super::with_own(&self.founders(), self.facts.node_id, &self.facts.addr),
+                serves: true,
+            },
+            shutdown.clone(),
+        )?;
         providers
             .task()
             .spawn_task("paros-machine-formed", async move {

@@ -168,3 +168,9 @@ well_known_method!(
     ViewRpc, 0x5041_0309, view::ViewRequest => view::ViewReply,
     "paros.view.View"
 );
+well_known_method!(
+    /// Which references serve a tenant (#216): the client's entry call,
+    /// answered by any machine of a cell from its folds.
+    ResolveRpc, 0x5041_030A, machine::Resolve => machine::ResolveAck,
+    "paros.machine.Resolve"
+);
