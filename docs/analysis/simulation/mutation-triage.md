@@ -52,7 +52,9 @@ Each line names the rule and the mutants it kills.
   and a reader answers itself only from inside its row (`read_row`, `row_of`,
   `is_phase1_addressee`).
 - `take_back_delegated`, `ProxyLeader::expire_stale`: no round past its budget
-  stays delegated or retained (`stalled`, `stalled_delegations`).
+  stays delegated or retained (`stalled_delegations`). `Rounds::stalled ->
+  vec![]` still survives: no seed keeps a delegated round past its budget
+  (#341).
 - `on_nack`: a Nack at the work in flight deposes it, and a Nack at no work in
   flight leaves the role alone (the four `supersedes` mutants).
 - `learn`: a slot learned chosen leaves the repair probe
@@ -62,7 +64,8 @@ Each line names the rule and the mutants it kills.
 - `Matchmaking::assert_invariants`: the disagreement count equals the extra
   configurations; `MatchStep::Completed` now carries the count, so the audit's
   "no two matchmakers disagree" sees it. Before, the driver read it after the
-  phase closed and always got zero.
+  phase closed and always got zero. `disagreements -> 0` still survives: no
+  seed makes two matchmakers disagree (#343).
 - `JournalState`: a won `SetLeader` names the leader in force and installs a
   different, set uuid; an accepted write takes the position it names. Both
   need a call the workload never sends (#339).
@@ -70,6 +73,23 @@ Each line names the rule and the mutants it kills.
   own arithmetic, with three shapes (`{1, 1}`, the boundary `{1, n - 1}`, a
   2-row grid that does not tile). It used the library's own `admits`, so a
   mutant of `admits` also stopped the request (`cross_intersects`, `admits`).
+
+## Verification
+
+The 137 mutants of the functions this PR touched ran again, first at 100
+seeds, then the survivors at the weekly 300 seeds:
+
+- 118 caught (6 of them by a timeout), 7 unviable.
+- `column_of` (both) and the three recovery counters die only at 300 seeds:
+  seeds 1..=100 draw no grid and drain few recoveries.
+- 7 still survive:
+  - `JournalState::apply_write` and `apply_set_leader`, `||` to `&&`: the
+    workload never sends the call (#339).
+  - `Matchmaking::disagreements -> 0` and `Rounds::stalled -> vec![]`
+    (above).
+  - `Replica::fold_hole -> None` and `<` to `>`: a fold hole needs a lost
+    chosen record below the prefix, and no seed makes one (#343).
+  - `read_row`'s guard to `false`: equivalent (next section).
 
 ## Equivalent edits a regex cannot isolate
 
