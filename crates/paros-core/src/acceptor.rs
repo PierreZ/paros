@@ -49,8 +49,10 @@ use crate::types::{Ballot, Slot};
 use crate::write::AcceptorWrite;
 
 /// Maximum accepted records and faulty entries carried by one promise page —
-/// the bound this role enforces in [`Acceptor::promise_page`], and the reason
-/// a `Promise` carries a continuation cursor.
+/// the ceiling on the `limit` [`Acceptor::promise_page`] takes, and the reason
+/// a `Promise` carries a continuation cursor. A node's own page size
+/// (`ColocatedNode::set_promise_page`, #338) lies in `1..=PROMISE_BATCH`, so a
+/// receiver checks a page against this ceiling, never the sender's size.
 pub const PROMISE_BATCH: usize = 64;
 
 // A page that cannot carry one entry could never make progress through a
@@ -422,14 +424,20 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// One bounded page over the slot-ordered union of readable records
     /// (`have`) and faulty entries (the tri-state's third answer): a rotted
     /// copy is reported as `faulty(ballot)` — silence toward the none-tally,
-    /// never "nothing accepted here".
+    /// never "nothing accepted here". The page carries at most `limit`
+    /// entries (#338: a small limit makes a suffix span several pages).
     ///
     /// # Panics
     ///
-    /// Never in practice: the peeked cursors are advanced only after a
-    /// successful peek.
+    /// If `limit` is zero or above [`PROMISE_BATCH`]. Never otherwise: the
+    /// peeked cursors are advanced only after a successful peek.
     #[must_use]
-    pub fn promise_page(&self, from_slot: Slot) -> PromisePage<V> {
+    pub fn promise_page(&self, from_slot: Slot, limit: usize) -> PromisePage<V> {
+        assert!(limit > 0, "a promise page carries at least one entry");
+        assert!(
+            limit <= PROMISE_BATCH,
+            "a promise page stays under PROMISE_BATCH"
+        );
         let mut readable = self.records.range(from_slot..).peekable();
         let mut rotted = self.faulty.range(from_slot..).peekable();
         let mut page = PromisePage {
@@ -437,7 +445,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
             faulty: BTreeMap::new(),
             next_from_slot: None,
         };
-        while page.accepted.len() + page.faulty.len() < PROMISE_BATCH {
+        while page.accepted.len() + page.faulty.len() < limit {
             let take_readable = match (readable.peek(), rotted.peek()) {
                 (None, None) => break,
                 (Some(_), None) => true,
@@ -460,7 +468,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
         // Postconditions: bounded, disjoint, at or after the requested slot,
         // and the cursor strictly past everything this page carried.
         assert!(
-            page.accepted.len() + page.faulty.len() <= PROMISE_BATCH,
+            page.accepted.len() + page.faulty.len() <= limit,
             "a promise page is bounded by PROMISE_BATCH"
         );
         assert!(
@@ -483,7 +491,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
                 "the continuation cursor lies past every slot the page carried"
             );
             assert!(
-                page.accepted.len() + page.faulty.len() == PROMISE_BATCH,
+                page.accepted.len() + page.faulty.len() == limit,
                 "only a full page carries a continuation cursor"
             );
         }

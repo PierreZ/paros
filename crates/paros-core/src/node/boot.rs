@@ -110,6 +110,8 @@ impl ColocatedNode {
             quorum_reads: QuorumReads::new(),
             pending_recovery_batch: None,
             recovery_page: crate::proposer::RECOVERY_BATCH,
+            promise_page: crate::acceptor::PROMISE_BATCH,
+            resend_page: crate::proposer::RESEND_BATCH,
             read_window: super::READ_TTL_TICKS,
             tick_count: 0,
             role: NodeRole::Follower,

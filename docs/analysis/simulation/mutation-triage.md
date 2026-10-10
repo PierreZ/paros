@@ -175,6 +175,32 @@ Each mutant applied by hand, at the weekly 300 seeds:
 - `Rounds::stalled -> vec![]`: caught in seeds 1..=20 ("no round past the
   retention budget survives").
 
+## The 64-entry page bounds (#338)
+
+No seed filled a 64-entry page, so every mutant of a page bound survived.
+Each bound is now a per-node tunable under its 64-entry ceiling, drawn per
+seed with an extreme of one to four entries (`DriverTunables::promise_page`,
+`resend_page`, `apply_page`, `registry_page`; the recovery page was drawn
+already, #330). The driver hands each size to the core at boot. A receiver
+checks a promise page or a registry page against the ceiling, never against
+the sender's size: a page with a cursor carries at least one entry. The
+audit cuts a matchmaker's page window at that matchmaker's size.
+
+The 103 mutants of the listed functions (`Acceptor::promise_page`,
+`Matchmaking::accepts`, `Recovery::remaining`, `Proposer::recovery`, both
+`resend_page`, `Replica::advance`, `Replica::read`), at the weekly 300
+seeds:
+
+- 67 caught, 5 timeouts (caught), 18 unviable.
+- 3 equivalent, listed in the next section: the merge order `<` to `<=` in
+  `promise_page`, `Replica::read`'s record-limit `<` to `<=` in the walk
+  guard, and `Rounds::resend_page`'s wrap guard `<` to `<=`.
+- 10 survive in `Matchmaking::accepts`: `-> true`, the cursor leg's
+  `cursor_collected` edits (`>` to `==` and `>=`, `==` to `!=`), and the
+  `&&` to `||` and `>` to `>=` edits on the page shape. Each one only
+  accepts a page that an honest matchmaker never sends: a matchmaker
+  asserts the shape of its own page. They are wire hygiene, #344.
+
 ## Equivalent edits a regex cannot isolate
 
 These stay in the rolling report. Each one is equivalent; a regex that names

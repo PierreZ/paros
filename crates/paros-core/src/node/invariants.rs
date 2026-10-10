@@ -83,6 +83,17 @@ impl ColocatedNode {
             self.recovery_page <= crate::proposer::RECOVERY_BATCH,
             "a recovery page never exceeds its ceiling"
         );
+        // So do the promise and re-send page sizes (#338).
+        assert!(self.promise_page > 0, "a promise page is never empty");
+        assert!(
+            self.promise_page <= crate::acceptor::PROMISE_BATCH,
+            "a promise page never exceeds its ceiling"
+        );
+        assert!(self.resend_page > 0, "a re-send page is never empty");
+        assert!(
+            self.resend_page <= crate::proposer::RESEND_BATCH,
+            "a re-send page never exceeds its ceiling"
+        );
         // The repair clock lives inside the probe it times, so closing a
         // probe — by a decision, a commit, a trim-point jump or an
         // abandoned leadership — takes the clock with it and no path has to

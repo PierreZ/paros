@@ -158,6 +158,9 @@ pub struct HistoryPage<'a> {
     /// drops the record, never the scalar, so a page whose window is empty
     /// can still name the acceptor set in force.
     pub effective: Option<&'a (Ballot, AcceptorConfig)>,
+    /// The most registrations a page of this matchmaker carries (#338,
+    /// `Matchmaker::registry_page`): the window is cut at this size.
+    pub page_limit: usize,
 }
 
 /// Provider-generic observation port for [`run_node`](crate::run_node).

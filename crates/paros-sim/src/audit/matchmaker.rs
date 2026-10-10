@@ -413,7 +413,8 @@ fn check_folded_union(
 }
 
 /// Invariant 4, per page (#P9): the page is the folded window
-/// `[from_ballot, ballot)` truncated to one [`REGISTRY_PAGE`] — nothing
+/// `[from_ballot, ballot)` truncated to the matchmaker's own page size
+/// (`page_limit`, at most [`REGISTRY_PAGE`], #338) — nothing
 /// missing (under-reporting), nothing foreign — it starts at or above the
 /// durable watermark, and the continuation cursor is set exactly when the
 /// window did not fit.
@@ -432,10 +433,15 @@ fn check_page_window(
             "folded_round" => entry.watermark.round
         }
     );
+    assert_always!(
+        page.page_limit > 0 && page.page_limit <= REGISTRY_PAGE,
+        "matchmaker: a page size lies under the registry page ceiling",
+        { "matchmaker" => matchmaker.0, "limit" => page.page_limit }
+    );
     let mut window = entry.registered.range(page.from_ballot..ballot);
     let expected: BTreeMap<Ballot, Registration> = window
         .by_ref()
-        .take(REGISTRY_PAGE)
+        .take(page.page_limit)
         .map(|(b, c)| (*b, c.clone()))
         .collect();
     let expected_next = window.next().map(|(b, _)| *b);

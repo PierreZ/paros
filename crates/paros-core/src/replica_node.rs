@@ -371,6 +371,24 @@ impl ReplicaNode {
         );
     }
 
+    /// The driver sets the apply page size (#338): the most chosen slots
+    /// one apply walk folds before it yields (see
+    /// `ColocatedNode::set_apply_page`).
+    ///
+    /// # Panics
+    ///
+    /// If `page` is zero or above [`crate::APPLY_BATCH`]: a programmer
+    /// error, never an operating condition.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, page)))]
+    pub fn set_apply_page(&mut self, page: usize) {
+        self.replica.set_apply_page(page);
+        assert!(
+            self.replica.apply_page() == page,
+            "the driver's apply page is in force"
+        );
+        self.assert_invariants();
+    }
+
     /// Advance logical time by one tick: while a faulty record is open, pull the decided range from its first missing
     /// slot — from the leader heard last, or from every bootstrap acceptor
     /// when none was. The same once-per-tick cadence a node's repair pull

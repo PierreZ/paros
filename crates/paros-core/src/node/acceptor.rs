@@ -107,7 +107,22 @@ impl ColocatedNode {
                     self.ballot >= ballot,
                     "the operating ballot follows a raised promise"
                 );
-                let page = self.acceptor.promise_page(from_slot);
+                let page = self.acceptor.promise_page(from_slot, self.promise_page);
+                // The paging paths a small promise page makes run (#338): a
+                // suffix over several pages, and a full page that mixes
+                // readable and faulty entries (the merge order decides it).
+                probe!(
+                    sometimes,
+                    page.next_from_slot.is_some(),
+                    "phase1: a promise page carries a continuation cursor"
+                );
+                probe!(
+                    sometimes,
+                    page.next_from_slot.is_some()
+                        && !page.accepted.is_empty()
+                        && !page.faulty.is_empty(),
+                    "phase1: a full promise page mixes readable and faulty entries"
+                );
                 // The durability claim behind a promise raised by this very
                 // message, paired with its write: the batch flushed before
                 // this send carries the matching raise. Scoped to the raise —

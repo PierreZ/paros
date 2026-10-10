@@ -51,8 +51,8 @@ use crate::types::{Command, Entry, Seq, Slot, Value};
 use crate::write::WriteOp;
 
 /// Maximum slots the contiguous apply walk releases in one batch — the
-/// bound this role enforces in [`Replica::advance`], so one `Ready` never
-/// hands the driver an unbounded run.
+/// ceiling of the page [`Replica::advance`] walks ([`Replica::set_apply_page`],
+/// #338), so one `Ready` never hands the driver an unbounded run.
 pub const APPLY_BATCH: usize = 64;
 
 // A walk that releases nothing per batch would never apply a slot.
@@ -156,6 +156,10 @@ pub struct Replica {
     /// The journal's writer mode (#241): configuration, fixed at creation,
     /// handed to every [`JournalState::apply`].
     mode: WriterMode,
+    /// The most slots one walk releases (#338): a node tunable in
+    /// `1..=APPLY_BATCH`, the constant by default
+    /// ([`Replica::set_apply_page`]).
+    apply_page: usize,
 }
 
 impl Replica {
@@ -204,6 +208,7 @@ impl Replica {
             compaction_due: false,
             committed: Vec::new(),
             mode,
+            apply_page: APPLY_BATCH,
         };
         replica.refold();
         replica.truncate_due = false;
@@ -237,6 +242,12 @@ impl Replica {
     /// Panics when a replica invariant is broken: a programmer error, never
     /// an operating condition.
     pub fn assert_invariants(&self, floor: Slot) {
+        // The apply page stays inside its tunable range (#338).
+        assert!(self.apply_page > 0, "an apply page is never empty");
+        assert!(
+            self.apply_page <= APPLY_BATCH,
+            "an apply page never exceeds its ceiling"
+        );
         // A chosen first-unchosen slot is legal only as the explicit bounded
         // continuation left by the walk — an iff, split into its two
         // directions so a violation names the side that broke.
@@ -841,6 +852,31 @@ impl Replica {
         LogRead::Page(page)
     }
 
+    /// Set the apply page size (#338): the most slots one walk
+    /// ([`Replica::advance`]) releases before it leaves a deferred
+    /// continuation. A per-node size, never on the wire. A small page makes
+    /// a burst of decisions span several walks.
+    ///
+    /// # Panics
+    ///
+    /// If `page` is zero or above [`APPLY_BATCH`]: a programmer error, never
+    /// an operating condition.
+    pub fn set_apply_page(&mut self, page: usize) {
+        assert!(page > 0, "an apply page releases at least one slot");
+        assert!(
+            page <= APPLY_BATCH,
+            "an apply page never exceeds its ceiling"
+        );
+        self.apply_page = page;
+        assert!(self.apply_page == page, "the apply page is in force");
+    }
+
+    /// The most slots one walk releases (#338), in `1..=APPLY_BATCH`.
+    #[must_use]
+    pub fn apply_page(&self) -> usize {
+        self.apply_page
+    }
+
     // ---- learning -------------------------------------------------------------
 
     /// Learn `slot` chosen with `command`. The caller has already checked the
@@ -960,7 +996,7 @@ impl Replica {
         if self.folded == self.first_unchosen() {
             let mut next = self.first_unchosen();
             let mut advanced = 0_usize;
-            while advanced < APPLY_BATCH
+            while advanced < self.apply_page
                 && let Some(command) = self.chosen.get(&next).cloned()
             {
                 // The walk is the *only* writer of `chosen_index`, and it
@@ -982,10 +1018,16 @@ impl Replica {
                 next = Slot(next.0 + 1);
                 advanced += 1;
             }
+            // A small apply page (#338) makes a walk yield mid-burst.
+            probe!(
+                sometimes,
+                advanced == self.apply_page && self.chosen.contains_key(&next),
+                "apply: a walk yields with the next slot already chosen"
+            );
             // Postcondition: either the walk consumed the entire contiguous
             // chosen prefix, or exactly one bounded chunk was released.
             assert!(
-                advanced == APPLY_BATCH || !self.chosen.contains_key(&self.first_unchosen()),
+                advanced == self.apply_page || !self.chosen.contains_key(&self.first_unchosen()),
                 "the walk consumes or bounds the contiguous chosen prefix"
             );
         }
@@ -997,7 +1039,7 @@ impl Replica {
             "the chosen index never decreases"
         );
         assert!(
-            writes.len() - writes_before <= APPLY_BATCH,
+            writes.len() - writes_before <= self.apply_page,
             "one walk writes one bounded batch"
         );
         self.compaction_due = std::mem::take(&mut self.truncate_due);

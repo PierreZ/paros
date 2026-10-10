@@ -272,6 +272,32 @@ pub struct DriverTunables {
     /// [`paros_core::LEADER_RECOVERY_BATCH`], the default; a larger value
     /// runs the ceiling.
     pub recovery_page: usize,
+    /// The most accepted records and faulty entries one `Promise` page
+    /// carries before its continuation cursor (#338,
+    /// `ColocatedNode::set_promise_page`). A per-node size: a receiver
+    /// checks a page against the core's ceiling, never against its own
+    /// size. Floor 1: a one-entry page still walks the suffix, one round
+    /// trip per entry. The ceiling is [`paros_core::PROMISE_BATCH`], the
+    /// default; a larger value runs the ceiling.
+    pub promise_page: usize,
+    /// The most open rounds one re-send page carries (#338,
+    /// `ColocatedNode::set_resend_page`). A per-node size, never on the
+    /// wire. Floor 1: the cursor still visits every open round, one per
+    /// beat. The ceiling is [`paros_core::RESEND_BATCH`], the default.
+    pub resend_page: usize,
+    /// The most chosen slots one apply walk folds before it yields (#338,
+    /// `ColocatedNode::set_apply_page`, `ReplicaNode::set_apply_page`). A
+    /// per-node size, never on the wire. Floor 1: the walk still folds the
+    /// whole prefix, one slot per `Ready`. The ceiling is
+    /// [`paros_core::APPLY_BATCH`], the default.
+    pub apply_page: usize,
+    /// The most registrations one matchmaker answer carries before its
+    /// continuation cursor (#338, `Matchmaker::set_registry_page`). A
+    /// per-matchmaker size: a candidate checks a page against the core's
+    /// ceiling. Floor 1: a one-registration page still delivers the whole
+    /// history, one round trip per registration. The ceiling is
+    /// [`paros_core::REGISTRY_PAGE`], the default.
+    pub registry_page: usize,
 }
 
 impl Default for DriverTunables {
@@ -308,6 +334,10 @@ impl Default for DriverTunables {
             election_compact_after: ELECTION_COMPACT_AFTER,
             machine_down_after: MACHINE_DOWN_AFTER,
             recovery_page: paros_core::LEADER_RECOVERY_BATCH,
+            promise_page: paros_core::PROMISE_BATCH,
+            resend_page: paros_core::RESEND_BATCH,
+            apply_page: paros_core::APPLY_BATCH,
+            registry_page: paros_core::REGISTRY_PAGE,
         };
         // The simulation's baseline is itself a winnable profile.
         assert!(

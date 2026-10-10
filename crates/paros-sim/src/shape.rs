@@ -256,6 +256,17 @@ impl NodeShape {
                 paros::LEADER_RECOVERY_BATCH,
                 1_usize..paros::LEADER_RECOVERY_BATCH + 1
             ),
+            // The page sizes the core's 64-entry ceilings bound (#338). The
+            // campaign rarely fills a 64-entry page, so each extreme is a
+            // small page (floor 1), which makes the paging paths run: a
+            // Phase 1 over several promise pages, a re-send cursor that
+            // wraps, an apply walk that yields mid-burst, a matchmaker
+            // history over several pages. Floor 1 for each: a one-entry page
+            // still makes progress, one round trip or one `Ready` per entry.
+            promise_page: buggify_knob!(paros::PROMISE_BATCH, 1_usize..5_usize),
+            resend_page: buggify_knob!(paros::RESEND_BATCH, 1_usize..5_usize),
+            apply_page: buggify_knob!(paros::APPLY_BATCH, 1_usize..5_usize),
+            registry_page: buggify_knob!(paros::REGISTRY_PAGE, 1_usize..5_usize),
             // The delegated round's take-back budget (#142), in
             // re-delegations (one per beat). Floor 1: a round taken back
             // after a single re-delegation runs colocated while its proxy
@@ -337,37 +348,8 @@ impl NodeShape {
         } else {
             drawn
         };
-        if !production && peer_queue_capacity != defaults.peer_queue_capacity {
-            // BUGGIFY pairing: the capacity extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme peer-queue capacity");
-        }
-        if !production && delivery_batch != defaults.delivery_batch {
-            // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme delivery batch");
-        }
-        if !production && drawn.election_backoff_doublings != 3 {
-            // BUGGIFY pairing: the election backoff extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme election backoff ceiling");
-        }
-        if !production && drawn.gc_resend_ticks != 5 {
-            // BUGGIFY pairing: the GC cadence extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme GC re-send cadence");
-        }
-        if !production && drawn.reconfigurer_resend_ticks != 5 {
-            // BUGGIFY pairing: the handover cadence extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme handover re-send cadence");
-        }
-        if !production && drawn.reconfigure_timeout_elections != 4 {
-            // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme handover stall budget");
-        }
-        if !production && drawn.recovery_page != paros::LEADER_RECOVERY_BATCH {
-            // BUGGIFY pairing: the recovery page extreme genuinely runs.
-            assert_reachable!("a node runs with a small recovery page");
-        }
-        if !production && drawn.reconfigure_backoff_max_ticks != 10 {
-            // BUGGIFY pairing: the decree backoff extreme genuinely runs.
-            assert_reachable!("a node runs with an extreme decree backoff ceiling");
+        if !production {
+            pair_extremes(&drawn, &defaults);
         }
         Self {
             tunables,
@@ -375,6 +357,60 @@ impl NodeShape {
             matchmaker_loss_pct: buggify_knob!(DEFAULT_LOSS_PCT, MIN_LOSS_PCT..MAX_LOSS_PCT + 1),
             config_edit_pct: buggify_knob!(DEFAULT_CONFIG_EDIT_PCT, 25..MAX_LOSS_PCT + 1),
         }
+    }
+}
+
+/// The BUGGIFY pairings of [`NodeShape::draw`]'s knobs: each extreme the
+/// node genuinely runs (never under the production profile, which runs none
+/// of them) reaches its gate.
+fn pair_extremes(drawn: &DriverTunables, defaults: &DriverTunables) {
+    if drawn.peer_queue_capacity != defaults.peer_queue_capacity {
+        // BUGGIFY pairing: the capacity extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme peer-queue capacity");
+    }
+    if drawn.delivery_batch != defaults.delivery_batch {
+        // BUGGIFY pairing: the delivery-batch extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme delivery batch");
+    }
+    if drawn.election_backoff_doublings != 3 {
+        // BUGGIFY pairing: the election backoff extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme election backoff ceiling");
+    }
+    if drawn.gc_resend_ticks != 5 {
+        // BUGGIFY pairing: the GC cadence extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme GC re-send cadence");
+    }
+    if drawn.reconfigurer_resend_ticks != 5 {
+        // BUGGIFY pairing: the handover cadence extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme handover re-send cadence");
+    }
+    if drawn.reconfigure_timeout_elections != 4 {
+        // BUGGIFY pairing: the handover stall budget extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme handover stall budget");
+    }
+    if drawn.recovery_page != paros::LEADER_RECOVERY_BATCH {
+        // BUGGIFY pairing: the recovery page extreme genuinely runs.
+        assert_reachable!("a node runs with a small recovery page");
+    }
+    if drawn.promise_page != paros::PROMISE_BATCH {
+        // BUGGIFY pairing: the promise page extreme genuinely runs.
+        assert_reachable!("a node runs with a small promise page");
+    }
+    if drawn.resend_page != paros::RESEND_BATCH {
+        // BUGGIFY pairing: the re-send page extreme genuinely runs.
+        assert_reachable!("a node runs with a small re-send page");
+    }
+    if drawn.apply_page != paros::APPLY_BATCH {
+        // BUGGIFY pairing: the apply page extreme genuinely runs.
+        assert_reachable!("a node runs with a small apply page");
+    }
+    if drawn.registry_page != paros::REGISTRY_PAGE {
+        // BUGGIFY pairing: the registry page extreme genuinely runs.
+        assert_reachable!("a node runs with a small registry page");
+    }
+    if drawn.reconfigure_backoff_max_ticks != 10 {
+        // BUGGIFY pairing: the decree backoff extreme genuinely runs.
+        assert_reachable!("a node runs with an extreme decree backoff ceiling");
     }
 }
 
